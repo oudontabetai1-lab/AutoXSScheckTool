@@ -70,6 +70,11 @@ class BaseScanner(ABC):
         """Scan a single input field for vulnerabilities."""
         ...
 
+    @property
+    def sleep_factor(self) -> float:
+        """Scaling factor for sleep durations (0.5 in CTF mode, 1.0 otherwise)."""
+        return getattr(self.engine, "sleep_factor", 1.0)
+
     async def get_payloads(self, field_name: str, url: str) -> list[str]:
         """Get payloads for this scanner's check type."""
         return await self.payload_gen.generate(

@@ -44,10 +44,10 @@ Examples:
     )
     scan.add_argument(
         "--checks", nargs="+",
-        choices=["sqli", "xss", "os"],
+        choices=["sqli", "xss", "os", "ssti"],
         default=["sqli", "xss", "os"],
         metavar="CHECK",
-        help="Security checks to run: sqli, xss, os (default: all)",
+        help="Security checks to run: sqli, xss, os, ssti (default: sqli xss os)",
     )
     scan.add_argument(
         "--depth", "-d", type=int, default=2, metavar="N",
@@ -92,6 +92,22 @@ Examples:
     scan.add_argument(
         "--exclude-file", metavar="FILE",
         help="Text file with one excluded parameter name per line",
+    )
+    scan.add_argument(
+        "--ctf", action="store_true",
+        help="CTF mode: adds SSTI scanner and halves sleep delays for faster scanning",
+    )
+    scan.add_argument(
+        "--cookie", metavar="COOKIES", default="",
+        help="Pre-set cookies before scanning (e.g. 'session=abc; token=xyz')",
+    )
+    scan.add_argument(
+        "--auth-user", metavar="USER", default="",
+        help="Username/email for login form auto-fill",
+    )
+    scan.add_argument(
+        "--auth-pass", metavar="PASS", default="",
+        help="Password for login form auto-fill",
     )
 
     return parser.parse_args()
@@ -144,6 +160,10 @@ async def run_scan(args):
             timeout=args.timeout,
             max_forms=args.max_forms,
             exclude_fields=exclude_fields,
+            ctf_mode=getattr(args, "ctf", False),
+            cookies=getattr(args, "cookie", "") or "",
+            auth_user=getattr(args, "auth_user", "") or "",
+            auth_pass=getattr(args, "auth_pass", "") or "",
         )
         await engine.run()
         return

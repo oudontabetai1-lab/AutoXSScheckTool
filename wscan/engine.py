@@ -21,6 +21,7 @@ from .scanners.base import Finding
 from .scanners.sqli import SQLiScanner
 from .scanners.xss import XSSScanner
 from .scanners.os_injection import OSInjectionScanner
+from .scanners.ssti import SSTIScanner
 
 console = Console()
 
@@ -45,13 +46,22 @@ class ScanEngine:
         timeout: int = 30,
         max_forms: int = 50,
         exclude_fields: Optional[list[str]] = None,
+        ctf_mode: bool = False,
+        cookies: str = "",
+        auth_user: str = "",
+        auth_pass: str = "",
     ):
         self.target_url = url.rstrip("/")
         self.monitor = monitor
         self.depth = depth
-        self.checks = checks or ["sqli", "xss", "os"]
+        self.checks = list(checks or ["sqli", "xss", "os"])
         self.timeout = timeout
         self.max_forms = max_forms
+        self.ctf_mode = ctf_mode
+        self.sleep_factor = 0.5 if ctf_mode else 1.0
+        self.cookies = cookies
+        if ctf_mode and "ssti" not in self.checks:
+            self.checks.append("ssti")
 
         # Set up output directory
         ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -78,7 +88,13 @@ class ScanEngine:
         prompt_templates = payloads_data.get("llm_prompts", {})
 
         # Initialize components
-        self.browser = BrowserManager(headless=headless, timeout=timeout, monitor=monitor)
+        self.browser = BrowserManager(
+            headless=headless,
+            timeout=timeout,
+            monitor=monitor,
+            auth_user=auth_user,
+            auth_pass=auth_pass,
+        )
         self.payload_gen = PayloadGenerator(
             provider=llm_provider,
             ollama_model=ollama_model,
@@ -91,6 +107,7 @@ class ScanEngine:
             "sqli": SQLiScanner,
             "xss": XSSScanner,
             "os": OSInjectionScanner,
+            "ssti": SSTIScanner,
         }
         self.scanners = {
             name: cls(self)
@@ -125,6 +142,8 @@ class ScanEngine:
 
         try:
             await self.browser.init()
+            if self.cookies:
+                await self.browser.set_cookies(self.cookies, self.target_url)
             await self._crawl_and_scan()
         finally:
             await self.browser.close()

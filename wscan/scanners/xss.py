@@ -65,12 +65,10 @@ class XSSScanner(BaseScanner):
                 url, form_index, field_name, payload, is_url_param
             )
 
-            await asyncio.sleep(0.5)  # Wait for any JS execution
+            await asyncio.sleep(0.5 * self.sleep_factor)  # Wait for any JS execution
 
             # --- Check 1: Alert dialog fired (confirmed XSS) ---
             if self.browser.dialog_fired:
-                # Use the screenshot captured right when alert fired (shows page context)
-                alert_ss = self.browser.dialog_screenshot_b64 or None
                 finding = await self.record_finding(
                     url=url,
                     field_name=field_name,
@@ -78,7 +76,6 @@ class XSSScanner(BaseScanner):
                     evidence=f"JavaScript alert() dialog triggered: '{self.browser.dialog_message}'",
                     pair=pair,
                     severity="critical",
-                    screenshot_b64=alert_ss,
                     dialog_confirmed=True,
                     dialog_message=self.browser.dialog_message,
                 )
@@ -101,7 +98,7 @@ class XSSScanner(BaseScanner):
                     findings.append(finding)
                     break
 
-            await asyncio.sleep(0.2)
+            await asyncio.sleep(0.2 * self.sleep_factor)
 
         return findings
 

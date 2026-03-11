@@ -5,6 +5,7 @@ Playwright-based browser automation with evidence collection.
 import asyncio
 import base64
 import time
+from urllib.parse import urlparse as _urlparse
 from typing import Optional, Callable, Any
 from urllib.parse import urljoin, urlparse
 
@@ -67,10 +68,14 @@ class BrowserManager:
         headless: bool = False,
         timeout: int = 30,
         monitor=None,
+        auth_user: str = "",
+        auth_pass: str = "",
     ):
         self.headless = headless
         self.timeout = timeout * 1000  # ms
         self.monitor = monitor
+        self.auth_user = auth_user
+        self.auth_pass = auth_pass
         self._playwright = None
         self._browser: Optional[Browser] = None
         self._context: Optional[BrowserContext] = None
@@ -112,24 +117,9 @@ class BrowserManager:
                 await self.monitor.emit_response(req.get("response", {}))
 
     async def _on_dialog(self, dialog):
-        """Capture alert dialogs (XSS indicator).
-        Takes a screenshot of the page context before dismissing, then overlays
-        an alert indicator in the monitoring dashboard.
-        """
+        """Capture alert dialogs (XSS indicator)."""
         self.dialog_fired = True
         self.dialog_message = dialog.message
-        # Screenshot the page context (dialog itself is OS-level and won't appear,
-        # but the page state shows where XSS fired)
-        try:
-            data = await self.page.screenshot(full_page=False, type="jpeg", quality=80)
-            self.dialog_screenshot_b64 = base64.b64encode(data).decode()
-            if self.monitor:
-                await self.monitor.emit_screenshot(
-                    self.dialog_screenshot_b64,
-                    f"[XSS ALERT TRIGGERED] alert('{dialog.message}')"
-                )
-        except Exception:
-            self.dialog_screenshot_b64 = ""
         await dialog.dismiss()
 
     def reset_dialog(self):
@@ -227,7 +217,7 @@ class BrowserManager:
         try:
             result = await self.page.evaluate(
                 """
-                async ([formIndex, fieldName, payload, safeValues]) => {
+                async ([formIndex, fieldName, payload, safeValues, authUser, authPass]) => {
                     const forms = document.querySelectorAll('form');
                     const form = forms[formIndex];
                     if (!form) return {success: false, error: 'form not found'};
@@ -236,16 +226,24 @@ class BrowserManager:
                         'input:not([type=submit]):not([type=button]):not([type=reset]):not([type=image]):not([type=file]), textarea'
                     );
 
-                    // Fill all inputs with safe values first
+                    // Fill all inputs with safe/auth values first
                     allInputs.forEach(el => {
-                        const name = el.name || el.id || '';
+                        const name = (el.name || el.id || '').toLowerCase();
                         if (el.type === 'checkbox' || el.type === 'radio') return;
                         if (el.type === 'hidden') return;
-                        const safe = safeValues && safeValues[name] ? safeValues[name] : 'test';
-                        el.value = safe;
+                        if (el.type === 'password' && authPass) {
+                            el.value = authPass;
+                        } else if (authUser && (name.includes('user') || name.includes('email') ||
+                                   name.includes('login') || name.includes('account') ||
+                                   name.includes('mail') || name.includes('name'))) {
+                            el.value = authUser;
+                        } else {
+                            const key = el.name || el.id || '';
+                            el.value = (safeValues && safeValues[key]) ? safeValues[key] : 'test';
+                        }
                     });
 
-                    // Fill target field with payload
+                    // Fill target field with payload (overrides auth fill)
                     const target = Array.from(allInputs).find(
                         el => (el.name || el.id) === fieldName
                     );
@@ -256,7 +254,7 @@ class BrowserManager:
                     return {success: true};
                 }
                 """,
-                [form_index, field_name, payload, safe_values or {}],
+                [form_index, field_name, payload, safe_values or {}, self.auth_user, self.auth_pass],
             )
 
             # Submit the form
@@ -323,6 +321,25 @@ class BrowserManager:
             return links
         except Exception:
             return []
+
+    async def set_cookies(self, cookies_str: str, url: str):
+        """Set cookies from a 'name=value; name2=value2' string."""
+        if not cookies_str or not self._context:
+            return
+        domain = _urlparse(url).hostname or ""
+        cookies = []
+        for part in cookies_str.split(";"):
+            part = part.strip()
+            if "=" in part:
+                name, _, value = part.partition("=")
+                cookies.append({
+                    "name": name.strip(),
+                    "value": value.strip(),
+                    "domain": domain,
+                    "path": "/",
+                })
+        if cookies:
+            await self._context.add_cookies(cookies)
 
     async def close(self):
         """Close browser and playwright."""

@@ -127,6 +127,18 @@ os_injection:
   - "; sleep 3"
   - "| sleep 3"
 
+ssti:
+  - "{{7*7}}"
+  - "${7*7}"
+  - "<%= 7*7 %>"
+  - "#{7*7}"
+  - "{{7*'7'}}"
+  - "*{7*7}"
+  - "%{7*7}"
+  - "[[${7*7}]]"
+  - "{{config}}"
+  - "${''class''}"
+
 header_injection:
   - "\r\nX-Injected: wscan"
   - "%0d%0aX-Injected: wscan"

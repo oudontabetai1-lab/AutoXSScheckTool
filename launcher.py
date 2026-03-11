@@ -71,6 +71,28 @@ def main():
     exclude_input = ask("除外パラメータ", "")
     exclude = [e for e in exclude_input.split() if e]
 
+    # ── CTF モード ────────────────────────────────────────
+    section("CTF モード")
+    print("    CTFモードを有効にすると以下が追加されます:")
+    print("      - SSTI (サーバーサイドテンプレートインジェクション) 検査")
+    print("      - スキャン速度の向上 (スリープ時間を半減)")
+    ctf_input = ask("CTFモードを有効にしますか? (y=有効 / n=無効)", "n").lower()
+    ctf_mode = ctf_input in ("y", "yes")
+
+    # ── 認証情報 ──────────────────────────────────────────
+    section("ログイン認証情報 (省略可)")
+    print("    ログインフォームのフィールドに自動入力する認証情報を設定します")
+    print("    ユーザー名フィールド: username / email / login 等")
+    print("    パスワードフィールド: type=password の全フィールド")
+    auth_user = ask("ユーザー名/メールアドレス", "")
+    auth_pass = ask("パスワード", "")
+
+    # ── Cookie ────────────────────────────────────────────
+    section("Cookie の事前付与 (省略可)")
+    print("    スキャン開始前にブラウザにセットするCookieを入力します")
+    print("    例: session=abc123; token=xyz789")
+    cookie = ask("Cookie", "")
+
     # ── LLM ───────────────────────────────────────────────
     section("LLM ペイロード生成")
     print("    none   = デフォルトペイロードのみ使用 (推奨)")
@@ -91,9 +113,14 @@ def main():
     print("  設定確認")
     print("  " + "─" * 44)
     print(f"    対象: {url}")
-    print(f"    検査: {' / '.join(c.upper() for c in checks)}")
+    print(f"    検査: {' / '.join(c.upper() for c in checks)}{' + SSTI' if ctf_mode else ''}")
     print(f"    深度: {depth}")
     print(f"    LLM : {llm}")
+    print(f"    CTF : {'有効' if ctf_mode else '無効'}")
+    if auth_user:
+        print(f"    認証: {auth_user} / {'*' * len(auth_pass)}")
+    if cookie:
+        print(f"    Cookie: {cookie[:60]}{'...' if len(cookie) > 60 else ''}")
     if exclude:
         print(f"    除外: {' '.join(exclude)}")
     print(f"    表示: {'非表示 (ヘッドレス)' if headless else '表示'}")
@@ -128,6 +155,10 @@ def main():
         max_forms=50,
         exclude=exclude,
         exclude_file=None,
+        ctf=ctf_mode,
+        cookie=cookie,
+        auth_user=auth_user,
+        auth_pass=auth_pass,
     )
 
     from main import run_scan
