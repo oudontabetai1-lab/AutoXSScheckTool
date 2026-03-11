@@ -1,0 +1,702 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>WScan — Live Monitor</title>
+<style>
+/* ─── Reset & Base ─────────────────────────────────────────── */
+* { box-sizing: border-box; margin: 0; padding: 0; }
+:root {
+  --bg: #0d1117;
+  --surface: #161b22;
+  --surface2: #21262d;
+  --border: #30363d;
+  --text: #e6edf3;
+  --text-muted: #7d8590;
+  --accent: #388bfd;
+  --accent-glow: rgba(56,139,253,0.15);
+  --critical: #f85149;
+  --high: #d29922;
+  --medium: #388bfd;
+  --low: #3fb950;
+  --info: #a5d6ff;
+  --success: #3fb950;
+  --running: #f0883e;
+}
+body {
+  font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  font-size: 13px;
+}
+
+/* ─── Header ────────────────────────────────────────────────── */
+.header {
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  padding: 10px 20px;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-shrink: 0;
+}
+.logo { font-size: 1.2rem; font-weight: 800; color: var(--accent); letter-spacing: -0.5px; }
+.logo span { color: var(--text-muted); font-weight: 400; }
+.status-bar {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.status-dot {
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  background: var(--text-muted);
+  flex-shrink: 0;
+}
+.status-dot.running { background: var(--running); animation: pulse 1.5s infinite; }
+.status-dot.done { background: var(--success); }
+.status-dot.error { background: var(--critical); }
+@keyframes pulse { 0%,100% { opacity:1; } 50% { opacity:0.4; } }
+.status-text { color: var(--text-muted); font-size: 0.85rem; }
+.header-stats {
+  display: flex;
+  gap: 16px;
+}
+.header-stat { text-align: center; }
+.header-stat .num { font-size: 1.1rem; font-weight: 700; }
+.header-stat .lbl { font-size: 0.7rem; color: var(--text-muted); text-transform: uppercase; }
+.ws-badge {
+  font-size: 0.7rem;
+  padding: 3px 8px;
+  border-radius: 20px;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+}
+.ws-badge.connected { color: var(--success); border-color: var(--success); }
+
+/* ─── Progress Bar ───────────────────────────────────────────── */
+.progress-bar-wrapper {
+  height: 2px;
+  background: var(--surface2);
+  flex-shrink: 0;
+}
+.progress-bar {
+  height: 100%;
+  background: linear-gradient(90deg, var(--accent), #79c0ff);
+  width: 0%;
+  transition: width 0.4s ease;
+}
+
+/* ─── Main Layout ────────────────────────────────────────────── */
+.main {
+  display: grid;
+  grid-template-columns: 340px 1fr 300px;
+  flex: 1;
+  overflow: hidden;
+}
+
+/* ─── Panel Base ─────────────────────────────────────────────── */
+.panel {
+  display: flex;
+  flex-direction: column;
+  border-right: 1px solid var(--border);
+  overflow: hidden;
+}
+.panel:last-child { border-right: none; }
+.panel-header {
+  padding: 10px 14px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  font-size: 0.75rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-muted);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-shrink: 0;
+}
+.panel-badge {
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  padding: 1px 7px;
+  border-radius: 10px;
+  font-size: 0.7rem;
+}
+.panel-content {
+  flex: 1;
+  overflow-y: auto;
+  padding: 8px;
+}
+
+/* ─── Event Log ──────────────────────────────────────────────── */
+.event-item {
+  padding: 6px 10px;
+  border-radius: 6px;
+  margin-bottom: 4px;
+  border-left: 3px solid transparent;
+  font-size: 0.8rem;
+  line-height: 1.5;
+  animation: fadeIn 0.2s ease;
+}
+@keyframes fadeIn { from { opacity:0; transform:translateX(-4px); } to { opacity:1; transform:none; } }
+.event-item .time { color: var(--text-muted); font-size: 0.7rem; margin-right: 6px; font-family: monospace; }
+.event-status { border-left-color: var(--accent); background: var(--accent-glow); }
+.event-finding { border-left-color: var(--critical); background: rgba(248,81,73,0.1); }
+.event-payload { border-left-color: var(--border); background: var(--surface2); }
+.event-page { border-left-color: var(--low); background: rgba(63,185,80,0.08); }
+.event-request { border-left-color: var(--border); background: var(--surface); }
+.event-screenshot { border-left-color: var(--high); background: rgba(210,153,34,0.1); }
+
+.event-finding .ev-type { color: var(--critical); font-weight: 700; }
+.event-status .ev-type { color: var(--accent); font-weight: 600; }
+.event-page .ev-type { color: var(--low); font-weight: 600; }
+.event-payload .ev-type { color: var(--text-muted); }
+
+/* ─── Center Panel ───────────────────────────────────────────── */
+.center-panel {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.screenshot-area {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  background: #0a0c0f;
+  overflow: hidden;
+  position: relative;
+}
+.screenshot-area img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  border-radius: 4px;
+  transition: opacity 0.3s;
+}
+.screenshot-label {
+  position: absolute;
+  bottom: 10px;
+  left: 10px;
+  background: rgba(0,0,0,0.7);
+  color: var(--text-muted);
+  font-size: 0.7rem;
+  padding: 4px 10px;
+  border-radius: 12px;
+  font-family: monospace;
+}
+.screenshot-placeholder {
+  color: var(--text-muted);
+  text-align: center;
+}
+.screenshot-placeholder .icon { font-size: 3rem; margin-bottom: 12px; opacity: 0.3; }
+.screenshot-placeholder p { font-size: 0.85rem; }
+
+/* Current Test Info */
+.current-test {
+  background: var(--surface);
+  border-top: 1px solid var(--border);
+  padding: 10px 16px;
+  flex-shrink: 0;
+}
+.current-test .ct-label { font-size: 0.7rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 4px; }
+.current-test .ct-field { font-size: 0.85rem; font-weight: 600; margin-bottom: 2px; }
+.current-test .ct-payload { font-family: monospace; font-size: 0.75rem; color: var(--high); word-break: break-all; max-height: 40px; overflow: hidden; }
+.check-badges { display: flex; gap: 6px; margin-top: 6px; }
+.check-badge {
+  font-size: 0.65rem; font-weight: 700;
+  padding: 2px 8px; border-radius: 10px;
+  text-transform: uppercase; letter-spacing: 0.05em;
+  background: var(--surface2); color: var(--text-muted);
+  border: 1px solid var(--border);
+}
+.check-badge.active { background: var(--accent-glow); color: var(--accent); border-color: var(--accent); }
+
+/* ─── Findings Panel ─────────────────────────────────────────── */
+.finding-card {
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin-bottom: 8px;
+  animation: fadeIn 0.3s ease;
+}
+.finding-card .fc-top { display: flex; gap: 8px; align-items: center; margin-bottom: 6px; flex-wrap: wrap; }
+.sev-badge {
+  font-size: 0.65rem; font-weight: 800;
+  padding: 2px 8px; border-radius: 10px;
+  text-transform: uppercase; letter-spacing: 0.06em;
+}
+.sev-critical { background: rgba(248,81,73,0.2); color: var(--critical); }
+.sev-high { background: rgba(210,153,34,0.2); color: var(--high); }
+.sev-medium { background: rgba(56,139,253,0.2); color: var(--medium); }
+.sev-low { background: rgba(63,185,80,0.2); color: var(--low); }
+.fc-type { font-size: 0.7rem; font-weight: 700; color: var(--text); }
+.fc-field { font-size: 0.75rem; color: var(--text-muted); }
+.fc-evidence { font-size: 0.75rem; color: var(--text); margin-bottom: 4px; line-height: 1.4; }
+.fc-url { font-size: 0.7rem; color: var(--text-muted); font-family: monospace; word-break: break-all; }
+.fc-payload { font-family: monospace; font-size: 0.7rem; color: var(--high); background: var(--surface); padding: 4px 8px; border-radius: 4px; margin-top: 4px; word-break: break-all; }
+.fc-screenshot { width: 100%; border-radius: 4px; margin-top: 8px; cursor: pointer; border: 1px solid var(--border); }
+.no-findings-msg { color: var(--text-muted); text-align: center; padding: 32px 16px; font-size: 0.85rem; }
+
+/* ─── Network Panel ──────────────────────────────────────────── */
+.net-tab-bar {
+  display: flex;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.net-tab {
+  flex: 1; text-align: center; padding: 8px;
+  font-size: 0.75rem; font-weight: 600;
+  color: var(--text-muted); cursor: pointer;
+  border-bottom: 2px solid transparent;
+  text-transform: uppercase; letter-spacing: 0.05em;
+}
+.net-tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+.net-view { display: none; flex-direction: column; height: 100%; }
+.net-view.active { display: flex; }
+.net-content {
+  flex: 1; overflow-y: auto; padding: 10px;
+  font-family: 'Cascadia Code', 'Consolas', monospace;
+  font-size: 0.75rem; line-height: 1.6;
+  white-space: pre-wrap; word-break: break-all;
+  color: var(--text-muted);
+}
+.net-section { color: var(--accent); font-weight: 700; margin-bottom: 4px; margin-top: 10px; }
+.net-key { color: #79c0ff; }
+.net-val { color: #a5d6ff; }
+.net-body { color: #e6edf3; }
+.net-status-ok { color: var(--low); }
+.net-status-err { color: var(--critical); }
+
+/* ─── Scrollbar ──────────────────────────────────────────────── */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+
+/* ─── Lightbox ───────────────────────────────────────────────── */
+.lightbox {
+  display: none; position: fixed; top:0; left:0; width:100%; height:100%;
+  background: rgba(0,0,0,0.9); z-index: 1000;
+  justify-content: center; align-items: center;
+}
+.lightbox.active { display: flex; }
+.lightbox img { max-width: 95%; max-height: 95vh; border-radius: 8px; }
+.lb-close {
+  position: fixed; top:16px; right:20px; color:white;
+  font-size: 1.8rem; cursor: pointer; background: rgba(0,0,0,0.5);
+  width: 40px; height: 40px; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+}
+</style>
+</head>
+<body>
+
+<!-- ─── Header ─────────────────────────────────────────────── -->
+<div class="header">
+  <div class="logo">WScan <span>Monitor</span></div>
+  <div class="status-bar">
+    <div class="status-dot" id="statusDot"></div>
+    <div class="status-text" id="statusText">Connecting...</div>
+  </div>
+  <div class="header-stats">
+    <div class="header-stat">
+      <div class="num" id="statPages">0</div>
+      <div class="lbl">Pages</div>
+    </div>
+    <div class="header-stat">
+      <div class="num" id="statTests">0<span id="statTotal" style="font-size:0.65rem;color:var(--text-muted);font-weight:400"></span></div>
+      <div class="lbl">Fields Tested</div>
+    </div>
+    <div class="header-stat" style="color:var(--critical)">
+      <div class="num" id="statFindings">0</div>
+      <div class="lbl">Findings</div>
+    </div>
+    <div class="header-stat" style="min-width:80px">
+      <div class="num" id="statPct" style="font-size:1.3rem">―%</div>
+      <div class="lbl">Progress</div>
+    </div>
+  </div>
+  <div class="ws-badge" id="wsBadge">WS: ―</div>
+</div>
+
+<!-- ─── Progress ───────────────────────────────────────────── -->
+<div class="progress-bar-wrapper" style="height:4px;position:relative">
+  <div class="progress-bar" id="progressBar" style="transition:width 0.5s ease;position:relative;overflow:hidden">
+    <div id="progressStripe" style="position:absolute;top:0;left:0;width:100%;height:100%;
+         background:repeating-linear-gradient(90deg,transparent,transparent 8px,rgba(255,255,255,0.15) 8px,rgba(255,255,255,0.15) 16px);
+         animation:stripe 0.8s linear infinite;display:none"></div>
+  </div>
+</div>
+<style>
+@keyframes stripe { from{background-position:0 0} to{background-position:32px 0} }
+</style>
+
+<!-- ─── Main Grid ──────────────────────────────────────────── -->
+<div class="main">
+
+  <!-- Left: Event Log -->
+  <div class="panel">
+    <div class="panel-header">
+      Event Log
+      <span class="panel-badge" id="eventCount">0</span>
+    </div>
+    <div class="panel-content" id="eventLog">
+      <div class="no-findings-msg">Waiting for scan to start...</div>
+    </div>
+  </div>
+
+  <!-- Center: Screenshot + Current Test -->
+  <div class="panel center-panel" style="border-right:1px solid var(--border)">
+    <div class="panel-header">Live Browser View</div>
+    <div class="screenshot-area" id="screenshotArea">
+      <div class="screenshot-placeholder">
+        <div class="icon">🔍</div>
+        <p>Browser screenshots will appear here</p>
+      </div>
+    </div>
+    <div class="current-test">
+      <div class="ct-label">Current Test</div>
+      <div class="ct-field" id="ctField">—</div>
+      <div class="ct-payload" id="ctPayload">—</div>
+      <div class="check-badges">
+        <span class="check-badge" id="badgeSqli">SQLi</span>
+        <span class="check-badge" id="badgeXss">XSS</span>
+        <span class="check-badge" id="badgeOs">OS</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Right: Findings + Network -->
+  <div class="panel" style="grid-template-rows: 1fr 1fr; display:grid; border-right:none">
+
+    <!-- Findings -->
+    <div style="display:flex;flex-direction:column;overflow:hidden;border-bottom:1px solid var(--border)">
+      <div class="panel-header">
+        Findings
+        <span class="panel-badge" id="findingCount" style="color:var(--critical)">0</span>
+      </div>
+      <div class="panel-content" id="findingsPanel">
+        <div class="no-findings-msg">No vulnerabilities detected yet.</div>
+      </div>
+    </div>
+
+    <!-- Network -->
+    <div style="display:flex;flex-direction:column;overflow:hidden">
+      <div class="panel-header">Last Network Activity</div>
+      <div class="net-tab-bar">
+        <div class="net-tab active" onclick="showNetTab('request',this)">Request</div>
+        <div class="net-tab" onclick="showNetTab('response',this)">Response</div>
+      </div>
+      <div class="net-view active" id="net-request">
+        <div class="net-content" id="reqContent">No request captured yet.</div>
+      </div>
+      <div class="net-view" id="net-response">
+        <div class="net-content" id="respContent">No response captured yet.</div>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<!-- Lightbox -->
+<div class="lightbox" id="lightbox" onclick="this.classList.remove('active')">
+  <div class="lb-close" onclick="document.getElementById('lightbox').classList.remove('active')">✕</div>
+  <img id="lbImg" src="" alt="">
+</div>
+
+<script>
+// ─── State ─────────────────────────────────────────────────────
+const state = {
+  ws: null,
+  connected: false,
+  eventCount: 0,
+  findingCount: 0,
+  pageCount: 0,
+  testCount: 0,
+  autoScroll: true,
+};
+
+// ─── WebSocket ──────────────────────────────────────────────────
+function connect() {
+  const ws = new WebSocket(`ws://${location.host}/ws`);
+  state.ws = ws;
+
+  ws.onopen = () => {
+    state.connected = true;
+    document.getElementById('wsBadge').textContent = 'WS: Connected';
+    document.getElementById('wsBadge').className = 'ws-badge connected';
+    setStatus('Connected — waiting for scan...', '');
+  };
+
+  ws.onclose = () => {
+    state.connected = false;
+    document.getElementById('wsBadge').textContent = 'WS: Disconnected';
+    document.getElementById('wsBadge').className = 'ws-badge';
+    setStatus('Disconnected. Reconnecting...', 'error');
+    setTimeout(connect, 3000);
+  };
+
+  ws.onerror = () => {
+    ws.close();
+  };
+
+  ws.onmessage = (evt) => {
+    try {
+      const event = JSON.parse(evt.data);
+      handleEvent(event);
+    } catch(e) {}
+  };
+}
+
+// ─── Event Handler ──────────────────────────────────────────────
+function handleEvent(event) {
+  const { type, data, timestamp } = event;
+  if (type === 'ping') return;
+
+  state.eventCount++;
+  document.getElementById('eventCount').textContent = state.eventCount;
+
+  switch (type) {
+    case 'status':
+      setStatus(data.message, data.state);
+      addEventLog('status', data.message);
+      break;
+
+    case 'page_start':
+      state.pageCount++;
+      document.getElementById('statPages').textContent = state.pageCount;
+      addEventLog('page', `Scanning: ${data.url}`);
+      break;
+
+    case 'payload_test':
+      state.testCount++;
+      document.getElementById('statTests').textContent = state.testCount;
+      document.getElementById('ctField').textContent = data.field;
+      document.getElementById('ctPayload').textContent = data.payload;
+      // Highlight active check
+      ['sqli','xss','os'].forEach(c => {
+        document.getElementById('badge' + c.charAt(0).toUpperCase() + c.slice(1)).className =
+          'check-badge' + (c === data.check_type ? ' active' : '');
+      });
+      addEventLog('payload', `[${data.check_type.toUpperCase()}] ${data.field}: ${data.payload.substring(0,50)}`);
+      break;
+
+    case 'screenshot':
+      updateScreenshot(data.image, data.label);
+      addEventLog('screenshot', `Screenshot: ${data.label || 'captured'}`);
+      break;
+
+    case 'finding':
+      state.findingCount++;
+      document.getElementById('statFindings').textContent = state.findingCount;
+      document.getElementById('findingCount').textContent = state.findingCount;
+      addFinding(data);
+      addEventLog('finding', `[FINDING] ${data.check_type?.toUpperCase()} on "${data.field_name}" — ${(data.evidence||'').substring(0,60)}`);
+      break;
+
+    case 'request':
+      updateRequest(data);
+      addEventLog('request', `${data.method || 'GET'} ${(data.url||'').substring(0,60)}`);
+      break;
+
+    case 'response':
+      updateResponse(data);
+      break;
+
+    case 'progress': {
+      const pct = data.percent || 0;
+      document.getElementById('progressBar').style.width = pct + '%';
+      document.getElementById('statPct').textContent = pct + '%';
+      document.getElementById('statTests').childNodes[0].textContent = data.current;
+      if (data.total > 0) {
+        document.getElementById('statTotal').textContent = '/' + data.total;
+      }
+      // Show stripe animation while running
+      document.getElementById('progressStripe').style.display = pct < 100 ? 'block' : 'none';
+      break;
+    }
+
+    case 'scan_complete':
+      setStatus(`Scan complete — ${data.total_findings} finding(s)`, 'done');
+      document.getElementById('progressBar').style.width = '100%';
+      document.getElementById('statPct').textContent = '100%';
+      document.getElementById('progressStripe').style.display = 'none';
+      addEventLog('status', `Scan complete. Report: ${data.report_path}`);
+      break;
+  }
+}
+
+// ─── UI Helpers ─────────────────────────────────────────────────
+function setStatus(message, state) {
+  document.getElementById('statusText').textContent = message;
+  const dot = document.getElementById('statusDot');
+  dot.className = 'status-dot' + (state ? ' ' + state : '');
+}
+
+function timeStr(ts) {
+  const d = new Date(ts * 1000);
+  return d.toTimeString().split(' ')[0];
+}
+
+function addEventLog(type, message) {
+  const log = document.getElementById('eventLog');
+  // Remove placeholder
+  const placeholder = log.querySelector('.no-findings-msg');
+  if (placeholder) placeholder.remove();
+
+  const item = document.createElement('div');
+  item.className = 'event-item event-' + type;
+  const ts = new Date().toTimeString().split(' ')[0];
+  item.innerHTML = `<span class="time">${ts}</span><span class="ev-type">[${type.toUpperCase()}]</span> ${escapeHtml(message)}`;
+  log.appendChild(item);
+  if (state.autoScroll) log.scrollTop = log.scrollHeight;
+
+  // Keep log trimmed
+  while (log.children.length > 500) log.removeChild(log.firstChild);
+}
+
+function updateScreenshot(b64, label) {
+  const area = document.getElementById('screenshotArea');
+  let img = area.querySelector('img');
+  if (!img) {
+    area.innerHTML = '';
+    img = document.createElement('img');
+    area.appendChild(img);
+    const lbl = document.createElement('div');
+    lbl.className = 'screenshot-label';
+    lbl.id = 'ssLabel';
+    area.appendChild(lbl);
+    img.onclick = () => {
+      document.getElementById('lbImg').src = img.src;
+      document.getElementById('lightbox').classList.add('active');
+    };
+    img.style.cursor = 'pointer';
+    img.title = 'Click to enlarge';
+  }
+  img.src = 'data:image/jpeg;base64,' + b64;
+  const lbl = document.getElementById('ssLabel');
+  if (lbl) {
+    lbl.textContent = label || '';
+    const isAlert = (label || '').includes('XSS ALERT');
+    lbl.style.background = isAlert ? 'rgba(220,38,38,0.85)' : 'rgba(0,0,0,0.7)';
+    lbl.style.color = 'white';
+    lbl.style.fontWeight = isAlert ? '700' : '400';
+  }
+}
+
+function addFinding(data) {
+  const panel = document.getElementById('findingsPanel');
+  const placeholder = panel.querySelector('.no-findings-msg');
+  if (placeholder) placeholder.remove();
+
+  const sev = (data.severity || 'medium').toLowerCase();
+  const card = document.createElement('div');
+  card.className = 'finding-card';
+
+  // XSS confirmed: show prominent alert banner
+  let alertBanner = '';
+  if (data.dialog_confirmed) {
+    alertBanner = `<div style="
+        background:linear-gradient(135deg,#7f1d1d,#991b1b);
+        color:white; border-radius:6px; padding:8px 12px; margin-bottom:8px;
+        font-size:0.8rem; font-weight:700; letter-spacing:0.03em;
+        display:flex; align-items:center; gap:8px;
+        border:1px solid rgba(248,113,113,0.4);">
+      <span style="font-size:1.1rem;">🚨</span>
+      <span>XSS CONFIRMED — JavaScript alert() was triggered</span>
+      <span style="margin-left:auto;font-weight:400;font-size:0.75rem;opacity:0.85;">${escapeHtml(data.dialog_message || '')}</span>
+    </div>`;
+  }
+
+  let ssHtml = '';
+  if (data.screenshot_b64) {
+    const border = data.dialog_confirmed
+      ? 'border:2px solid var(--critical);box-shadow:0 0 8px rgba(248,81,73,0.4);'
+      : '';
+    ssHtml = `
+      <div style="position:relative">
+        <img class="fc-screenshot" style="${border}" src="data:image/jpeg;base64,${data.screenshot_b64}" onclick="openLightbox(this.src)" alt="Screenshot">
+        ${data.dialog_confirmed ? '<div style="position:absolute;top:6px;left:6px;background:rgba(220,38,38,0.9);color:white;font-size:0.65rem;font-weight:800;padding:3px 8px;border-radius:4px;letter-spacing:0.05em;">ALERT FIRED</div>' : ''}
+      </div>`;
+  }
+
+  card.innerHTML = `
+    ${alertBanner}
+    <div class="fc-top">
+      <span class="sev-badge sev-${sev}">${sev}</span>
+      <span class="fc-type">${escapeHtml(data.check_type?.toUpperCase() || '')}</span>
+      <span class="fc-field">Field: ${escapeHtml(data.field_name || '')}</span>
+    </div>
+    <div class="fc-evidence">${escapeHtml(data.evidence || '')}</div>
+    <div class="fc-url">${escapeHtml(data.url || '')}</div>
+    <div class="fc-payload">${escapeHtml(data.payload || '')}</div>
+    ${ssHtml}
+  `;
+  panel.insertBefore(card, panel.firstChild);
+}
+
+function updateRequest(req) {
+  const el = document.getElementById('reqContent');
+  if (!req || !req.url) return;
+  const headers = req.headers || {};
+  const hLines = Object.entries(headers).slice(0, 15).map(
+    ([k,v]) => `  ${k}: ${v}`
+  ).join('\n');
+  el.innerHTML =
+    `<span class="net-section">${escapeHtml(req.method||'GET')} ${escapeHtml(req.url)}</span>\n` +
+    `<span class="net-section">Headers:</span>\n${escapeHtml(hLines)}` +
+    (req.post_data ? `\n\n<span class="net-section">Body:</span>\n<span class="net-body">${escapeHtml(req.post_data.substring(0,2000))}</span>` : '');
+}
+
+function updateResponse(resp) {
+  const el = document.getElementById('respContent');
+  if (!resp) return;
+  const status = resp.status || '';
+  const statusClass = status >= 400 ? 'net-status-err' : 'net-status-ok';
+  const headers = resp.headers || {};
+  const hLines = Object.entries(headers).slice(0, 15).map(
+    ([k,v]) => `  ${k}: ${v}`
+  ).join('\n');
+  const body = resp.body || '';
+  el.innerHTML =
+    `<span class="${statusClass}">HTTP ${escapeHtml(String(status))}</span>\n` +
+    `<span class="net-section">Headers:</span>\n${escapeHtml(hLines)}` +
+    (body ? `\n\n<span class="net-section">Body (excerpt):</span>\n<span class="net-body">${escapeHtml(body.substring(0,2000))}</span>` : '');
+}
+
+function showNetTab(name, el) {
+  document.querySelectorAll('.net-tab').forEach(t => t.classList.remove('active'));
+  document.querySelectorAll('.net-view').forEach(v => v.classList.remove('active'));
+  el.classList.add('active');
+  document.getElementById('net-' + name).classList.add('active');
+}
+
+function openLightbox(src) {
+  document.getElementById('lbImg').src = src;
+  document.getElementById('lightbox').classList.add('active');
+}
+
+function escapeHtml(str) {
+  return String(str)
+    .replace(/&/g,'&amp;')
+    .replace(/</g,'&lt;')
+    .replace(/>/g,'&gt;')
+    .replace(/"/g,'&quot;');
+}
+
+// ─── Init ────────────────────────────────────────────────────────
+connect();
+</script>
+</body>
+</html>

