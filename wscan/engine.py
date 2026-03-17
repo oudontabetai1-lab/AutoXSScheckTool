@@ -22,6 +22,13 @@ from .scanners.sqli import SQLiScanner
 from .scanners.xss import XSSScanner
 from .scanners.os_injection import OSInjectionScanner
 from .scanners.ssti import SSTIScanner
+from .scanners.path_traversal import PathTraversalScanner
+from .scanners.csrf import CSRFScanner
+from .scanners.header_injection import HeaderInjectionScanner
+from .scanners.mail_header import MailHeaderInjectionScanner
+from .scanners.open_redirect import OpenRedirectScanner
+from .scanners.clickjacking import ClickjackingScanner
+from .scanners.session import SessionScanner
 
 console = Console()
 
@@ -54,7 +61,20 @@ class ScanEngine:
         self.target_url = url.rstrip("/")
         self.monitor = monitor
         self.depth = depth
-        self.checks = list(checks or ["sqli", "xss", "os"])
+        # Default checks cover every IPA "安全なウェブサイトの作り方" vulnerability category
+        _IPA_DEFAULT_CHECKS = [
+            "sqli",            # IPA 1.1
+            "xss",             # IPA 1.5
+            "os",              # IPA 1.2
+            "path_traversal",  # IPA 1.3
+            "session",         # IPA 1.4
+            "csrf",            # IPA 1.6
+            "header_injection",# IPA 1.7
+            "mail_header",     # IPA 1.8
+            "clickjacking",    # IPA 1.9
+            "open_redirect",   # IPA 1.11
+        ]
+        self.checks = list(checks or _IPA_DEFAULT_CHECKS)
         self.timeout = timeout
         self.max_forms = max_forms
         self.ctf_mode = ctf_mode
@@ -81,7 +101,10 @@ class ScanEngine:
         # If a custom payloads file was specified, override defaults for those types
         if payloads_file and payloads_file != str(default_payloads_path):
             custom = self._load_yaml(payloads_file)
-            for check_type in ["sqli", "xss", "os", "header", "path"]:
+            for check_type in [
+                "sqli", "xss", "os", "ssti",
+                "path_traversal", "header_injection", "open_redirect",
+            ]:
                 if check_type in custom:
                     self.custom_payloads[check_type] = custom[check_type]
 
@@ -102,12 +125,19 @@ class ScanEngine:
             prompt_templates=prompt_templates,
         )
 
-        # Initialize scanners
+        # Initialize scanners — covers all IPA "安全なウェブサイトの作り方" categories
         scanner_map = {
-            "sqli": SQLiScanner,
-            "xss": XSSScanner,
-            "os": OSInjectionScanner,
-            "ssti": SSTIScanner,
+            "sqli":             SQLiScanner,             # IPA 1.1
+            "xss":              XSSScanner,              # IPA 1.5
+            "os":               OSInjectionScanner,      # IPA 1.2
+            "ssti":             SSTIScanner,             # bonus
+            "path_traversal":   PathTraversalScanner,    # IPA 1.3
+            "csrf":             CSRFScanner,             # IPA 1.6
+            "header_injection": HeaderInjectionScanner,  # IPA 1.7
+            "mail_header":      MailHeaderInjectionScanner, # IPA 1.8
+            "open_redirect":    OpenRedirectScanner,     # IPA 1.11
+            "clickjacking":     ClickjackingScanner,     # IPA 1.9
+            "session":          SessionScanner,          # IPA 1.4
         }
         self.scanners = {
             name: cls(self)
@@ -194,6 +224,22 @@ class ScanEngine:
 
     async def _scan_page(self, url: str):
         """Scan all forms and URL parameters on the current page."""
+        # --- Page-level checks (run once per URL, no payload injection needed) ---
+        for check_name, scanner in self.scanners.items():
+            try:
+                page_findings = await scanner.scan_page(url)
+                if page_findings:
+                    for f in page_findings:
+                        console.print(
+                            f"    [bold red][FINDING][/bold red] "
+                            f"{f.check_type.upper()} (page-level) on [yellow]{url}[/yellow] "
+                            f"- {f.evidence[:80]}"
+                        )
+            except Exception as e:
+                console.print(
+                    f"    [yellow]Page-level scanner error ({check_name}): {e}[/yellow]"
+                )
+
         forms = await self.browser.find_forms()
         url_params = await self.browser.get_url_params()
 

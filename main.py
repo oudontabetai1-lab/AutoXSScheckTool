@@ -42,12 +42,20 @@ Examples:
         "--payloads", "-p", metavar="FILE",
         help="Custom payloads YAML file (see config/default_payloads.yaml for format)",
     )
+    _ALL_CHECKS = [
+        "sqli", "xss", "os", "path_traversal",
+        "session", "csrf", "header_injection", "mail_header",
+        "clickjacking", "open_redirect", "ssti",
+    ]
     scan.add_argument(
         "--checks", nargs="+",
-        choices=["sqli", "xss", "os", "ssti"],
-        default=["sqli", "xss", "os"],
+        choices=_ALL_CHECKS,
+        default=None,  # None → engine uses IPA full-coverage defaults
         metavar="CHECK",
-        help="Security checks to run: sqli, xss, os, ssti (default: sqli xss os)",
+        help=(
+            "Security checks to run (default: all IPA checks). "
+            "Available: " + ", ".join(_ALL_CHECKS)
+        ),
     )
     scan.add_argument(
         "--depth", "-d", type=int, default=2, metavar="N",
@@ -206,6 +214,10 @@ async def run_scan(args):
                 timeout=args.timeout,
                 max_forms=args.max_forms,
                 exclude_fields=exclude_fields,
+                ctf_mode=getattr(args, "ctf", False),
+                cookies=getattr(args, "cookie", "") or "",
+                auth_user=getattr(args, "auth_user", "") or "",
+                auth_pass=getattr(args, "auth_pass", "") or "",
             )
             await engine.run()
 

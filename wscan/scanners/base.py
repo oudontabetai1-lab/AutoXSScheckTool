@@ -70,6 +70,15 @@ class BaseScanner(ABC):
         """Scan a single input field for vulnerabilities."""
         ...
 
+    async def scan_page(self, url: str) -> list[Finding]:
+        """
+        Optional page-level check called once per URL, before per-field scanning.
+        Override in scanners that inspect HTTP headers, cookies, or page structure
+        (e.g. Clickjacking, Session, CSRF) rather than injecting payloads into fields.
+        Default: returns empty list (no-op).
+        """
+        return []
+
     @property
     def sleep_factor(self) -> float:
         """Scaling factor for sleep durations (0.5 in CTF mode, 1.0 otherwise)."""
