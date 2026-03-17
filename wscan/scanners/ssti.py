@@ -44,6 +44,11 @@ class SSTIScanner(BaseScanner):
         if self.monitor:
             await self.monitor.emit_status(f"SSTI testing: {field_name} on {url}")
 
+        # Baseline: submit a neutral value to capture any pre-existing numbers in the response.
+        baseline_source, _ = await self._apply_payload(
+            url, form_index, field_name, "wscan_ssti_baseline", is_url_param
+        )
+
         for payload, expected, engine_name in SSTI_PROBES:
             if self.monitor:
                 await self.monitor.emit_payload_test(field_name, payload, "ssti")
@@ -54,20 +59,27 @@ class SSTIScanner(BaseScanner):
 
             await asyncio.sleep(0.2 * self.sleep_factor)
 
-            if source and expected in source:
-                finding = await self.record_finding(
-                    url=url,
-                    field_name=field_name,
-                    payload=payload,
-                    evidence=(
-                        f"SSTI detected ({engine_name}): "
-                        f"payload '{payload}' evaluated to '{expected}' in response"
-                    ),
-                    pair=pair,
-                    severity="critical",
-                )
-                findings.append(finding)
-                break  # Confirmed - no need to test more probes
+            if not source or expected not in source:
+                continue
+
+            # Reduce false positives: only flag if the expected value was NOT already
+            # present in the baseline response (it appeared only after template evaluation).
+            if baseline_source and expected in baseline_source:
+                continue
+
+            finding = await self.record_finding(
+                url=url,
+                field_name=field_name,
+                payload=payload,
+                evidence=(
+                    f"SSTI detected ({engine_name}): "
+                    f"payload '{payload}' evaluated to '{expected}' in response"
+                ),
+                pair=pair,
+                severity="critical",
+            )
+            findings.append(finding)
+            break  # Confirmed - no need to test more probes
 
         return findings
 

@@ -42,12 +42,20 @@ Examples:
         "--payloads", "-p", metavar="FILE",
         help="Custom payloads YAML file (see config/default_payloads.yaml for format)",
     )
+    _ALL_CHECKS = [
+        "sqli", "xss", "os", "path_traversal",
+        "session", "csrf", "header_injection", "mail_header",
+        "clickjacking", "open_redirect", "ssti",
+    ]
     scan.add_argument(
         "--checks", nargs="+",
-        choices=["sqli", "xss", "os", "ssti"],
+        choices=_ALL_CHECKS,
         default=["sqli", "xss", "os"],
         metavar="CHECK",
-        help="Security checks to run: sqli, xss, os, ssti (default: sqli xss os)",
+        help=(
+            "Security checks to run (default: sqli xss os). "
+            "Available: " + ", ".join(_ALL_CHECKS)
+        ),
     )
     scan.add_argument(
         "--depth", "-d", type=int, default=2, metavar="N",
@@ -62,12 +70,26 @@ Examples:
         help="Disable the real-time monitoring dashboard",
     )
     scan.add_argument(
-        "--llm", choices=["ollama", "claude", "none"], default="ollama",
-        help="LLM for context-aware payload generation (default: ollama)",
+        "--llm",
+        choices=["ollama", "claude", "openai", "gemini", "none"],
+        default="ollama",
+        help=(
+            "LLM for context-aware payload generation (default: ollama). "
+            "openai requires OPENAI_API_KEY env var. "
+            "gemini requires GEMINI_API_KEY env var."
+        ),
     )
     scan.add_argument(
         "--ollama-model", default="llama3", metavar="MODEL",
         help="Ollama model name (default: llama3)",
+    )
+    scan.add_argument(
+        "--openai-model", default="gpt-4o-mini", metavar="MODEL",
+        help="OpenAI model name (default: gpt-4o-mini)",
+    )
+    scan.add_argument(
+        "--gemini-model", default="gemini-2.0-flash", metavar="MODEL",
+        help="Google Gemini model name (default: gemini-2.0-flash)",
     )
     scan.add_argument(
         "--output", "-o", metavar="DIR",
@@ -109,8 +131,28 @@ Examples:
         "--auth-pass", metavar="PASS", default="",
         help="Password for login form auto-fill",
     )
+    scan.add_argument(
+        "--no-planner", action="store_true",
+        help=(
+            "Disable the AI attack planner. "
+            "Runs all checks on all fields without strategic prioritisation."
+        ),
+    )
 
     return parser.parse_args()
+
+
+def _llm_model_display(args) -> str:
+    """Return a short model info string for the startup banner."""
+    if args.llm == "ollama":
+        return f"Model    : [blue]{args.ollama_model}[/blue] (Ollama)"
+    if args.llm == "openai":
+        return f"Model    : [blue]{args.openai_model}[/blue] (OpenAI)"
+    if args.llm == "gemini":
+        return f"Model    : [blue]{args.gemini_model}[/blue] (Gemini)"
+    if args.llm == "claude":
+        return "Model    : [blue]claude-haiku-4-5-20251001[/blue] (Claude)"
+    return "Model    : [dim]none[/dim]"
 
 
 async def run_scan(args):
@@ -119,13 +161,17 @@ async def run_scan(args):
 
     console = Console()
 
+    checks_display = ', '.join(args.checks) if args.checks else "all IPA checks"
+    planner_display = "off" if getattr(args, "no_planner", False) else "on (AI-driven)"
     console.print(Panel.fit(
         f"[bold cyan]WScan - Web Security Scanner[/bold cyan]\n"
-        f"Target  : [yellow]{args.url}[/yellow]\n"
-        f"Checks  : [green]{', '.join(args.checks)}[/green]\n"
-        f"Depth   : [blue]{args.depth}[/blue]   "
+        f"Target   : [yellow]{args.url}[/yellow]\n"
+        f"Checks   : [green]{checks_display}[/green]\n"
+        f"Planner  : [cyan]{planner_display}[/cyan]\n"
+        f"Depth    : [blue]{args.depth}[/blue]   "
         f"LLM: [blue]{args.llm}[/blue]   "
-        f"Headless: [blue]{args.headless}[/blue]",
+        f"Headless: [blue]{args.headless}[/blue]\n"
+        + _llm_model_display(args),
         border_style="cyan",
     ))
 
@@ -155,6 +201,8 @@ async def run_scan(args):
             headless=args.headless,
             llm_provider=args.llm,
             ollama_model=args.ollama_model,
+            openai_model=args.openai_model,
+            gemini_model=args.gemini_model,
             checks=args.checks,
             output_dir=args.output,
             timeout=args.timeout,
@@ -164,6 +212,7 @@ async def run_scan(args):
             cookies=getattr(args, "cookie", "") or "",
             auth_user=getattr(args, "auth_user", "") or "",
             auth_pass=getattr(args, "auth_pass", "") or "",
+            use_planner=not getattr(args, "no_planner", False),
         )
         await engine.run()
         return
@@ -201,11 +250,18 @@ async def run_scan(args):
                 headless=args.headless,
                 llm_provider=args.llm,
                 ollama_model=args.ollama_model,
+                openai_model=args.openai_model,
+                gemini_model=args.gemini_model,
                 checks=args.checks,
                 output_dir=args.output,
                 timeout=args.timeout,
                 max_forms=args.max_forms,
                 exclude_fields=exclude_fields,
+                ctf_mode=getattr(args, "ctf", False),
+                cookies=getattr(args, "cookie", "") or "",
+                auth_user=getattr(args, "auth_user", "") or "",
+                auth_pass=getattr(args, "auth_pass", "") or "",
+                use_planner=not getattr(args, "no_planner", False),
             )
             await engine.run()
 

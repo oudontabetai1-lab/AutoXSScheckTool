@@ -107,22 +107,40 @@ class XSSScanner(BaseScanner):
         Check if the payload is reflected in the source without HTML encoding.
         Returns the matched snippet or empty string.
         """
-        # Check for unencoded dangerous markers from the payload
         source_lower = source.lower()
         payload_lower = payload.lower()
 
         for marker in XSS_MARKERS:
-            if marker.lower() in payload_lower and marker.lower() in source_lower:
-                # Make sure it's not just in a comment or encoded
-                encoded = html.escape(marker)
-                if encoded.lower() not in source_lower or marker.lower() in source_lower:
-                    # Find the context
-                    idx = source_lower.find(marker.lower())
-                    if idx != -1:
-                        snippet = source[max(0, idx - 20):idx + len(marker) + 50]
-                        return snippet
+            marker_lower = marker.lower()
+            if marker_lower not in payload_lower:
+                continue
+            if marker_lower not in source_lower:
+                continue
 
-        # Direct payload match check
+            # Confirm the raw (unencoded) marker is what appears, not just an encoded version.
+            # html.escape converts e.g. '<' -> '&lt;'. If the escaped form differs from the
+            # raw marker, the raw marker must be genuinely present as an unencoded tag/attribute.
+            encoded = html.escape(marker).lower()
+            # If encoding changes the string, both forms might coexist; only flag the raw one.
+            if encoded != marker_lower and encoded in source_lower and marker_lower not in source_lower:
+                continue
+
+            idx = source_lower.find(marker_lower)
+            if idx == -1:
+                continue
+
+            # Skip occurrences that sit inside an HTML comment (<!-- ... -->)
+            preceding = source_lower[max(0, idx - 300):idx]
+            last_comment_open = preceding.rfind("<!--")
+            last_comment_close = preceding.rfind("-->")
+            if last_comment_open != -1 and last_comment_open > last_comment_close:
+                continue  # Inside an unclosed comment block
+
+            snippet = source[max(0, idx - 20):idx + len(marker) + 50]
+            return snippet
+
+        # Fallback: direct full-payload match (handles cases where the whole payload
+        # is reflected verbatim without any individual marker triggering above).
         if payload in source:
             idx = source.find(payload)
             return source[max(0, idx):idx + len(payload)]

@@ -56,6 +56,14 @@ TIME_BASED_PAYLOADS = [
     "1) AND SLEEP(3)--",
 ]
 
+# Boolean-based pairs: (true_payload, false_payload)
+# A significant response difference between true/false conditions indicates boolean-based SQLi.
+BOOLEAN_PAIRS = [
+    ("1 AND 1=1", "1 AND 1=2"),
+    ("1' AND '1'='1", "1' AND '1'='2"),
+    ("1) AND (1=1", "1) AND (1=2"),
+]
+
 
 class SQLiScanner(BaseScanner):
     """SQL Injection vulnerability scanner."""
@@ -112,15 +120,46 @@ class SQLiScanner(BaseScanner):
                 findings.append(finding)
                 break  # Found vulnerability, move to next field
 
-            # --- Check 2: Response length anomaly (boolean-based indicator) ---
-            diff = abs(len(source) - baseline_len)
-            if diff > 500 and baseline_len > 0:
-                # Significant change - note as potential
-                pass  # Could be informational, skip for now
+            # --- Check 2: Boolean-based blind SQLi ---
+            # Compare true vs false condition: if one matches the baseline and the other
+            # diverges significantly, it indicates the backend evaluates the expression.
+            for true_payload, false_payload in BOOLEAN_PAIRS:
+                if payload not in (true_payload, false_payload):
+                    continue
+                partner = false_payload if payload == true_payload else true_payload
+                partner_source, _ = await self._apply_payload(
+                    url, form_index, field_name, partner, is_url_param
+                )
+                true_src = source if payload == true_payload else partner_source
+                false_src = partner_source if payload == true_payload else source
+                # True condition should resemble baseline; false should differ significantly.
+                diff_true_base = abs(len(true_src) - baseline_len)
+                diff_false_base = abs(len(false_src) - baseline_len)
+                if (
+                    baseline_len > 0
+                    and diff_false_base > 200
+                    and diff_true_base < diff_false_base * 0.5
+                ):
+                    finding = await self.record_finding(
+                        url=url,
+                        field_name=field_name,
+                        payload=payload,
+                        evidence=(
+                            f"Boolean-based blind SQLi: true condition response length "
+                            f"{len(true_src)} vs false condition {len(false_src)} "
+                            f"(baseline {baseline_len})"
+                        ),
+                        pair=pair,
+                        severity="high",
+                    )
+                    findings.append(finding)
+                    break
+            if findings:
+                break
 
             # --- Check 3: Time-based blind SQLi ---
             if payload in TIME_BASED_PAYLOADS:
-                if self.response_time_exceeded(pair, threshold=2.8):
+                if self.response_time_exceeded(pair, threshold=2.5):
                     finding = await self.record_finding(
                         url=url,
                         field_name=field_name,
