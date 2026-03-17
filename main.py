@@ -261,6 +261,7 @@ async def run_scan(args):
                 cookies=getattr(args, "cookie", "") or "",
                 auth_user=getattr(args, "auth_user", "") or "",
                 auth_pass=getattr(args, "auth_pass", "") or "",
+                use_planner=not getattr(args, "no_planner", False),
             )
             await engine.run()
 

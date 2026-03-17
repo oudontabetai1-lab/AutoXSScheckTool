@@ -19,15 +19,27 @@ from __future__ import annotations
 
 import json
 import re
+import sys
 from dataclasses import dataclass, field
 from typing import Optional, TYPE_CHECKING
 
 from rich.console import Console
+from rich.rule import Rule
 
 if TYPE_CHECKING:
     from wscan.payload_gen import PayloadGenerator
 
 console = Console()
+
+
+def _thinking_header(provider: str, model: str) -> None:
+    console.print(Rule(f"[bold cyan] AI AttackPlanner ({provider}: {model}) ", style="cyan"))
+    console.print()
+
+
+def _thinking_footer() -> None:
+    console.print()
+    console.print(Rule(style="cyan"))
 
 # ---------------------------------------------------------------------------
 # All check names the planner can recommend
@@ -192,10 +204,7 @@ Page purpose (your initial guess): {purpose_hint}
         if self.payload_gen.provider != "none" and await self.payload_gen._check_llm_available():
             plan = await self._llm_plan(url, page_html, forms, url_params)
             if plan:
-                console.print(
-                    f"  [dim cyan][AttackPlanner][/dim cyan] LLM plan ready — "
-                    f"{len(plan.fields)} fields, purpose: {plan.page_purpose[:60]}"
-                )
+                self._print_plan_summary(plan)
                 return plan
 
         plan = self._heuristic_plan(url, forms, url_params)
@@ -204,6 +213,37 @@ Page purpose (your initial guess): {purpose_hint}
             f"{len(plan.fields)} fields"
         )
         return plan
+
+    def _print_plan_summary(self, plan: "PageAttackPlan") -> None:
+        """Print a rich table summarising the LLM-generated attack plan."""
+        from rich.table import Table
+        from rich import box as rbox
+
+        console.print(
+            f"\n  [bold cyan][AttackPlanner][/bold cyan] "
+            f"LLM plan ready — purpose: [yellow]{plan.page_purpose[:80]}[/yellow]"
+        )
+        t = Table(
+            show_header=True,
+            header_style="bold magenta",
+            box=rbox.SIMPLE,
+            padding=(0, 1),
+        )
+        t.add_column("Field",          style="cyan",  no_wrap=True)
+        t.add_column("Risk", justify="center", style="bold")
+        t.add_column("Checks",         style="green")
+        t.add_column("Rationale",      style="dim", overflow="fold")
+
+        for fp in plan.sorted_fields():
+            score = fp.risk_score
+            risk_color = "red" if score >= 8 else ("yellow" if score >= 5 else "green")
+            t.add_row(
+                fp.name,
+                f"[{risk_color}]{score}[/{risk_color}]",
+                " · ".join(fp.priority_checks[:4]),
+                fp.rationale[:80],
+            )
+        console.print(t)
 
     # ------------------------------------------------------------------
     # LLM-based planning
@@ -261,52 +301,91 @@ Page purpose (your initial guess): {purpose_hint}
         return self._parse_llm_response(url, raw)
 
     async def _call_claude(self, prompt: str) -> Optional[str]:
+        """Claude streaming attack plan — prints chunks live."""
         client = self.payload_gen._get_anthropic_client()
         if not client:
             return None
+        _thinking_header("Claude", "claude-haiku-4-5-20251001")
         try:
             import asyncio
-            loop = asyncio.get_event_loop()
-            response = await loop.run_in_executor(
-                None,
-                lambda: client.messages.create(
+            full = ""
+
+            def _stream_sync():
+                nonlocal full
+                with client.messages.stream(
                     model="claude-haiku-4-5-20251001",
                     max_tokens=2000,
                     messages=[{"role": "user", "content": prompt}],
-                ),
-            )
-            return response.content[0].text
+                ) as stream:
+                    for chunk in stream.text_stream:
+                        sys.stdout.write(chunk)
+                        sys.stdout.flush()
+                        full += chunk
+                return full
+
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(None, _stream_sync)
+            _thinking_footer()
+            return full if full else None
         except Exception as e:
+            _thinking_footer()
             console.print(f"[yellow][AttackPlanner] Claude error: {e}[/yellow]")
             return None
 
     async def _call_ollama(self, prompt: str) -> Optional[str]:
+        """Ollama streaming attack plan — prints chunks live."""
+        import httpx
+        _thinking_header("Ollama", self.payload_gen.ollama_model)
+        full = ""
         try:
-            import httpx
-            async with httpx.AsyncClient(timeout=60.0) as client:
-                resp = await client.post(
+            async with httpx.AsyncClient(timeout=90.0) as client:
+                async with client.stream(
+                    "POST",
                     f"{self.payload_gen.ollama_url}/api/generate",
                     json={
                         "model": self.payload_gen.ollama_model,
                         "prompt": prompt,
-                        "stream": False,
+                        "stream": True,
                         "options": {"temperature": 0.3, "num_predict": 2000},
                     },
-                )
-                if resp.status_code == 200:
-                    return resp.json().get("response", "")
+                ) as resp:
+                    if resp.status_code != 200:
+                        _thinking_footer()
+                        console.print(f"[yellow][AttackPlanner] Ollama error {resp.status_code}[/yellow]")
+                        return None
+                    async for line in resp.aiter_lines():
+                        if not line:
+                            continue
+                        try:
+                            data = json.loads(line)
+                            chunk = data.get("response", "")
+                            if chunk:
+                                sys.stdout.write(chunk)
+                                sys.stdout.flush()
+                                full += chunk
+                            if data.get("done"):
+                                break
+                        except json.JSONDecodeError:
+                            pass
+            _thinking_footer()
+            return full if full else None
         except Exception as e:
+            _thinking_footer()
             console.print(f"[yellow][AttackPlanner] Ollama error: {e}[/yellow]")
         return None
 
     async def _call_openai(self, prompt: str) -> Optional[str]:
+        """OpenAI streaming attack plan — prints chunks live."""
         import os, httpx
         api_key = os.environ.get("OPENAI_API_KEY")
         if not api_key:
             return None
+        _thinking_header("OpenAI", self.payload_gen.openai_model)
+        full = ""
         try:
-            async with httpx.AsyncClient(timeout=60.0) as client:
-                resp = await client.post(
+            async with httpx.AsyncClient(timeout=90.0) as client:
+                async with client.stream(
+                    "POST",
                     "https://api.openai.com/v1/chat/completions",
                     headers={"Authorization": f"Bearer {api_key}"},
                     json={
@@ -314,37 +393,64 @@ Page purpose (your initial guess): {purpose_hint}
                         "messages": [{"role": "user", "content": prompt}],
                         "max_tokens": 2000,
                         "temperature": 0.3,
+                        "stream": True,
                     },
-                )
-                if resp.status_code == 200:
-                    return resp.json()["choices"][0]["message"]["content"]
-                console.print(f"[yellow][AttackPlanner] OpenAI error {resp.status_code}[/yellow]")
+                ) as resp:
+                    if resp.status_code != 200:
+                        _thinking_footer()
+                        console.print(f"[yellow][AttackPlanner] OpenAI error {resp.status_code}[/yellow]")
+                        return None
+                    async for line in resp.aiter_lines():
+                        if not line.startswith("data: "):
+                            continue
+                        data_str = line[6:]
+                        if data_str.strip() == "[DONE]":
+                            break
+                        try:
+                            data = json.loads(data_str)
+                            chunk = data["choices"][0]["delta"].get("content", "")
+                            if chunk:
+                                sys.stdout.write(chunk)
+                                sys.stdout.flush()
+                                full += chunk
+                        except (json.JSONDecodeError, KeyError, IndexError):
+                            pass
+            _thinking_footer()
+            return full if full else None
         except Exception as e:
+            _thinking_footer()
             console.print(f"[yellow][AttackPlanner] OpenAI error: {e}[/yellow]")
         return None
 
     async def _call_gemini(self, prompt: str) -> Optional[str]:
+        """Gemini attack plan — prints response after generation."""
         import os, httpx
         api_key = os.environ.get("GEMINI_API_KEY")
         if not api_key:
             return None
+        _thinking_header("Gemini", self.payload_gen.gemini_model)
         try:
             model = self.payload_gen.gemini_model
             url = (
                 f"https://generativelanguage.googleapis.com/v1beta/models/"
                 f"{model}:generateContent?key={api_key}"
             )
-            async with httpx.AsyncClient(timeout=60.0) as client:
+            async with httpx.AsyncClient(timeout=90.0) as client:
                 resp = await client.post(
                     url,
                     json={"contents": [{"parts": [{"text": prompt}]}]},
                 )
                 if resp.status_code == 200:
                     data = resp.json()
-                    return data["candidates"][0]["content"]["parts"][0]["text"]
+                    text = data["candidates"][0]["content"]["parts"][0]["text"]
+                    sys.stdout.write(text)
+                    sys.stdout.flush()
+                    _thinking_footer()
+                    return text
                 console.print(f"[yellow][AttackPlanner] Gemini error {resp.status_code}[/yellow]")
         except Exception as e:
             console.print(f"[yellow][AttackPlanner] Gemini error: {e}[/yellow]")
+        _thinking_footer()
         return None
 
     def _parse_llm_response(self, url: str, raw: str) -> Optional[PageAttackPlan]:
