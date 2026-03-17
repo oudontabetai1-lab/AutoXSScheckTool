@@ -70,12 +70,26 @@ Examples:
         help="Disable the real-time monitoring dashboard",
     )
     scan.add_argument(
-        "--llm", choices=["ollama", "claude", "none"], default="ollama",
-        help="LLM for context-aware payload generation (default: ollama)",
+        "--llm",
+        choices=["ollama", "claude", "openai", "gemini", "none"],
+        default="ollama",
+        help=(
+            "LLM for context-aware payload generation (default: ollama). "
+            "openai requires OPENAI_API_KEY env var. "
+            "gemini requires GEMINI_API_KEY env var."
+        ),
     )
     scan.add_argument(
         "--ollama-model", default="llama3", metavar="MODEL",
         help="Ollama model name (default: llama3)",
+    )
+    scan.add_argument(
+        "--openai-model", default="gpt-4o-mini", metavar="MODEL",
+        help="OpenAI model name (default: gpt-4o-mini)",
+    )
+    scan.add_argument(
+        "--gemini-model", default="gemini-2.0-flash", metavar="MODEL",
+        help="Google Gemini model name (default: gemini-2.0-flash)",
     )
     scan.add_argument(
         "--output", "-o", metavar="DIR",
@@ -128,6 +142,19 @@ Examples:
     return parser.parse_args()
 
 
+def _llm_model_display(args) -> str:
+    """Return a short model info string for the startup banner."""
+    if args.llm == "ollama":
+        return f"Model    : [blue]{args.ollama_model}[/blue] (Ollama)"
+    if args.llm == "openai":
+        return f"Model    : [blue]{args.openai_model}[/blue] (OpenAI)"
+    if args.llm == "gemini":
+        return f"Model    : [blue]{args.gemini_model}[/blue] (Gemini)"
+    if args.llm == "claude":
+        return "Model    : [blue]claude-haiku-4-5-20251001[/blue] (Claude)"
+    return "Model    : [dim]none[/dim]"
+
+
 async def run_scan(args):
     from rich.console import Console
     from rich.panel import Panel
@@ -143,7 +170,8 @@ async def run_scan(args):
         f"Planner  : [cyan]{planner_display}[/cyan]\n"
         f"Depth    : [blue]{args.depth}[/blue]   "
         f"LLM: [blue]{args.llm}[/blue]   "
-        f"Headless: [blue]{args.headless}[/blue]",
+        f"Headless: [blue]{args.headless}[/blue]\n"
+        + _llm_model_display(args),
         border_style="cyan",
     ))
 
@@ -173,6 +201,8 @@ async def run_scan(args):
             headless=args.headless,
             llm_provider=args.llm,
             ollama_model=args.ollama_model,
+            openai_model=args.openai_model,
+            gemini_model=args.gemini_model,
             checks=args.checks,
             output_dir=args.output,
             timeout=args.timeout,
@@ -220,6 +250,8 @@ async def run_scan(args):
                 headless=args.headless,
                 llm_provider=args.llm,
                 ollama_model=args.ollama_model,
+                openai_model=args.openai_model,
+                gemini_model=args.gemini_model,
                 checks=args.checks,
                 output_dir=args.output,
                 timeout=args.timeout,

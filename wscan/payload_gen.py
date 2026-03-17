@@ -1,9 +1,10 @@
 """
 WScan Payload Generator
-Generates context-aware payloads using local LLM (Ollama) or Claude API.
-Falls back to default payloads when LLM is unavailable.
+Generates context-aware payloads using local LLM (Ollama) or cloud APIs
+(Claude, OpenAI, Gemini). Falls back to default payloads when LLM is unavailable.
 """
 import json
+import os
 import re
 import httpx
 from typing import Optional
@@ -21,20 +22,27 @@ class PayloadGenerator:
         provider: str = "ollama",
         ollama_model: str = "llama3",
         ollama_url: str = "http://localhost:11434",
+        openai_model: str = "gpt-4o-mini",
+        gemini_model: str = "gemini-2.0-flash",
         default_payloads: Optional[dict] = None,
         prompt_templates: Optional[dict] = None,
     ):
         self.provider = provider
         self.ollama_model = ollama_model
         self.ollama_url = ollama_url
+        self.openai_model = openai_model
+        self.gemini_model = gemini_model
         self.default_payloads = default_payloads or {}
         self.prompt_templates = prompt_templates or {}
         self._anthropic_client = None
         self._llm_available: Optional[bool] = None
 
+    # ------------------------------------------------------------------
+    # Client / availability helpers
+    # ------------------------------------------------------------------
+
     def _get_anthropic_client(self):
         if self._anthropic_client is None:
-            import os
             api_key = os.environ.get("ANTHROPIC_API_KEY")
             if api_key:
                 try:
@@ -53,6 +61,16 @@ class PayloadGenerator:
         if self.provider == "claude":
             self._llm_available = self._get_anthropic_client() is not None
             return self._llm_available
+        if self.provider == "openai":
+            self._llm_available = bool(os.environ.get("OPENAI_API_KEY"))
+            if not self._llm_available:
+                console.print("[yellow]OPENAI_API_KEY not set, using default payloads[/yellow]")
+            return self._llm_available
+        if self.provider == "gemini":
+            self._llm_available = bool(os.environ.get("GEMINI_API_KEY"))
+            if not self._llm_available:
+                console.print("[yellow]GEMINI_API_KEY not set, using default payloads[/yellow]")
+            return self._llm_available
         # Check Ollama
         try:
             async with httpx.AsyncClient(timeout=3.0) as client:
@@ -63,6 +81,10 @@ class PayloadGenerator:
         if not self._llm_available:
             console.print("[yellow]LLM not available, using default payloads[/yellow]")
         return self._llm_available
+
+    # ------------------------------------------------------------------
+    # Generation backends
+    # ------------------------------------------------------------------
 
     async def _generate_with_ollama(self, prompt: str) -> Optional[list[str]]:
         """Generate payloads using Ollama."""
@@ -106,9 +128,61 @@ class PayloadGenerator:
             console.print(f"[yellow]Claude API error: {e}[/yellow]")
         return None
 
+    async def _generate_with_openai(self, prompt: str) -> Optional[list[str]]:
+        """Generate payloads using OpenAI API."""
+        api_key = os.environ.get("OPENAI_API_KEY")
+        if not api_key:
+            return None
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                resp = await client.post(
+                    "https://api.openai.com/v1/chat/completions",
+                    headers={"Authorization": f"Bearer {api_key}"},
+                    json={
+                        "model": self.openai_model,
+                        "messages": [{"role": "user", "content": prompt}],
+                        "max_tokens": 500,
+                        "temperature": 0.7,
+                    },
+                )
+                if resp.status_code == 200:
+                    text = resp.json()["choices"][0]["message"]["content"]
+                    return self._extract_json_list(text)
+                console.print(f"[yellow]OpenAI API error {resp.status_code}: {resp.text[:200]}[/yellow]")
+        except Exception as e:
+            console.print(f"[yellow]OpenAI error: {e}[/yellow]")
+        return None
+
+    async def _generate_with_gemini(self, prompt: str) -> Optional[list[str]]:
+        """Generate payloads using Google Gemini API."""
+        api_key = os.environ.get("GEMINI_API_KEY")
+        if not api_key:
+            return None
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                url = (
+                    f"https://generativelanguage.googleapis.com/v1beta/models/"
+                    f"{self.gemini_model}:generateContent?key={api_key}"
+                )
+                resp = await client.post(
+                    url,
+                    json={"contents": [{"parts": [{"text": prompt}]}]},
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    text = data["candidates"][0]["content"]["parts"][0]["text"]
+                    return self._extract_json_list(text)
+                console.print(f"[yellow]Gemini API error {resp.status_code}: {resp.text[:200]}[/yellow]")
+        except Exception as e:
+            console.print(f"[yellow]Gemini error: {e}[/yellow]")
+        return None
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
     def _extract_json_list(self, text: str) -> Optional[list[str]]:
         """Extract a JSON array from LLM response text."""
-        # Find JSON array in the response
         match = re.search(r'\[.*?\]', text, re.DOTALL)
         if match:
             try:
@@ -118,6 +192,10 @@ class PayloadGenerator:
             except json.JSONDecodeError:
                 pass
         return None
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
 
     async def generate(
         self,
@@ -134,28 +212,30 @@ class PayloadGenerator:
         2. LLM-generated payloads
         3. Default payloads from YAML
         """
-        # Custom payloads take priority
         if custom_payloads:
             return custom_payloads
 
         defaults = self.default_payloads.get(check_type, [])
 
-        # Try LLM generation if available
         if self.provider != "none" and await self._check_llm_available():
             template = self.prompt_templates.get(check_type, "")
             if template:
                 prompt = template.format(field_name=field_name, url=url)
-                if self.provider == "claude":
-                    llm_payloads = await self._generate_with_claude(prompt)
-                else:
-                    llm_payloads = await self._generate_with_ollama(prompt)
-
+                llm_payloads = await self._call_llm(prompt)
                 if llm_payloads:
                     console.print(
                         f"[dim]LLM generated {len(llm_payloads)} payloads for {field_name}[/dim]"
                     )
-                    # Combine LLM payloads with defaults (LLM first)
-                    combined = llm_payloads + [p for p in defaults if p not in llm_payloads]
-                    return combined
+                    return llm_payloads + [p for p in defaults if p not in llm_payloads]
 
         return defaults
+
+    async def _call_llm(self, prompt: str) -> Optional[list[str]]:
+        """Route to the appropriate LLM backend."""
+        if self.provider == "claude":
+            return await self._generate_with_claude(prompt)
+        if self.provider == "openai":
+            return await self._generate_with_openai(prompt)
+        if self.provider == "gemini":
+            return await self._generate_with_gemini(prompt)
+        return await self._generate_with_ollama(prompt)

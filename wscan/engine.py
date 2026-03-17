@@ -49,6 +49,8 @@ class ScanEngine:
         headless: bool = False,
         llm_provider: str = "ollama",
         ollama_model: str = "llama3",
+        openai_model: str = "gpt-4o-mini",
+        gemini_model: str = "gemini-2.0-flash",
         checks: Optional[list[str]] = None,
         output_dir: Optional[str] = None,
         timeout: int = 30,
@@ -111,6 +113,8 @@ class ScanEngine:
         self.payload_gen = PayloadGenerator(
             provider=llm_provider,
             ollama_model=ollama_model,
+            openai_model=openai_model,
+            gemini_model=gemini_model,
             default_payloads=payloads_data,
             prompt_templates=prompt_templates,
         )

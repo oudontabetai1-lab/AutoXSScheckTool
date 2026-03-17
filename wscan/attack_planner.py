@@ -245,8 +245,13 @@ Page purpose (your initial guess): {purpose_hint}
         )
 
         raw: Optional[str] = None
-        if self.payload_gen.provider == "claude":
+        provider = self.payload_gen.provider
+        if provider == "claude":
             raw = await self._call_claude(prompt)
+        elif provider == "openai":
+            raw = await self._call_openai(prompt)
+        elif provider == "gemini":
+            raw = await self._call_gemini(prompt)
         else:
             raw = await self._call_ollama(prompt)
 
@@ -292,6 +297,54 @@ Page purpose (your initial guess): {purpose_hint}
                     return resp.json().get("response", "")
         except Exception as e:
             console.print(f"[yellow][AttackPlanner] Ollama error: {e}[/yellow]")
+        return None
+
+    async def _call_openai(self, prompt: str) -> Optional[str]:
+        import os, httpx
+        api_key = os.environ.get("OPENAI_API_KEY")
+        if not api_key:
+            return None
+        try:
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                resp = await client.post(
+                    "https://api.openai.com/v1/chat/completions",
+                    headers={"Authorization": f"Bearer {api_key}"},
+                    json={
+                        "model": self.payload_gen.openai_model,
+                        "messages": [{"role": "user", "content": prompt}],
+                        "max_tokens": 2000,
+                        "temperature": 0.3,
+                    },
+                )
+                if resp.status_code == 200:
+                    return resp.json()["choices"][0]["message"]["content"]
+                console.print(f"[yellow][AttackPlanner] OpenAI error {resp.status_code}[/yellow]")
+        except Exception as e:
+            console.print(f"[yellow][AttackPlanner] OpenAI error: {e}[/yellow]")
+        return None
+
+    async def _call_gemini(self, prompt: str) -> Optional[str]:
+        import os, httpx
+        api_key = os.environ.get("GEMINI_API_KEY")
+        if not api_key:
+            return None
+        try:
+            model = self.payload_gen.gemini_model
+            url = (
+                f"https://generativelanguage.googleapis.com/v1beta/models/"
+                f"{model}:generateContent?key={api_key}"
+            )
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                resp = await client.post(
+                    url,
+                    json={"contents": [{"parts": [{"text": prompt}]}]},
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    return data["candidates"][0]["content"]["parts"][0]["text"]
+                console.print(f"[yellow][AttackPlanner] Gemini error {resp.status_code}[/yellow]")
+        except Exception as e:
+            console.print(f"[yellow][AttackPlanner] Gemini error: {e}[/yellow]")
         return None
 
     def _parse_llm_response(self, url: str, raw: str) -> Optional[PageAttackPlan]:
