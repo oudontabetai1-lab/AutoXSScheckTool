@@ -63,20 +63,7 @@ class ScanEngine:
         self.target_url = url.rstrip("/")
         self.monitor = monitor
         self.depth = depth
-        # Default checks cover every IPA "安全なウェブサイトの作り方" vulnerability category
-        _IPA_DEFAULT_CHECKS = [
-            "sqli",             # IPA 1.1
-            "xss",              # IPA 1.5
-            "os",               # IPA 1.2
-            "path_traversal",   # IPA 1.3
-            "session",          # IPA 1.4
-            "csrf",             # IPA 1.6
-            "header_injection", # IPA 1.7
-            "mail_header",      # IPA 1.8
-            "clickjacking",     # IPA 1.9
-            "open_redirect",    # IPA 1.11
-        ]
-        self.checks = list(checks or _IPA_DEFAULT_CHECKS)
+        self.checks = list(checks or ["sqli", "xss", "os"])
         self.timeout = timeout
         self.max_forms = max_forms
         self.ctf_mode = ctf_mode

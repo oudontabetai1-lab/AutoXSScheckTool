@@ -50,10 +50,10 @@ Examples:
     scan.add_argument(
         "--checks", nargs="+",
         choices=_ALL_CHECKS,
-        default=None,  # None → engine uses IPA full-coverage defaults
+        default=["sqli", "xss", "os"],
         metavar="CHECK",
         help=(
-            "Security checks to run (default: all IPA checks). "
+            "Security checks to run (default: sqli xss os). "
             "Available: " + ", ".join(_ALL_CHECKS)
         ),
     )
