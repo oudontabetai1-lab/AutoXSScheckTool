@@ -144,7 +144,10 @@ class AttackPlanner:
     _LLM_PROMPT = """You are a senior web application penetration tester.
 Analyse the following web page and produce a detailed attack plan.
 
-## Page Information
+## Site Map (all pages discovered in this crawl)
+{site_map}
+
+## Current Page
 URL: {url}
 Title: {title}
 Page purpose (your initial guess): {purpose_hint}
@@ -152,12 +155,20 @@ Page purpose (your initial guess): {purpose_hint}
 ## Discovered Inputs
 {inputs_desc}
 
+## Cross-page attack awareness
+Consider stored / second-order attacks carefully:
+- If this page ACCEPTS input that could be DISPLAYED on another page (e.g., a comment that
+  appears in a feed, or a username shown on a profile page), mark XSS / SQLi risk HIGH even
+  if the reflection is not immediate on this same page.
+- If another page in the site map looks like it could render input from this page, note it
+  in the rationale.
+
 ## Your task
 1. State the page's actual purpose (login, search, file upload, admin, etc.).
 2. For EACH input field / URL parameter, decide:
    - Which vulnerability checks are most relevant (pick from: {all_checks})
    - A risk score 1-10 (10 = almost certainly vulnerable given context)
-   - A brief rationale (1-2 sentences)
+   - A brief rationale (1-2 sentences, mention cross-page risk if applicable)
    - Up to 5 targeted payloads for the most likely check type (optional but preferred)
 
 ## Return ONLY valid JSON in this exact schema (no markdown, no extra text):
@@ -170,7 +181,7 @@ Page purpose (your initial guess): {purpose_hint}
       "is_url_param": <bool>,
       "risk_score": <1-10>,
       "priority_checks": ["<check1>", "<check2>"],
-      "rationale": "<why>",
+      "rationale": "<why, including any cross-page risk>",
       "custom_payloads": {{
         "<check_type>": ["<payload1>", "<payload2>"]
       }}
@@ -196,13 +207,15 @@ Page purpose (your initial guess): {purpose_hint}
         page_html: str,
         forms: list[dict],
         url_params: list[str],
+        site_map: str = "",
     ) -> PageAttackPlan:
         """
         Build a PageAttackPlan for the given page.
+        site_map: newline-separated summary of all crawled pages (for cross-page XSS awareness).
         Tries LLM first; falls back to heuristic analysis.
         """
         if self.payload_gen.provider != "none" and await self.payload_gen._check_llm_available():
-            plan = await self._llm_plan(url, page_html, forms, url_params)
+            plan = await self._llm_plan(url, page_html, forms, url_params, site_map)
             if plan:
                 self._print_plan_summary(plan)
                 return plan
@@ -255,8 +268,9 @@ Page purpose (your initial guess): {purpose_hint}
         page_html: str,
         forms: list[dict],
         url_params: list[str],
+        site_map: str = "",
     ) -> Optional[PageAttackPlan]:
-        """Ask the LLM to produce a structured attack plan."""
+        """Ask the LLM to produce a structured attack plan with cross-page awareness."""
         inputs_lines: list[str] = []
         for fi, form in enumerate(forms):
             for inp in form.get("inputs", []):
@@ -271,7 +285,6 @@ Page purpose (your initial guess): {purpose_hint}
         if not inputs_lines:
             return None
 
-        # Extract a brief page excerpt for context (title + first 800 chars of visible text)
         title = self._extract_title(page_html)
         text_snippet = self._extract_text(page_html, max_chars=800)
         purpose_hint = self._guess_purpose(title, text_snippet, forms)
@@ -282,6 +295,7 @@ Page purpose (your initial guess): {purpose_hint}
             purpose_hint=purpose_hint,
             inputs_desc="\n".join(inputs_lines),
             all_checks=", ".join(sorted(self.enabled_checks)),
+            site_map=site_map or "  (only this page was crawled)",
         )
 
         raw: Optional[str] = None
