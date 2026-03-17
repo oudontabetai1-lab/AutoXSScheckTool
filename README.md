@@ -24,6 +24,7 @@ WScan は、IPA「**安全なウェブサイトの作り方**」の全脆弱性�
 
 ## 主な機能
 
+- **AI 攻撃計画（AeyeScan / VEX スタイル）** — スキャン前にページを分析し、フィールドごとに優先チェックとターゲット特化ペイロードを計画
 - **全 IPA チェックをデフォルト実行** — 引数なしで全カテゴリをスキャン
 - **フィールドレベル検査** (sqli, xss, os, path_traversal, header_injection, mail_header, open_redirect) とページレベル検査 (csrf, clickjacking, session) の 2 層構造
 - **BFS クローラー** — 設定可能な深さで同一ドメインリンクを自動収集
@@ -121,6 +122,7 @@ usage: main.py scan [オプション] URL
   --cookie COOKIES       スキャン前にセットする Cookie 文字列
   --auth-user USER       ログインフォーム自動入力ユーザー名
   --auth-pass PASS       ログインフォーム自動入力パスワード
+  --no-planner           AI 攻撃計画機能を無効化（全フィールドに全チェック実施）
 ```
 
 ---
@@ -198,14 +200,64 @@ path_traversal:
 
 ---
 
+## AI 攻撃計画機能（AttackPlanner）
+
+AeyeScan・VEX が採用する「スキャン前の AI による攻撃戦略立案」を実装しています。
+
+### 動作フロー
+
+```
+[ページ訪問] → [HTML / フォーム / パラメーター収集]
+      ↓
+[AttackPlanner.analyze_page()]
+      ├─ LLM 利用可能 → LLM にページ解析を依頼
+      │     • ページ用途を特定（ログイン / 検索 / ファイルアップロード等）
+      │     • フィールドごとに最適チェックと専用ペイロードを生成
+      │     • JSON 形式で構造化された計画を返却
+      └─ LLM 非接続   → ヒューリスティック分析
+            • フィールド名のパターンマッチ
+            • "search" → sqli/xss 優先、"file" → path_traversal 優先 等
+      ↓
+[PageAttackPlan — フィールドをリスクスコア順にソート]
+      ↓
+[優先度順でスキャン実行 — 不要なチェックをスキップ]
+      ↓
+[HTML レポートに「Attack Plan」セクションを追加]
+```
+
+### LLM への指示内容（プロンプト要点）
+
+- ページの用途（ログイン・検索・管理画面など）を判定
+- 各フィールドに対して「どの脆弱性が最も可能性が高いか」とリスクスコアを算出
+- そのフィールドに特化した攻撃ペイロードを最大 5 つ生成
+- 優先チェックを順位付きリストで返却
+
+### 利点
+
+| 従来スキャナー | AttackPlanner 搭載 WScan |
+|--------------|--------------------------|
+| 全フィールドに全チェックを実施 | リスクに応じてチェックを絞り込み |
+| 汎用ペイロードのみ | フィールド文脈に特化したペイロード |
+| スキャン順序はランダム | リスクスコアが高いフィールドを優先 |
+| 計画なし | 計画と根拠が HTML レポートに可視化 |
+
+### 無効化
+
+```bash
+python main.py scan https://example.com --no-planner
+```
+
+---
+
 ## アーキテクチャ
 
 ```
 main.py / launcher.py
     └── ScanEngine (wscan/engine.py)
-            ├── BrowserManager (wscan/browser.py)      # Playwright 操作
+            ├── AttackPlanner (wscan/attack_planner.py) # AI 攻撃計画
+            ├── BrowserManager (wscan/browser.py)       # Playwright 操作
             ├── PayloadGenerator (wscan/payload_gen.py) # LLM / デフォルト
-            ├── MonitorServer (wscan/monitor.py)        # WebSocket ダッシュボード
+            ├── MonitorServer (wscan/monitor.py)         # WebSocket ダッシュボード
             └── Scanners (wscan/scanners/)
                     ├── XSSScanner            (IPA 1.5)
                     ├── SQLiScanner           (IPA 1.1)

@@ -14,6 +14,7 @@ import yaml
 from rich.console import Console
 from rich.table import Table
 
+from .attack_planner import AttackPlanner, FieldAttackPlan, PageAttackPlan
 from .browser import BrowserManager
 from .monitor import MonitorServer
 from .payload_gen import PayloadGenerator
@@ -57,22 +58,23 @@ class ScanEngine:
         cookies: str = "",
         auth_user: str = "",
         auth_pass: str = "",
+        use_planner: bool = True,
     ):
         self.target_url = url.rstrip("/")
         self.monitor = monitor
         self.depth = depth
         # Default checks cover every IPA "安全なウェブサイトの作り方" vulnerability category
         _IPA_DEFAULT_CHECKS = [
-            "sqli",            # IPA 1.1
-            "xss",             # IPA 1.5
-            "os",              # IPA 1.2
-            "path_traversal",  # IPA 1.3
-            "session",         # IPA 1.4
-            "csrf",            # IPA 1.6
-            "header_injection",# IPA 1.7
-            "mail_header",     # IPA 1.8
-            "clickjacking",    # IPA 1.9
-            "open_redirect",   # IPA 1.11
+            "sqli",             # IPA 1.1
+            "xss",              # IPA 1.5
+            "os",               # IPA 1.2
+            "path_traversal",   # IPA 1.3
+            "session",          # IPA 1.4
+            "csrf",             # IPA 1.6
+            "header_injection", # IPA 1.7
+            "mail_header",      # IPA 1.8
+            "clickjacking",     # IPA 1.9
+            "open_redirect",    # IPA 1.11
         ]
         self.checks = list(checks or _IPA_DEFAULT_CHECKS)
         self.timeout = timeout
@@ -80,6 +82,7 @@ class ScanEngine:
         self.ctf_mode = ctf_mode
         self.sleep_factor = 0.5 if ctf_mode else 1.0
         self.cookies = cookies
+        self.use_planner = use_planner
         if ctf_mode and "ssti" not in self.checks:
             self.checks.append("ssti")
 
@@ -127,23 +130,30 @@ class ScanEngine:
 
         # Initialize scanners — covers all IPA "安全なウェブサイトの作り方" categories
         scanner_map = {
-            "sqli":             SQLiScanner,             # IPA 1.1
-            "xss":              XSSScanner,              # IPA 1.5
-            "os":               OSInjectionScanner,      # IPA 1.2
-            "ssti":             SSTIScanner,             # bonus
-            "path_traversal":   PathTraversalScanner,    # IPA 1.3
-            "csrf":             CSRFScanner,             # IPA 1.6
-            "header_injection": HeaderInjectionScanner,  # IPA 1.7
+            "sqli":             SQLiScanner,              # IPA 1.1
+            "xss":              XSSScanner,               # IPA 1.5
+            "os":               OSInjectionScanner,       # IPA 1.2
+            "ssti":             SSTIScanner,              # bonus
+            "path_traversal":   PathTraversalScanner,     # IPA 1.3
+            "csrf":             CSRFScanner,              # IPA 1.6
+            "header_injection": HeaderInjectionScanner,   # IPA 1.7
             "mail_header":      MailHeaderInjectionScanner, # IPA 1.8
-            "open_redirect":    OpenRedirectScanner,     # IPA 1.11
-            "clickjacking":     ClickjackingScanner,     # IPA 1.9
-            "session":          SessionScanner,          # IPA 1.4
+            "open_redirect":    OpenRedirectScanner,      # IPA 1.11
+            "clickjacking":     ClickjackingScanner,      # IPA 1.9
+            "session":          SessionScanner,           # IPA 1.4
         }
         self.scanners = {
             name: cls(self)
             for name, cls in scanner_map.items()
             if name in self.checks
         }
+
+        # Attack planner (AeyeScan / VEX-style AI-driven strategy)
+        self.attack_planner = AttackPlanner(
+            payload_gen=self.payload_gen,
+            enabled_checks=self.checks,
+        )
+        self.attack_plans: list[PageAttackPlan] = []
 
         # Exclude list (case-insensitive field name matching)
         self.exclude_fields: set[str] = {f.lower() for f in (exclude_fields or [])}
@@ -167,6 +177,8 @@ class ScanEngine:
     async def run(self):
         """Main scan entry point."""
         console.print(f"\n[bold]Starting scan of:[/bold] [cyan]{self.target_url}[/cyan]")
+        if self.use_planner:
+            console.print("[dim cyan]Attack planner:[/dim cyan] enabled (AeyeScan/VEX-style)")
         if self.monitor:
             await self.monitor.emit_status(f"Starting scan of {self.target_url}", "running")
 
@@ -249,6 +261,24 @@ class ScanEngine:
 
         form_count = min(len(forms), self.max_forms)
 
+        # ---------------------------------------------------------------
+        # Attack planning phase
+        # ---------------------------------------------------------------
+        attack_plan: Optional[PageAttackPlan] = None
+        if self.use_planner:
+            try:
+                page_html = await self.browser.page.content()
+            except Exception:
+                page_html = ""
+            attack_plan = await self.attack_planner.analyze_page(
+                url, page_html, forms[:form_count], url_params
+            )
+            self.attack_plans.append(attack_plan)
+            if self.monitor:
+                await self.monitor.emit_status(
+                    f"Attack plan ready: {attack_plan.page_purpose[:60]}"
+                )
+
         # Count new testable fields to update total (for progress bar)
         new_fields = 0
         for fi, form in enumerate(forms[:form_count]):
@@ -264,7 +294,8 @@ class ScanEngine:
         self.total_fields += new_fields
 
         skipped = sum(
-            1 for f in [fld.get("name","") for fm in forms[:form_count] for fld in fm.get("inputs",[])]
+            1 for f in [fld.get("name", "") for fm in forms[:form_count]
+                        for fld in fm.get("inputs", [])]
             + list(url_params)
             if f.lower() in self.exclude_fields
         )
@@ -274,33 +305,50 @@ class ScanEngine:
             + (f", [yellow]{skipped} excluded[/yellow]" if skipped else "")
         )
 
-        # Scan form fields
+        # ---------------------------------------------------------------
+        # Determine field order: prioritised by attack plan risk score
+        # ---------------------------------------------------------------
+        # Build a flat list of (fi, field, is_url_param) in priority order
+        field_queue: list[tuple[int, dict, bool]] = []
         for fi, form in enumerate(forms[:form_count]):
-            for field in form.get("inputs", []):
-                field_name = field.get("name", f"field_{fi}")
-                key = f"{url}||{fi}||{field_name}"
-                if key in self.scanned_forms:
-                    continue
-                self.scanned_forms.add(key)
-                # Skip excluded fields
-                if field_name.lower() in self.exclude_fields:
-                    console.print(f"  [dim]Skipping excluded field: {field_name}[/dim]")
-                    continue
-
-                await self._scan_field(url, fi, field, is_url_param=False)
-                await self.browser.navigate(url)
-
-        # Scan URL parameters
+            for inp in form.get("inputs", []):
+                field_queue.append((fi, inp, False))
         for param in url_params:
-            field = {"name": param, "type": "text"}
-            key = f"{url}||url_param||{param}"
+            field_queue.append((0, {"name": param, "type": "text"}, True))
+
+        if attack_plan:
+            def _sort_key(item: tuple[int, dict, bool]) -> int:
+                fi, inp, is_url = item
+                fp = attack_plan.get_field_plan(
+                    inp.get("name", ""), fi, is_url
+                )
+                return -(fp.risk_score if fp else 5)  # higher risk first
+            field_queue.sort(key=_sort_key)
+
+        # ---------------------------------------------------------------
+        # Scan fields
+        # ---------------------------------------------------------------
+        for fi, field, is_url_param in field_queue:
+            field_name = field.get("name", f"field_{fi}")
+            key = (f"{url}||url_param||{field_name}" if is_url_param
+                   else f"{url}||{fi}||{field_name}")
             if key in self.scanned_forms:
                 continue
             self.scanned_forms.add(key)
-            if param.lower() in self.exclude_fields:
-                console.print(f"  [dim]Skipping excluded param: {param}[/dim]")
+
+            if field_name.lower() in self.exclude_fields:
+                console.print(f"  [dim]Skipping excluded field: {field_name}[/dim]")
                 continue
-            await self._scan_field(url, 0, field, is_url_param=True)
+
+            # Get field-level plan (may be None if planner disabled)
+            field_plan: Optional[FieldAttackPlan] = None
+            if attack_plan:
+                field_plan = attack_plan.get_field_plan(field_name, fi, is_url_param)
+
+            await self._scan_field(url, fi, field, is_url_param, field_plan)
+
+            if not is_url_param:
+                await self.browser.navigate(url)
 
     async def _scan_field(
         self,
@@ -308,13 +356,45 @@ class ScanEngine:
         form_index: int,
         field: dict,
         is_url_param: bool = False,
+        field_plan: Optional[FieldAttackPlan] = None,
     ):
-        """Run all enabled scanners on a single field."""
+        """Run enabled scanners on a single field, guided by the attack plan."""
         field_name = field.get("name", "unknown")
         location = "URL param" if is_url_param else "form field"
-        console.print(f"  [dim]Testing {location}:[/dim] [green]{field_name}[/green]")
 
-        for check_name, scanner in self.scanners.items():
+        # Determine which scanners to run
+        if field_plan and field_plan.priority_checks:
+            # Planner's ordered list comes first, remaining enabled checks appended
+            planned = [c for c in field_plan.priority_checks if c in self.scanners]
+            rest = [c for c in self.scanners if c not in set(planned)]
+            ordered_checks = planned + rest
+            risk_label = f"risk={field_plan.risk_score}/10"
+        else:
+            ordered_checks = list(self.scanners.keys())
+            risk_label = "risk=?"
+
+        console.print(
+            f"  [dim]Testing {location}:[/dim] [green]{field_name}[/green] "
+            f"[dim]({risk_label})[/dim]"
+        )
+        if field_plan and field_plan.rationale:
+            console.print(
+                f"    [dim cyan]Plan:[/dim cyan] [dim]{field_plan.rationale[:100]}[/dim]"
+            )
+
+        for check_name in ordered_checks:
+            scanner = self.scanners.get(check_name)
+            if scanner is None:
+                continue
+
+            # Temporarily inject planner's targeted payloads for this check
+            plan_payloads = (
+                field_plan.custom_payloads.get(check_name) if field_plan else None
+            )
+            _prev = self.custom_payloads.get(check_name)
+            if plan_payloads:
+                self.custom_payloads[check_name] = plan_payloads
+
             try:
                 findings = await scanner.scan_field(url, form_index, field, is_url_param)
                 if findings:
@@ -326,11 +406,17 @@ class ScanEngine:
                         )
             except Exception as e:
                 console.print(f"    [yellow]Scanner error ({check_name}): {e}[/yellow]")
+            finally:
+                # Restore previous custom payloads
+                if plan_payloads:
+                    if _prev is None:
+                        self.custom_payloads.pop(check_name, None)
+                    else:
+                        self.custom_payloads[check_name] = _prev
 
-        # Update progress after all checks on this field
+        # Update progress
         self.completed_fields += 1
         if self.monitor and self.total_fields > 0:
-            pct = int(self.completed_fields / self.total_fields * 100)
             await self.monitor.emit_progress(
                 current=self.completed_fields,
                 total=self.total_fields,
@@ -345,6 +431,23 @@ class ScanEngine:
             "checks": self.checks,
             "visited_urls": list(self.visited_urls),
             "findings": [f.to_dict() for f in self.all_findings],
+            "attack_plans": [
+                {
+                    "url": p.url,
+                    "page_purpose": p.page_purpose,
+                    "planned_by": p.planned_by,
+                    "fields": [
+                        {
+                            "name": fp.name,
+                            "risk_score": fp.risk_score,
+                            "priority_checks": fp.priority_checks,
+                            "rationale": fp.rationale,
+                        }
+                        for fp in p.fields
+                    ],
+                }
+                for p in self.attack_plans
+            ],
         }
         evidence_path = self.output_dir / "evidence.json"
         with open(evidence_path, "w", encoding="utf-8") as fp:
@@ -360,6 +463,7 @@ class ScanEngine:
             findings=self.all_findings,
             visited_urls=list(self.visited_urls),
             checks=self.checks,
+            attack_plans=self.attack_plans,
         )
 
     def _print_summary(self):
@@ -368,7 +472,13 @@ class ScanEngine:
         console.print("[bold]Scan Summary[/bold]")
         console.print(f"Target: [cyan]{self.target_url}[/cyan]")
         console.print(f"Pages visited: [cyan]{len(self.visited_urls)}[/cyan]")
-        console.print(f"Total findings: [{'red' if self.all_findings else 'green'}]{len(self.all_findings)}[/{'red' if self.all_findings else 'green'}]")
+        console.print(f"Attack plans: [cyan]{len(self.attack_plans)}[/cyan]")
+        console.print(
+            f"Total findings: "
+            f"[{'red' if self.all_findings else 'green'}]"
+            f"{len(self.all_findings)}"
+            f"[/{'red' if self.all_findings else 'green'}]"
+        )
 
         if self.all_findings:
             table = Table(show_header=True, header_style="bold magenta")
@@ -378,7 +488,10 @@ class ScanEngine:
             table.add_column("Evidence")
 
             for f in self.all_findings:
-                sev_color = {"critical": "red", "high": "yellow", "medium": "blue", "low": "green"}.get(f.severity, "white")
+                sev_color = {
+                    "critical": "red", "high": "yellow",
+                    "medium": "blue", "low": "green",
+                }.get(f.severity, "white")
                 table.add_row(
                     f.check_type.upper(),
                     f"[{sev_color}]{f.severity}[/{sev_color}]",

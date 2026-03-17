@@ -117,6 +117,13 @@ Examples:
         "--auth-pass", metavar="PASS", default="",
         help="Password for login form auto-fill",
     )
+    scan.add_argument(
+        "--no-planner", action="store_true",
+        help=(
+            "Disable the AI attack planner. "
+            "Runs all checks on all fields without strategic prioritisation."
+        ),
+    )
 
     return parser.parse_args()
 
@@ -127,11 +134,14 @@ async def run_scan(args):
 
     console = Console()
 
+    checks_display = ', '.join(args.checks) if args.checks else "all IPA checks"
+    planner_display = "off" if getattr(args, "no_planner", False) else "on (AI-driven)"
     console.print(Panel.fit(
         f"[bold cyan]WScan - Web Security Scanner[/bold cyan]\n"
-        f"Target  : [yellow]{args.url}[/yellow]\n"
-        f"Checks  : [green]{', '.join(args.checks)}[/green]\n"
-        f"Depth   : [blue]{args.depth}[/blue]   "
+        f"Target   : [yellow]{args.url}[/yellow]\n"
+        f"Checks   : [green]{checks_display}[/green]\n"
+        f"Planner  : [cyan]{planner_display}[/cyan]\n"
+        f"Depth    : [blue]{args.depth}[/blue]   "
         f"LLM: [blue]{args.llm}[/blue]   "
         f"Headless: [blue]{args.headless}[/blue]",
         border_style="cyan",
@@ -172,6 +182,7 @@ async def run_scan(args):
             cookies=getattr(args, "cookie", "") or "",
             auth_user=getattr(args, "auth_user", "") or "",
             auth_pass=getattr(args, "auth_pass", "") or "",
+            use_planner=not getattr(args, "no_planner", False),
         )
         await engine.run()
         return

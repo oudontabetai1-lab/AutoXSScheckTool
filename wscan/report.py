@@ -5,9 +5,12 @@ Generates a self-contained HTML security assessment report.
 import datetime
 import json
 from pathlib import Path
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
 
 from .scanners.base import Finding
+
+if TYPE_CHECKING:
+    from .attack_planner import PageAttackPlan
 
 TEMPLATES_DIR = Path(__file__).parent.parent / "templates"
 
@@ -20,6 +23,16 @@ SEVERITY_COLORS = {
     "info": "#4299e1",
 }
 
+# Risk score → colour
+def _risk_color(score: int) -> str:
+    if score >= 8:
+        return "#e53e3e"
+    if score >= 6:
+        return "#dd6b20"
+    if score >= 4:
+        return "#d69e2e"
+    return "#38a169"
+
 
 class ReportGenerator:
     def __init__(self, output_dir: Path):
@@ -31,10 +44,12 @@ class ReportGenerator:
         findings: list[Finding],
         visited_urls: list[str],
         checks: list[str],
+        attack_plans: "Optional[list[PageAttackPlan]]" = None,
     ):
         """Generate HTML report and save to output directory."""
         sorted_findings = sorted(findings, key=lambda f: SEVERITY_ORDER.get(f.severity, 99))
-        html = self._build_html(target, sorted_findings, visited_urls, checks)
+        html = self._build_html(target, sorted_findings, visited_urls, checks,
+                                attack_plans or [])
         report_path = self.output_dir / "report.html"
         report_path.write_text(html, encoding="utf-8")
         return report_path
@@ -45,7 +60,9 @@ class ReportGenerator:
         findings: list[Finding],
         visited_urls: list[str],
         checks: list[str],
+        attack_plans: "list[PageAttackPlan]" = None,
     ) -> str:
+        attack_plans = attack_plans or []
         scan_date = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         total = len(findings)
         counts = {}
@@ -108,6 +125,9 @@ class ReportGenerator:
                 <p class="note">This does not guarantee security. The tool tests known patterns only.</p>
             </div>"""
 
+        # ── Attack Plan section ──────────────────────────────────────────
+        attack_plan_html = self._build_attack_plan_html(attack_plans)
+
         return f"""<!DOCTYPE html>
 <html lang="ja">
 <head>
@@ -167,6 +187,24 @@ body {{ font-family: 'Segoe UI', system-ui, -apple-system, sans-serif; backgroun
 .lightbox.active {{ display: flex; }}
 .lightbox img {{ max-width: 95%; max-height: 95vh; border-radius: 8px; }}
 .lightbox-close {{ position: fixed; top: 20px; right: 20px; color: white; font-size: 2rem; cursor: pointer; background: rgba(0,0,0,0.5); width: 44px; height: 44px; border-radius: 50%; display: flex; align-items: center; justify-content: center; }}
+/* ── Attack Plan styles ── */
+.plan-card {{ border: 1px solid #bee3f8; border-radius: 10px; margin-bottom: 20px; overflow: hidden; }}
+.plan-card-header {{ background: #ebf8ff; padding: 14px 20px; border-bottom: 1px solid #bee3f8; display: flex; flex-direction: column; gap: 4px; }}
+.plan-card-header .plan-url {{ font-family: monospace; font-size: 0.85rem; color: #2b6cb0; word-break: break-all; }}
+.plan-card-header .plan-purpose {{ font-size: 0.9rem; color: #1a365d; font-weight: 600; }}
+.plan-card-header .plan-by {{ font-size: 0.75rem; color: #718096; }}
+.plan-fields {{ padding: 16px 20px; display: flex; flex-direction: column; gap: 10px; }}
+.plan-field-row {{ display: grid; grid-template-columns: 1fr 60px 1fr 2fr; gap: 12px; align-items: start; font-size: 0.85rem; border-bottom: 1px solid #f0f4f8; padding-bottom: 8px; }}
+.plan-field-row:last-child {{ border-bottom: none; padding-bottom: 0; }}
+.plan-field-name {{ font-family: monospace; font-weight: 600; color: #2d3748; }}
+.plan-risk-badge {{ width: 48px; height: 48px; border-radius: 50%; display: flex; align-items: center; justify-content: center; color: white; font-size: 1.1rem; font-weight: 800; }}
+.plan-checks {{ display: flex; flex-wrap: wrap; gap: 4px; }}
+.plan-check-badge {{ background: #e2e8f0; color: #4a5568; border-radius: 4px; padding: 2px 7px; font-size: 0.75rem; font-weight: 600; letter-spacing: 0.03em; }}
+.plan-check-badge.priority-0 {{ background: #fed7d7; color: #742a2a; }}
+.plan-check-badge.priority-1 {{ background: #feebc8; color: #7b341e; }}
+.plan-rationale {{ color: #718096; font-size: 0.82rem; font-style: italic; }}
+.plan-cols-header {{ display: grid; grid-template-columns: 1fr 60px 1fr 2fr; gap: 12px; padding: 0 0 6px; font-size: 0.72rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; color: #a0aec0; border-bottom: 2px solid #e2e8f0; margin-bottom: 6px; }}
+.no-plans {{ color: #a0aec0; font-size: 0.9rem; padding: 16px 0; }}
 </style>
 </head>
 <body>
@@ -228,6 +266,9 @@ body {{ font-family: 'Segoe UI', system-ui, -apple-system, sans-serif; backgroun
         </div>
     </div>
 
+    <!-- Attack Plans -->
+    {attack_plan_html}
+
     <!-- Findings -->
     <div class="section">
         <h2>Vulnerability Findings ({total})</h2>
@@ -265,6 +306,62 @@ document.querySelectorAll('.evidence-screenshot').forEach(img => {{
 </script>
 </body>
 </html>"""
+
+    def _build_attack_plan_html(self, attack_plans: list) -> str:
+        """Render the Attack Planning section of the report."""
+        if not attack_plans:
+            return ""
+
+        cards_html = ""
+        for plan in attack_plans:
+            fields_rows = ""
+            sorted_fields = sorted(plan.fields, key=lambda f: f.risk_score, reverse=True)
+            for fp in sorted_fields:
+                color = _risk_color(fp.risk_score)
+                checks_html = "".join(
+                    f'<span class="plan-check-badge priority-{min(i, 2)}">'
+                    f'{self._escape(c)}</span>'
+                    for i, c in enumerate(fp.priority_checks)
+                )
+                fields_rows += f"""
+                <div class="plan-field-row">
+                    <div class="plan-field-name">{self._escape(fp.name)}</div>
+                    <div>
+                        <div class="plan-risk-badge" style="background:{color}">{fp.risk_score}</div>
+                    </div>
+                    <div class="plan-checks">{checks_html or '<span style="color:#a0aec0">—</span>'}</div>
+                    <div class="plan-rationale">{self._escape(fp.rationale)}</div>
+                </div>"""
+
+            planned_by_label = "AI (LLM)" if plan.planned_by == "llm" else "Heuristic"
+            cards_html += f"""
+            <div class="plan-card">
+                <div class="plan-card-header">
+                    <div class="plan-url">{self._escape(plan.url)}</div>
+                    <div class="plan-purpose">{self._escape(plan.page_purpose)}</div>
+                    <div class="plan-by">Planned by: {planned_by_label}</div>
+                </div>
+                <div class="plan-fields">
+                    <div class="plan-cols-header">
+                        <span>Field / Parameter</span>
+                        <span>Risk</span>
+                        <span>Priority Checks</span>
+                        <span>Rationale</span>
+                    </div>
+                    {fields_rows or '<div class="no-plans">No testable fields found on this page.</div>'}
+                </div>
+            </div>"""
+
+        return f"""
+    <div class="section">
+        <h2>Attack Plan ({len(attack_plans)} page{'s' if len(attack_plans) != 1 else ''})</h2>
+        <p style="color:#718096; font-size:0.9rem; margin-bottom:16px;">
+            AI-driven attack strategy analysis performed before payload injection.
+            Fields are ordered by risk score (10 = highest priority).
+            Red badges = highest-priority checks for that field.
+        </p>
+        {cards_html}
+    </div>"""
 
     def _format_request(self, req: dict) -> str:
         if not req:
