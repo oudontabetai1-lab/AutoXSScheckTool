@@ -17,19 +17,35 @@ class NetworkCapture:
 
     def __init__(self):
         self.pairs: list[dict] = []
-        self._pending: dict[str, dict] = {}
+        # Use (url, id(request_object)) as key to avoid collisions when the same URL
+        # is requested multiple times concurrently (race condition fix).
+        self._pending: dict[tuple, dict] = {}
 
     def on_request(self, request: Request):
-        self._pending[request.url] = {
+        key = (request.url, id(request))
+        self._pending[key] = {
             "url": request.url,
             "method": request.method,
             "headers": dict(request.headers),
             "post_data": request.post_data,
             "timestamp": time.time(),
+            "_req_id": id(request),
         }
 
     def on_response(self, response: Response):
-        req = self._pending.pop(response.url, {"url": response.url})
+        # Match by (url, id(response.request)) so concurrent requests to the same URL
+        # are kept separate and don't overwrite each other.
+        req_id = id(response.request) if response.request else None
+        key = (response.url, req_id)
+        req = self._pending.pop(key, None)
+        if req is None:
+            # Fallback: try matching by URL alone (older Playwright versions)
+            for k in list(self._pending):
+                if k[0] == response.url:
+                    req = self._pending.pop(k)
+                    break
+        if req is None:
+            req = {"url": response.url}
         pair = {
             "request": req,
             "response": {
