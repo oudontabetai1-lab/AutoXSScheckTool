@@ -88,6 +88,14 @@ class ReportGenerator:
             req_html = self._format_request(req)
             resp_html = self._format_response(resp, f)
 
+            extra_badges = ""
+            if "[ChainDetect]" in f.evidence:
+                extra_badges += '<span class="badge-chain">🔗 Chain</span>'
+            if "[MultiParam]" in f.evidence:
+                extra_badges += '<span class="badge-multi">⚡ MultiParam</span>'
+            if "[AdaptiveAI]" in f.evidence:
+                extra_badges += '<span class="badge-ai">🧠 AdaptiveAI</span>'
+
             findings_html += f"""
             <div class="finding-card" id="finding-{i}">
                 <div class="finding-header" style="border-left: 4px solid {color}">
@@ -95,6 +103,7 @@ class ReportGenerator:
                         <span class="badge" style="background:{color}">{f.severity.upper()}</span>
                         <span class="check-type">{f.check_type.upper()}</span>
                         <span class="field-name">Field: {self._escape(f.field_name)}</span>
+                        {extra_badges}
                     </div>
                     <div class="finding-url">{self._escape(f.url)}</div>
                 </div>
@@ -163,6 +172,9 @@ body {{ font-family: 'Segoe UI', system-ui, -apple-system, sans-serif; backgroun
 .finding-header {{ padding: 16px 20px; background: #f8fafc; display: flex; flex-direction: column; gap: 8px; }}
 .finding-title {{ display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }}
 .badge {{ color: white; padding: 3px 10px; border-radius: 20px; font-size: 0.75rem; font-weight: 700; letter-spacing: 0.05em; }}
+.badge-chain {{ background:#744210; color:#fefcbf; padding:2px 8px; border-radius:10px; font-size:0.72rem; font-weight:700; }}
+.badge-multi {{ background:#1a365d; color:#bee3f8; padding:2px 8px; border-radius:10px; font-size:0.72rem; font-weight:700; }}
+.badge-ai {{ background:#44337a; color:#e9d8fd; padding:2px 8px; border-radius:10px; font-size:0.72rem; font-weight:700; }}
 .check-type {{ font-weight: 700; font-size: 1rem; }}
 .field-name {{ color: #4a5568; font-size: 0.9rem; }}
 .finding-url {{ font-size: 0.85rem; color: #718096; word-break: break-all; }}

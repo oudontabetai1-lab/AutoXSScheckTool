@@ -295,6 +295,80 @@ class BrowserManager:
             source = await self.get_page_source()
             return source, {}
 
+    async def fill_and_submit_form_multi(
+        self,
+        form_index: int,
+        field_payloads: dict,
+    ) -> tuple[str, dict]:
+        """
+        Fill *multiple* form fields with their respective payloads and submit.
+
+        field_payloads: {field_name: payload_string, ...}
+        All non-specified fields receive safe/auth values (same as fill_and_submit_form).
+        Returns (page_source, network_pair).
+        """
+        self.reset_dialog()
+        self.network.clear()
+        try:
+            await self.page.evaluate(
+                """
+                async ([formIndex, fieldPayloads, authUser, authPass]) => {
+                    const forms = document.querySelectorAll('form');
+                    const form = forms[formIndex];
+                    if (!form) return;
+
+                    const allInputs = form.querySelectorAll(
+                        'input:not([type=submit]):not([type=button]):not([type=reset]):not([type=image]):not([type=file]), textarea'
+                    );
+
+                    // Fill non-targeted fields with safe / auth values first
+                    allInputs.forEach(el => {
+                        if (el.type === 'checkbox' || el.type === 'radio' || el.type === 'hidden') return;
+                        const name = (el.name || el.id || '').toLowerCase();
+                        if (el.type === 'password' && authPass) {
+                            el.value = authPass;
+                        } else if (authUser && (name.includes('user') || name.includes('email') ||
+                                   name.includes('login') || name.includes('account') ||
+                                   name.includes('mail') || name.includes('name'))) {
+                            el.value = authUser;
+                        } else {
+                            el.value = 'test';
+                        }
+                    });
+
+                    // Override targeted fields with their attack payloads
+                    for (const [fieldName, payload] of Object.entries(fieldPayloads)) {
+                        const target = Array.from(allInputs).find(
+                            el => (el.name || el.id) === fieldName
+                        );
+                        if (target) target.value = payload;
+                    }
+                }
+                """,
+                [form_index, field_payloads, self.auth_user, self.auth_pass],
+            )
+
+            submit_btn = await self.page.query_selector(
+                f"form:nth-of-type({form_index + 1}) [type=submit], "
+                f"form:nth-of-type({form_index + 1}) button"
+            )
+            if submit_btn:
+                await submit_btn.click()
+            else:
+                await self.page.evaluate(
+                    f"document.querySelectorAll('form')[{form_index}].submit()"
+                )
+
+            await self.page.wait_for_load_state("domcontentloaded", timeout=10000)
+            await asyncio.sleep(0.5)
+
+            source = await self.get_page_source()
+            pair = self.network.latest() or {}
+            return source, pair
+        except Exception:
+            source = await self.get_page_source()
+            return source, {}
+
     async def test_url_param(self, base_url: str, param: str, payload: str) -> tuple[str, dict]:
         """Test a URL parameter with a payload."""
         self.reset_dialog()
