@@ -11,6 +11,7 @@ Usage:
 """
 import asyncio
 import argparse
+import json
 import sys
 import webbrowser
 from pathlib import Path
@@ -45,7 +46,7 @@ Examples:
     _ALL_CHECKS = [
         "sqli", "xss", "os", "path_traversal",
         "session", "csrf", "header_injection", "mail_header",
-        "clickjacking", "open_redirect", "ssti",
+        "clickjacking", "open_redirect", "ssti", "privesc",
     ]
     scan.add_argument(
         "--checks", nargs="+",
@@ -139,6 +140,31 @@ Examples:
         help="Pre-set cookies before scanning (e.g. 'session=abc; token=xyz')",
     )
     scan.add_argument(
+        "--cookie-file", metavar="FILE", default="",
+        help=(
+            "JSON file containing cookies from a successful login session "
+            "(browser export format: list of {name, value, domain, path, …} objects). "
+            "Overrides/augments --cookie. "
+            "Example: '[{\"name\":\"session\",\"value\":\"abc\",\"domain\":\"example.com\"}]'"
+        ),
+    )
+    scan.add_argument(
+        "--low-priv-cookies", metavar="COOKIES", default="",
+        help=(
+            "Cookie string for a low-privilege session used to test vertical "
+            "privilege escalation (e.g. 'session=lowprivtoken'). "
+            "The scanner will try to access high-privilege URLs with this session."
+        ),
+    )
+    scan.add_argument(
+        "--low-priv-cookie-file", metavar="FILE", default="",
+        help=(
+            "JSON file containing low-privilege session cookies "
+            "(same format as --cookie-file). "
+            "Used for vertical privilege escalation testing."
+        ),
+    )
+    scan.add_argument(
         "--auth-user", metavar="USER", default="",
         help="Username/email for login form auto-fill",
     )
@@ -163,6 +189,27 @@ Examples:
     )
 
     return parser.parse_args()
+
+
+def _load_cookie_file(path: str, console) -> list:
+    """Load cookies from a JSON export file. Returns a list of cookie dicts."""
+    if not path:
+        return []
+    try:
+        raw = Path(path).read_text(encoding="utf-8").strip()
+        data = json.loads(raw)
+        if isinstance(data, list):
+            return data
+        # Some exporters wrap as {"cookies": [...]}
+        if isinstance(data, dict):
+            for key in ("cookies", "Cookie", "cookie"):
+                if isinstance(data.get(key), list):
+                    return data[key]
+        console.print(f"[yellow]Warning: unexpected cookie file format in {path}[/yellow]")
+        return []
+    except Exception as ex:
+        console.print(f"[yellow]Warning: could not load cookie file '{path}': {ex}[/yellow]")
+        return []
 
 
 def _llm_model_display(args) -> str:
@@ -210,6 +257,27 @@ async def run_scan(args):
     if exclude_fields:
         console.print(f"Excluded params : [yellow]{', '.join(exclude_fields)}[/yellow]")
 
+    # Build cookie list from --cookie-file (JSON export format)
+    cookie_list: list = _load_cookie_file(getattr(args, "cookie_file", "") or "", console)
+    if cookie_list:
+        console.print(f"Auth cookies    : [green]{len(cookie_list)} cookie(s) loaded from file[/green]")
+
+    # Build low-privilege cookie list from --low-priv-cookie-file
+    low_priv_cookie_list: list = _load_cookie_file(
+        getattr(args, "low_priv_cookie_file", "") or "", console
+    )
+    low_priv_cookies: str = getattr(args, "low_priv_cookies", "") or ""
+    if low_priv_cookie_list:
+        console.print(
+            f"Low-priv cookies: [cyan]{len(low_priv_cookie_list)} cookie(s) loaded — "
+            f"vertical privilege-escalation testing enabled[/cyan]"
+        )
+    elif low_priv_cookies:
+        console.print(
+            "[cyan]Low-priv cookies provided — "
+            "vertical privilege-escalation testing enabled[/cyan]"
+        )
+
     # Build exclude-urls list from --exclude-urls-file
     exclude_urls: list = []
     excl_urls_file = getattr(args, "exclude_urls_file", None)
@@ -246,6 +314,9 @@ async def run_scan(args):
             ctf_mode=getattr(args, "ctf", False),
             ctf_flag_pattern=getattr(args, "ctf_flag_format", "") or "",
             cookies=getattr(args, "cookie", "") or "",
+            cookie_list=cookie_list,
+            low_priv_cookies=low_priv_cookies,
+            low_priv_cookie_list=low_priv_cookie_list,
             auth_user=getattr(args, "auth_user", "") or "",
             auth_pass=getattr(args, "auth_pass", "") or "",
             use_planner=not getattr(args, "no_planner", False),
@@ -298,6 +369,9 @@ async def run_scan(args):
                 ctf_mode=getattr(args, "ctf", False),
                 ctf_flag_pattern=getattr(args, "ctf_flag_format", "") or "",
                 cookies=getattr(args, "cookie", "") or "",
+                cookie_list=cookie_list,
+                low_priv_cookies=low_priv_cookies,
+                low_priv_cookie_list=low_priv_cookie_list,
                 auth_user=getattr(args, "auth_user", "") or "",
                 auth_pass=getattr(args, "auth_pass", "") or "",
                 use_planner=not getattr(args, "no_planner", False),

@@ -431,6 +431,28 @@ class BrowserManager:
         if cookies:
             await self._context.add_cookies(cookies)
 
+    async def set_cookies_from_list(self, cookie_list: list, url: str):
+        """Set cookies from a list of dicts (browser JSON export format).
+
+        Each dict should have at least 'name' and 'value'.  Optional keys:
+        'domain', 'path', 'secure', 'httpOnly', 'sameSite'.
+        """
+        if not cookie_list or not self._context:
+            return
+        default_domain = _urlparse(url).hostname or ""
+        normalized = []
+        for c in cookie_list:
+            if not c.get("name") or c.get("value") is None:
+                continue
+            normalized.append({
+                "name": c["name"],
+                "value": str(c["value"]),
+                "domain": c.get("domain") or default_domain,
+                "path": c.get("path") or "/",
+            })
+        if normalized:
+            await self._context.add_cookies(normalized)
+
     async def close(self):
         """Close browser and playwright."""
         try:

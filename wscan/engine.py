@@ -54,6 +54,7 @@ from .scanners.mail_header import MailHeaderInjectionScanner
 from .scanners.open_redirect import OpenRedirectScanner
 from .scanners.clickjacking import ClickjackingScanner
 from .scanners.session import SessionScanner
+from .scanners.privesc import PrivEscScanner
 
 console = Console()
 
@@ -102,6 +103,9 @@ class ScanEngine:
         ctf_mode: bool = False,
         ctf_flag_pattern: str = "",
         cookies: str = "",
+        cookie_list: Optional[list] = None,
+        low_priv_cookies: str = "",
+        low_priv_cookie_list: Optional[list] = None,
         auth_user: str = "",
         auth_pass: str = "",
         use_planner: bool = True,
@@ -116,6 +120,17 @@ class ScanEngine:
         self.ctf_mode = ctf_mode
         self.sleep_factor = 0.5 if ctf_mode else 1.0
         self.cookies = cookies
+        self.cookie_list: list = list(cookie_list or [])
+        # Normalise low-privilege cookies: prefer list form when both are given
+        self.low_priv_cookies: str = low_priv_cookies
+        self.low_priv_cookie_list: list = list(low_priv_cookie_list or [])
+        # Convert low_priv_cookie_list → cookie-string for httpx usage
+        if self.low_priv_cookie_list and not self.low_priv_cookies:
+            self.low_priv_cookies = "; ".join(
+                f"{c['name']}={c['value']}"
+                for c in self.low_priv_cookie_list
+                if c.get("name") and c.get("value") is not None
+            )
         self.use_planner = use_planner
         self.interactive_plan = interactive_plan
         if ctf_mode and "ssti" not in self.checks:
@@ -170,8 +185,14 @@ class ScanEngine:
             "open_redirect":    OpenRedirectScanner,
             "clickjacking":     ClickjackingScanner,
             "session":          SessionScanner,
+            "privesc":          PrivEscScanner,
         }
         self.scanners = {n: cls(self) for n, cls in scanner_map.items() if n in self.checks}
+
+        # Always enable privilege-escalation scanner when auth cookies are provided,
+        # even if the user didn't explicitly list "privesc" in --checks.
+        if "privesc" not in self.scanners and (self.cookies or self.cookie_list or self.low_priv_cookies):
+            self.scanners["privesc"] = PrivEscScanner(self)
 
         self.attack_planner = AttackPlanner(
             payload_gen=self.payload_gen,
@@ -215,6 +236,8 @@ class ScanEngine:
             await self.browser.init()
             if self.cookies:
                 await self.browser.set_cookies(self.cookies, self.target_url)
+            if self.cookie_list:
+                await self.browser.set_cookies_from_list(self.cookie_list, self.target_url)
 
             # ── Phase 1: Crawl ───────────────────────────────────────────
             crawled_pages = await self._phase_crawl()
