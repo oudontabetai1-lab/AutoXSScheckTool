@@ -27,6 +27,7 @@ from rich import box as rbox
 
 from .attack_planner import AttackPlanner, FieldAttackPlan, PageAttackPlan
 from .browser import BrowserManager
+from .ctf_flag_finder import FlagFinder
 from .monitor import MonitorServer
 from .payload_gen import PayloadGenerator
 from .scanners.base import Finding
@@ -86,6 +87,7 @@ class ScanEngine:
         max_forms: int = 50,
         exclude_fields: Optional[list] = None,
         ctf_mode: bool = False,
+        ctf_flag_pattern: str = "",
         cookies: str = "",
         auth_user: str = "",
         auth_pass: str = "",
@@ -105,6 +107,10 @@ class ScanEngine:
         self.interactive_plan = interactive_plan
         if ctf_mode and "ssti" not in self.checks:
             self.checks.append("ssti")
+
+        # CTF flag finder
+        self.flag_finder: Optional[FlagFinder] = FlagFinder(ctf_flag_pattern) if ctf_mode else None
+        self.ctf_found_flags: list = []   # [(flag_str, source_url)]
 
         # Output directory
         ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -236,6 +242,10 @@ class ScanEngine:
             forms = await self.browser.find_forms()
             url_params = await self.browser.get_url_params()
             await self.browser.screenshot_b64(f"Crawl: {url}")
+
+            # CTF: scan page HTML for flags even during crawl
+            if self.flag_finder:
+                self._check_page_for_flags(html, url)
 
             input_count = sum(len(f.get("inputs", [])) for f in forms) + len(url_params)
             console.print(
@@ -550,6 +560,14 @@ class ScanEngine:
             if not success:
                 continue
 
+            # CTF: re-check page after navigating (dynamic content may differ from crawl)
+            if self.flag_finder:
+                try:
+                    attack_html = await self.browser.page.content()
+                    self._check_page_for_flags(attack_html, page.url)
+                except Exception:
+                    pass
+
             console.print(f"\n  [bold]Attacking:[/bold] {page.url}")
             plan = plans.get(page.url)
             findings_before = len(self.all_findings)
@@ -691,6 +709,14 @@ class ScanEngine:
                     else:
                         self.custom_payloads[check_name] = _prev
 
+        # CTF: check page source after all scanners ran on this field
+        if self.flag_finder:
+            try:
+                post_html = await self.browser.page.content()
+                self._check_page_for_flags(post_html, url)
+            except Exception:
+                pass
+
         self.completed_fields += 1
         if self.monitor and self.total_fields > 0:
             await self.monitor.emit_progress(
@@ -699,6 +725,24 @@ class ScanEngine:
                 message=f"{field_name} ({url})",
             )
 
+    def _check_page_for_flags(self, text: str, source: str = ""):
+        """Search text for CTF flags; print a banner and store any new finds."""
+        if not self.flag_finder or not text:
+            return
+        found = self.flag_finder.find(text)
+        for flag in found:
+            if flag not in [f for f, _ in self.ctf_found_flags]:
+                self.ctf_found_flags.append((flag, source))
+                console.print()
+                console.print(
+                    f"  [bold white on red]  🚩 FLAG FOUND  [/bold white on red]"
+                )
+                console.print(
+                    f"  [bold yellow]{flag}[/bold yellow]"
+                    f"  [dim](source: {source})[/dim]"
+                )
+                console.print()
+
     def _record_finding(self, f: Finding, source: str = ""):
         self.all_findings.append(f)
         label = f.check_type.upper()
@@ -706,6 +750,14 @@ class ScanEngine:
         console.print(
             f"    [bold red][FINDING][/bold red] {label}{loc} — {f.evidence[:80]}"
         )
+        # Also scan the finding's evidence and response for flags
+        if self.flag_finder:
+            self._check_page_for_flags(f.evidence, f.url)
+            body = (f.response or {}).get("body", "") or ""
+            if body:
+                self._check_page_for_flags(body, f.url)
+            if f.dialog_message:
+                self._check_page_for_flags(f.dialog_message, f.url)
 
     # =========================================================================
     # Phase 4: Report
@@ -724,6 +776,7 @@ class ScanEngine:
             "checks": self.checks,
             "visited_urls": list(self.visited_urls),
             "findings": [f.to_dict() for f in self.all_findings],
+            "ctf_flags": [{"flag": flag, "source": src} for flag, src in self.ctf_found_flags],
             "attack_plans": [
                 {
                     "url": p.url,
@@ -756,6 +809,7 @@ class ScanEngine:
             visited_urls=list(self.visited_urls),
             checks=self.checks,
             attack_plans=self.attack_plans,
+            ctf_flags=self.ctf_found_flags,
         )
 
     def _print_summary(self):
@@ -781,6 +835,13 @@ class ScanEngine:
                     f.evidence[:60],
                 )
             console.print(t)
+
+        if self.ctf_found_flags:
+            console.print()
+            console.print(Rule("[bold white on red]  🚩  CTF FLAGS CAPTURED  🚩  [/bold white on red]", style="red"))
+            for flag, src in self.ctf_found_flags:
+                console.print(f"  [bold yellow]{flag}[/bold yellow]  [dim]← {src}[/dim]")
+            console.print(Rule(style="red"))
 
         console.print(f"\n  [bold green]Report:[/bold green] [cyan]{self.output_dir / 'report.html'}[/cyan]")
 

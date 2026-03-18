@@ -292,6 +292,8 @@ def _section_advanced(provider: str = "ollama") -> dict:
         "no_planner": False,
         "interactive_plan": default_interactive,
         "ctf": False,
+        "ctf_flag_format": "",
+        "ctf_llm_override": None,
         "port": 8765,
         "timeout": 30,
         "max_forms": 50,
@@ -329,6 +331,45 @@ def _section_advanced(provider: str = "ollama") -> dict:
     # CTF モード
     ctf = _ask("CTF モードを有効にしますか? (y/N)", "n").lower()
     defaults["ctf"] = ctf in ("y", "yes")
+
+    if defaults["ctf"]:
+        _header("CTF モード設定")
+        _print("  フラグ形式の例:")
+        _print("    1. FLAG{...}  / CTF{...}   (汎用 — デフォルト)")
+        _print("    2. HTB{...}                (Hack The Box)")
+        _print("    3. picoCTF{...}            (picoCTF)")
+        _print("    4. DUCTF{...}              (DownUnder CTF)")
+        _print("    5. カスタム正規表現        (例: [A-Z0-9]{4}\\{[^}]+\\})")
+        _print()
+        _print("    デフォルト: FLAG|CTF の形式を自動検出。カスタム正規表現も可")
+        flag_fmt = _ask(
+            "フラグ形式 (例: HTB{[^}]+} / 空白=デフォルト自動検出)",
+            "",
+        )
+        defaults["ctf_flag_format"] = flag_fmt
+        if flag_fmt:
+            _ok(f"フラグパターン: {flag_fmt}")
+        else:
+            _ok("フラグパターン: デフォルト自動検出 (FLAG/CTF/HTB 等)")
+
+        _print()
+        _print("  CTF モードでの LLM 使用:")
+        _print("  ・LLM を使うとペイロードが強化されますが、外部 API / Ollama が必要です")
+        _print(f"  ・現在の LLM 設定: [{provider}]")
+        ctf_llm_change = _ask(
+            "CTF モード用に LLM を変更しますか? (y/N)", "n"
+        ).lower()
+        if ctf_llm_change in ("y", "yes"):
+            _print("  CTF 用 LLM を選択:")
+            providers_list = list(_LLM_INFO.keys())
+            for i, p in enumerate(providers_list, 1):
+                marker = " ◀ (現在)" if p == provider else ""
+                _print(f"    [{i}] {p:<8}  {_LLM_INFO[p]}{marker}")
+            new_provider = _choose("プロバイダー番号", providers_list, provider)
+            defaults["ctf_llm_override"] = new_provider
+            _ok(f"CTF LLM: {new_provider}")
+        else:
+            defaults["ctf_llm_override"] = None
 
     # ポート番号
     while True:
@@ -390,7 +431,15 @@ def _show_summary(
         t.add_row("AI プランナー", "無効" if adv["no_planner"] else "有効")
         ip_label = "有効 (手動編集あり)" if adv.get("interactive_plan") else "無効 (自動確定)"
         t.add_row("手動プラン編集", ip_label)
-        t.add_row("CTF モード",  "有効" if adv["ctf"] else "無効")
+        if adv["ctf"]:
+            ctf_label = "有効"
+            if adv.get("ctf_flag_format"):
+                ctf_label += f"  (パターン: {adv['ctf_flag_format']})"
+            if adv.get("ctf_llm_override"):
+                ctf_label += f"  LLM→{adv['ctf_llm_override']}"
+            t.add_row("CTF モード", ctf_label)
+        else:
+            t.add_row("CTF モード", "無効")
         if auth_user:
             t.add_row("認証",   f"{auth_user} / {'*' * len(auth_pass)}")
         if cookie:
@@ -463,6 +512,9 @@ def main():
     _print()
 
     # ── スキャン実行 ─────────────────────────────────────────────
+    # CTF モードで LLM オーバーライドが指定されていれば適用
+    effective_provider = adv.get("ctf_llm_override") or provider
+
     args = argparse.Namespace(
         url=url,
         checks=checks,
@@ -471,7 +523,7 @@ def main():
         no_monitor=adv["no_monitor"],
         no_planner=adv["no_planner"],
         interactive_plan=adv.get("interactive_plan", False),
-        llm=provider,
+        llm=effective_provider,
         ollama_model=ollama_model,
         openai_model=openai_model,
         gemini_model=gemini_model,
@@ -483,6 +535,7 @@ def main():
         exclude=exclude,
         exclude_file=None,
         ctf=adv["ctf"],
+        ctf_flag_format=adv.get("ctf_flag_format", ""),
         cookie=cookie,
         auth_user=auth_user,
         auth_pass=auth_pass,

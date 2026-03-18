@@ -45,11 +45,12 @@ class ReportGenerator:
         visited_urls: list[str],
         checks: list[str],
         attack_plans: "Optional[list[PageAttackPlan]]" = None,
+        ctf_flags: "Optional[list]" = None,
     ):
         """Generate HTML report and save to output directory."""
         sorted_findings = sorted(findings, key=lambda f: SEVERITY_ORDER.get(f.severity, 99))
         html = self._build_html(target, sorted_findings, visited_urls, checks,
-                                attack_plans or [])
+                                attack_plans or [], ctf_flags or [])
         report_path = self.output_dir / "report.html"
         report_path.write_text(html, encoding="utf-8")
         return report_path
@@ -61,8 +62,10 @@ class ReportGenerator:
         visited_urls: list[str],
         checks: list[str],
         attack_plans: "list[PageAttackPlan]" = None,
+        ctf_flags: list = None,
     ) -> str:
         attack_plans = attack_plans or []
+        ctf_flags = ctf_flags or []
         scan_date = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         total = len(findings)
         counts = {}
@@ -127,6 +130,9 @@ class ReportGenerator:
 
         # ── Attack Plan section ──────────────────────────────────────────
         attack_plan_html = self._build_attack_plan_html(attack_plans)
+
+        # ── CTF Flags section ────────────────────────────────────────────
+        ctf_flags_html = self._build_ctf_flags_html(ctf_flags)
 
         return f"""<!DOCTYPE html>
 <html lang="ja">
@@ -226,6 +232,15 @@ body {{ font-family: 'Segoe UI', system-ui, -apple-system, sans-serif; backgroun
 .plan-payload-type {{ color:#a0aec0; font-size:.7rem; margin-bottom:4px; }}
 .no-plans {{ color:#a0aec0; font-size:.9rem; padding:16px 0; }}
 @media (max-width:768px) {{ .plan-cols-header,.plan-field-row {{ grid-template-columns:1fr 44px 1fr; }} .plan-rationale-col {{ display:none; }} }}
+/* ── CTF Flags styles ── */
+.ctf-section {{ background: linear-gradient(135deg,#1a202c 0%,#2d3748 100%); border-radius:12px; padding:24px; margin-bottom:24px; box-shadow: 0 4px 12px rgba(0,0,0,0.3); }}
+.ctf-section h2 {{ color:#ffd700; font-size:1.3rem; font-weight:800; margin-bottom:16px; padding-bottom:10px; border-bottom:2px solid #4a5568; letter-spacing:.03em; }}
+.ctf-flag-list {{ display:flex; flex-direction:column; gap:10px; }}
+.ctf-flag-item {{ background:#2d3748; border:1px solid #4a5568; border-radius:8px; padding:14px 18px; display:flex; flex-direction:column; gap:4px; }}
+.ctf-flag-value {{ font-family:'Cascadia Code','Consolas',monospace; font-size:1.05rem; font-weight:700; color:#ffd700; letter-spacing:.04em; word-break:break-all; }}
+.ctf-flag-source {{ font-size:.78rem; color:#a0aec0; }}
+.ctf-flag-copy {{ display:inline-block; margin-top:4px; font-size:.75rem; color:#68d391; cursor:pointer; text-decoration:underline; }}
+.ctf-no-flags {{ color:#a0aec0; font-style:italic; }}
 </style>
 </head>
 <body>
@@ -259,6 +274,9 @@ body {{ font-family: 'Segoe UI', system-ui, -apple-system, sans-serif; backgroun
             <div class="label">Low</div>
         </div>
     </div>
+
+    <!-- CTF Flags -->
+    {ctf_flags_html}
 
     <!-- Scan Metadata -->
     <div class="section">
@@ -343,6 +361,30 @@ document.querySelectorAll('.plan-payloads-toggle').forEach(btn => {{
 </script>
 </body>
 </html>"""
+
+    def _build_ctf_flags_html(self, ctf_flags: list) -> str:
+        """Render the CTF Flags section (only shown when CTF mode is active)."""
+        if not ctf_flags:
+            return ""
+
+        items = ""
+        for flag, source in ctf_flags:
+            esc_flag = self._escape(flag)
+            esc_src = self._escape(source)
+            items += f"""
+            <div class="ctf-flag-item">
+                <div class="ctf-flag-value">{esc_flag}</div>
+                <div class="ctf-flag-source">Found on: {esc_src}</div>
+                <span class="ctf-flag-copy" onclick="navigator.clipboard.writeText('{esc_flag}').then(()=>this.textContent='Copied!')">📋 Copy to clipboard</span>
+            </div>"""
+
+        return f"""
+    <div class="ctf-section">
+        <h2>🚩 CTF Flags Captured ({len(ctf_flags)})</h2>
+        <div class="ctf-flag-list">
+            {items}
+        </div>
+    </div>"""
 
     def _build_attack_plan_html(self, attack_plans: list) -> str:
         """Render the Attack Planning section of the report (Phase 2 results)."""
