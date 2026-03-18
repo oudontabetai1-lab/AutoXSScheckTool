@@ -1,14 +1,18 @@
 """
 WScan Scan Engine — 4-Phase Pipeline
 =====================================
-Phase 1: Crawl   — BFS crawl, collect page info. No payload injection.
-Phase 2: Plan    — Build per-page attack plans (LLM or heuristic).
-                   Cross-page XSS/stored-injection awareness.
-                   User confirms before attack begins.
-Phase 3: Attack  — Execute attacks guided by the plan.
-                   LLM adaptively re-ranks remaining pages when new findings appear.
-                   Payloads = default + LLM-generated extras (combined, not replaced).
-Phase 4: Report  — Save evidence JSON and generate HTML report.
+Phase 1: Crawl    — BFS crawl, collect page info. No payload injection.
+Phase 2: Plan     — Build per-page attack plans (LLM or heuristic).
+                    Cross-page XSS/stored-injection awareness.
+                    User confirms before attack begins.
+Phase 3: Attack   — Execute attacks guided by the plan.
+  Phase 3a:         Standard payload sweep (default list + plan extras).
+                    LLM adaptively re-ranks remaining pages on new findings.
+  Phase 3b:         Adaptive AI round — after each field, LLM observes the
+                    application's filtering behavior in the page HTML and
+                    generates creative bypass payloads (encoding tricks,
+                    WAF evasion, context-aware injection, polyglots).
+Phase 4: Report   — Save evidence JSON and generate HTML report.
 """
 import asyncio
 import datetime
@@ -26,6 +30,7 @@ from rich.table import Table
 from rich import box as rbox
 
 from .attack_planner import AttackPlanner, FieldAttackPlan, PageAttackPlan
+from .adaptive_payload import AdaptivePayloadEngine
 from .browser import BrowserManager
 from .ctf_flag_finder import FlagFinder
 from .monitor import MonitorServer
@@ -164,6 +169,11 @@ class ScanEngine:
             payload_gen=self.payload_gen,
             enabled_checks=self.checks,
         )
+
+        # Adaptive AI payload refinement — runs a second pass per field
+        # using LLM analysis of the page's filtering behavior
+        self.adaptive_engine = AdaptivePayloadEngine(self.payload_gen)
+        self.adaptive_enabled = llm_provider != "none"
 
         self.exclude_fields: set = {f.lower() for f in (exclude_fields or [])}
 
@@ -717,6 +727,16 @@ class ScanEngine:
             except Exception:
                 pass
 
+        # ── Adaptive AI round ────────────────────────────────────────────
+        # Skip if LLM disabled, or a critical/high finding already confirmed
+        field_findings = [f for f in self.all_findings if f.field_name == field_name and f.url == url]
+        already_critical = any(f.severity in ("critical",) for f in field_findings)
+
+        if self.adaptive_enabled and not already_critical:
+            await self._adaptive_attack_field(
+                url, form_index, field, is_url_param, ordered_checks, field_plan
+            )
+
         self.completed_fields += 1
         if self.monitor and self.total_fields > 0:
             await self.monitor.emit_progress(
@@ -724,6 +744,85 @@ class ScanEngine:
                 total=self.total_fields,
                 message=f"{field_name} ({url})",
             )
+
+    async def _adaptive_attack_field(
+        self,
+        url: str,
+        form_index: int,
+        field: dict,
+        is_url_param: bool,
+        check_names: list,
+        field_plan: Optional[FieldAttackPlan],
+    ):
+        """
+        Phase 3b: Adaptive AI round.
+        For each check type, get current page HTML, ask LLM to generate
+        context-aware bypass payloads, then run the scanner again with those payloads.
+        """
+        field_name = field.get("name", "unknown")
+
+        # Get current page HTML as probe context
+        try:
+            page_html = await self.browser.page.content()
+        except Exception:
+            return
+
+        for check_name in check_names:
+            scanner = self.scanners.get(check_name)
+            if scanner is None:
+                continue
+
+            # Don't bother adaptive pass on page-level-only scanners
+            if check_name in ("csrf", "session", "clickjacking"):
+                continue
+
+            # Standard payloads that were tried in the first pass
+            plan_payloads = field_plan.custom_payloads.get(check_name, []) if field_plan else []
+            defaults = self.payload_gen.default_payloads.get(check_name, [])
+            tried = plan_payloads + [p for p in defaults if p not in plan_payloads]
+
+            # Ask LLM for bypass payloads
+            adaptive_payloads = await self.adaptive_engine.generate(
+                check_type=check_name,
+                field_name=field_name,
+                url=url,
+                payloads_tried=tried,
+                page_html=page_html,
+            )
+
+            if not adaptive_payloads:
+                continue
+
+            # Run scanner again with adaptive payloads
+            _prev = self.custom_payloads.get(check_name)
+            self.custom_payloads[check_name] = adaptive_payloads
+
+            try:
+                findings = await scanner.scan_field(url, form_index, field, is_url_param)
+                for f in (findings or []):
+                    # Tag adaptive findings so they're identifiable
+                    f.evidence = f"[AdaptiveAI] {f.evidence}"
+                    self._record_finding(f, source=f"{field_name}[adaptive]")
+
+                # Stop adaptive passes for this field if critical hit confirmed
+                if any(f.severity == "critical" for f in (findings or [])):
+                    self.custom_payloads[check_name] = _prev if _prev is not None else self.custom_payloads.pop(check_name, None)
+                    break
+            except Exception as e:
+                console.print(f"    [yellow]Adaptive scanner error ({check_name}): {e}[/yellow]")
+            finally:
+                if _prev is None:
+                    self.custom_payloads.pop(check_name, None)
+                else:
+                    self.custom_payloads[check_name] = _prev
+
+            # CTF: scan page again after adaptive probe
+            if self.flag_finder:
+                try:
+                    post_html = await self.browser.page.content()
+                    self._check_page_for_flags(post_html, url)
+                except Exception:
+                    pass
 
     def _check_page_for_flags(self, text: str, source: str = ""):
         """Search text for CTF flags; print a banner and store any new finds."""
@@ -819,6 +918,12 @@ class ScanEngine:
         console.print(f"  Plans    : [cyan]{len(self.attack_plans)}[/cyan]")
         color = "red" if self.all_findings else "green"
         console.print(f"  Findings : [{color}]{len(self.all_findings)}[/{color}]")
+        adaptive_count = sum(1 for f in self.all_findings if "[AdaptiveAI]" in f.evidence)
+        if adaptive_count:
+            console.print(
+                f"  [bold magenta]Adaptive AI[/bold magenta] : "
+                f"[magenta]{adaptive_count}[/magenta] finding(s) discovered via LLM-generated bypass payloads"
+            )
 
         if self.all_findings:
             t = Table(show_header=True, header_style="bold magenta", box=rbox.SIMPLE)
