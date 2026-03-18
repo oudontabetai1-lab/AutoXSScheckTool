@@ -188,23 +188,44 @@ body {{ font-family: 'Segoe UI', system-ui, -apple-system, sans-serif; backgroun
 .lightbox img {{ max-width: 95%; max-height: 95vh; border-radius: 8px; }}
 .lightbox-close {{ position: fixed; top: 20px; right: 20px; color: white; font-size: 2rem; cursor: pointer; background: rgba(0,0,0,0.5); width: 44px; height: 44px; border-radius: 50%; display: flex; align-items: center; justify-content: center; }}
 /* ── Attack Plan styles ── */
-.plan-card {{ border: 1px solid #bee3f8; border-radius: 10px; margin-bottom: 20px; overflow: hidden; }}
-.plan-card-header {{ background: #ebf8ff; padding: 14px 20px; border-bottom: 1px solid #bee3f8; display: flex; flex-direction: column; gap: 4px; }}
-.plan-card-header .plan-url {{ font-family: monospace; font-size: 0.85rem; color: #2b6cb0; word-break: break-all; }}
-.plan-card-header .plan-purpose {{ font-size: 0.9rem; color: #1a365d; font-weight: 600; }}
-.plan-card-header .plan-by {{ font-size: 0.75rem; color: #718096; }}
-.plan-fields {{ padding: 16px 20px; display: flex; flex-direction: column; gap: 10px; }}
-.plan-field-row {{ display: grid; grid-template-columns: 1fr 60px 1fr 2fr; gap: 12px; align-items: start; font-size: 0.85rem; border-bottom: 1px solid #f0f4f8; padding-bottom: 8px; }}
-.plan-field-row:last-child {{ border-bottom: none; padding-bottom: 0; }}
-.plan-field-name {{ font-family: monospace; font-weight: 600; color: #2d3748; }}
-.plan-risk-badge {{ width: 48px; height: 48px; border-radius: 50%; display: flex; align-items: center; justify-content: center; color: white; font-size: 1.1rem; font-weight: 800; }}
-.plan-checks {{ display: flex; flex-wrap: wrap; gap: 4px; }}
-.plan-check-badge {{ background: #e2e8f0; color: #4a5568; border-radius: 4px; padding: 2px 7px; font-size: 0.75rem; font-weight: 600; letter-spacing: 0.03em; }}
-.plan-check-badge.priority-0 {{ background: #fed7d7; color: #742a2a; }}
-.plan-check-badge.priority-1 {{ background: #feebc8; color: #7b341e; }}
-.plan-rationale {{ color: #718096; font-size: 0.82rem; font-style: italic; }}
-.plan-cols-header {{ display: grid; grid-template-columns: 1fr 60px 1fr 2fr; gap: 12px; padding: 0 0 6px; font-size: 0.72rem; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; color: #a0aec0; border-bottom: 2px solid #e2e8f0; margin-bottom: 6px; }}
-.no-plans {{ color: #a0aec0; font-size: 0.9rem; padding: 16px 0; }}
+.plan-section-meta {{ display:flex; gap:12px; flex-wrap:wrap; margin-bottom:20px; }}
+.plan-stat-card {{ background:#ebf8ff; border:1px solid #bee3f8; border-radius:8px; padding:12px 20px; text-align:center; min-width:100px; }}
+.plan-stat-card .ps-count {{ font-size:1.8rem; font-weight:800; }}
+.plan-stat-card .ps-label {{ font-size:0.75rem; color:#2b6cb0; text-transform:uppercase; letter-spacing:.05em; }}
+.ps-high {{ background:#fff5f5; border-color:#fed7d7; }} .ps-high .ps-count {{ color:#e53e3e; }}
+.ps-mid  {{ background:#fffaf0; border-color:#fbd38d; }} .ps-mid  .ps-count {{ color:#dd6b20; }}
+.ps-low  {{ background:#f0fff4; border-color:#9ae6b4; }} .ps-low  .ps-count {{ color:#276749; }}
+.plan-card {{ border:1px solid #bee3f8; border-radius:10px; margin-bottom:20px; overflow:hidden; }}
+.plan-card-header {{ background:#ebf8ff; padding:14px 20px; border-bottom:1px solid #bee3f8; display:flex; justify-content:space-between; align-items:start; cursor:pointer; user-select:none; }}
+.plan-card-header:hover {{ background:#dbeafe; }}
+.plan-header-left {{ display:flex; flex-direction:column; gap:4px; }}
+.plan-url {{ font-family:monospace; font-size:.85rem; color:#2b6cb0; word-break:break-all; }}
+.plan-purpose {{ font-size:.9rem; color:#1a365d; font-weight:600; }}
+.plan-by {{ font-size:.75rem; color:#718096; }}
+.plan-by.llm {{ color:#6b46c1; font-weight:600; }}
+.plan-toggle {{ font-size:1.2rem; color:#4299e1; transition:transform .2s; padding-left:12px; }}
+.plan-card.collapsed .plan-toggle {{ transform:rotate(-90deg); }}
+.plan-card.collapsed .plan-fields {{ display:none; }}
+.plan-fields {{ padding:16px 20px; display:flex; flex-direction:column; gap:10px; }}
+.plan-cols-header {{ display:grid; grid-template-columns:160px 56px 1fr 1.6fr; gap:12px; padding:0 0 6px; font-size:.72rem; font-weight:700; text-transform:uppercase; letter-spacing:.06em; color:#a0aec0; border-bottom:2px solid #e2e8f0; margin-bottom:6px; }}
+.plan-field-row {{ display:grid; grid-template-columns:160px 56px 1fr 1.6fr; gap:12px; align-items:start; font-size:.85rem; border-bottom:1px solid #f0f4f8; padding-bottom:10px; }}
+.plan-field-row:last-child {{ border-bottom:none; padding-bottom:0; }}
+.plan-field-name {{ font-family:monospace; font-weight:600; color:#2d3748; word-break:break-all; }}
+.plan-risk-badge {{ width:44px; height:44px; border-radius:50%; display:flex; align-items:center; justify-content:center; color:white; font-size:1.05rem; font-weight:800; flex-shrink:0; }}
+.plan-checks {{ display:flex; flex-wrap:wrap; gap:4px; align-content:start; }}
+.plan-check-badge {{ background:#e2e8f0; color:#4a5568; border-radius:4px; padding:2px 7px; font-size:.75rem; font-weight:600; }}
+.plan-check-badge.priority-0 {{ background:#fed7d7; color:#742a2a; }}
+.plan-check-badge.priority-1 {{ background:#feebc8; color:#7b341e; }}
+.plan-rationale-col {{ display:flex; flex-direction:column; gap:6px; }}
+.plan-rationale {{ color:#718096; font-size:.82rem; font-style:italic; }}
+.cross-page-tag {{ display:inline-block; background:#e9d8fd; color:#553c9a; border-radius:4px; padding:1px 6px; font-size:.72rem; font-weight:700; font-style:normal; }}
+.plan-payloads-toggle {{ font-size:.75rem; color:#4299e1; cursor:pointer; text-decoration:underline; margin-top:4px; }}
+.plan-payload-list {{ display:none; margin-top:6px; background:#1a202c; border-radius:6px; padding:8px 12px; }}
+.plan-payload-list.open {{ display:block; }}
+.plan-payload-list code {{ display:block; color:#68d391; font-family:monospace; font-size:.78rem; padding:2px 0; word-break:break-all; }}
+.plan-payload-type {{ color:#a0aec0; font-size:.7rem; margin-bottom:4px; }}
+.no-plans {{ color:#a0aec0; font-size:.9rem; padding:16px 0; }}
+@media (max-width:768px) {{ .plan-cols-header,.plan-field-row {{ grid-template-columns:1fr 44px 1fr; }} .plan-rationale-col {{ display:none; }} }}
 </style>
 </head>
 <body>
@@ -296,6 +317,7 @@ body {{ font-family: 'Segoe UI', system-ui, -apple-system, sans-serif; backgroun
 </div>
 
 <script>
+// Screenshot lightbox
 document.querySelectorAll('.evidence-screenshot').forEach(img => {{
     img.addEventListener('click', (e) => {{
         e.stopPropagation();
@@ -303,63 +325,142 @@ document.querySelectorAll('.evidence-screenshot').forEach(img => {{
         document.getElementById('lightbox').classList.add('active');
     }});
 }});
+// Plan card collapse/expand
+document.querySelectorAll('.plan-card-header').forEach(header => {{
+    header.addEventListener('click', () => {{
+        header.closest('.plan-card').classList.toggle('collapsed');
+    }});
+}});
+// Payload list expand
+document.querySelectorAll('.plan-payloads-toggle').forEach(btn => {{
+    btn.addEventListener('click', (e) => {{
+        e.stopPropagation();
+        const list = btn.nextElementSibling;
+        list.classList.toggle('open');
+        btn.textContent = list.classList.contains('open') ? '▲ ペイロードを隠す' : '▼ LLMペイロードを表示';
+    }});
+}});
 </script>
 </body>
 </html>"""
 
     def _build_attack_plan_html(self, attack_plans: list) -> str:
-        """Render the Attack Planning section of the report."""
+        """Render the Attack Planning section of the report (Phase 2 results)."""
         if not attack_plans:
             return ""
 
+        # ── Risk distribution across all fields ─────────────────────
+        all_fields = [fp for plan in attack_plans for fp in plan.fields]
+        high_count = sum(1 for fp in all_fields if fp.risk_score >= 8)
+        mid_count  = sum(1 for fp in all_fields if 5 <= fp.risk_score < 8)
+        low_count  = sum(1 for fp in all_fields if fp.risk_score < 5)
+        llm_pages  = sum(1 for p in attack_plans if p.planned_by == "llm")
+
+        stat_html = f"""
+        <div class="plan-section-meta">
+            <div class="plan-stat-card">
+                <div class="ps-count">{len(attack_plans)}</div>
+                <div class="ps-label">Pages planned</div>
+            </div>
+            <div class="plan-stat-card">
+                <div class="ps-count">{len(all_fields)}</div>
+                <div class="ps-label">Fields analyzed</div>
+            </div>
+            <div class="plan-stat-card ps-high">
+                <div class="ps-count">{high_count}</div>
+                <div class="ps-label">High risk (8-10)</div>
+            </div>
+            <div class="plan-stat-card ps-mid">
+                <div class="ps-count">{mid_count}</div>
+                <div class="ps-label">Medium risk (5-7)</div>
+            </div>
+            <div class="plan-stat-card ps-low">
+                <div class="ps-count">{low_count}</div>
+                <div class="ps-label">Low risk (1-4)</div>
+            </div>
+            <div class="plan-stat-card" style="background:#faf5ff;border-color:#d6bcfa;">
+                <div class="ps-count" style="color:#6b46c1;">{llm_pages}</div>
+                <div class="ps-label" style="color:#6b46c1;">LLM planned</div>
+            </div>
+        </div>"""
+
+        # ── Per-page plan cards ──────────────────────────────────────
         cards_html = ""
         for plan in attack_plans:
-            fields_rows = ""
             sorted_fields = sorted(plan.fields, key=lambda f: f.risk_score, reverse=True)
+            fields_rows = ""
             for fp in sorted_fields:
                 color = _risk_color(fp.risk_score)
                 checks_html = "".join(
-                    f'<span class="plan-check-badge priority-{min(i, 2)}">'
-                    f'{self._escape(c)}</span>'
+                    f'<span class="plan-check-badge priority-{min(i, 2)}">{self._escape(c)}</span>'
                     for i, c in enumerate(fp.priority_checks)
-                )
+                ) or '<span style="color:#a0aec0">—</span>'
+
+                # Cross-page indicator
+                rationale_text = fp.rationale or ""
+                cross_tag = ""
+                cross_keywords = ["cross-page", "stored", "second-order", "another page",
+                                   "格納型", "別ページ", "クロスページ"]
+                if any(kw.lower() in rationale_text.lower() for kw in cross_keywords):
+                    cross_tag = '<span class="cross-page-tag">⚠ Cross-page</span> '
+
+                # LLM-generated payloads
+                payload_html = ""
+                if fp.custom_payloads:
+                    payload_items = ""
+                    for check_type, payloads in fp.custom_payloads.items():
+                        if not payloads:
+                            continue
+                        codes = "".join(
+                            f'<code>{self._escape(p)}</code>' for p in payloads[:6]
+                        )
+                        payload_items += f'<div class="plan-payload-type">{self._escape(check_type)}</div>{codes}'
+                    if payload_items:
+                        payload_html = f"""
+                        <span class="plan-payloads-toggle">▼ LLMペイロードを表示 ({sum(len(v) for v in fp.custom_payloads.values())}件)</span>
+                        <div class="plan-payload-list">{payload_items}</div>"""
+
                 fields_rows += f"""
                 <div class="plan-field-row">
                     <div class="plan-field-name">{self._escape(fp.name)}</div>
-                    <div>
-                        <div class="plan-risk-badge" style="background:{color}">{fp.risk_score}</div>
+                    <div><div class="plan-risk-badge" style="background:{color}">{fp.risk_score}</div></div>
+                    <div class="plan-checks">{checks_html}</div>
+                    <div class="plan-rationale-col">
+                        <div class="plan-rationale">{cross_tag}{self._escape(rationale_text)}</div>
+                        {payload_html}
                     </div>
-                    <div class="plan-checks">{checks_html or '<span style="color:#a0aec0">—</span>'}</div>
-                    <div class="plan-rationale">{self._escape(fp.rationale)}</div>
                 </div>"""
 
-            planned_by_label = "AI (LLM)" if plan.planned_by == "llm" else "Heuristic"
+            planned_by_label = "🤖 AI (LLM)" if plan.planned_by == "llm" else "📐 Heuristic"
+            by_class = "plan-by llm" if plan.planned_by == "llm" else "plan-by"
             cards_html += f"""
             <div class="plan-card">
                 <div class="plan-card-header">
-                    <div class="plan-url">{self._escape(plan.url)}</div>
-                    <div class="plan-purpose">{self._escape(plan.page_purpose)}</div>
-                    <div class="plan-by">Planned by: {planned_by_label}</div>
+                    <div class="plan-header-left">
+                        <div class="plan-url">{self._escape(plan.url)}</div>
+                        <div class="plan-purpose">{self._escape(plan.page_purpose)}</div>
+                        <div class="{by_class}">{planned_by_label} · {len(plan.fields)} fields</div>
+                    </div>
+                    <div class="plan-toggle">▾</div>
                 </div>
                 <div class="plan-fields">
                     <div class="plan-cols-header">
-                        <span>Field / Parameter</span>
-                        <span>Risk</span>
-                        <span>Priority Checks</span>
-                        <span>Rationale</span>
+                        <span>Field / Parameter</span><span>Risk</span>
+                        <span>Priority Checks</span><span>Rationale &amp; LLM Payloads</span>
                     </div>
-                    {fields_rows or '<div class="no-plans">No testable fields found on this page.</div>'}
+                    {fields_rows or '<div class="no-plans">No testable fields found.</div>'}
                 </div>
             </div>"""
 
         return f"""
     <div class="section">
-        <h2>Attack Plan ({len(attack_plans)} page{'s' if len(attack_plans) != 1 else ''})</h2>
-        <p style="color:#718096; font-size:0.9rem; margin-bottom:16px;">
-            AI-driven attack strategy analysis performed before payload injection.
-            Fields are ordered by risk score (10 = highest priority).
-            Red badges = highest-priority checks for that field.
+        <h2>🗺 Attack Plan — Phase 2 ({len(attack_plans)} page{'s' if len(attack_plans) != 1 else ''})</h2>
+        <p style="color:#718096;font-size:.9rem;margin-bottom:16px;">
+            巡回完了後に LLM / ヒューリスティックが生成した攻撃プランです。
+            リスクスコアが高いフィールドを優先的に攻撃しました。
+            <strong style="color:#553c9a">⚠ Cross-page</strong> は格納型 XSS や別ページへの影響が疑われるフィールドを示します。
         </p>
+        {stat_html}
         {cards_html}
     </div>"""
 
