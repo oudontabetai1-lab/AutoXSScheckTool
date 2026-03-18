@@ -178,6 +178,9 @@ class ScanEngine:
             enabled_checks=self.checks,
         )
 
+        self.exclude_fields: set = {f.lower() for f in (exclude_fields or [])}
+        self.exclude_urls: set = set(exclude_urls or [])
+
         # Adaptive AI payload refinement — runs a second pass per field
         # using LLM analysis of the page's filtering behavior
         self.adaptive_engine = AdaptivePayloadEngine(self.payload_gen)
@@ -190,9 +193,6 @@ class ScanEngine:
             exclude_fields=self.exclude_fields,
             enabled_checks=self.checks,
         )
-
-        self.exclude_fields: set = {f.lower() for f in (exclude_fields or [])}
-        self.exclude_urls: set = set(exclude_urls or [])
 
         # State
         self.all_findings: list = []
