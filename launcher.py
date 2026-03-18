@@ -297,6 +297,7 @@ def _section_advanced(provider: str = "ollama") -> dict:
         "port": 8765,
         "timeout": 30,
         "max_forms": 50,
+        "exclude_urls_file": "",
     }
     if use_adv not in ("y", "yes"):
         if default_interactive:
@@ -316,17 +317,27 @@ def _section_advanced(provider: str = "ollama") -> dict:
     p = _ask("AI アタックプランナーを無効にしますか? (y/N)", "n").lower()
     defaults["no_planner"] = p in ("y", "yes")
 
-    # 手動プラン編集
-    if not defaults["no_planner"]:
-        default_ip = "Y" if default_interactive else "n"
-        ip = _ask(
+    # 手動プラン作成 / 編集
+    # AIプランナー有効時: AIが生成したプランを編集
+    # AIプランナー無効時: ヒューリスティック分析を起点に手動で1から作成
+    default_ip = "Y" if (default_interactive or defaults["no_planner"]) else "n"
+    if defaults["no_planner"]:
+        ip_label = (
+            "手動プラン作成モードを有効にしますか? "
+            "(ヒューリスティック分析を起点にフィールドごとに設定)"
+        )
+    else:
+        ip_label = (
             "巡回後に攻撃プランを手動で確認・編集しますか? "
-            "(LLM=none の場合は推奨)",
-            default_ip,
-        ).lower()
-        defaults["interactive_plan"] = ip in ("y", "yes")
-        if defaults["interactive_plan"]:
-            _ok("手動プラン編集モード: 有効 (各フィールドのリスク・検査・ペイロードを編集できます)")
+            "(AIプランに追加で修正を加えられます)"
+        )
+    ip = _ask(ip_label, default_ip).lower()
+    defaults["interactive_plan"] = ip in ("y", "yes")
+    if defaults["interactive_plan"]:
+        if defaults["no_planner"]:
+            _ok("手動プラン作成モード: 有効 (ヒューリスティック分析 → 各フィールドを手動設定)")
+        else:
+            _ok("手動プラン編集モード: 有効 (AIプランを確認・変更できます)")
 
     # CTF モード
     ctf = _ask("CTF モードを有効にしますか? (y/N)", "n").lower()
@@ -370,6 +381,18 @@ def _section_advanced(provider: str = "ollama") -> dict:
             _ok(f"CTF LLM: {new_provider}")
         else:
             defaults["ctf_llm_override"] = None
+
+    # 除外 URL ファイル
+    excl_urls_file = _ask(
+        "除外 URL リストファイル (1行1URL / 空白=なし)",
+        "",
+    )
+    if excl_urls_file and not __import__("os").path.isfile(excl_urls_file):
+        _warn(f"ファイルが見つかりません: {excl_urls_file}  (無視します)")
+        excl_urls_file = ""
+    defaults["exclude_urls_file"] = excl_urls_file
+    if excl_urls_file:
+        _ok(f"除外 URL リスト: {excl_urls_file}")
 
     # ポート番号
     while True:
@@ -446,6 +469,8 @@ def _show_summary(
             t.add_row("Cookie", cookie[:60] + ("..." if len(cookie) > 60 else ""))
         if exclude:
             t.add_row("除外パラメータ", " ".join(exclude))
+        if adv.get("exclude_urls_file"):
+            t.add_row("除外 URL ファイル", adv["exclude_urls_file"])
         _console.print(Panel(t, title="[bold cyan]設定確認[/bold cyan]", border_style="cyan"))
     else:
         print()
@@ -534,6 +559,7 @@ def main():
         max_forms=adv["max_forms"],
         exclude=exclude,
         exclude_file=None,
+        exclude_urls_file=adv.get("exclude_urls_file", "") or None,
         ctf=adv["ctf"],
         ctf_flag_format=adv.get("ctf_flag_format", ""),
         cookie=cookie,

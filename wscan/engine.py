@@ -12,6 +12,12 @@ Phase 3: Attack   — Execute attacks guided by the plan.
                     application's filtering behavior in the page HTML and
                     generates creative bypass payloads (encoding tricks,
                     WAF evasion, context-aware injection, polyglots).
+  Phase 3c:         Chain detection — inject distinctive probes into content
+                    fields, then check ALL pages for stored/second-order
+                    execution (Stored XSS, HTML injection → XSS, SSTI chain).
+  Phase 3d:         Multi-parameter simultaneous injection — fill all form
+                    fields with their respective payloads at once to catch
+                    cross-parameter interactions and WAF bypasses.
 Phase 4: Report   — Save evidence JSON and generate HTML report.
 """
 import asyncio
@@ -32,6 +38,7 @@ from rich import box as rbox
 from .attack_planner import AttackPlanner, FieldAttackPlan, PageAttackPlan
 from .adaptive_payload import AdaptivePayloadEngine
 from .browser import BrowserManager
+from .chain_scanner import ChainScanner, ChainFinding
 from .ctf_flag_finder import FlagFinder
 from .monitor import MonitorServer
 from .payload_gen import PayloadGenerator
@@ -91,6 +98,7 @@ class ScanEngine:
         timeout: int = 30,
         max_forms: int = 50,
         exclude_fields: Optional[list] = None,
+        exclude_urls: Optional[list] = None,
         ctf_mode: bool = False,
         ctf_flag_pattern: str = "",
         cookies: str = "",
@@ -175,7 +183,16 @@ class ScanEngine:
         self.adaptive_engine = AdaptivePayloadEngine(self.payload_gen)
         self.adaptive_enabled = llm_provider != "none"
 
+        # Chain / stored vulnerability scanner (Phase 3c)
+        self.chain_scanner = ChainScanner(
+            browser=self.browser,
+            sleep_factor=self.sleep_factor,
+            exclude_fields=self.exclude_fields,
+            enabled_checks=self.checks,
+        )
+
         self.exclude_fields: set = {f.lower() for f in (exclude_fields or [])}
+        self.exclude_urls: set = set(exclude_urls or [])
 
         # State
         self.all_findings: list = []
@@ -235,6 +252,12 @@ class ScanEngine:
 
         while queue:
             url, depth = queue.popleft()
+
+            # Skip excluded URLs (exact match or prefix match)
+            if self._is_url_excluded(url):
+                console.print(f"  [dim yellow]Skip (excluded URL):[/dim yellow] {url}")
+                continue
+
             console.print(f"  [dim]Crawling[/dim] ({depth}/{self.depth}): {url}")
             if self.monitor:
                 await self.monitor.emit_page_start(url)
@@ -271,7 +294,9 @@ class ScanEngine:
                 links = await self.browser.collect_links(url, same_domain=True)
                 for link in links:
                     clean = link.split("#")[0].split("?")[0]
-                    if clean not in self.visited_urls and len(self.visited_urls) < 50:
+                    if (clean not in self.visited_urls
+                            and len(self.visited_urls) < 50
+                            and not self._is_url_excluded(clean)):
                         self.visited_urls.add(clean)
                         queue.append((link, depth + 1))
 
@@ -297,7 +322,29 @@ class ScanEngine:
         plans: dict = {}
 
         if not self.use_planner:
-            console.print("  [dim]Planner disabled — all checks will run on every field.[/dim]")
+            if self.interactive_plan:
+                # Manual planning mode: generate heuristic base plans so the user
+                # has something to start from, then open the interactive editor.
+                console.print(
+                    "  [bold yellow]手動プラン作成モード[/bold yellow]  "
+                    "(AIプランナー無効 — ヒューリスティック分析から開始)\n"
+                )
+                plans = self._generate_heuristic_plans_for_pages(pages)
+                if plans:
+                    self.attack_plans = list(plans.values())
+                    self._interactive_plan_editor(plans)
+                    self._print_all_plans(plans)
+                    console.print()
+                    console.print(
+                        "[bold]  手動プランが完成しました。[/bold] "
+                        "[green]Enter[/green] で攻撃開始、[red]Ctrl+C[/red] で中断。"
+                    )
+                    try:
+                        await asyncio.get_event_loop().run_in_executor(None, input, "  → ")
+                    except (KeyboardInterrupt, EOFError):
+                        raise SystemExit("\nAborted by user.")
+            else:
+                console.print("  [dim]Planner disabled — all checks will run on every field.[/dim]")
             return plans
 
         # Build a site map string so LLM can reason about cross-page flows
@@ -582,7 +629,11 @@ class ScanEngine:
             plan = plans.get(page.url)
             findings_before = len(self.all_findings)
 
+            # Phase 3a + 3b: individual field scan + adaptive AI
             await self._attack_page(page, plan)
+
+            # Phase 3d: multi-parameter simultaneous injection
+            await self._phase_multi_param(page, plan)
 
             # Adaptive re-planning: if new findings appeared, elevate risk on similar fields
             new_findings = self.all_findings[findings_before:]
@@ -590,6 +641,16 @@ class ScanEngine:
                 remaining = [p for p in pages if p.url not in attacked_urls]
                 if remaining:
                     self._adaptive_rerank(new_findings, remaining, plans)
+
+        # Phase 3c: chain / stored vulnerability detection (runs after ALL pages attacked)
+        chain_findings = await self.chain_scanner.run(
+            source_pages=[p for p in pages if p.forms],
+            observation_pages=pages,
+            attack_plans=plans,
+            max_forms=self.max_forms,
+        )
+        for cf in chain_findings:
+            self._record_finding(cf.finding, source=f"chain:{cf.source_url}→{cf.trigger_url}")
 
     async def _attack_page(self, page: CrawledPage, plan: Optional[PageAttackPlan]):
         """Run all scanners on all fields of a single page."""
@@ -639,6 +700,150 @@ class ScanEngine:
 
             if not is_url_param:
                 await self.browser.navigate(page.url)
+
+    # =========================================================================
+    # Phase 3d: Multi-parameter simultaneous injection
+    # =========================================================================
+
+    async def _phase_multi_param(self, page: CrawledPage, plan: Optional[PageAttackPlan]):
+        """
+        Fill ALL relevant fields in each form simultaneously with their
+        respective check-type payloads and test the combined submission.
+
+        Catches:
+        - Cross-parameter WAF bypasses (each field clean alone, dangerous together)
+        - Vulnerabilities that need valid companion field values to trigger
+        - Concatenated rendering (multiple fields appear together on another page)
+        """
+        if not page.forms:
+            return
+
+        # Only run when there are forms with 2+ testable fields
+        forms_to_test = [
+            (fi, form) for fi, form in enumerate(page.forms[:self.max_forms])
+            if len([
+                inp for inp in form.get("inputs", [])
+                if inp.get("name", "").lower() not in self.exclude_fields
+            ]) >= 2
+        ]
+        if not forms_to_test:
+            return
+
+        console.print(
+            f"\n  [bold magenta][MultiParam][/bold magenta] "
+            f"Multi-parameter attack on {page.url}  "
+            f"({len(forms_to_test)} form(s) with 2+ fields)"
+        )
+
+        xss_scanner = self.scanners.get("xss")
+        sqli_scanner = self.scanners.get("sqli")
+
+        for fi, form in forms_to_test:
+            inputs = [
+                inp for inp in form.get("inputs", [])
+                if inp.get("name", "").lower() not in self.exclude_fields
+            ]
+
+            # Build a per-field payload map for each relevant check type
+            for check_name in [c for c in ("xss", "sqli", "ssti") if c in self.scanners]:
+                field_payloads: dict = {}
+
+                for inp in inputs:
+                    fname = inp.get("name", "")
+                    if not fname:
+                        continue
+
+                    fp = plan.get_field_plan(fname, fi, False) if plan else None
+                    # Use check if: explicitly planned OR field name heuristically relevant
+                    if fp and fp.priority_checks and check_name not in fp.priority_checks:
+                        continue
+
+                    plan_payloads = (fp.custom_payloads.get(check_name) if fp else None) or []
+                    defaults = self.payload_gen.default_payloads.get(check_name, [])
+                    candidates = plan_payloads + [p for p in defaults if p not in plan_payloads]
+                    if candidates:
+                        field_payloads[fname] = candidates[0]  # pick first/best payload
+
+                if len(field_payloads) < 2:
+                    continue  # skip if only 1 field would be filled — that's already tested
+
+                console.print(
+                    f"  [dim magenta]  {check_name.upper()} × "
+                    f"{len(field_payloads)} fields: "
+                    f"{', '.join(field_payloads)}[/dim magenta]"
+                )
+
+                ok = await self.browser.navigate(page.url)
+                if not ok:
+                    continue
+                self.browser.reset_dialog()
+
+                source, pair = await self.browser.fill_and_submit_form_multi(fi, field_payloads)
+                await asyncio.sleep(0.5 * self.sleep_factor)
+
+                # CTF flag check on combined result
+                if self.flag_finder and source:
+                    self._check_page_for_flags(source, page.url)
+
+                # ── XSS detection ──────────────────────────────────────
+                if check_name == "xss" and xss_scanner:
+                    if self.browser.dialog_fired:
+                        f = await xss_scanner.record_finding(
+                            url=page.url,
+                            field_name=f"multi[{','.join(field_payloads)}]",
+                            payload=str(field_payloads),
+                            evidence=(
+                                f"[MultiParam] XSS dialog triggered with simultaneous "
+                                f"multi-field injection: '{self.browser.dialog_message}'"
+                            ),
+                            pair=pair,
+                            severity="critical",
+                            dialog_confirmed=True,
+                            dialog_message=self.browser.dialog_message,
+                        )
+                        self._record_finding(f, source="multi-param")
+                    elif source:
+                        for fname, p in field_payloads.items():
+                            reflected = xss_scanner._check_reflected(source, p)
+                            if reflected:
+                                f = await xss_scanner.record_finding(
+                                    url=page.url,
+                                    field_name=f"multi[{','.join(field_payloads)}]",
+                                    payload=str(field_payloads),
+                                    evidence=(
+                                        f"[MultiParam] XSS reflected in combined submission "
+                                        f"(field '{fname}'): '{reflected[:80]}'"
+                                    ),
+                                    pair=pair,
+                                    severity="high",
+                                )
+                                self._record_finding(f, source="multi-param")
+                                break
+
+                # ── SQLi detection ─────────────────────────────────────
+                elif check_name == "sqli" and sqli_scanner and source:
+                    sqli_patterns = [
+                        r"SQL syntax.*MySQL", r"Warning.*mysql_",
+                        r"PostgreSQL.*ERROR", r"ORA-\d{5}",
+                        r"SQLite.*Exception", r"ODBC.*Driver",
+                        r"Microsoft.*ODBC.*SQL Server",
+                        r"syntax error.*sqlite",
+                        r"Unclosed quotation mark",
+                    ]
+                    matched = sqli_scanner.check_response_for_patterns(source, sqli_patterns)
+                    if matched:
+                        f = await sqli_scanner.record_finding(
+                            url=page.url,
+                            field_name=f"multi[{','.join(field_payloads)}]",
+                            payload=str(field_payloads),
+                            evidence=(
+                                f"[MultiParam] SQLi error in combined submission: "
+                                f"'{matched[:120]}'"
+                            ),
+                            pair=pair,
+                            severity="high",
+                        )
+                        self._record_finding(f, source="multi-param")
 
     def _adaptive_rerank(self, new_findings: list, remaining_pages: list, plans: dict):
         """
@@ -824,6 +1029,36 @@ class ScanEngine:
                 except Exception:
                     pass
 
+    def _generate_heuristic_plans_for_pages(self, pages: list) -> dict:
+        """
+        Generate heuristic attack plans for all pages without calling the LLM.
+        Used as a starting point for manual (interactive) plan editing.
+        """
+        plans: dict = {}
+        for page in pages:
+            if not page.forms and not page.url_params:
+                continue
+            plan = self.attack_planner._heuristic_plan(
+                url=page.url,
+                forms=page.forms[:self.max_forms],
+                url_params=page.url_params,
+            )
+            plans[page.url] = plan
+            console.print(
+                f"  [dim cyan][HeuristicPlan][/dim cyan] {page.url}  "
+                f"→ {len(plan.fields)} field(s)"
+            )
+        return plans
+
+    def _is_url_excluded(self, url: str) -> bool:
+        """Return True if *url* matches any entry in the exclude_urls set.
+        Supports exact match or prefix match (e.g. 'http://host/admin' excludes all /admin/* URLs).
+        """
+        for pattern in self.exclude_urls:
+            if url == pattern or url.startswith(pattern):
+                return True
+        return False
+
     def _check_page_for_flags(self, text: str, source: str = ""):
         """Search text for CTF flags; print a banner and store any new finds."""
         if not self.flag_finder or not text:
@@ -923,6 +1158,18 @@ class ScanEngine:
             console.print(
                 f"  [bold magenta]Adaptive AI[/bold magenta] : "
                 f"[magenta]{adaptive_count}[/magenta] finding(s) discovered via LLM-generated bypass payloads"
+            )
+        chain_count = sum(1 for f in self.all_findings if "[ChainDetect]" in f.evidence)
+        if chain_count:
+            console.print(
+                f"  [bold yellow]Chain Detect[/bold yellow] : "
+                f"[yellow]{chain_count}[/yellow] finding(s) from stored/second-order vulnerability chain"
+            )
+        multi_count = sum(1 for f in self.all_findings if "[MultiParam]" in f.evidence)
+        if multi_count:
+            console.print(
+                f"  [bold cyan]Multi-Param [/bold cyan] : "
+                f"[cyan]{multi_count}[/cyan] finding(s) from simultaneous multi-field injection"
             )
 
         if self.all_findings:
