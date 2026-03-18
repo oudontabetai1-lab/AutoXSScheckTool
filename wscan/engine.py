@@ -91,6 +91,7 @@ class ScanEngine:
         timeout: int = 30,
         max_forms: int = 50,
         exclude_fields: Optional[list] = None,
+        exclude_urls: Optional[list] = None,
         ctf_mode: bool = False,
         ctf_flag_pattern: str = "",
         cookies: str = "",
@@ -176,6 +177,7 @@ class ScanEngine:
         self.adaptive_enabled = llm_provider != "none"
 
         self.exclude_fields: set = {f.lower() for f in (exclude_fields or [])}
+        self.exclude_urls: set = set(exclude_urls or [])
 
         # State
         self.all_findings: list = []
@@ -235,6 +237,12 @@ class ScanEngine:
 
         while queue:
             url, depth = queue.popleft()
+
+            # Skip excluded URLs (exact match or prefix match)
+            if self._is_url_excluded(url):
+                console.print(f"  [dim yellow]Skip (excluded URL):[/dim yellow] {url}")
+                continue
+
             console.print(f"  [dim]Crawling[/dim] ({depth}/{self.depth}): {url}")
             if self.monitor:
                 await self.monitor.emit_page_start(url)
@@ -271,7 +279,9 @@ class ScanEngine:
                 links = await self.browser.collect_links(url, same_domain=True)
                 for link in links:
                     clean = link.split("#")[0].split("?")[0]
-                    if clean not in self.visited_urls and len(self.visited_urls) < 50:
+                    if (clean not in self.visited_urls
+                            and len(self.visited_urls) < 50
+                            and not self._is_url_excluded(clean)):
                         self.visited_urls.add(clean)
                         queue.append((link, depth + 1))
 
@@ -297,7 +307,29 @@ class ScanEngine:
         plans: dict = {}
 
         if not self.use_planner:
-            console.print("  [dim]Planner disabled — all checks will run on every field.[/dim]")
+            if self.interactive_plan:
+                # Manual planning mode: generate heuristic base plans so the user
+                # has something to start from, then open the interactive editor.
+                console.print(
+                    "  [bold yellow]手動プラン作成モード[/bold yellow]  "
+                    "(AIプランナー無効 — ヒューリスティック分析から開始)\n"
+                )
+                plans = self._generate_heuristic_plans_for_pages(pages)
+                if plans:
+                    self.attack_plans = list(plans.values())
+                    self._interactive_plan_editor(plans)
+                    self._print_all_plans(plans)
+                    console.print()
+                    console.print(
+                        "[bold]  手動プランが完成しました。[/bold] "
+                        "[green]Enter[/green] で攻撃開始、[red]Ctrl+C[/red] で中断。"
+                    )
+                    try:
+                        await asyncio.get_event_loop().run_in_executor(None, input, "  → ")
+                    except (KeyboardInterrupt, EOFError):
+                        raise SystemExit("\nAborted by user.")
+            else:
+                console.print("  [dim]Planner disabled — all checks will run on every field.[/dim]")
             return plans
 
         # Build a site map string so LLM can reason about cross-page flows
@@ -823,6 +855,36 @@ class ScanEngine:
                     self._check_page_for_flags(post_html, url)
                 except Exception:
                     pass
+
+    def _generate_heuristic_plans_for_pages(self, pages: list) -> dict:
+        """
+        Generate heuristic attack plans for all pages without calling the LLM.
+        Used as a starting point for manual (interactive) plan editing.
+        """
+        plans: dict = {}
+        for page in pages:
+            if not page.forms and not page.url_params:
+                continue
+            plan = self.attack_planner._heuristic_plan(
+                url=page.url,
+                forms=page.forms[:self.max_forms],
+                url_params=page.url_params,
+            )
+            plans[page.url] = plan
+            console.print(
+                f"  [dim cyan][HeuristicPlan][/dim cyan] {page.url}  "
+                f"→ {len(plan.fields)} field(s)"
+            )
+        return plans
+
+    def _is_url_excluded(self, url: str) -> bool:
+        """Return True if *url* matches any entry in the exclude_urls set.
+        Supports exact match or prefix match (e.g. 'http://host/admin' excludes all /admin/* URLs).
+        """
+        for pattern in self.exclude_urls:
+            if url == pattern or url.startswith(pattern):
+                return True
+        return False
 
     def _check_page_for_flags(self, text: str, source: str = ""):
         """Search text for CTF flags; print a banner and store any new finds."""

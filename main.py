@@ -116,6 +116,14 @@ Examples:
         help="Text file with one excluded parameter name per line",
     )
     scan.add_argument(
+        "--exclude-urls-file", metavar="FILE",
+        help=(
+            "Text file with URLs/prefixes to skip during crawl and attack "
+            "(one entry per line, lines starting with # are ignored). "
+            "Prefix match: 'http://host/admin' skips all /admin/* URLs."
+        ),
+    )
+    scan.add_argument(
         "--ctf", action="store_true",
         help="CTF mode: adds SSTI scanner and halves sleep delays for faster scanning",
     )
@@ -202,6 +210,17 @@ async def run_scan(args):
     if exclude_fields:
         console.print(f"Excluded params : [yellow]{', '.join(exclude_fields)}[/yellow]")
 
+    # Build exclude-urls list from --exclude-urls-file
+    exclude_urls: list = []
+    excl_urls_file = getattr(args, "exclude_urls_file", None)
+    if excl_urls_file:
+        try:
+            lines = Path(excl_urls_file).read_text(encoding="utf-8").splitlines()
+            exclude_urls = [l.strip() for l in lines if l.strip() and not l.startswith("#")]
+            console.print(f"Excluded URLs   : [yellow]{len(exclude_urls)} entry/entries from {excl_urls_file}[/yellow]")
+        except Exception as ex:
+            console.print(f"[yellow]Warning: Could not read exclude-urls file: {ex}[/yellow]")
+
     if args.no_monitor:
         # Simple mode - no web dashboard
         from wscan.engine import ScanEngine
@@ -223,7 +242,9 @@ async def run_scan(args):
             timeout=args.timeout,
             max_forms=args.max_forms,
             exclude_fields=exclude_fields,
+            exclude_urls=exclude_urls,
             ctf_mode=getattr(args, "ctf", False),
+            ctf_flag_pattern=getattr(args, "ctf_flag_format", "") or "",
             cookies=getattr(args, "cookie", "") or "",
             auth_user=getattr(args, "auth_user", "") or "",
             auth_pass=getattr(args, "auth_pass", "") or "",
@@ -273,12 +294,14 @@ async def run_scan(args):
                 timeout=args.timeout,
                 max_forms=args.max_forms,
                 exclude_fields=exclude_fields,
+                exclude_urls=exclude_urls,
                 ctf_mode=getattr(args, "ctf", False),
                 ctf_flag_pattern=getattr(args, "ctf_flag_format", "") or "",
                 cookies=getattr(args, "cookie", "") or "",
                 auth_user=getattr(args, "auth_user", "") or "",
                 auth_pass=getattr(args, "auth_pass", "") or "",
                 use_planner=not getattr(args, "no_planner", False),
+                interactive_plan=getattr(args, "interactive_plan", False) or args.llm == "none",
             )
             await engine.run()
 
