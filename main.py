@@ -138,6 +138,14 @@ Examples:
             "Runs all checks on all fields without strategic prioritisation."
         ),
     )
+    scan.add_argument(
+        "--interactive-plan", action="store_true",
+        help=(
+            "After crawling, open the interactive plan editor to review and "
+            "adjust risk scores, checks, and payloads per field before attacking. "
+            "Enabled automatically when --llm none."
+        ),
+    )
 
     return parser.parse_args()
 
@@ -213,6 +221,7 @@ async def run_scan(args):
             auth_user=getattr(args, "auth_user", "") or "",
             auth_pass=getattr(args, "auth_pass", "") or "",
             use_planner=not getattr(args, "no_planner", False),
+            interactive_plan=getattr(args, "interactive_plan", False) or args.llm == "none",
         )
         await engine.run()
         return

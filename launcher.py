@@ -281,20 +281,25 @@ def _section_exclude() -> list[str]:
 
 # ── セクション: 詳細設定 ────────────────────────────────────────
 
-def _section_advanced() -> dict:
+def _section_advanced(provider: str = "ollama") -> dict:
     _header("詳細設定")
     use_adv = _ask("詳細設定を変更しますか? (y/N)", "n").lower()
+    # interactive_plan: LLM が none の時はデフォルト ON
+    default_interactive = provider == "none"
     defaults = {
         "headless": False,
         "no_monitor": False,
         "no_planner": False,
+        "interactive_plan": default_interactive,
         "ctf": False,
         "port": 8765,
         "timeout": 30,
         "max_forms": 50,
     }
     if use_adv not in ("y", "yes"):
-        _ok("デフォルト値を使用します")
+        if default_interactive:
+            _ok("LLM なし → 手動プラン編集モード: 有効 (デフォルト)")
+        _ok("その他はデフォルト値を使用します")
         return defaults
 
     # ブラウザ表示
@@ -308,6 +313,18 @@ def _section_advanced() -> dict:
     # AI プランナー
     p = _ask("AI アタックプランナーを無効にしますか? (y/N)", "n").lower()
     defaults["no_planner"] = p in ("y", "yes")
+
+    # 手動プラン編集
+    if not defaults["no_planner"]:
+        default_ip = "Y" if default_interactive else "n"
+        ip = _ask(
+            "巡回後に攻撃プランを手動で確認・編集しますか? "
+            "(LLM=none の場合は推奨)",
+            default_ip,
+        ).lower()
+        defaults["interactive_plan"] = ip in ("y", "yes")
+        if defaults["interactive_plan"]:
+            _ok("手動プラン編集モード: 有効 (各フィールドのリスク・検査・ペイロードを編集できます)")
 
     # CTF モード
     ctf = _ask("CTF モードを有効にしますか? (y/N)", "n").lower()
@@ -371,6 +388,8 @@ def _show_summary(
         t.add_row("ブラウザ",    "非表示" if adv["headless"] else "表示")
         t.add_row("ダッシュボード", "無効" if adv["no_monitor"] else f"有効 (port {adv['port']})")
         t.add_row("AI プランナー", "無効" if adv["no_planner"] else "有効")
+        ip_label = "有効 (手動編集あり)" if adv.get("interactive_plan") else "無効 (自動確定)"
+        t.add_row("手動プラン編集", ip_label)
         t.add_row("CTF モード",  "有効" if adv["ctf"] else "無効")
         if auth_user:
             t.add_row("認証",   f"{auth_user} / {'*' * len(auth_pass)}")
@@ -421,7 +440,7 @@ def main():
     auth_user, auth_pass = _section_auth()
     cookie = _section_cookie()
     exclude = _section_exclude()
-    adv = _section_advanced()
+    adv = _section_advanced(provider=provider)
 
     # ── 設定確認 ────────────────────────────────────────────────
     _show_summary(
@@ -451,6 +470,7 @@ def main():
         headless=adv["headless"],
         no_monitor=adv["no_monitor"],
         no_planner=adv["no_planner"],
+        interactive_plan=adv.get("interactive_plan", False),
         llm=provider,
         ollama_model=ollama_model,
         openai_model=openai_model,
