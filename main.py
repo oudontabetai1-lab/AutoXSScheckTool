@@ -120,6 +120,13 @@ Examples:
         help="CTF mode: adds SSTI scanner and halves sleep delays for faster scanning",
     )
     scan.add_argument(
+        "--ctf-flag-format", metavar="REGEX", default="",
+        help=(
+            "Regex pattern to search for CTF flags (default: auto-detect FLAG/CTF/HTB formats). "
+            "Example: 'HTB{[^}]+}' or 'picoCTF{[^}]+}'"
+        ),
+    )
+    scan.add_argument(
         "--cookie", metavar="COOKIES", default="",
         help="Pre-set cookies before scanning (e.g. 'session=abc; token=xyz')",
     )
@@ -136,6 +143,14 @@ Examples:
         help=(
             "Disable the AI attack planner. "
             "Runs all checks on all fields without strategic prioritisation."
+        ),
+    )
+    scan.add_argument(
+        "--interactive-plan", action="store_true",
+        help=(
+            "After crawling, open the interactive plan editor to review and "
+            "adjust risk scores, checks, and payloads per field before attacking. "
+            "Enabled automatically when --llm none."
         ),
     )
 
@@ -213,6 +228,7 @@ async def run_scan(args):
             auth_user=getattr(args, "auth_user", "") or "",
             auth_pass=getattr(args, "auth_pass", "") or "",
             use_planner=not getattr(args, "no_planner", False),
+            interactive_plan=getattr(args, "interactive_plan", False) or args.llm == "none",
         )
         await engine.run()
         return
@@ -258,6 +274,7 @@ async def run_scan(args):
                 max_forms=args.max_forms,
                 exclude_fields=exclude_fields,
                 ctf_mode=getattr(args, "ctf", False),
+                ctf_flag_pattern=getattr(args, "ctf_flag_format", "") or "",
                 cookies=getattr(args, "cookie", "") or "",
                 auth_user=getattr(args, "auth_user", "") or "",
                 auth_pass=getattr(args, "auth_pass", "") or "",

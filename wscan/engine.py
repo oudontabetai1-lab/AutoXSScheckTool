@@ -27,6 +27,7 @@ from rich import box as rbox
 
 from .attack_planner import AttackPlanner, FieldAttackPlan, PageAttackPlan
 from .browser import BrowserManager
+from .ctf_flag_finder import FlagFinder
 from .monitor import MonitorServer
 from .payload_gen import PayloadGenerator
 from .scanners.base import Finding
@@ -86,10 +87,12 @@ class ScanEngine:
         max_forms: int = 50,
         exclude_fields: Optional[list] = None,
         ctf_mode: bool = False,
+        ctf_flag_pattern: str = "",
         cookies: str = "",
         auth_user: str = "",
         auth_pass: str = "",
         use_planner: bool = True,
+        interactive_plan: bool = False,
     ):
         self.target_url = url.rstrip("/")
         self.monitor = monitor
@@ -101,8 +104,13 @@ class ScanEngine:
         self.sleep_factor = 0.5 if ctf_mode else 1.0
         self.cookies = cookies
         self.use_planner = use_planner
+        self.interactive_plan = interactive_plan
         if ctf_mode and "ssti" not in self.checks:
             self.checks.append("ssti")
+
+        # CTF flag finder
+        self.flag_finder: Optional[FlagFinder] = FlagFinder(ctf_flag_pattern) if ctf_mode else None
+        self.ctf_found_flags: list = []   # [(flag_str, source_url)]
 
         # Output directory
         ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -235,6 +243,10 @@ class ScanEngine:
             url_params = await self.browser.get_url_params()
             await self.browser.screenshot_b64(f"Crawl: {url}")
 
+            # CTF: scan page HTML for flags even during crawl
+            if self.flag_finder:
+                self._check_page_for_flags(html, url)
+
             input_count = sum(len(f.get("inputs", [])) for f in forms) + len(url_params)
             console.print(
                 f"    [dim]forms:[/dim] {len(forms)}  "
@@ -311,6 +323,10 @@ class ScanEngine:
             if self.monitor:
                 await self.monitor.emit_status(f"Plan: {plan.page_purpose[:60]}")
 
+        # ── Interactive manual editor ────────────────────────────────
+        if self.interactive_plan and plans:
+            self._interactive_plan_editor(plans)
+
         # Print all plans summary and ask user to confirm
         if plans:
             self._print_all_plans(plans)
@@ -353,6 +369,168 @@ class ScanEngine:
         console.print(t)
 
     # =========================================================================
+    # Interactive Plan Editor
+    # =========================================================================
+
+    def _interactive_plan_editor(self, plans: dict) -> None:
+        """
+        Per-field interactive attack plan editor.
+        Runs after LLM/heuristic planning, before the attack phase.
+        Lets the user review, adjust, or override every field's plan.
+        """
+        console.print(Rule("[bold yellow] 手動プラン編集モード [/bold yellow]", style="yellow"))
+        console.print(
+            "  各フィールドのリスク・検査項目・カスタムペイロードを設定できます。\n"
+            "  [dim]操作: [Enter] 確定  [番号] フィールド編集  [s] ページスキップ  [a] 全ページ確定[/dim]"
+        )
+
+        page_list = list(plans.items())
+        for page_idx, (url, plan) in enumerate(page_list):
+            if not plan.fields:
+                continue
+
+            while True:
+                console.print(f"\n  [bold cyan]ページ {page_idx + 1}/{len(page_list)}:[/bold cyan] {url}")
+                console.print(f"  [dim]目的:[/dim] {plan.page_purpose}  [dim]計画:[/dim] {plan.planned_by}")
+                self._print_editable_fields(plan)
+
+                try:
+                    raw = input(
+                        "\n  操作 → [Enter]=確定  [番号]=編集  [s]=スキップ  [a]=全確定: "
+                    ).strip().lower()
+                except (KeyboardInterrupt, EOFError):
+                    raise SystemExit("\nAborted.")
+
+                if raw == "a":
+                    console.print("  [green]全ページを確定しました。[/green]")
+                    return
+                if raw == "s":
+                    for fp in plan.fields:
+                        fp.priority_checks = []
+                        fp.risk_score = 0
+                    console.print(f"  [yellow]  ページをスキップします。[/yellow]")
+                    break
+                if raw == "":
+                    break
+                if raw.isdigit():
+                    idx = int(raw) - 1
+                    sorted_fields = plan.sorted_fields()
+                    if 0 <= idx < len(sorted_fields):
+                        self._edit_field(sorted_fields[idx])
+                    else:
+                        console.print(f"  [red]  1〜{len(sorted_fields)} の番号を入力してください。[/red]")
+
+    def _print_editable_fields(self, plan) -> None:
+        """Print a numbered table of fields for interactive editing."""
+        t = Table(show_header=True, header_style="bold", box=rbox.SIMPLE, padding=(0, 1))
+        t.add_column("#",         justify="right", style="dim", width=3)
+        t.add_column("フィールド",  style="cyan",   no_wrap=True, max_width=20)
+        t.add_column("種別",       style="dim",    width=8)
+        t.add_column("Risk",       justify="center", width=5)
+        t.add_column("検査項目",   style="green",  max_width=30)
+        t.add_column("PL",         justify="right", style="dim", width=4)
+
+        for i, fp in enumerate(plan.sorted_fields(), 1):
+            if fp.risk_score == 0:
+                risk_disp = "[dim]SKIP[/dim]"
+            else:
+                rc = "red" if fp.risk_score >= 8 else ("yellow" if fp.risk_score >= 5 else "green")
+                risk_disp = f"[{rc}]{fp.risk_score}[/{rc}]"
+            kind = "URL param" if fp.is_url_param else "form"
+            pl_count = sum(len(v) for v in fp.custom_payloads.values()) if fp.custom_payloads else 0
+            checks_str = " · ".join(fp.priority_checks[:4]) if fp.priority_checks else "[dim]—[/dim]"
+            t.add_row(str(i), fp.name, kind, risk_disp, checks_str, str(pl_count) if pl_count else "-")
+        console.print(t)
+
+    def _edit_field(self, fp) -> None:
+        """Interactive editor for a single FieldAttackPlan."""
+        console.print(f"\n  [bold]編集中:[/bold] [cyan]{fp.name}[/cyan]"
+                      f"  [dim](現在: risk={fp.risk_score}, checks={' '.join(fp.priority_checks)})[/dim]")
+
+        # ── Risk score ───────────────────────────────────────────────
+        try:
+            r = input(f"  リスクスコア (1-10) [{fp.risk_score}]: ").strip()
+        except (KeyboardInterrupt, EOFError):
+            return
+        if r.isdigit():
+            fp.risk_score = max(1, min(10, int(r)))
+
+        # ── Checks ───────────────────────────────────────────────────
+        console.print("  実施する検査:")
+        for i, c in enumerate(self.checks, 1):
+            mark = "[green]●[/green]" if c in fp.priority_checks else "[dim]○[/dim]"
+            console.print(f"    [{i:>2}] {mark} {c}")
+
+        try:
+            c_raw = input(
+                f"  番号 (スペース区切り) / 'all' / 'none'  [現在: {' '.join(fp.priority_checks) or '—'}] [Enter=変更なし]: "
+            ).strip().lower()
+        except (KeyboardInterrupt, EOFError):
+            c_raw = ""
+
+        if c_raw == "all":
+            fp.priority_checks = list(self.checks)
+        elif c_raw == "none":
+            fp.priority_checks = []
+            fp.risk_score = 0
+            console.print("  [yellow]  スキップに設定しました。[/yellow]")
+            return
+        elif c_raw:
+            selected = []
+            for token in c_raw.split():
+                if token.isdigit() and 1 <= int(token) <= len(self.checks):
+                    selected.append(self.checks[int(token) - 1])
+                elif token in self.checks:
+                    selected.append(token)
+            if selected:
+                fp.priority_checks = selected
+
+        # ── Custom payloads ──────────────────────────────────────────
+        try:
+            add_pl = input("  カスタムペイロードを追加しますか? (y/N): ").strip().lower()
+        except (KeyboardInterrupt, EOFError):
+            add_pl = ""
+
+        if add_pl in ("y", "yes") and fp.priority_checks:
+            # Choose check type
+            console.print("  どの検査用ペイロードを追加しますか?")
+            for i, c in enumerate(fp.priority_checks, 1):
+                console.print(f"    [{i}] {c}")
+            try:
+                ct_raw = input(f"  番号 [{fp.priority_checks[0]}]: ").strip()
+            except (KeyboardInterrupt, EOFError):
+                ct_raw = ""
+            check_type = fp.priority_checks[0]
+            if ct_raw.isdigit() and 1 <= int(ct_raw) <= len(fp.priority_checks):
+                check_type = fp.priority_checks[int(ct_raw) - 1]
+            elif ct_raw in self.checks:
+                check_type = ct_raw
+
+            console.print(f"  [dim]{check_type} 用ペイロードを1行ずつ入力 (空行で終了)[/dim]")
+            new_payloads: list = []
+            while True:
+                try:
+                    p = input("    > ").strip()
+                except (KeyboardInterrupt, EOFError):
+                    break
+                if not p:
+                    break
+                new_payloads.append(p)
+
+            if new_payloads:
+                existing = fp.custom_payloads.get(check_type, [])
+                fp.custom_payloads[check_type] = existing + new_payloads
+                console.print(f"  [green]  ✔ {len(new_payloads)} 件のペイロードを追加しました[/green]")
+
+        # ── Summary ──────────────────────────────────────────────────
+        pl_total = sum(len(v) for v in fp.custom_payloads.values())
+        console.print(
+            f"  [green]  ✔ 更新:[/green] risk={fp.risk_score}  "
+            f"checks={' · '.join(fp.priority_checks) or '—'}  "
+            f"custom_payloads={pl_total}件"
+        )
+
+    # =========================================================================
     # Phase 3: Attack
     # =========================================================================
 
@@ -381,6 +559,14 @@ class ScanEngine:
             success = await self.browser.navigate(page.url)
             if not success:
                 continue
+
+            # CTF: re-check page after navigating (dynamic content may differ from crawl)
+            if self.flag_finder:
+                try:
+                    attack_html = await self.browser.page.content()
+                    self._check_page_for_flags(attack_html, page.url)
+                except Exception:
+                    pass
 
             console.print(f"\n  [bold]Attacking:[/bold] {page.url}")
             plan = plans.get(page.url)
@@ -523,6 +709,14 @@ class ScanEngine:
                     else:
                         self.custom_payloads[check_name] = _prev
 
+        # CTF: check page source after all scanners ran on this field
+        if self.flag_finder:
+            try:
+                post_html = await self.browser.page.content()
+                self._check_page_for_flags(post_html, url)
+            except Exception:
+                pass
+
         self.completed_fields += 1
         if self.monitor and self.total_fields > 0:
             await self.monitor.emit_progress(
@@ -531,6 +725,24 @@ class ScanEngine:
                 message=f"{field_name} ({url})",
             )
 
+    def _check_page_for_flags(self, text: str, source: str = ""):
+        """Search text for CTF flags; print a banner and store any new finds."""
+        if not self.flag_finder or not text:
+            return
+        found = self.flag_finder.find(text)
+        for flag in found:
+            if flag not in [f for f, _ in self.ctf_found_flags]:
+                self.ctf_found_flags.append((flag, source))
+                console.print()
+                console.print(
+                    f"  [bold white on red]  🚩 FLAG FOUND  [/bold white on red]"
+                )
+                console.print(
+                    f"  [bold yellow]{flag}[/bold yellow]"
+                    f"  [dim](source: {source})[/dim]"
+                )
+                console.print()
+
     def _record_finding(self, f: Finding, source: str = ""):
         self.all_findings.append(f)
         label = f.check_type.upper()
@@ -538,6 +750,14 @@ class ScanEngine:
         console.print(
             f"    [bold red][FINDING][/bold red] {label}{loc} — {f.evidence[:80]}"
         )
+        # Also scan the finding's evidence and response for flags
+        if self.flag_finder:
+            self._check_page_for_flags(f.evidence, f.url)
+            body = (f.response or {}).get("body", "") or ""
+            if body:
+                self._check_page_for_flags(body, f.url)
+            if f.dialog_message:
+                self._check_page_for_flags(f.dialog_message, f.url)
 
     # =========================================================================
     # Phase 4: Report
@@ -556,6 +776,7 @@ class ScanEngine:
             "checks": self.checks,
             "visited_urls": list(self.visited_urls),
             "findings": [f.to_dict() for f in self.all_findings],
+            "ctf_flags": [{"flag": flag, "source": src} for flag, src in self.ctf_found_flags],
             "attack_plans": [
                 {
                     "url": p.url,
@@ -588,6 +809,7 @@ class ScanEngine:
             visited_urls=list(self.visited_urls),
             checks=self.checks,
             attack_plans=self.attack_plans,
+            ctf_flags=self.ctf_found_flags,
         )
 
     def _print_summary(self):
@@ -613,6 +835,13 @@ class ScanEngine:
                     f.evidence[:60],
                 )
             console.print(t)
+
+        if self.ctf_found_flags:
+            console.print()
+            console.print(Rule("[bold white on red]  🚩  CTF FLAGS CAPTURED  🚩  [/bold white on red]", style="red"))
+            for flag, src in self.ctf_found_flags:
+                console.print(f"  [bold yellow]{flag}[/bold yellow]  [dim]← {src}[/dim]")
+            console.print(Rule(style="red"))
 
         console.print(f"\n  [bold green]Report:[/bold green] [cyan]{self.output_dir / 'report.html'}[/cyan]")
 
