@@ -238,33 +238,85 @@ class BrowserManager:
                     const form = forms[formIndex];
                     if (!form) return {success: false, error: 'form not found'};
 
+                    // Infer a safe, type-valid value for a field so HTML5 validation passes.
+                    function getSafeValue(el) {
+                        const type = (el.type || 'text').toLowerCase();
+                        const name = (el.name || el.id || '').toLowerCase();
+                        const ph   = (el.placeholder || '').toLowerCase();
+                        const hint = name + ' ' + ph;
+
+                        // --- Auth fields (highest priority) ---
+                        if (type === 'password') return authPass || 'Test1234!';
+                        if (authUser && /user|email|login|account|mail/.test(hint)) return authUser;
+
+                        // --- Input type ---
+                        if (type === 'email')          return authUser && authUser.includes('@') ? authUser : 'tester@example.com';
+                        if (type === 'url')            return 'https://example.com';
+                        if (type === 'tel')            return '090-0000-0000';
+                        if (type === 'color')          return '#000000';
+                        if (type === 'date')           return '2000-01-01';
+                        if (type === 'datetime-local') return '2000-01-01T00:00';
+                        if (type === 'time')           return '12:00';
+                        if (type === 'month')          return '2000-01';
+                        if (type === 'week')           return '2000-W01';
+                        if (type === 'range' || type === 'number') {
+                            const min = parseFloat(el.min);
+                            const max = parseFloat(el.max);
+                            if (!isNaN(min) && min >= 0) return String(Math.ceil(min) || 1);
+                            if (!isNaN(max) && max >= 1) return '1';
+                            return '1';
+                        }
+
+                        // --- Hint-based (name / placeholder) ---
+                        if (/email|mail/.test(hint))                      return 'tester@example.com';
+                        if (/url|link|href|website|site/.test(hint))      return 'https://example.com';
+                        if (/phone|tel|mobile|fax|cell/.test(hint))       return '090-0000-0000';
+                        if (/zip|postal|post.code|postcode/.test(hint))   return '100-0001';
+                        if (/age|year|num|qty|quantity|amount|price|cost|score|count|total|size|limit|page/.test(hint)) return '1';
+                        if (/date/.test(hint))                            return '2000-01-01';
+                        if (/address|addr/.test(hint))                    return '1-1 Test Street';
+                        if (/city|town|prefecture|state|region/.test(hint)) return 'Tokyo';
+                        if (/country/.test(hint))                         return 'Japan';
+                        if (/comment|message|description|body|content|text|memo|note/.test(hint)) return 'test message';
+                        if (/pass|password|passwd|pwd/.test(hint))        return 'Test1234!';
+                        if (/first.?name|given.?name/.test(hint))         return 'Taro';
+                        if (/last.?name|family.?name|surname/.test(hint)) return 'Yamada';
+                        if (/name/.test(hint))                            return authUser || 'TaroYamada';
+                        if (/title|subject/.test(hint))                   return 'Test Title';
+
+                        return safeValues && safeValues[el.name || el.id] ? safeValues[el.name || el.id] : 'test';
+                    }
+
+                    function dispatchEvents(el) {
+                        ['input', 'change', 'blur'].forEach(evt =>
+                            el.dispatchEvent(new Event(evt, {bubbles: true}))
+                        );
+                    }
+
                     const allInputs = form.querySelectorAll(
-                        'input:not([type=submit]):not([type=button]):not([type=reset]):not([type=image]):not([type=file]), textarea'
+                        'input:not([type=submit]):not([type=button]):not([type=reset]):not([type=image]):not([type=file]), textarea, select'
                     );
 
-                    // Fill all inputs with safe/auth values first
+                    // Fill all inputs with safe / auth values first
                     allInputs.forEach(el => {
-                        const name = (el.name || el.id || '').toLowerCase();
-                        if (el.type === 'checkbox' || el.type === 'radio') return;
-                        if (el.type === 'hidden') return;
-                        if (el.type === 'password' && authPass) {
-                            el.value = authPass;
-                        } else if (authUser && (name.includes('user') || name.includes('email') ||
-                                   name.includes('login') || name.includes('account') ||
-                                   name.includes('mail') || name.includes('name'))) {
-                            el.value = authUser;
-                        } else {
-                            const key = el.name || el.id || '';
-                            el.value = (safeValues && safeValues[key]) ? safeValues[key] : 'test';
+                        if (el.type === 'checkbox' || el.type === 'radio' || el.type === 'hidden') return;
+                        if (el.tagName === 'SELECT') {
+                            // Pick first non-empty option
+                            const opts = Array.from(el.options).filter(o => o.value && o.value !== '0');
+                            if (opts.length) { el.value = opts[0].value; dispatchEvents(el); }
+                            return;
                         }
+                        el.value = getSafeValue(el);
+                        dispatchEvents(el);
                     });
 
-                    // Fill target field with payload (overrides auth fill)
+                    // Fill target field with payload (overrides safe fill)
                     const target = Array.from(allInputs).find(
                         el => (el.name || el.id) === fieldName
                     );
                     if (target) {
                         target.value = payload;
+                        dispatchEvents(target);
                     }
 
                     return {success: true};
@@ -317,23 +369,60 @@ class BrowserManager:
                     const form = forms[formIndex];
                     if (!form) return;
 
+                    function getSafeValue(el) {
+                        const type = (el.type || 'text').toLowerCase();
+                        const name = (el.name || el.id || '').toLowerCase();
+                        const ph   = (el.placeholder || '').toLowerCase();
+                        const hint = name + ' ' + ph;
+                        if (type === 'password') return authPass || 'Test1234!';
+                        if (authUser && /user|email|login|account|mail/.test(hint)) return authUser;
+                        if (type === 'email')          return authUser && authUser.includes('@') ? authUser : 'tester@example.com';
+                        if (type === 'url')            return 'https://example.com';
+                        if (type === 'tel')            return '090-0000-0000';
+                        if (type === 'color')          return '#000000';
+                        if (type === 'date')           return '2000-01-01';
+                        if (type === 'datetime-local') return '2000-01-01T00:00';
+                        if (type === 'time')           return '12:00';
+                        if (type === 'month')          return '2000-01';
+                        if (type === 'week')           return '2000-W01';
+                        if (type === 'range' || type === 'number') {
+                            const min = parseFloat(el.min);
+                            if (!isNaN(min) && min >= 0) return String(Math.ceil(min) || 1);
+                            return '1';
+                        }
+                        if (/email|mail/.test(hint))      return 'tester@example.com';
+                        if (/url|link|href|website/.test(hint)) return 'https://example.com';
+                        if (/phone|tel|mobile|fax/.test(hint))  return '090-0000-0000';
+                        if (/zip|postal|postcode/.test(hint))   return '100-0001';
+                        if (/age|year|num|qty|quantity|amount|price|count|score/.test(hint)) return '1';
+                        if (/date/.test(hint))                  return '2000-01-01';
+                        if (/comment|message|description|body|content|text/.test(hint)) return 'test message';
+                        if (/pass|password|passwd|pwd/.test(hint)) return 'Test1234!';
+                        if (/name/.test(hint))                  return authUser || 'TaroYamada';
+                        if (/title|subject/.test(hint))         return 'Test Title';
+                        return 'test';
+                    }
+
+                    function dispatchEvents(el) {
+                        ['input', 'change', 'blur'].forEach(evt =>
+                            el.dispatchEvent(new Event(evt, {bubbles: true}))
+                        );
+                    }
+
                     const allInputs = form.querySelectorAll(
-                        'input:not([type=submit]):not([type=button]):not([type=reset]):not([type=image]):not([type=file]), textarea'
+                        'input:not([type=submit]):not([type=button]):not([type=reset]):not([type=image]):not([type=file]), textarea, select'
                     );
 
                     // Fill non-targeted fields with safe / auth values first
                     allInputs.forEach(el => {
                         if (el.type === 'checkbox' || el.type === 'radio' || el.type === 'hidden') return;
-                        const name = (el.name || el.id || '').toLowerCase();
-                        if (el.type === 'password' && authPass) {
-                            el.value = authPass;
-                        } else if (authUser && (name.includes('user') || name.includes('email') ||
-                                   name.includes('login') || name.includes('account') ||
-                                   name.includes('mail') || name.includes('name'))) {
-                            el.value = authUser;
-                        } else {
-                            el.value = 'test';
+                        if (el.tagName === 'SELECT') {
+                            const opts = Array.from(el.options).filter(o => o.value && o.value !== '0');
+                            if (opts.length) { el.value = opts[0].value; dispatchEvents(el); }
+                            return;
                         }
+                        el.value = getSafeValue(el);
+                        dispatchEvents(el);
                     });
 
                     // Override targeted fields with their attack payloads
@@ -341,7 +430,7 @@ class BrowserManager:
                         const target = Array.from(allInputs).find(
                             el => (el.name || el.id) === fieldName
                         );
-                        if (target) target.value = payload;
+                        if (target) { target.value = payload; dispatchEvents(target); }
                     }
                 }
                 """,
