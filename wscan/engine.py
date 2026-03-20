@@ -23,6 +23,7 @@ Phase 4: Report   — Save evidence JSON and generate HTML report.
 import asyncio
 import datetime
 import json
+import re
 from collections import deque
 from dataclasses import dataclass, field as dc_field
 from pathlib import Path
@@ -61,6 +62,29 @@ console = Console()
 CONFIG_DIR = Path(__file__).parent.parent / "config"
 OUTPUT_BASE = Path(__file__).parent.parent / "output"
 
+
+# ---------------------------------------------------------------------------
+# Registration page / form detection
+# ---------------------------------------------------------------------------
+
+# URL path patterns that strongly suggest a new-account registration page
+_REGISTRATION_URL_RE = re.compile(
+    r"/(register|signup|sign[_-]up|new[_-]?account|create[_-]?account|join|enroll"
+    r"|account/new|user/new|users/new|member/new|members/new"
+    r"|新規登録|会員登録|ユーザー登録|アカウント登録|メンバー登録)",
+    re.IGNORECASE,
+)
+
+# Field name / id patterns that only appear in registration (confirm-password) forms
+_REGISTRATION_FIELD_RE = re.compile(
+    r"^(confirm[_-]?pass(word)?|pass(word)?[_-]?confirm"
+    r"|pass(word)?[_-]?(2|two|again|repeat|retry|check|verify|verification)"
+    r"|re[_-]?pass(word)?|re[_-]?enter[_-]?pass(word)?"
+    r"|password_?confirmation|passwordConfirmation"
+    r"|repeat_?password|new_?password_?confirm"
+    r"|パスワード確認|確認用パスワード)$",
+    re.IGNORECASE,
+)
 
 # ---------------------------------------------------------------------------
 # Data class for crawled pages
@@ -110,6 +134,7 @@ class ScanEngine:
         auth_pass: str = "",
         use_planner: bool = True,
         interactive_plan: bool = False,
+        skip_registration: bool = True,
     ):
         self.target_url = url.rstrip("/")
         self.monitor = monitor
@@ -133,6 +158,7 @@ class ScanEngine:
             )
         self.use_planner = use_planner
         self.interactive_plan = interactive_plan
+        self.skip_registration = skip_registration
         if ctf_mode and "ssti" not in self.checks:
             self.checks.append("ssti")
 
@@ -303,11 +329,27 @@ class ScanEngine:
             if self.flag_finder:
                 self._check_page_for_flags(html, url)
 
+            # Count and flag registration forms during crawl (informational only;
+            # actual skipping happens in _attack_page)
+            reg_form_count = 0
+            if self.skip_registration:
+                reg_form_count = sum(
+                    1 for f in forms
+                    if self._is_registration_form(f)
+                )
+                if self._is_registration_url(url):
+                    reg_form_count = len(forms)  # whole page will be skipped
+
             input_count = sum(len(f.get("inputs", [])) for f in forms) + len(url_params)
+            reg_note = (
+                f"  [dim yellow]({reg_form_count} registration form(s) will be skipped)[/dim yellow]"
+                if reg_form_count else ""
+            )
             console.print(
                 f"    [dim]forms:[/dim] {len(forms)}  "
                 f"[dim]url params:[/dim] {len(url_params)}  "
                 f"[dim]inputs:[/dim] {input_count}"
+                + (f"\n    {reg_note}" if reg_note else "")
             )
 
             pages.append(CrawledPage(url=url, html=html, forms=forms,
@@ -677,7 +719,28 @@ class ScanEngine:
 
     async def _attack_page(self, page: CrawledPage, plan: Optional[PageAttackPlan]):
         """Run all scanners on all fields of a single page."""
-        forms = page.forms[:self.max_forms]
+        all_forms = page.forms[:self.max_forms]
+
+        # ── Registration form exclusion ───────────────────────────────
+        if self.skip_registration:
+            # Also skip the whole page if its URL looks like a registration page
+            if self._is_registration_url(page.url):
+                console.print(
+                    f"  [dim yellow]Skip (registration page):[/dim yellow] {page.url}"
+                )
+                return
+            forms = []
+            for form in all_forms:
+                if self._is_registration_form(form):
+                    action_hint = urlparse(form.get("action", "")).path or page.url
+                    console.print(
+                        f"  [dim yellow]Skip (registration form):[/dim yellow] "
+                        f"action={action_hint}"
+                    )
+                else:
+                    forms.append(form)
+        else:
+            forms = all_forms
 
         # Build ordered field list
         field_queue: list = []
@@ -1080,6 +1143,28 @@ class ScanEngine:
         for pattern in self.exclude_urls:
             if url == pattern or url.startswith(pattern):
                 return True
+        return False
+
+    def _is_registration_url(self, url: str) -> bool:
+        """Return True if the URL path looks like a new-account registration page."""
+        return bool(_REGISTRATION_URL_RE.search(urlparse(url).path))
+
+    def _is_registration_form(self, form: dict) -> bool:
+        """
+        Return True if this form appears to be a signup / account-creation form.
+        Detection signals (any one is sufficient):
+          1. A field name / id matches the confirm-password pattern.
+          2. The form action URL matches the registration URL pattern.
+        """
+        # Signal 1: confirm-password field present
+        for inp in form.get("inputs", []):
+            name = inp.get("name", "") or inp.get("id", "")
+            if name and _REGISTRATION_FIELD_RE.match(name):
+                return True
+        # Signal 2: form action points to a registration endpoint
+        action = form.get("action", "")
+        if action and _REGISTRATION_URL_RE.search(urlparse(action).path):
+            return True
         return False
 
     def _check_page_for_flags(self, text: str, source: str = ""):
