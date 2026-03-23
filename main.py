@@ -173,6 +173,15 @@ Examples:
         help="Password for login form auto-fill",
     )
     scan.add_argument(
+        "--include-registration", action="store_true",
+        help=(
+            "Also test registration / sign-up forms (default: skipped). "
+            "By default the scanner skips forms and pages that look like "
+            "new-account creation (signup, register, 新規登録, etc.) to avoid "
+            "creating garbage accounts and sending unexpected emails."
+        ),
+    )
+    scan.add_argument(
         "--no-planner", action="store_true",
         help=(
             "Disable the AI attack planner. "
@@ -321,6 +330,7 @@ async def run_scan(args):
             auth_pass=getattr(args, "auth_pass", "") or "",
             use_planner=not getattr(args, "no_planner", False),
             interactive_plan=getattr(args, "interactive_plan", False) or args.llm == "none",
+            skip_registration=not getattr(args, "include_registration", False),
         )
         await engine.run()
         return
@@ -376,6 +386,7 @@ async def run_scan(args):
                 auth_pass=getattr(args, "auth_pass", "") or "",
                 use_planner=not getattr(args, "no_planner", False),
                 interactive_plan=getattr(args, "interactive_plan", False) or args.llm == "none",
+            skip_registration=not getattr(args, "include_registration", False),
             )
             await engine.run()
 
