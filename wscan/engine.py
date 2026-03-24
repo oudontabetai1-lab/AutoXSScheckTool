@@ -147,6 +147,11 @@ class ScanEngine:
         login_pass_field: str = "password",
         login_success_indicator: str = "",
         learning_file: Optional[str] = None,
+        # Feature flags (from config/wscan.yaml via main.py)
+        enable_ai_analysis: bool = True,
+        enable_waf_detection: bool = True,
+        enable_payload_learning: bool = True,
+        enable_sitemap_crawl: bool = True,
     ):
         self.target_url = url.rstrip("/")
         self.monitor = monitor
@@ -177,6 +182,11 @@ class ScanEngine:
         self.login_user_field = login_user_field
         self.login_pass_field = login_pass_field
         self.login_success_indicator = login_success_indicator
+        # Feature on/off
+        self.enable_ai_analysis = enable_ai_analysis
+        self.enable_waf_detection = enable_waf_detection
+        self.enable_payload_learning = enable_payload_learning
+        self.enable_sitemap_crawl = enable_sitemap_crawl
         if ctf_mode and "ssti" not in self.checks:
             self.checks.append("ssti")
 
@@ -317,16 +327,19 @@ class ScanEngine:
                 else:
                     console.print("  [yellow][Auth] Login may have failed — continuing anyway.[/yellow]")
 
-            # A-2: Detect WAF before crawling
-            waf_name = await self.waf_detector.detect(self.target_url, timeout=float(self.timeout))
-            if waf_name:
-                console.print(f"  [bold yellow][WAF][/bold yellow] Detected: {waf_name}")
-                bypass_hints = self.waf_detector.get_bypass_hints(waf_name)
-                console.print(f"  [dim yellow]Bypass hints: {'; '.join(bypass_hints[:3])}[/dim yellow]")
-                if self.monitor:
-                    await self.monitor.emit("waf_detected", {"waf": waf_name, "hints": bypass_hints})
+            # A-2: Detect WAF before crawling (if enabled)
+            if self.enable_waf_detection:
+                waf_name = await self.waf_detector.detect(self.target_url, timeout=float(self.timeout))
+                if waf_name:
+                    console.print(f"  [bold yellow][WAF][/bold yellow] Detected: {waf_name}")
+                    bypass_hints = self.waf_detector.get_bypass_hints(waf_name)
+                    console.print(f"  [dim yellow]Bypass hints: {'; '.join(bypass_hints[:3])}[/dim yellow]")
+                    if self.monitor:
+                        await self.monitor.emit("waf_detected", {"waf": waf_name, "hints": bypass_hints})
+                else:
+                    console.print("  [dim]No WAF detected.[/dim]")
             else:
-                console.print("  [dim]No WAF detected.[/dim]")
+                console.print("  [dim]WAF detection disabled.[/dim]")
 
             # ── Phase 1: Crawl ───────────────────────────────────────────
             crawled_pages = await self._phase_crawl()
@@ -433,8 +446,8 @@ class ScanEngine:
         queue: deque = deque([(self.target_url, 0, None)])  # (url, depth, parent_url)
         self.visited_urls.add(self.target_url)
 
-        # C-3: Seed crawl queue from sitemap.xml / robots.txt
-        sitemap_urls = await self._fetch_sitemap_urls()
+        # C-3: Seed crawl queue from sitemap.xml / robots.txt (if enabled)
+        sitemap_urls = await self._fetch_sitemap_urls() if self.enable_sitemap_crawl else []
         if sitemap_urls:
             console.print(
                 f"  [dim cyan][C-3] Sitemap/robots.txt:[/dim cyan] "
@@ -1434,8 +1447,8 @@ class ScanEngine:
         console.print(
             f"    [bold red][FINDING][/bold red] {label}{loc} — {f.evidence[:80]}"
         )
-        # A-3: record successful payload
-        if f.payload:
+        # A-3: record successful payload (if learning enabled)
+        if f.payload and self.enable_payload_learning:
             self.payload_learner.record(f.check_type, f.payload, success=True)
         # Also scan the finding's evidence and response for flags
         if self.flag_finder:
@@ -1455,19 +1468,21 @@ class ScanEngine:
         self._save_evidence()
         self._generate_report()
         self._print_summary()
-        # A-3: Save payload learning data
-        try:
-            self.payload_learner.save()
-        except Exception:
-            pass
+        # A-3: Save payload learning data (if enabled)
+        if self.enable_payload_learning:
+            try:
+                self.payload_learner.save()
+            except Exception:
+                pass
 
     async def _phase_report_async(self):
         """Async wrapper for report phase — runs A-1 AI analysis after report."""
         self._phase_report()
-        # A-1: post-scan AI analysis
-        ai_text = await self._ai_analysis_report()
-        if ai_text and self.monitor:
-            await self.monitor.emit("ai_analysis", {"text": ai_text})
+        # A-1: post-scan AI analysis (if enabled)
+        if self.enable_ai_analysis:
+            ai_text = await self._ai_analysis_report()
+            if ai_text and self.monitor:
+                await self.monitor.emit("ai_analysis", {"text": ai_text})
 
     def _save_evidence(self):
         evidence = {

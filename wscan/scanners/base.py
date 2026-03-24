@@ -129,9 +129,9 @@ class BaseScanner(ABC):
             url=url,
             custom_payloads=self.engine.custom_payloads.get(self.CHECK_TYPE),
         )
-        # A-3: re-order by historical success rate
+        # A-3: re-order by historical success rate (if learning enabled)
         learner = getattr(self.engine, "payload_learner", None)
-        if learner:
+        if learner and getattr(self.engine, "enable_payload_learning", True):
             payloads = learner.sort_payloads(self.CHECK_TYPE, payloads)
         return payloads
 
