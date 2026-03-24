@@ -1,18 +1,27 @@
 """
 Intervention system for real-time scan control.
 
-Allows the inspector to pause, resume, skip a field, skip a page, or abort
-the scan entirely by pressing a single key while scanning is in progress.
+Two operating modes:
+  1. Web mode (preferred): intervention commands arrive from the web dashboard
+     via MonitorServer.command_queue.  The dashboard shows Pause / Skip Field /
+     Skip Page / Abort buttons that send JSON messages over WebSocket.
 
-  p  — pause / resume
-  s  — skip current field
-  n  — skip current page
-  q  — abort scan (saves partial report)
+  2. Keyboard fallback (no monitor / non-TTY ignored silently):
+     p = pause / resume
+     s = skip current field
+     n = skip current page
+     q = abort scan (saves partial report)
+
+Call ``start(loop, monitor)`` once at scan start.
+Call ``await checkpoint()`` frequently inside scan loops.
 """
 import asyncio
 import sys
 import threading
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .monitor import MonitorServer
 
 
 # ---------------------------------------------------------------------------
@@ -39,10 +48,10 @@ class ScanController:
     """
     Thread-safe scan controller.
 
-    Call ``start(loop)`` once to launch the background key-reader thread.
-    Call ``await checkpoint()`` frequently inside scan loops; it will:
-      - block (pause) until resumed when paused,
-      - raise SkipField / SkipPage / AbortScan as appropriate.
+    With a MonitorServer: reads commands from monitor.command_queue (web UI).
+    Without a MonitorServer: reads single keypresses from stdin (keyboard fallback).
+
+    Call ``start(loop, monitor)`` once, then ``await checkpoint()`` in scan loops.
     """
 
     def __init__(self) -> None:
@@ -51,60 +60,75 @@ class ScanController:
         self._skip_page = False
         self._abort = False
         self._loop: Optional[asyncio.AbstractEventLoop] = None
-        self._pause_event = asyncio.Event()
-        self._pause_event.set()  # initially not paused
+        self._pause_event: asyncio.Event = asyncio.Event()
+        self._pause_event.set()          # initially not paused
         self._thread: Optional[threading.Thread] = None
         self._active = False
+        self._monitor: "Optional[MonitorServer]" = None
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
 
-    def start(self, loop: asyncio.AbstractEventLoop) -> None:
-        """Start the background keyboard-reader thread."""
+    def start(
+        self,
+        loop: asyncio.AbstractEventLoop,
+        monitor: "Optional[MonitorServer]" = None,
+    ) -> None:
+        """Start the intervention listener."""
         self._loop = loop
         self._active = True
-        self._thread = threading.Thread(target=self._key_reader, daemon=True)
-        self._thread.start()
-        print(
-            "\n[Intervention] Keys: p=pause/resume  s=skip field  "
-            "n=skip page  q=abort\n",
-            flush=True,
-        )
+        self._monitor = monitor
+
+        if monitor is not None:
+            # Web mode: consume monitor.command_queue in a background coroutine
+            asyncio.run_coroutine_threadsafe(
+                self._monitor_reader(monitor), loop
+            )
+            print(
+                "\n[Intervention] Web controls active — "
+                "use the dashboard to pause / skip / abort.\n",
+                flush=True,
+            )
+        else:
+            # Keyboard fallback
+            self._thread = threading.Thread(target=self._key_reader, daemon=True)
+            self._thread.start()
+            print(
+                "\n[Intervention] Keys: p=pause/resume  s=skip field  "
+                "n=skip page  q=abort\n",
+                flush=True,
+            )
 
     def stop(self) -> None:
-        """Stop the key-reader thread."""
+        """Stop the intervention listener."""
         self._active = False
-        # Unblock any waiting checkpoint so the scan can exit cleanly.
-        if self._loop and self._pause_event:
+        if self._loop and not self._pause_event.is_set():
             self._loop.call_soon_threadsafe(self._pause_event.set)
 
     async def checkpoint(self) -> None:
         """
         Yield control point inside a scan loop.
 
-        - If abort is requested → raise AbortScan
-        - If skip-page is requested → raise SkipPage (clears flag)
-        - If skip-field is requested → raise SkipField (clears flag)
-        - If paused → waits until resumed
+        - abort requested  → raise AbortScan
+        - skip-page        → raise SkipPage  (clears flag)
+        - skip-field       → raise SkipField (clears flag)
+        - paused           → waits until resumed
         """
         if self._abort:
             raise AbortScan("Scan aborted by operator")
-
         if self._skip_page:
             self._skip_page = False
             raise SkipPage("Page skipped by operator")
-
         if self._skip_field:
             self._skip_field = False
             raise SkipField("Field skipped by operator")
 
-        # Block while paused
         if not self._pause_event.is_set():
-            print("[Intervention] Paused — press 'p' to resume …", flush=True)
+            print("[Intervention] Paused — resume via dashboard or press 'p'…", flush=True)
             await self._pause_event.wait()
 
-        # Re-check after waking from pause
+        # Re-check after wake
         if self._abort:
             raise AbortScan("Scan aborted by operator")
         if self._skip_page:
@@ -115,7 +139,62 @@ class ScanController:
             raise SkipField("Field skipped by operator")
 
     # ------------------------------------------------------------------
-    # Internal
+    # Web mode: drain monitor.command_queue
+    # ------------------------------------------------------------------
+
+    async def _monitor_reader(self, monitor: "MonitorServer") -> None:
+        """Background coroutine: read commands from the web dashboard."""
+        while self._active:
+            try:
+                cmd = await asyncio.wait_for(monitor.command_queue.get(), timeout=0.2)
+                await self._handle_command(cmd, monitor)
+            except asyncio.TimeoutError:
+                continue
+            except Exception:
+                break
+
+    async def _handle_command(self, cmd: str, monitor: "Optional[MonitorServer]" = None) -> None:
+        """Handle a single command string (web or keyboard)."""
+        cmd = cmd.lower().strip()
+
+        if cmd in ("pause", "p"):
+            if self._paused:
+                self._paused = False
+                self._pause_event.set()
+                print("[Intervention] Resumed.", flush=True)
+                if monitor:
+                    await monitor.emit_intervention_state(paused=False)
+            else:
+                self._paused = True
+                self._pause_event.clear()
+                print("[Intervention] Paused.", flush=True)
+                if monitor:
+                    await monitor.emit_intervention_state(paused=True)
+
+        elif cmd in ("resume",):
+            self._paused = False
+            self._pause_event.set()
+            print("[Intervention] Resumed.", flush=True)
+            if monitor:
+                await monitor.emit_intervention_state(paused=False)
+
+        elif cmd in ("skip_field", "s"):
+            self._skip_field = True
+            self._pause_event.set()
+            print("[Intervention] Skip-field requested.", flush=True)
+
+        elif cmd in ("skip_page", "n"):
+            self._skip_page = True
+            self._pause_event.set()
+            print("[Intervention] Skip-page requested.", flush=True)
+
+        elif cmd in ("abort", "q"):
+            self._abort = True
+            self._pause_event.set()
+            print("[Intervention] Abort requested — finishing current action…", flush=True)
+
+    # ------------------------------------------------------------------
+    # Keyboard fallback
     # ------------------------------------------------------------------
 
     def _key_reader(self) -> None:
@@ -126,51 +205,19 @@ class ScanController:
             import select as sel
 
             fd = sys.stdin.fileno()
-            old_settings = termios.tcgetattr(fd)
+            old = termios.tcgetattr(fd)
             try:
                 tty.setraw(fd)
                 while self._active:
-                    # Non-blocking poll with 0.1 s timeout
                     r, _, _ = sel.select([sys.stdin], [], [], 0.1)
                     if not r:
                         continue
                     ch = sys.stdin.read(1)
                     if self._loop:
                         asyncio.run_coroutine_threadsafe(
-                            self._handle_key(ch), self._loop
+                            self._handle_command(ch), self._loop
                         )
             finally:
-                termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+                termios.tcsetattr(fd, termios.TCSADRAIN, old)
         except Exception:
-            # Non-TTY environment (CI, pipes, etc.) — silently disable
             self._active = False
-
-    async def _handle_key(self, ch: str) -> None:
-        """Handle a single keypress (runs on the main asyncio loop)."""
-        ch = ch.lower()
-
-        if ch == "p":
-            if self._paused:
-                self._paused = False
-                self._pause_event.set()
-                print("[Intervention] Resumed.", flush=True)
-            else:
-                self._paused = True
-                self._pause_event.clear()
-                print("[Intervention] Paused.", flush=True)
-
-        elif ch == "s":
-            self._skip_field = True
-            # Unblock pause so the exception can be raised
-            self._pause_event.set()
-            print("[Intervention] Skip-field requested.", flush=True)
-
-        elif ch == "n":
-            self._skip_page = True
-            self._pause_event.set()
-            print("[Intervention] Skip-page requested.", flush=True)
-
-        elif ch == "q":
-            self._abort = True
-            self._pause_event.set()
-            print("[Intervention] Abort requested — finishing current action …", flush=True)

@@ -266,7 +266,7 @@ class ScanEngine:
             await self.monitor.emit_status(f"Starting scan of {self.target_url}", "running")
 
         loop = asyncio.get_event_loop()
-        self.controller.start(loop)
+        self.controller.start(loop, monitor=self.monitor)
 
         try:
             await self.browser.init()
@@ -469,20 +469,38 @@ class ScanEngine:
             if self.monitor:
                 await self.monitor.emit_status(f"Plan: {plan.page_purpose[:60]}")
 
-        # ── Interactive manual editor (always shown after AI planning) ──
-        if plans:
-            self._interactive_plan_editor(plans)
-
-        # Print all plans summary and ask user to confirm
+        # Print all plans summary (terminal log)
         if plans:
             self._print_all_plans(plans)
 
-        console.print()
-        console.print("[bold]  Plans are ready.[/bold] Review above, then press [green]Enter[/green] to start the attack, or [red]Ctrl+C[/red] to abort.")
-        try:
-            await asyncio.get_event_loop().run_in_executor(None, input, "  → ")
-        except (KeyboardInterrupt, EOFError):
-            raise SystemExit("\nAborted by user.")
+        # ── Confirm / edit plans ─────────────────────────────────────
+        # When the web dashboard is active, send plans there and wait for
+        # the operator to click "Start Attack" (edits are applied below).
+        # Without a dashboard, fall back to the terminal interactive editor.
+        if self.monitor and plans:
+            console.print(
+                "\n  [bold cyan][Web Dashboard][/bold cyan] "
+                "プラン確認モーダルが開きます。ダッシュボードで確認・修正後に攻撃を開始してください。"
+            )
+            plans_data = self._serialize_plans(plans)
+            await self.monitor.emit_plan_review(plans_data)
+            edits = await self.monitor.wait_for_plan_confirm()
+            if edits:
+                self._apply_plan_edits(plans, edits)
+                console.print("  [dim]プラン編集が適用されました。[/dim]")
+        else:
+            # Terminal fallback: show interactive editor then wait for Enter
+            if plans:
+                self._interactive_plan_editor(plans)
+            console.print()
+            console.print(
+                "[bold]  Plans are ready.[/bold] "
+                "Press [green]Enter[/green] to start the attack, or [red]Ctrl+C[/red] to abort."
+            )
+            try:
+                await asyncio.get_event_loop().run_in_executor(None, input, "  → ")
+            except (KeyboardInterrupt, EOFError):
+                raise SystemExit("\nAborted by user.")
 
         return plans
 
@@ -515,7 +533,59 @@ class ScanEngine:
         console.print(t)
 
     # =========================================================================
-    # Interactive Plan Editor
+    # Plan serialisation / deserialisation (web dashboard ↔ engine)
+    # =========================================================================
+
+    def _serialize_plans(self, plans: dict) -> list:
+        """Convert plans dict → JSON-serialisable list for the web dashboard."""
+        result = []
+        for url, plan in plans.items():
+            fields = []
+            for fp in plan.fields:
+                fields.append({
+                    "name": fp.name,
+                    "risk_score": fp.risk_score,
+                    "priority_checks": fp.priority_checks,
+                    "rationale": fp.rationale or "",
+                    "is_url_param": fp.is_url_param,
+                    "form_index": fp.form_index,
+                    "custom_payloads": fp.custom_payloads or {},
+                    "skip": False,
+                })
+            result.append({
+                "url": url,
+                "page_purpose": plan.page_purpose,
+                "planned_by": plan.planned_by,
+                "fields": fields,
+            })
+        return result
+
+    def _apply_plan_edits(self, plans: dict, edits: dict) -> None:
+        """
+        Apply edits from the web dashboard back into the plan objects.
+
+        edits format:
+          {url: {field_name: {risk_score, priority_checks, custom_payloads, skip}}}
+        """
+        for url, field_edits in edits.items():
+            plan = plans.get(url)
+            if not plan:
+                continue
+            for fp in plan.fields:
+                fe = field_edits.get(fp.name)
+                if not fe:
+                    continue
+                if "risk_score" in fe:
+                    fp.risk_score = int(fe["risk_score"])
+                if "priority_checks" in fe:
+                    fp.priority_checks = list(fe["priority_checks"])
+                if "custom_payloads" in fe:
+                    fp.custom_payloads = dict(fe["custom_payloads"])
+                if fe.get("skip"):
+                    fp.risk_score = 0   # score=0 causes field to be skipped
+
+    # =========================================================================
+    # Interactive Plan Editor (terminal fallback)
     # =========================================================================
 
     def _interactive_plan_editor(self, plans: dict) -> None:
