@@ -88,6 +88,7 @@ def _load_config(path: Path = _CONFIG_PATH) -> dict:
     cfg["cvss_scores"]             = bool(f.get("cvss_scores",      True))
     cfg["skip_registration"]       = bool(f.get("skip_registration", True))
     cfg["open_report"]             = bool(f.get("open_report",      True))
+    cfg["auto_config"]             = bool(f.get("auto_config",      False))
 
     cfg["learning_file"]           = str(le.get("file", "") or "")
 
@@ -331,6 +332,20 @@ Examples:
         default=not _CFG.get("sitemap_crawl", True),
         help="Disable sitemap.xml / robots.txt crawl seeding.",
     )
+    # Auto-config wizard
+    _ac_default = _CFG.get("auto_config", False)
+    _ac_group = scan.add_mutually_exclusive_group()
+    _ac_group.add_argument(
+        "--auto-config", action="store_true", default=_ac_default,
+        help=(
+            "Run the LLM-powered scan configuration wizard before scanning. "
+            "Interviews you about the target and auto-generates optimal settings."
+        ),
+    )
+    _ac_group.add_argument(
+        "--no-auto-config", action="store_true", default=not _ac_default,
+        help="Disable the auto-config wizard (default).",
+    )
 
     # A-4: Natural language setup subcommand
     setup = sub.add_parser("setup", help="Interactively configure scan options via natural language")
@@ -398,6 +413,26 @@ async def run_scan(args):
         border_style="cyan",
     ))
 
+    # ── Auto-config wizard (opt-in) ────────────────────────────────
+    _run_auto_config = getattr(args, "auto_config", False) and not getattr(args, "no_auto_config", False)
+    if _run_auto_config:
+        from wscan.payload_gen import PayloadGenerator
+        from wscan.auto_config import run_wizard, apply_to_args
+        _pg = PayloadGenerator(
+            provider=args.llm,
+            ollama_model=getattr(args, "ollama_model", "llama3"),
+            ollama_url=getattr(args, "ollama_url", "http://localhost:11434"),
+            openai_model=getattr(args, "openai_model", "gpt-4o-mini"),
+            gemini_model=getattr(args, "gemini_model", "gemini-2.0-flash"),
+        )
+        _wizard_result = await run_wizard(_pg)
+        if _wizard_result is not None:
+            apply_to_args(_wizard_result, args)
+            # Rebuild checks display after wizard
+            checks_display = ', '.join(args.checks) if args.checks else "all IPA checks"
+            console.print(f"[cyan]Auto-config applied:[/cyan] checks=[green]{checks_display}[/green]  "
+                          f"depth=[blue]{args.depth}[/blue]")
+
     # Build exclude list from --exclude and --exclude-file
     exclude_fields = list(args.exclude)
     if args.exclude_file:
@@ -442,7 +477,7 @@ async def run_scan(args):
         except Exception as ex:
             console.print(f"[yellow]Warning: Could not read exclude-urls file: {ex}[/yellow]")
 
-    # Build checks list (add dom_xss if requested)
+    # Build checks list (add dom_xss if requested, allow wizard to have updated args.checks)
     checks_list = list(args.checks)
     if getattr(args, "dom_xss", False) and "dom_xss" not in checks_list:
         checks_list.append("dom_xss")
