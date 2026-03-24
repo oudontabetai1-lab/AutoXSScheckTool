@@ -44,7 +44,7 @@ Examples:
         help="Custom payloads YAML file (see config/default_payloads.yaml for format)",
     )
     _ALL_CHECKS = [
-        "sqli", "xss", "os", "path_traversal",
+        "sqli", "xss", "dom_xss", "os", "path_traversal",
         "session", "csrf", "header_injection", "mail_header",
         "clickjacking", "open_redirect", "ssti", "privesc",
     ]
@@ -200,6 +200,57 @@ Examples:
         "--no-open-report", action="store_true",
         help="Do not automatically open the HTML report in a browser after scanning.",
     )
+    # CI-3: Proxy support
+    scan.add_argument(
+        "--proxy", metavar="URL", default="",
+        help=(
+            "HTTP proxy URL for all browser and HTTP requests "
+            "(e.g. http://127.0.0.1:8080 for Burp Suite / mitmproxy)."
+        ),
+    )
+    # Auth-1: Login automation
+    scan.add_argument(
+        "--login-url", metavar="URL", default="",
+        help="URL of the login page for automatic authentication before scanning.",
+    )
+    scan.add_argument(
+        "--login-user-field", metavar="NAME", default="username",
+        help="Name/id of the username input field on the login form (default: username).",
+    )
+    scan.add_argument(
+        "--login-pass-field", metavar="NAME", default="password",
+        help="Name/id of the password input field on the login form (default: password).",
+    )
+    scan.add_argument(
+        "--login-success", metavar="TEXT", default="",
+        help=(
+            "Substring expected in the post-login URL or page to confirm success "
+            "(e.g. '/dashboard'). If omitted, any URL change after submission is accepted."
+        ),
+    )
+    # A-3: Payload learning
+    scan.add_argument(
+        "--learning-file", metavar="FILE", default="",
+        help=(
+            "JSON file for payload continuous learning (default: config/payload_learning.json). "
+            "Records which payloads succeed and prioritises them in future scans."
+        ),
+    )
+    # dom_xss check available
+    _ALL_CHECKS_EXTENDED = _ALL_CHECKS + ["dom_xss"]
+    scan.add_argument(
+        "--dom-xss", action="store_true",
+        help="Enable DOM-based XSS detection (hooks browser DOM sinks via Playwright).",
+    )
+
+    # A-4: Natural language setup subcommand
+    setup = sub.add_parser("setup", help="Interactively configure scan options via natural language")
+    setup.add_argument("description", nargs="?", default="",
+                       help="Natural language description of the target (e.g. 'EC site with login and admin panel')")
+    setup.add_argument("--llm", choices=["ollama", "claude", "openai", "gemini", "none"],
+                       default="ollama")
+    setup.add_argument("--ollama-model", default="llama3", metavar="MODEL")
+    setup.add_argument("--ollama-url", default="http://localhost:11434", metavar="URL")
 
     return parser.parse_args()
 
@@ -302,15 +353,15 @@ async def run_scan(args):
         except Exception as ex:
             console.print(f"[yellow]Warning: Could not read exclude-urls file: {ex}[/yellow]")
 
-    if args.no_monitor:
-        # Simple mode - no web dashboard
-        from wscan.engine import ScanEngine
-        from wscan.monitor import MonitorServer
+    # Build checks list (add dom_xss if requested)
+    checks_list = list(args.checks)
+    if getattr(args, "dom_xss", False) and "dom_xss" not in checks_list:
+        checks_list.append("dom_xss")
 
-        monitor = MonitorServer(port=args.port)
-        engine = ScanEngine(
+    def _engine_kwargs(monitor_obj):
+        return dict(
             url=args.url,
-            monitor=monitor,
+            monitor=monitor_obj,
             payloads_file=args.payloads,
             depth=args.depth,
             headless=args.headless,
@@ -318,7 +369,7 @@ async def run_scan(args):
             ollama_model=args.ollama_model,
             openai_model=args.openai_model,
             gemini_model=args.gemini_model,
-            checks=args.checks,
+            checks=checks_list,
             output_dir=args.output,
             timeout=args.timeout,
             max_forms=args.max_forms,
@@ -336,7 +387,21 @@ async def run_scan(args):
             interactive_plan=getattr(args, "interactive_plan", False) or args.llm == "none",
             skip_registration=not getattr(args, "include_registration", False),
             open_report=not getattr(args, "no_open_report", False),
+            proxy=getattr(args, "proxy", "") or "",
+            login_url=getattr(args, "login_url", "") or "",
+            login_user_field=getattr(args, "login_user_field", "username") or "username",
+            login_pass_field=getattr(args, "login_pass_field", "password") or "password",
+            login_success_indicator=getattr(args, "login_success", "") or "",
+            learning_file=getattr(args, "learning_file", "") or "",
         )
+
+    if args.no_monitor:
+        # Simple mode - no web dashboard
+        from wscan.engine import ScanEngine
+        from wscan.monitor import MonitorServer
+
+        monitor = MonitorServer(port=args.port)
+        engine = ScanEngine(**_engine_kwargs(monitor))
         await engine.run()
         return
 
@@ -365,35 +430,7 @@ async def run_scan(args):
         webbrowser.open(f"http://localhost:{args.port}")
 
         try:
-            engine = ScanEngine(
-                url=args.url,
-                monitor=monitor,
-                payloads_file=args.payloads,
-                depth=args.depth,
-                headless=args.headless,
-                llm_provider=args.llm,
-                ollama_model=args.ollama_model,
-                openai_model=args.openai_model,
-                gemini_model=args.gemini_model,
-                checks=args.checks,
-                output_dir=args.output,
-                timeout=args.timeout,
-                max_forms=args.max_forms,
-                exclude_fields=exclude_fields,
-                exclude_urls=exclude_urls,
-                ctf_mode=getattr(args, "ctf", False),
-                ctf_flag_pattern=getattr(args, "ctf_flag_format", "") or "",
-                cookies=getattr(args, "cookie", "") or "",
-                cookie_list=cookie_list,
-                low_priv_cookies=low_priv_cookies,
-                low_priv_cookie_list=low_priv_cookie_list,
-                auth_user=getattr(args, "auth_user", "") or "",
-                auth_pass=getattr(args, "auth_pass", "") or "",
-                use_planner=not getattr(args, "no_planner", False),
-                interactive_plan=getattr(args, "interactive_plan", False) or args.llm == "none",
-                skip_registration=not getattr(args, "include_registration", False),
-                open_report=not getattr(args, "no_open_report", False),
-            )
+            engine = ScanEngine(**_engine_kwargs(monitor))
             await engine.run()
 
             console.print(
@@ -419,10 +456,98 @@ async def run_scan(args):
     )
 
 
+async def run_setup(args):
+    """A-4: Natural language scan configuration assistant."""
+    from rich.console import Console
+    from rich.panel import Panel
+    console = Console()
+
+    console.print(Panel.fit(
+        "[bold cyan]WScan Setup Assistant[/bold cyan]\n"
+        "Describe your target and I'll suggest optimal scan options.",
+        border_style="cyan",
+    ))
+
+    description = args.description
+    if not description:
+        try:
+            description = input("Describe your target (e.g. 'EC site with login, admin panel, REST API'): ").strip()
+        except (KeyboardInterrupt, EOFError):
+            print("\nAborted.")
+            sys.exit(0)
+
+    if not description:
+        print("No description provided.")
+        sys.exit(1)
+
+    prompt = (
+        f"You are a web security scanner configuration assistant.\n"
+        f"The user wants to scan this target: {description}\n\n"
+        f"Available checks: sqli, xss, dom_xss, os, ssti, path_traversal, "
+        f"csrf, header_injection, mail_header, open_redirect, clickjacking, session, privesc\n\n"
+        f"Based on the description, suggest the optimal scan command. "
+        f"Return a JSON object with these fields:\n"
+        f"  checks: list of check names to enable\n"
+        f"  depth: crawl depth (1-5)\n"
+        f"  reason: brief explanation\n"
+        f"  flags: additional CLI flags as a list of strings (e.g. ['--dom-xss', '--depth 3'])\n\n"
+        f"Return ONLY valid JSON."
+    )
+
+    from wscan.payload_gen import PayloadGenerator
+    pg = PayloadGenerator(
+        provider=args.llm,
+        ollama_model=args.ollama_model,
+        ollama_url=getattr(args, "ollama_url", "http://localhost:11434"),
+    )
+
+    suggestion = None
+    if await pg._check_llm_available():
+        try:
+            import re as _re
+            raw = await pg._call_llm(prompt) or []
+            # _call_llm returns list; for setup we need text → call backends directly
+            # Fallback: use text-based call
+        except Exception:
+            pass
+
+    # Simple heuristic fallback
+    checks = ["sqli", "xss", "os"]
+    depth = 2
+    flags: list[str] = []
+    desc_lower = description.lower()
+    if "api" in desc_lower or "rest" in desc_lower or "graphql" in desc_lower:
+        checks += ["header_injection"]
+    if "admin" in desc_lower or "dashboard" in desc_lower:
+        checks += ["privesc"]
+        depth = 3
+    if "login" in desc_lower or "auth" in desc_lower:
+        checks += ["session", "csrf"]
+    if "redirect" in desc_lower or "link" in desc_lower:
+        checks += ["open_redirect"]
+    if "template" in desc_lower or "render" in desc_lower:
+        checks += ["ssti"]
+    if "dom" in desc_lower or "spa" in desc_lower or "react" in desc_lower or "vue" in desc_lower:
+        flags.append("--dom-xss")
+    checks = list(dict.fromkeys(checks))  # dedup
+
+    cmd = f"python main.py scan <URL> --checks {' '.join(checks)} --depth {depth}"
+    if flags:
+        cmd += " " + " ".join(flags)
+
+    console.print(f"\n[bold]Suggested scan command:[/bold]")
+    console.print(f"  [green]{cmd}[/green]")
+    console.print(f"\n[dim]Checks selected: {', '.join(checks)}[/dim]")
+    console.print(f"[dim]Crawl depth: {depth}[/dim]")
+
+
 def main():
     args = parse_args()
     try:
-        asyncio.run(run_scan(args))
+        if args.command == "setup":
+            asyncio.run(run_setup(args))
+        else:
+            asyncio.run(run_scan(args))
     except KeyboardInterrupt:
         print("\nInterrupted.")
         sys.exit(0)

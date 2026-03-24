@@ -24,11 +24,12 @@ import asyncio
 import datetime
 import json
 import re
+import xml.etree.ElementTree as _ET
 from collections import deque
 from dataclasses import dataclass, field as dc_field
 from pathlib import Path
 from typing import Optional
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urljoin
 
 import yaml
 from rich.console import Console
@@ -57,6 +58,9 @@ from .scanners.open_redirect import OpenRedirectScanner
 from .scanners.clickjacking import ClickjackingScanner
 from .scanners.session import SessionScanner
 from .scanners.privesc import PrivEscScanner
+from .scanners.dom_xss import DOMXSSScanner
+from .waf_detector import WAFDetector
+from .payload_learning import PayloadLearner
 
 console = Console()
 
@@ -137,6 +141,12 @@ class ScanEngine:
         interactive_plan: bool = False,
         skip_registration: bool = True,
         open_report: bool = True,
+        proxy: str = "",
+        login_url: str = "",
+        login_user_field: str = "username",
+        login_pass_field: str = "password",
+        login_success_indicator: str = "",
+        learning_file: Optional[str] = None,
     ):
         self.target_url = url.rstrip("/")
         self.monitor = monitor
@@ -162,6 +172,11 @@ class ScanEngine:
         self.interactive_plan = interactive_plan
         self.skip_registration = skip_registration
         self.open_report = open_report
+        self.proxy = proxy
+        self.login_url = login_url
+        self.login_user_field = login_user_field
+        self.login_pass_field = login_pass_field
+        self.login_success_indicator = login_success_indicator
         if ctf_mode and "ssti" not in self.checks:
             self.checks.append("ssti")
 
@@ -192,6 +207,7 @@ class ScanEngine:
         self.browser = BrowserManager(
             headless=headless, timeout=timeout, monitor=monitor,
             auth_user=auth_user, auth_pass=auth_pass,
+            proxy=proxy,
         )
         self.payload_gen = PayloadGenerator(
             provider=llm_provider,
@@ -205,6 +221,7 @@ class ScanEngine:
         scanner_map = {
             "sqli":             SQLiScanner,
             "xss":              XSSScanner,
+            "dom_xss":          DOMXSSScanner,
             "os":               OSInjectionScanner,
             "ssti":             SSTIScanner,
             "path_traversal":   PathTraversalScanner,
@@ -230,6 +247,11 @@ class ScanEngine:
 
         self.exclude_fields: set = {f.lower() for f in (exclude_fields or [])}
         self.exclude_urls: set = set(exclude_urls or [])
+
+        # A-2: WAF detection
+        self.waf_detector = WAFDetector(payload_gen=self.payload_gen)
+        # A-3: Payload continuous learning
+        self.payload_learner = PayloadLearner(learning_file=learning_file)
 
         # Adaptive AI payload refinement — runs a second pass per field
         # using LLM analysis of the page's filtering behavior
@@ -268,12 +290,43 @@ class ScanEngine:
         loop = asyncio.get_event_loop()
         self.controller.start(loop, monitor=self.monitor)
 
+        # U-3: Start manual payload listener if monitor active
+        if self.monitor:
+            asyncio.run_coroutine_threadsafe(self._manual_payload_listener(), loop)
+
         try:
             await self.browser.init()
             if self.cookies:
                 await self.browser.set_cookies(self.cookies, self.target_url)
             if self.cookie_list:
                 await self.browser.set_cookies_from_list(self.cookie_list, self.target_url)
+
+            # Auth-1: Auto-login if login URL provided
+            if self.login_url and self.browser.auth_user and self.browser.auth_pass:
+                console.print(
+                    f"  [cyan][Auth] Auto-login:[/cyan] {self.login_url}"
+                )
+                success = await self.browser.auto_login(
+                    self.login_url,
+                    user_field=self.login_user_field,
+                    pass_field=self.login_pass_field,
+                    success_indicator=self.login_success_indicator,
+                )
+                if success:
+                    console.print("  [green][Auth] Login successful — session cookies captured.[/green]")
+                else:
+                    console.print("  [yellow][Auth] Login may have failed — continuing anyway.[/yellow]")
+
+            # A-2: Detect WAF before crawling
+            waf_name = await self.waf_detector.detect(self.target_url, timeout=float(self.timeout))
+            if waf_name:
+                console.print(f"  [bold yellow][WAF][/bold yellow] Detected: {waf_name}")
+                bypass_hints = self.waf_detector.get_bypass_hints(waf_name)
+                console.print(f"  [dim yellow]Bypass hints: {'; '.join(bypass_hints[:3])}[/dim yellow]")
+                if self.monitor:
+                    await self.monitor.emit("waf_detected", {"waf": waf_name, "hints": bypass_hints})
+            else:
+                console.print("  [dim]No WAF detected.[/dim]")
 
             # ── Phase 1: Crawl ───────────────────────────────────────────
             crawled_pages = await self._phase_crawl()
@@ -295,7 +348,7 @@ class ScanEngine:
             await self.browser.close()
 
             # ── Phase 4: Report ──────────────────────────────────────────
-            self._phase_report()
+            await self._phase_report_async()
 
             if self.monitor:
                 await self.monitor.emit("scan_complete", {
@@ -307,6 +360,70 @@ class ScanEngine:
     # Phase 1: Crawl
     # =========================================================================
 
+    async def _fetch_sitemap_urls(self) -> list[str]:
+        """C-3: Fetch and parse sitemap.xml and robots.txt for additional seed URLs."""
+        import httpx
+        discovered: list[str] = []
+        base = self.target_url.rstrip("/")
+
+        async with httpx.AsyncClient(timeout=10.0, verify=False, follow_redirects=True) as client:
+            # robots.txt
+            try:
+                r = await client.get(f"{base}/robots.txt")
+                if r.status_code == 200:
+                    for line in r.text.splitlines():
+                        line = line.strip()
+                        if line.lower().startswith("sitemap:"):
+                            sitemap_url = line.split(":", 1)[1].strip()
+                            discovered += await self._parse_sitemap(client, sitemap_url)
+                        elif line.lower().startswith("disallow:"):
+                            path = line.split(":", 1)[1].strip()
+                            if path and path != "/":
+                                full = urljoin(base + "/", path.lstrip("/"))
+                                discovered.append(full)
+            except Exception:
+                pass
+
+            # sitemap.xml (try directly if not found via robots)
+            try:
+                r = await client.get(f"{base}/sitemap.xml")
+                if r.status_code == 200:
+                    discovered += self._extract_sitemap_locs(r.text)
+            except Exception:
+                pass
+
+        # Filter to same domain
+        base_parsed = urlparse(base)
+        return [
+            u for u in discovered
+            if urlparse(u).netloc == base_parsed.netloc and u not in self.visited_urls
+        ]
+
+    async def _parse_sitemap(self, client, sitemap_url: str) -> list[str]:
+        """Fetch and parse a sitemap URL (supports sitemap index)."""
+        try:
+            r = await client.get(sitemap_url, timeout=10.0)
+            if r.status_code == 200:
+                return self._extract_sitemap_locs(r.text)
+        except Exception:
+            pass
+        return []
+
+    def _extract_sitemap_locs(self, xml_text: str) -> list[str]:
+        """Extract <loc> URLs from a sitemap XML string."""
+        urls: list[str] = []
+        try:
+            root = _ET.fromstring(xml_text)
+            ns = {"sm": "http://www.sitemaps.org/schemas/sitemap/0.9"}
+            for loc in root.iter():
+                if loc.tag.endswith("}loc") or loc.tag == "loc":
+                    text = (loc.text or "").strip()
+                    if text.startswith("http"):
+                        urls.append(text)
+        except Exception:
+            pass
+        return urls
+
     async def _phase_crawl(self) -> list:
         """BFS crawl — navigate every reachable page, collect forms/HTML. No payloads."""
         console.print(Rule("[bold blue] Phase 1 / 4  ·  Crawl [/bold blue]", style="blue"))
@@ -315,6 +432,18 @@ class ScanEngine:
         pages: list = []
         queue: deque = deque([(self.target_url, 0, None)])  # (url, depth, parent_url)
         self.visited_urls.add(self.target_url)
+
+        # C-3: Seed crawl queue from sitemap.xml / robots.txt
+        sitemap_urls = await self._fetch_sitemap_urls()
+        if sitemap_urls:
+            console.print(
+                f"  [dim cyan][C-3] Sitemap/robots.txt:[/dim cyan] "
+                f"{len(sitemap_urls)} additional URL(s) discovered"
+            )
+            for su in sitemap_urls[:30]:  # cap at 30 seed URLs
+                if su not in self.visited_urls:
+                    self.visited_urls.add(su)
+                    queue.append((su, 1, self.target_url))
 
         while queue:
             url, depth, parent_url = queue.popleft()
@@ -1305,6 +1434,9 @@ class ScanEngine:
         console.print(
             f"    [bold red][FINDING][/bold red] {label}{loc} — {f.evidence[:80]}"
         )
+        # A-3: record successful payload
+        if f.payload:
+            self.payload_learner.record(f.check_type, f.payload, success=True)
         # Also scan the finding's evidence and response for flags
         if self.flag_finder:
             self._check_page_for_flags(f.evidence, f.url)
@@ -1323,6 +1455,19 @@ class ScanEngine:
         self._save_evidence()
         self._generate_report()
         self._print_summary()
+        # A-3: Save payload learning data
+        try:
+            self.payload_learner.save()
+        except Exception:
+            pass
+
+    async def _phase_report_async(self):
+        """Async wrapper for report phase — runs A-1 AI analysis after report."""
+        self._phase_report()
+        # A-1: post-scan AI analysis
+        ai_text = await self._ai_analysis_report()
+        if ai_text and self.monitor:
+            await self.monitor.emit("ai_analysis", {"text": ai_text})
 
     def _save_evidence(self):
         evidence = {
@@ -1373,6 +1518,153 @@ class ScanEngine:
                 webbrowser.open(report_path.as_uri())
             except Exception:
                 pass
+
+    async def _manual_payload_listener(self) -> None:
+        """U-3: Background coroutine — executes manual payloads requested from dashboard."""
+        if not self.monitor:
+            return
+        while self.controller._active:
+            try:
+                msg = await asyncio.wait_for(
+                    self.monitor.manual_payload_queue.get(), timeout=0.3
+                )
+            except asyncio.TimeoutError:
+                continue
+            except Exception:
+                break
+            url        = msg.get("url", "")
+            field_name = msg.get("field", "")
+            payload    = msg.get("payload", "")
+            check_type = msg.get("check_type", "xss")
+            if not url or not field_name or not payload:
+                continue
+            console.print(
+                f"  [bold cyan][U-3 Manual][/bold cyan] "
+                f"{check_type.upper()} payload on {field_name} @ {url}"
+            )
+            try:
+                scanner = self.scanners.get(check_type)
+                if scanner:
+                    field = {"name": field_name, "type": "text"}
+                    prev = self.custom_payloads.get(check_type)
+                    self.custom_payloads[check_type] = [payload]
+                    findings = await scanner.scan_field(url, 0, field, is_url_param=False)
+                    if prev is None:
+                        self.custom_payloads.pop(check_type, None)
+                    else:
+                        self.custom_payloads[check_type] = prev
+                    for f in (findings or []):
+                        f.evidence = f"[ManualExec] {f.evidence}"
+                        self._record_finding(f, source=f"manual:{field_name}")
+                else:
+                    # Generic: just navigate and check for payload in response
+                    await self.browser.navigate(url)
+                    source, pair = await self.browser.fill_and_submit_form(0, field_name, payload)
+                    if payload in (source or ""):
+                        console.print(
+                            f"  [dim yellow][U-3 Manual] Payload reflected in response[/dim yellow]"
+                        )
+                    if self.monitor:
+                        await self.monitor.emit("manual_result", {
+                            "reflected": payload in (source or ""),
+                            "field": field_name,
+                            "payload": payload,
+                        })
+            except Exception as e:
+                console.print(f"  [yellow][U-3 Manual] Error: {e}[/yellow]")
+
+    async def _ai_analysis_report(self) -> str:
+        """
+        A-1: Generate a comprehensive AI analysis of all findings.
+        Returns the analysis text (also saved to output_dir/ai_analysis.md).
+        """
+        if not self.all_findings:
+            return ""
+        if not await self.payload_gen._check_llm_available():
+            return ""
+
+        findings_summary = "\n".join(
+            f"- [{f.severity.upper()}] {f.check_type} on {f.url} "
+            f"(field: {f.field_name}): {f.evidence[:120]}"
+            for f in self.all_findings[:50]
+        )
+        prompt = (
+            f"You are a security analyst reviewing findings from an automated web security scan.\n"
+            f"Target: {self.target_url}\n\n"
+            f"Findings ({len(self.all_findings)} total):\n{findings_summary}\n\n"
+            f"Please provide:\n"
+            f"1. Overall attack scenario narrative (how these vulnerabilities could be chained)\n"
+            f"2. Top 3 priority fixes with specific remediation steps\n"
+            f"3. Recommended WAF rules or HTTP security headers\n"
+            f"4. Risk rating for the application overall (Critical/High/Medium/Low)\n\n"
+            f"Keep the response concise and actionable."
+        )
+        try:
+            resp_text = await self._call_llm_text(prompt)
+            if resp_text:
+                analysis_path = self.output_dir / "ai_analysis.md"
+                analysis_path.write_text(resp_text, encoding="utf-8")
+                console.print(f"  [dim cyan][A-1][/dim cyan] AI analysis saved → {analysis_path}")
+                return resp_text
+        except Exception as e:
+            console.print(f"  [yellow][A-1] AI analysis failed: {e}[/yellow]")
+        return ""
+
+    async def _call_llm_text(self, prompt: str) -> str:
+        """Call the configured LLM and return raw text response."""
+        provider = self.payload_gen.provider
+        if provider == "claude":
+            client = self.payload_gen._get_anthropic_client()
+            if client:
+                import asyncio as _aio
+                loop = _aio.get_event_loop()
+                response = await loop.run_in_executor(
+                    None,
+                    lambda: client.messages.create(
+                        model="claude-haiku-4-5-20251001",
+                        max_tokens=1500,
+                        messages=[{"role": "user", "content": prompt}],
+                    ),
+                )
+                return response.content[0].text
+        elif provider == "openai":
+            import httpx, os
+            api_key = os.environ.get("OPENAI_API_KEY", "")
+            if api_key:
+                async with httpx.AsyncClient(timeout=60.0) as client:
+                    resp = await client.post(
+                        "https://api.openai.com/v1/chat/completions",
+                        headers={"Authorization": f"Bearer {api_key}"},
+                        json={"model": self.payload_gen.openai_model,
+                              "messages": [{"role": "user", "content": prompt}],
+                              "max_tokens": 1500},
+                    )
+                    if resp.status_code == 200:
+                        return resp.json()["choices"][0]["message"]["content"]
+        elif provider == "gemini":
+            import httpx, os
+            api_key = os.environ.get("GEMINI_API_KEY", "")
+            if api_key:
+                url = (
+                    f"https://generativelanguage.googleapis.com/v1beta/models/"
+                    f"{self.payload_gen.gemini_model}:generateContent?key={api_key}"
+                )
+                async with httpx.AsyncClient(timeout=60.0) as client:
+                    resp = await client.post(url, json={"contents": [{"parts": [{"text": prompt}]}]})
+                    if resp.status_code == 200:
+                        return resp.json()["candidates"][0]["content"]["parts"][0]["text"]
+        else:
+            # Ollama
+            import httpx
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                resp = await client.post(
+                    f"{self.payload_gen.ollama_url}/api/generate",
+                    json={"model": self.payload_gen.ollama_model, "prompt": prompt,
+                          "stream": False, "options": {"num_predict": 1500}},
+                )
+                if resp.status_code == 200:
+                    return resp.json().get("response", "")
+        return ""
 
     def _print_summary(self):
         console.print()

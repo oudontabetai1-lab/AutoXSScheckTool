@@ -99,13 +99,27 @@ class ReportGenerator:
             if "[AdaptiveAI]" in f.evidence:
                 extra_badges += '<span class="badge-ai">🧠 AdaptiveAI</span>'
 
+            cvss_score = getattr(f, "cvss_score", 0.0)
+            cvss_vector = getattr(f, "cvss_vector", "")
+            cvss_html = ""
+            if cvss_score > 0:
+                sc = cvss_score
+                sc_color = "#e53e3e" if sc >= 9 else ("#dd6b20" if sc >= 7 else ("#d69e2e" if sc >= 4 else "#38a169"))
+                cvss_html = (
+                    f'<span class="cvss-badge" style="background:{sc_color}" '
+                    f'title="{self._escape(cvss_vector)}">CVSS {sc:.1f}</span>'
+                )
+
             findings_html += f"""
-            <div class="finding-card" id="finding-{i}">
+            <div class="finding-card" id="finding-{i}"
+                 data-severity="{f.severity}" data-check="{f.check_type}"
+                 data-url="{self._escape(f.url)}" data-field="{self._escape(f.field_name)}">
                 <div class="finding-header" style="border-left: 4px solid {color}">
                     <div class="finding-title">
                         <span class="badge" style="background:{color}">{f.severity.upper()}</span>
                         <span class="check-type">{f.check_type.upper()}</span>
                         <span class="field-name">Field: {self._escape(f.field_name)}</span>
+                        {cvss_html}
                         {extra_badges}
                     </div>
                     <div class="finding-url">{self._escape(f.url)}</div>
@@ -181,6 +195,11 @@ body {{ font-family: 'Segoe UI', system-ui, -apple-system, sans-serif; backgroun
 .badge-chain {{ background:#744210; color:#fefcbf; padding:2px 8px; border-radius:10px; font-size:0.72rem; font-weight:700; }}
 .badge-multi {{ background:#1a365d; color:#bee3f8; padding:2px 8px; border-radius:10px; font-size:0.72rem; font-weight:700; }}
 .badge-ai {{ background:#44337a; color:#e9d8fd; padding:2px 8px; border-radius:10px; font-size:0.72rem; font-weight:700; }}
+.cvss-badge {{ color:white; padding:2px 8px; border-radius:10px; font-size:0.72rem; font-weight:700; cursor:help; }}
+.filter-bar {{ display:flex; gap:12px; flex-wrap:wrap; margin-bottom:20px; align-items:center; }}
+.filter-bar label {{ font-size:0.85rem; color:#4a5568; font-weight:600; }}
+.filter-bar select, .filter-bar input {{ border:1px solid #e2e8f0; border-radius:6px; padding:6px 10px; font-size:0.85rem; background:white; }}
+.filter-bar input {{ min-width:200px; }}
 .check-type {{ font-weight: 700; font-size: 1rem; }}
 .field-name {{ color: #4a5568; font-size: 0.9rem; }}
 .finding-url {{ font-size: 0.85rem; color: #718096; word-break: break-all; }}
@@ -338,8 +357,26 @@ body {{ font-family: 'Segoe UI', system-ui, -apple-system, sans-serif; backgroun
     <!-- Findings -->
     <div class="section">
         <h2>Vulnerability Findings ({total})</h2>
+        <div class="filter-bar" id="finding-filters">
+            <label>Filter:</label>
+            <select id="filter-severity" onchange="applyFilters()">
+                <option value="">All Severities</option>
+                <option value="critical">Critical</option>
+                <option value="high">High</option>
+                <option value="medium">Medium</option>
+                <option value="low">Low</option>
+            </select>
+            <select id="filter-check" onchange="applyFilters()">
+                <option value="">All Check Types</option>
+                {' '.join(f'<option value="{c}">{c.upper()}</option>' for c in sorted(set(f.check_type for f in findings)))}
+            </select>
+            <input type="text" id="filter-search" placeholder="Search URL or field…" oninput="applyFilters()">
+            <button onclick="document.getElementById('filter-severity').value='';document.getElementById('filter-check').value='';document.getElementById('filter-search').value='';applyFilters();" style="padding:6px 12px;border:1px solid #e2e8f0;border-radius:6px;cursor:pointer;font-size:0.85rem;">Reset</button>
+        </div>
         {no_findings_html}
+        <div id="findings-container">
         {findings_html}
+        </div>
     </div>
 
     <!-- Page Flow Diagram -->
@@ -373,6 +410,22 @@ document.querySelectorAll('.evidence-screenshot').forEach(img => {{
         document.getElementById('lightbox').classList.add('active');
     }});
 }});
+// Finding filter (U-2 equivalent in report)
+function applyFilters() {{
+    const sev = document.getElementById('filter-severity').value.toLowerCase();
+    const chk = document.getElementById('filter-check').value.toLowerCase();
+    const q   = document.getElementById('filter-search').value.toLowerCase();
+    document.querySelectorAll('#findings-container .finding-card').forEach(card => {{
+        const cardSev   = (card.dataset.severity || '').toLowerCase();
+        const cardCheck = (card.dataset.check || '').toLowerCase();
+        const cardUrl   = (card.dataset.url || '').toLowerCase();
+        const cardField = (card.dataset.field || '').toLowerCase();
+        const sevOk   = !sev || cardSev === sev;
+        const chkOk   = !chk || cardCheck === chk;
+        const searchOk = !q  || cardUrl.includes(q) || cardField.includes(q);
+        card.style.display = (sevOk && chkOk && searchOk) ? '' : 'none';
+    }});
+}}
 // Plan card collapse/expand
 document.querySelectorAll('.plan-card-header').forEach(header => {{
     header.addEventListener('click', () => {{

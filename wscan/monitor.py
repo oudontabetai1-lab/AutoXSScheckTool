@@ -34,6 +34,8 @@ class MonitorServer:
         self.plan_confirm_event: asyncio.Event = asyncio.Event()
         # Plan edits returned by the operator (field overrides sent from web UI)
         self.confirmed_plan_edits: dict = {}   # {url: {field_name: {risk, checks, payloads}}}
+        # U-3: Manual payload requests from web UI
+        self.manual_payload_queue: asyncio.Queue = asyncio.Queue()
 
     def _create_app(self) -> FastAPI:
         app = FastAPI(title="WScan Monitor", docs_url=None, redoc_url=None)
@@ -95,6 +97,10 @@ class MonitorServer:
             # e.g. {"action": "plan_confirm", "edits": { url: {field: {risk, checks}} }}
             self.confirmed_plan_edits = msg.get("edits", {})
             self.plan_confirm_event.set()
+
+        elif action == "manual_payload":
+            # U-3: {"action": "manual_payload", "url": ..., "field": ..., "payload": ..., "check_type": ...}
+            self.manual_payload_queue.put_nowait(msg)
 
     # ------------------------------------------------------------------
     # Broadcast helpers

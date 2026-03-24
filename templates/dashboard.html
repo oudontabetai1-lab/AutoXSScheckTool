@@ -508,6 +508,7 @@ body {
   <button class="ib-btn skip-p" onclick="sendIntervention('skip_page')" title="現在のページをスキップ">⏩ ページスキップ</button>
   <button class="ib-btn abort" onclick="confirmAbort()" title="スキャンを中断（部分レポートを保存）">⏹ 中断</button>
   <span class="ib-pause-state" id="ibPauseState">⏸ 一時停止中</span>
+  <button class="ib-btn" onclick="toggleManualPayload()" title="手動ペイロード実行パネルを開く" style="margin-left:auto;background:rgba(56,139,253,0.15);color:var(--accent);border-color:var(--accent)">🎯 手動実行</button>
 </div>
 
 <!-- ─── Progress ───────────────────────────────────────────── -->
@@ -560,11 +561,22 @@ body {
   <!-- Right: Findings + Network -->
   <div class="panel" style="grid-template-rows: 1fr 1fr; display:grid; border-right:none">
 
-    <!-- Findings -->
+    <!-- Findings (U-2: filter bar) -->
     <div style="display:flex;flex-direction:column;overflow:hidden;border-bottom:1px solid var(--border)">
       <div class="panel-header">
         Findings
         <span class="panel-badge" id="findingCount" style="color:var(--critical)">0</span>
+        <div style="display:flex;gap:6px;margin-left:auto;align-items:center">
+          <select id="filterSeverity" onchange="filterFindings()" style="background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:2px 6px;font-size:0.72rem">
+            <option value="">All</option>
+            <option value="critical">Critical</option>
+            <option value="high">High</option>
+            <option value="medium">Medium</option>
+            <option value="low">Low</option>
+          </select>
+          <input id="filterSearch" type="text" placeholder="Search…" oninput="filterFindings()"
+            style="background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:2px 6px;font-size:0.72rem;width:100px">
+        </div>
       </div>
       <div class="panel-content" id="findingsPanel">
         <div class="no-findings-msg">No vulnerabilities detected yet.</div>
@@ -587,6 +599,28 @@ body {
     </div>
   </div>
 
+</div>
+
+<!-- ─── U-3: Manual Payload Panel ──────────────────────────── -->
+<div id="manualPayloadPanel" style="
+  position:fixed; bottom:0; left:0; right:0;
+  background:var(--surface); border-top:2px solid var(--accent);
+  padding:10px 20px; display:none; gap:10px; align-items:center;
+  z-index:200; flex-wrap:wrap;
+">
+  <span style="font-size:0.8rem;font-weight:700;color:var(--accent)">手動ペイロード実行</span>
+  <input id="mpUrl" type="text" placeholder="URL" style="flex:2;min-width:160px;background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:4px 8px;border-radius:4px;font-size:0.8rem">
+  <input id="mpField" type="text" placeholder="フィールド名" style="flex:1;min-width:100px;background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:4px 8px;border-radius:4px;font-size:0.8rem">
+  <input id="mpPayload" type="text" placeholder="ペイロード" style="flex:2;min-width:160px;background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:4px 8px;border-radius:4px;font-family:monospace;font-size:0.8rem">
+  <select id="mpCheckType" style="background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:4px 8px;border-radius:4px;font-size:0.8rem">
+    <option value="xss">XSS</option>
+    <option value="sqli">SQLi</option>
+    <option value="os">OS</option>
+    <option value="ssti">SSTI</option>
+    <option value="custom">Custom</option>
+  </select>
+  <button onclick="sendManualPayload()" style="background:var(--accent);color:white;border:none;padding:6px 14px;border-radius:4px;cursor:pointer;font-size:0.8rem;font-weight:700">実行</button>
+  <button onclick="document.getElementById('manualPayloadPanel').style.display='none'" style="background:var(--surface2);color:var(--text-muted);border:1px solid var(--border);padding:6px 10px;border-radius:4px;cursor:pointer;font-size:0.8rem">✕</button>
 </div>
 
 <!-- ─── Plan Review Modal ───────────────────────────────────── -->
@@ -747,6 +781,15 @@ function handleEvent(event) {
     case 'intervention_state':
       setPauseState(!!data.paused);
       break;
+
+    case 'ai_analysis':
+      showAiAnalysis(data.text || '');
+      addEventLog('status', 'AI分析レポートが生成されました');
+      break;
+
+    case 'waf_detected':
+      handleWafDetected(data);
+      break;
   }
 }
 
@@ -816,6 +859,7 @@ function addFinding(data) {
   const sev = (data.severity || 'medium').toLowerCase();
   const card = document.createElement('div');
   card.className = 'finding-card';
+  card.dataset.severity = sev;
 
   // XSS confirmed: show prominent alert banner
   let alertBanner = '';
@@ -1021,6 +1065,78 @@ function confirmPlan() {
   }
   document.getElementById('planModalOverlay').classList.remove('active');
   addEventLog('status', '攻撃プランが確定されました — 攻撃を開始します');
+}
+
+// ─── U-2: Finding filter ────────────────────────────────────────
+function filterFindings() {
+  const sev = document.getElementById('filterSeverity').value.toLowerCase();
+  const q   = document.getElementById('filterSearch').value.toLowerCase();
+  document.querySelectorAll('#findingsPanel .finding-card').forEach(card => {
+    const cardSev = (card.dataset.severity || '').toLowerCase();
+    const text    = card.textContent.toLowerCase();
+    const sevOk   = !sev || cardSev === sev;
+    const searchOk = !q || text.includes(q);
+    card.style.display = (sevOk && searchOk) ? '' : 'none';
+  });
+}
+
+// ─── U-3: Manual payload execution ──────────────────────────────
+function toggleManualPayload() {
+  const panel = document.getElementById('manualPayloadPanel');
+  panel.style.display = panel.style.display === 'none' ? 'flex' : 'none';
+}
+
+function sendManualPayload() {
+  if (!state.ws || state.ws.readyState !== WebSocket.OPEN) {
+    alert('WebSocket が接続されていません');
+    return;
+  }
+  const url       = document.getElementById('mpUrl').value.trim();
+  const field     = document.getElementById('mpField').value.trim();
+  const payload   = document.getElementById('mpPayload').value.trim();
+  const checkType = document.getElementById('mpCheckType').value;
+  if (!url || !field || !payload) {
+    alert('URL・フィールド名・ペイロードをすべて入力してください');
+    return;
+  }
+  state.ws.send(JSON.stringify({
+    action: 'manual_payload',
+    url, field, payload, check_type: checkType,
+  }));
+  addEventLog('payload', `[手動] [${checkType.toUpperCase()}] ${field}: ${payload.substring(0,50)}`);
+}
+
+// ─── AI Analysis (A-1) ──────────────────────────────────────────
+function showAiAnalysis(text) {
+  const existing = document.getElementById('aiAnalysisModal');
+  if (existing) existing.remove();
+  const modal = document.createElement('div');
+  modal.id = 'aiAnalysisModal';
+  modal.style.cssText = `
+    position:fixed;top:0;left:0;width:100%;height:100%;
+    background:rgba(0,0,0,0.85);z-index:500;
+    display:flex;justify-content:center;align-items:center;
+  `;
+  modal.innerHTML = `
+    <div style="background:var(--surface);border:1px solid var(--border);border-radius:12px;
+                max-width:700px;width:90%;max-height:80vh;display:flex;flex-direction:column;overflow:hidden">
+      <div style="padding:16px 20px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center">
+        <span style="font-weight:700;color:var(--accent)">🤖 AI総合分析レポート</span>
+        <button onclick="document.getElementById('aiAnalysisModal').remove()"
+          style="background:none;border:none;color:var(--text-muted);cursor:pointer;font-size:1.2rem">✕</button>
+      </div>
+      <div style="padding:20px;overflow-y:auto;white-space:pre-wrap;font-size:0.82rem;line-height:1.6;color:var(--text)">
+        ${escapeHtml(text)}
+      </div>
+    </div>`;
+  document.body.appendChild(modal);
+  modal.addEventListener('click', e => { if (e.target === modal) modal.remove(); });
+}
+
+// ─── WAF detected event ─────────────────────────────────────────
+function handleWafDetected(data) {
+  const waf = data.waf || 'Unknown WAF';
+  addEventLog('status', `🛡 WAF Detected: ${waf}. Hints: ${(data.hints||[]).slice(0,2).join('; ')}`);
 }
 
 // ─── Init ────────────────────────────────────────────────────────
