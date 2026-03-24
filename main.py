@@ -196,6 +196,10 @@ Examples:
             "Enabled automatically when --llm none."
         ),
     )
+    scan.add_argument(
+        "--no-open-report", action="store_true",
+        help="Do not automatically open the HTML report in a browser after scanning.",
+    )
 
     return parser.parse_args()
 
@@ -331,6 +335,7 @@ async def run_scan(args):
             use_planner=not getattr(args, "no_planner", False),
             interactive_plan=getattr(args, "interactive_plan", False) or args.llm == "none",
             skip_registration=not getattr(args, "include_registration", False),
+            open_report=not getattr(args, "no_open_report", False),
         )
         await engine.run()
         return
@@ -386,7 +391,8 @@ async def run_scan(args):
                 auth_pass=getattr(args, "auth_pass", "") or "",
                 use_planner=not getattr(args, "no_planner", False),
                 interactive_plan=getattr(args, "interactive_plan", False) or args.llm == "none",
-            skip_registration=not getattr(args, "include_registration", False),
+                skip_registration=not getattr(args, "include_registration", False),
+                open_report=not getattr(args, "no_open_report", False),
             )
             await engine.run()
 

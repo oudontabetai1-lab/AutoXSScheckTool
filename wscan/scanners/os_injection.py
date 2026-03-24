@@ -11,35 +11,32 @@ if TYPE_CHECKING:
     from wscan.engine import ScanEngine
 
 
-# Patterns indicating command execution in response
+# Patterns indicating command execution in response.
+# These are deliberately specific to avoid false positives on dashboards/logs.
 OS_OUTPUT_PATTERNS = [
-    # Linux/Mac command output
-    r"uid=\d+\(",            # id command
-    r"gid=\d+\(",            # id command
-    r"root:x:\d+:\d+:",      # /etc/passwd
-    r"/bin/bash",
-    r"/bin/sh",
-    r"/usr/bin",
-    r"LISTENING|ESTABLISHED",  # netstat
-    r"total \d+\ndr",          # ls -la
-    r"Linux.*#\d+",            # uname -a
-    r"Darwin Kernel Version",  # macOS
-    # Windows command output
-    r"Windows IP Configuration",    # ipconfig
-    r"Microsoft Windows \[Version", # ver
-    r"Volume in drive [A-Z]",       # dir
-    r"Directory of [A-Z]:\\",       # dir
-    r"\[extensions\]",              # win.ini
-    r"for 16-bit app support",      # win.ini
-    r"WINDOWS\\system32",
-    # Environment variables
-    r"PATH=|Path=",
-    r"HOME=/",
-    r"SHELL=",
-    # Common Unix file contents
-    r"nobody:x:\d+",
-    r"daemon:x:\d+",
-    r"www-data:x:\d+",
+    # Linux/Mac — output from 'id' command (very distinctive format)
+    r"uid=\d+\(\w+\)\s+gid=\d+\(\w+\)",
+    # /etc/passwd format — full line
+    r"root:x:\d+:\d+:[^:]*:/root:",
+    r"nobody:x:\d+:\d+:[^:]*:",
+    r"daemon:x:\d+:\d+:[^:]*:",
+    r"www-data:x:\d+:\d+:[^:]*:",
+    # Shell exec confirmation
+    r"/bin/bash\s*$",
+    r"/bin/sh\s*$",
+    # ls -la output pattern
+    r"total \d+\s*\ndr[-rwx]{9}",
+    # uname -a output
+    r"Linux \S+ \d+\.\d+\.\d+.*#\d+",
+    r"Darwin Kernel Version \d+",
+    # Windows — distinctive multi-word phrases
+    r"Windows IP Configuration",
+    r"Microsoft Windows \[Version \d+\.\d+",
+    r"Volume in drive [A-Z] (is|has)",
+    r"Directory of [A-Z]:\\",
+    r"for 16-bit app support",
+    # Windows system path (distinctive)
+    r"WINDOWS\\system32\\cmd\.exe",
 ]
 
 # Blind/time-based payloads
@@ -77,6 +74,22 @@ class OSInjectionScanner(BaseScanner):
                 f"OS injection testing: {field_name} on {url}"
             )
 
+        # Baseline: capture pre-existing patterns and response time
+        baseline_source, baseline_pair = await self._apply_payload(
+            url, form_index, field_name, "baseline_os_test", is_url_param
+        )
+        _b_req = baseline_pair.get("request", {})
+        _b_resp = baseline_pair.get("response", {})
+        _b_ts_req = _b_req.get("timestamp", 0)
+        _b_ts_resp = _b_resp.get("timestamp", 0)
+        baseline_time = (
+            float(_b_ts_resp - _b_ts_req)
+            if _b_ts_req and _b_ts_resp
+            else 0.0
+        )
+        # Threshold = baseline + 2.8 s (injected sleep) with 0.5 s margin
+        time_threshold = max(2.8, baseline_time + 2.8)
+
         for payload in payloads:
             if self.monitor:
                 await self.monitor.emit_payload_test(field_name, payload, "os")
@@ -88,28 +101,32 @@ class OSInjectionScanner(BaseScanner):
                 url, form_index, field_name, payload, is_url_param
             )
 
-            # --- Check 1: Command output in response ---
+            # --- Check 1: Command output in response (not pre-existing in baseline) ---
             match = self.check_response_for_patterns(source, OS_OUTPUT_PATTERNS)
             if match:
-                finding = await self.record_finding(
-                    url=url,
-                    field_name=field_name,
-                    payload=payload,
-                    evidence=f"OS command output detected in response: '{match}'",
-                    pair=pair,
-                    severity="critical",
-                )
-                findings.append(finding)
-                break
-
-            # --- Check 2: Time-based blind injection ---
-            if payload in TIME_BASED_PAYLOADS:
-                if self.response_time_exceeded(pair, threshold=2.8):
+                baseline_match = self.check_response_for_patterns(
+                    baseline_source, OS_OUTPUT_PATTERNS
+                ) if baseline_source else None
+                if not baseline_match:
                     finding = await self.record_finding(
                         url=url,
                         field_name=field_name,
                         payload=payload,
-                        evidence="Time-based blind OS injection: response delayed (>3s)",
+                        evidence=f"OS command output detected in response: '{match}'",
+                        pair=pair,
+                        severity="critical",
+                    )
+                    findings.append(finding)
+                    break
+
+            # --- Check 2: Time-based blind injection ---
+            if payload in TIME_BASED_PAYLOADS:
+                if self.response_time_exceeded(pair, threshold=time_threshold):
+                    finding = await self.record_finding(
+                        url=url,
+                        field_name=field_name,
+                        payload=payload,
+                        evidence=f"Time-based blind OS injection: response delayed (>{time_threshold:.1f}s, baseline {baseline_time:.2f}s)",
                         pair=pair,
                         severity="high",
                     )

@@ -53,6 +53,11 @@ class PathTraversalScanner(BaseScanner):
                 f"Path traversal testing: {field_name} on {url}"
             )
 
+        # Baseline: capture what patterns already appear in a neutral response
+        baseline_source, _ = await self._apply_payload(
+            url, form_index, field_name, "baseline_test_value", is_url_param
+        )
+
         for payload in payloads:
             if self.monitor:
                 await self.monitor.emit_payload_test(field_name, payload, "path_traversal")
@@ -64,6 +69,13 @@ class PathTraversalScanner(BaseScanner):
 
             match = self.check_response_for_patterns(source, PATH_TRAVERSAL_PATTERNS)
             if match:
+                # Only flag if this pattern was NOT already present in the baseline response
+                baseline_match = self.check_response_for_patterns(
+                    baseline_source, PATH_TRAVERSAL_PATTERNS
+                ) if baseline_source else None
+                if baseline_match:
+                    continue  # Pattern pre-existed — not caused by our payload
+
                 finding = await self.record_finding(
                     url=url,
                     field_name=field_name,

@@ -301,8 +301,8 @@ class BrowserManager:
                     allInputs.forEach(el => {
                         if (el.type === 'checkbox' || el.type === 'radio' || el.type === 'hidden') return;
                         if (el.tagName === 'SELECT') {
-                            // Pick first non-empty option
-                            const opts = Array.from(el.options).filter(o => o.value && o.value !== '0');
+                            // Pick first non-empty option (value="" is empty; "0" is valid)
+                            const opts = Array.from(el.options).filter(o => o.value !== '');
                             if (opts.length) { el.value = opts[0].value; dispatchEvents(el); }
                             return;
                         }
@@ -324,6 +324,11 @@ class BrowserManager:
                 """,
                 [form_index, field_name, payload, safe_values or {}, self.auth_user, self.auth_pass],
             )
+
+            # Check whether the form was found before attempting submit
+            if not result or not result.get("success"):
+                source = await self.get_page_source()
+                return source, {}
 
             # Submit the form
             submit_btn = await self.page.query_selector(
@@ -417,7 +422,7 @@ class BrowserManager:
                     allInputs.forEach(el => {
                         if (el.type === 'checkbox' || el.type === 'radio' || el.type === 'hidden') return;
                         if (el.tagName === 'SELECT') {
-                            const opts = Array.from(el.options).filter(o => o.value && o.value !== '0');
+                            const opts = Array.from(el.options).filter(o => o.value !== '');
                             if (opts.length) { el.value = opts[0].value; dispatchEvents(el); }
                             return;
                         }

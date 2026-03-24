@@ -46,11 +46,12 @@ class ReportGenerator:
         checks: list[str],
         attack_plans: "Optional[list[PageAttackPlan]]" = None,
         ctf_flags: "Optional[list]" = None,
+        page_graph: "Optional[dict]" = None,
     ):
         """Generate HTML report and save to output directory."""
         sorted_findings = sorted(findings, key=lambda f: SEVERITY_ORDER.get(f.severity, 99))
         html = self._build_html(target, sorted_findings, visited_urls, checks,
-                                attack_plans or [], ctf_flags or [])
+                                attack_plans or [], ctf_flags or [], page_graph or {})
         report_path = self.output_dir / "report.html"
         report_path.write_text(html, encoding="utf-8")
         return report_path
@@ -63,9 +64,11 @@ class ReportGenerator:
         checks: list[str],
         attack_plans: "list[PageAttackPlan]" = None,
         ctf_flags: list = None,
+        page_graph: dict = None,
     ) -> str:
         attack_plans = attack_plans or []
         ctf_flags = ctf_flags or []
+        page_graph = page_graph or {}
         scan_date = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         total = len(findings)
         counts = {}
@@ -142,6 +145,9 @@ class ReportGenerator:
 
         # ── CTF Flags section ────────────────────────────────────────────
         ctf_flags_html = self._build_ctf_flags_html(ctf_flags)
+
+        # ── Page flow diagram section ─────────────────────────────────────
+        page_flow_html = self._build_page_flow_html(page_graph)
 
         return f"""<!DOCTYPE html>
 <html lang="ja">
@@ -244,6 +250,15 @@ body {{ font-family: 'Segoe UI', system-ui, -apple-system, sans-serif; backgroun
 .plan-payload-type {{ color:#a0aec0; font-size:.7rem; margin-bottom:4px; }}
 .no-plans {{ color:#a0aec0; font-size:.9rem; padding:16px 0; }}
 @media (max-width:768px) {{ .plan-cols-header,.plan-field-row {{ grid-template-columns:1fr 44px 1fr; }} .plan-rationale-col {{ display:none; }} }}
+/* ── Page Flow Diagram styles ── */
+.page-flow-wrapper {{ overflow-x: auto; }}
+.page-flow-svg {{ min-width: 100%; }}
+.page-node {{ cursor: pointer; }}
+.page-node rect {{ fill: #ebf8ff; stroke: #4299e1; stroke-width: 1.5; rx: 6; }}
+.page-node.root rect {{ fill: #fefcbf; stroke: #d69e2e; stroke-width: 2; }}
+.page-node text {{ font-size: 11px; fill: #1a365d; font-family: monospace; }}
+.page-edge {{ stroke: #a0aec0; stroke-width: 1.5; fill: none; marker-end: url(#arrow); }}
+.page-thumb {{ border: 1px solid #e2e8f0; border-radius: 4px; }}
 /* ── CTF Flags styles ── */
 .ctf-section {{ background: linear-gradient(135deg,#1a202c 0%,#2d3748 100%); border-radius:12px; padding:24px; margin-bottom:24px; box-shadow: 0 4px 12px rgba(0,0,0,0.3); }}
 .ctf-section h2 {{ color:#ffd700; font-size:1.3rem; font-weight:800; margin-bottom:16px; padding-bottom:10px; border-bottom:2px solid #4a5568; letter-spacing:.03em; }}
@@ -327,6 +342,9 @@ body {{ font-family: 'Segoe UI', system-ui, -apple-system, sans-serif; backgroun
         {findings_html}
     </div>
 
+    <!-- Page Flow Diagram -->
+    {page_flow_html}
+
     <!-- Visited URLs -->
     <div class="section">
         <h2>Scanned URLs ({len(visited_urls)})</h2>
@@ -387,7 +405,7 @@ document.querySelectorAll('.plan-payloads-toggle').forEach(btn => {{
             <div class="ctf-flag-item">
                 <div class="ctf-flag-value">{esc_flag}</div>
                 <div class="ctf-flag-source">Found on: {esc_src}</div>
-                <span class="ctf-flag-copy" onclick="navigator.clipboard.writeText('{esc_flag}').then(()=>this.textContent='Copied!')">📋 Copy to clipboard</span>
+                <span class="ctf-flag-copy" data-flag="{esc_flag}" onclick="navigator.clipboard.writeText(this.dataset.flag).then(()=>this.textContent='Copied!')">📋 Copy to clipboard</span>
             </div>"""
 
         return f"""
@@ -518,6 +536,110 @@ document.querySelectorAll('.plan-payloads-toggle').forEach(btn => {{
         {cards_html}
     </div>"""
 
+    def _build_page_flow_html(self, page_graph: dict) -> str:
+        """
+        Build an SVG-based page transition diagram.
+
+        page_graph: {url: {"parent": parent_url|None, "screenshot_b64": str, "depth": int}}
+        """
+        if not page_graph:
+            return ""
+
+        # --- Layout: simple layered layout by depth ----------------------
+        # Group nodes by depth
+        by_depth: dict[int, list[str]] = {}
+        for url, info in page_graph.items():
+            depth = info.get("depth", 0)
+            by_depth.setdefault(depth, []).append(url)
+
+        NODE_W = 200
+        NODE_H = 50
+        H_GAP = 40
+        V_GAP = 30
+        PADDING = 20
+
+        positions: dict[str, tuple[int, int]] = {}
+        max_cols = max((len(v) for v in by_depth.values()), default=1)
+        canvas_w = max(max_cols * (NODE_W + H_GAP) + PADDING * 2, 400)
+
+        y = PADDING
+        for depth in sorted(by_depth.keys()):
+            urls_at_depth = by_depth[depth]
+            row_w = len(urls_at_depth) * (NODE_W + H_GAP) - H_GAP
+            x_start = (canvas_w - row_w) // 2
+            for i, url in enumerate(urls_at_depth):
+                x = x_start + i * (NODE_W + H_GAP)
+                positions[url] = (x, y)
+            y += NODE_H + V_GAP
+
+        canvas_h = y + PADDING
+
+        # --- Build SVG elements ------------------------------------------
+        edges_svg = []
+        nodes_svg = []
+
+        for url, info in page_graph.items():
+            parent = info.get("parent")
+            if parent and parent in positions:
+                px, py = positions[parent]
+                cx, cy = positions[url]
+                # Draw line from bottom-center of parent to top-center of child
+                x1 = px + NODE_W // 2
+                y1 = py + NODE_H
+                x2 = cx + NODE_W // 2
+                y2 = cy
+                edges_svg.append(
+                    f'<path class="page-edge" d="M{x1},{y1} C{x1},{(y1+y2)//2} {x2},{(y1+y2)//2} {x2},{y2}"/>'
+                )
+
+        for url, info in page_graph.items():
+            if url not in positions:
+                continue
+            x, y_pos = positions[url]
+            depth = info.get("depth", 0)
+            root_class = ' root' if depth == 0 else ''
+            screenshot = info.get("screenshot_b64", "")
+            short_url = url[-45:] if len(url) > 45 else url
+            esc_url = self._escape(url)
+            esc_short = self._escape(short_url)
+
+            thumb_html = ""
+            if screenshot:
+                thumb_html = (
+                    f'<image href="data:image/jpeg;base64,{screenshot}" '
+                    f'x="{x}" y="{y_pos}" width="{NODE_W}" height="{NODE_H}" '
+                    f'preserveAspectRatio="xMidYMid slice" clip-path="url(#clip_{id(url)})" opacity="0.18"/>'
+                    f'<clipPath id="clip_{id(url)}"><rect x="{x}" y="{y_pos}" width="{NODE_W}" height="{NODE_H}" rx="6"/></clipPath>'
+                )
+
+            node_svg = f"""
+            {thumb_html}
+            <g class="page-node{root_class}" onclick="window.open('{esc_url}','_blank')" title="{esc_url}">
+                <rect x="{x}" y="{y_pos}" width="{NODE_W}" height="{NODE_H}" rx="6"/>
+                <text x="{x + NODE_W//2}" y="{y_pos + 20}" text-anchor="middle" font-size="10">{esc_short}</text>
+                <text x="{x + NODE_W//2}" y="{y_pos + 36}" text-anchor="middle" font-size="9" fill="#718096">depth {depth}</text>
+            </g>"""
+            nodes_svg.append(node_svg)
+
+        edges_str = "\n".join(edges_svg)
+        nodes_str = "\n".join(nodes_svg)
+
+        return f"""
+    <div class="section">
+        <h2>🗺 Page Transition Diagram ({len(page_graph)} pages)</h2>
+        <div class="page-flow-wrapper">
+            <svg class="page-flow-svg" width="{canvas_w}" height="{canvas_h}" xmlns="http://www.w3.org/2000/svg">
+                <defs>
+                    <marker id="arrow" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+                        <path d="M0,0 L0,6 L8,3 z" fill="#a0aec0"/>
+                    </marker>
+                </defs>
+                {edges_str}
+                {nodes_str}
+            </svg>
+        </div>
+    </div>"""
+
     def _format_request(self, req: dict) -> str:
         if not req:
             return '<div class="network-box"><h4>Request</h4><div class="network-content">N/A</div></div>'
@@ -551,4 +673,5 @@ document.querySelectorAll('.plan-payloads-toggle').forEach(btn => {{
             .replace("<", "&lt;")
             .replace(">", "&gt;")
             .replace('"', "&quot;")
+            .replace("'", "&#39;")
         )

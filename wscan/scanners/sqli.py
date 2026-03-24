@@ -88,11 +88,24 @@ class SQLiScanner(BaseScanner):
                 f"SQLi testing: {field_name} on {url}"
             )
 
-        # Get baseline response for comparison
+        # Get baseline response for comparison (content + timing)
         baseline_source, baseline_pair = await self._get_baseline(
             url, form_index, field_name, is_url_param
         )
         baseline_len = len(baseline_source)
+
+        # Measure baseline response time for dynamic time-based threshold
+        _b_req = baseline_pair.get("request", {})
+        _b_resp = baseline_pair.get("response", {})
+        _b_ts_req = _b_req.get("timestamp", 0)
+        _b_ts_resp = _b_resp.get("timestamp", 0)
+        baseline_time = (
+            float(_b_ts_resp - _b_ts_req)
+            if _b_ts_req and _b_ts_resp
+            else 0.0
+        )
+        # Threshold = baseline + 2.5 s (the injected sleep) with 0.5 s margin
+        time_threshold = max(2.5, baseline_time + 2.5)
 
         for payload in payloads:
             if self.monitor:
@@ -159,7 +172,7 @@ class SQLiScanner(BaseScanner):
 
             # --- Check 3: Time-based blind SQLi ---
             if payload in TIME_BASED_PAYLOADS:
-                if self.response_time_exceeded(pair, threshold=2.5):
+                if self.response_time_exceeded(pair, threshold=time_threshold):
                     finding = await self.record_finding(
                         url=url,
                         field_name=field_name,

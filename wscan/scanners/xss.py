@@ -19,12 +19,21 @@ XSS_MARKERS = [
     "onload=",
     "onfocus=",
     "ontoggle=",
+    "ontouchstart=",
+    "onwheel=",
+    "onpointerenter=",
+    "onmouseover=",
+    "onanimationend=",
     "javascript:",
     "<svg",
     "<img",
     "<iframe",
     "<body",
     "<input",
+    "<video",
+    "<audio",
+    "<details",
+    "<marquee",
     "alert(",
 ]
 
@@ -143,6 +152,12 @@ class XSSScanner(BaseScanner):
         # is reflected verbatim without any individual marker triggering above).
         if payload in source:
             idx = source.find(payload)
+            source_lower2 = source.lower()
+            preceding2 = source_lower2[max(0, idx - 300):idx]
+            last_open2 = preceding2.rfind("<!--")
+            last_close2 = preceding2.rfind("-->")
+            if last_open2 != -1 and last_open2 > last_close2:
+                return ""  # Inside HTML comment — skip
             return source[max(0, idx):idx + len(payload)]
 
         return ""

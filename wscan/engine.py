@@ -41,6 +41,7 @@ from .adaptive_payload import AdaptivePayloadEngine
 from .browser import BrowserManager
 from .chain_scanner import ChainScanner, ChainFinding
 from .ctf_flag_finder import FlagFinder
+from .intervention import ScanController, AbortScan, SkipField, SkipPage
 from .monitor import MonitorServer
 from .payload_gen import PayloadGenerator
 from .scanners.base import Finding
@@ -135,6 +136,7 @@ class ScanEngine:
         use_planner: bool = True,
         interactive_plan: bool = False,
         skip_registration: bool = True,
+        open_report: bool = True,
     ):
         self.target_url = url.rstrip("/")
         self.monitor = monitor
@@ -159,6 +161,7 @@ class ScanEngine:
         self.use_planner = use_planner
         self.interactive_plan = interactive_plan
         self.skip_registration = skip_registration
+        self.open_report = open_report
         if ctf_mode and "ssti" not in self.checks:
             self.checks.append("ssti")
 
@@ -248,6 +251,10 @@ class ScanEngine:
         self.scanned_forms: set = set()
         self.completed_fields: int = 0
         self.total_fields: int = 0
+        # page_graph: {url: {"parent": parent_url|None, "screenshot_b64": str, "depth": int}}
+        self.page_graph: dict = {}
+        # Scan controller (intervention system)
+        self.controller = ScanController()
 
     # =========================================================================
     # Public entry point
@@ -257,6 +264,9 @@ class ScanEngine:
         """4-phase scan pipeline."""
         if self.monitor:
             await self.monitor.emit_status(f"Starting scan of {self.target_url}", "running")
+
+        loop = asyncio.get_event_loop()
+        self.controller.start(loop)
 
         try:
             await self.browser.init()
@@ -272,9 +282,16 @@ class ScanEngine:
             plans = await self._phase_plan(crawled_pages)
 
             # ── Phase 3: Attack ──────────────────────────────────────────
-            await self._phase_attack(crawled_pages, plans)
+            try:
+                await self._phase_attack(crawled_pages, plans)
+            except AbortScan:
+                console.print(
+                    "\n[bold red][Intervention] Scan aborted by operator.[/bold red] "
+                    "Generating partial report …"
+                )
 
         finally:
+            self.controller.stop()
             await self.browser.close()
 
             # ── Phase 4: Report ──────────────────────────────────────────
@@ -296,11 +313,11 @@ class ScanEngine:
         console.print(f"  Target: [cyan]{self.target_url}[/cyan]  depth={self.depth}\n")
 
         pages: list = []
-        queue: deque = deque([(self.target_url, 0)])
+        queue: deque = deque([(self.target_url, 0, None)])  # (url, depth, parent_url)
         self.visited_urls.add(self.target_url)
 
         while queue:
-            url, depth = queue.popleft()
+            url, depth, parent_url = queue.popleft()
 
             # Skip excluded URLs (exact match or prefix match)
             if self._is_url_excluded(url):
@@ -323,7 +340,14 @@ class ScanEngine:
 
             forms = await self.browser.find_forms()
             url_params = await self.browser.get_url_params()
-            await self.browser.screenshot_b64(f"Crawl: {url}")
+            screenshot_b64 = await self.browser.screenshot_b64(f"Crawl: {url}")
+
+            # Record in page_graph for the transition diagram
+            self.page_graph[url] = {
+                "parent": parent_url,
+                "screenshot_b64": screenshot_b64,
+                "depth": depth,
+            }
 
             # CTF: scan page HTML for flags even during crawl
             if self.flag_finder:
@@ -363,7 +387,7 @@ class ScanEngine:
                             and len(self.visited_urls) < 50
                             and not self._is_url_excluded(clean)):
                         self.visited_urls.add(clean)
-                        queue.append((link, depth + 1))
+                        queue.append((link, depth + 1, url))
 
         total_inputs = sum(
             sum(len(f.get("inputs", [])) for f in p.forms) + len(p.url_params)
@@ -445,8 +469,8 @@ class ScanEngine:
             if self.monitor:
                 await self.monitor.emit_status(f"Plan: {plan.page_purpose[:60]}")
 
-        # ── Interactive manual editor ────────────────────────────────
-        if self.interactive_plan and plans:
+        # ── Interactive manual editor (always shown after AI planning) ──
+        if plans:
             self._interactive_plan_editor(plans)
 
         # Print all plans summary and ask user to confirm
@@ -663,6 +687,14 @@ class ScanEngine:
         attacked_urls: set = set()
 
         for page in pages:
+            # Intervention checkpoint — allows skip-page / abort
+            try:
+                await self.controller.checkpoint()
+            except SkipPage:
+                console.print(f"  [yellow][Intervention] Skipping page: {page.url}[/yellow]")
+                continue
+            # AbortScan propagates up to run()
+
             attacked_urls.add(page.url)
 
             # ── Page-level checks (header inspection, clickjacking, session, etc.) ──
@@ -780,6 +812,17 @@ class ScanEngine:
             if field_name.lower() in self.exclude_fields:
                 console.print(f"  [dim]Skip excluded: {field_name}[/dim]")
                 continue
+
+            # Intervention checkpoint — allows skip-field / skip-page / abort
+            try:
+                await self.controller.checkpoint()
+            except SkipField:
+                console.print(f"  [yellow][Intervention] Skipping field: {field_name}[/yellow]")
+                continue
+            except SkipPage:
+                console.print(f"  [yellow][Intervention] Skipping rest of page: {page.url}[/yellow]")
+                return
+            # AbortScan propagates up
 
             field_plan = plan.get_field_plan(field_name, fi, is_url_param) if plan else None
             await self._scan_field(page.url, fi, field, is_url_param, field_plan)
@@ -1243,16 +1286,23 @@ class ScanEngine:
         console.print(f"  [dim]Evidence:[/dim] {evidence_path}")
 
     def _generate_report(self):
+        import webbrowser
         from .report import ReportGenerator
         gen = ReportGenerator(self.output_dir)
-        gen.generate(
+        report_path = gen.generate(
             target=self.target_url,
             findings=self.all_findings,
             visited_urls=list(self.visited_urls),
             checks=self.checks,
             attack_plans=self.attack_plans,
             ctf_flags=self.ctf_found_flags,
+            page_graph=self.page_graph,
         )
+        if self.open_report:
+            try:
+                webbrowser.open(report_path.as_uri())
+            except Exception:
+                pass
 
     def _print_summary(self):
         console.print()
