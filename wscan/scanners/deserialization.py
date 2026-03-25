@@ -1,0 +1,226 @@
+"""
+Insecure Deserialization Scanner (V-8)
+Detects unsafe deserialization endpoints by sending malformed/probe payloads
+and observing error messages that reveal deserialization is in use.
+
+Tests:
+  1. PHP serialized object pattern (detect/trigger unserialize() errors)
+  2. Java serialized object magic bytes (detect ObjectInputStream usage)
+  3. Python pickle header (detect pickle.loads() usage)
+  4. YAML deserialization probe (detect yaml.load() usage)
+
+NOTE: This scanner DOES NOT attempt RCE payloads. It only sends
+probe payloads that trigger recognizable error messages, indicating
+that deserialization is occurring. This allows safe detection without
+executing arbitrary code on target systems.
+
+If the application errors on recognizable deserialization input,
+it is likely vulnerable to a real deserialization attack.
+"""
+import asyncio
+import base64
+from typing import TYPE_CHECKING
+
+import httpx
+
+from .base import BaseScanner, Finding
+
+if TYPE_CHECKING:
+    from wscan.engine import ScanEngine
+
+# Error patterns that reveal deserialization is in use
+_DESER_ERROR_PATTERNS = [
+    # PHP
+    r"unserialize\(\)",
+    r"O:\d+:\"[A-Za-z_]",
+    r"unserialization.*failed",
+    r"could not be unserialized",
+    # Java
+    r"java\.io\.InvalidClassException",
+    r"java\.io\.StreamCorruptedException",
+    r"java\.io\.ObjectStreamException",
+    r"java\.lang\.ClassNotFoundException",
+    r"com\.fasterxml\.jackson",
+    r"JsonMappingException",
+    # Python
+    r"pickle\.loads",
+    r"_pickle\.UnpicklingError",
+    r"AttributeError.*__reduce__",
+    # Ruby Marshal
+    r"Marshal\.load",
+    r"ArgumentError.*marshal",
+    # YAML
+    r"Psych::DisallowedClass",
+    r"yaml\.load.*unsafe",
+    r"YAML::PermittedClassesError",
+    # Generic
+    r"deserialization.*error",
+    r"deserialization.*failed",
+]
+
+# Probe payloads for each platform
+_PROBES = [
+    # PHP: minimal serialized string (boolean true)
+    (
+        "php_serialize",
+        "PHP serialized object",
+        "b:1;",
+        "text/plain",
+    ),
+    # PHP: corrupted serialized string to trigger error
+    (
+        "php_serialize_malformed",
+        "PHP malformed serialized data",
+        "O:1:\"A\":1:{s:1:\"a\";R:99999999;}",
+        "application/x-www-form-urlencoded",
+    ),
+    # Java: first 4 bytes of a Java serialized object (magic bytes)
+    # AC ED 00 05 → base64: rO0ABQ==
+    (
+        "java_serialize",
+        "Java serialized object (magic bytes)",
+        base64.b64encode(b"\xac\xed\x00\x05\x73\x72").decode(),
+        "application/octet-stream",
+    ),
+    # Python: pickle protocol 2 header (only the header, no opcode payload)
+    # \x80\x02 → protocol 2 marker
+    (
+        "python_pickle",
+        "Python pickle header",
+        base64.b64encode(b"\x80\x02").decode(),
+        "application/octet-stream",
+    ),
+    # YAML: probe that triggers Psych::DisallowedClass in Ruby/Rails
+    (
+        "yaml_probe",
+        "YAML deserialization probe",
+        "--- !ruby/object:OpenStruct\ntable:\n  :a: 1\n",
+        "application/yaml",
+    ),
+]
+
+
+class DeserializationScanner(BaseScanner):
+    """Insecure deserialization detection scanner."""
+
+    CHECK_TYPE = "deserialization"
+    SEVERITY = "critical"
+
+    async def scan_field(
+        self,
+        url: str,
+        form_index: int,
+        field: dict,
+        is_url_param: bool = False,
+    ) -> list[Finding]:
+        field_name = field.get("name", "unknown")
+        field_type = field.get("type", "text").lower()
+
+        # Only relevant for hidden fields and data fields, not UI elements
+        if field_type in ("file", "submit", "button", "image", "reset", "checkbox", "radio"):
+            return []
+
+        if self.monitor:
+            await self.monitor.emit_status(
+                f"Deserialization probe: {field_name} on {url}"
+            )
+
+        findings = []
+
+        for probe_id, description, payload, content_type in _PROBES:
+            if self.monitor:
+                await self.monitor.emit_payload_test(
+                    field_name, f"[{probe_id}]", "deserialization"
+                )
+            try:
+                if is_url_param:
+                    src, pair = await self.browser.test_url_param(
+                        url, field_name, payload
+                    )
+                else:
+                    await self.browser.navigate(url)
+                    src, pair = await self.browser.fill_and_submit_form(
+                        form_index, field_name, payload
+                    )
+
+                err = self.check_response_for_patterns(src, _DESER_ERROR_PATTERNS)
+                if err:
+                    finding = await self.record_finding(
+                        url=url,
+                        field_name=field_name,
+                        payload=f"[{probe_id}] {payload[:60]}",
+                        evidence=(
+                            f"Insecure deserialization detected via {description}: "
+                            f"error pattern '{err[:150]}' returned. "
+                            f"The endpoint may be vulnerable to deserialization attacks."
+                        ),
+                        pair=pair,
+                        severity="critical",
+                    )
+                    findings.append(finding)
+                    break  # One confirmed finding per field is enough
+
+            except Exception:
+                continue
+            await asyncio.sleep(0.2 * self.sleep_factor)
+
+        # Also test via raw HTTP POST with appropriate Content-Type headers
+        if not findings:
+            findings += await self._test_raw_post(url, field_name)
+
+        return findings
+
+    async def scan_page(self, url: str) -> list[Finding]:
+        return []
+
+    async def _test_raw_post(self, url: str, field_name: str) -> list[Finding]:
+        """Send raw probe payloads with deserialization-specific Content-Types."""
+        findings = []
+        proxy = getattr(self.engine, "proxy", "") or None
+        timeout = getattr(self.engine, "timeout", 15)
+
+        for probe_id, description, payload, content_type in _PROBES:
+            if content_type == "application/x-www-form-urlencoded":
+                continue  # Already covered by form submission
+            try:
+                kwargs: dict = {
+                    "timeout": timeout,
+                    "follow_redirects": True,
+                    "headers": {"Content-Type": content_type},
+                }
+                if proxy:
+                    kwargs["proxy"] = proxy
+
+                # Convert base64-encoded binary payloads back to bytes
+                raw_payload: bytes
+                try:
+                    raw_payload = base64.b64decode(payload)
+                except Exception:
+                    raw_payload = payload.encode()
+
+                async with httpx.AsyncClient(**kwargs) as client:
+                    r = await client.post(url, content=raw_payload)
+
+                err = self.check_response_for_patterns(r.text, _DESER_ERROR_PATTERNS)
+                if err:
+                    pair = {
+                        "request": {"url": url, "content_type": content_type},
+                        "response": {"status": r.status_code, "body": r.text[:1000]},
+                    }
+                    finding = await self.record_finding(
+                        url=url,
+                        field_name=field_name,
+                        payload=f"[{probe_id}] raw POST ({content_type})",
+                        evidence=(
+                            f"Insecure deserialization via raw POST: {description} "
+                            f"triggered error: '{err[:150]}'"
+                        ),
+                        pair=pair,
+                        severity="critical",
+                    )
+                    findings.append(finding)
+                    break
+            except Exception:
+                continue
+
+        return findings

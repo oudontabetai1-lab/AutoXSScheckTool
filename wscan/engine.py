@@ -59,6 +59,15 @@ from .scanners.clickjacking import ClickjackingScanner
 from .scanners.session import SessionScanner
 from .scanners.privesc import PrivEscScanner
 from .scanners.dom_xss import DOMXSSScanner
+from .scanners.stored_xss import StoredXSSScanner
+from .scanners.cors import CORSScanner
+from .scanners.info_disclosure import InfoDisclosureScanner
+from .scanners.host_header import HostHeaderScanner
+from .scanners.security_headers import SecurityHeadersScanner
+from .scanners.file_upload import FileUploadScanner
+from .scanners.nosql_injection import NoSQLInjectionScanner
+from .scanners.deserialization import DeserializationScanner
+from .scanners.request_smuggling import RequestSmugglingScanner
 from .waf_detector import WAFDetector
 from .payload_learning import PayloadLearner
 
@@ -239,9 +248,18 @@ class ScanEngine:
             "header_injection": HeaderInjectionScanner,
             "mail_header":      MailHeaderInjectionScanner,
             "open_redirect":    OpenRedirectScanner,
-            "clickjacking":     ClickjackingScanner,
-            "session":          SessionScanner,
-            "privesc":          PrivEscScanner,
+            "clickjacking":       ClickjackingScanner,
+            "session":            SessionScanner,
+            "privesc":            PrivEscScanner,
+            "stored_xss":         StoredXSSScanner,
+            "cors":               CORSScanner,
+            "info_disclosure":    InfoDisclosureScanner,
+            "host_header":        HostHeaderScanner,
+            "security_headers":   SecurityHeadersScanner,
+            "file_upload":        FileUploadScanner,
+            "nosql":              NoSQLInjectionScanner,
+            "deserialization":    DeserializationScanner,
+            "request_smuggling":  RequestSmugglingScanner,
         }
         self.scanners = {n: cls(self) for n, cls in scanner_map.items() if n in self.checks}
 

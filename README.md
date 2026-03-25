@@ -14,12 +14,21 @@ WScan は、IPA「**安全なウェブサイトの作り方**」の全脆弱性�
 | 1.4 | セッション管理の不備 | `session` | Cookie 属性チェック (Secure/HttpOnly/SameSite) |
 | 1.5 | クロスサイト・スクリプティング（反射型） | `xss` | ダイアログ確認・反射検出 |
 | 1.5 | クロスサイト・スクリプティング（DOM型） | `dom_xss` | Playwright DOM シンクフック |
+| 1.5 | クロスサイト・スクリプティング（格納型） | `stored_xss` | マーカー注入 → 全ページ横断検出 |
 | 1.6 | CSRF | `csrf` | POST フォームの CSRF トークン有無 |
 | 1.7 | HTTPヘッダ・インジェクション | `header_injection` | CRLF 注入 → レスポンスヘッダ確認 |
 | 1.8 | メールヘッダ・インジェクション | `mail_header` | メール関連フィールドへの CRLF 注入 |
 | 1.9 | クリックジャッキング | `clickjacking` | X-Frame-Options / CSP frame-ancestors 確認 |
 | 1.11 | オープンリダイレクト | `open_redirect` | リダイレクト先未検証の検出 |
 | — | アクセス制御・権限昇格 | `privesc` | 未認証アクセス・垂直/水平権限昇格 (IDOR) |
+| — | CORS 設定ミス | `cors` | ワイルドカード ACAO・任意 Origin 反射 |
+| — | 機密ファイル露出・情報漏洩 | `info_disclosure` | `.env`・`.git`・phpinfo 等へのアクセス確認 |
+| — | Host ヘッダインジェクション | `host_header` | パスワードリセット汚染 |
+| — | セキュリティヘッダ監査 | `security_headers` | HSTS・CSP・X-Content-Type-Options 等 |
+| — | ファイルアップロード脆弱性 | `file_upload` | Webシェル・二重拡張子・Content-Type 偽装 |
+| — | NoSQL インジェクション | `nosql` | MongoDB オペレータ注入 (`$ne`, `$gt`, `$regex`) |
+| — | 安全でないデシリアライズ | `deserialization` | PHP/Java/Python pickle プローブ |
+| — | HTTP リクエストスマグリング | `request_smuggling` | CL.TE / TE.CL / TE.TE タイミング検出 |
 | — | SSTI (オプション) | `ssti` | テンプレートエンジン数式評価確認 |
 
 ---
@@ -30,7 +39,16 @@ WScan は、IPA「**安全なウェブサイトの作り方**」の全脆弱性�
 
 - **AI 攻撃計画（AttackPlanner）** — スキャン前にページを分析し、フィールドごとに優先チェックとターゲット特化ペイロードを計画
 - **DOM-based XSS 検出** — `innerHTML` / `document.write` / `eval` / `location.href` 等の危険シンクを Playwright でフック、クライアントサイド実行を検出
+- **格納型 XSS 検出** — ユニークマーカーを注入し、全クロールページを横断してペイロードの出現を確認
 - **アクセス制御検査** — 未認証アクセス・垂直権限昇格（低権限セッション）・水平権限昇格 (IDOR) の 3 種テスト
+- **CORS 検出** — ワイルドカード ACAO・任意 Origin 反射・クレデンシャル付き CORS を自動判定
+- **機密ファイル露出** — `.env`・`.git`・phpinfo・actuator 等 35 種以上のパスをプローブ
+- **セキュリティヘッダ監査** — HSTS・CSP・X-Content-Type-Options・Referrer-Policy・Permissions-Policy の欠如/設定ミスを検出
+- **ファイルアップロード検査** — PHP/JSP/ASPX Webシェル・二重拡張子・Content-Type 偽装を試行
+- **NoSQL インジェクション** — MongoDB `$ne`/`$gt`/`$regex` オペレータ注入・JSON ボディ注入
+- **安全でないデシリアライズ検出** — PHP/Java/Python pickle/YAML プローブでエラーパターンを検出
+- **HTTP リクエストスマグリング** — CL.TE / TE.CL / TE.TE(難読化) をタイミング差で検出
+- **Host ヘッダインジェクション** — パスワードリセット汚染シナリオを自動テスト
 - **フィールドレベル検査**と**ページレベル検査**の 2 層構造
 
 ### AI / 自動化強化
@@ -79,6 +97,37 @@ playwright install chromium
 ---
 
 ## 使い方
+
+### トリアージモード（ペイロード送信なし・高速リスク評価）
+
+```bash
+# ペイロードを一切送らずにページ構造・ヘッダを解析し、リスクと推奨ペイロードを表示
+python main.py triage https://example.com
+
+# LLM を使った AI 攻撃戦略アドバイスつき
+python main.py triage https://example.com --llm ollama --depth 2
+
+# JSON ファイルに保存
+python main.py triage https://example.com --output triage.json
+```
+
+出力例:
+```
+╭─ WScan Triage Report ─────────────────────────╮
+│ Target: https://example.com                    │
+│ Fields analysed: 12   Pages visited: 5         │
+╰────────────────────────────────────────────────╯
+┌──────────┬──────────┬──────┬───────┬──────────────────────────────────────┐
+│ URL      │ Field    │ Type │ Risk  │ Recommended Payloads (top 2)         │
+├──────────┼──────────┼──────┼───────┼──────────────────────────────────────┤
+│ /login   │ username │ text │ ●HIGH │ [sqli] ' OR '1'='1'--               │
+│          │          │      │       │ [xss] <script>alert(document.domain) │
+│ /search  │ q        │ text │ ●HIGH │ [xss] <img src=x onerror=alert(1)>  │
+│ /        │ (header) │  —   │ ●MED  │ Clickjacking: X-Frame-Options missing│
+└──────────┴──────────┴──────┴───────┴──────────────────────────────────────┘
+Suggested full scan command:
+  python main.py scan https://example.com --checks sqli xss ssti os nosql cors
+```
 
 ### 基本スキャン
 
@@ -154,9 +203,11 @@ usage: main.py scan [オプション] URL
 
 主要オプション:
   --checks CHECK ...       実行するチェック (デフォルト: config/wscan.yaml)
-                           選択肢: sqli xss dom_xss os path_traversal session
-                                   csrf header_injection mail_header
+                           選択肢: sqli xss dom_xss stored_xss os path_traversal
+                                   session csrf header_injection mail_header
                                    clickjacking open_redirect ssti privesc
+                                   cors info_disclosure host_header security_headers
+                                   file_upload nosql deserialization request_smuggling
   --depth N                クロール深度 (デフォルト: 2)
   --headless               ブラウザをヘッドレスモードで起動
   --no-monitor             リアルタイム監視ダッシュボードを無効化
@@ -321,11 +372,13 @@ path_traversal:
 
 ```
 main.py
-    ├── run_scan()   → ScanEngine
-    └── run_setup()  → 自然言語設定アシスタント
+    ├── run_scan()    → ScanEngine
+    ├── run_triage()  → TriageEngine  ← NEW
+    └── run_setup()   → 自然言語設定アシスタント
 
 wscan/
     ├── engine.py              # スキャン全体の制御・フェーズ管理
+    ├── triage.py              # トリアージモード (ペイロードなし高速評価) ← NEW
     ├── browser.py             # Playwright 操作・ログイン自動化
     ├── attack_planner.py      # AI 攻撃計画 (AttackPlanner)
     ├── payload_gen.py         # LLM / デフォルトペイロード生成
@@ -337,7 +390,8 @@ wscan/
     └── scanners/
             ├── base.py                    # Finding・CVSS テーブル・基底クラス
             ├── xss.py                     # IPA 1.5 反射型 XSS
-            ├── dom_xss.py                 # IPA 1.5 DOM-based XSS (S-1)
+            ├── dom_xss.py                 # IPA 1.5 DOM-based XSS
+            ├── stored_xss.py              # IPA 1.5 格納型 XSS ← NEW
             ├── sqli.py                    # IPA 1.1 SQLi
             ├── os_injection.py            # IPA 1.2 OSコマンドインジェクション
             ├── path_traversal.py          # IPA 1.3 ディレクトリトラバーサル
@@ -348,7 +402,15 @@ wscan/
             ├── clickjacking.py            # IPA 1.9 クリックジャッキング
             ├── open_redirect.py           # IPA 1.11 オープンリダイレクト
             ├── ssti.py                    # SSTI (オプション)
-            └── privesc.py                 # 認証・権限昇格 (S-6)
+            ├── privesc.py                 # 認証・権限昇格
+            ├── cors.py                    # CORS 設定ミス ← NEW
+            ├── info_disclosure.py         # 機密ファイル露出・情報漏洩 ← NEW
+            ├── host_header.py             # Hostヘッダインジェクション ← NEW
+            ├── security_headers.py        # セキュリティヘッダ監査 ← NEW
+            ├── file_upload.py             # ファイルアップロード脆弱性 ← NEW
+            ├── nosql_injection.py         # NoSQLインジェクション ← NEW
+            ├── deserialization.py         # 安全でないデシリアライズ ← NEW
+            └── request_smuggling.py       # HTTPリクエストスマグリング ← NEW
 ```
 
 ---
@@ -376,6 +438,22 @@ wscan/
 ### WAF 検出 (A-2)
 - スキャン前プローブで Cloudflare・AWS WAF・ModSecurity・Akamai・Imperva 等を判定
 - LLM が WAF 種別に応じた二重エンコード・Unicode 正規化・コメント挿入等のバイパス戦略を提案
+
+### 深刻度・CVSS スコア早見表（全スキャナ）
+
+| チェック名 | CVSS スコア | 深刻度 |
+|-----------|------------|--------|
+| `sqli`, `os`, `ssti` | 10.0 | Critical |
+| `file_upload`, `deserialization` | 10.0 | Critical |
+| `stored_xss` | 9.6 | Critical |
+| `nosql`, `privesc_unauth` | 9.1 | High |
+| `request_smuggling` | 8.7 | High |
+| `xss`, `dom_xss`, `privesc_vertical` | 8.1–8.8 | High |
+| `path_traversal`, `info_disclosure`, `cors` | 7.4–7.5 | High |
+| `session`, `privesc_horizontal` | 6.5–7.4 | High/Medium |
+| `csrf`, `open_redirect`, `host_header` | 5.4–6.5 | Medium |
+| `header_injection`, `mail_header` | 5.3 | Medium |
+| `clickjacking`, `security_headers` | 3.1–4.3 | Low/Medium |
 
 ---
 

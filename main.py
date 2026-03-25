@@ -130,9 +130,11 @@ Examples:
         help="Custom payloads YAML file (see config/default_payloads.yaml for format)",
     )
     _ALL_CHECKS = [
-        "sqli", "xss", "dom_xss", "os", "path_traversal",
+        "sqli", "xss", "dom_xss", "stored_xss", "os", "path_traversal",
         "session", "csrf", "header_injection", "mail_header",
         "clickjacking", "open_redirect", "ssti", "privesc",
+        "cors", "info_disclosure", "host_header", "security_headers",
+        "file_upload", "nosql", "deserialization", "request_smuggling",
     ]
     _default_checks = _CFG.get("checks", ["sqli", "xss", "os"])
     scan.add_argument(
@@ -345,6 +347,47 @@ Examples:
     _ac_group.add_argument(
         "--no-auto-config", action="store_true", default=not _ac_default,
         help="Disable the auto-config wizard (default).",
+    )
+
+    # triage subcommand
+    triage = sub.add_parser(
+        "triage",
+        help="Fast vulnerability assessment: crawl and analyse page structure without sending payloads",
+    )
+    triage.add_argument("url", help="Target URL")
+    triage.add_argument(
+        "--depth", "-d", type=int, default=_CFG.get("depth", 2), metavar="N",
+        help=f"Crawl depth (default: {_CFG.get('depth', 2)})",
+    )
+    triage.add_argument(
+        "--headless", action="store_true", default=True,
+        help="Run browser in headless mode (default: true for triage)",
+    )
+    triage.add_argument(
+        "--proxy", metavar="URL", default=_CFG.get("proxy", ""),
+        help="HTTP proxy URL",
+    )
+    triage.add_argument(
+        "--timeout", type=int, default=_CFG.get("timeout", 20), metavar="SECS",
+        help=f"Page load timeout in seconds (default: {_CFG.get('timeout', 20)})",
+    )
+    triage.add_argument(
+        "--llm", choices=["ollama", "claude", "openai", "gemini", "none"],
+        default=_CFG.get("llm_provider", "none"),
+        help="LLM provider for AI attack-strategy insights (default: none)",
+    )
+    triage.add_argument(
+        "--ollama-model", default=_CFG.get("ollama_model", "llama3"), metavar="MODEL",
+    )
+    triage.add_argument(
+        "--openai-model", default=_CFG.get("openai_model", "gpt-4o-mini"), metavar="MODEL",
+    )
+    triage.add_argument(
+        "--gemini-model", default=_CFG.get("gemini_model", "gemini-2.0-flash"), metavar="MODEL",
+    )
+    triage.add_argument(
+        "--output", "-o", metavar="FILE",
+        help="Save triage report as JSON to this file path",
     )
 
     # A-4: Natural language setup subcommand
@@ -585,6 +628,48 @@ async def run_scan(args):
     )
 
 
+async def run_triage(args):
+    """Triage mode — fast structural analysis without payload injection."""
+    from rich.console import Console
+    from rich.panel import Panel
+    console = Console()
+
+    console.print(Panel.fit(
+        f"[bold cyan]WScan Triage Mode[/bold cyan]\n"
+        f"Target  : [yellow]{args.url}[/yellow]\n"
+        f"Depth   : [blue]{args.depth}[/blue]   "
+        f"LLM: [blue]{args.llm}[/blue]\n"
+        "[dim]No payloads will be sent — structural and header analysis only[/dim]",
+        border_style="cyan",
+    ))
+
+    from wscan.triage import TriageEngine, render_triage_report
+
+    engine = TriageEngine(
+        url=args.url,
+        depth=args.depth,
+        headless=getattr(args, "headless", True),
+        proxy=getattr(args, "proxy", "") or "",
+        timeout=getattr(args, "timeout", 20),
+        llm_provider=getattr(args, "llm", "none"),
+        ollama_model=getattr(args, "ollama_model", "llama3"),
+        openai_model=getattr(args, "openai_model", "gpt-4o-mini"),
+        gemini_model=getattr(args, "gemini_model", "gemini-2.0-flash"),
+    )
+
+    report = await engine.run()
+    render_triage_report(report, console)
+
+    # Optional JSON output
+    output_file = getattr(args, "output", None)
+    if output_file:
+        Path(output_file).write_text(
+            __import__("json").dumps(report.to_dict(), ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        console.print(f"\n[green]Triage report saved:[/green] {output_file}")
+
+
 async def run_setup(args):
     """A-4: Natural language scan configuration assistant."""
     from rich.console import Console
@@ -675,6 +760,8 @@ def main():
     try:
         if args.command == "setup":
             asyncio.run(run_setup(args))
+        elif args.command == "triage":
+            asyncio.run(run_triage(args))
         else:
             asyncio.run(run_scan(args))
     except KeyboardInterrupt:
