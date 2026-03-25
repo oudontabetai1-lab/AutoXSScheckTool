@@ -89,7 +89,7 @@ class StoredXSSScanner(BaseScanner):
             return []
 
         try:
-            source = await self.browser._page.content()
+            source = await self.browser.page.content()
         except Exception:
             return []
 

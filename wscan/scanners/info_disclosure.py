@@ -220,7 +220,7 @@ class InfoDisclosureScanner(BaseScanner):
     async def _check_error_page(self, url: str) -> list[Finding]:
         """Check current page HTML for verbose error / stack trace patterns."""
         try:
-            source = await self.browser._page.content()
+            source = await self.browser.page.content()
         except Exception:
             return []
 

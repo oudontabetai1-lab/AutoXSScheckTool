@@ -189,7 +189,7 @@ class FileUploadScanner(BaseScanner):
         """
         try:
             # Get the form's action URL from Playwright
-            action = await self.browser._page.eval_on_selector(
+            action = await self.browser.page.eval_on_selector(
                 f"form:nth-of-type({form_index + 1})",
                 "el => el.action || el.getAttribute('action') || ''",
             )
@@ -197,7 +197,7 @@ class FileUploadScanner(BaseScanner):
             action_url = urljoin(url, action) if action else url
 
             # Get other form fields to include in the submission
-            other_fields = await self.browser._page.eval_on_selector_all(
+            other_fields = await self.browser.page.eval_on_selector_all(
                 f"form:nth-of-type({form_index + 1}) input:not([type=file]), "
                 f"form:nth-of-type({form_index + 1}) select, "
                 f"form:nth-of-type({form_index + 1}) textarea",

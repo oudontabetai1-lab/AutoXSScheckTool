@@ -334,6 +334,14 @@ Examples:
         default=not _CFG.get("sitemap_crawl", True),
         help="Disable sitemap.xml / robots.txt crawl seeding.",
     )
+    scan.add_argument(
+        "--concurrency", "-j", type=int, default=1, metavar="N",
+        help=(
+            "Number of parallel browser workers for Phase 3 (default: 1 = serial). "
+            "Each worker gets its own Playwright page so N pages are attacked simultaneously. "
+            "Recommended range: 2-4. Higher values increase speed but also server load."
+        ),
+    )
     # Auto-config wizard
     _ac_default = _CFG.get("auto_config", False)
     _ac_group = scan.add_mutually_exclusive_group()
@@ -444,6 +452,12 @@ async def run_scan(args):
 
     checks_display = ', '.join(args.checks) if args.checks else "all IPA checks"
     planner_display = "off" if getattr(args, "no_planner", False) else "on (AI-driven)"
+    concurrency_val = getattr(args, "concurrency", 1)
+    concurrency_display = (
+        f"[bold green]{concurrency_val} workers[/bold green]"
+        if concurrency_val > 1
+        else "[dim]serial[/dim]"
+    )
     console.print(Panel.fit(
         f"[bold cyan]WScan - Web Security Scanner[/bold cyan]\n"
         f"Target   : [yellow]{args.url}[/yellow]\n"
@@ -451,7 +465,8 @@ async def run_scan(args):
         f"Planner  : [cyan]{planner_display}[/cyan]\n"
         f"Depth    : [blue]{args.depth}[/blue]   "
         f"LLM: [blue]{args.llm}[/blue]   "
-        f"Headless: [blue]{args.headless}[/blue]\n"
+        f"Headless: [blue]{args.headless}[/blue]   "
+        f"Workers: {concurrency_display}\n"
         + _llm_model_display(args),
         border_style="cyan",
     ))
@@ -565,6 +580,7 @@ async def run_scan(args):
             enable_waf_detection=not getattr(args, "no_waf_detection", False),
             enable_payload_learning=not getattr(args, "no_payload_learning", False),
             enable_sitemap_crawl=not getattr(args, "no_sitemap_crawl", False),
+            concurrency=getattr(args, "concurrency", 1),
         )
 
     if args.no_monitor:
