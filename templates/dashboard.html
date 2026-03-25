@@ -511,6 +511,19 @@ body {
   <button class="ib-btn" onclick="toggleManualPayload()" title="手動ペイロード実行パネルを開く" style="margin-left:auto;background:rgba(56,139,253,0.15);color:var(--accent);border-color:var(--accent)">🎯 手動実行</button>
 </div>
 
+<!-- ─── Scan Config Info Bar ────────────────────────────────── -->
+<div id="scanConfigBar" style="
+  display:none; background:var(--surface2); border-bottom:1px solid var(--border);
+  padding:4px 16px; font-size:0.72rem; color:var(--text-muted);
+  display:flex; gap:16px; align-items:center; flex-wrap:wrap;
+">
+  <span>🎯 <span id="cfgUrl" style="color:var(--accent)">—</span></span>
+  <span>Depth: <strong id="cfgDepth">—</strong></span>
+  <span>Workers: <strong id="cfgWorkers">—</strong></span>
+  <span>Timeout: <strong id="cfgTimeout">—</strong>s</span>
+  <span>Checks (<strong id="cfgCheckCount">0</strong>): <span id="cfgChecks" style="color:var(--text)">—</span></span>
+</div>
+
 <!-- ─── Progress ───────────────────────────────────────────── -->
 <div class="progress-bar-wrapper" style="height:4px;position:relative">
   <div class="progress-bar" id="progressBar" style="transition:width 0.5s ease;position:relative;overflow:hidden">
@@ -550,10 +563,8 @@ body {
       <div class="ct-label">Current Test</div>
       <div class="ct-field" id="ctField">—</div>
       <div class="ct-payload" id="ctPayload">—</div>
-      <div class="check-badges">
-        <span class="check-badge" id="badgeSqli">SQLi</span>
-        <span class="check-badge" id="badgeXss">XSS</span>
-        <span class="check-badge" id="badgeOs">OS</span>
+      <div class="check-badges" id="checkBadges">
+        <!-- Dynamically populated from scan_config event -->
       </div>
     </div>
   </div>
@@ -716,15 +727,37 @@ function handleEvent(event) {
       addEventLog('page', `Scanning: ${data.url}`);
       break;
 
+    case 'scan_config': {
+      // Populate dynamic check badges
+      const badgesEl = document.getElementById('checkBadges');
+      badgesEl.innerHTML = '';
+      (data.checks || []).forEach(c => {
+        const span = document.createElement('span');
+        span.className = 'check-badge';
+        span.id = 'badge_' + c;
+        span.textContent = c.toUpperCase().replace(/_/g, ' ');
+        badgesEl.appendChild(span);
+      });
+      // Show config bar
+      const bar = document.getElementById('scanConfigBar');
+      bar.style.display = 'flex';
+      document.getElementById('cfgUrl').textContent = data.url || '—';
+      document.getElementById('cfgDepth').textContent = data.depth ?? '—';
+      document.getElementById('cfgWorkers').textContent = data.concurrency ?? '—';
+      document.getElementById('cfgTimeout').textContent = data.timeout ?? '—';
+      document.getElementById('cfgCheckCount').textContent = (data.checks || []).length;
+      document.getElementById('cfgChecks').textContent = (data.checks || []).join(', ');
+      break;
+    }
+
     case 'payload_test':
       state.testCount++;
       document.getElementById('statTests').textContent = state.testCount;
       document.getElementById('ctField').textContent = data.field;
       document.getElementById('ctPayload').textContent = data.payload;
-      // Highlight active check
-      ['sqli','xss','os'].forEach(c => {
-        document.getElementById('badge' + c.charAt(0).toUpperCase() + c.slice(1)).className =
-          'check-badge' + (c === data.check_type ? ' active' : '');
+      // Highlight active check badge (dynamic)
+      document.querySelectorAll('#checkBadges .check-badge').forEach(b => {
+        b.className = 'check-badge' + (b.id === 'badge_' + data.check_type ? ' active' : '');
       });
       addEventLog('payload', `[${data.check_type.toUpperCase()}] ${data.field}: ${data.payload.substring(0,50)}`);
       break;

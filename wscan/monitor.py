@@ -137,6 +137,23 @@ class MonitorServer:
     async def emit_response(self, resp: dict):
         await self.emit("response", resp)
 
+    async def emit_scan_config(
+        self,
+        url: str,
+        checks: list,
+        depth: int,
+        concurrency: int,
+        timeout: int,
+    ):
+        """Send scan configuration to the dashboard so it can render dynamic badges."""
+        await self.emit("scan_config", {
+            "url": url,
+            "checks": checks,
+            "depth": depth,
+            "concurrency": concurrency,
+            "timeout": timeout,
+        })
+
     async def emit_page_start(self, url: str):
         await self.emit("page_start", {"url": url})
 
@@ -172,10 +189,18 @@ class MonitorServer:
     # Blocking wait helpers (called from engine coroutine)
     # ------------------------------------------------------------------
 
-    async def wait_for_plan_confirm(self) -> dict:
+    async def wait_for_plan_confirm(self, timeout: float = 600.0) -> dict:
         """
         Block until the operator clicks 'Start Attack' in the web UI.
+        Auto-confirms with no edits after `timeout` seconds so the scan
+        never hangs when no dashboard client is connected.
         Returns the edits dict (may be empty if no changes were made).
         """
-        await self.plan_confirm_event.wait()
+        try:
+            await asyncio.wait_for(
+                asyncio.shield(self.plan_confirm_event.wait()),
+                timeout=timeout,
+            )
+        except asyncio.TimeoutError:
+            pass  # auto-confirm
         return self.confirmed_plan_edits

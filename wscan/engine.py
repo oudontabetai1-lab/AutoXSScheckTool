@@ -343,6 +343,13 @@ class ScanEngine:
         """4-phase scan pipeline."""
         if self.monitor:
             await self.monitor.emit_status(f"Starting scan of {self.target_url}", "running")
+            await self.monitor.emit_scan_config(
+                url=self.target_url,
+                checks=self.checks,
+                depth=self.depth,
+                concurrency=self.concurrency,
+                timeout=self.timeout,
+            )
 
         loop = asyncio.get_event_loop()
         self.controller.start(loop, monitor=self.monitor)
@@ -503,7 +510,7 @@ class ScanEngine:
             for su in sitemap_urls[:30]:  # cap at 30 seed URLs
                 if su not in self.visited_urls:
                     self.visited_urls.add(su)
-                    queue.append((su, 1, self.target_url))
+                    queue.append((su, 0, self.target_url))  # depth=0: treat as root-level
 
         while queue:
             url, depth, parent_url = queue.popleft()
@@ -570,10 +577,11 @@ class ScanEngine:
 
             if depth < self.depth:
                 links = await self.browser.collect_links(url, same_domain=True)
+                url_cap = max(200, self.depth * 50)
                 for link in links:
                     clean = link.split("#")[0].split("?")[0]
                     if (clean not in self.visited_urls
-                            and len(self.visited_urls) < 50
+                            and len(self.visited_urls) < url_cap
                             and not self._is_url_excluded(clean)):
                         self.visited_urls.add(clean)
                         queue.append((link, depth + 1, url))
@@ -610,17 +618,31 @@ class ScanEngine:
                 plans = self._generate_heuristic_plans_for_pages(pages)
                 if plans:
                     self.attack_plans = list(plans.values())
-                    self._interactive_plan_editor(plans)
                     self._print_all_plans(plans)
                     console.print()
-                    console.print(
-                        "[bold]  手動プランが完成しました。[/bold] "
-                        "[green]Enter[/green] で攻撃開始、[red]Ctrl+C[/red] で中断。"
-                    )
-                    try:
-                        await asyncio.get_event_loop().run_in_executor(None, input, "  → ")
-                    except (KeyboardInterrupt, EOFError):
-                        raise SystemExit("\nAborted by user.")
+                    if self.monitor:
+                        # Dashboard mode: send plans to web UI for review
+                        console.print(
+                            "  [bold cyan][Web Dashboard][/bold cyan] "
+                            "プラン確認モーダルが開きます。ダッシュボードで確認後に攻撃を開始してください。"
+                        )
+                        plans_data = self._serialize_plans(plans)
+                        await self.monitor.emit_plan_review(plans_data)
+                        edits = await self.monitor.wait_for_plan_confirm()
+                        if edits:
+                            self._apply_plan_edits(plans, edits)
+                            console.print("  [dim]プラン編集が適用されました。[/dim]")
+                    else:
+                        # Terminal fallback: interactive CUI editor
+                        self._interactive_plan_editor(plans)
+                        console.print(
+                            "[bold]  手動プランが完成しました。[/bold] "
+                            "[green]Enter[/green] で攻撃開始、[red]Ctrl+C[/red] で中断。"
+                        )
+                        try:
+                            await asyncio.get_event_loop().run_in_executor(None, input, "  → ")
+                        except (KeyboardInterrupt, EOFError):
+                            raise SystemExit("\nAborted by user.")
             else:
                 console.print("  [dim]Planner disabled — all checks will run on every field.[/dim]")
             return plans
@@ -1029,8 +1051,15 @@ class ScanEngine:
         for p in pages:
             await page_queue.put(p)
 
+        # Shared abort signal — any worker that catches AbortScan sets this
+        # so that other workers stop starting new pages.
+        _abort_event = asyncio.Event()
+        tasks: list = []  # populated below; referenced inside worker_loop
+
         async def worker_loop():
             while True:
+                if _abort_event.is_set():
+                    return
                 try:
                     page = page_queue.get_nowait()
                 except asyncio.QueueEmpty:
@@ -1038,6 +1067,7 @@ class ScanEngine:
 
                 worker_browser = await worker_pool.get()
                 token = _CURRENT_WORKER.set(worker_browser)
+                skip_this_page = False
                 try:
                     try:
                         await self.controller.checkpoint()
@@ -1045,9 +1075,11 @@ class ScanEngine:
                         console.print(
                             f"  [yellow][Intervention] Skipping page: {page.url}[/yellow]"
                         )
-                        return
-                    await self._attack_one_page(page, plans)
+                        skip_this_page = True
+                    if not skip_this_page:
+                        await self._attack_one_page(page, plans)
                 except AbortScan:
+                    _abort_event.set()
                     raise
                 except Exception as exc:
                     console.print(f"  [yellow][Worker] Error on {page.url}: {exc}[/yellow]")
@@ -1057,12 +1089,18 @@ class ScanEngine:
                     page_queue.task_done()
 
         n_slots = 1 + len(extra_workers)
-        tasks = [asyncio.create_task(worker_loop()) for _ in range(n_slots)]
+        tasks[:] = [asyncio.create_task(worker_loop()) for _ in range(n_slots)]
         try:
-            await asyncio.gather(*tasks)
+            # return_exceptions=True so one AbortScan doesn't cancel other tasks mid-page;
+            # they will exit cleanly at the top-of-loop _abort_event check.
+            results = await asyncio.gather(*tasks, return_exceptions=True)
         finally:
             for w in extra_workers:
                 await w.close()
+
+        # Propagate AbortScan to the caller (_phase_attack → run)
+        if _abort_event.is_set():
+            raise AbortScan()
 
     # ── Single-page attack (shared by serial and concurrent modes) ────────
 
