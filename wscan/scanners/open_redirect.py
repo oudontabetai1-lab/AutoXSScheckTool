@@ -23,6 +23,12 @@ REDIRECT_PARAM_NAMES = {
     "url", "forward", "goto", "target", "dest", "destination",
     "redir", "continue", "ref", "callback", "back", "location",
     "jump", "link",
+    # Additional common names
+    "endpoint", "service", "webhook", "callback_url", "logout_url",
+    "error_page", "api", "jump_to", "redirect_uri", "post_login_redirect",
+    "success_url", "failure_url", "cancel_url", "after_login", "after_logout",
+    "from", "from_url", "origin", "referrer", "referer", "path",
+    "out", "go", "view", "page", "site", "host",
 }
 
 # External domain used in payloads — chosen to be distinctive and harmless

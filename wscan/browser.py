@@ -86,12 +86,14 @@ class BrowserManager:
         monitor=None,
         auth_user: str = "",
         auth_pass: str = "",
+        proxy: str = "",
     ):
         self.headless = headless
         self.timeout = timeout * 1000  # ms
         self.monitor = monitor
         self.auth_user = auth_user
         self.auth_pass = auth_pass
+        self.proxy = proxy  # e.g. "http://127.0.0.1:8080"
         self._playwright = None
         self._browser: Optional[Browser] = None
         self._context: Optional[BrowserContext] = None
@@ -104,15 +106,19 @@ class BrowserManager:
     async def init(self):
         """Launch browser and create page."""
         self._playwright = await async_playwright().start()
-        self._browser = await self._playwright.chromium.launch(
-            headless=self.headless,
-            args=["--disable-web-security", "--disable-features=IsolateOrigins"],
-        )
-        self._context = await self._browser.new_context(
-            viewport={"width": 1280, "height": 800},
-            ignore_https_errors=True,
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        )
+        launch_args = ["--disable-web-security", "--disable-features=IsolateOrigins"]
+        launch_kwargs: dict = {"headless": self.headless, "args": launch_args}
+        if self.proxy:
+            launch_kwargs["proxy"] = {"server": self.proxy}
+        self._browser = await self._playwright.chromium.launch(**launch_kwargs)
+        ctx_kwargs: dict = {
+            "viewport": {"width": 1280, "height": 800},
+            "ignore_https_errors": True,
+            "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        }
+        if self.proxy:
+            ctx_kwargs["proxy"] = {"server": self.proxy}
+        self._context = await self._browser.new_context(**ctx_kwargs)
         self.page = await self._context.new_page()
         self.page.set_default_timeout(self.timeout)
 
@@ -301,8 +307,8 @@ class BrowserManager:
                     allInputs.forEach(el => {
                         if (el.type === 'checkbox' || el.type === 'radio' || el.type === 'hidden') return;
                         if (el.tagName === 'SELECT') {
-                            // Pick first non-empty option
-                            const opts = Array.from(el.options).filter(o => o.value && o.value !== '0');
+                            // Pick first non-empty option (value="" is empty; "0" is valid)
+                            const opts = Array.from(el.options).filter(o => o.value !== '');
                             if (opts.length) { el.value = opts[0].value; dispatchEvents(el); }
                             return;
                         }
@@ -324,6 +330,11 @@ class BrowserManager:
                 """,
                 [form_index, field_name, payload, safe_values or {}, self.auth_user, self.auth_pass],
             )
+
+            # Check whether the form was found before attempting submit
+            if not result or not result.get("success"):
+                source = await self.get_page_source()
+                return source, {}
 
             # Submit the form
             submit_btn = await self.page.query_selector(
@@ -417,7 +428,7 @@ class BrowserManager:
                     allInputs.forEach(el => {
                         if (el.type === 'checkbox' || el.type === 'radio' || el.type === 'hidden') return;
                         if (el.tagName === 'SELECT') {
-                            const opts = Array.from(el.options).filter(o => o.value && o.value !== '0');
+                            const opts = Array.from(el.options).filter(o => o.value !== '');
                             if (opts.length) { el.value = opts[0].value; dispatchEvents(el); }
                             return;
                         }
@@ -541,6 +552,65 @@ class BrowserManager:
             })
         if normalized:
             await self._context.add_cookies(normalized)
+
+    async def auto_login(
+        self,
+        login_url: str,
+        user_field: str = "username",
+        pass_field: str = "password",
+        success_indicator: str = "",
+    ) -> bool:
+        """
+        Navigate to *login_url*, fill *user_field* / *pass_field* with
+        self.auth_user / self.auth_pass, submit the form, and return True
+        if login appears successful.
+
+        *success_indicator*: substring expected in the post-login URL or
+        page body to confirm success (e.g. '/dashboard').  If empty, the
+        method returns True as long as the URL changed after submission.
+        """
+        if not self.auth_user or not self.auth_pass:
+            return False
+        try:
+            await self.navigate(login_url)
+            await self.page.evaluate(
+                """([userField, passField, user, pw]) => {
+                    function _fill(sel, val) {
+                        const el = document.querySelector(
+                            `[name="${sel}"],[id="${sel}"]`
+                        );
+                        if (!el) return false;
+                        el.value = val;
+                        ['input','change','blur'].forEach(e =>
+                            el.dispatchEvent(new Event(e, {bubbles:true}))
+                        );
+                        return true;
+                    }
+                    _fill(userField, user);
+                    _fill(passField, pw);
+                }""",
+                [user_field, pass_field, self.auth_user, self.auth_pass],
+            )
+            # Submit the form that contains the user field
+            await self.page.evaluate(
+                """([userField]) => {
+                    const el = document.querySelector(`[name="${userField}"],[id="${userField}"]`);
+                    if (el) {
+                        const form = el.closest('form');
+                        if (form) form.submit();
+                    }
+                }""",
+                [user_field],
+            )
+            await self.page.wait_for_load_state("domcontentloaded", timeout=15000)
+            post_url = self.page.url
+            post_body = await self.get_page_source()
+            if success_indicator:
+                return success_indicator in post_url or success_indicator in post_body
+            # Heuristic: no longer on the login URL → success
+            return post_url.rstrip("/") != login_url.rstrip("/")
+        except Exception:
+            return False
 
     async def close(self):
         """Close browser and playwright."""

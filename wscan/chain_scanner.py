@@ -15,7 +15,7 @@ Phase 3c — runs AFTER all individual field scans have completed:
        a. JS alert dialog fired → the probe executed (Stored XSS)
        b. Unencoded probe marker in HTML → HTML injection / content injection
           (injected content rendered without escaping → potential XSS vector)
-       c. Rendered template output (for SSTI chain): "49wscanchain_UID"
+       c. Rendered template output (for SSTI chain): "49wscc_UID"
 
   Findings are tagged with "[ChainDetect]" and include both the injection source
   (URL + field) and the page where the payload triggered.
@@ -63,9 +63,9 @@ _HTML_PROBE_TMPL = (
     '<span id="wscc_{uid}" style="display:none">wscanchain_{uid}</span>'
 )
 
-# SSTI probe: most template engines evaluate {{7*7}} → 49.
-# We embed the UID so partial matches don't collide.
-_SSTI_PROBE_TMPL = "{{7*'wscc_{uid}'}}%{{7*'wscc_{uid}'}}"
+# SSTI probe: Jinja2/Twig evaluate {{7*7}} → 49.
+# Appending the UID makes the expected output unique: "49wscc_{uid}".
+_SSTI_PROBE_TMPL = "{{7*7}}wscc_{uid}"
 
 # Keywords that suggest a field stores user-visible content
 _CONTENT_FIELD_HINTS = {
@@ -328,8 +328,8 @@ class ChainScanner:
                             break
 
                 elif probe.probe_type == "ssti":
-                    # SSTI: {{7*'uid'}} → 49 if Jinja2, or uid repeated 7 times
-                    if f"49wscc_{uid}" in html or (uid * 7) in html:
+                    # SSTI: {{7*7}}wscc_{uid} → "49wscc_{uid}" if Jinja2/Twig evaluates
+                    if f"49wscc_{uid}" in html:
                         cf = await self._make_ssti_chain_finding(
                             probe=probe,
                             trigger_url=page.url,

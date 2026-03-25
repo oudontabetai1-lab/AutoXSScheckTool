@@ -6,7 +6,7 @@ import asyncio
 import json
 import time
 from pathlib import Path
-from typing import Set, Any
+from typing import Set, Any, Optional
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
@@ -27,6 +27,16 @@ class MonitorServer:
         self._started = False
         self.event_history: list[dict] = []
 
+        # ── Intervention / plan-confirm channels ──────────────────────
+        # Commands arriving from the web UI (pause / resume / skip_field / skip_page / abort)
+        self.command_queue: asyncio.Queue = asyncio.Queue()
+        # Set when the operator clicks "Start Attack" in the plan review modal
+        self.plan_confirm_event: asyncio.Event = asyncio.Event()
+        # Plan edits returned by the operator (field overrides sent from web UI)
+        self.confirmed_plan_edits: dict = {}   # {url: {field_name: {risk, checks, payloads}}}
+        # U-3: Manual payload requests from web UI
+        self.manual_payload_queue: asyncio.Queue = asyncio.Queue()
+
     def _create_app(self) -> FastAPI:
         app = FastAPI(title="WScan Monitor", docs_url=None, redoc_url=None)
 
@@ -45,10 +55,11 @@ class MonitorServer:
             try:
                 for event in self.event_history[-200:]:
                     await ws.send_text(json.dumps(event))
-                # Keep connection alive and receive messages
+                # Keep connection alive and process incoming messages
                 while True:
                     try:
-                        await asyncio.wait_for(ws.receive_text(), timeout=30)
+                        raw = await asyncio.wait_for(ws.receive_text(), timeout=30)
+                        self._handle_client_message(raw)
                     except asyncio.TimeoutError:
                         # Send ping to keep alive
                         await ws.send_text(json.dumps({"type": "ping"}))
@@ -63,6 +74,38 @@ class MonitorServer:
 
         return app
 
+    # ------------------------------------------------------------------
+    # Client message handler (called from WebSocket coroutine)
+    # ------------------------------------------------------------------
+
+    def _handle_client_message(self, raw: str) -> None:
+        """Parse and dispatch a JSON message sent from the browser."""
+        try:
+            msg = json.loads(raw)
+        except Exception:
+            return
+
+        action = msg.get("action", "")
+
+        if action == "intervention":
+            # e.g. {"action": "intervention", "command": "pause"}
+            cmd = msg.get("command", "")
+            if cmd:
+                self.command_queue.put_nowait(cmd)
+
+        elif action == "plan_confirm":
+            # e.g. {"action": "plan_confirm", "edits": { url: {field: {risk, checks}} }}
+            self.confirmed_plan_edits = msg.get("edits", {})
+            self.plan_confirm_event.set()
+
+        elif action == "manual_payload":
+            # U-3: {"action": "manual_payload", "url": ..., "field": ..., "payload": ..., "check_type": ...}
+            self.manual_payload_queue.put_nowait(msg)
+
+    # ------------------------------------------------------------------
+    # Broadcast helpers
+    # ------------------------------------------------------------------
+
     async def emit(self, event_type: str, data: Any = None):
         """Send an event to all connected monitoring clients."""
         event = {
@@ -71,7 +114,6 @@ class MonitorServer:
             "data": data or {},
         }
         self.event_history.append(event)
-        # Broadcast to all clients
         dead = set()
         for client in list(self.clients):
             try:
@@ -81,31 +123,24 @@ class MonitorServer:
         self.clients -= dead
 
     async def emit_status(self, message: str, state: str = "running"):
-        """Emit a status update."""
         await self.emit("status", {"message": message, "state": state})
 
     async def emit_finding(self, finding: dict):
-        """Emit a vulnerability finding."""
         await self.emit("finding", finding)
 
     async def emit_screenshot(self, screenshot_b64: str, label: str = ""):
-        """Emit a screenshot (base64 encoded PNG)."""
         await self.emit("screenshot", {"image": screenshot_b64, "label": label})
 
     async def emit_request(self, req: dict):
-        """Emit an HTTP request."""
         await self.emit("request", req)
 
     async def emit_response(self, resp: dict):
-        """Emit an HTTP response."""
         await self.emit("response", resp)
 
     async def emit_page_start(self, url: str):
-        """Emit page scan start."""
         await self.emit("page_start", {"url": url})
 
     async def emit_payload_test(self, field: str, payload: str, check_type: str):
-        """Emit payload test event."""
         await self.emit("payload_test", {
             "field": field,
             "payload": payload,
@@ -113,10 +148,34 @@ class MonitorServer:
         })
 
     async def emit_progress(self, current: int, total: int, message: str = ""):
-        """Emit progress update."""
         await self.emit("progress", {
             "current": current,
             "total": total,
             "percent": int(current / total * 100) if total > 0 else 0,
             "message": message,
         })
+
+    async def emit_plan_review(self, plans_data: list):
+        """
+        Send plan data to the dashboard for operator review/edit.
+        The dashboard will show the plan modal and wait for the operator
+        to click 'Start Attack'.
+        """
+        self.plan_confirm_event.clear()
+        await self.emit("plan_review", {"plans": plans_data})
+
+    async def emit_intervention_state(self, paused: bool):
+        """Tell the dashboard whether the scan is paused."""
+        await self.emit("intervention_state", {"paused": paused})
+
+    # ------------------------------------------------------------------
+    # Blocking wait helpers (called from engine coroutine)
+    # ------------------------------------------------------------------
+
+    async def wait_for_plan_confirm(self) -> dict:
+        """
+        Block until the operator clicks 'Start Attack' in the web UI.
+        Returns the edits dict (may be empty if no changes were made).
+        """
+        await self.plan_confirm_event.wait()
+        return self.confirmed_plan_edits

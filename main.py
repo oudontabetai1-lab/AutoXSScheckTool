@@ -19,6 +19,91 @@ from pathlib import Path
 # Ensure the wscan package is importable
 sys.path.insert(0, str(Path(__file__).parent))
 
+# ──────────────────────────────────────────────────────────────────
+# Config file loader (config/wscan.yaml)
+# ──────────────────────────────────────────────────────────────────
+_CONFIG_PATH = Path(__file__).parent / "config" / "wscan.yaml"
+
+
+def _load_config(path: Path = _CONFIG_PATH) -> dict:
+    """
+    Load config/wscan.yaml and return a flat dict of resolved values.
+    Returns defaults silently if the file is missing or unparseable.
+    """
+    cfg: dict = {}
+    if not path.exists():
+        return cfg
+    try:
+        import yaml
+        raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except Exception:
+        return cfg
+
+    # ── Flatten into a single namespace ──────────────────────────
+    s   = raw.get("scan",     {})
+    b   = raw.get("browser",  {})
+    l   = raw.get("llm",      {})
+    m   = raw.get("monitor",  {})
+    pl  = raw.get("planner",  {})
+    a   = raw.get("auth",     {})
+    f   = raw.get("features", {})
+    le  = raw.get("learning", {})
+    ct  = raw.get("ctf",      {})
+    o   = raw.get("output",   {})
+
+    cfg["checks"]                  = s.get("checks",    ["sqli", "xss", "os"])
+    cfg["depth"]                   = int(s.get("depth",     2))
+    cfg["max_forms"]               = int(s.get("max_forms", 50))
+    cfg["timeout"]                 = int(s.get("timeout",   30))
+    cfg["exclude_fields"]          = list(s.get("exclude_fields", []))
+    cfg["exclude_urls"]            = list(s.get("exclude_urls",   []))
+
+    cfg["headless"]                = bool(b.get("headless", False))
+    cfg["proxy"]                   = str(b.get("proxy", "") or "")
+
+    cfg["llm_provider"]            = str(l.get("provider",     "ollama"))
+    cfg["ollama_model"]            = str(l.get("ollama_model", "llama3"))
+    cfg["ollama_url"]              = str(l.get("ollama_url",   "http://localhost:11434"))
+    cfg["openai_model"]            = str(l.get("openai_model", "gpt-4o-mini"))
+    cfg["gemini_model"]            = str(l.get("gemini_model", "gemini-2.0-flash"))
+
+    cfg["monitor_enabled"]         = bool(m.get("enabled", True))
+    cfg["port"]                    = int(m.get("port", 8765))
+
+    cfg["use_planner"]             = bool(pl.get("enabled",     True))
+    cfg["interactive_plan"]        = bool(pl.get("interactive", False))
+
+    cfg["login_url"]               = str(a.get("login_url",               "") or "")
+    cfg["login_user_field"]        = str(a.get("login_user_field",        "username"))
+    cfg["login_pass_field"]        = str(a.get("login_pass_field",        "password"))
+    cfg["login_success_indicator"] = str(a.get("login_success_indicator", "") or "")
+    cfg["auth_user"]               = str(a.get("auth_user", "") or "")
+    cfg["auth_pass"]               = str(a.get("auth_pass", "") or "")
+
+    cfg["dom_xss"]                 = bool(f.get("dom_xss",          False))
+    cfg["ai_analysis"]             = bool(f.get("ai_analysis",      True))
+    cfg["waf_detection"]           = bool(f.get("waf_detection",    True))
+    cfg["payload_learning"]        = bool(f.get("payload_learning", True))
+    cfg["sitemap_crawl"]           = bool(f.get("sitemap_crawl",    True))
+    cfg["cvss_scores"]             = bool(f.get("cvss_scores",      True))
+    cfg["skip_registration"]       = bool(f.get("skip_registration", True))
+    cfg["open_report"]             = bool(f.get("open_report",      True))
+    cfg["auto_config"]             = bool(f.get("auto_config",      False))
+
+    cfg["learning_file"]           = str(le.get("file", "") or "")
+
+    cfg["ctf_mode"]                = bool(ct.get("enabled",      False))
+    cfg["ctf_flag_pattern"]        = str(ct.get("flag_pattern",  "") or "")
+
+    cfg["output_dir"]              = str(o.get("dir",           "") or "")
+    cfg["payloads_file"]           = str(o.get("payloads_file", "") or "")
+
+    return cfg
+
+
+# Load once at import time so parse_args() can reference it
+_CFG = _load_config()
+
 
 def parse_args():
     parser = argparse.ArgumentParser(
@@ -41,75 +126,81 @@ Examples:
 
     scan.add_argument(
         "--payloads", "-p", metavar="FILE",
+        default=_CFG.get("payloads_file") or None,
         help="Custom payloads YAML file (see config/default_payloads.yaml for format)",
     )
     _ALL_CHECKS = [
-        "sqli", "xss", "os", "path_traversal",
+        "sqli", "xss", "dom_xss", "stored_xss", "os", "path_traversal",
         "session", "csrf", "header_injection", "mail_header",
         "clickjacking", "open_redirect", "ssti", "privesc",
+        "cors", "info_disclosure", "host_header", "security_headers",
+        "file_upload", "nosql", "deserialization", "request_smuggling",
     ]
+    _default_checks = _CFG.get("checks", ["sqli", "xss", "os"])
     scan.add_argument(
         "--checks", nargs="+",
         choices=_ALL_CHECKS,
-        default=["sqli", "xss", "os"],
+        default=_default_checks,
         metavar="CHECK",
         help=(
-            "Security checks to run (default: sqli xss os). "
+            f"Security checks to run (default from config: {' '.join(_default_checks)}). "
             "Available: " + ", ".join(_ALL_CHECKS)
         ),
     )
     scan.add_argument(
-        "--depth", "-d", type=int, default=2, metavar="N",
-        help="Crawl depth: how many links deep to follow (default: 2)",
+        "--depth", "-d", type=int, default=_CFG.get("depth", 2), metavar="N",
+        help=f"Crawl depth (default: {_CFG.get('depth', 2)})",
     )
     scan.add_argument(
-        "--headless", action="store_true",
+        "--headless", action="store_true", default=_CFG.get("headless", False),
         help="Run browser in headless mode (no visible window)",
     )
     scan.add_argument(
         "--no-monitor", action="store_true",
+        default=not _CFG.get("monitor_enabled", True),
         help="Disable the real-time monitoring dashboard",
     )
     scan.add_argument(
         "--llm",
         choices=["ollama", "claude", "openai", "gemini", "none"],
-        default="ollama",
+        default=_CFG.get("llm_provider", "ollama"),
         help=(
-            "LLM for context-aware payload generation (default: ollama). "
-            "openai requires OPENAI_API_KEY env var. "
-            "gemini requires GEMINI_API_KEY env var."
+            f"LLM for payload generation (default from config: {_CFG.get('llm_provider','ollama')}). "
+            "openai requires OPENAI_API_KEY. gemini requires GEMINI_API_KEY."
         ),
     )
     scan.add_argument(
-        "--ollama-model", default="llama3", metavar="MODEL",
-        help="Ollama model name (default: llama3)",
+        "--ollama-model", default=_CFG.get("ollama_model", "llama3"), metavar="MODEL",
+        help=f"Ollama model name (default: {_CFG.get('ollama_model','llama3')})",
     )
     scan.add_argument(
-        "--openai-model", default="gpt-4o-mini", metavar="MODEL",
-        help="OpenAI model name (default: gpt-4o-mini)",
+        "--openai-model", default=_CFG.get("openai_model", "gpt-4o-mini"), metavar="MODEL",
+        help=f"OpenAI model name (default: {_CFG.get('openai_model','gpt-4o-mini')})",
     )
     scan.add_argument(
-        "--gemini-model", default="gemini-2.0-flash", metavar="MODEL",
-        help="Google Gemini model name (default: gemini-2.0-flash)",
+        "--gemini-model", default=_CFG.get("gemini_model", "gemini-2.0-flash"), metavar="MODEL",
+        help=f"Google Gemini model name (default: {_CFG.get('gemini_model','gemini-2.0-flash')})",
     )
     scan.add_argument(
         "--output", "-o", metavar="DIR",
+        default=_CFG.get("output_dir") or None,
         help="Output directory for evidence and reports (default: output/<timestamp>)",
     )
     scan.add_argument(
-        "--port", type=int, default=8765,
-        help="Monitoring dashboard port (default: 8765)",
+        "--port", type=int, default=_CFG.get("port", 8765),
+        help=f"Monitoring dashboard port (default: {_CFG.get('port', 8765)})",
     )
     scan.add_argument(
-        "--timeout", type=int, default=30, metavar="SECS",
-        help="Request timeout in seconds (default: 30)",
+        "--timeout", type=int, default=_CFG.get("timeout", 30), metavar="SECS",
+        help=f"Request timeout in seconds (default: {_CFG.get('timeout', 30)})",
     )
     scan.add_argument(
-        "--max-forms", type=int, default=50, metavar="N",
-        help="Max forms to test per page (default: 50)",
+        "--max-forms", type=int, default=_CFG.get("max_forms", 50), metavar="N",
+        help=f"Max forms to test per page (default: {_CFG.get('max_forms', 50)})",
     )
     scan.add_argument(
-        "--exclude", "-e", nargs="+", metavar="PARAM", default=[],
+        "--exclude", "-e", nargs="+", metavar="PARAM",
+        default=_CFG.get("exclude_fields", []),
         help="Parameter/field names to skip (e.g. --exclude csrf_token __token)",
     )
     scan.add_argument(
@@ -120,16 +211,15 @@ Examples:
         "--exclude-urls-file", metavar="FILE",
         help=(
             "Text file with URLs/prefixes to skip during crawl and attack "
-            "(one entry per line, lines starting with # are ignored). "
-            "Prefix match: 'http://host/admin' skips all /admin/* URLs."
+            "(one entry per line, lines starting with # are ignored)."
         ),
     )
     scan.add_argument(
-        "--ctf", action="store_true",
+        "--ctf", action="store_true", default=_CFG.get("ctf_mode", False),
         help="CTF mode: adds SSTI scanner and halves sleep delays for faster scanning",
     )
     scan.add_argument(
-        "--ctf-flag-format", metavar="REGEX", default="",
+        "--ctf-flag-format", metavar="REGEX", default=_CFG.get("ctf_flag_pattern", ""),
         help=(
             "Regex pattern to search for CTF flags (default: auto-detect FLAG/CTF/HTB formats). "
             "Example: 'HTB{[^}]+}' or 'picoCTF{[^}]+}'"
@@ -143,59 +233,171 @@ Examples:
         "--cookie-file", metavar="FILE", default="",
         help=(
             "JSON file containing cookies from a successful login session "
-            "(browser export format: list of {name, value, domain, path, …} objects). "
-            "Overrides/augments --cookie. "
-            "Example: '[{\"name\":\"session\",\"value\":\"abc\",\"domain\":\"example.com\"}]'"
+            "(browser export format: list of {name, value, domain, path, …} objects)."
         ),
     )
     scan.add_argument(
         "--low-priv-cookies", metavar="COOKIES", default="",
         help=(
             "Cookie string for a low-privilege session used to test vertical "
-            "privilege escalation (e.g. 'session=lowprivtoken'). "
-            "The scanner will try to access high-privilege URLs with this session."
+            "privilege escalation (e.g. 'session=lowprivtoken')."
         ),
     )
     scan.add_argument(
         "--low-priv-cookie-file", metavar="FILE", default="",
-        help=(
-            "JSON file containing low-privilege session cookies "
-            "(same format as --cookie-file). "
-            "Used for vertical privilege escalation testing."
-        ),
+        help="JSON file containing low-privilege session cookies (same format as --cookie-file).",
     )
     scan.add_argument(
-        "--auth-user", metavar="USER", default="",
+        "--auth-user", metavar="USER", default=_CFG.get("auth_user", ""),
         help="Username/email for login form auto-fill",
     )
     scan.add_argument(
-        "--auth-pass", metavar="PASS", default="",
+        "--auth-pass", metavar="PASS", default=_CFG.get("auth_pass", ""),
         help="Password for login form auto-fill",
     )
     scan.add_argument(
         "--include-registration", action="store_true",
+        default=not _CFG.get("skip_registration", True),
         help=(
-            "Also test registration / sign-up forms (default: skipped). "
-            "By default the scanner skips forms and pages that look like "
-            "new-account creation (signup, register, 新規登録, etc.) to avoid "
-            "creating garbage accounts and sending unexpected emails."
+            "Also test registration / sign-up forms (config default: "
+            f"{'include' if not _CFG.get('skip_registration', True) else 'skip'})."
         ),
     )
     scan.add_argument(
         "--no-planner", action="store_true",
-        help=(
-            "Disable the AI attack planner. "
-            "Runs all checks on all fields without strategic prioritisation."
-        ),
+        default=not _CFG.get("use_planner", True),
+        help="Disable the AI attack planner.",
     )
     scan.add_argument(
         "--interactive-plan", action="store_true",
+        default=_CFG.get("interactive_plan", False),
+        help="Open the interactive plan editor before attacking.",
+    )
+    scan.add_argument(
+        "--no-open-report", action="store_true",
+        default=not _CFG.get("open_report", True),
+        help="Do not automatically open the HTML report after scanning.",
+    )
+    # CI-3: Proxy support
+    scan.add_argument(
+        "--proxy", metavar="URL", default=_CFG.get("proxy", ""),
         help=(
-            "After crawling, open the interactive plan editor to review and "
-            "adjust risk scores, checks, and payloads per field before attacking. "
-            "Enabled automatically when --llm none."
+            "HTTP proxy URL for all browser/HTTP requests "
+            "(e.g. http://127.0.0.1:8080 for Burp Suite / mitmproxy)."
         ),
     )
+    # Auth-1: Login automation
+    scan.add_argument(
+        "--login-url", metavar="URL", default=_CFG.get("login_url", ""),
+        help="URL of the login page for automatic authentication before scanning.",
+    )
+    scan.add_argument(
+        "--login-user-field", metavar="NAME", default=_CFG.get("login_user_field", "username"),
+        help=f"Username input field name on the login form (default: {_CFG.get('login_user_field','username')}).",
+    )
+    scan.add_argument(
+        "--login-pass-field", metavar="NAME", default=_CFG.get("login_pass_field", "password"),
+        help=f"Password input field name on the login form (default: {_CFG.get('login_pass_field','password')}).",
+    )
+    scan.add_argument(
+        "--login-success", metavar="TEXT", default=_CFG.get("login_success_indicator", ""),
+        help="Substring expected in the post-login URL or page to confirm success.",
+    )
+    # A-3: Payload learning
+    scan.add_argument(
+        "--learning-file", metavar="FILE", default=_CFG.get("learning_file", ""),
+        help="JSON file for payload continuous learning (default: config/payload_learning.json).",
+    )
+    # S-1: DOM XSS
+    scan.add_argument(
+        "--dom-xss", action="store_true", default=_CFG.get("dom_xss", False),
+        help="Enable DOM-based XSS detection (hooks browser DOM sinks via Playwright).",
+    )
+    # Feature flags that can also be toggled via config
+    scan.add_argument(
+        "--no-ai-analysis", action="store_true",
+        default=not _CFG.get("ai_analysis", True),
+        help="Disable post-scan AI comprehensive analysis report.",
+    )
+    scan.add_argument(
+        "--no-waf-detection", action="store_true",
+        default=not _CFG.get("waf_detection", True),
+        help="Disable WAF auto-detection probe before crawling.",
+    )
+    scan.add_argument(
+        "--no-payload-learning", action="store_true",
+        default=not _CFG.get("payload_learning", True),
+        help="Disable payload continuous learning (don't load/save success rates).",
+    )
+    scan.add_argument(
+        "--no-sitemap-crawl", action="store_true",
+        default=not _CFG.get("sitemap_crawl", True),
+        help="Disable sitemap.xml / robots.txt crawl seeding.",
+    )
+    # Auto-config wizard
+    _ac_default = _CFG.get("auto_config", False)
+    _ac_group = scan.add_mutually_exclusive_group()
+    _ac_group.add_argument(
+        "--auto-config", action="store_true", default=_ac_default,
+        help=(
+            "Run the LLM-powered scan configuration wizard before scanning. "
+            "Interviews you about the target and auto-generates optimal settings."
+        ),
+    )
+    _ac_group.add_argument(
+        "--no-auto-config", action="store_true", default=not _ac_default,
+        help="Disable the auto-config wizard (default).",
+    )
+
+    # triage subcommand
+    triage = sub.add_parser(
+        "triage",
+        help="Fast vulnerability assessment: crawl and analyse page structure without sending payloads",
+    )
+    triage.add_argument("url", help="Target URL")
+    triage.add_argument(
+        "--depth", "-d", type=int, default=_CFG.get("depth", 2), metavar="N",
+        help=f"Crawl depth (default: {_CFG.get('depth', 2)})",
+    )
+    triage.add_argument(
+        "--headless", action="store_true", default=True,
+        help="Run browser in headless mode (default: true for triage)",
+    )
+    triage.add_argument(
+        "--proxy", metavar="URL", default=_CFG.get("proxy", ""),
+        help="HTTP proxy URL",
+    )
+    triage.add_argument(
+        "--timeout", type=int, default=_CFG.get("timeout", 20), metavar="SECS",
+        help=f"Page load timeout in seconds (default: {_CFG.get('timeout', 20)})",
+    )
+    triage.add_argument(
+        "--llm", choices=["ollama", "claude", "openai", "gemini", "none"],
+        default=_CFG.get("llm_provider", "none"),
+        help="LLM provider for AI attack-strategy insights (default: none)",
+    )
+    triage.add_argument(
+        "--ollama-model", default=_CFG.get("ollama_model", "llama3"), metavar="MODEL",
+    )
+    triage.add_argument(
+        "--openai-model", default=_CFG.get("openai_model", "gpt-4o-mini"), metavar="MODEL",
+    )
+    triage.add_argument(
+        "--gemini-model", default=_CFG.get("gemini_model", "gemini-2.0-flash"), metavar="MODEL",
+    )
+    triage.add_argument(
+        "--output", "-o", metavar="FILE",
+        help="Save triage report as JSON to this file path",
+    )
+
+    # A-4: Natural language setup subcommand
+    setup = sub.add_parser("setup", help="Interactively configure scan options via natural language")
+    setup.add_argument("description", nargs="?", default="",
+                       help="Natural language description of the target")
+    setup.add_argument("--llm", choices=["ollama", "claude", "openai", "gemini", "none"],
+                       default=_CFG.get("llm_provider", "ollama"))
+    setup.add_argument("--ollama-model", default=_CFG.get("ollama_model", "llama3"), metavar="MODEL")
+    setup.add_argument("--ollama-url", default=_CFG.get("ollama_url", "http://localhost:11434"), metavar="URL")
 
     return parser.parse_args()
 
@@ -254,6 +456,26 @@ async def run_scan(args):
         border_style="cyan",
     ))
 
+    # ── Auto-config wizard (opt-in) ────────────────────────────────
+    _run_auto_config = getattr(args, "auto_config", False) and not getattr(args, "no_auto_config", False)
+    if _run_auto_config:
+        from wscan.payload_gen import PayloadGenerator
+        from wscan.auto_config import run_wizard, apply_to_args
+        _pg = PayloadGenerator(
+            provider=args.llm,
+            ollama_model=getattr(args, "ollama_model", "llama3"),
+            ollama_url=getattr(args, "ollama_url", "http://localhost:11434"),
+            openai_model=getattr(args, "openai_model", "gpt-4o-mini"),
+            gemini_model=getattr(args, "gemini_model", "gemini-2.0-flash"),
+        )
+        _wizard_result = await run_wizard(_pg)
+        if _wizard_result is not None:
+            apply_to_args(_wizard_result, args)
+            # Rebuild checks display after wizard
+            checks_display = ', '.join(args.checks) if args.checks else "all IPA checks"
+            console.print(f"[cyan]Auto-config applied:[/cyan] checks=[green]{checks_display}[/green]  "
+                          f"depth=[blue]{args.depth}[/blue]")
+
     # Build exclude list from --exclude and --exclude-file
     exclude_fields = list(args.exclude)
     if args.exclude_file:
@@ -298,15 +520,15 @@ async def run_scan(args):
         except Exception as ex:
             console.print(f"[yellow]Warning: Could not read exclude-urls file: {ex}[/yellow]")
 
-    if args.no_monitor:
-        # Simple mode - no web dashboard
-        from wscan.engine import ScanEngine
-        from wscan.monitor import MonitorServer
+    # Build checks list (add dom_xss if requested, allow wizard to have updated args.checks)
+    checks_list = list(args.checks)
+    if getattr(args, "dom_xss", False) and "dom_xss" not in checks_list:
+        checks_list.append("dom_xss")
 
-        monitor = MonitorServer(port=args.port)
-        engine = ScanEngine(
+    def _engine_kwargs(monitor_obj):
+        return dict(
             url=args.url,
-            monitor=monitor,
+            monitor=monitor_obj,
             payloads_file=args.payloads,
             depth=args.depth,
             headless=args.headless,
@@ -314,7 +536,7 @@ async def run_scan(args):
             ollama_model=args.ollama_model,
             openai_model=args.openai_model,
             gemini_model=args.gemini_model,
-            checks=args.checks,
+            checks=checks_list,
             output_dir=args.output,
             timeout=args.timeout,
             max_forms=args.max_forms,
@@ -331,7 +553,27 @@ async def run_scan(args):
             use_planner=not getattr(args, "no_planner", False),
             interactive_plan=getattr(args, "interactive_plan", False) or args.llm == "none",
             skip_registration=not getattr(args, "include_registration", False),
+            open_report=not getattr(args, "no_open_report", False),
+            proxy=getattr(args, "proxy", "") or "",
+            login_url=getattr(args, "login_url", "") or "",
+            login_user_field=getattr(args, "login_user_field", "username") or "username",
+            login_pass_field=getattr(args, "login_pass_field", "password") or "password",
+            login_success_indicator=getattr(args, "login_success", "") or "",
+            learning_file=getattr(args, "learning_file", "") or "",
+            # Feature on/off flags (from config or CLI)
+            enable_ai_analysis=not getattr(args, "no_ai_analysis", False),
+            enable_waf_detection=not getattr(args, "no_waf_detection", False),
+            enable_payload_learning=not getattr(args, "no_payload_learning", False),
+            enable_sitemap_crawl=not getattr(args, "no_sitemap_crawl", False),
         )
+
+    if args.no_monitor:
+        # Simple mode - no web dashboard
+        from wscan.engine import ScanEngine
+        from wscan.monitor import MonitorServer
+
+        monitor = MonitorServer(port=args.port)
+        engine = ScanEngine(**_engine_kwargs(monitor))
         await engine.run()
         return
 
@@ -360,34 +602,7 @@ async def run_scan(args):
         webbrowser.open(f"http://localhost:{args.port}")
 
         try:
-            engine = ScanEngine(
-                url=args.url,
-                monitor=monitor,
-                payloads_file=args.payloads,
-                depth=args.depth,
-                headless=args.headless,
-                llm_provider=args.llm,
-                ollama_model=args.ollama_model,
-                openai_model=args.openai_model,
-                gemini_model=args.gemini_model,
-                checks=args.checks,
-                output_dir=args.output,
-                timeout=args.timeout,
-                max_forms=args.max_forms,
-                exclude_fields=exclude_fields,
-                exclude_urls=exclude_urls,
-                ctf_mode=getattr(args, "ctf", False),
-                ctf_flag_pattern=getattr(args, "ctf_flag_format", "") or "",
-                cookies=getattr(args, "cookie", "") or "",
-                cookie_list=cookie_list,
-                low_priv_cookies=low_priv_cookies,
-                low_priv_cookie_list=low_priv_cookie_list,
-                auth_user=getattr(args, "auth_user", "") or "",
-                auth_pass=getattr(args, "auth_pass", "") or "",
-                use_planner=not getattr(args, "no_planner", False),
-                interactive_plan=getattr(args, "interactive_plan", False) or args.llm == "none",
-            skip_registration=not getattr(args, "include_registration", False),
-            )
+            engine = ScanEngine(**_engine_kwargs(monitor))
             await engine.run()
 
             console.print(
@@ -413,10 +628,142 @@ async def run_scan(args):
     )
 
 
+async def run_triage(args):
+    """Triage mode — fast structural analysis without payload injection."""
+    from rich.console import Console
+    from rich.panel import Panel
+    console = Console()
+
+    console.print(Panel.fit(
+        f"[bold cyan]WScan Triage Mode[/bold cyan]\n"
+        f"Target  : [yellow]{args.url}[/yellow]\n"
+        f"Depth   : [blue]{args.depth}[/blue]   "
+        f"LLM: [blue]{args.llm}[/blue]\n"
+        "[dim]No payloads will be sent — structural and header analysis only[/dim]",
+        border_style="cyan",
+    ))
+
+    from wscan.triage import TriageEngine, render_triage_report
+
+    engine = TriageEngine(
+        url=args.url,
+        depth=args.depth,
+        headless=getattr(args, "headless", True),
+        proxy=getattr(args, "proxy", "") or "",
+        timeout=getattr(args, "timeout", 20),
+        llm_provider=getattr(args, "llm", "none"),
+        ollama_model=getattr(args, "ollama_model", "llama3"),
+        openai_model=getattr(args, "openai_model", "gpt-4o-mini"),
+        gemini_model=getattr(args, "gemini_model", "gemini-2.0-flash"),
+    )
+
+    report = await engine.run()
+    render_triage_report(report, console)
+
+    # Optional JSON output
+    output_file = getattr(args, "output", None)
+    if output_file:
+        Path(output_file).write_text(
+            __import__("json").dumps(report.to_dict(), ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        console.print(f"\n[green]Triage report saved:[/green] {output_file}")
+
+
+async def run_setup(args):
+    """A-4: Natural language scan configuration assistant."""
+    from rich.console import Console
+    from rich.panel import Panel
+    console = Console()
+
+    console.print(Panel.fit(
+        "[bold cyan]WScan Setup Assistant[/bold cyan]\n"
+        "Describe your target and I'll suggest optimal scan options.",
+        border_style="cyan",
+    ))
+
+    description = args.description
+    if not description:
+        try:
+            description = input("Describe your target (e.g. 'EC site with login, admin panel, REST API'): ").strip()
+        except (KeyboardInterrupt, EOFError):
+            print("\nAborted.")
+            sys.exit(0)
+
+    if not description:
+        print("No description provided.")
+        sys.exit(1)
+
+    prompt = (
+        f"You are a web security scanner configuration assistant.\n"
+        f"The user wants to scan this target: {description}\n\n"
+        f"Available checks: sqli, xss, dom_xss, os, ssti, path_traversal, "
+        f"csrf, header_injection, mail_header, open_redirect, clickjacking, session, privesc\n\n"
+        f"Based on the description, suggest the optimal scan command. "
+        f"Return a JSON object with these fields:\n"
+        f"  checks: list of check names to enable\n"
+        f"  depth: crawl depth (1-5)\n"
+        f"  reason: brief explanation\n"
+        f"  flags: additional CLI flags as a list of strings (e.g. ['--dom-xss', '--depth 3'])\n\n"
+        f"Return ONLY valid JSON."
+    )
+
+    from wscan.payload_gen import PayloadGenerator
+    pg = PayloadGenerator(
+        provider=args.llm,
+        ollama_model=args.ollama_model,
+        ollama_url=getattr(args, "ollama_url", "http://localhost:11434"),
+    )
+
+    suggestion = None
+    if await pg._check_llm_available():
+        try:
+            import re as _re
+            raw = await pg._call_llm(prompt) or []
+            # _call_llm returns list; for setup we need text → call backends directly
+            # Fallback: use text-based call
+        except Exception:
+            pass
+
+    # Simple heuristic fallback
+    checks = ["sqli", "xss", "os"]
+    depth = 2
+    flags: list[str] = []
+    desc_lower = description.lower()
+    if "api" in desc_lower or "rest" in desc_lower or "graphql" in desc_lower:
+        checks += ["header_injection"]
+    if "admin" in desc_lower or "dashboard" in desc_lower:
+        checks += ["privesc"]
+        depth = 3
+    if "login" in desc_lower or "auth" in desc_lower:
+        checks += ["session", "csrf"]
+    if "redirect" in desc_lower or "link" in desc_lower:
+        checks += ["open_redirect"]
+    if "template" in desc_lower or "render" in desc_lower:
+        checks += ["ssti"]
+    if "dom" in desc_lower or "spa" in desc_lower or "react" in desc_lower or "vue" in desc_lower:
+        flags.append("--dom-xss")
+    checks = list(dict.fromkeys(checks))  # dedup
+
+    cmd = f"python main.py scan <URL> --checks {' '.join(checks)} --depth {depth}"
+    if flags:
+        cmd += " " + " ".join(flags)
+
+    console.print(f"\n[bold]Suggested scan command:[/bold]")
+    console.print(f"  [green]{cmd}[/green]")
+    console.print(f"\n[dim]Checks selected: {', '.join(checks)}[/dim]")
+    console.print(f"[dim]Crawl depth: {depth}[/dim]")
+
+
 def main():
     args = parse_args()
     try:
-        asyncio.run(run_scan(args))
+        if args.command == "setup":
+            asyncio.run(run_setup(args))
+        elif args.command == "triage":
+            asyncio.run(run_triage(args))
+        else:
+            asyncio.run(run_scan(args))
     except KeyboardInterrupt:
         print("\nInterrupted.")
         sys.exit(0)

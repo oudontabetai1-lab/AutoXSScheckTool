@@ -279,6 +279,175 @@ body {
 .net-status-ok { color: var(--low); }
 .net-status-err { color: var(--critical); }
 
+/* ─── Intervention Toolbar ───────────────────────────────────── */
+.intervention-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 16px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.intervention-bar .ib-label {
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  margin-right: 4px;
+  flex-shrink: 0;
+}
+.ib-btn {
+  font-size: 0.75rem;
+  font-weight: 700;
+  padding: 4px 12px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  cursor: pointer;
+  background: var(--surface2);
+  color: var(--text);
+  transition: background 0.15s, border-color 0.15s;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+.ib-btn:hover { background: var(--surface); border-color: var(--accent); }
+.ib-btn.pause  { color: var(--high); border-color: var(--high); }
+.ib-btn.resume { color: var(--success); border-color: var(--success); }
+.ib-btn.skip-f { color: var(--info); }
+.ib-btn.skip-p { color: var(--accent); }
+.ib-btn.abort  { color: var(--critical); border-color: var(--critical); }
+.ib-btn:disabled { opacity: 0.35; cursor: not-allowed; }
+.ib-pause-state {
+  font-size: 0.7rem;
+  padding: 2px 10px;
+  border-radius: 10px;
+  margin-left: 4px;
+  display: none;
+}
+.ib-pause-state.visible { display: inline-block; background: rgba(210,153,34,0.2); color: var(--high); font-weight: 700; }
+
+/* ─── Plan Review Modal ──────────────────────────────────────── */
+.plan-modal-overlay {
+  display: none;
+  position: fixed; top:0; left:0; width:100%; height:100%;
+  background: rgba(0,0,0,0.75);
+  z-index: 2000;
+  justify-content: center;
+  align-items: flex-start;
+  padding-top: 40px;
+  overflow-y: auto;
+}
+.plan-modal-overlay.active { display: flex; }
+.plan-modal {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  width: 90%;
+  max-width: 1000px;
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  box-shadow: 0 20px 60px rgba(0,0,0,0.6);
+}
+.plan-modal-header {
+  padding: 16px 20px;
+  background: var(--surface2);
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-shrink: 0;
+}
+.plan-modal-header h2 { font-size: 1rem; font-weight: 700; color: var(--accent); }
+.plan-modal-header .pm-subtitle { font-size: 0.8rem; color: var(--text-muted); margin-top: 2px; }
+.plan-modal-body { flex:1; overflow-y:auto; padding: 16px 20px; }
+.plan-modal-footer {
+  padding: 12px 20px;
+  border-top: 1px solid var(--border);
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  flex-shrink: 0;
+  background: var(--surface2);
+}
+.pm-btn {
+  font-size: 0.85rem;
+  font-weight: 700;
+  padding: 8px 20px;
+  border-radius: 8px;
+  border: none;
+  cursor: pointer;
+}
+.pm-btn.confirm { background: var(--success); color: #0d1117; }
+.pm-btn.confirm:hover { opacity: 0.9; }
+/* Plan table inside modal */
+.pm-page-card {
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  margin-bottom: 14px;
+  overflow: hidden;
+}
+.pm-page-header {
+  padding: 10px 14px;
+  background: rgba(56,139,253,0.08);
+  border-bottom: 1px solid var(--border);
+  font-size: 0.8rem;
+}
+.pm-page-url { font-family: monospace; color: var(--accent); word-break: break-all; }
+.pm-page-purpose { color: var(--text-muted); font-size: 0.75rem; margin-top: 2px; }
+.pm-fields-table { width: 100%; border-collapse: collapse; font-size: 0.78rem; }
+.pm-fields-table th {
+  text-align: left;
+  padding: 6px 10px;
+  background: var(--surface);
+  color: var(--text-muted);
+  font-weight: 700;
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  border-bottom: 1px solid var(--border);
+}
+.pm-fields-table td { padding: 6px 10px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+.pm-fields-table tr:last-child td { border-bottom: none; }
+.pm-risk-input {
+  width: 46px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 3px 6px;
+  border-radius: 4px;
+  font-size: 0.8rem;
+  text-align: center;
+}
+.pm-checks-input {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 3px 8px;
+  border-radius: 4px;
+  font-size: 0.75rem;
+  font-family: monospace;
+  width: 100%;
+  min-width: 160px;
+}
+.pm-skip-cb { cursor: pointer; accent-color: var(--critical); }
+.pm-rationale { color: var(--text-muted); font-size: 0.72rem; font-style: italic; }
+.pm-payloads-area {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  color: #68d391;
+  font-family: monospace;
+  font-size: 0.72rem;
+  padding: 4px 8px;
+  border-radius: 4px;
+  width: 100%;
+  min-height: 48px;
+  resize: vertical;
+}
+
 /* ─── Scrollbar ──────────────────────────────────────────────── */
 ::-webkit-scrollbar { width: 6px; height: 6px; }
 ::-webkit-scrollbar-track { background: transparent; }
@@ -328,6 +497,18 @@ body {
     </div>
   </div>
   <div class="ws-badge" id="wsBadge">WS: ―</div>
+</div>
+
+<!-- ─── Intervention Toolbar ───────────────────────────────── -->
+<div class="intervention-bar" id="interventionBar">
+  <span class="ib-label">介入</span>
+  <button class="ib-btn pause" id="ibPause" onclick="sendIntervention('pause')" title="スキャンを一時停止">⏸ 一時停止</button>
+  <button class="ib-btn resume" id="ibResume" onclick="sendIntervention('resume')" title="スキャンを再開" style="display:none">▶ 再開</button>
+  <button class="ib-btn skip-f" onclick="sendIntervention('skip_field')" title="現在のフィールドをスキップ">⏭ フィールドスキップ</button>
+  <button class="ib-btn skip-p" onclick="sendIntervention('skip_page')" title="現在のページをスキップ">⏩ ページスキップ</button>
+  <button class="ib-btn abort" onclick="confirmAbort()" title="スキャンを中断（部分レポートを保存）">⏹ 中断</button>
+  <span class="ib-pause-state" id="ibPauseState">⏸ 一時停止中</span>
+  <button class="ib-btn" onclick="toggleManualPayload()" title="手動ペイロード実行パネルを開く" style="margin-left:auto;background:rgba(56,139,253,0.15);color:var(--accent);border-color:var(--accent)">🎯 手動実行</button>
 </div>
 
 <!-- ─── Progress ───────────────────────────────────────────── -->
@@ -380,11 +561,22 @@ body {
   <!-- Right: Findings + Network -->
   <div class="panel" style="grid-template-rows: 1fr 1fr; display:grid; border-right:none">
 
-    <!-- Findings -->
+    <!-- Findings (U-2: filter bar) -->
     <div style="display:flex;flex-direction:column;overflow:hidden;border-bottom:1px solid var(--border)">
       <div class="panel-header">
         Findings
         <span class="panel-badge" id="findingCount" style="color:var(--critical)">0</span>
+        <div style="display:flex;gap:6px;margin-left:auto;align-items:center">
+          <select id="filterSeverity" onchange="filterFindings()" style="background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:2px 6px;font-size:0.72rem">
+            <option value="">All</option>
+            <option value="critical">Critical</option>
+            <option value="high">High</option>
+            <option value="medium">Medium</option>
+            <option value="low">Low</option>
+          </select>
+          <input id="filterSearch" type="text" placeholder="Search…" oninput="filterFindings()"
+            style="background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:2px 6px;font-size:0.72rem;width:100px">
+        </div>
       </div>
       <div class="panel-content" id="findingsPanel">
         <div class="no-findings-msg">No vulnerabilities detected yet.</div>
@@ -409,6 +601,49 @@ body {
 
 </div>
 
+<!-- ─── U-3: Manual Payload Panel ──────────────────────────── -->
+<div id="manualPayloadPanel" style="
+  position:fixed; bottom:0; left:0; right:0;
+  background:var(--surface); border-top:2px solid var(--accent);
+  padding:10px 20px; display:none; gap:10px; align-items:center;
+  z-index:200; flex-wrap:wrap;
+">
+  <span style="font-size:0.8rem;font-weight:700;color:var(--accent)">手動ペイロード実行</span>
+  <input id="mpUrl" type="text" placeholder="URL" style="flex:2;min-width:160px;background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:4px 8px;border-radius:4px;font-size:0.8rem">
+  <input id="mpField" type="text" placeholder="フィールド名" style="flex:1;min-width:100px;background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:4px 8px;border-radius:4px;font-size:0.8rem">
+  <input id="mpPayload" type="text" placeholder="ペイロード" style="flex:2;min-width:160px;background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:4px 8px;border-radius:4px;font-family:monospace;font-size:0.8rem">
+  <select id="mpCheckType" style="background:var(--surface2);border:1px solid var(--border);color:var(--text);padding:4px 8px;border-radius:4px;font-size:0.8rem">
+    <option value="xss">XSS</option>
+    <option value="sqli">SQLi</option>
+    <option value="os">OS</option>
+    <option value="ssti">SSTI</option>
+    <option value="custom">Custom</option>
+  </select>
+  <button onclick="sendManualPayload()" style="background:var(--accent);color:white;border:none;padding:6px 14px;border-radius:4px;cursor:pointer;font-size:0.8rem;font-weight:700">実行</button>
+  <button onclick="document.getElementById('manualPayloadPanel').style.display='none'" style="background:var(--surface2);color:var(--text-muted);border:1px solid var(--border);padding:6px 10px;border-radius:4px;cursor:pointer;font-size:0.8rem">✕</button>
+</div>
+
+<!-- ─── Plan Review Modal ───────────────────────────────────── -->
+<div class="plan-modal-overlay" id="planModalOverlay">
+  <div class="plan-modal">
+    <div class="plan-modal-header">
+      <div>
+        <h2>🗺 攻撃プラン確認・編集</h2>
+        <div class="pm-subtitle">各フィールドのリスクスコア・検査項目・カスタムペイロードを確認・修正してから攻撃を開始してください。</div>
+      </div>
+    </div>
+    <div class="plan-modal-body" id="planModalBody">
+      <!-- filled dynamically -->
+    </div>
+    <div class="plan-modal-footer">
+      <span style="font-size:0.75rem;color:var(--text-muted);margin-right:auto">
+        リスク: 1–10　検査項目: sqli xss os ssti path_traversal csrf open_redirect header_injection
+      </span>
+      <button class="pm-btn confirm" onclick="confirmPlan()">▶ 攻撃開始</button>
+    </div>
+  </div>
+</div>
+
 <!-- Lightbox -->
 <div class="lightbox" id="lightbox" onclick="this.classList.remove('active')">
   <div class="lb-close" onclick="document.getElementById('lightbox').classList.remove('active')">✕</div>
@@ -425,6 +660,8 @@ const state = {
   pageCount: 0,
   testCount: 0,
   autoScroll: true,
+  paused: false,
+  planData: null,   // pending plan received from server
 };
 
 // ─── WebSocket ──────────────────────────────────────────────────
@@ -534,6 +771,25 @@ function handleEvent(event) {
       document.getElementById('progressStripe').style.display = 'none';
       addEventLog('status', `Scan complete. Report: ${data.report_path}`);
       break;
+
+    case 'plan_review':
+      state.planData = data.plans || [];
+      showPlanModal(state.planData);
+      addEventLog('status', `攻撃プランが ${state.planData.length} ページ分生成されました — ダッシュボードで確認してください`);
+      break;
+
+    case 'intervention_state':
+      setPauseState(!!data.paused);
+      break;
+
+    case 'ai_analysis':
+      showAiAnalysis(data.text || '');
+      addEventLog('status', 'AI分析レポートが生成されました');
+      break;
+
+    case 'waf_detected':
+      handleWafDetected(data);
+      break;
   }
 }
 
@@ -603,6 +859,7 @@ function addFinding(data) {
   const sev = (data.severity || 'medium').toLowerCase();
   const card = document.createElement('div');
   card.className = 'finding-card';
+  card.dataset.severity = sev;
 
   // XSS confirmed: show prominent alert banner
   let alertBanner = '';
@@ -693,6 +950,193 @@ function escapeHtml(str) {
     .replace(/</g,'&lt;')
     .replace(/>/g,'&gt;')
     .replace(/"/g,'&quot;');
+}
+
+// ─── Intervention ───────────────────────────────────────────────
+function sendIntervention(command) {
+  if (!state.ws || state.ws.readyState !== WebSocket.OPEN) return;
+  state.ws.send(JSON.stringify({ action: 'intervention', command }));
+}
+
+function confirmAbort() {
+  if (confirm('スキャンを中断しますか？\n現在までの結果で部分レポートが保存されます。')) {
+    sendIntervention('abort');
+  }
+}
+
+function setPauseState(paused) {
+  state.paused = paused;
+  document.getElementById('ibPause').style.display  = paused ? 'none'         : 'flex';
+  document.getElementById('ibResume').style.display = paused ? 'flex'         : 'none';
+  const badge = document.getElementById('ibPauseState');
+  badge.className = 'ib-pause-state' + (paused ? ' visible' : '');
+}
+
+// ─── Plan Review Modal ──────────────────────────────────────────
+function showPlanModal(plans) {
+  const body = document.getElementById('planModalBody');
+  body.innerHTML = '';
+
+  plans.forEach(page => {
+    const card = document.createElement('div');
+    card.className = 'pm-page-card';
+    card.dataset.url = page.url;
+
+    let rows = '';
+    (page.fields || []).forEach(fp => {
+      const checksVal = (fp.priority_checks || []).join(' ');
+      const payloadsVal = Object.entries(fp.custom_payloads || {})
+        .map(([ct, ps]) => ps.map(p => `[${ct}] ${p}`).join('\n')).join('\n');
+      rows += `
+        <tr data-field="${escapeHtml(fp.name)}">
+          <td><code style="color:var(--text)">${escapeHtml(fp.name)}</code>
+              ${fp.is_url_param ? '<span style="font-size:0.65rem;color:var(--text-muted)">[URL param]</span>' : ''}</td>
+          <td><input class="pm-risk-input" type="number" min="0" max="10" value="${fp.risk_score}" title="リスクスコア (0=スキップ)"></td>
+          <td><input class="pm-checks-input" type="text" value="${escapeHtml(checksVal)}" placeholder="sqli xss os …"></td>
+          <td class="pm-rationale">${escapeHtml(fp.rationale)}</td>
+          <td>
+            <textarea class="pm-payloads-area" rows="2" placeholder="[sqli] payload1&#10;[xss] payload2">${escapeHtml(payloadsVal)}</textarea>
+          </td>
+          <td><input class="pm-skip-cb" type="checkbox" title="このフィールドをスキップ" ${fp.risk_score === 0 ? 'checked' : ''}></td>
+        </tr>`;
+    });
+
+    card.innerHTML = `
+      <div class="pm-page-header">
+        <div class="pm-page-url">${escapeHtml(page.url)}</div>
+        <div class="pm-page-purpose">${escapeHtml(page.page_purpose)} <span style="font-size:0.7rem;color:var(--accent)">(${page.planned_by})</span></div>
+      </div>
+      <table class="pm-fields-table">
+        <thead>
+          <tr>
+            <th>フィールド</th>
+            <th>リスク</th>
+            <th>検査項目</th>
+            <th>根拠</th>
+            <th>カスタムペイロード (任意)</th>
+            <th>Skip</th>
+          </tr>
+        </thead>
+        <tbody>${rows}</tbody>
+      </table>`;
+    body.appendChild(card);
+  });
+
+  document.getElementById('planModalOverlay').classList.add('active');
+}
+
+function confirmPlan() {
+  // Collect edits from the modal
+  const edits = {};
+  document.querySelectorAll('.pm-page-card').forEach(card => {
+    const url = card.dataset.url;
+    edits[url] = {};
+    card.querySelectorAll('tbody tr').forEach(row => {
+      const fieldName = row.dataset.field;
+      const riskInput = row.querySelector('.pm-risk-input');
+      const checksInput = row.querySelector('.pm-checks-input');
+      const payloadsArea = row.querySelector('.pm-payloads-area');
+      const skipCb = row.querySelector('.pm-skip-cb');
+
+      const checks = checksInput.value.trim().split(/\s+/).filter(Boolean);
+      const skip = skipCb.checked;
+
+      // Parse custom payloads: "[check_type] payload" lines
+      const customPayloads = {};
+      (payloadsArea.value || '').split('\n').forEach(line => {
+        const m = line.match(/^\[(\w+)\]\s+(.+)$/);
+        if (m) {
+          (customPayloads[m[1]] = customPayloads[m[1]] || []).push(m[2]);
+        }
+      });
+
+      edits[url][fieldName] = {
+        risk_score: parseInt(riskInput.value, 10) || 0,
+        priority_checks: checks,
+        custom_payloads: customPayloads,
+        skip,
+      };
+    });
+  });
+
+  // Send confirmation to engine
+  if (state.ws && state.ws.readyState === WebSocket.OPEN) {
+    state.ws.send(JSON.stringify({ action: 'plan_confirm', edits }));
+  }
+  document.getElementById('planModalOverlay').classList.remove('active');
+  addEventLog('status', '攻撃プランが確定されました — 攻撃を開始します');
+}
+
+// ─── U-2: Finding filter ────────────────────────────────────────
+function filterFindings() {
+  const sev = document.getElementById('filterSeverity').value.toLowerCase();
+  const q   = document.getElementById('filterSearch').value.toLowerCase();
+  document.querySelectorAll('#findingsPanel .finding-card').forEach(card => {
+    const cardSev = (card.dataset.severity || '').toLowerCase();
+    const text    = card.textContent.toLowerCase();
+    const sevOk   = !sev || cardSev === sev;
+    const searchOk = !q || text.includes(q);
+    card.style.display = (sevOk && searchOk) ? '' : 'none';
+  });
+}
+
+// ─── U-3: Manual payload execution ──────────────────────────────
+function toggleManualPayload() {
+  const panel = document.getElementById('manualPayloadPanel');
+  panel.style.display = panel.style.display === 'none' ? 'flex' : 'none';
+}
+
+function sendManualPayload() {
+  if (!state.ws || state.ws.readyState !== WebSocket.OPEN) {
+    alert('WebSocket が接続されていません');
+    return;
+  }
+  const url       = document.getElementById('mpUrl').value.trim();
+  const field     = document.getElementById('mpField').value.trim();
+  const payload   = document.getElementById('mpPayload').value.trim();
+  const checkType = document.getElementById('mpCheckType').value;
+  if (!url || !field || !payload) {
+    alert('URL・フィールド名・ペイロードをすべて入力してください');
+    return;
+  }
+  state.ws.send(JSON.stringify({
+    action: 'manual_payload',
+    url, field, payload, check_type: checkType,
+  }));
+  addEventLog('payload', `[手動] [${checkType.toUpperCase()}] ${field}: ${payload.substring(0,50)}`);
+}
+
+// ─── AI Analysis (A-1) ──────────────────────────────────────────
+function showAiAnalysis(text) {
+  const existing = document.getElementById('aiAnalysisModal');
+  if (existing) existing.remove();
+  const modal = document.createElement('div');
+  modal.id = 'aiAnalysisModal';
+  modal.style.cssText = `
+    position:fixed;top:0;left:0;width:100%;height:100%;
+    background:rgba(0,0,0,0.85);z-index:500;
+    display:flex;justify-content:center;align-items:center;
+  `;
+  modal.innerHTML = `
+    <div style="background:var(--surface);border:1px solid var(--border);border-radius:12px;
+                max-width:700px;width:90%;max-height:80vh;display:flex;flex-direction:column;overflow:hidden">
+      <div style="padding:16px 20px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center">
+        <span style="font-weight:700;color:var(--accent)">🤖 AI総合分析レポート</span>
+        <button onclick="document.getElementById('aiAnalysisModal').remove()"
+          style="background:none;border:none;color:var(--text-muted);cursor:pointer;font-size:1.2rem">✕</button>
+      </div>
+      <div style="padding:20px;overflow-y:auto;white-space:pre-wrap;font-size:0.82rem;line-height:1.6;color:var(--text)">
+        ${escapeHtml(text)}
+      </div>
+    </div>`;
+  document.body.appendChild(modal);
+  modal.addEventListener('click', e => { if (e.target === modal) modal.remove(); });
+}
+
+// ─── WAF detected event ─────────────────────────────────────────
+function handleWafDetected(data) {
+  const waf = data.waf || 'Unknown WAF';
+  addEventLog('status', `🛡 WAF Detected: ${waf}. Hints: ${(data.hints||[]).slice(0,2).join('; ')}`);
 }
 
 // ─── Init ────────────────────────────────────────────────────────

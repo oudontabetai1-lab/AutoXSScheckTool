@@ -12,15 +12,16 @@ if TYPE_CHECKING:
 
 
 # Probe tuples: (payload, expected_substring, template_engine_name)
+# Use 1337*1337=1787569 — a distinctive result that rarely appears naturally on pages.
 SSTI_PROBES = [
-    ("{{7*7}}", "49", "Jinja2/Twig"),
-    ("${7*7}", "49", "Mako/Freemarker"),
-    ("<%= 7*7 %>", "49", "ERB"),
-    ("#{7*7}", "49", "Ruby/Pebble"),
-    ("{{7*'7'}}", "7777777", "Jinja2"),
-    ("*{7*7}", "49", "SpEL"),
-    ("%{7*7}", "49", "OGNL"),
-    ("[[${7*7}]]", "49", "Thymeleaf"),
+    ("{{1337*1337}}", "1787569", "Jinja2/Twig"),
+    ("${1337*1337}", "1787569", "Mako/Freemarker"),
+    ("<%= 1337*1337 %>", "1787569", "ERB"),
+    ("#{1337*1337}", "1787569", "Ruby/Pebble"),
+    ("{{3*'wscan'}}", "wscanwscanwscan", "Jinja2-str"),
+    ("*{1337*1337}", "1787569", "SpEL"),
+    ("%{1337*1337}", "1787569", "OGNL"),
+    ("[[${1337*1337}]]", "1787569", "Thymeleaf"),
 ]
 
 

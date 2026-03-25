@@ -21,7 +21,7 @@ Trigger conditions
 """
 import re
 from typing import TYPE_CHECKING, Optional
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlunparse
 
 import httpx
 
@@ -129,6 +129,22 @@ class PrivEscScanner(BaseScanner):
             if lp_finding:
                 findings.append(lp_finding)
                 await self._emit(lp_finding)
+
+        # ── Test 3: Horizontal privilege escalation (IDOR) ────────────
+        if has_auth:
+            cookies_str = (
+                getattr(self.engine, "cookies", "")
+                or "; ".join(
+                    f"{c['name']}={c['value']}"
+                    for c in getattr(self.engine, "cookie_list", [])
+                    if c.get("name") and c.get("value") is not None
+                )
+            )
+            if cookies_str:
+                horiz_findings = await self._test_horizontal_privesc(url, cookies_str, timeout)
+                for hf in horiz_findings:
+                    findings.append(hf)
+                    await self._emit(hf)
 
         return findings
 
@@ -250,6 +266,106 @@ class PrivEscScanner(BaseScanner):
             request={"url": url, "method": "GET", "headers": {"Cookie": "<low-priv-token>"}},
             response={"status": status, "url": url},
         )
+
+    # ------------------------------------------------------------------
+    # S-6: Horizontal privilege escalation (IDOR)
+    # ------------------------------------------------------------------
+
+    async def _test_horizontal_privesc(
+        self,
+        url: str,
+        cookies: str,
+        timeout: float,
+    ) -> list[Finding]:
+        """
+        Detect Insecure Direct Object Reference (IDOR) by enumerating
+        numeric IDs in the URL path and checking if adjacent IDs are
+        accessible with the same session.
+
+        Example: /user/123/profile → try /user/122/profile, /user/124/profile
+        """
+        parsed = urlparse(url)
+        path = parsed.path
+
+        # Find all numeric path segments
+        segments = path.split("/")
+        findings: list[Finding] = []
+
+        for seg_idx, seg in enumerate(segments):
+            if not seg.isdigit():
+                continue
+            original_id = int(seg)
+            # Try adjacent IDs (±1, ±5)
+            candidate_ids = {original_id - 1, original_id + 1,
+                             original_id - 5, original_id + 5}
+            candidate_ids.discard(original_id)
+            candidate_ids = {i for i in candidate_ids if i > 0}
+
+            # Get our own response to use as baseline
+            try:
+                async with httpx.AsyncClient(
+                    follow_redirects=True,
+                    timeout=timeout,
+                    verify=False,
+                    headers={**_HEADERS, "Cookie": cookies},
+                ) as client:
+                    own_resp = await client.get(url)
+                    own_status = own_resp.status_code
+                    own_body = own_resp.text[:8000]
+            except Exception:
+                continue
+
+            if own_status not in range(200, 300):
+                continue
+
+            for candidate_id in candidate_ids:
+                new_segments = list(segments)
+                new_segments[seg_idx] = str(candidate_id)
+                new_path = "/".join(new_segments)
+                candidate_url = urlunparse(parsed._replace(path=new_path))
+
+                try:
+                    async with httpx.AsyncClient(
+                        follow_redirects=True,
+                        timeout=timeout,
+                        verify=False,
+                        headers={**_HEADERS, "Cookie": cookies},
+                    ) as client:
+                        resp = await client.get(candidate_url)
+                        status = resp.status_code
+                        body = resp.text[:8000]
+                except Exception:
+                    continue
+
+                if status not in range(200, 300):
+                    continue
+                if LOGIN_GATE_RE.search(body):
+                    continue
+
+                # Heuristic: significant overlap with own response could mean same page,
+                # but different content means we actually got another resource
+                if len(body) < 100:
+                    continue
+
+                finding = Finding(
+                    check_type="privesc_horizontal",
+                    severity="high",
+                    url=url,
+                    field_name=f"(URL path segment: {seg})",
+                    payload=candidate_url,
+                    evidence=(
+                        f"Horizontal privilege escalation (IDOR): "
+                        f"Changed ID {original_id}→{candidate_id} in '{path}' "
+                        f"returned HTTP {status}. Possible access to another user's resource."
+                    ),
+                    request={"url": candidate_url, "method": "GET",
+                             "headers": {"Cookie": "<session-token>"}},
+                    response={"status": status, "url": candidate_url},
+                )
+                findings.append(finding)
+                break  # One confirmation per segment is enough
+
+        return findings
 
     async def _emit(self, finding: Finding) -> None:
         """Push finding to the engine and monitor."""

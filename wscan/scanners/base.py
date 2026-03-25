@@ -12,6 +12,43 @@ if TYPE_CHECKING:
     from wscan.engine import ScanEngine
 
 
+# CVSS 3.1 base score lookup table: check_type → (vector_string, numeric_score)
+# Vectors use worst-case assumptions for web scanner context.
+_CVSS_TABLE: dict[str, tuple[str, float]] = {
+    "sqli":              ("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H", 10.0),
+    "xss":               ("CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:H/I:L/A:N",  8.8),
+    "dom_xss":           ("CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:H/I:L/A:N",  8.8),
+    "os":                ("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H", 10.0),
+    "ssti":              ("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H", 10.0),
+    "path_traversal":    ("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N",  7.5),
+    "open_redirect":     ("CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:L/I:L/A:N",  6.1),
+    "csrf":              ("CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:N/I:H/A:N",  6.5),
+    "header_injection":  ("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:L/A:N",  5.3),
+    "mail_header":       ("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:L/A:N",  5.3),
+    "clickjacking":      ("CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:N/I:L/A:N",  4.3),
+    "session":           ("CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:H/A:N",  7.4),
+    "privesc_unauth":    ("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:N",  9.1),
+    "privesc_vertical":  ("CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:N",  8.1),
+    "privesc_horizontal":("CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:N",  6.5),
+    # V-1〜V-9 new scanners
+    "stored_xss":        ("CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:H/I:H/A:N",  9.6),
+    "cors":              ("CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:H/I:N/A:N",  7.4),
+    "info_disclosure":   ("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N",  7.5),
+    "host_header":       ("CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:L/I:L/A:N",  5.4),
+    "security_headers":  ("CVSS:3.1/AV:N/AC:H/PR:N/UI:R/S:U/C:L/I:N/A:N",  3.1),
+    "file_upload":       ("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H", 10.0),
+    "nosql":             ("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:N",  9.1),
+    "deserialization":   ("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H", 10.0),
+    "request_smuggling": ("CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:C/C:H/I:H/A:N",  8.7),
+}
+
+
+def _cvss_for(check_type: str) -> tuple[str, float]:
+    """Return (vector, score) for a check type, or empty defaults."""
+    base = check_type.split("_")[0] if "_" in check_type else check_type
+    return _CVSS_TABLE.get(check_type) or _CVSS_TABLE.get(base, ("", 0.0))
+
+
 @dataclass
 class Finding:
     """A security vulnerability finding."""
@@ -28,6 +65,14 @@ class Finding:
     dialog_message: str = ""         # The alert message that appeared
     timestamp: float = field(default_factory=time.time)
 
+    @property
+    def cvss_vector(self) -> str:
+        return _cvss_for(self.check_type)[0]
+
+    @property
+    def cvss_score(self) -> float:
+        return _cvss_for(self.check_type)[1]
+
     def to_dict(self) -> dict:
         return {
             "check_type": self.check_type,
@@ -43,6 +88,8 @@ class Finding:
             "dialog_confirmed": self.dialog_confirmed,
             "dialog_message": self.dialog_message,
             "timestamp": self.timestamp,
+            "cvss_vector": self.cvss_vector,
+            "cvss_score": self.cvss_score,
         }
 
 
@@ -85,13 +132,18 @@ class BaseScanner(ABC):
         return getattr(self.engine, "sleep_factor", 1.0)
 
     async def get_payloads(self, field_name: str, url: str) -> list[str]:
-        """Get payloads for this scanner's check type."""
-        return await self.payload_gen.generate(
+        """Get payloads for this scanner's check type, sorted by learning data."""
+        payloads = await self.payload_gen.generate(
             check_type=self.CHECK_TYPE,
             field_name=field_name,
             url=url,
             custom_payloads=self.engine.custom_payloads.get(self.CHECK_TYPE),
         )
+        # A-3: re-order by historical success rate (if learning enabled)
+        learner = getattr(self.engine, "payload_learner", None)
+        if learner and getattr(self.engine, "enable_payload_learning", True):
+            payloads = learner.sort_payloads(self.CHECK_TYPE, payloads)
+        return payloads
 
     def check_response_for_patterns(self, body: str, patterns: list[str]) -> Optional[str]:
         """Check response body for any of the given regex patterns."""
