@@ -398,6 +398,16 @@ Examples:
         help="Save triage report as JSON to this file path",
     )
 
+    # ── serve subcommand (GUI-first: start dashboard, configure via browser) ──
+    serve = sub.add_parser(
+        "serve",
+        help="Start the dashboard server only — configure and launch scans from the browser",
+    )
+    serve.add_argument(
+        "--port", type=int, default=_CFG.get("port", 8765),
+        help=f"Dashboard port (default: {_CFG.get('port', 8765)})",
+    )
+
     # A-4: Natural language setup subcommand
     setup = sub.add_parser("setup", help="Interactively configure scan options via natural language")
     setup.add_argument("description", nargs="?", default="",
@@ -644,6 +654,103 @@ async def run_scan(args):
     )
 
 
+async def run_serve(args):
+    """
+    GUI-first mode: start the dashboard server, show configuration form in
+    the browser, then launch the scan engine once the user submits settings.
+    """
+    import uvicorn
+    from rich.console import Console
+    from rich.panel import Panel
+    from wscan.monitor import MonitorServer
+    from wscan.engine import ScanEngine
+
+    console = Console()
+    port = args.port
+
+    console.print(Panel.fit(
+        f"[bold cyan]WScan — Dashboard Mode[/bold cyan]\n"
+        f"  Opening [underline]http://localhost:{port}[/underline]\n"
+        "  Configure and start your scan from the browser.",
+        border_style="cyan",
+    ))
+
+    monitor = MonitorServer(port=port)
+    config = uvicorn.Config(app=monitor.app, host="0.0.0.0", port=port, log_level="error")
+    server = uvicorn.Server(config)
+
+    async def serve_task():
+        await asyncio.sleep(1.2)
+        webbrowser.open(f"http://localhost:{port}")
+        # Tell dashboard to show the config form
+        await monitor.emit_awaiting_config()
+        # Wait for the user to submit config from the GUI
+        await monitor.scan_request_event.wait()
+        cfg = monitor.scan_request_data
+
+        url = cfg.get("url", "").strip()
+        if not url:
+            console.print("[red]No target URL provided — aborting.[/red]")
+            server.should_exit = True
+            return
+
+        checks = cfg.get("checks", ["sqli", "xss", "os"]) or ["sqli", "xss", "os"]
+        await monitor.emit_scan_started(cfg)
+        await monitor.emit_status(f"Starting scan of {url}", "running")
+
+        try:
+            engine = ScanEngine(
+                url=url,
+                monitor=monitor,
+                depth=int(cfg.get("depth", 2)),
+                timeout=int(cfg.get("timeout", 30)),
+                max_forms=int(cfg.get("max_forms", 50)),
+                headless=bool(cfg.get("headless", True)),
+                concurrency=int(cfg.get("concurrency", 1)),
+                checks=checks,
+                llm_provider=cfg.get("llm", "none") or "none",
+                ollama_model=cfg.get("ollama_model", "llama3") or "llama3",
+                openai_model=cfg.get("openai_model", "gpt-4o-mini") or "gpt-4o-mini",
+                gemini_model=cfg.get("gemini_model", "gemini-2.0-flash") or "gemini-2.0-flash",
+                auth_user=cfg.get("auth_user", "") or "",
+                auth_pass=cfg.get("auth_pass", "") or "",
+                cookies=cfg.get("cookies", "") or "",
+                proxy=cfg.get("proxy", "") or "",
+                login_url=cfg.get("login_url", "") or "",
+                login_user_field=cfg.get("login_user_field", "username") or "username",
+                login_pass_field=cfg.get("login_pass_field", "password") or "password",
+                login_success_indicator=cfg.get("login_success_indicator", "") or "",
+                use_planner=bool(cfg.get("use_planner", True)),
+                interactive_plan=False,
+                skip_registration=bool(cfg.get("skip_registration", True)),
+                open_report=bool(cfg.get("open_report", True)),
+                enable_ai_analysis=bool(cfg.get("enable_ai_analysis", True)),
+                enable_waf_detection=bool(cfg.get("enable_waf_detection", True)),
+                enable_payload_learning=bool(cfg.get("enable_payload_learning", True)),
+                enable_sitemap_crawl=bool(cfg.get("enable_sitemap_crawl", True)),
+                ctf_mode=bool(cfg.get("ctf_mode", False)),
+                ctf_flag_pattern=cfg.get("ctf_flag_pattern", "") or "",
+                exclude_fields=cfg.get("exclude_fields", []) or [],
+                exclude_urls=cfg.get("exclude_urls", []) or [],
+            )
+            await engine.run()
+            console.print(
+                f"\n[bold green]Scan complete![/bold green]  "
+                f"Report: [cyan]{engine.output_dir / 'report.html'}[/cyan]"
+            )
+            console.print("[dim]Dashboard still running — press Ctrl+C to stop.[/dim]")
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:
+            console.print(f"\n[red]Error: {exc}[/red]")
+            raise
+        finally:
+            server.should_exit = True
+
+    await asyncio.gather(server.serve(), serve_task())
+
+
 async def run_triage(args):
     """Triage mode — fast structural analysis without payload injection."""
     from rich.console import Console
@@ -778,6 +885,8 @@ def main():
             asyncio.run(run_setup(args))
         elif args.command == "triage":
             asyncio.run(run_triage(args))
+        elif args.command == "serve":
+            asyncio.run(run_serve(args))
         else:
             asyncio.run(run_scan(args))
     except KeyboardInterrupt:
