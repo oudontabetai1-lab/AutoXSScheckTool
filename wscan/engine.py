@@ -26,10 +26,20 @@ import json
 import re
 import xml.etree.ElementTree as _ET
 from collections import deque
+from contextvars import ContextVar
 from dataclasses import dataclass, field as dc_field
 from pathlib import Path
 from typing import Optional
 from urllib.parse import urlparse, urljoin
+
+# ---------------------------------------------------------------------------
+# Per-worker browser context variable
+# ---------------------------------------------------------------------------
+# When concurrent scanning is enabled, each asyncio Task that handles a page
+# sets this variable to its dedicated WorkerBrowser instance.  The engine's
+# ``browser`` property reads it so that scanners transparently use the
+# worker's isolated page without any code changes.
+_CURRENT_WORKER: ContextVar = ContextVar("wscan_worker", default=None)
 
 import yaml
 from rich.console import Console
@@ -161,6 +171,8 @@ class ScanEngine:
         enable_waf_detection: bool = True,
         enable_payload_learning: bool = True,
         enable_sitemap_crawl: bool = True,
+        # Concurrent scanning
+        concurrency: int = 1,
     ):
         self.target_url = url.rstrip("/")
         self.monitor = monitor
@@ -196,6 +208,7 @@ class ScanEngine:
         self.enable_waf_detection = enable_waf_detection
         self.enable_payload_learning = enable_payload_learning
         self.enable_sitemap_crawl = enable_sitemap_crawl
+        self.concurrency = max(1, concurrency)
         if ctf_mode and "ssti" not in self.checks:
             self.checks.append("ssti")
 
@@ -223,7 +236,7 @@ class ScanEngine:
         prompt_templates = payloads_data.get("llm_prompts", {})
 
         # Components
-        self.browser = BrowserManager(
+        self._browser = BrowserManager(
             headless=headless, timeout=timeout, monitor=monitor,
             auth_user=auth_user, auth_pass=auth_pass,
             proxy=proxy,
@@ -288,7 +301,7 @@ class ScanEngine:
 
         # Chain / stored vulnerability scanner (Phase 3c)
         self.chain_scanner = ChainScanner(
-            browser=self.browser,
+            browser=self._browser,
             sleep_factor=self.sleep_factor,
             exclude_fields=self.exclude_fields,
             enabled_checks=self.checks,
@@ -299,12 +312,28 @@ class ScanEngine:
         self.attack_plans: list = []
         self.visited_urls: set = set()
         self.scanned_forms: set = set()
+        self._scanned_forms_lock = asyncio.Lock()   # guards scanned_forms in concurrent mode
         self.completed_fields: int = 0
         self.total_fields: int = 0
         # page_graph: {url: {"parent": parent_url|None, "screenshot_b64": str, "depth": int}}
         self.page_graph: dict = {}
         # Scan controller (intervention system)
         self.controller = ScanController()
+
+    # =========================================================================
+    # browser property — transparently returns the current worker's browser
+    # =========================================================================
+
+    @property
+    def browser(self):
+        """
+        Returns the current concurrent worker's WorkerBrowser when called from
+        inside a worker task, otherwise returns the main BrowserManager.
+        This makes all scanners work correctly in both serial and concurrent modes
+        without any changes to scanner code.
+        """
+        worker = _CURRENT_WORKER.get(None)
+        return worker if worker is not None else self._browser
 
     # =========================================================================
     # Public entry point
@@ -323,18 +352,18 @@ class ScanEngine:
             asyncio.run_coroutine_threadsafe(self._manual_payload_listener(), loop)
 
         try:
-            await self.browser.init()
+            await self._browser.init()
             if self.cookies:
-                await self.browser.set_cookies(self.cookies, self.target_url)
+                await self._browser.set_cookies(self.cookies, self.target_url)
             if self.cookie_list:
-                await self.browser.set_cookies_from_list(self.cookie_list, self.target_url)
+                await self._browser.set_cookies_from_list(self.cookie_list, self.target_url)
 
             # Auth-1: Auto-login if login URL provided
-            if self.login_url and self.browser.auth_user and self.browser.auth_pass:
+            if self.login_url and self._browser.auth_user and self._browser.auth_pass:
                 console.print(
                     f"  [cyan][Auth] Auto-login:[/cyan] {self.login_url}"
                 )
-                success = await self.browser.auto_login(
+                success = await self._browser.auto_login(
                     self.login_url,
                     user_field=self.login_user_field,
                     pass_field=self.login_pass_field,
@@ -376,7 +405,7 @@ class ScanEngine:
 
         finally:
             self.controller.stop()
-            await self.browser.close()
+            await self._browser.close()
 
             # ── Phase 4: Report ──────────────────────────────────────────
             await self._phase_report_async()
@@ -911,63 +940,25 @@ class ScanEngine:
     # =========================================================================
 
     async def _phase_attack(self, pages: list, plans: dict):
-        """Execute attacks guided by the plan. Re-rank remaining pages on new findings."""
+        """
+        Execute attacks guided by the plan.
+
+        Serial mode (concurrency=1):  same sequential flow as before.
+        Concurrent mode (concurrency>1): worker pool — each worker holds its
+        own Playwright page (WorkerBrowser) and processes pages in parallel.
+        Within a single page, fields are still tested sequentially so that
+        form state is consistent.
+        """
         console.print(Rule("[bold red] Phase 3 / 4  ·  Attack [/bold red]", style="red"))
 
-        attacked_urls: set = set()
-
-        for page in pages:
-            # Intervention checkpoint — allows skip-page / abort
-            try:
-                await self.controller.checkpoint()
-            except SkipPage:
-                console.print(f"  [yellow][Intervention] Skipping page: {page.url}[/yellow]")
-                continue
-            # AbortScan propagates up to run()
-
-            attacked_urls.add(page.url)
-
-            # ── Page-level checks (header inspection, clickjacking, session, etc.) ──
-            for check_name, scanner in self.scanners.items():
-                try:
-                    page_findings = await scanner.scan_page(page.url)
-                    for f in (page_findings or []):
-                        self._record_finding(f, source="page-level")
-                except Exception as e:
-                    console.print(f"  [yellow]Page-level ({check_name}): {e}[/yellow]")
-
-            if not page.forms and not page.url_params:
-                continue
-
-            # Navigate back to page for form interaction
-            success = await self.browser.navigate(page.url)
-            if not success:
-                continue
-
-            # CTF: re-check page after navigating (dynamic content may differ from crawl)
-            if self.flag_finder:
-                try:
-                    attack_html = await self.browser.page.content()
-                    self._check_page_for_flags(attack_html, page.url)
-                except Exception:
-                    pass
-
-            console.print(f"\n  [bold]Attacking:[/bold] {page.url}")
-            plan = plans.get(page.url)
-            findings_before = len(self.all_findings)
-
-            # Phase 3a + 3b: individual field scan + adaptive AI
-            await self._attack_page(page, plan)
-
-            # Phase 3d: multi-parameter simultaneous injection
-            await self._phase_multi_param(page, plan)
-
-            # Adaptive re-planning: if new findings appeared, elevate risk on similar fields
-            new_findings = self.all_findings[findings_before:]
-            if new_findings and self.use_planner:
-                remaining = [p for p in pages if p.url not in attacked_urls]
-                if remaining:
-                    self._adaptive_rerank(new_findings, remaining, plans)
+        if self.concurrency > 1:
+            console.print(
+                f"  [bold cyan][Concurrent][/bold cyan] "
+                f"{self.concurrency} parallel worker(s)"
+            )
+            await self._phase_attack_concurrent(pages, plans)
+        else:
+            await self._phase_attack_serial(pages, plans)
 
         # Phase 3c: chain / stored vulnerability detection (runs after ALL pages attacked)
         chain_findings = await self.chain_scanner.run(
@@ -978,6 +969,142 @@ class ScanEngine:
         )
         for cf in chain_findings:
             self._record_finding(cf.finding, source=f"chain:{cf.source_url}→{cf.trigger_url}")
+
+    # ── Serial attack (original flow) ─────────────────────────────────────
+
+    async def _phase_attack_serial(self, pages: list, plans: dict):
+        attacked_urls: set = set()
+
+        for page in pages:
+            try:
+                await self.controller.checkpoint()
+            except SkipPage:
+                console.print(f"  [yellow][Intervention] Skipping page: {page.url}[/yellow]")
+                continue
+
+            attacked_urls.add(page.url)
+            findings_before = len(self.all_findings)
+            await self._attack_one_page(page, plans)
+
+            new_findings = self.all_findings[findings_before:]
+            if new_findings and self.use_planner:
+                remaining = [p for p in pages if p.url not in attacked_urls]
+                if remaining:
+                    self._adaptive_rerank(new_findings, remaining, plans)
+
+    # ── Concurrent attack ─────────────────────────────────────────────────
+
+    async def _phase_attack_concurrent(self, pages: list, plans: dict):
+        """
+        Distribute pages across N WorkerBrowser instances.
+
+        Concurrency model:
+        - N worker coroutines run as asyncio Tasks (N = self.concurrency).
+        - Each worker picks a page from the queue, sets _CURRENT_WORKER
+          in its task-local ContextVar, runs _attack_one_page(), then
+          returns the worker to the pool.
+        - Since asyncio is cooperative (not preemptive) and each page-attack
+          is a single sequential coroutine, there are no data races on
+          per-worker browser state.
+        - The shared findings list and scanned_forms set are guarded by
+          asyncio Locks at yield points.
+        """
+        # Create (concurrency-1) additional worker pages; worker[0] = main page.
+        extra_workers = []
+        for i in range(self.concurrency - 1):
+            try:
+                w = await self._browser.create_worker()
+                extra_workers.append(w)
+                console.print(f"  [dim]Worker {i + 2} page created[/dim]")
+            except Exception as e:
+                console.print(f"  [yellow]Could not create worker {i + 2}: {e}[/yellow]")
+
+        # Worker pool queue: None = use main browser, WorkerBrowser = use worker
+        worker_pool: asyncio.Queue = asyncio.Queue()
+        await worker_pool.put(None)          # slot 0 → main _browser
+        for w in extra_workers:
+            await worker_pool.put(w)
+
+        page_queue: asyncio.Queue = asyncio.Queue()
+        for p in pages:
+            await page_queue.put(p)
+
+        async def worker_loop():
+            while True:
+                try:
+                    page = page_queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    return
+
+                worker_browser = await worker_pool.get()
+                token = _CURRENT_WORKER.set(worker_browser)
+                try:
+                    try:
+                        await self.controller.checkpoint()
+                    except SkipPage:
+                        console.print(
+                            f"  [yellow][Intervention] Skipping page: {page.url}[/yellow]"
+                        )
+                        return
+                    await self._attack_one_page(page, plans)
+                except AbortScan:
+                    raise
+                except Exception as exc:
+                    console.print(f"  [yellow][Worker] Error on {page.url}: {exc}[/yellow]")
+                finally:
+                    _CURRENT_WORKER.reset(token)
+                    await worker_pool.put(worker_browser)
+                    page_queue.task_done()
+
+        n_slots = 1 + len(extra_workers)
+        tasks = [asyncio.create_task(worker_loop()) for _ in range(n_slots)]
+        try:
+            await asyncio.gather(*tasks)
+        finally:
+            for w in extra_workers:
+                await w.close()
+
+    # ── Single-page attack (shared by serial and concurrent modes) ────────
+
+    async def _attack_one_page(self, page: CrawledPage, plans: dict):
+        """
+        Run all checks on a single crawled page.
+        Uses ``self.browser`` which transparently returns the worker's browser
+        when called from inside a concurrent worker task.
+        """
+        # ── Page-level checks (header inspection, clickjacking, session, etc.) ──
+        for check_name, scanner in self.scanners.items():
+            try:
+                page_findings = await scanner.scan_page(page.url)
+                for f in (page_findings or []):
+                    self._record_finding(f, source="page-level")
+            except Exception as e:
+                console.print(f"  [yellow]Page-level ({check_name}): {e}[/yellow]")
+
+        if not page.forms and not page.url_params:
+            return
+
+        # Navigate back to page for form interaction
+        success = await self.browser.navigate(page.url)
+        if not success:
+            return
+
+        # CTF: re-check page after navigating (dynamic content may differ from crawl)
+        if self.flag_finder:
+            try:
+                attack_html = await self.browser.page.content()
+                self._check_page_for_flags(attack_html, page.url)
+            except Exception:
+                pass
+
+        console.print(f"\n  [bold]Attacking:[/bold] {page.url}")
+        plan = plans.get(page.url)
+
+        # Phase 3a + 3b: individual field scan + adaptive AI
+        await self._attack_page(page, plan)
+
+        # Phase 3d: multi-parameter simultaneous injection
+        await self._phase_multi_param(page, plan)
 
     async def _attack_page(self, page: CrawledPage, plan: Optional[PageAttackPlan]):
         """Run all scanners on all fields of a single page."""
@@ -1035,9 +1162,12 @@ class ScanEngine:
             field_name = field.get("name", f"field_{fi}")
             key = (f"{page.url}||url_param||{field_name}" if is_url_param
                    else f"{page.url}||{fi}||{field_name}")
-            if key in self.scanned_forms:
-                continue
-            self.scanned_forms.add(key)
+            # Guard scanned_forms with a lock so concurrent workers don't
+            # both pick up the same field simultaneously.
+            async with self._scanned_forms_lock:
+                if key in self.scanned_forms:
+                    continue
+                self.scanned_forms.add(key)
 
             if field_name.lower() in self.exclude_fields:
                 console.print(f"  [dim]Skip excluded: {field_name}[/dim]")

@@ -612,6 +612,20 @@ class BrowserManager:
         except Exception:
             return False
 
+    async def create_worker(self) -> "WorkerBrowser":
+        """
+        Create an additional browser page for concurrent scanning.
+        The worker shares the same browser context (cookies) as the main page
+        but has its own Playwright page, network capture, and dialog state.
+        """
+        page = await self._context.new_page()
+        page.set_default_timeout(self.timeout)
+        worker = WorkerBrowser(self, page)
+        page.on("request", worker.network.on_request)
+        page.on("response", worker._on_response)
+        page.on("dialog", worker._on_dialog)
+        return worker
+
     async def close(self):
         """Close browser and playwright."""
         try:
@@ -621,5 +635,44 @@ class BrowserManager:
                 await self._browser.close()
             if self._playwright:
                 await self._playwright.stop()
+        except Exception:
+            pass
+
+
+class WorkerBrowser(BrowserManager):
+    """
+    A BrowserManager slice for one concurrent page worker.
+
+    Inherits ALL methods from BrowserManager so scanners don't need any changes.
+    The key difference: ``self.page`` points to this worker's dedicated Playwright
+    page instead of the main page, so all navigation / form-filling / screenshot
+    operations are fully isolated.  The shared browser context (cookies, auth)
+    comes from the real BrowserManager.
+    """
+
+    def __init__(self, real_browser: "BrowserManager", page):
+        # Bypass BrowserManager.__init__ — we just copy the fields we need.
+        self.headless = real_browser.headless
+        self.timeout = real_browser.timeout
+        self.monitor = real_browser.monitor
+        self.auth_user = real_browser.auth_user
+        self.auth_pass = real_browser.auth_pass
+        self.proxy = real_browser.proxy
+        self._playwright = real_browser._playwright
+        self._browser = real_browser._browser
+        self._context = real_browser._context      # Shared — cookies are inherited
+        self._real = real_browser
+
+        # Worker-private state
+        self.page = page
+        self.network = NetworkCapture()
+        self.dialog_fired: bool = False
+        self.dialog_message: str = ""
+        self.dialog_screenshot_b64: str = ""
+
+    async def close(self):
+        """Close only this worker's page (not the whole browser)."""
+        try:
+            await self.page.close()
         except Exception:
             pass
