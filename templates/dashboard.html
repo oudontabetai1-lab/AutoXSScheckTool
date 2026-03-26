@@ -728,7 +728,6 @@ body {
           <div class="cfg-toggle on" id="tog-enable_waf_detection" onclick="toggleCfg('enable_waf_detection')">WAF自動検出</div>
           <div class="cfg-toggle on" id="tog-enable_payload_learning" onclick="toggleCfg('enable_payload_learning')">ペイロード学習</div>
           <div class="cfg-toggle on" id="tog-enable_sitemap_crawl" onclick="toggleCfg('enable_sitemap_crawl')">サイトマップ/robots.txtクロール</div>
-          <div class="cfg-toggle off" id="tog-dom_xss" onclick="toggleCfg('dom_xss')">DOM XSS検出 (低速)</div>
         </div>
         <div class="cfg-section-title" style="margin-top:20px">CTFモード</div>
         <div class="cfg-toggle-row">
@@ -976,7 +975,6 @@ const cfgToggles = {
   enable_waf_detection: true,
   enable_payload_learning: true,
   enable_sitemap_crawl: true,
-  dom_xss: false,
   ctf_mode: false,
 };
 
@@ -1088,7 +1086,6 @@ function submitScanConfig() {
     enable_waf_detection:  cfgToggles.enable_waf_detection,
     enable_payload_learning: cfgToggles.enable_payload_learning,
     enable_sitemap_crawl:  cfgToggles.enable_sitemap_crawl,
-    dom_xss:     cfgToggles.dom_xss,
     ctf_mode:    cfgToggles.ctf_mode,
     ctf_flag_pattern: document.getElementById('cfgCtfFlagPattern').value.trim(),
     checks:      getSelectedChecks(),
@@ -1144,9 +1141,11 @@ function saveConfigToStorage() {
       openai_model: document.getElementById('cfgOpenaiModel').value,
       gemini_model: document.getElementById('cfgGeminiModel').value,
       auth_user: document.getElementById('cfgAuthUser').value,
+      auth_pass: document.getElementById('cfgAuthPass').value,
       login_url: document.getElementById('cfgLoginUrl').value,
       login_user_field: document.getElementById('cfgLoginUserField').value,
       login_pass_field: document.getElementById('cfgLoginPassField').value,
+      login_success_indicator: document.getElementById('cfgLoginSuccess').value,
       cookies: document.getElementById('cfgCookies').value,
       exclude_fields: document.getElementById('cfgExcludeFields').value,
       exclude_urls: document.getElementById('cfgExcludeUrls').value,
@@ -1174,9 +1173,11 @@ function loadConfigFromStorage() {
     if (cfg.openai_model) document.getElementById('cfgOpenaiModel').value = cfg.openai_model;
     if (cfg.gemini_model) document.getElementById('cfgGeminiModel').value = cfg.gemini_model;
     if (cfg.auth_user) document.getElementById('cfgAuthUser').value = cfg.auth_user;
+    if (cfg.auth_pass) document.getElementById('cfgAuthPass').value = cfg.auth_pass;
     if (cfg.login_url) document.getElementById('cfgLoginUrl').value = cfg.login_url;
     if (cfg.login_user_field) document.getElementById('cfgLoginUserField').value = cfg.login_user_field;
     if (cfg.login_pass_field) document.getElementById('cfgLoginPassField').value = cfg.login_pass_field;
+    if (cfg.login_success_indicator) document.getElementById('cfgLoginSuccess').value = cfg.login_success_indicator;
     if (cfg.cookies) document.getElementById('cfgCookies').value = cfg.cookies;
     if (cfg.exclude_fields) document.getElementById('cfgExcludeFields').value = cfg.exclude_fields;
     if (cfg.exclude_urls) document.getElementById('cfgExcludeUrls').value = cfg.exclude_urls;

@@ -214,7 +214,7 @@ class MonitorServer:
         """
         try:
             await asyncio.wait_for(
-                asyncio.shield(self.plan_confirm_event.wait()),
+                self.plan_confirm_event.wait(),
                 timeout=timeout,
             )
         except asyncio.TimeoutError:
