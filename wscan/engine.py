@@ -410,6 +410,12 @@ class ScanEngine:
                     "Generating partial report …"
                 )
 
+        except Exception as _run_exc:
+            console.print(f"\n[bold red]Scan error:[/bold red] {_run_exc}")
+            if self.monitor:
+                await self.monitor.emit_status(f"Scan error: {_run_exc}", "error")
+            raise
+
         finally:
             self.controller.stop()
             await self._browser.close()
@@ -1231,7 +1237,13 @@ class ScanEngine:
             # AbortScan propagates up
 
             field_plan = plan.get_field_plan(field_name, fi, is_url_param) if plan else None
-            await self._scan_field(page.url, fi, field, is_url_param, field_plan)
+            try:
+                await self._scan_field(page.url, fi, field, is_url_param, field_plan)
+            except (AbortScan, SkipPage):
+                raise
+            except Exception as e:
+                console.print(f"  [dim red]Field scan error ({field_name}): {e}[/dim red]")
+                continue
 
             if not is_url_param:
                 await self.browser.navigate(page.url)
