@@ -133,7 +133,7 @@ class OSInjectionScanner(BaseScanner):
                     findings.append(finding)
                     break
 
-            await asyncio.sleep(0.2)
+            await asyncio.sleep(0.2 * self.sleep_factor)
 
         return findings
 

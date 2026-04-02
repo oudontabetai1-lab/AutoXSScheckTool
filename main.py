@@ -134,7 +134,7 @@ Examples:
         "session", "csrf", "header_injection", "mail_header",
         "clickjacking", "open_redirect", "ssti", "privesc",
         "cors", "info_disclosure", "host_header", "security_headers",
-        "nosql", "deserialization", "request_smuggling",
+        "nosql", "deserialization", "request_smuggling", "ssrf",
     ]
     _default_checks = _CFG.get("checks", ["sqli", "xss", "os"])
     scan.add_argument(

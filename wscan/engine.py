@@ -77,6 +77,7 @@ from .scanners.security_headers import SecurityHeadersScanner
 from .scanners.nosql_injection import NoSQLInjectionScanner
 from .scanners.deserialization import DeserializationScanner
 from .scanners.request_smuggling import RequestSmugglingScanner
+from .scanners.ssrf import SSRFScanner
 from .waf_detector import WAFDetector
 from .payload_learning import PayloadLearner
 
@@ -271,6 +272,7 @@ class ScanEngine:
             "nosql":              NoSQLInjectionScanner,
             "deserialization":    DeserializationScanner,
             "request_smuggling":  RequestSmugglingScanner,
+            "ssrf":               SSRFScanner,
         }
         self.scanners = {n: cls(self) for n, cls in scanner_map.items() if n in self.checks}
 
@@ -576,10 +578,18 @@ class ScanEngine:
             if depth < self.depth:
                 links = await self.browser.collect_links(url, same_domain=True)
                 url_cap = max(200, self.depth * 50)
+                _cap_warned = False
                 for link in links:
                     clean = link.split("#")[0].split("?")[0]
+                    if len(self.visited_urls) >= url_cap:
+                        if not _cap_warned:
+                            console.print(
+                                f"  [yellow]Crawl URL cap ({url_cap}) reached — "
+                                f"some pages may have been skipped.[/yellow]"
+                            )
+                            _cap_warned = True
+                        break
                     if (clean not in self.visited_urls
-                            and len(self.visited_urls) < url_cap
                             and not self._is_url_excluded(clean)):
                         self.visited_urls.add(clean)
                         queue.append((link, depth + 1, url))

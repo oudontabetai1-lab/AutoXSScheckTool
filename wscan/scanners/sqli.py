@@ -185,7 +185,7 @@ class SQLiScanner(BaseScanner):
                     break
 
             # Small delay to avoid overwhelming the server
-            await asyncio.sleep(0.2)
+            await asyncio.sleep(0.2 * self.sleep_factor)
 
         return findings
 

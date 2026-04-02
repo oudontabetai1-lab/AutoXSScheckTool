@@ -145,7 +145,7 @@ _RECOMMENDED_PAYLOADS: dict[str, list[str]] = {
 _FIELD_RULES: list[tuple[re.Pattern, list[str]]] = [
     # SQL injection targets
     (re.compile(r"id$|user_?id$|item_?id$|order_?id$|product_?id$", re.I),
-     ["sqli", "privesc", "nosql"]),
+     ["sqli", "nosql"]),
     (re.compile(r"q$|query$|search$|keyword$|filter$|term$", re.I),
      ["sqli", "xss", "ssti"]),
     (re.compile(r"username|user$|login$|email$", re.I),
