@@ -1177,8 +1177,16 @@ class ScanEngine:
     async def _phase_crawl_postauth(self) -> list:
         """
         Re-crawl the application with the authenticated session gained via SQL
-        injection auth bypass.  Only pages NOT already visited in the initial
-        crawl are returned as new CrawledPage objects for re-attack.
+        injection auth bypass.
+
+        Key difference from the initial crawl: we re-visit ALL pages regardless of
+        whether they were visited before authentication.  Pages that previously just
+        returned the login redirect may now show actual authenticated content (forms,
+        data) that must be scanned.
+
+        Deduplication is only within this crawl pass (auth_visited), NOT against
+        self.visited_urls.  A page whose content changed after authentication is
+        treated as new and re-added to new_pages for attack.
         """
         console.print(Rule(
             "[bold red] Phase 3c  ·  Post-Auth Crawl (SQLi Bypass) [/bold red]",
@@ -1194,19 +1202,37 @@ class ScanEngine:
                 "Post-auth crawl: re-crawling authenticated surface (SQLi bypass)", "running"
             )
 
-        # Navigate to target URL with authenticated session to find landing page
+        # Navigate to target URL with authenticated session to find the landing page
+        # (e.g., target is /login but authenticated session redirects to /dashboard)
         await self._browser.navigate(self.target_url)
         landing_url = self._browser.page.url.rstrip("/")
 
-        new_pages: list = []
-        queue: deque = deque()
-        auth_visited: set = set()
+        # If we landed on the login page, session may have expired — try to re-login
+        if self._browser.is_on_login_page(self.login_url):
+            console.print("  [yellow][Post-Auth] Session appears expired — re-authenticating …[/yellow]")
+            if self.login_url and self._browser.auth_user:
+                ok = await self._browser.auto_login(
+                    self.login_url,
+                    user_field=self.login_user_field,
+                    pass_field=self.login_pass_field,
+                    success_indicator=self.login_success_indicator,
+                )
+                if not ok:
+                    console.print(
+                        "  [red][Post-Auth] Re-authentication failed — cannot crawl authenticated surface.[/red]"
+                    )
+                    return []
+                landing_url = self._browser.page.url.rstrip("/")
 
-        # Start from the authenticated landing page
-        for seed_url in {landing_url, self.target_url}:
-            if seed_url not in auth_visited:
-                auth_visited.add(seed_url)
-                queue.append((seed_url, 0, None))
+        new_pages: list = []
+        # auth_visited: only prevents re-queueing within THIS crawl (not against pre-auth crawl)
+        auth_visited: set = set()
+        queue: deque = deque()
+
+        for seed in {landing_url, self.target_url}:
+            if seed and seed not in auth_visited:
+                auth_visited.add(seed)
+                queue.append((seed, 0, None))
 
         while queue:
             url, depth, parent_url = queue.popleft()
@@ -1214,61 +1240,74 @@ class ScanEngine:
             if self._is_url_excluded(url):
                 continue
 
-            already_crawled = url in self.visited_urls
+            console.print(
+                f"  [dim][Post-Auth][/dim] Crawling ({depth}/{self.depth}): {url}"
+            )
+            if self.monitor:
+                await self.monitor.emit_page_start(url)
 
-            if not already_crawled:
+            success = await self._browser.navigate(url)
+            if not success:
+                console.print(f"  [yellow]  ✘ could not load[/yellow]")
+                continue
+
+            # Check actual URL after navigation (may redirect)
+            actual_url = self._browser.page.url.rstrip("/")
+
+            # If redirected to login, session expired mid-crawl
+            if self._browser.is_on_login_page(self.login_url):
                 console.print(
-                    f"  [dim][Post-Auth][/dim] Crawling ({depth}/{self.depth}): {url}"
+                    "  [yellow][Post-Auth] Redirected to login — session expired.[/yellow]"
                 )
-                if self.monitor:
-                    await self.monitor.emit_page_start(url)
+                break
 
-                success = await self._browser.navigate(url)
-                if not success:
-                    continue
+            try:
+                html = await self._browser.page.content()
+            except Exception:
+                html = ""
 
-                try:
-                    html = await self._browser.page.content()
-                except Exception:
-                    html = ""
+            forms = await self._browser.find_forms()
+            url_params = await self._browser.get_url_params()
+            screenshot_b64 = await self._browser.screenshot_b64(
+                f"Post-Auth Crawl: {actual_url}"
+            )
 
-                forms = await self._browser.find_forms()
-                url_params = await self._browser.get_url_params()
-                screenshot_b64 = await self._browser.screenshot_b64(
-                    f"Post-Auth Crawl: {url}"
-                )
+            was_known = url in self.visited_urls or actual_url in self.visited_urls
 
-                self.page_graph[url] = {
-                    "parent": parent_url,
-                    "screenshot_b64": screenshot_b64,
-                    "depth": depth,
-                }
-                self.visited_urls.add(url)
+            self.page_graph[actual_url] = {
+                "parent": parent_url,
+                "screenshot_b64": screenshot_b64,
+                "depth": depth,
+            }
+            # Mark as visited so the main scanner doesn't double-count
+            self.visited_urls.add(actual_url)
 
-                input_count = (
-                    sum(len(f.get("inputs", [])) for f in forms) + len(url_params)
-                )
-                console.print(
-                    f"    [green][NEW][/green] "
-                    f"forms: {len(forms)}  "
-                    f"url params: {len(url_params)}  "
-                    f"inputs: {input_count}"
-                )
-                new_pages.append(
-                    CrawledPage(url=url, html=html, forms=forms,
-                                url_params=url_params, depth=depth)
-                )
-            else:
-                # Already crawled — navigate to collect links without re-adding page
-                try:
-                    await self._browser.navigate(url)
-                except Exception:
-                    continue
+            input_count = (
+                sum(len(f.get("inputs", [])) for f in forms) + len(url_params)
+            )
+            label = "[dim](re-crawled with auth)[/dim]" if was_known else "[green][NEW][/green]"
+            console.print(
+                f"    {label} "
+                f"forms: {len(forms)}  "
+                f"url params: {len(url_params)}  "
+                f"inputs: {input_count}"
+            )
 
-            # Collect links from this page for BFS
+            # Always add to new_pages — authenticated content may differ completely
+            # from what was seen pre-auth (login form vs real page content)
+            new_pages.append(
+                CrawledPage(url=actual_url, html=html, forms=forms,
+                            url_params=url_params, depth=depth)
+            )
+
+            # If actual_url differs from queued url (redirect), also mark in auth_visited
+            if actual_url != url.rstrip("/") and actual_url not in auth_visited:
+                auth_visited.add(actual_url)
+
+            # BFS: collect links from actual page
             if depth < self.depth:
                 try:
-                    links = await self._browser.collect_links(url, same_domain=True)
+                    links = await self._browser.collect_links(actual_url, same_domain=True)
                 except Exception:
                     links = []
                 url_cap = max(200, self.depth * 50)
@@ -1278,7 +1317,7 @@ class ScanEngine:
                         break
                     if clean not in auth_visited and not self._is_url_excluded(clean):
                         auth_visited.add(clean)
-                        queue.append((link, depth + 1, url))
+                        queue.append((clean, depth + 1, actual_url))
 
         total_inputs = sum(
             sum(len(f.get("inputs", [])) for f in p.forms) + len(p.url_params)
@@ -1286,8 +1325,8 @@ class ScanEngine:
         )
         console.print(
             f"\n  [bold green]Post-Auth Crawl complete[/bold green]  "
-            f"[cyan]{len(new_pages)}[/cyan] new page(s) · "
-            f"[cyan]{total_inputs}[/cyan] new input(s) discovered\n"
+            f"[cyan]{len(new_pages)}[/cyan] page(s) · "
+            f"[cyan]{total_inputs}[/cyan] input(s) discovered\n"
         )
         return new_pages
 
