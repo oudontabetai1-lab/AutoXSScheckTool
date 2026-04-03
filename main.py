@@ -591,6 +591,7 @@ async def run_scan(args):
             enable_payload_learning=not getattr(args, "no_payload_learning", False),
             enable_sitemap_crawl=not getattr(args, "no_sitemap_crawl", False),
             concurrency=getattr(args, "concurrency", 1),
+            flows=getattr(args, "flows", None) or [],
         )
 
     if args.no_monitor:
@@ -738,6 +739,7 @@ async def run_serve(args):
                 ctf_flag_pattern=cfg.get("ctf_flag_pattern", "") or "",
                 exclude_fields=cfg.get("exclude_fields", []) or [],
                 exclude_urls=cfg.get("exclude_urls", []) or [],
+                flows=cfg.get("flows", []) or [],
             )
             await engine.run()
             console.print(
