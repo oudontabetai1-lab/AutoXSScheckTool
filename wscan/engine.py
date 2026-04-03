@@ -74,10 +74,10 @@ from .scanners.cors import CORSScanner
 from .scanners.info_disclosure import InfoDisclosureScanner
 from .scanners.host_header import HostHeaderScanner
 from .scanners.security_headers import SecurityHeadersScanner
-from .scanners.file_upload import FileUploadScanner
 from .scanners.nosql_injection import NoSQLInjectionScanner
 from .scanners.deserialization import DeserializationScanner
 from .scanners.request_smuggling import RequestSmugglingScanner
+from .scanners.ssrf import SSRFScanner
 from .waf_detector import WAFDetector
 from .payload_learning import PayloadLearner
 
@@ -269,10 +269,10 @@ class ScanEngine:
             "info_disclosure":    InfoDisclosureScanner,
             "host_header":        HostHeaderScanner,
             "security_headers":   SecurityHeadersScanner,
-            "file_upload":        FileUploadScanner,
             "nosql":              NoSQLInjectionScanner,
             "deserialization":    DeserializationScanner,
             "request_smuggling":  RequestSmugglingScanner,
+            "ssrf":               SSRFScanner,
         }
         self.scanners = {n: cls(self) for n, cls in scanner_map.items() if n in self.checks}
 
@@ -409,6 +409,12 @@ class ScanEngine:
                     "\n[bold red][Intervention] Scan aborted by operator.[/bold red] "
                     "Generating partial report …"
                 )
+
+        except Exception as _run_exc:
+            console.print(f"\n[bold red]Scan error:[/bold red] {_run_exc}")
+            if self.monitor:
+                await self.monitor.emit_status(f"Scan error: {_run_exc}", "error")
+            raise
 
         finally:
             self.controller.stop()
@@ -578,10 +584,18 @@ class ScanEngine:
             if depth < self.depth:
                 links = await self.browser.collect_links(url, same_domain=True)
                 url_cap = max(200, self.depth * 50)
+                _cap_warned = False
                 for link in links:
                     clean = link.split("#")[0].split("?")[0]
+                    if len(self.visited_urls) >= url_cap:
+                        if not _cap_warned:
+                            console.print(
+                                f"  [yellow]Crawl URL cap ({url_cap}) reached — "
+                                f"some pages may have been skipped.[/yellow]"
+                            )
+                            _cap_warned = True
+                        break
                     if (clean not in self.visited_urls
-                            and len(self.visited_urls) < url_cap
                             and not self._is_url_excluded(clean)):
                         self.visited_urls.add(clean)
                         queue.append((link, depth + 1, url))
@@ -1223,7 +1237,13 @@ class ScanEngine:
             # AbortScan propagates up
 
             field_plan = plan.get_field_plan(field_name, fi, is_url_param) if plan else None
-            await self._scan_field(page.url, fi, field, is_url_param, field_plan)
+            try:
+                await self._scan_field(page.url, fi, field, is_url_param, field_plan)
+            except (AbortScan, SkipPage):
+                raise
+            except Exception as e:
+                console.print(f"  [dim red]Field scan error ({field_name}): {e}[/dim red]")
+                continue
 
             if not is_url_param:
                 await self.browser.navigate(page.url)

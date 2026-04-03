@@ -220,10 +220,10 @@ class ChainScanner:
                         uid = self._make_uid(page.url, field_name, ptype)
                         payload = self._make_payload(ptype, uid)
 
+                        self.browser.reset_dialog()
                         ok = await self.browser.navigate(page.url)
                         if not ok:
                             continue
-                        self.browser.reset_dialog()
                         await self.browser.fill_and_submit_form(
                             fi, field_name, payload
                         )
@@ -254,6 +254,7 @@ class ChainScanner:
         uid_to_probe = {p.uid: p for p in self.probes}
 
         for page in pages:
+            self.browser.reset_dialog()
             ok = await self.browser.navigate(page.url)
             if not ok:
                 continue

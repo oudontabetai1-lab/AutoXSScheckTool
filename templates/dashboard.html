@@ -467,9 +467,299 @@ body {
   width: 40px; height: 40px; border-radius: 50%;
   display: flex; align-items: center; justify-content: center;
 }
+/* ─── Scan Config Overlay ───────────────────────────────────── */
+#scanConfigOverlay {
+  position: fixed; inset: 0; z-index: 900;
+  background: var(--bg);
+  display: none; flex-direction: column;
+  overflow: hidden;
+}
+#scanConfigOverlay.active { display: flex; }
+.cfg-header {
+  background: var(--surface); border-bottom: 1px solid var(--border);
+  padding: 14px 24px; display: flex; align-items: center; gap: 16px; flex-shrink: 0;
+}
+.cfg-header .logo { font-size: 1.25rem; font-weight: 800; color: var(--accent); }
+.cfg-header .subtitle { font-size: 0.8rem; color: var(--text-muted); }
+.cfg-body {
+  flex: 1; overflow-y: auto; padding: 20px 24px;
+  display: flex; flex-direction: column; gap: 16px;
+}
+.cfg-url-row { display: flex; gap: 10px; align-items: center; }
+.cfg-url-row input[type=text] {
+  flex: 1; font-size: 1rem; padding: 10px 14px;
+  background: var(--surface2); border: 2px solid var(--accent);
+  color: var(--text); border-radius: 8px; outline: none;
+}
+.cfg-url-row input[type=text]:focus { border-color: #5fa8ff; }
+.cfg-tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--border); flex-shrink: 0; flex-wrap: wrap; }
+.cfg-tab {
+  padding: 6px 16px; border-radius: 6px 6px 0 0; cursor: pointer;
+  font-size: 0.78rem; font-weight: 600; color: var(--text-muted);
+  background: none; border: none; border-bottom: 2px solid transparent;
+  transition: color 0.15s;
+}
+.cfg-tab:hover { color: var(--text); }
+.cfg-tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+.cfg-panel { display: none; }
+.cfg-panel.active { display: block; }
+.cfg-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 12px; margin-top: 10px; }
+.cfg-field { display: flex; flex-direction: column; gap: 4px; }
+.cfg-field label { font-size: 0.72rem; color: var(--text-muted); font-weight: 600; text-transform: uppercase; letter-spacing: 0.03em; }
+.cfg-field input[type=text], .cfg-field input[type=number], .cfg-field input[type=password],
+.cfg-field select, .cfg-field textarea {
+  background: var(--surface2); border: 1px solid var(--border);
+  color: var(--text); border-radius: 6px; padding: 7px 10px; font-size: 0.82rem;
+  outline: none; width: 100%;
+}
+.cfg-field input:focus, .cfg-field select:focus, .cfg-field textarea:focus {
+  border-color: var(--accent);
+}
+.cfg-field textarea { resize: vertical; min-height: 60px; font-family: monospace; }
+.cfg-check-group { margin-top: 10px; }
+.cfg-check-group h4 { font-size: 0.72rem; color: var(--text-muted); text-transform: uppercase;
+  letter-spacing: 0.05em; margin-bottom: 6px; }
+.cfg-checks-grid { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 14px; }
+.cfg-check-item {
+  display: flex; align-items: center; gap: 5px;
+  background: var(--surface2); border: 1px solid var(--border);
+  border-radius: 6px; padding: 4px 10px; cursor: pointer;
+  font-size: 0.75rem; user-select: none; transition: border-color 0.15s;
+}
+.cfg-check-item:hover { border-color: var(--accent); }
+.cfg-check-item.checked { border-color: var(--accent); background: var(--accent-glow); color: var(--accent); }
+.cfg-check-item input[type=checkbox] { display: none; }
+.cfg-toggle-row { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+.cfg-toggle {
+  display: flex; align-items: center; gap: 6px;
+  background: var(--surface2); border: 1px solid var(--border);
+  border-radius: 6px; padding: 5px 12px; cursor: pointer;
+  font-size: 0.78rem; user-select: none; transition: border-color 0.15s;
+}
+.cfg-toggle:hover { border-color: var(--accent); }
+.cfg-toggle.on { border-color: var(--success); color: var(--success); }
+.cfg-toggle.on::before { content: '✓ '; }
+.cfg-toggle.off { color: var(--text-muted); }
+.cfg-toggle.off::before { content: '○ '; }
+.cfg-section-title { font-size: 0.85rem; font-weight: 700; color: var(--text); margin-top: 14px; margin-bottom: 6px; }
+.cfg-footer {
+  background: var(--surface); border-top: 1px solid var(--border);
+  padding: 12px 24px; display: flex; align-items: center; gap: 12px; flex-shrink: 0;
+}
+.cfg-start-btn {
+  padding: 10px 32px; font-size: 0.95rem; font-weight: 700;
+  background: var(--accent); color: #fff; border: none; border-radius: 8px;
+  cursor: pointer; transition: opacity 0.2s;
+}
+.cfg-start-btn:hover { opacity: 0.85; }
+.cfg-hint { font-size: 0.75rem; color: var(--text-muted); }
 </style>
 </head>
 <body>
+
+<!-- ─── Scan Config Overlay ─────────────────────────────────── -->
+<div id="scanConfigOverlay">
+  <div class="cfg-header">
+    <div class="logo">WScan <span>Scan Setup</span></div>
+    <div class="subtitle">すべての設定をここで行い、ブラウザから直接スキャンを開始できます</div>
+  </div>
+
+  <div class="cfg-body">
+    <!-- URL row -->
+    <div>
+      <div style="font-size:0.72rem;color:var(--text-muted);font-weight:600;text-transform:uppercase;letter-spacing:0.03em;margin-bottom:6px">Target URL</div>
+      <div class="cfg-url-row">
+        <input type="text" id="cfgInputUrl" placeholder="https://example.com" autocomplete="url" spellcheck="false">
+      </div>
+    </div>
+
+    <!-- Tabs -->
+    <div>
+      <div class="cfg-tabs">
+        <button class="cfg-tab active" onclick="showCfgTab('basic',this)">⚙ 基本設定</button>
+        <button class="cfg-tab" onclick="showCfgTab('checks',this)">🔍 検査項目</button>
+        <button class="cfg-tab" onclick="showCfgTab('auth',this)">🔐 認証・Cookie</button>
+        <button class="cfg-tab" onclick="showCfgTab('llm',this)">🤖 LLM設定</button>
+        <button class="cfg-tab" onclick="showCfgTab('features',this)">🧩 機能フラグ</button>
+        <button class="cfg-tab" onclick="showCfgTab('exclusions',this)">🚫 除外設定</button>
+      </div>
+
+      <!-- Tab: Basic -->
+      <div id="cfgTab-basic" class="cfg-panel active">
+        <div class="cfg-grid">
+          <div class="cfg-field">
+            <label>クロール深度 (Depth)</label>
+            <input type="number" id="cfgDepth" value="2" min="1" max="10">
+          </div>
+          <div class="cfg-field">
+            <label>タイムアウト (秒)</label>
+            <input type="number" id="cfgTimeoutInput" value="30" min="5" max="300">
+          </div>
+          <div class="cfg-field">
+            <label>最大フォーム数/ページ</label>
+            <input type="number" id="cfgMaxForms" value="50" min="1" max="500">
+          </div>
+          <div class="cfg-field">
+            <label>並列ワーカー数</label>
+            <input type="number" id="cfgConcurrency" value="1" min="1" max="8">
+          </div>
+          <div class="cfg-field">
+            <label>ダッシュボードポート</label>
+            <input type="number" id="cfgPortDisp" value="8765" readonly style="opacity:0.5;cursor:not-allowed">
+          </div>
+          <div class="cfg-field">
+            <label>プロキシ URL</label>
+            <input type="text" id="cfgProxy" placeholder="http://127.0.0.1:8080">
+          </div>
+        </div>
+        <div class="cfg-toggle-row" style="margin-top:14px">
+          <div class="cfg-toggle off" id="tog-headless" onclick="toggleCfg('headless')">ヘッドレスモード</div>
+          <div class="cfg-toggle on" id="tog-skip_registration" onclick="toggleCfg('skip_registration')">登録フォームをスキップ</div>
+          <div class="cfg-toggle on" id="tog-open_report" onclick="toggleCfg('open_report')">スキャン後レポートを開く</div>
+          <div class="cfg-toggle on" id="tog-use_planner" onclick="toggleCfg('use_planner')">AI攻撃プランナー</div>
+        </div>
+      </div>
+
+      <!-- Tab: Checks -->
+      <div id="cfgTab-checks" class="cfg-panel">
+        <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap">
+          <button onclick="selectAllChecks(true)" style="background:var(--accent-glow);border:1px solid var(--accent);color:var(--accent);border-radius:4px;padding:3px 10px;cursor:pointer;font-size:0.72rem">全選択</button>
+          <button onclick="selectAllChecks(false)" style="background:var(--surface2);border:1px solid var(--border);color:var(--text-muted);border-radius:4px;padding:3px 10px;cursor:pointer;font-size:0.72rem">全解除</button>
+        </div>
+        <div class="cfg-check-group">
+          <h4>インジェクション</h4>
+          <div class="cfg-checks-grid" id="checkGroup-injection"></div>
+        </div>
+        <div class="cfg-check-group">
+          <h4>XSS</h4>
+          <div class="cfg-checks-grid" id="checkGroup-xss"></div>
+        </div>
+        <div class="cfg-check-group">
+          <h4>アクセス制御</h4>
+          <div class="cfg-checks-grid" id="checkGroup-access"></div>
+        </div>
+        <div class="cfg-check-group">
+          <h4>ヘッダー・リダイレクト</h4>
+          <div class="cfg-checks-grid" id="checkGroup-header"></div>
+        </div>
+        <div class="cfg-check-group">
+          <h4>プロトコル・設定</h4>
+          <div class="cfg-checks-grid" id="checkGroup-proto"></div>
+        </div>
+        <div class="cfg-check-group">
+          <h4>ファイル・その他</h4>
+          <div class="cfg-checks-grid" id="checkGroup-file"></div>
+        </div>
+      </div>
+
+      <!-- Tab: Auth -->
+      <div id="cfgTab-auth" class="cfg-panel">
+        <div class="cfg-section-title">ログイン自動化</div>
+        <div class="cfg-grid">
+          <div class="cfg-field" style="grid-column:1/-1">
+            <label>ログインページ URL</label>
+            <input type="text" id="cfgLoginUrl" placeholder="https://example.com/login">
+          </div>
+          <div class="cfg-field">
+            <label>ユーザー名フィールド名</label>
+            <input type="text" id="cfgLoginUserField" value="username">
+          </div>
+          <div class="cfg-field">
+            <label>パスワードフィールド名</label>
+            <input type="text" id="cfgLoginPassField" value="password">
+          </div>
+          <div class="cfg-field">
+            <label>ユーザー名</label>
+            <input type="text" id="cfgAuthUser" placeholder="admin">
+          </div>
+          <div class="cfg-field">
+            <label>パスワード</label>
+            <input type="password" id="cfgAuthPass" placeholder="••••••••">
+          </div>
+          <div class="cfg-field" style="grid-column:1/-1">
+            <label>ログイン成功確認テキスト (URLまたはページ内)</label>
+            <input type="text" id="cfgLoginSuccess" placeholder="dashboard">
+          </div>
+        </div>
+        <div class="cfg-section-title" style="margin-top:16px">Cookie</div>
+        <div class="cfg-field">
+          <label>Cookie文字列 (session=xxx; token=yyy)</label>
+          <input type="text" id="cfgCookies" placeholder="session=abc123; auth=xyz">
+        </div>
+      </div>
+
+      <!-- Tab: LLM -->
+      <div id="cfgTab-llm" class="cfg-panel">
+        <div class="cfg-grid">
+          <div class="cfg-field">
+            <label>LLMプロバイダー</label>
+            <select id="cfgLlm" onchange="updateLlmModelField()">
+              <option value="none">None (LLM無効)</option>
+              <option value="ollama">Ollama (ローカル)</option>
+              <option value="claude">Claude (Anthropic)</option>
+              <option value="openai">OpenAI</option>
+              <option value="gemini">Google Gemini</option>
+            </select>
+          </div>
+          <div class="cfg-field" id="cfgOllamaModelField">
+            <label>Ollamaモデル名</label>
+            <input type="text" id="cfgOllamaModel" value="llama3">
+          </div>
+          <div class="cfg-field" id="cfgOpenaiModelField" style="display:none">
+            <label>OpenAIモデル名</label>
+            <input type="text" id="cfgOpenaiModel" value="gpt-4o-mini">
+          </div>
+          <div class="cfg-field" id="cfgGeminiModelField" style="display:none">
+            <label>Geminiモデル名</label>
+            <input type="text" id="cfgGeminiModel" value="gemini-2.0-flash">
+          </div>
+        </div>
+        <div style="margin-top:14px;font-size:0.78rem;color:var(--text-muted);line-height:1.6">
+          <strong>注意:</strong> OpenAI には <code>OPENAI_API_KEY</code>、Gemini には <code>GEMINI_API_KEY</code>
+          環境変数が必要です。Claudeには <code>ANTHROPIC_API_KEY</code> が必要です。
+        </div>
+      </div>
+
+      <!-- Tab: Features -->
+      <div id="cfgTab-features" class="cfg-panel">
+        <div class="cfg-section-title">機能フラグ</div>
+        <div class="cfg-toggle-row">
+          <div class="cfg-toggle on" id="tog-enable_ai_analysis" onclick="toggleCfg('enable_ai_analysis')">AI総合分析レポート</div>
+          <div class="cfg-toggle on" id="tog-enable_waf_detection" onclick="toggleCfg('enable_waf_detection')">WAF自動検出</div>
+          <div class="cfg-toggle on" id="tog-enable_payload_learning" onclick="toggleCfg('enable_payload_learning')">ペイロード学習</div>
+          <div class="cfg-toggle on" id="tog-enable_sitemap_crawl" onclick="toggleCfg('enable_sitemap_crawl')">サイトマップ/robots.txtクロール</div>
+        </div>
+        <div class="cfg-section-title" style="margin-top:20px">CTFモード</div>
+        <div class="cfg-toggle-row">
+          <div class="cfg-toggle off" id="tog-ctf_mode" onclick="toggleCfg('ctf_mode')">CTFモード (フラグ自動検出)</div>
+        </div>
+        <div class="cfg-field" style="margin-top:10px;max-width:360px">
+          <label>CTFフラグ正規表現 (空欄=自動検出)</label>
+          <input type="text" id="cfgCtfFlagPattern" placeholder="HTB{[^}]+}">
+        </div>
+      </div>
+
+      <!-- Tab: Exclusions -->
+      <div id="cfgTab-exclusions" class="cfg-panel">
+        <div class="cfg-grid" style="margin-top:10px">
+          <div class="cfg-field" style="grid-column:1/-1">
+            <label>除外フィールド名 (カンマ区切り)</label>
+            <input type="text" id="cfgExcludeFields" placeholder="csrf_token, __token, _method">
+          </div>
+          <div class="cfg-field" style="grid-column:1/-1">
+            <label>除外URL (1行1URL、前方一致)</label>
+            <textarea id="cfgExcludeUrls" rows="5" placeholder="/logout&#10;/delete&#10;/admin/reset"></textarea>
+          </div>
+        </div>
+      </div>
+    </div><!-- /tabs container -->
+  </div><!-- /cfg-body -->
+
+  <div class="cfg-footer">
+    <button class="cfg-start-btn" onclick="submitScanConfig()">▶ スキャン開始</button>
+    <div class="cfg-hint">設定はブラウザセッション中に保持されます。CLIから起動した場合はCLIオプションが優先されます。</div>
+  </div>
+</div>
 
 <!-- ─── Header ─────────────────────────────────────────────── -->
 <div class="header">
@@ -675,6 +965,239 @@ const state = {
   planData: null,   // pending plan received from server
 };
 
+// ─── Config form state ───────────────────────────────────────────
+const cfgToggles = {
+  headless: false,
+  skip_registration: true,
+  open_report: true,
+  use_planner: true,
+  enable_ai_analysis: true,
+  enable_waf_detection: true,
+  enable_payload_learning: true,
+  enable_sitemap_crawl: true,
+  ctf_mode: false,
+};
+
+const CHECK_GROUPS = {
+  injection:  [
+    {id:'sqli',         label:'SQLi',             def:true},
+    {id:'os',           label:'OSインジェクション', def:true},
+    {id:'nosql',        label:'NoSQLi',            def:false},
+    {id:'ssti',         label:'SSTI',              def:false},
+    {id:'deserialization', label:'逆シリアル化',    def:false},
+  ],
+  xss: [
+    {id:'xss',          label:'XSS',              def:true},
+    {id:'stored_xss',   label:'Stored XSS',       def:false},
+    {id:'dom_xss',      label:'DOM XSS',          def:false},
+  ],
+  access: [
+    {id:'csrf',         label:'CSRF',             def:false},
+    {id:'session',      label:'セッション管理',   def:false},
+    {id:'privesc',      label:'権限昇格',         def:false},
+  ],
+  header: [
+    {id:'header_injection',  label:'ヘッダインジェクション', def:false},
+    {id:'mail_header',       label:'メールヘッダ',           def:false},
+    {id:'open_redirect',     label:'オープンリダイレクト',   def:false},
+    {id:'path_traversal',    label:'パストラバーサル',       def:false},
+    {id:'host_header',       label:'Hostヘッダ攻撃',         def:false},
+  ],
+  proto: [
+    {id:'cors',              label:'CORS',                   def:false},
+    {id:'security_headers',  label:'セキュリティヘッダ',     def:false},
+    {id:'request_smuggling', label:'リクエストスマグリング', def:false},
+    {id:'info_disclosure',   label:'情報漏えい',             def:false},
+    {id:'ssrf',              label:'SSRF',                   def:false},
+  ],
+  file: [
+    {id:'clickjacking',  label:'クリックジャッキング', def:false},
+  ],
+};
+
+function initCheckGroups() {
+  Object.entries(CHECK_GROUPS).forEach(([group, checks]) => {
+    const el = document.getElementById('checkGroup-' + group);
+    if (!el) return;
+    checks.forEach(c => {
+      const div = document.createElement('div');
+      div.className = 'cfg-check-item' + (c.def ? ' checked' : '');
+      div.dataset.check = c.id;
+      div.innerHTML = c.label;
+      div.onclick = () => div.classList.toggle('checked');
+      el.appendChild(div);
+    });
+  });
+}
+
+function getSelectedChecks() {
+  return [...document.querySelectorAll('.cfg-check-item.checked')].map(el => el.dataset.check);
+}
+
+function selectAllChecks(on) {
+  document.querySelectorAll('.cfg-check-item').forEach(el => {
+    if (on) el.classList.add('checked'); else el.classList.remove('checked');
+  });
+}
+
+function toggleCfg(key) {
+  cfgToggles[key] = !cfgToggles[key];
+  const el = document.getElementById('tog-' + key);
+  if (el) {
+    el.className = 'cfg-toggle ' + (cfgToggles[key] ? 'on' : 'off');
+  }
+}
+
+function showCfgTab(name, btn) {
+  document.querySelectorAll('.cfg-panel').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.cfg-tab').forEach(b => b.classList.remove('active'));
+  const panel = document.getElementById('cfgTab-' + name);
+  if (panel) panel.classList.add('active');
+  if (btn) btn.classList.add('active');
+}
+
+function updateLlmModelField() {
+  const llm = document.getElementById('cfgLlm').value;
+  document.getElementById('cfgOllamaModelField').style.display = llm === 'ollama' ? '' : 'none';
+  document.getElementById('cfgOpenaiModelField').style.display = llm === 'openai' ? '' : 'none';
+  document.getElementById('cfgGeminiModelField').style.display = llm === 'gemini' ? '' : 'none';
+}
+
+function submitScanConfig() {
+  const url = document.getElementById('cfgInputUrl').value.trim();
+  if (!url || !url.startsWith('http')) {
+    document.getElementById('cfgInputUrl').focus();
+    document.getElementById('cfgInputUrl').style.borderColor = 'var(--critical)';
+    return;
+  }
+  const excludeFieldsRaw = document.getElementById('cfgExcludeFields').value.trim();
+  const excludeUrlsRaw = document.getElementById('cfgExcludeUrls').value.trim();
+  const config = {
+    url,
+    depth:       parseInt(document.getElementById('cfgDepth').value) || 2,
+    timeout:     parseInt(document.getElementById('cfgTimeoutInput').value) || 30,
+    max_forms:   parseInt(document.getElementById('cfgMaxForms').value) || 50,
+    concurrency: parseInt(document.getElementById('cfgConcurrency').value) || 1,
+    proxy:       document.getElementById('cfgProxy').value.trim(),
+    headless:    cfgToggles.headless,
+    skip_registration: cfgToggles.skip_registration,
+    open_report: cfgToggles.open_report,
+    use_planner: cfgToggles.use_planner,
+    enable_ai_analysis:    cfgToggles.enable_ai_analysis,
+    enable_waf_detection:  cfgToggles.enable_waf_detection,
+    enable_payload_learning: cfgToggles.enable_payload_learning,
+    enable_sitemap_crawl:  cfgToggles.enable_sitemap_crawl,
+    ctf_mode:    cfgToggles.ctf_mode,
+    ctf_flag_pattern: document.getElementById('cfgCtfFlagPattern').value.trim(),
+    checks:      getSelectedChecks(),
+    llm:         document.getElementById('cfgLlm').value,
+    ollama_model:  document.getElementById('cfgOllamaModel').value.trim() || 'llama3',
+    openai_model:  document.getElementById('cfgOpenaiModel').value.trim() || 'gpt-4o-mini',
+    gemini_model:  document.getElementById('cfgGeminiModel').value.trim() || 'gemini-2.0-flash',
+    auth_user:   document.getElementById('cfgAuthUser').value.trim(),
+    auth_pass:   document.getElementById('cfgAuthPass').value,
+    login_url:   document.getElementById('cfgLoginUrl').value.trim(),
+    login_user_field: document.getElementById('cfgLoginUserField').value.trim() || 'username',
+    login_pass_field: document.getElementById('cfgLoginPassField').value.trim() || 'password',
+    login_success_indicator: document.getElementById('cfgLoginSuccess').value.trim(),
+    cookies:     document.getElementById('cfgCookies').value.trim(),
+    exclude_fields: excludeFieldsRaw ? excludeFieldsRaw.split(',').map(s=>s.trim()).filter(Boolean) : [],
+    exclude_urls:   excludeUrlsRaw ? excludeUrlsRaw.split('\n').map(s=>s.trim()).filter(Boolean) : [],
+  };
+
+  if (!config.checks.length) {
+    config.checks = ['sqli', 'xss', 'os'];
+  }
+
+  if (state.ws && state.ws.readyState === WebSocket.OPEN) {
+    state.ws.send(JSON.stringify({ action: 'start_scan', config }));
+    document.getElementById('scanConfigOverlay').classList.remove('active');
+    setStatus('スキャン開始リクエスト送信中...', 'running');
+  } else {
+    alert('WebSocket未接続。ページを再読み込みしてください。');
+  }
+}
+
+function initConfigOverlay() {
+  initCheckGroups();
+  // Read current port from URL
+  const port = location.port || '8765';
+  const portEl = document.getElementById('cfgPortDisp');
+  if (portEl) portEl.value = port;
+}
+
+// ─── Restore saved config from localStorage ─────────────────────
+function saveConfigToStorage() {
+  try {
+    const cfg = {
+      url: document.getElementById('cfgInputUrl').value,
+      depth: document.getElementById('cfgDepth').value,
+      timeout: document.getElementById('cfgTimeoutInput').value,
+      max_forms: document.getElementById('cfgMaxForms').value,
+      concurrency: document.getElementById('cfgConcurrency').value,
+      proxy: document.getElementById('cfgProxy').value,
+      toggles: {...cfgToggles},
+      llm: document.getElementById('cfgLlm').value,
+      ollama_model: document.getElementById('cfgOllamaModel').value,
+      openai_model: document.getElementById('cfgOpenaiModel').value,
+      gemini_model: document.getElementById('cfgGeminiModel').value,
+      auth_user: document.getElementById('cfgAuthUser').value,
+      auth_pass: document.getElementById('cfgAuthPass').value,
+      login_url: document.getElementById('cfgLoginUrl').value,
+      login_user_field: document.getElementById('cfgLoginUserField').value,
+      login_pass_field: document.getElementById('cfgLoginPassField').value,
+      login_success_indicator: document.getElementById('cfgLoginSuccess').value,
+      cookies: document.getElementById('cfgCookies').value,
+      exclude_fields: document.getElementById('cfgExcludeFields').value,
+      exclude_urls: document.getElementById('cfgExcludeUrls').value,
+      ctf_flag_pattern: document.getElementById('cfgCtfFlagPattern').value,
+      checks: getSelectedChecks(),
+    };
+    localStorage.setItem('wscan_config', JSON.stringify(cfg));
+  } catch(e) {}
+}
+
+function loadConfigFromStorage() {
+  try {
+    const raw = localStorage.getItem('wscan_config');
+    if (!raw) return;
+    const cfg = JSON.parse(raw);
+    if (cfg.url) document.getElementById('cfgInputUrl').value = cfg.url;
+    if (cfg.depth) document.getElementById('cfgDepth').value = cfg.depth;
+    if (cfg.timeout) document.getElementById('cfgTimeoutInput').value = cfg.timeout;
+    if (cfg.max_forms) document.getElementById('cfgMaxForms').value = cfg.max_forms;
+    if (cfg.concurrency) document.getElementById('cfgConcurrency').value = cfg.concurrency;
+    if (cfg.proxy) document.getElementById('cfgProxy').value = cfg.proxy;
+    if (cfg.toggles) Object.assign(cfgToggles, cfg.toggles);
+    if (cfg.llm) { document.getElementById('cfgLlm').value = cfg.llm; updateLlmModelField(); }
+    if (cfg.ollama_model) document.getElementById('cfgOllamaModel').value = cfg.ollama_model;
+    if (cfg.openai_model) document.getElementById('cfgOpenaiModel').value = cfg.openai_model;
+    if (cfg.gemini_model) document.getElementById('cfgGeminiModel').value = cfg.gemini_model;
+    if (cfg.auth_user) document.getElementById('cfgAuthUser').value = cfg.auth_user;
+    if (cfg.auth_pass) document.getElementById('cfgAuthPass').value = cfg.auth_pass;
+    if (cfg.login_url) document.getElementById('cfgLoginUrl').value = cfg.login_url;
+    if (cfg.login_user_field) document.getElementById('cfgLoginUserField').value = cfg.login_user_field;
+    if (cfg.login_pass_field) document.getElementById('cfgLoginPassField').value = cfg.login_pass_field;
+    if (cfg.login_success_indicator) document.getElementById('cfgLoginSuccess').value = cfg.login_success_indicator;
+    if (cfg.cookies) document.getElementById('cfgCookies').value = cfg.cookies;
+    if (cfg.exclude_fields) document.getElementById('cfgExcludeFields').value = cfg.exclude_fields;
+    if (cfg.exclude_urls) document.getElementById('cfgExcludeUrls').value = cfg.exclude_urls;
+    if (cfg.ctf_flag_pattern) document.getElementById('cfgCtfFlagPattern').value = cfg.ctf_flag_pattern;
+    // Restore toggle UI
+    Object.keys(cfgToggles).forEach(k => {
+      const el = document.getElementById('tog-' + k);
+      if (el) el.className = 'cfg-toggle ' + (cfgToggles[k] ? 'on' : 'off');
+    });
+    // Restore checks
+    if (cfg.checks && cfg.checks.length) {
+      document.querySelectorAll('.cfg-check-item').forEach(el => {
+        if (cfg.checks.includes(el.dataset.check)) el.classList.add('checked');
+        else el.classList.remove('checked');
+      });
+    }
+  } catch(e) {}
+}
+
 // ─── WebSocket ──────────────────────────────────────────────────
 function connect() {
   const ws = new WebSocket(`ws://${location.host}/ws`);
@@ -822,6 +1345,18 @@ function handleEvent(event) {
 
     case 'waf_detected':
       handleWafDetected(data);
+      break;
+
+    case 'awaiting_config':
+      // Serve mode: show the scan config form
+      document.getElementById('scanConfigOverlay').classList.add('active');
+      setStatus('設定フォームに入力してスキャンを開始してください', '');
+      break;
+
+    case 'scan_started':
+      // Hide config overlay once scan begins
+      document.getElementById('scanConfigOverlay').classList.remove('active');
+      setStatus(`スキャン開始: ${data.url || ''}`, 'running');
       break;
   }
 }
@@ -1173,6 +1708,8 @@ function handleWafDetected(data) {
 }
 
 // ─── Init ────────────────────────────────────────────────────────
+initConfigOverlay();
+loadConfigFromStorage();
 connect();
 </script>
 </body>

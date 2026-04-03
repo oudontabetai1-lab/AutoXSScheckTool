@@ -138,7 +138,7 @@ class DOMXSSScanner(BaseScanner):
                     form_index, field_name, payload
                 )
 
-            await asyncio.sleep(0.8)  # Allow JS to settle
+            await asyncio.sleep(0.8 * self.sleep_factor)  # Allow JS to settle
 
             # Read what the sink hooks captured
             log = await self.browser.page.evaluate(

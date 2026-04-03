@@ -36,6 +36,9 @@ class MonitorServer:
         self.confirmed_plan_edits: dict = {}   # {url: {field_name: {risk, checks, payloads}}}
         # U-3: Manual payload requests from web UI
         self.manual_payload_queue: asyncio.Queue = asyncio.Queue()
+        # Scan config submitted from the dashboard (serve mode)
+        self.scan_request_event: asyncio.Event = asyncio.Event()
+        self.scan_request_data: dict = {}
 
     def _create_app(self) -> FastAPI:
         app = FastAPI(title="WScan Monitor", docs_url=None, redoc_url=None)
@@ -102,6 +105,11 @@ class MonitorServer:
             # U-3: {"action": "manual_payload", "url": ..., "field": ..., "payload": ..., "check_type": ...}
             self.manual_payload_queue.put_nowait(msg)
 
+        elif action == "start_scan":
+            # Serve mode: dashboard submits full scan config
+            self.scan_request_data = msg.get("config", {})
+            self.scan_request_event.set()
+
     # ------------------------------------------------------------------
     # Broadcast helpers
     # ------------------------------------------------------------------
@@ -154,6 +162,14 @@ class MonitorServer:
             "timeout": timeout,
         })
 
+    async def emit_awaiting_config(self):
+        """Tell the dashboard to show the scan configuration form (serve mode)."""
+        await self.emit("awaiting_config", {})
+
+    async def emit_scan_started(self, config: dict):
+        """Tell the dashboard the scan has started with the given config."""
+        await self.emit("scan_started", config)
+
     async def emit_page_start(self, url: str):
         await self.emit("page_start", {"url": url})
 
@@ -198,7 +214,7 @@ class MonitorServer:
         """
         try:
             await asyncio.wait_for(
-                asyncio.shield(self.plan_confirm_event.wait()),
+                self.plan_confirm_event.wait(),
                 timeout=timeout,
             )
         except asyncio.TimeoutError:
