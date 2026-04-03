@@ -553,6 +553,18 @@ body {
 }
 .cfg-start-btn:hover { opacity: 0.85; }
 .cfg-hint { font-size: 0.75rem; color: var(--text-muted); }
+/* ── Flow builder ─────────────────────────────────────── */
+.flow-card { background:var(--surface); border:1px solid var(--border); border-radius:8px; padding:12px; margin-bottom:12px; }
+.flow-card-header { display:flex; align-items:center; gap:8px; margin-bottom:10px; }
+.flow-name-input { flex:1; background:var(--bg); border:1px solid var(--border); border-radius:4px; padding:4px 8px; color:var(--text); font-size:0.85rem; }
+.flow-del-btn { background:none; border:none; color:var(--critical); cursor:pointer; font-size:1rem; padding:2px 6px; }
+.flow-step { display:flex; align-items:center; gap:6px; margin-bottom:6px; flex-wrap:wrap; }
+.flow-step select, .flow-step input { background:var(--bg); border:1px solid var(--border); border-radius:4px; padding:3px 7px; color:var(--text); font-size:0.8rem; }
+.flow-step select { min-width:90px; }
+.flow-step input { flex:1; min-width:100px; }
+.flow-step-del { background:none; border:none; color:var(--text-muted); cursor:pointer; font-size:0.9rem; }
+.flow-step-del:hover { color:var(--critical); }
+.flow-add-step { font-size:0.78rem; color:var(--accent); background:none; border:none; cursor:pointer; padding:2px 4px; }
 </style>
 </head>
 <body>
@@ -582,6 +594,7 @@ body {
         <button class="cfg-tab" onclick="showCfgTab('llm',this)">🤖 LLM設定</button>
         <button class="cfg-tab" onclick="showCfgTab('features',this)">🧩 機能フラグ</button>
         <button class="cfg-tab" onclick="showCfgTab('exclusions',this)">🚫 除外設定</button>
+        <button class="cfg-tab" onclick="showCfgTab('flows',this)">🔄 攻撃フロー</button>
       </div>
 
       <!-- Tab: Basic -->
@@ -751,6 +764,17 @@ body {
             <textarea id="cfgExcludeUrls" rows="5" placeholder="/logout&#10;/delete&#10;/admin/reset"></textarea>
           </div>
         </div>
+      </div>
+
+      <!-- Tab: Flows -->
+      <div id="cfgTab-flows" class="cfg-panel">
+        <div class="cfg-section-title">多段階攻撃フロー</div>
+        <div style="font-size:0.78rem;color:var(--text-muted);margin-bottom:12px;line-height:1.5">
+          ログイン → 保護ページへ移動 → XSS検査 のような複数段階の操作を定義できます。<br>
+          各フローはスキャン前に実行され、最後の <code>navigate</code> ステップのURLがそのフローの攻撃対象ページになります。
+        </div>
+        <div id="flowsList"></div>
+        <button onclick="addFlow()" style="margin-top:8px;padding:6px 14px;background:var(--accent);color:#fff;border:none;border-radius:4px;cursor:pointer;font-size:0.82rem">＋ フローを追加</button>
       </div>
     </div><!-- /tabs container -->
   </div><!-- /cfg-body -->
@@ -1103,6 +1127,7 @@ function submitScanConfig() {
     cookies:     document.getElementById('cfgCookies').value.trim(),
     exclude_fields: excludeFieldsRaw ? excludeFieldsRaw.split(',').map(s=>s.trim()).filter(Boolean) : [],
     exclude_urls:   excludeUrlsRaw ? excludeUrlsRaw.split('\n').map(s=>s.trim()).filter(Boolean) : [],
+    flows: collectFlows(),
   };
 
   if (!config.checks.length) {
@@ -1152,6 +1177,7 @@ function saveConfigToStorage() {
       exclude_urls: document.getElementById('cfgExcludeUrls').value,
       ctf_flag_pattern: document.getElementById('cfgCtfFlagPattern').value,
       checks: getSelectedChecks(),
+      flows: collectFlows(),
     };
     localStorage.setItem('wscan_config', JSON.stringify(cfg));
   } catch(e) {}
@@ -1183,6 +1209,7 @@ function loadConfigFromStorage() {
     if (cfg.exclude_fields) document.getElementById('cfgExcludeFields').value = cfg.exclude_fields;
     if (cfg.exclude_urls) document.getElementById('cfgExcludeUrls').value = cfg.exclude_urls;
     if (cfg.ctf_flag_pattern) document.getElementById('cfgCtfFlagPattern').value = cfg.ctf_flag_pattern;
+    if (cfg.flows && cfg.flows.length) restoreFlows(cfg.flows);
     // Restore toggle UI
     Object.keys(cfgToggles).forEach(k => {
       const el = document.getElementById('tog-' + k);
@@ -1196,6 +1223,126 @@ function loadConfigFromStorage() {
       });
     }
   } catch(e) {}
+}
+
+// ─── Multi-step Attack Flow Builder ─────────────────────────────
+
+const FLOW_STEP_ACTIONS = [
+  {v:'navigate', l:'移動 (navigate)'},
+  {v:'fill',     l:'入力 (fill)'},
+  {v:'submit',   l:'送信 (submit)'},
+  {v:'click',    l:'クリック (click)'},
+  {v:'wait',     l:'待機 (wait)'},
+];
+
+let _flowIdx = 0;
+
+function addFlow(initial) {
+  const id = ++_flowIdx;
+  const name = (initial && initial.name) || `フロー ${id}`;
+  const card = document.createElement('div');
+  card.className = 'flow-card';
+  card.id = `flow-${id}`;
+  card.innerHTML = `
+    <div class="flow-card-header">
+      <strong style="font-size:0.8rem;color:var(--text-muted)">フロー ${id}</strong>
+      <input class="flow-name-input" id="flow-name-${id}" value="${_esc(name)}" placeholder="フロー名">
+      <button class="flow-del-btn" onclick="this.closest('.flow-card').remove()" title="削除">✕</button>
+    </div>
+    <div id="flow-steps-${id}"></div>
+    <button class="flow-add-step" onclick="addFlowStep(${id})">＋ ステップ追加</button>
+  `;
+  document.getElementById('flowsList').appendChild(card);
+  if (initial && initial.steps) {
+    initial.steps.forEach(s => addFlowStep(id, s));
+  } else {
+    // Default template: navigate → fill user → fill pass → submit → navigate target
+    addFlowStep(id, {action:'navigate', url:document.getElementById('cfgLoginUrl').value||''});
+    addFlowStep(id, {action:'fill', field: document.getElementById('cfgLoginUserField').value||'username', value: document.getElementById('cfgAuthUser').value||''});
+    addFlowStep(id, {action:'fill', field: document.getElementById('cfgLoginPassField').value||'password', value: document.getElementById('cfgAuthPass').value||''});
+    addFlowStep(id, {action:'submit'});
+    addFlowStep(id, {action:'navigate', url:''});
+  }
+}
+
+let _stepIdx = 0;
+function addFlowStep(flowId, initial) {
+  const sid = ++_stepIdx;
+  const action = (initial && initial.action) || 'navigate';
+  const container = document.getElementById(`flow-steps-${flowId}`);
+  const row = document.createElement('div');
+  row.className = 'flow-step';
+  row.id = `fstep-${sid}`;
+  const opts = FLOW_STEP_ACTIONS.map(a =>
+    `<option value="${a.v}"${a.v===action?' selected':''}>${a.l}</option>`
+  ).join('');
+  row.innerHTML = `
+    <select onchange="updateFlowStepUI(${sid},this.value)">${opts}</select>
+    <span id="fstep-extra-${sid}"></span>
+    <button class="flow-step-del" onclick="document.getElementById('fstep-${sid}').remove()" title="削除">✕</button>
+  `;
+  container.appendChild(row);
+  updateFlowStepUI(sid, action, initial);
+}
+
+function updateFlowStepUI(sid, action, initial) {
+  const extra = document.getElementById(`fstep-extra-${sid}`);
+  if (!extra) return;
+  const v = initial || {};
+  if (action === 'navigate') {
+    extra.innerHTML = `<input placeholder="URL (例: https://example.com/login)" value="${_esc(v.url||'')}" style="min-width:260px">`;
+  } else if (action === 'fill') {
+    extra.innerHTML = `<input placeholder="フィールド名 (name/id)" value="${_esc(v.field||'')}" style="max-width:130px">
+                       <input placeholder="値" value="${_esc(v.value||'')}" style="max-width:200px">`;
+  } else if (action === 'submit') {
+    extra.innerHTML = `<span style="font-size:0.75rem;color:var(--text-muted)">フォームを送信</span>`;
+  } else if (action === 'click') {
+    extra.innerHTML = `<input placeholder="CSSセレクタ (例: #btn-login)" value="${_esc(v.selector||v.field||'')}" style="min-width:200px">`;
+  } else if (action === 'wait') {
+    extra.innerHTML = `<input type="number" min="0.5" max="30" step="0.5" placeholder="秒" value="${v.timeout||2}" style="max-width:70px">
+                       <span style="font-size:0.75rem;color:var(--text-muted)">秒待機</span>`;
+  } else {
+    extra.innerHTML = '';
+  }
+}
+
+function _esc(s) {
+  return String(s || '').replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;');
+}
+
+function collectFlows() {
+  const flows = [];
+  document.querySelectorAll('.flow-card').forEach(card => {
+    const mid = card.id.replace('flow-','');
+    const name = (document.getElementById(`flow-name-${mid}`)?.value || '').trim() || `フロー`;
+    const steps = [];
+    card.querySelectorAll('.flow-step').forEach(row => {
+      const sel = row.querySelector('select');
+      if (!sel) return;
+      const action = sel.value;
+      const inputs = Array.from(row.querySelectorAll('input'));
+      const step = {action};
+      if (action === 'navigate') {
+        step.url = (inputs[0]?.value || '').trim();
+      } else if (action === 'fill') {
+        step.field = (inputs[0]?.value || '').trim();
+        step.value = (inputs[1]?.value || '');
+      } else if (action === 'click') {
+        step.selector = (inputs[0]?.value || '').trim();
+      } else if (action === 'wait') {
+        step.timeout = parseFloat(inputs[0]?.value || 2);
+      }
+      if (step.url !== '' || action !== 'navigate') steps.push(step);
+    });
+    if (steps.length) flows.push({name, steps});
+  });
+  return flows;
+}
+
+function restoreFlows(flows) {
+  document.getElementById('flowsList').innerHTML = '';
+  _flowIdx = 0; _stepIdx = 0;
+  flows.forEach(f => addFlow(f));
 }
 
 // ─── WebSocket ──────────────────────────────────────────────────

@@ -80,6 +80,7 @@ from .scanners.request_smuggling import RequestSmugglingScanner
 from .scanners.ssrf import SSRFScanner
 from .waf_detector import WAFDetector
 from .payload_learning import PayloadLearner
+from .flow_runner import ScanFlow, FlowRunner
 
 console = Console()
 
@@ -173,6 +174,8 @@ class ScanEngine:
         enable_sitemap_crawl: bool = True,
         # Concurrent scanning
         concurrency: int = 1,
+        # Multi-step attack flows
+        flows: Optional[list] = None,
     ):
         self.target_url = url.rstrip("/")
         self.monitor = monitor
@@ -209,6 +212,8 @@ class ScanEngine:
         self.enable_payload_learning = enable_payload_learning
         self.enable_sitemap_crawl = enable_sitemap_crawl
         self.concurrency = max(1, concurrency)
+        # Multi-step attack flows (list[ScanFlow])
+        self.flows: list[ScanFlow] = ScanFlow.list_from_dicts(flows or [])
         if ctf_mode and "ssti" not in self.checks:
             self.checks.append("ssti")
 
@@ -241,6 +246,7 @@ class ScanEngine:
             auth_user=auth_user, auth_pass=auth_pass,
             proxy=proxy,
         )
+        self._flow_runner = FlowRunner(self._browser)
         self.payload_gen = PayloadGenerator(
             provider=llm_provider,
             ollama_model=ollama_model,
@@ -1118,6 +1124,34 @@ class ScanEngine:
 
     # ── Single-page attack (shared by serial and concurrent modes) ────────
 
+    async def _ensure_authenticated(self) -> bool:
+        """
+        Detect session expiry (redirect to login page) and re-authenticate.
+        Called before attacking each page.  Returns True if session is valid
+        (or if no auto-login is configured).
+        """
+        br = self.browser  # context-aware: returns worker in concurrent mode
+        if not self.login_url and not br.auth_user:
+            return True
+        if br.is_on_login_page(self.login_url):
+            console.print(
+                "  [yellow][Auth] Session expired — re-authenticating...[/yellow]"
+            )
+            if self.monitor:
+                await self.monitor.emit_status("Session expired — re-authenticating", "running")
+            success = await br.auto_login(
+                self.login_url,
+                user_field=self.login_user_field,
+                pass_field=self.login_pass_field,
+                success_indicator=self.login_success_indicator,
+            )
+            if success:
+                console.print("  [green][Auth] Re-login successful.[/green]")
+            else:
+                console.print("  [yellow][Auth] Re-login may have failed — continuing.[/yellow]")
+            return success
+        return True
+
     async def _attack_one_page(self, page: CrawledPage, plans: dict):
         """
         Run all checks on a single crawled page.
@@ -1136,10 +1170,32 @@ class ScanEngine:
         if not page.forms and not page.url_params:
             return
 
-        # Navigate back to page for form interaction
-        success = await self.browser.navigate(page.url)
-        if not success:
-            return
+        # ── Run multi-step attack flows that target this page ─────────────
+        matched_flow = None
+        for flow in self.flows:
+            if flow.steps:
+                # The last step action=navigate|attack defines the target URL
+                last_nav = next(
+                    (s for s in reversed(flow.steps) if s.action == "navigate"),
+                    None,
+                )
+                if last_nav and last_nav.url.rstrip("/") == page.url.rstrip("/"):
+                    matched_flow = flow
+                    break
+        if matched_flow:
+            console.print(
+                f"\n  [cyan][Flow] Pre-attack flow:[/cyan] {matched_flow.name}"
+            )
+            # Use context-aware browser (worker in concurrent mode)
+            await FlowRunner(self.browser).run(matched_flow)
+            # After flow, current browser page should already be on target URL
+        else:
+            # ── Re-authenticate if session expired ───────────────────────
+            await self._ensure_authenticated()
+            # Navigate back to page for form interaction
+            success = await self.browser.navigate(page.url)
+            if not success:
+                return
 
         # CTF: re-check page after navigating (dynamic content may differ from crawl)
         if self.flag_finder:

@@ -591,14 +591,19 @@ class BrowserManager:
                 }""",
                 [user_field, pass_field, self.auth_user, self.auth_pass],
             )
-            # Submit the form that contains the user field
+            # Submit — prefer clicking the button so JS frameworks receive the event
             await self.page.evaluate(
                 """([userField]) => {
                     const el = document.querySelector(`[name="${userField}"],[id="${userField}"]`);
-                    if (el) {
-                        const form = el.closest('form');
-                        if (form) form.submit();
-                    }
+                    if (!el) return;
+                    const form = el.closest('form');
+                    if (!form) return;
+                    // Try submit button first (handles React/Vue event handlers)
+                    const btn = form.querySelector(
+                        'button[type="submit"],input[type="submit"],[type="submit"]'
+                    ) || form.querySelector('button:not([type="button"])');
+                    if (btn) { btn.click(); }
+                    else { form.submit(); }
                 }""",
                 [user_field],
             )
@@ -611,6 +616,34 @@ class BrowserManager:
             return post_url.rstrip("/") != login_url.rstrip("/")
         except Exception:
             return False
+
+    def is_on_login_page(self, login_url: str) -> bool:
+        """
+        Return True when the browser appears to have been redirected back to the
+        login page (session expired or unauthenticated access).
+
+        Checks:
+        1. Current URL matches the configured login URL.
+        2. Current URL contains common login path segments when login_url is empty.
+        """
+        if not self.page:
+            return False
+        current = self.page.url.rstrip("/").lower()
+        if login_url:
+            if current == login_url.rstrip("/").lower():
+                return True
+            # Also catch redirects like /login?next=... or /login#...
+            from urllib.parse import urlparse
+            cur_path = urlparse(current).path
+            login_path = urlparse(login_url.lower()).path
+            if login_path and cur_path == login_path:
+                return True
+        else:
+            # Heuristic: URL contains login/signin/auth keywords
+            for kw in ("/login", "/signin", "/sign-in", "/auth/login", "/account/login"):
+                if current.endswith(kw) or (kw + "?") in current or (kw + "#") in current:
+                    return True
+        return False
 
     async def create_worker(self) -> "WorkerBrowser":
         """
