@@ -196,6 +196,8 @@ Consider stored / second-order attacks carefully:
     ):
         self.payload_gen = payload_gen
         self.enabled_checks: set[str] = set(enabled_checks)
+        # Inherited from payload_gen so both stay in sync
+        self.enable_web_browsing: bool = getattr(payload_gen, "enable_web_browsing", False)
 
     # ------------------------------------------------------------------
     # Public entry point
@@ -297,6 +299,28 @@ Consider stored / second-order attacks carefully:
             all_checks=", ".join(sorted(self.enabled_checks)),
             site_map=site_map or "  (only this page was crawled)",
         )
+
+        # ── Web intelligence enrichment (optional) ───────────────────────
+        if self.enable_web_browsing:
+            from .llm_web_tools import search_web
+            try:
+                tech_hints = " ".join(t for t in [title, purpose_hint] if t)
+                host = url.split("/")[2] if "//" in url else url
+                query = f"web application vulnerability {tech_hints} {host}"
+                web_ctx = await search_web(query, max_results=3)
+                from rich.console import Console as _C
+                _C().print(
+                    f"[dim cyan][Web] Research injected into planner prompt "
+                    f"({url[:60]})[/dim cyan]"
+                )
+                prompt = (
+                    f"## Live Web Intelligence\n"
+                    f"{web_ctx}\n\n"
+                    f"Use the above intelligence to inform your attack plan.\n\n"
+                    f"{prompt}"
+                )
+            except Exception:
+                pass
 
         raw: Optional[str] = None
         provider = self.payload_gen.provider

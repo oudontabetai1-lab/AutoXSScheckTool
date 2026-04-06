@@ -172,6 +172,7 @@ class ScanEngine:
         enable_waf_detection: bool = True,
         enable_payload_learning: bool = True,
         enable_sitemap_crawl: bool = True,
+        enable_llm_web_browsing: bool = False,
         # Concurrent scanning
         concurrency: int = 1,
         # Multi-step attack flows
@@ -211,6 +212,7 @@ class ScanEngine:
         self.enable_waf_detection = enable_waf_detection
         self.enable_payload_learning = enable_payload_learning
         self.enable_sitemap_crawl = enable_sitemap_crawl
+        self.enable_llm_web_browsing = enable_llm_web_browsing
         self.concurrency = max(1, concurrency)
         # Multi-step attack flows (list[ScanFlow])
         self.flows: list[ScanFlow] = ScanFlow.list_from_dicts(flows or [])
@@ -254,6 +256,7 @@ class ScanEngine:
             gemini_model=gemini_model,
             default_payloads=payloads_data,
             prompt_templates=prompt_templates,
+            enable_web_browsing=enable_llm_web_browsing,
         )
 
         scanner_map = {

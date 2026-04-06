@@ -590,6 +590,7 @@ async def run_scan(args):
             enable_waf_detection=not getattr(args, "no_waf_detection", False),
             enable_payload_learning=not getattr(args, "no_payload_learning", False),
             enable_sitemap_crawl=not getattr(args, "no_sitemap_crawl", False),
+            enable_llm_web_browsing=getattr(args, "llm_web_browsing", False),
             concurrency=getattr(args, "concurrency", 1),
             flows=getattr(args, "flows", None) or [],
         )
@@ -735,6 +736,7 @@ async def run_serve(args):
                 enable_waf_detection=bool(cfg.get("enable_waf_detection", True)),
                 enable_payload_learning=bool(cfg.get("enable_payload_learning", True)),
                 enable_sitemap_crawl=bool(cfg.get("enable_sitemap_crawl", True)),
+                enable_llm_web_browsing=bool(cfg.get("enable_llm_web_browsing", False)),
                 ctf_mode=bool(cfg.get("ctf_mode", False)),
                 ctf_flag_pattern=cfg.get("ctf_flag_pattern", "") or "",
                 exclude_fields=cfg.get("exclude_fields", []) or [],

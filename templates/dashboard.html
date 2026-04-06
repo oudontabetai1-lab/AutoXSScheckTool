@@ -727,6 +727,14 @@ body {
             <input type="text" id="cfgGeminiModel" value="gemini-2.0-flash">
           </div>
         </div>
+        <div class="cfg-section-title" style="margin-top:18px">🌐 LLM Web検索</div>
+        <div class="cfg-toggle-row">
+          <div class="cfg-toggle off" id="tog-enable_llm_web_browsing" onclick="toggleCfg('enable_llm_web_browsing')">LLMにWeb検索を許可</div>
+        </div>
+        <div style="margin-top:8px;font-size:0.78rem;color:var(--text-muted);line-height:1.6">
+          有効にすると、LLMが攻撃計画・ペイロード生成の前に DuckDuckGo でターゲット技術の既知脆弱性を検索し、
+          結果をプロンプトに反映します。APIキー不要。LLMが <strong>none</strong> の場合は無効です。
+        </div>
         <div style="margin-top:14px;font-size:0.78rem;color:var(--text-muted);line-height:1.6">
           <strong>注意:</strong> OpenAI には <code>OPENAI_API_KEY</code>、Gemini には <code>GEMINI_API_KEY</code>
           環境変数が必要です。Claudeには <code>ANTHROPIC_API_KEY</code> が必要です。
@@ -999,6 +1007,7 @@ const cfgToggles = {
   enable_waf_detection: true,
   enable_payload_learning: true,
   enable_sitemap_crawl: true,
+  enable_llm_web_browsing: false,
   ctf_mode: false,
 };
 
@@ -1111,6 +1120,7 @@ function submitScanConfig() {
     enable_waf_detection:  cfgToggles.enable_waf_detection,
     enable_payload_learning: cfgToggles.enable_payload_learning,
     enable_sitemap_crawl:  cfgToggles.enable_sitemap_crawl,
+    enable_llm_web_browsing: cfgToggles.enable_llm_web_browsing,
     ctf_mode:    cfgToggles.ctf_mode,
     ctf_flag_pattern: document.getElementById('cfgCtfFlagPattern').value.trim(),
     checks:      getSelectedChecks(),
