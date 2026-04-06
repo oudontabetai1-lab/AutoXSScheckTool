@@ -357,6 +357,93 @@ Examples:
         help="Disable the auto-config wizard (default).",
     )
 
+    # ── agent subcommand ───────────────────────────────────────────
+    agent = sub.add_parser(
+        "agent",
+        help=(
+            "Agent Browser Mode: LLM directly controls a real browser to autonomously "
+            "discover and exploit vulnerabilities (requires browser-use)"
+        ),
+    )
+    agent.add_argument("url", help="Target URL (e.g. https://example.com)")
+    agent.add_argument(
+        "--llm",
+        choices=["claude", "openai", "ollama"],
+        default=_CFG.get("llm_provider", "claude"),
+        help=(
+            "LLM provider that drives the browser agent "
+            "(default: claude). Requires corresponding API key."
+        ),
+    )
+    agent.add_argument(
+        "--model", metavar="MODEL", default="",
+        help=(
+            "Model name (default: claude-sonnet-4-5-20250929 / gpt-4o-mini / llama3). "
+            "Leave blank to use provider default."
+        ),
+    )
+    agent.add_argument(
+        "--ollama-url", metavar="URL",
+        default=_CFG.get("ollama_url", "http://localhost:11434"),
+        help=f"Ollama endpoint (default: {_CFG.get('ollama_url','http://localhost:11434')})",
+    )
+    _AGENT_CHECKS = [
+        "xss", "sqli", "ssti", "os", "path_traversal",
+        "ssrf", "open_redirect", "csrf", "header_injection",
+    ]
+    agent.add_argument(
+        "--checks", nargs="+",
+        choices=_AGENT_CHECKS,
+        default=["xss", "sqli", "ssti", "os", "path_traversal", "ssrf"],
+        metavar="CHECK",
+        help=(
+            "Vulnerability checks for the agent to test "
+            "(default: xss sqli ssti os path_traversal ssrf). "
+            "Available: " + ", ".join(_AGENT_CHECKS)
+        ),
+    )
+    agent.add_argument(
+        "--max-steps", type=int, default=50, metavar="N",
+        help="Maximum agent steps before stopping (default: 50)",
+    )
+    agent.add_argument(
+        "--headless", action="store_true", default=_CFG.get("headless", True),
+        help="Run browser in headless mode (default: true)",
+    )
+    agent.add_argument(
+        "--no-headless", action="store_true", default=False,
+        help="Show browser window (disables headless)",
+    )
+    agent.add_argument(
+        "--auth-user", metavar="USER", default=_CFG.get("auth_user", ""),
+        help="Username for pre-scan login",
+    )
+    agent.add_argument(
+        "--auth-pass", metavar="PASS", default=_CFG.get("auth_pass", ""),
+        help="Password for pre-scan login",
+    )
+    agent.add_argument(
+        "--login-url", metavar="URL", default=_CFG.get("login_url", ""),
+        help="Login page URL (agent will log in before testing)",
+    )
+    agent.add_argument(
+        "--output", "-o", metavar="DIR",
+        default=_CFG.get("output_dir") or None,
+        help="Output directory for report and evidence (default: output/agent_<timestamp>)",
+    )
+    agent.add_argument(
+        "--port", type=int, default=_CFG.get("port", 8765),
+        help=f"Monitoring dashboard port (default: {_CFG.get('port', 8765)})",
+    )
+    agent.add_argument(
+        "--no-monitor", action="store_true", default=False,
+        help="Disable the real-time monitoring dashboard",
+    )
+    agent.add_argument(
+        "--no-open-report", action="store_true", default=False,
+        help="Do not automatically open the HTML report after scanning",
+    )
+
     # triage subcommand
     triage = sub.add_parser(
         "triage",
@@ -452,6 +539,98 @@ def _llm_model_display(args) -> str:
     if args.llm == "claude":
         return "Model    : [blue]claude-haiku-4-5-20251001[/blue] (Claude)"
     return "Model    : [dim]none[/dim]"
+
+
+async def run_agent(args):
+    """Agent Browser Mode — LLM autonomously controls the browser to find vulnerabilities."""
+    import uvicorn
+    from rich.console import Console
+    from rich.panel import Panel
+    from wscan.monitor import MonitorServer
+    from wscan.agent_engine import AgentEngine
+
+    console = Console()
+
+    headless = not getattr(args, "no_headless", False)
+
+    model_display = args.model or "(default)"
+    console.print(Panel.fit(
+        f"[bold magenta]WScan — Agent Browser Mode[/bold magenta]\n"
+        f"Target  : [yellow]{args.url}[/yellow]\n"
+        f"LLM     : [blue]{args.llm}[/blue] / {model_display}\n"
+        f"Checks  : [green]{', '.join(args.checks)}[/green]\n"
+        f"Steps   : [dim]max {args.max_steps}[/dim]",
+        border_style="magenta",
+    ))
+
+    if getattr(args, "no_monitor", False):
+        monitor = MonitorServer(port=args.port)
+        engine = AgentEngine(
+            url=args.url,
+            llm_provider=args.llm,
+            llm_model=args.model or "",
+            ollama_url=getattr(args, "ollama_url", "http://localhost:11434"),
+            checks=args.checks,
+            headless=headless,
+            auth_user=getattr(args, "auth_user", "") or "",
+            auth_pass=getattr(args, "auth_pass", "") or "",
+            login_url=getattr(args, "login_url", "") or "",
+            max_steps=args.max_steps,
+            output_dir=args.output or None,
+            open_report=not getattr(args, "no_open_report", False),
+            monitor=monitor,
+            port=args.port,
+        )
+        await engine.run()
+        return
+
+    # With monitoring dashboard
+    monitor = MonitorServer(port=args.port)
+    config = uvicorn.Config(
+        app=monitor.app,
+        host="0.0.0.0",
+        port=args.port,
+        log_level="error",
+    )
+    server = uvicorn.Server(config)
+
+    async def run_agent_task():
+        await asyncio.sleep(1.5)
+        console.print(
+            f"\n[cyan]Monitoring dashboard:[/cyan] "
+            f"[underline]http://localhost:{args.port}[/underline]"
+        )
+        webbrowser.open(f"http://localhost:{args.port}")
+
+        try:
+            engine = AgentEngine(
+                url=args.url,
+                llm_provider=args.llm,
+                llm_model=args.model or "",
+                ollama_url=getattr(args, "ollama_url", "http://localhost:11434"),
+                checks=args.checks,
+                headless=headless,
+                auth_user=getattr(args, "auth_user", "") or "",
+                auth_pass=getattr(args, "auth_pass", "") or "",
+                login_url=getattr(args, "login_url", "") or "",
+                max_steps=args.max_steps,
+                output_dir=args.output or None,
+                open_report=not getattr(args, "no_open_report", False),
+                monitor=monitor,
+                port=args.port,
+            )
+            await engine.run()
+            console.print("[dim]Dashboard is still running — press Ctrl+C to stop.[/dim]")
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:
+            console.print(f"\n[red]Error: {exc}[/red]")
+            raise
+        finally:
+            server.should_exit = True
+
+    await asyncio.gather(server.serve(), run_agent_task())
 
 
 async def run_scan(args):
@@ -697,6 +876,39 @@ async def run_serve(args):
 
         checks = cfg.get("checks", ["sqli", "xss", "os"]) or ["sqli", "xss", "os"]
         await monitor.emit_scan_started(cfg)
+
+        # ── Agent Browser mode ─────────────────────────────────────
+        if cfg.get("agent_mode"):
+            from wscan.agent_engine import AgentEngine
+            await monitor.emit_status(f"Agent Browser: {url} をスキャン中", "running")
+            try:
+                agent_engine = AgentEngine(
+                    url=url,
+                    llm_provider=cfg.get("llm", "claude") or "claude",
+                    llm_model=cfg.get("agent_model", "") or "",
+                    ollama_url=cfg.get("agent_ollama_url", "http://localhost:11434") or "http://localhost:11434",
+                    checks=checks,
+                    headless=bool(cfg.get("headless", True)),
+                    auth_user=cfg.get("auth_user", "") or "",
+                    auth_pass=cfg.get("auth_pass", "") or "",
+                    login_url=cfg.get("login_url", "") or "",
+                    max_steps=int(cfg.get("agent_max_steps", 50)),
+                    open_report=bool(cfg.get("open_report", True)),
+                    monitor=monitor,
+                    port=port,
+                )
+                await agent_engine.run()
+                console.print("[dim]Dashboard still running — press Ctrl+C to stop.[/dim]")
+                await asyncio.sleep(3600)
+            except asyncio.CancelledError:
+                pass
+            except Exception as exc:
+                console.print(f"\n[red]Agent Error: {exc}[/red]")
+                raise
+            finally:
+                server.should_exit = True
+            return
+
         await monitor.emit_status(f"Starting scan of {url}", "running")
 
         try:
@@ -895,6 +1107,8 @@ def main():
             asyncio.run(run_triage(args))
         elif args.command == "serve":
             asyncio.run(run_serve(args))
+        elif args.command == "agent":
+            asyncio.run(run_agent(args))
         else:
             asyncio.run(run_scan(args))
     except KeyboardInterrupt:
