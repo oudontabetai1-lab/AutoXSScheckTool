@@ -865,7 +865,7 @@ body {
       <div class="lbl">Pages</div>
     </div>
     <div class="header-stat">
-      <div class="num" id="statTests">0<span id="statTotal" style="font-size:0.65rem;color:var(--text-muted);font-weight:400"></span></div>
+      <div class="num" id="statTests"><span id="statCurrent">0</span><span id="statTotal" style="font-size:0.65rem;color:var(--text-muted);font-weight:400"></span></div>
       <div class="lbl">Fields Tested</div>
     </div>
     <div class="header-stat" style="color:var(--critical)">
@@ -1537,8 +1537,7 @@ function handleEvent(event) {
     }
 
     case 'payload_test':
-      state.testCount++;
-      document.getElementById('statTests').textContent = state.testCount;
+      // Update "currently testing" indicators only — statTests is updated by 'progress' events
       document.getElementById('ctField').textContent = data.field;
       document.getElementById('ctPayload').textContent = data.payload;
       // Highlight active check badge (dynamic)
@@ -1574,7 +1573,8 @@ function handleEvent(event) {
       const pct = data.percent || 0;
       document.getElementById('progressBar').style.width = pct + '%';
       document.getElementById('statPct').textContent = pct + '%';
-      document.getElementById('statTests').childNodes[0].textContent = data.current;
+      const curEl = document.getElementById('statCurrent');
+      if (curEl) curEl.textContent = data.current;
       if (data.total > 0) {
         document.getElementById('statTotal').textContent = '/' + data.total;
       }
@@ -1620,6 +1620,17 @@ function handleEvent(event) {
       // Hide config overlay once scan begins
       document.getElementById('scanConfigOverlay').classList.remove('active');
       setStatus(`スキャン開始: ${data.url || ''}`, 'running');
+      // Reset all counters for fresh scan
+      state.pageCount = 0;
+      state.findingCount = 0;
+      document.getElementById('statPages').textContent = '0';
+      document.getElementById('statFindings').textContent = '0';
+      document.getElementById('findingCount').textContent = '0';
+      { const cur = document.getElementById('statCurrent'); if (cur) cur.textContent = '0'; }
+      document.getElementById('statTotal').textContent = '';
+      document.getElementById('statPct').textContent = '―%';
+      document.getElementById('progressBar').style.width = '0%';
+      document.getElementById('progressStripe').style.display = 'none';
       break;
   }
 }
