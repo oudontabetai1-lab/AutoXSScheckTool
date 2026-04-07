@@ -491,6 +491,179 @@ def _show_summary(
         print("  " + "─" * 44)
 
 
+# ── Agent Browser モード ─────────────────────────────────────────
+
+_AGENT_CHECKS = {
+    "xss":            "クロスサイトスクリプティング",
+    "sqli":           "SQL インジェクション",
+    "ssti":           "サーバーサイドテンプレートインジェクション",
+    "os":             "OS コマンドインジェクション",
+    "path_traversal": "ディレクトリトラバーサル",
+    "ssrf":           "サーバーサイドリクエストフォージェリ",
+    "open_redirect":  "オープンリダイレクト",
+    "csrf":           "CSRF",
+    "header_injection": "HTTP ヘッダインジェクション",
+}
+
+_AGENT_DEFAULT_CHECKS = ["xss", "sqli", "ssti", "os", "path_traversal", "ssrf"]
+
+_AGENT_LLM_INFO = {
+    "claude": "Claude API (要: ANTHROPIC_API_KEY) — 推奨",
+    "openai": "OpenAI API (要: OPENAI_API_KEY)",
+    "ollama": "Ollama     (ローカル実行 / 要: ollama起動済み)",
+}
+
+_AGENT_DEFAULT_MODELS = {
+    "claude": "claude-sonnet-4-5-20250929",
+    "openai": "gpt-4o-mini",
+    "ollama": "llama3",
+}
+
+
+def _section_agent_checks() -> list[str]:
+    _header("検査項目 (Agent)")
+    _print("  番号をスペース区切りで入力、または all で全項目、Enter でデフォルト")
+    keys = list(_AGENT_CHECKS.keys())
+    for i, k in enumerate(keys, 1):
+        mark = "●" if k in _AGENT_DEFAULT_CHECKS else "○"
+        _print(f"    [{i:>2}] {mark} {k:<18} {_AGENT_CHECKS[k]}")
+
+    raw = _ask(f"選択 (デフォルト: {' '.join(_AGENT_DEFAULT_CHECKS)})", "")
+    if not raw:
+        return list(_AGENT_DEFAULT_CHECKS)
+    if raw.strip().lower() == "all":
+        _ok("全項目を選択しました")
+        return keys
+
+    selected = []
+    for token in raw.split():
+        if token.isdigit() and 1 <= int(token) <= len(keys):
+            selected.append(keys[int(token) - 1])
+        elif token in keys:
+            selected.append(token)
+
+    if not selected:
+        _warn("無効な入力です。デフォルトを使用します。")
+        return list(_AGENT_DEFAULT_CHECKS)
+    _ok(f"選択: {', '.join(selected)}")
+    return selected
+
+
+def _section_agent_mode() -> argparse.Namespace:
+    """Agent Browser モードの設定を収集して Namespace を返す。"""
+    url = _section_url()
+
+    _header("LLM プロバイダー (Agent Browser)")
+    _print("  ※ Gemini は browser-use 非対応のため除外しています")
+    providers = list(_AGENT_LLM_INFO.keys())
+    for i, p in enumerate(providers, 1):
+        _print(f"    [{i}] {p:<8}  {_AGENT_LLM_INFO[p]}")
+    provider = _choose("プロバイダー番号", providers, "claude")
+    _ok(f"プロバイダー: {provider}")
+
+    default_model = _AGENT_DEFAULT_MODELS[provider]
+    _print(f"  デフォルトモデル: {default_model}")
+    model = _ask("モデル名 (空白=デフォルト)", "")
+    if not model:
+        model = ""  # run_agent 側でデフォルト適用
+        _ok(f"モデル: {default_model} (デフォルト)")
+    else:
+        _ok(f"モデル: {model}")
+
+    if provider in ("claude", "openai", "ollama"):
+        env_map = {
+            "claude": "ANTHROPIC_API_KEY",
+            "openai": "OPENAI_API_KEY",
+        }
+        env_key = env_map.get(provider)
+        if env_key:
+            _section_api_key(env_key, "sk-..." if provider == "openai" else "sk-ant-...")
+
+    checks = _section_agent_checks()
+
+    _header("最大ステップ数")
+    _print("  LLM エージェントが実行できる最大操作ステップ数 (推奨: 50〜100)")
+    while True:
+        raw = _ask("最大ステップ数", "50")
+        try:
+            max_steps = max(5, min(500, int(raw)))
+            break
+        except ValueError:
+            _err("数値を入力してください。")
+
+    _header("ログイン認証情報 (省略可)")
+    _print("  ログインが必要なサイトの場合、エージェントが自動的にログインします")
+    login_url = _ask("ログイン URL (省略可)", "")
+    if login_url:
+        auth_user = _ask("ユーザー名", "")
+        auth_pass = _ask("パスワード", "") if auth_user else ""
+    else:
+        auth_user = ""
+        auth_pass = ""
+
+    _header("その他の設定")
+    port_raw = _ask("ダッシュボードポート", "8765")
+    try:
+        port = int(port_raw)
+    except ValueError:
+        port = 8765
+
+    show_browser = _ask("ブラウザを表示しますか? (y/N)", "n").lower()
+
+    _print()
+    if _USE_RICH:
+        from rich.table import Table
+        from rich import box as _box
+        t = Table(show_header=False, box=_box.SIMPLE, padding=(0, 1))
+        t.add_column("key",   style="dim",   no_wrap=True)
+        t.add_column("value", style="white")
+        t.add_row("対象 URL",     url)
+        t.add_row("LLM",          f"{provider}  ({model or _AGENT_DEFAULT_MODELS[provider]})")
+        t.add_row("検査項目",     " / ".join(c.upper() for c in checks))
+        t.add_row("最大ステップ", str(max_steps))
+        t.add_row("ブラウザ",     "表示" if show_browser in ("y", "yes") else "非表示")
+        if login_url:
+            t.add_row("ログイン URL", login_url)
+        if auth_user:
+            t.add_row("認証",         f"{auth_user} / {'*' * len(auth_pass)}")
+        _console.print(Panel(t, title="[bold magenta]Agent Browser 設定確認[/bold magenta]", border_style="magenta"))
+    else:
+        print()
+        print(f"    URL      : {url}")
+        print(f"    LLM      : {provider}")
+        print(f"    検査     : {' / '.join(c.upper() for c in checks)}")
+        print(f"    ステップ : {max_steps}")
+
+    _print()
+    try:
+        ok = input("  Agent Browser スキャンを開始しますか? [Y/n]: ").strip().lower()
+    except (KeyboardInterrupt, EOFError):
+        _print()
+        _print("  中断しました。")
+        sys.exit(0)
+    if ok in ("n", "no"):
+        _print("  キャンセルしました。")
+        sys.exit(0)
+
+    return argparse.Namespace(
+        url=url,
+        llm=provider,
+        model=model,
+        ollama_url="http://localhost:11434",
+        checks=checks,
+        max_steps=max_steps,
+        headless=show_browser not in ("y", "yes"),
+        no_headless=show_browser in ("y", "yes"),
+        auth_user=auth_user,
+        auth_pass=auth_pass,
+        login_url=login_url,
+        output=None,
+        port=port,
+        no_monitor=False,
+        no_open_report=False,
+    )
+
+
 # ── メイン ───────────────────────────────────────────────────────
 
 def main():
@@ -506,7 +679,46 @@ def main():
         print("    WScan  -  Web Security Scanner")
         print("  " + "=" * 44)
 
-    # ── 各セクションで設定を収集 ────────────────────────────────
+    # ── モード選択 ───────────────────────────────────────────────
+    _header("起動モードを選択")
+    _print("    [1] 通常スキャン        — クロール → AI プランナー → ペイロード自動攻撃")
+    _print("    [2] Agent Browser スキャン — LLM がブラウザを直接操作して自律的に探索")
+    _print("    [3] ダッシュボードを開く   — ブラウザ UI から設定・スキャン起動 (serve)")
+    _print()
+    mode_options = ["scan", "agent", "serve"]
+    mode = _choose("モード番号", mode_options, "scan")
+
+    # ── serve モード ─────────────────────────────────────────────
+    if mode == "serve":
+        _header("ダッシュボードポート")
+        port_raw = _ask("ポート番号", "8765")
+        try:
+            port = int(port_raw)
+        except ValueError:
+            port = 8765
+        _ok(f"http://localhost:{port} でダッシュボードを起動します")
+        _print()
+        serve_args = argparse.Namespace(port=port)
+        from main import run_serve
+        try:
+            asyncio.run(run_serve(serve_args))
+        except KeyboardInterrupt:
+            _print()
+            _print("  ダッシュボードを停止しました。")
+        return
+
+    # ── Agent Browser モード ─────────────────────────────────────
+    if mode == "agent":
+        agent_args = _section_agent_mode()
+        from main import run_agent
+        try:
+            asyncio.run(run_agent(agent_args))
+        except KeyboardInterrupt:
+            _print()
+            _print("  スキャンを中断しました。")
+        return
+
+    # ── 通常スキャン (scan) ─────────────────────────────────────
     url = _section_url()
     checks = _section_checks()
     provider, ollama_model, openai_model, gemini_model = _section_llm()
@@ -565,6 +777,28 @@ def main():
         cookie=cookie,
         auth_user=auth_user,
         auth_pass=auth_pass,
+        # 追加フィールド（run_scan が getattr で参照するもの）
+        login_url="",
+        login_user_field="username",
+        login_pass_field="password",
+        login_success="",
+        proxy="",
+        no_open_report=False,
+        include_registration=False,
+        dom_xss=False,
+        auto_config=False,
+        no_auto_config=True,
+        learning_file="",
+        concurrency=1,
+        flows=[],
+        cookie_file="",
+        low_priv_cookies="",
+        low_priv_cookie_file="",
+        no_ai_analysis=False,
+        no_waf_detection=False,
+        no_payload_learning=False,
+        no_sitemap_crawl=False,
+        enable_llm_web_browsing=False,
     )
 
     from main import run_scan
