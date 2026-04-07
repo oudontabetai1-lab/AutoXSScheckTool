@@ -817,6 +817,18 @@ body {
       <div class="num" id="statPct" style="font-size:1.3rem">―%</div>
       <div class="lbl">Progress</div>
     </div>
+    <div class="header-stat" id="etaBlock" style="display:none">
+      <div class="num" style="font-size:0.9rem;letter-spacing:0" id="statElapsed">—</div>
+      <div class="lbl">経過</div>
+    </div>
+    <div class="header-stat" id="remainBlock" style="display:none">
+      <div class="num" style="font-size:0.9rem;letter-spacing:0" id="statRemain">—</div>
+      <div class="lbl">残り推定</div>
+    </div>
+    <div class="header-stat" id="etaTimeBlock" style="display:none">
+      <div class="num" style="font-size:0.9rem;letter-spacing:0" id="statETA">—</div>
+      <div class="lbl">完了予定</div>
+    </div>
   </div>
   <div class="ws-badge" id="wsBadge">WS: ―</div>
 </div>
@@ -995,6 +1007,8 @@ const state = {
   autoScroll: true,
   paused: false,
   planData: null,   // pending plan received from server
+  scanStartTime: null,  // Unix ms of first progress event (attack phase start)
+  scanDone: false,      // true after scan_complete — stop ETA updates
 };
 
 // ─── Config form state ───────────────────────────────────────────
@@ -1356,6 +1370,34 @@ function restoreFlows(flows) {
 }
 
 // ─── WebSocket ──────────────────────────────────────────────────
+// ─── ETA helpers ────────────────────────────────────────────────────────────
+function formatDuration(secs) {
+  if (!isFinite(secs) || secs < 0) return '—';
+  if (secs < 60) return Math.round(secs) + '秒';
+  const m = Math.floor(secs / 60);
+  const s = Math.round(secs % 60).toString().padStart(2, '0');
+  if (m < 60) return m + '分' + s + '秒';
+  const h = Math.floor(m / 60);
+  return h + '時間' + (m % 60) + '分';
+}
+
+function updateETA(current, total, evTimestampSec) {
+  if (state.scanDone) return;
+  const nowMs = evTimestampSec * 1000;
+  if (!state.scanStartTime) state.scanStartTime = nowMs;
+
+  const elapsedSec = (nowMs - state.scanStartTime) / 1000;
+  document.getElementById('statElapsed').textContent = formatDuration(elapsedSec);
+
+  if (current >= 2 && total > 0 && elapsedSec > 0) {
+    const rate = current / elapsedSec;
+    const remainSec = (total - current) / rate;
+    document.getElementById('statRemain').textContent = formatDuration(remainSec);
+    const etaStr = new Date(Date.now() + remainSec * 1000).toTimeString().slice(0, 5);
+    document.getElementById('statETA').textContent = etaStr;
+  }
+}
+
 // ─── WebSocket message queue (requestAnimationFrame batching) ────────────────
 const _msgQueue = [];
 let _rafPending = false;
@@ -1491,6 +1533,11 @@ function handleEvent(event) {
       }
       // Show stripe animation while running
       document.getElementById('progressStripe').style.display = pct < 100 ? 'block' : 'none';
+      // ETA
+      updateETA(data.current, data.total, timestamp);
+      ['etaBlock', 'remainBlock', 'etaTimeBlock'].forEach(id =>
+        document.getElementById(id).style.display = ''
+      );
       break;
     }
 
@@ -1500,6 +1547,10 @@ function handleEvent(event) {
       document.getElementById('statPct').textContent = '100%';
       document.getElementById('progressStripe').style.display = 'none';
       addEventLog('status', `Scan complete. Report: ${data.report_path}`);
+      // Finalize ETA display
+      state.scanDone = true;
+      document.getElementById('statRemain').textContent = '完了';
+      document.getElementById('statETA').textContent = '—';
       break;
 
     case 'plan_review':
@@ -1531,6 +1582,15 @@ function handleEvent(event) {
       // Hide config overlay once scan begins
       document.getElementById('scanConfigOverlay').classList.remove('active');
       setStatus(`スキャン開始: ${data.url || ''}`, 'running');
+      // Reset ETA state for new scan
+      state.scanStartTime = null;
+      state.scanDone = false;
+      document.getElementById('statElapsed').textContent = '—';
+      document.getElementById('statRemain').textContent = '—';
+      document.getElementById('statETA').textContent = '—';
+      ['etaBlock', 'remainBlock', 'etaTimeBlock'].forEach(id =>
+        document.getElementById(id).style.display = 'none'
+      );
       break;
   }
 }
