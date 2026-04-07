@@ -524,9 +524,9 @@ Consider stored / second-order attacks carefully:
 
             field_plans.append(FieldAttackPlan(
                 name=name,
-                form_index=int(fd.get("form_index", 0)),
+                form_index=int(fd.get("form_index") or 0),
                 is_url_param=bool(fd.get("is_url_param", False)),
-                risk_score=max(1, min(10, int(fd.get("risk_score", 5)))),
+                risk_score=max(1, min(10, int(fd.get("risk_score") or 5))),
                 priority_checks=priority_checks,
                 rationale=str(fd.get("rationale", "")),
                 custom_payloads=custom_payloads,

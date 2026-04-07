@@ -1356,6 +1356,20 @@ function restoreFlows(flows) {
 }
 
 // ─── WebSocket ──────────────────────────────────────────────────
+// ─── WebSocket message queue (requestAnimationFrame batching) ────────────────
+const _msgQueue = [];
+let _rafPending = false;
+
+function _flushMsgQueue() {
+  _rafPending = false;
+  const batch = _msgQueue.splice(0, 50);  // process up to 50 events per frame
+  batch.forEach(handleEvent);
+  if (_msgQueue.length > 0) {
+    _rafPending = true;
+    requestAnimationFrame(_flushMsgQueue);
+  }
+}
+
 function connect() {
   const ws = new WebSocket(`ws://${location.host}/ws`);
   state.ws = ws;
@@ -1381,8 +1395,11 @@ function connect() {
 
   ws.onmessage = (evt) => {
     try {
-      const event = JSON.parse(evt.data);
-      handleEvent(event);
+      _msgQueue.push(JSON.parse(evt.data));
+      if (!_rafPending) {
+        _rafPending = true;
+        requestAnimationFrame(_flushMsgQueue);
+      }
     } catch(e) {}
   };
 }
@@ -1606,9 +1623,13 @@ function addFinding(data) {
     const border = data.dialog_confirmed
       ? 'border:2px solid var(--critical);box-shadow:0 0 8px rgba(248,81,73,0.4);'
       : '';
+    const dataSrc = `data:image/jpeg;base64,${data.screenshot_b64}`;
     ssHtml = `
       <div style="position:relative">
-        <img class="fc-screenshot" style="${border}" src="data:image/jpeg;base64,${data.screenshot_b64}" onclick="openLightbox(this.src)" alt="Screenshot">
+        <button class="btn-show-shot" style="margin-top:6px;padding:4px 10px;font-size:0.75rem;background:var(--surface2);border:1px solid var(--border);border-radius:4px;color:var(--text-muted);cursor:pointer;"
+          onclick="var img=this.nextElementSibling;img.src=this.dataset.src;img.style.display='block';this.style.display='none';"
+          data-src="${dataSrc}">📷 Show screenshot</button>
+        <img class="fc-screenshot" style="${border}display:none" onclick="openLightbox(this.src)" alt="Screenshot" onload="this.style.display='block'">
         ${data.dialog_confirmed ? '<div style="position:absolute;top:6px;left:6px;background:rgba(220,38,38,0.9);color:white;font-size:0.65rem;font-weight:800;padding:3px 8px;border-radius:4px;letter-spacing:0.05em;">ALERT FIRED</div>' : ''}
       </div>`;
   }
@@ -1626,6 +1647,12 @@ function addFinding(data) {
     ${ssHtml}
   `;
   panel.insertBefore(card, panel.firstChild);
+
+  // Cap findings panel at 300 cards to prevent DOM bloat
+  const MAX_CARDS = 300;
+  while (panel.children.length > MAX_CARDS) {
+    panel.removeChild(panel.lastChild);
+  }
 }
 
 function updateRequest(req) {

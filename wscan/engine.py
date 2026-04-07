@@ -318,6 +318,7 @@ class ScanEngine:
 
         # State
         self.all_findings: list = []
+        self._finding_dedup: set[tuple] = set()     # (url, field_name, check_type) — prevent duplicates
         self.attack_plans: list = []
         self.visited_urls: set = set()
         self.scanned_forms: set = set()
@@ -1914,6 +1915,10 @@ class ScanEngine:
                 console.print()
 
     def _record_finding(self, f: Finding, source: str = ""):
+        dedup_key = (f.url, f.field_name, f.check_type)
+        if dedup_key in self._finding_dedup:
+            return   # duplicate — skip
+        self._finding_dedup.add(dedup_key)
         self.all_findings.append(f)
         label = f.check_type.upper()
         loc = f" on [yellow]{source}[/yellow]" if source else ""
