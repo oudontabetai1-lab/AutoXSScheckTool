@@ -173,28 +173,45 @@ _VULN_BLOCK_RE = re.compile(
 
 def _parse_findings_from_text(text: str) -> list[AgentFinding]:
     """エージェントの出力テキストから VULNERABILITY FOUND ブロックを解析する。"""
+    _type_map = {
+        "cross-site scripting": "xss",
+        "sql injection": "sqli",
+        "server-side template injection": "ssti",
+        "os command injection": "os",
+        "command injection": "os",
+        "path traversal": "path_traversal",
+        "directory traversal": "path_traversal",
+        "server-side request forgery": "ssrf",
+        "open redirect": "open_redirect",
+        "cross-site request forgery": "csrf",
+        "http header injection": "header_injection",
+    }
+    _valid_severities = {"critical", "high", "medium", "low"}
+
     findings: list[AgentFinding] = []
+    seen: set[tuple] = set()  # BUG-4 fix: deduplicate on (url, field, check_type)
+
     for m in _VULN_BLOCK_RE.finditer(text):
         check_type = m.group("type").strip().lower()
-        # Normalize type names
-        _type_map = {
-            "cross-site scripting": "xss",
-            "sql injection": "sqli",
-            "server-side template injection": "ssti",
-            "os command injection": "os",
-            "command injection": "os",
-            "path traversal": "path_traversal",
-            "directory traversal": "path_traversal",
-            "server-side request forgery": "ssrf",
-            "open redirect": "open_redirect",
-            "cross-site request forgery": "csrf",
-        }
         check_type = _type_map.get(check_type, check_type)
+
+        severity = m.group("severity").strip().lower()
+        if severity not in _valid_severities:
+            severity = "medium"  # fallback for unexpected values
+
+        url = m.group("url").strip()
+        field_name = m.group("field").strip()
+
+        dedup_key = (url, field_name, check_type)
+        if dedup_key in seen:
+            continue
+        seen.add(dedup_key)
+
         findings.append(AgentFinding(
             check_type=check_type,
-            severity=m.group("severity").strip().lower(),
-            url=m.group("url").strip(),
-            field_name=m.group("field").strip(),
+            severity=severity,
+            url=url,
+            field_name=field_name,
             payload=m.group("payload").strip(),
             evidence=m.group("evidence").strip(),
         ))
@@ -233,7 +250,7 @@ class AgentBrowserScanner:
         auth_user: str = "",
         auth_pass: str = "",
         login_url: str = "",
-        max_steps: int = 50,
+        max_steps: int = 100,
         monitor: Optional["MonitorServer"] = None,
     ):
         self.target_url = target_url.rstrip("/")
@@ -366,35 +383,95 @@ class AgentBrowserScanner:
     # ------------------------------------------------------------------
 
     def _build_task(self) -> str:
-        checks_desc = "\n".join(
-            f"  - {_CHECK_DESCRIPTIONS.get(c, c)}"
-            for c in self.checks
-        )
+        # BUG-2 fix: Include concrete payloads per check type so the LLM
+        # knows exactly what to test, not just vague "relevant payloads".
+        _PAYLOADS: dict[str, list[str]] = {
+            "xss":            ['<script>alert(1)</script>',
+                               '"><img src=x onerror=alert(1)>',
+                               "'><svg onload=alert(1)>"],
+            "sqli":           ["' OR '1'='1' --",
+                               "' OR 1=1--",
+                               "admin'--",
+                               "' UNION SELECT NULL--"],
+            "ssti":           ["{{7*7}}", "${7*7}", "<%= 7*7 %>", "{{config}}"],
+            "os":             ["; id", "| id", "; whoami", "&& id"],
+            "path_traversal": ["../../etc/passwd",
+                               "....//....//etc/passwd",
+                               "%2e%2e%2fetc%2fpasswd"],
+            "ssrf":           ["http://169.254.169.254/latest/meta-data/",
+                               "http://127.0.0.1/",
+                               "http://[::1]/"],
+            "open_redirect":  ["https://evil.com",
+                               "//evil.com",
+                               "/\\evil.com"],
+            "header_injection": ["foo\r\nSet-Cookie: evil=1",
+                                 "foo\r\nX-Injected: bar"],
+            "csrf":           ["(check if form has no CSRF token field)"],
+        }
+
+        checks_section = ""
+        for c in self.checks:
+            desc = _CHECK_DESCRIPTIONS.get(c, c)
+            payloads = _PAYLOADS.get(c, [])
+            payload_str = (
+                "\n      Try: " + " | ".join(payloads[:3])
+                if payloads and payloads[0] != "(check if form has no CSRF token field)"
+                else ""
+            )
+            checks_section += f"  - {desc}{payload_str}\n"
+
         auth_section = ""
         if self.login_url and self.auth_user and self.auth_pass:
             auth_section = (
-                f"\n## Authentication\n"
-                f"Login URL: {self.login_url}\n"
+                f"\n## Step 0: Authentication\n"
+                f"Before testing, log in at: {self.login_url}\n"
                 f"Username: {self.auth_user}\n"
                 f"Password: {self.auth_pass}\n"
-                f"Please log in first, then test authenticated pages.\n"
+                f"Confirm you are logged in, then proceed to test authenticated pages.\n"
             )
+
+        # BUG-1 fix: format block uses newlines, matching _VULN_BLOCK_RE exactly.
+        report_format = (
+            "VULNERABILITY FOUND:\n"
+            "Type: <xss|sqli|ssti|os|path_traversal|ssrf|open_redirect|csrf|header_injection>\n"
+            "Severity: <critical|high|medium|low>\n"
+            "URL: <exact URL of the vulnerable page>\n"
+            "Field: <input field name or URL parameter>\n"
+            "Payload: <exact string you injected>\n"
+            "Evidence: <what you observed: error message, alert text, redirect URL, etc.>\n"
+        )
 
         return (
             f"Perform a thorough authorized penetration test of: {self.target_url}\n"
             f"\n"
             f"## Vulnerability Checks Required\n"
-            f"{checks_desc}\n"
+            f"{checks_section}"
             f"{auth_section}\n"
-            f"## Instructions\n"
-            f"1. Start at {self.target_url} and navigate the application\n"
-            f"2. Discover all forms, search boxes, URL parameters, and user inputs\n"
-            f"3. Test each input systematically with relevant payloads\n"
-            f"4. For each vulnerability found, report it using the exact format:\n"
-            f"   VULNERABILITY FOUND: / Type: / Severity: / URL: / Field: / Payload: / Evidence:\n"
-            f"5. After testing all inputs, provide a final summary\n"
+            f"## Testing Procedure (follow for EVERY input field/parameter)\n"
+            f"1. Navigate to {self.target_url} and explore all pages/links\n"
+            f"2. For each form or URL parameter found:\n"
+            f"   a. Note what the field does (search, login, comment, file path, etc.)\n"
+            f"   b. Enter the test payload into the field\n"
+            f"   c. Submit the form (click the submit button)\n"
+            f"   d. Observe the response carefully:\n"
+            f"      - Did a JavaScript alert/dialog fire? → XSS confirmed\n"
+            f"      - Is there a database error or stack trace? → SQLi confirmed\n"
+            f"      - Was the template expression evaluated (e.g. 49 for 7*7)? → SSTI confirmed\n"
+            f"      - Is system command output visible (uid=, /bin/bash)? → OS injection confirmed\n"
+            f"      - Does the response contain /etc/passwd content? → Path traversal confirmed\n"
+            f"      - Is there an internal service response? → SSRF confirmed\n"
+            f"      - Did the browser redirect to the injected URL? → Open redirect confirmed\n"
+            f"   e. Also compare the response with the same field using a normal value to confirm\n"
+            f"3. Test ALL discovered inputs, not just the first one\n"
+            f"4. For EACH vulnerability found, report it IMMEDIATELY using this exact format:\n"
             f"\n"
-            f"Be systematic. Test all inputs. This is an authorized test."
+            f"{report_format}"
+            f"\n"
+            f"5. After testing all inputs, write a brief final summary\n"
+            f"\n"
+            f"IMPORTANT: Be systematic. Do not stop after the first finding. "
+            f"Test every form field and URL parameter you discover. "
+            f"This is an authorized security test."
         )
 
     async def _on_step(self, state, output, step_num: int) -> None:

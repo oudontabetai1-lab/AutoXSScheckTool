@@ -403,8 +403,8 @@ Examples:
         ),
     )
     agent.add_argument(
-        "--max-steps", type=int, default=50, metavar="N",
-        help="Maximum agent steps before stopping (default: 50)",
+        "--max-steps", type=int, default=100, metavar="N",
+        help="Maximum agent steps before stopping (default: 100)",
     )
     agent.add_argument(
         "--headless", action="store_true", default=_CFG.get("headless", True),
