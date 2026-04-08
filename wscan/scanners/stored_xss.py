@@ -11,6 +11,7 @@ Flow:
                 from the injection origin, it is a Stored XSS finding.
 """
 import asyncio
+import html as _html
 import uuid
 from typing import TYPE_CHECKING
 
@@ -97,7 +98,12 @@ class StoredXSSScanner(BaseScanner):
         for marker, meta in list(self._injected.items()):
             if marker in self._detected_markers:
                 continue
-            if marker not in source:
+
+            marker_encoded = _html.escape(marker)
+            in_raw = marker in source
+            in_encoded = marker_encoded in source
+
+            if not in_raw and not in_encoded:
                 continue
 
             # Stored XSS only if the marker appears on a page OTHER than where it was injected
@@ -106,16 +112,22 @@ class StoredXSSScanner(BaseScanner):
 
             self._detected_markers.add(marker)
             pair = self.browser.network.latest() or {}
+
+            # Distinguish executable XSS (raw tags) from stored HTML injection (encoded)
+            is_executable = in_raw
+            severity = "critical" if is_executable else "medium"
+            evidence_prefix = "Stored XSS" if is_executable else "Stored HTML injection (encoded)"
+
             finding = await self.record_finding(
                 url=url,
                 field_name=meta["field"],
                 payload=meta["payload"],
                 evidence=(
-                    f"Stored XSS: marker '{marker}' injected at {meta['url']} "
-                    f"appeared unescaped on {url}"
+                    f"{evidence_prefix}: marker '{marker}' injected at {meta['url']} "
+                    f"appeared on {url}"
                 ),
                 pair=pair,
-                severity="critical",
+                severity=severity,
             )
             findings.append(finding)
 

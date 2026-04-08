@@ -12,30 +12,27 @@ if TYPE_CHECKING:
 
 
 # Patterns indicating command execution in response.
-# These are deliberately specific to avoid false positives on dashboards/logs.
 OS_OUTPUT_PATTERNS = [
-    # Linux/Mac — output from 'id' command (very distinctive format)
-    r"uid=\d+\(\w+\)\s+gid=\d+\(\w+\)",
-    # /etc/passwd format — full line
-    r"root:x:\d+:\d+:[^:]*:/root:",
-    r"nobody:x:\d+:\d+:[^:]*:",
-    r"daemon:x:\d+:\d+:[^:]*:",
-    r"www-data:x:\d+:\d+:[^:]*:",
-    # Shell exec confirmation
-    r"/bin/bash\s*$",
-    r"/bin/sh\s*$",
-    # ls -la output pattern
-    r"total \d+\s*\ndr[-rwx]{9}",
-    # uname -a output
-    r"Linux \S+ \d+\.\d+\.\d+.*#\d+",
-    r"Darwin Kernel Version \d+",
-    # Windows — distinctive multi-word phrases
+    # Linux/Mac — output from 'id' command (flexible: gid optional)
+    r"uid=\d+",
+    r"gid=\d+",
+    # /etc/passwd entries (partial match is sufficient)
+    r"root:x:\d+",
+    r"nobody:x:\d+",
+    r"daemon:x:\d+",
+    r"www-data:x:\d+",
+    # Shell paths
+    r"/bin/(?:bash|sh|zsh|dash)",
+    # ls -la output (relaxed)
+    r"(?:total \d+|drwx|drwxr|drwxrwx)",
+    # uname output
+    r"Linux \S+ \d+\.\d+",
+    r"Darwin Kernel Version",
+    # Windows
     r"Windows IP Configuration",
-    r"Microsoft Windows \[Version \d+\.\d+",
-    r"Volume in drive [A-Z] (is|has)",
-    r"Directory of [A-Z]:\\",
+    r"Microsoft Windows \[Version",
+    r"(?:Volume in drive|Directory of [A-Z]:\\)",
     r"for 16-bit app support",
-    # Windows system path (distinctive)
     r"WINDOWS\\system32\\cmd\.exe",
 ]
 

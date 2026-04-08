@@ -59,6 +59,14 @@ class XSSScanner(BaseScanner):
         if self.monitor:
             await self.monitor.emit_status(f"XSS testing: {field_name} on {url}")
 
+        # Capture baseline before injecting any payload
+        baseline_source = ""
+        try:
+            await self.browser.navigate(url)
+            baseline_source = await self.browser.page.content()
+        except Exception:
+            pass
+
         for payload in payloads:
             if self.monitor:
                 await self.monitor.emit_payload_test(field_name, payload, "xss")
@@ -94,7 +102,7 @@ class XSSScanner(BaseScanner):
 
             # --- Check 2: Payload reflected without HTML encoding ---
             if source:
-                reflected = self._check_reflected(source, payload)
+                reflected = self._check_reflected(source, payload, baseline_source)
                 if reflected:
                     finding = await self.record_finding(
                         url=url,
@@ -111,12 +119,21 @@ class XSSScanner(BaseScanner):
 
         return findings
 
-    def _check_reflected(self, source: str, payload: str) -> str:
+    def _check_reflected(self, source: str, payload: str, baseline_source: str = "") -> str:
         """
         Check if the payload is reflected in the source without HTML encoding.
+        Uses baseline comparison to avoid false positives from pre-existing page content.
         Returns the matched snippet or empty string.
         """
+        # --- Priority check: full payload present verbatim (most reliable) ---
+        if payload and len(payload) > 5 and payload in source:
+            idx = source.find(payload)
+            preceding = source.lower()[max(0, idx - 300):idx]
+            if not (preceding.rfind("<!--") > preceding.rfind("-->")):
+                return source[max(0, idx - 10):idx + len(payload) + 50]
+
         source_lower = source.lower()
+        baseline_lower = baseline_source.lower() if baseline_source else ""
         payload_lower = payload.lower()
 
         for marker in XSS_MARKERS:
@@ -126,11 +143,13 @@ class XSSScanner(BaseScanner):
             if marker_lower not in source_lower:
                 continue
 
-            # Confirm the raw (unencoded) marker is what appears, not just an encoded version.
-            # html.escape converts e.g. '<' -> '&lt;'. If the escaped form differs from the
-            # raw marker, the raw marker must be genuinely present as an unencoded tag/attribute.
+            # Baseline comparison: skip if marker count did not increase after injection
+            if baseline_lower:
+                if source_lower.count(marker_lower) <= baseline_lower.count(marker_lower):
+                    continue  # No new occurrence introduced by the payload
+
+            # Skip if only the HTML-encoded form is present (not the raw marker)
             encoded = html.escape(marker).lower()
-            # If encoding changes the string, both forms might coexist; only flag the raw one.
             if encoded != marker_lower and encoded in source_lower and marker_lower not in source_lower:
                 continue
 
@@ -138,27 +157,12 @@ class XSSScanner(BaseScanner):
             if idx == -1:
                 continue
 
-            # Skip occurrences that sit inside an HTML comment (<!-- ... -->)
+            # Skip occurrences inside HTML comments (<!-- ... -->)
             preceding = source_lower[max(0, idx - 300):idx]
-            last_comment_open = preceding.rfind("<!--")
-            last_comment_close = preceding.rfind("-->")
-            if last_comment_open != -1 and last_comment_open > last_comment_close:
-                continue  # Inside an unclosed comment block
+            if preceding.rfind("<!--") > preceding.rfind("-->"):
+                continue
 
-            snippet = source[max(0, idx - 20):idx + len(marker) + 50]
-            return snippet
-
-        # Fallback: direct full-payload match (handles cases where the whole payload
-        # is reflected verbatim without any individual marker triggering above).
-        if payload in source:
-            idx = source.find(payload)
-            source_lower2 = source.lower()
-            preceding2 = source_lower2[max(0, idx - 300):idx]
-            last_open2 = preceding2.rfind("<!--")
-            last_close2 = preceding2.rfind("-->")
-            if last_open2 != -1 and last_open2 > last_close2:
-                return ""  # Inside HTML comment — skip
-            return source[max(0, idx):idx + len(payload)]
+            return source[max(0, idx - 20):idx + len(marker) + 50]
 
         return ""
 
