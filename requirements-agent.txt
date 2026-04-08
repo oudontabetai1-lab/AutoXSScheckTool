@@ -1,0 +1,18 @@
+# Requirements for Agent Browser Mode (browser-use integration)
+# Install these in addition to the base requirements.txt
+#
+# Usage:
+#   pip install -r requirements-agent.txt
+#
+# Then run:
+#   python main.py agent https://target.com --llm claude
+#   python main.py agent https://target.com --llm openai --model gpt-4o
+#   python main.py agent https://target.com --llm ollama --model llama3
+#
+# Required env vars (depending on provider):
+#   ANTHROPIC_API_KEY   — for --llm claude
+#   OPENAI_API_KEY      — for --llm openai
+#   (none needed)       — for --llm ollama (requires Ollama running locally)
+
+browser-use==0.12.6
+playwright>=1.40.0

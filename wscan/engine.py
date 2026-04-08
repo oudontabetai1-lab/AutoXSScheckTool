@@ -248,7 +248,6 @@ class ScanEngine:
             auth_user=auth_user, auth_pass=auth_pass,
             proxy=proxy,
         )
-        self._flow_runner = FlowRunner(self._browser)
         self.payload_gen = PayloadGenerator(
             provider=llm_provider,
             ollama_model=ollama_model,
@@ -1048,6 +1047,9 @@ class ScanEngine:
     # ── Serial attack (original flow) ─────────────────────────────────────
 
     async def _phase_attack_serial(self, pages: list, plans: dict):
+        # Reset progress counters at the start of each attack phase
+        self.completed_fields = 0
+        self.total_fields = 0
         attacked_urls: set = set()
 
         for page in pages:
@@ -1072,6 +1074,7 @@ class ScanEngine:
     async def _phase_attack_concurrent(self, pages: list, plans: dict):
         """
         Distribute pages across N WorkerBrowser instances.
+        Reset progress counters so dashboard starts from 0 each time.
 
         Concurrency model:
         - N worker coroutines run as asyncio Tasks (N = self.concurrency).
@@ -1084,6 +1087,9 @@ class ScanEngine:
         - The shared findings list and scanned_forms set are guarded by
           asyncio Locks at yield points.
         """
+        # Reset progress counters at the start of each attack phase
+        self.completed_fields = 0
+        self.total_fields = 0
         # Create (concurrency-1) additional worker pages; worker[0] = main page.
         extra_workers = []
         for i in range(self.concurrency - 1):
@@ -1400,7 +1406,20 @@ class ScanEngine:
             )
             # Use context-aware browser (worker in concurrent mode)
             await FlowRunner(self.browser).run(matched_flow)
-            # After flow, current browser page should already be on target URL
+            # Verify the browser ended on the intended target page.
+            # A failed step in the flow may leave the browser on the wrong URL.
+            try:
+                actual_url = self.browser.page.url.rstrip("/")
+                if actual_url != page.url.rstrip("/"):
+                    console.print(
+                        f"  [yellow][Flow] Ended on {actual_url}, "
+                        f"re-navigating to {page.url}[/yellow]"
+                    )
+                    if not await self.browser.navigate(page.url):
+                        return
+            except Exception:
+                if not await self.browser.navigate(page.url):
+                    return
         else:
             # ── Re-authenticate if session expired ───────────────────────
             await self._ensure_authenticated()
@@ -1476,7 +1495,10 @@ class ScanEngine:
             f"[cyan]{len(page.url_params)}[/cyan] URL param(s)"
             + (f" · [yellow]{skipped} excluded[/yellow]" if skipped else "")
         )
-        self.total_fields += len(field_queue) - skipped
+        # NOTE: total_fields is incremented inside the scanned_forms lock below,
+        # so it only counts fields that are actually going to be scanned.
+        # This prevents overcounting when multiple concurrent workers process
+        # pages with overlapping URL params.
 
         for fi, field, is_url_param in field_queue:
             field_name = field.get("name", f"field_{fi}")
@@ -1488,6 +1510,7 @@ class ScanEngine:
                 if key in self.scanned_forms:
                     continue
                 self.scanned_forms.add(key)
+                self.total_fields += 1  # Only count fields we'll actually scan
 
             if field_name.lower() in self.exclude_fields:
                 console.print(f"  [dim]Skip excluded: {field_name}[/dim]")
@@ -1717,6 +1740,13 @@ class ScanEngine:
             scanner = self.scanners.get(check_name)
             if scanner is None:
                 continue
+
+            # Signal dashboard: currently testing this field/check
+            if self.monitor:
+                try:
+                    await self.monitor.emit_payload_test(field_name, "", check_name)
+                except Exception:
+                    pass
 
             # Merge plan payloads with defaults (LLM extras come first, defaults appended)
             plan_payloads = field_plan.custom_payloads.get(check_name) if field_plan else None
