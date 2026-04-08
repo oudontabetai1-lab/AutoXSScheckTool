@@ -89,6 +89,9 @@ Vulnerability type: {check_type}
 ## Vulnerability description
 {check_desc}
 
+## Detected WAF / Security Layer
+{waf_section}
+
 ## Standard payloads already tried (no hit found):
 {payloads_tried}
 
@@ -244,6 +247,7 @@ class AdaptivePayloadEngine:
         url: str,
         payloads_tried: list[str],
         page_html: str,
+        waf_name: Optional[str] = None,
     ) -> list[str]:
         """
         Analyse the page HTML and generate adaptive bypass payloads.
@@ -259,11 +263,24 @@ class AdaptivePayloadEngine:
         payloads_list = "\n".join(f"  {p}" for p in payloads_tried[:30]) or "  (none recorded)"
         page_excerpt = page_html[:5000].replace("```", "'''")
 
+        if waf_name:
+            from .waf_detector import _WAF_BYPASSES
+            hints = _WAF_BYPASSES.get(waf_name, _WAF_BYPASSES.get("Generic WAF", []))
+            hints_text = "\n".join(f"  - {h}" for h in hints)
+            waf_section = (
+                f"**{waf_name}** is protecting the target.\n"
+                f"Known bypass techniques for {waf_name}:\n{hints_text}\n"
+                f"Incorporate these evasion strategies into your payloads."
+            )
+        else:
+            waf_section = "No WAF detected — standard payloads expected to pass through."
+
         prompt = _ADAPTIVE_PROMPT.format(
             url=url,
             field_name=field_name,
             check_type=check_type,
             check_desc=check_desc,
+            waf_section=waf_section,
             payloads_tried=payloads_list,
             page_excerpt=page_excerpt,
             observations=observations,

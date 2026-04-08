@@ -98,6 +98,9 @@ class ReportGenerator:
                 extra_badges += '<span class="badge-multi">⚡ MultiParam</span>'
             if "[AdaptiveAI]" in f.evidence:
                 extra_badges += '<span class="badge-ai">🧠 AdaptiveAI</span>'
+            if not getattr(f, "verified", True):
+                note = self._escape(getattr(f, "verification_note", ""))
+                extra_badges += f'<span class="badge-unconfirmed" title="{note}">⚠ 要確認</span>'
 
             cvss_score = getattr(f, "cvss_score", 0.0)
             cvss_vector = getattr(f, "cvss_vector", "")
@@ -195,6 +198,7 @@ body {{ font-family: 'Segoe UI', system-ui, -apple-system, sans-serif; backgroun
 .badge-chain {{ background:#744210; color:#fefcbf; padding:2px 8px; border-radius:10px; font-size:0.72rem; font-weight:700; }}
 .badge-multi {{ background:#1a365d; color:#bee3f8; padding:2px 8px; border-radius:10px; font-size:0.72rem; font-weight:700; }}
 .badge-ai {{ background:#44337a; color:#e9d8fd; padding:2px 8px; border-radius:10px; font-size:0.72rem; font-weight:700; }}
+.badge-unconfirmed {{ background:#d97706; color:#fff; padding:2px 8px; border-radius:10px; font-size:0.72rem; font-weight:700; cursor:help; }}
 .cvss-badge {{ color:white; padding:2px 8px; border-radius:10px; font-size:0.72rem; font-weight:700; cursor:help; }}
 .filter-bar {{ display:flex; gap:12px; flex-wrap:wrap; margin-bottom:20px; align-items:center; }}
 .filter-bar label {{ font-size:0.85rem; color:#4a5568; font-weight:600; }}

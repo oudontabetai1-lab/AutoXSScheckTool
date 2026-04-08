@@ -56,7 +56,7 @@ from .intervention import ScanController, AbortScan, SkipField, SkipPage
 from .monitor import MonitorServer
 from .payload_gen import PayloadGenerator
 from .scanners.base import Finding
-from .scanners.sqli import SQLiScanner
+from .scanners.sqli import SQLiScanner, SQL_ERROR_PATTERNS
 from .scanners.xss import XSSScanner
 from .scanners.os_injection import OSInjectionScanner
 from .scanners.ssti import SSTIScanner
@@ -458,6 +458,9 @@ class ScanEngine:
         finally:
             self.controller.stop()
             await self._browser.close()
+
+            # ── Phase 4.5: Verification ──────────────────────────────────
+            await self._phase_verify()
 
             # ── Phase 4: Report ──────────────────────────────────────────
             await self._phase_report_async()
@@ -1801,13 +1804,14 @@ class ScanEngine:
             defaults = self.payload_gen.default_payloads.get(check_name, [])
             tried = plan_payloads + [p for p in defaults if p not in plan_payloads]
 
-            # Ask LLM for bypass payloads
+            # Ask LLM for bypass payloads (include detected WAF for targeted evasion)
             adaptive_payloads = await self.adaptive_engine.generate(
                 check_type=check_name,
                 field_name=field_name,
                 url=url,
                 payloads_tried=tried,
                 page_html=page_html,
+                waf_name=self.waf_detector._detected,
             )
 
             if not adaptive_payloads:
@@ -1936,6 +1940,110 @@ class ScanEngine:
                 self._check_page_for_flags(body, f.url)
             if f.dialog_message:
                 self._check_page_for_flags(f.dialog_message, f.url)
+
+    # =========================================================================
+    # Phase 4.5: Verification — re-test each finding to catch false positives
+    # =========================================================================
+
+    _VERIFIABLE_CHECKS = frozenset({"xss", "sqli", "os", "ssti", "path_traversal"})
+
+    async def _phase_verify(self):
+        """
+        Re-inject each finding's exact payload to confirm the vulnerability
+        is reproducible.  Findings that cannot be reproduced are marked
+        verified=False (kept in report with a ⚠ badge, not deleted).
+        """
+        from urllib.parse import parse_qs, urlparse
+
+        to_verify = [
+            f for f in self.all_findings
+            if f.check_type in self._VERIFIABLE_CHECKS and not f.dialog_confirmed
+        ]
+        if not to_verify:
+            return
+
+        console.print(
+            Rule(
+                f"[bold blue] Phase 4.5  ·  Verification ({len(to_verify)} finding(s)) [/bold blue]",
+                style="blue",
+            )
+        )
+        if self.monitor:
+            await self.monitor.emit_status(
+                f"Verification: re-testing {len(to_verify)} finding(s)", "running"
+            )
+
+        for i, finding in enumerate(to_verify):
+            confirmed = await self._verify_one(finding)
+            if confirmed:
+                console.print(
+                    f"  [green][CONFIRMED][/green] {finding.check_type.upper()} "
+                    f"on [yellow]{finding.field_name}[/yellow]: reproduced"
+                )
+            else:
+                finding.verified = False
+                finding.verification_note = "2回目の試行で再現できませんでした (possible false positive)"
+                console.print(
+                    f"  [yellow][UNCONFIRMED][/yellow] {finding.check_type.upper()} "
+                    f"on [yellow]{finding.field_name}[/yellow]: not reproduced"
+                )
+            if self.monitor:
+                await self.monitor.emit_progress(
+                    current=i + 1,
+                    total=len(to_verify),
+                    message=f"検証 {i+1}/{len(to_verify)}: {finding.check_type}/{finding.field_name}",
+                )
+
+    async def _verify_one(self, f: Finding) -> bool:
+        """
+        Re-inject f.payload into f.field_name on f.url and check if the
+        vulnerability is still reproducible.  Returns True if confirmed,
+        True if verification could not be performed (don't penalise for nav errors).
+        """
+        from urllib.parse import parse_qs, urlparse
+        import re as _re
+
+        scanner = self.scanners.get(f.check_type)
+        if scanner is None:
+            return True  # no scanner available → assume confirmed
+
+        # Determine URL-param vs form-field injection context
+        is_url_param = f.field_name in parse_qs(
+            urlparse(f.url).query, keep_blank_values=True
+        )
+
+        try:
+            await self.browser.navigate(f.url)
+            self.browser.reset_dialog()
+            source, pair = await scanner._apply_payload(
+                f.url, 0, f.field_name, f.payload, is_url_param
+            )
+            await asyncio.sleep(0.5 * self.sleep_factor)
+
+            if f.check_type == "xss":
+                return self.browser.dialog_fired or bool(
+                    source and scanner._check_reflected(source, f.payload)
+                )
+
+            elif f.check_type == "sqli":
+                body = pair.get("response", {}).get("body", "") or source or ""
+                return bool(scanner.check_response_for_patterns(body, SQL_ERROR_PATTERNS))
+
+            elif f.check_type == "os":
+                OS_OUT_PATTERNS = [r"root:x:", r"uid=\d+\(", r"volume serial", r"directory of"]
+                return any(
+                    _re.search(p, source or "", _re.IGNORECASE)
+                    for p in OS_OUT_PATTERNS
+                )
+
+            elif f.check_type == "ssti":
+                return "49" in (source or "") or "7777777" in (source or "")
+
+            else:
+                return True  # path_traversal etc. — difficult to re-check, assume confirmed
+
+        except Exception:
+            return True  # navigation/injection failure → assume confirmed
 
     # =========================================================================
     # Phase 4: Report
