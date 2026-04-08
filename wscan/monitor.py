@@ -122,6 +122,8 @@ class MonitorServer:
             "data": data or {},
         }
         self.event_history.append(event)
+        if len(self.event_history) > 2000:
+            self.event_history = self.event_history[-1000:]  # trim to last 1000
         dead = set()
         for client in list(self.clients):
             try:

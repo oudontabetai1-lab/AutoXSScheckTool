@@ -26,6 +26,7 @@ class PayloadGenerator:
         gemini_model: str = "gemini-2.0-flash",
         default_payloads: Optional[dict] = None,
         prompt_templates: Optional[dict] = None,
+        enable_web_browsing: bool = False,
     ):
         self.provider = provider
         self.ollama_model = ollama_model
@@ -34,6 +35,7 @@ class PayloadGenerator:
         self.gemini_model = gemini_model
         self.default_payloads = default_payloads or {}
         self.prompt_templates = prompt_templates or {}
+        self.enable_web_browsing = enable_web_browsing
         self._anthropic_client = None
         self._llm_available: Optional[bool] = None
 
@@ -221,6 +223,23 @@ class PayloadGenerator:
             template = self.prompt_templates.get(check_type, "")
             if template:
                 prompt = template.format(field_name=field_name, url=url)
+
+                # ── Web intelligence enrichment ──────────────────────────
+                if self.enable_web_browsing:
+                    from .llm_web_tools import research_vulnerability
+                    try:
+                        web_ctx = await research_vulnerability(check_type, url)
+                        prompt = (
+                            f"{web_ctx}\n\n"
+                            f"Use the above web intelligence to generate more targeted payloads.\n\n"
+                            f"{prompt}"
+                        )
+                        console.print(
+                            f"[dim cyan][Web] Research injected into payload prompt ({check_type})[/dim cyan]"
+                        )
+                    except Exception:
+                        pass
+
                 llm_payloads = await self._call_llm(prompt)
                 if llm_payloads:
                     console.print(

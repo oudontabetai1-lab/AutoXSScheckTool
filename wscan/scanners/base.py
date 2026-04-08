@@ -181,6 +181,12 @@ class BaseScanner(ABC):
             screenshot_b64 = await self.browser.screenshot_b64(
                 label=f"[FINDING] {self.CHECK_TYPE} on {field_name}"
             )
+        # Dedup: skip if the same (url, field_name, check_type) was already recorded
+        dedup_key = (url, field_name, self.CHECK_TYPE)
+        if dedup_key in self.engine._finding_dedup:
+            return None  # duplicate
+        self.engine._finding_dedup.add(dedup_key)
+
         finding = Finding(
             check_type=self.CHECK_TYPE,
             severity=severity or self.SEVERITY,
