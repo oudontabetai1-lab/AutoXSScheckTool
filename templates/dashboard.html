@@ -882,6 +882,7 @@ body {
   <span>Workers: <strong id="cfgWorkers">—</strong></span>
   <span>Timeout: <strong id="cfgTimeout">—</strong>s</span>
   <span>Checks (<strong id="cfgCheckCount">0</strong>): <span id="cfgChecks" style="color:var(--text)">—</span></span>
+  <span id="fastModeBadge" style="display:none;background:#854d0e;color:#fde047;padding:1px 8px;border-radius:8px;font-size:.7rem;font-weight:700;letter-spacing:.04em">⚡ FAST</span>
 </div>
 
 <!-- ─── Phase Timeline ──────────────────────────────────────── -->
@@ -1543,6 +1544,9 @@ function handleEvent(event) {
       document.getElementById('cfgTimeout').textContent = data.timeout ?? '—';
       document.getElementById('cfgCheckCount').textContent = (data.checks || []).length;
       document.getElementById('cfgChecks').textContent = (data.checks || []).join(', ');
+      // Fast mode badge
+      { const fb = document.getElementById('fastModeBadge');
+        if (fb) fb.style.display = data.fast_mode ? 'inline-block' : 'none'; }
       break;
     }
 

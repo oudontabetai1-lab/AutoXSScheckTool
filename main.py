@@ -342,6 +342,20 @@ Examples:
             "Recommended range: 2-4. Higher values increase speed but also server load."
         ),
     )
+    scan.add_argument(
+        "--fast", "-F", action="store_true", default=False,
+        help=(
+            "高速スキャンモード (ベストエフォート): ペイロード上限 12・深さ 1・遅延 0 で "
+            "高リスク脆弱性を素早く発見する。各フラグで個別上書き可能。"
+        ),
+    )
+    scan.add_argument(
+        "--max-payloads", type=int, default=0, metavar="N",
+        help=(
+            "フィールド・チェックタイプ毎のペイロード上限 (0=無制限)。"
+            "--fast 時のデフォルトは 12。単独でも指定可能。"
+        ),
+    )
     # Auto-config wizard
     _ac_default = _CFG.get("auto_config", False)
     _ac_group = scan.add_mutually_exclusive_group()
@@ -459,6 +473,31 @@ async def run_scan(args):
     from rich.panel import Panel
 
     console = Console()
+
+    # ── Fast mode preset ──────────────────────────────────────────────
+    # Apply defaults only for options the user did NOT explicitly set.
+    # Explicit CLI flags always win over the preset.
+    if getattr(args, "fast", False):
+        _DEPTH_DEFAULT    = 2
+        _FORMS_DEFAULT    = 50
+        _CONC_DEFAULT     = 1
+        _CHECKS_DEFAULT   = ["sqli", "xss", "os"]  # defined in add_argument default
+        _LLM_DEFAULT      = "ollama"
+        if args.depth       == _DEPTH_DEFAULT:  args.depth       = 1
+        if args.max_forms   == _FORMS_DEFAULT:  args.max_forms   = 3
+        if args.concurrency == _CONC_DEFAULT:   args.concurrency = 2
+        if args.checks      == _CHECKS_DEFAULT: args.checks      = ["sqli", "xss"]
+        if args.llm         == _LLM_DEFAULT:    args.llm         = "none"
+        if not args.headless:                   args.headless    = True
+        if not getattr(args, "no_planner",        False): args.no_planner        = True
+        if not getattr(args, "no_waf_detection",  False): args.no_waf_detection  = True
+        if not getattr(args, "no_sitemap_crawl",  False): args.no_sitemap_crawl  = True
+        if not getattr(args, "no_ai_analysis",    False): args.no_ai_analysis    = True
+        if getattr(args, "max_payloads", 0) == 0:         args.max_payloads      = 12
+        console.print(
+            "[bold yellow]⚡ FAST MODE[/bold yellow] — "
+            f"ペイロード上限 {args.max_payloads}、遅延 0、深さ {args.depth}"
+        )
 
     checks_display = ', '.join(args.checks) if args.checks else "all IPA checks"
     planner_display = "off" if getattr(args, "no_planner", False) else "on (AI-driven)"
@@ -593,6 +632,8 @@ async def run_scan(args):
             enable_llm_web_browsing=getattr(args, "llm_web_browsing", False),
             concurrency=getattr(args, "concurrency", 1),
             flows=getattr(args, "flows", None) or [],
+            max_payloads=getattr(args, "max_payloads", 0),
+            fast_mode=getattr(args, "fast", False),
         )
 
     if args.no_monitor:

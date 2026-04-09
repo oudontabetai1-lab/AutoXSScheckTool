@@ -177,6 +177,9 @@ class ScanEngine:
         concurrency: int = 1,
         # Multi-step attack flows
         flows: Optional[list] = None,
+        # Fast mode
+        max_payloads: int = 0,   # 0 = no limit; fast mode default: 12
+        fast_mode: bool = False,  # sets sleep_factor=0
     ):
         self.target_url = url.rstrip("/")
         self.monitor = monitor
@@ -185,7 +188,15 @@ class ScanEngine:
         self.timeout = timeout
         self.max_forms = max_forms
         self.ctf_mode = ctf_mode
-        self.sleep_factor = 0.5 if ctf_mode else 1.0
+        self.max_payloads = max_payloads
+        self.fast_mode = fast_mode
+        # sleep_factor: fast=0.0 (no delays), ctf=0.5, normal=1.0
+        if fast_mode:
+            self.sleep_factor = 0.0
+        elif ctf_mode:
+            self.sleep_factor = 0.5
+        else:
+            self.sleep_factor = 1.0
         self.cookies = cookies
         self.cookie_list: list = list(cookie_list or [])
         # Normalise low-privilege cookies: prefer list form when both are given
@@ -363,6 +374,7 @@ class ScanEngine:
                 depth=self.depth,
                 concurrency=self.concurrency,
                 timeout=self.timeout,
+                fast_mode=self.fast_mode,
             )
 
         loop = asyncio.get_event_loop()

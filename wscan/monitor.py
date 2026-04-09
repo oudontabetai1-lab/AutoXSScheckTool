@@ -154,6 +154,7 @@ class MonitorServer:
         depth: int,
         concurrency: int,
         timeout: int,
+        fast_mode: bool = False,
     ):
         """Send scan configuration to the dashboard so it can render dynamic badges."""
         await self.emit("scan_config", {
@@ -162,6 +163,7 @@ class MonitorServer:
             "depth": depth,
             "concurrency": concurrency,
             "timeout": timeout,
+            "fast_mode": fast_mode,
         })
 
     async def emit_awaiting_config(self):

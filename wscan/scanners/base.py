@@ -148,6 +148,10 @@ class BaseScanner(ABC):
         learner = getattr(self.engine, "payload_learner", None)
         if learner and getattr(self.engine, "enable_payload_learning", True):
             payloads = learner.sort_payloads(self.CHECK_TYPE, payloads)
+        # Fast mode: cap payload count (highest-priority payloads are already first)
+        cap = getattr(self.engine, "max_payloads", 0)
+        if cap > 0:
+            payloads = payloads[:cap]
         return payloads
 
     def check_response_for_patterns(self, body: str, patterns: list[str]) -> Optional[str]:
