@@ -147,9 +147,16 @@ def _build_llm(provider: str, model: str, ollama_url: str = "http://localhost:11
 
     elif provider == "ollama":
         from browser_use.llm import ChatOllama
-        # ollama_url は "http://localhost:11434" 形式
         host = ollama_url.rstrip("/")
-        return ChatOllama(model=model or "llama3", host=host)
+        model_name = model or "llama3"
+        # Warn if model is too small for reliable browser-use tool calling
+        _SMALL_SUFFIXES = (":1b", ":3b", ":1.5b", ":2b", ":0.5b")
+        if any(model_name.lower().endswith(s) for s in _SMALL_SUFFIXES):
+            console.print(
+                f"[yellow]⚠️  警告: {model_name!r} はブラウザ操作には小さすぎる可能性があります。"
+                f" 最低でも 7B 以上 (例: qwen2.5-coder:7b, llama3:8b) を推奨します。[/yellow]"
+            )
+        return ChatOllama(model=model_name, host=host)
 
     else:
         raise RuntimeError(
@@ -297,6 +304,13 @@ class AgentBrowserScanner:
                 disable_security=True,
             )
 
+            # タスク文字列には SSRF/redirect ペイロードとして複数の URL が含まれる。
+            # directly_open_url=True (デフォルト) は「複数 URL 検出 → スキップ」する仕様のため、
+            # ブラウザが白紙ページのまま開始してしまう。
+            # initial_actions で明示的に最初のページへ遷移する。
+            start_url = self.login_url or self.target_url
+            initial_actions = [{"navigate": {"url": start_url, "new_tab": False}}]
+
             agent = Agent(
                 task=task,
                 llm=llm,
@@ -306,6 +320,8 @@ class AgentBrowserScanner:
                 use_vision=True,
                 use_thinking=True,
                 enable_planning=True,
+                directly_open_url=False,           # 自動 URL 抽出を無効化 (複数 URL 問題を回避)
+                initial_actions=initial_actions,   # 最初のページへ確実に遷移
                 register_new_step_callback=self._on_step,
             )
 
@@ -332,8 +348,8 @@ class AgentBrowserScanner:
 
             result.findings = _parse_findings_from_text(all_text)
 
-            # エラーがあればログに記録
-            errors = history.errors()
+            # エラーがあればログに記録 (None エントリを除外)
+            errors = [e for e in (history.errors() or []) if e is not None]
             if errors:
                 console.print(
                     f"  [yellow]エージェントエラー {len(errors)} 件:[/yellow]"
@@ -341,7 +357,8 @@ class AgentBrowserScanner:
                 for err in errors[:3]:
                     console.print(f"    [dim]{str(err)[:120]}[/dim]")
 
-            await browser.close()
+            # BrowserSession は close() を持たない — stop() が正しい
+            await browser.stop()
 
         except ImportError:
             result.error = "browser-use がインストールされていません。pip install browser-use を実行してください。"
