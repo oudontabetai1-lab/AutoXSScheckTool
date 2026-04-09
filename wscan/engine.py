@@ -410,12 +410,15 @@ class ScanEngine:
                 console.print("  [dim]WAF detection disabled.[/dim]")
 
             # ── Phase 1: Crawl ───────────────────────────────────────────
+            if self.monitor: await self.monitor.emit_phase("crawl")
             crawled_pages = await self._phase_crawl()
 
             # ── Phase 2: Plan ────────────────────────────────────────────
+            if self.monitor: await self.monitor.emit_phase("plan")
             plans = await self._phase_plan(crawled_pages)
 
             # ── Phase 3: Attack ──────────────────────────────────────────
+            if self.monitor: await self.monitor.emit_phase("attack")
             try:
                 await self._phase_attack(crawled_pages, plans)
             except AbortScan:
@@ -463,6 +466,7 @@ class ScanEngine:
             await self._phase_verify()
 
             # ── Phase 4: Report ──────────────────────────────────────────
+            if self.monitor: await self.monitor.emit_phase("report")
             await self._phase_report_async()
 
             if self.monitor:
@@ -1062,7 +1066,11 @@ class ScanEngine:
 
             attacked_urls.add(page.url)
             findings_before = len(self.all_findings)
+            if self.monitor:
+                await self.monitor.emit_url_start(page.url, len(pages))
             await self._attack_one_page(page, plans)
+            if self.monitor:
+                await self.monitor.emit_url_complete(page.url)
 
             new_findings = self.all_findings[findings_before:]
             if new_findings and self.use_planner:
@@ -1133,7 +1141,11 @@ class ScanEngine:
                         )
                         skip_this_page = True
                     if not skip_this_page:
+                        if self.monitor:
+                            await self.monitor.emit_url_start(page.url, page_queue.qsize() + 1)
                         await self._attack_one_page(page, plans)
+                        if self.monitor:
+                            await self.monitor.emit_url_complete(page.url)
                 except AbortScan:
                     _abort_event.set()
                     raise

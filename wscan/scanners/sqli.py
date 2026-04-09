@@ -210,7 +210,7 @@ class SQLiScanner(BaseScanner):
 
         for payload in payloads:
             if self.monitor:
-                await self.monitor.emit_payload_test(field_name, payload, "sqli")
+                await self.monitor.emit_payload_test(field_name, payload, "sqli", url)
 
             # Take before screenshot
             await self.browser.screenshot_b64(f"SQLi test: {field_name} = {payload[:30]}")
