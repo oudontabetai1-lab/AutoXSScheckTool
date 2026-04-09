@@ -12,16 +12,17 @@ if TYPE_CHECKING:
 
 
 # Probe tuples: (payload, expected_substring, template_engine_name)
-# Use 1337*1337=1787569 — a distinctive result that rarely appears naturally on pages.
+# Use product of two large primes — astronomically unlikely to appear naturally in page HTML.
+# 2654435761 * 2654435761 = 7045744422742119121
 SSTI_PROBES = [
-    ("{{1337*1337}}", "1787569", "Jinja2/Twig"),
-    ("${1337*1337}", "1787569", "Mako/Freemarker"),
-    ("<%= 1337*1337 %>", "1787569", "ERB"),
-    ("#{1337*1337}", "1787569", "Ruby/Pebble"),
-    ("{{3*'wscan'}}", "wscanwscanwscan", "Jinja2-str"),
-    ("*{1337*1337}", "1787569", "SpEL"),
-    ("%{1337*1337}", "1787569", "OGNL"),
-    ("[[${1337*1337}]]", "1787569", "Thymeleaf"),
+    ("{{2654435761*2654435761}}", "7045744422742119121", "Jinja2/Twig"),
+    ("${2654435761*2654435761}", "7045744422742119121", "Mako/Freemarker"),
+    ("<%= 2654435761*2654435761 %>", "7045744422742119121", "ERB"),
+    ("#{2654435761*2654435761}", "7045744422742119121", "Ruby/Pebble"),
+    ("{{3*'wscan99991'}}", "wscan99991wscan99991wscan99991", "Jinja2-str"),
+    ("*{2654435761*2654435761}", "7045744422742119121", "SpEL"),
+    ("%{2654435761*2654435761}", "7045744422742119121", "OGNL"),
+    ("[[${2654435761*2654435761}]]", "7045744422742119121", "Thymeleaf"),
 ]
 
 
@@ -63,9 +64,9 @@ class SSTIScanner(BaseScanner):
             if not source or expected not in source:
                 continue
 
-            # Reduce false positives: only flag if the expected value was NOT already
-            # present in the baseline response (it appeared only after template evaluation).
-            if baseline_source and expected in baseline_source:
+            # Reduce false positives: only flag if the expected value count increased
+            # after injection (not just pre-existing in baseline response).
+            if baseline_source and source.count(expected) <= baseline_source.count(expected):
                 continue
 
             finding = await self.record_finding(

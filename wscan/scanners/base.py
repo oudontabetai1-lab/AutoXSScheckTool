@@ -65,6 +65,8 @@ class Finding:
     dialog_confirmed: bool = False   # True when JS alert() was actually triggered
     dialog_message: str = ""         # The alert message that appeared
     timestamp: float = field(default_factory=time.time)
+    verified: bool = True            # False = could not reproduce on second attempt
+    verification_note: str = ""      # Reason when verified=False
 
     @property
     def cvss_vector(self) -> str:
@@ -91,6 +93,8 @@ class Finding:
             "timestamp": self.timestamp,
             "cvss_vector": self.cvss_vector,
             "cvss_score": self.cvss_score,
+            "verified": self.verified,
+            "verification_note": self.verification_note,
         }
 
 

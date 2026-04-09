@@ -190,6 +190,11 @@ class SQLiScanner(BaseScanner):
         )
         baseline_len = len(baseline_source)
 
+        # Second baseline to measure natural response length variance
+        # (dynamic content like ads/timestamps can shift length by hundreds of bytes)
+        baseline_source2, _ = await self._get_baseline(url, form_index, field_name, is_url_param)
+        baseline_variance = abs(len(baseline_source) - len(baseline_source2))
+
         # Measure baseline response time for dynamic time-based threshold
         _b_req = baseline_pair.get("request", {})
         _b_resp = baseline_pair.get("response", {})
@@ -244,9 +249,12 @@ class SQLiScanner(BaseScanner):
                 # True condition should resemble baseline; false should differ significantly.
                 diff_true_base = abs(len(true_src) - baseline_len)
                 diff_false_base = abs(len(false_src) - baseline_len)
+                # Require the difference to be at least 4× the natural page variance
+                # to avoid false positives from dynamic content (ads, timestamps, etc.)
+                min_threshold = max(200, baseline_variance * 4)
                 if (
                     baseline_len > 0
-                    and diff_false_base > 200
+                    and diff_false_base > min_threshold
                     and diff_true_base < diff_false_base * 0.5
                 ):
                     finding = await self.record_finding(
