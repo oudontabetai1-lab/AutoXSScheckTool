@@ -124,7 +124,7 @@ class DOMXSSScanner(BaseScanner):
         marker = f"__WSCAN_DOMXSS__{uid}"
 
         if self.monitor:
-            await self.monitor.emit_payload_test(field_name, payload, "dom_xss")
+            await self.monitor.emit_payload_test(field_name, payload, "dom_xss", url)
 
         try:
             # Install DOM hook before the page loads

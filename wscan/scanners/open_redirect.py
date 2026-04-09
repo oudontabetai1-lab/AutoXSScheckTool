@@ -72,7 +72,7 @@ class OpenRedirectScanner(BaseScanner):
 
         for payload in REDIRECT_PAYLOADS:
             if self.monitor:
-                await self.monitor.emit_payload_test(field_name, payload, "open_redirect")
+                await self.monitor.emit_payload_test(field_name, payload, "open_redirect", url)
 
             source, pair = await self._apply_payload(
                 url, form_index, field_name, payload, is_url_param

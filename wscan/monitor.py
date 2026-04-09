@@ -154,6 +154,7 @@ class MonitorServer:
         depth: int,
         concurrency: int,
         timeout: int,
+        fast_mode: bool = False,
     ):
         """Send scan configuration to the dashboard so it can render dynamic badges."""
         await self.emit("scan_config", {
@@ -162,6 +163,7 @@ class MonitorServer:
             "depth": depth,
             "concurrency": concurrency,
             "timeout": timeout,
+            "fast_mode": fast_mode,
         })
 
     async def emit_awaiting_config(self):
@@ -175,11 +177,12 @@ class MonitorServer:
     async def emit_page_start(self, url: str):
         await self.emit("page_start", {"url": url})
 
-    async def emit_payload_test(self, field: str, payload: str, check_type: str):
+    async def emit_payload_test(self, field: str, payload: str, check_type: str, url: str = "") -> None:
         await self.emit("payload_test", {
             "field": field,
             "payload": payload,
             "check_type": check_type,
+            "url": url,
         })
 
     async def emit_progress(self, current: int, total: int, message: str = ""):
@@ -189,6 +192,18 @@ class MonitorServer:
             "percent": int(current / total * 100) if total > 0 else 0,
             "message": message,
         })
+
+    async def emit_phase(self, phase: str) -> None:
+        """Emit current scan phase: 'crawl' | 'plan' | 'attack' | 'report'"""
+        await self.emit("phase", {"phase": phase})
+
+    async def emit_url_start(self, url: str, total_urls: int = 0) -> None:
+        """Emit when a URL begins being attacked."""
+        await self.emit("url_start", {"url": url, "total_urls": total_urls})
+
+    async def emit_url_complete(self, url: str) -> None:
+        """Emit when a URL has finished being attacked."""
+        await self.emit("url_complete", {"url": url})
 
     async def emit_plan_review(self, plans_data: list):
         """

@@ -60,7 +60,7 @@ class PathTraversalScanner(BaseScanner):
 
         for payload in payloads:
             if self.monitor:
-                await self.monitor.emit_payload_test(field_name, payload, "path_traversal")
+                await self.monitor.emit_payload_test(field_name, payload, "path_traversal", url)
 
             source, pair = await self._apply_payload(
                 url, form_index, field_name, payload, is_url_param

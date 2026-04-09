@@ -65,7 +65,7 @@ class StoredXSSScanner(BaseScanner):
                 "payload": payload,
             }
             if self.monitor:
-                await self.monitor.emit_payload_test(field_name, payload, "stored_xss")
+                await self.monitor.emit_payload_test(field_name, payload, "stored_xss", url)
             try:
                 if is_url_param:
                     await self.browser.test_url_param(url, field_name, payload)

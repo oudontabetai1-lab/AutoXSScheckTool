@@ -53,7 +53,7 @@ class SSTIScanner(BaseScanner):
 
         for payload, expected, engine_name in SSTI_PROBES:
             if self.monitor:
-                await self.monitor.emit_payload_test(field_name, payload, "ssti")
+                await self.monitor.emit_payload_test(field_name, payload, "ssti", url)
 
             source, pair = await self._apply_payload(
                 url, form_index, field_name, payload, is_url_param

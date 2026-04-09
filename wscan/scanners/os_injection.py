@@ -89,7 +89,7 @@ class OSInjectionScanner(BaseScanner):
 
         for payload in payloads:
             if self.monitor:
-                await self.monitor.emit_payload_test(field_name, payload, "os")
+                await self.monitor.emit_payload_test(field_name, payload, "os", url)
 
             await self.browser.screenshot_b64(f"OS inject test: {field_name}")
 

@@ -211,8 +211,34 @@ body {
 }
 .current-test .ct-label { font-size: 0.7rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 4px; }
 .current-test .ct-field { font-size: 0.85rem; font-weight: 600; margin-bottom: 2px; }
-.current-test .ct-payload { font-family: monospace; font-size: 0.75rem; color: var(--high); word-break: break-all; max-height: 40px; overflow: hidden; }
-.check-badges { display: flex; gap: 6px; margin-top: 6px; }
+.current-test .ct-payload { font-family: monospace; font-size: 0.75rem; color: var(--high); word-break: break-all; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.check-badges { display: flex; gap: 6px; margin-top: 6px; flex-wrap: wrap; }
+/* Phase timeline */
+.ph-step { display:flex; align-items:center; gap:5px; opacity:.3; transition:opacity .3s; }
+.ph-step.active { opacity:1; }
+.ph-step.done { opacity:.65; }
+.ph-dot { width:9px; height:9px; border-radius:50%; background:#555; transition:background .3s; flex-shrink:0; }
+.ph-step.active .ph-dot { background:#7c3aed; box-shadow:0 0 6px #7c3aed; animation:phasePulse 1.2s infinite; }
+.ph-step.done .ph-dot { background:#22c55e; }
+.ph-arrow { color:#444; font-size:.75rem; }
+.ph-label { font-size:.75rem; color:#bbb; }
+@keyframes phasePulse { 0%,100%{opacity:1} 50%{opacity:.5} }
+/* URL list */
+.url-item { display:flex; align-items:center; gap:8px; padding:3px 0; font-size:.75rem; border-bottom:1px solid #1e1e2e; }
+.url-item:last-child { border-bottom:none; }
+.url-item .url-text { flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:#aaa; }
+.url-badge { flex-shrink:0; padding:1px 7px; border-radius:9px; font-size:.68rem; font-weight:600; }
+.url-badge-pending  { background:#2a2a3e; color:#555; }
+.url-badge-scanning { background:#3b1fa8; color:#c4b5fd; animation:phasePulse 1s infinite; }
+.url-badge-done     { background:#14532d; color:#86efac; }
+.url-badge-vuln     { background:#7f1d1d; color:#fca5a5; }
+/* Current test rows */
+.ct-row-item { display:flex; align-items:center; gap:6px; margin-bottom:3px; min-width:0; }
+.ct-meta-label { font-size:.68rem; color:var(--text-muted); text-transform:uppercase; letter-spacing:.06em; flex-shrink:0; width:42px; }
+.ct-url-val { font-size:.75rem; color:var(--accent); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; flex:1; min-width:0; }
+/* Check counters */
+.check-counter { padding:2px 8px; border-radius:9px; font-size:.68rem; background:#1e1e2e; color:#777; border:1px solid #2a2a3e; }
+.check-counter.active { border-color:#7c3aed; color:#c4b5fd; background:#2d1f5e; }
 .check-badge {
   font-size: 0.65rem; font-weight: 700;
   padding: 2px 8px; border-radius: 10px;
@@ -923,6 +949,18 @@ body {
   <span>Workers: <strong id="cfgWorkers">—</strong></span>
   <span>Timeout: <strong id="cfgTimeout">—</strong>s</span>
   <span>Checks (<strong id="cfgCheckCount">0</strong>): <span id="cfgChecks" style="color:var(--text)">—</span></span>
+  <span id="fastModeBadge" style="display:none;background:#854d0e;color:#fde047;padding:1px 8px;border-radius:8px;font-size:.7rem;font-weight:700;letter-spacing:.04em">⚡ FAST</span>
+</div>
+
+<!-- ─── Phase Timeline ──────────────────────────────────────── -->
+<div id="phaseBar" style="display:flex;align-items:center;gap:8px;padding:6px 16px;background:#1e1e2e;border-bottom:1px solid #333">
+  <div class="ph-step" id="ph-crawl"><span class="ph-dot"></span><span class="ph-label">Crawl</span></div>
+  <div class="ph-arrow">→</div>
+  <div class="ph-step" id="ph-plan"><span class="ph-dot"></span><span class="ph-label">Plan</span></div>
+  <div class="ph-arrow">→</div>
+  <div class="ph-step" id="ph-attack"><span class="ph-dot"></span><span class="ph-label">Attack</span></div>
+  <div class="ph-arrow">→</div>
+  <div class="ph-step" id="ph-report"><span class="ph-dot"></span><span class="ph-label">Report</span></div>
 </div>
 
 <!-- ─── Progress ───────────────────────────────────────────── -->
@@ -936,6 +974,14 @@ body {
 <style>
 @keyframes stripe { from{background-position:0 0} to{background-position:32px 0} }
 </style>
+
+<!-- ─── URL Scan Status List ────────────────────────────────── -->
+<div id="urlListPanel" style="padding:6px 16px;background:#161622;max-height:140px;overflow-y:auto;border-bottom:1px solid #2a2a3e;display:none">
+  <div style="font-size:.75rem;color:#888;margin-bottom:4px">
+    スキャン対象 URL <span id="urlListCount" style="background:#2a2a3e;color:#888;padding:0 5px;border-radius:8px;font-size:.7rem">0</span>
+  </div>
+  <div id="urlList"></div>
+</div>
 
 <!-- ─── Main Grid ──────────────────────────────────────────── -->
 <div class="main">
@@ -962,11 +1008,19 @@ body {
     </div>
     <div class="current-test">
       <div class="ct-label">Current Test</div>
-      <div class="ct-field" id="ctField">—</div>
-      <div class="ct-payload" id="ctPayload">—</div>
+      <div class="ct-row-item"><span class="ct-meta-label">URL</span><span id="ctUrl" class="ct-url-val" title="">—</span></div>
+      <div class="ct-row-item"><span class="ct-meta-label">Field</span><span id="ctField" class="ct-field">—</span></div>
+      <div class="ct-row-item"><span class="ct-meta-label">Check</span><span id="ctCheckType" style="font-size:.8rem;color:var(--text-muted)">—</span></div>
+      <div class="ct-row-item" style="align-items:flex-start">
+        <span class="ct-meta-label" style="padding-top:2px">Payload</span>
+        <span id="ctPayload" class="ct-payload" style="flex:1;min-width:0">—</span>
+        <button id="ctPayloadToggle" onclick="togglePayloadExpand()" style="display:none;background:none;border:1px solid #444;color:#aaa;border-radius:3px;padding:1px 5px;cursor:pointer;font-size:.7rem;margin-left:4px;flex-shrink:0">▼</button>
+      </div>
+      <div id="ctPayloadFull" style="display:none;margin:4px 0 0 0;padding:6px 8px;background:#0d0d1a;border:1px solid #2a2a3e;border-radius:4px;font-family:monospace;font-size:.75rem;color:#e879f9;word-break:break-all;white-space:pre-wrap"></div>
       <div class="check-badges" id="checkBadges">
         <!-- Dynamically populated from scan_config event -->
       </div>
+      <div id="checkCounters" style="display:flex;flex-wrap:wrap;gap:5px;margin-top:6px"></div>
     </div>
   </div>
 
@@ -1076,6 +1130,10 @@ const state = {
   planData: null,   // pending plan received from server
   scanStartTime: null,  // Unix ms of first progress event (attack phase start)
   scanDone: false,      // true after scan_complete — stop ETA updates
+  phase: null,
+  urlStatuses: {},   // { url: 'pending'|'scanning'|'done'|'vuln' }
+  urlOrder: [],      // discovery order
+  checkCounts: {},   // { xss: 12, sqli: 8, ... }
 };
 
 // ─── Config form state ───────────────────────────────────────────
@@ -1602,19 +1660,59 @@ function handleEvent(event) {
       document.getElementById('cfgTimeout').textContent = data.timeout ?? '—';
       document.getElementById('cfgCheckCount').textContent = (data.checks || []).length;
       document.getElementById('cfgChecks').textContent = (data.checks || []).join(', ');
+      // Fast mode badge
+      { const fb = document.getElementById('fastModeBadge');
+        if (fb) fb.style.display = data.fast_mode ? 'inline-block' : 'none'; }
       break;
     }
 
     case 'payload_test':
       // Update "currently testing" indicators only — statTests is updated by 'progress' events
       document.getElementById('ctField').textContent = data.field;
-      document.getElementById('ctPayload').textContent = data.payload;
+      updatePayloadDisplay(data.payload || '');
+      // URL row
+      { const urlEl = document.getElementById('ctUrl');
+        if (urlEl) { urlEl.textContent = data.url || '—'; urlEl.title = data.url || ''; } }
+      // Check type row
+      { const ctEl = document.getElementById('ctCheckType');
+        if (ctEl) ctEl.textContent = data.check_type || '—'; }
       // Highlight active check badge (dynamic)
       document.querySelectorAll('#checkBadges .check-badge').forEach(b => {
         b.className = 'check-badge' + (b.id === 'badge_' + data.check_type ? ' active' : '');
       });
+      // Check counters
+      if (data.check_type) {
+        state.checkCounts[data.check_type] = (state.checkCounts[data.check_type] || 0) + 1;
+        renderCheckCounters();
+      }
       addEventLog('payload', `[${data.check_type.toUpperCase()}] ${data.field}: ${data.payload.substring(0,50)}`);
       break;
+
+    case 'phase':
+      updatePhaseBar(data.phase);
+      break;
+
+    case 'url_start': {
+      const u = data.url;
+      if (!state.urlStatuses[u]) {
+        state.urlOrder.push(u);
+        state.urlStatuses[u] = 'pending';
+      }
+      // Demote any previous 'scanning' to 'done'
+      for (const k in state.urlStatuses) {
+        if (state.urlStatuses[k] === 'scanning') state.urlStatuses[k] = 'done';
+      }
+      state.urlStatuses[u] = 'scanning';
+      renderUrlList();
+      break;
+    }
+
+    case 'url_complete': {
+      const u = data.url;
+      if (state.urlStatuses[u] === 'scanning') state.urlStatuses[u] = 'done';
+      renderUrlList();
+      break;
+    }
 
     case 'screenshot':
       updateScreenshot(data.image, data.label);
@@ -1627,6 +1725,11 @@ function handleEvent(event) {
       document.getElementById('findingCount').textContent = state.findingCount;
       addFinding(data);
       addEventLog('finding', `[FINDING] ${data.check_type?.toUpperCase()} on "${data.field_name}" — ${(data.evidence||'').substring(0,60)}`);
+      // Mark the finding's URL as vuln in the URL list
+      if (data.url && state.urlStatuses[data.url]) {
+        state.urlStatuses[data.url] = 'vuln';
+        renderUrlList();
+      }
       break;
 
     case 'request':
@@ -1707,8 +1810,82 @@ function handleEvent(event) {
       ['etaBlock', 'remainBlock', 'etaTimeBlock'].forEach(id =>
         document.getElementById(id).style.display = 'none'
       );
+      // Reset phase/URL state
+      state.phase = null;
+      state.urlStatuses = {};
+      state.urlOrder = [];
+      state.checkCounts = {};
+      updatePhaseBar('');
+      renderUrlList();
+      renderCheckCounters();
       break;
   }
+}
+
+// ─── Phase / URL / Payload helpers ──────────────────────────────
+function updatePhaseBar(phase) {
+  const PHASES = ['crawl', 'plan', 'attack', 'report'];
+  const idx = PHASES.indexOf(phase);
+  PHASES.forEach((p, i) => {
+    const el = document.getElementById('ph-' + p);
+    if (!el) return;
+    el.classList.toggle('active', i === idx);
+    el.classList.toggle('done',   i < idx);
+  });
+}
+
+function renderUrlList() {
+  const panel = document.getElementById('urlListPanel');
+  const el = document.getElementById('urlList');
+  const countEl = document.getElementById('urlListCount');
+  if (!el) return;
+  const total = state.urlOrder.length;
+  if (panel) panel.style.display = total > 0 ? 'block' : 'none';
+  if (countEl) countEl.textContent = total;
+  const LABELS = { pending: '待機中', scanning: '検査中', done: '完了', vuln: '発見あり' };
+  el.innerHTML = state.urlOrder.map(url => {
+    const st = state.urlStatuses[url] || 'pending';
+    return `<div class="url-item"><span class="url-text" title="${escapeHtml(url)}">${escapeHtml(url)}</span><span class="url-badge url-badge-${st}">${LABELS[st] || st}</span></div>`;
+  }).join('');
+  // Auto-scroll to scanning item
+  const scanning = el.querySelector('.url-badge-scanning');
+  if (scanning) scanning.scrollIntoView({ block: 'nearest' });
+}
+
+function renderCheckCounters() {
+  const el = document.getElementById('checkCounters');
+  if (!el) return;
+  const lastActive = document.getElementById('ctCheckType')?.textContent || '';
+  el.innerHTML = Object.entries(state.checkCounts)
+    .sort(([, a], [, b]) => b - a)
+    .map(([ct, n]) => `<span class="check-counter${ct === lastActive ? ' active' : ''}">${ct} <strong>${n}</strong></span>`)
+    .join('');
+}
+
+function updatePayloadDisplay(payload) {
+  const MAX = 60;
+  const shortEl = document.getElementById('ctPayload');
+  const toggleBtn = document.getElementById('ctPayloadToggle');
+  const fullEl = document.getElementById('ctPayloadFull');
+  if (!shortEl) return;
+  if (!payload || payload.length <= MAX) {
+    shortEl.textContent = payload || '—';
+    if (toggleBtn) toggleBtn.style.display = 'none';
+    if (fullEl) fullEl.style.display = 'none';
+  } else {
+    shortEl.textContent = payload.slice(0, MAX) + '…';
+    if (toggleBtn) { toggleBtn.style.display = ''; toggleBtn.textContent = '▼'; }
+    if (fullEl) { fullEl.textContent = payload; fullEl.style.display = 'none'; }
+  }
+}
+
+function togglePayloadExpand() {
+  const fullEl = document.getElementById('ctPayloadFull');
+  const btn = document.getElementById('ctPayloadToggle');
+  if (!fullEl || !btn) return;
+  const expanded = fullEl.style.display !== 'none';
+  fullEl.style.display = expanded ? 'none' : 'block';
+  btn.textContent = expanded ? '▼' : '▲';
 }
 
 // ─── UI Helpers ─────────────────────────────────────────────────
