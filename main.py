@@ -135,6 +135,7 @@ Examples:
         "clickjacking", "open_redirect", "ssti", "privesc",
         "cors", "info_disclosure", "host_header", "security_headers",
         "nosql", "deserialization", "request_smuggling", "ssrf",
+        "graphql", "jwt",
     ]
     _default_checks = _CFG.get("checks", ["sqli", "xss", "os"])
     scan.add_argument(
@@ -356,6 +357,46 @@ Examples:
             "--fast 時のデフォルトは 12。単独でも指定可能。"
         ),
     )
+    # A: Multi-account privilege escalation
+    scan.add_argument(
+        "--accounts", metavar="USER:PASS,...",
+        default="",
+        help=(
+            "Comma-separated list of user:password pairs for multi-account "
+            "privilege escalation testing. "
+            "Example: --accounts admin:admin123,user1:pass1,user2:pass2"
+        ),
+    )
+    scan.add_argument(
+        "--accounts-file", metavar="FILE",
+        default="",
+        help=(
+            "YAML file with account list for privilege escalation testing. "
+            "Format: accounts: [{username: x, password: y, role: z}]"
+        ),
+    )
+    scan.add_argument(
+        "--auto-register", action="store_true",
+        default=_CFG.get("auto_register", False),
+        help=(
+            "Automatically register test accounts via detected registration forms "
+            "and use them for privilege escalation testing."
+        ),
+    )
+    scan.add_argument(
+        "--auto-register-count", type=int, default=_CFG.get("auto_register_count", 2), metavar="N",
+        help="Number of test accounts to auto-register (default: 2).",
+    )
+    # ①: SPA crawl
+    scan.add_argument(
+        "--spa-crawl", action="store_true",
+        default=_CFG.get("spa_crawl", False),
+        help=(
+            "Enable SPA/dynamic content crawl: click interactive elements "
+            "to discover routes rendered by React/Vue/Angular."
+        ),
+    )
+
     # Auto-config wizard
     _ac_default = _CFG.get("auto_config", False)
     _ac_group = scan.add_mutually_exclusive_group()
@@ -768,6 +809,30 @@ async def run_scan(args):
     if getattr(args, "dom_xss", False) and "dom_xss" not in checks_list:
         checks_list.append("dom_xss")
 
+    # A: Build accounts list from --accounts or --accounts-file
+    import yaml as _yaml
+    _accounts_list: list = []
+    _accounts_str = getattr(args, "accounts", "") or ""
+    if _accounts_str:
+        for pair in _accounts_str.split(","):
+            pair = pair.strip()
+            if ":" in pair:
+                user, pw = pair.split(":", 1)
+                _accounts_list.append({"username": user.strip(), "password": pw.strip(), "role": "user"})
+    _accounts_file = getattr(args, "accounts_file", "") or ""
+    if _accounts_file:
+        try:
+            with open(_accounts_file, encoding="utf-8") as _af:
+                _af_data = _yaml.safe_load(_af) or {}
+            _accounts_list.extend(_af_data.get("accounts", []))
+        except Exception as _ex:
+            console.print(f"[yellow]Warning: Could not read accounts file: {_ex}[/yellow]")
+    if _accounts_list:
+        console.print(
+            f"Accounts        : [cyan]{len(_accounts_list)} account(s) loaded for "
+            f"privilege escalation testing[/cyan]"
+        )
+
     def _engine_kwargs(monitor_obj):
         return dict(
             url=args.url,
@@ -813,6 +878,12 @@ async def run_scan(args):
             flows=getattr(args, "flows", None) or [],
             max_payloads=getattr(args, "max_payloads", 0),
             fast_mode=getattr(args, "fast", False),
+            # A: Multi-account privilege escalation
+            accounts=_accounts_list,
+            auto_register=getattr(args, "auto_register", False),
+            auto_register_count=getattr(args, "auto_register_count", 2),
+            # ①: SPA crawl
+            spa_crawl=getattr(args, "spa_crawl", False),
         )
 
     if args.no_monitor:

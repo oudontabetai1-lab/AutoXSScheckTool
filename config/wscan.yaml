@@ -10,7 +10,8 @@
 scan:
   # 実施するセキュリティチェック (利用可能: sqli xss dom_xss os ssti
   #   path_traversal csrf header_injection mail_header clickjacking
-  #   open_redirect session privesc)
+  #   open_redirect session privesc
+  #   graphql jwt  ← 新規スキャナー (② ④))
   checks:
     - sqli
     - xss
@@ -132,6 +133,30 @@ features:
 
   # 起動時にLLMを使ったスキャン設定ウィザードを実行するか
   auto_config: false
+
+  # ① SPA クロール: クリック操作で動的ルートを発見するか
+  spa_crawl: false
+
+# ──────────────────────────────────────────────────────────
+# A: 複数アカウント権限昇格
+# ──────────────────────────────────────────────────────────
+accounts:
+  # 登録フォームで自動アカウント作成を行うか
+  auto_register: false
+
+  # 自動作成するアカウント数
+  auto_register_count: 2
+
+  # アカウントリスト (--accounts の代替, 設定ファイル指定時)
+  # 例:
+  # list:
+  #   - username: admin
+  #     password: admin123
+  #     role: admin
+  #   - username: user1
+  #     password: pass1
+  #     role: user
+  list: []
 
 # ──────────────────────────────────────────────────────────
 # ペイロード学習

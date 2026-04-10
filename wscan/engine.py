@@ -78,6 +78,8 @@ from .scanners.nosql_injection import NoSQLInjectionScanner
 from .scanners.deserialization import DeserializationScanner
 from .scanners.request_smuggling import RequestSmugglingScanner
 from .scanners.ssrf import SSRFScanner
+from .scanners.graphql import GraphQLScanner
+from .scanners.jwt_scanner import JWTScanner
 from .waf_detector import WAFDetector
 from .payload_learning import PayloadLearner
 from .flow_runner import ScanFlow, FlowRunner
@@ -180,6 +182,12 @@ class ScanEngine:
         # Fast mode
         max_payloads: int = 0,   # 0 = no limit; fast mode default: 12
         fast_mode: bool = False,  # sets sleep_factor=0
+        # A: Multi-account privilege escalation
+        accounts: Optional[list] = None,      # list of {"username":, "password":, "role":}
+        auto_register: bool = False,          # auto-create accounts via registration forms
+        auto_register_count: int = 2,         # how many accounts to auto-register
+        # ①: SPA crawl enhancement
+        spa_crawl: bool = False,
     ):
         self.target_url = url.rstrip("/")
         self.monitor = monitor
@@ -209,6 +217,15 @@ class ScanEngine:
                 for c in self.low_priv_cookie_list
                 if c.get("name") and c.get("value") is not None
             )
+        # A: Multi-account settings
+        self.accounts: list = list(accounts or [])
+        self.auto_register = auto_register
+        self.auto_register_count = auto_register_count
+        # account_sessions: resolved at run time — list of {"username":, "cookies":, "role":}
+        self.account_sessions: list = []
+        # ①: SPA crawl
+        self.spa_crawl = spa_crawl
+
         self.use_planner = use_planner
         self.interactive_plan = interactive_plan
         self.skip_registration = skip_registration
@@ -293,6 +310,8 @@ class ScanEngine:
             "deserialization":    DeserializationScanner,
             "request_smuggling":  RequestSmugglingScanner,
             "ssrf":               SSRFScanner,
+            "graphql":            GraphQLScanner,
+            "jwt":                JWTScanner,
         }
         self.scanners = {n: cls(self) for n, cls in scanner_map.items() if n in self.checks}
 
@@ -407,6 +426,10 @@ class ScanEngine:
                 else:
                     console.print("  [yellow][Auth] Login may have failed — continuing anyway.[/yellow]")
 
+            # A: Set up multi-account sessions (if --accounts supplied)
+            if self.accounts and self.login_url:
+                await self._setup_account_sessions()
+
             # A-2: Detect WAF before crawling (if enabled)
             if self.enable_waf_detection:
                 waf_name = await self.waf_detector.detect(self.target_url, timeout=float(self.timeout))
@@ -424,6 +447,15 @@ class ScanEngine:
             # ── Phase 1: Crawl ───────────────────────────────────────────
             if self.monitor: await self.monitor.emit_phase("crawl")
             crawled_pages = await self._phase_crawl()
+
+            # A: Auto-register accounts via registration forms (after crawl)
+            if self.auto_register and self.login_url:
+                await self._auto_register_accounts(crawled_pages)
+                if self.account_sessions:
+                    console.print(
+                        f"  [green][A] {len(self.account_sessions)} account session(s) ready "
+                        f"for privilege escalation testing.[/green]"
+                    )
 
             # ── Phase 2: Plan ────────────────────────────────────────────
             if self.monitor: await self.monitor.emit_phase("plan")
@@ -638,6 +670,20 @@ class ScanEngine:
 
             pages.append(CrawledPage(url=url, html=html, forms=forms,
                                      url_params=url_params, depth=depth))
+
+            # ① SPA crawl: discover dynamically-rendered routes via click interaction
+            if self.spa_crawl:
+                try:
+                    spa_links = await self._browser.explore_spa_interactions(
+                        self._browser.page, url, max_clicks=20
+                    )
+                    for spa_link in spa_links:
+                        clean_spa = spa_link.split("#")[0].split("?")[0]
+                        if clean_spa not in self.visited_urls and not self._is_url_excluded(clean_spa):
+                            self.visited_urls.add(clean_spa)
+                            queue.append((spa_link, depth + 1, url))
+                except Exception:
+                    pass
 
             if depth < self.depth:
                 links = await self.browser.collect_links(url, same_domain=True)
@@ -1997,9 +2043,11 @@ class ScanEngine:
         console.print(
             f"    [bold red][FINDING][/bold red] {label}{loc} — {f.evidence[:80]}"
         )
-        # A-3: record successful payload (if learning enabled)
+        # A-3 / ⑩: record successful payload (domain-aware if learning enabled)
         if f.payload and self.enable_payload_learning:
-            self.payload_learner.record(f.check_type, f.payload, success=True)
+            from urllib.parse import urlparse as _up
+            _domain = _up(self.target_url).hostname or None
+            self.payload_learner.record(f.check_type, f.payload, success=True, domain=_domain)
         # Also scan the finding's evidence and response for flags
         if self.flag_finder:
             self._check_page_for_flags(f.evidence, f.url)
@@ -2242,10 +2290,180 @@ class ScanEngine:
             except Exception as e:
                 console.print(f"  [yellow][U-3 Manual] Error: {e}[/yellow]")
 
+    # =========================================================================
+    # A: Multi-account privilege escalation helpers
+    # =========================================================================
+
+    async def _setup_account_sessions(self) -> None:
+        """
+        For each account in self.accounts, log in via the login URL and
+        capture the resulting cookies as a cookie string.
+        Populates self.account_sessions.
+        """
+        if not self.login_url:
+            return
+        console.print(
+            f"  [cyan][A] Setting up {len(self.accounts)} account session(s)…[/cyan]"
+        )
+        for acct in self.accounts:
+            username = acct.get("username", "")
+            password = acct.get("password", "")
+            role = acct.get("role", "user")
+            if not username or not password:
+                continue
+            cookie_str = await self._browser.create_session_for_account(
+                username=username,
+                password=password,
+                login_url=self.login_url,
+                user_field=self.login_user_field,
+                pass_field=self.login_pass_field,
+                success_indicator=self.login_success_indicator,
+            )
+            if cookie_str:
+                self.account_sessions.append({
+                    "username": username,
+                    "cookies": cookie_str,
+                    "role": role,
+                })
+                console.print(
+                    f"    [green]✓[/green] {username} ({role}) — session captured"
+                )
+            else:
+                console.print(
+                    f"    [yellow]✗[/yellow] {username} — login failed, skipping"
+                )
+
+    async def _auto_register_accounts(self, pages: list) -> None:
+        """
+        Auto-detect registration forms in the crawled pages and create
+        self.auto_register_count test accounts.  Each successfully
+        registered account is then logged in and added to account_sessions.
+        """
+        import random
+        import string
+
+        if not self.login_url:
+            return
+
+        # Find registration forms
+        reg_forms = []
+        for page in pages:
+            if self._is_registration_url(page.url):
+                if page.forms:
+                    reg_forms.append((page.url, page.forms[0]))
+                    break
+            for form in page.forms:
+                if self._is_registration_form(form):
+                    reg_forms.append((page.url, form))
+                    break
+            if reg_forms:
+                break
+
+        if not reg_forms:
+            console.print(
+                "  [yellow][A] No registration form detected — "
+                "cannot auto-register accounts.[/yellow]"
+            )
+            return
+
+        reg_url, reg_form = reg_forms[0]
+        console.print(
+            f"  [cyan][A] Auto-registering up to {self.auto_register_count} "
+            f"test account(s) via {reg_url}[/cyan]"
+        )
+
+        for i in range(self.auto_register_count):
+            rand = "".join(random.choices(string.ascii_lowercase + string.digits, k=8))
+            username = f"wscan_{rand}"
+            password = f"Wscan@{rand}1!"
+            email = f"wscan_{rand}@example-test.invalid"
+
+            # Fill and submit the registration form via Playwright
+            try:
+                await self._browser.navigate(reg_url)
+                form_inputs = reg_form.get("inputs", [])
+                for inp in form_inputs:
+                    iname = inp.get("name", "")
+                    itype = inp.get("type", "text")
+                    if not iname:
+                        continue
+                    if itype == "email" or "email" in iname.lower():
+                        val = email
+                    elif "user" in iname.lower() or "login" in iname.lower() or "name" == iname.lower():
+                        val = username
+                    elif "pass" in iname.lower():
+                        val = password
+                    else:
+                        val = username  # fill unknown fields with username as placeholder
+                    await self._browser.page.evaluate(
+                        """([n, v]) => {
+                            const el = document.querySelector(`[name="${n}"],[id="${n}"]`);
+                            if (el) {
+                                el.value = v;
+                                ['input','change','blur'].forEach(e =>
+                                    el.dispatchEvent(new Event(e, {bubbles:true}))
+                                );
+                            }
+                        }""",
+                        [iname, val],
+                    )
+
+                # Submit
+                await self._browser.page.evaluate(
+                    """() => {
+                        const form = document.querySelector('form');
+                        if (!form) return;
+                        const btn = form.querySelector(
+                            'button[type="submit"],input[type="submit"],[type="submit"]'
+                        ) || form.querySelector('button:not([type="button"])');
+                        if (btn) btn.click(); else form.submit();
+                    }"""
+                )
+                await self._browser.page.wait_for_load_state("domcontentloaded", timeout=10000)
+            except Exception as e:
+                console.print(f"    [yellow]✗[/yellow] Auto-register failed for {username}: {e}")
+                continue
+
+            # Try to log in with the newly registered credentials
+            cookie_str = await self._browser.create_session_for_account(
+                username=username,
+                password=password,
+                login_url=self.login_url,
+                user_field=self.login_user_field,
+                pass_field=self.login_pass_field,
+                success_indicator=self.login_success_indicator,
+            )
+            if cookie_str:
+                self.account_sessions.append({
+                    "username": username,
+                    "cookies": cookie_str,
+                    "role": "registered",
+                })
+                console.print(
+                    f"    [green]✓[/green] {username} registered & logged in"
+                )
+            else:
+                console.print(
+                    f"    [yellow]✗[/yellow] {username} registered but login failed"
+                )
+
+    # =========================================================================
+    # ⑧ ⑨  Enhanced AI Analysis (chain reasoning + per-finding fix suggestions)
+    # =========================================================================
+
     async def _ai_analysis_report(self) -> str:
         """
-        A-1: Generate a comprehensive AI analysis of all findings.
+        A-1 (enhanced): Generate a comprehensive AI analysis of all findings.
+
+        Enhancements:
+          ⑧ Vulnerability chain reasoning — asks LLM to identify multi-step
+             attack scenarios from combinations of findings.
+          ⑨ AI report writing — for each Critical/High finding, the LLM
+             produces a business impact statement, code-level fix, and
+             OWASP/CWE reference.
+
         Returns the analysis text (also saved to output_dir/ai_analysis.md).
+        Per-finding AI fixes are saved to output_dir/ai_finding_fixes.json.
         """
         if not self.all_findings:
             return ""
@@ -2254,30 +2472,90 @@ class ScanEngine:
 
         findings_summary = "\n".join(
             f"- [{f.severity.upper()}] {f.check_type} on {f.url} "
-            f"(field: {f.field_name}): {f.evidence[:120]}"
-            for f in self.all_findings[:50]
+            f"(field: {f.field_name}): {f.evidence[:150]}"
+            for f in self.all_findings[:60]
         )
+
+        # ── ⑧ Chain reasoning prompt ────────────────────────────────────
+        chain_section = (
+            "\n\n## 攻撃チェーン分析 (Vulnerability Chain Analysis)\n"
+            "以下の発見を組み合わせた多段攻撃シナリオを最大3つ分析してください。\n"
+            "各シナリオには以下を含めてください:\n"
+            "  Step 1, Step 2, ... (使用する脆弱性), 攻撃者が得るもの, 最終的なビジネス影響\n"
+            "例: XSS → CSRF token 窃取 → アカウント乗っ取り\n"
+        )
+
         prompt = (
             f"You are a security analyst reviewing findings from an automated web security scan.\n"
             f"Target: {self.target_url}\n\n"
             f"Findings ({len(self.all_findings)} total):\n{findings_summary}\n\n"
-            f"Please provide:\n"
-            f"1. Overall attack scenario narrative (how these vulnerabilities could be chained)\n"
-            f"2. Top 3 priority fixes with specific remediation steps\n"
-            f"3. Recommended WAF rules or HTTP security headers\n"
-            f"4. Risk rating for the application overall (Critical/High/Medium/Low)\n\n"
-            f"Keep the response concise and actionable."
+            f"Please provide (in Japanese):\n"
+            f"1. 全体的な攻撃シナリオのナラティブ (これらの脆弱性がどう連鎖するか)\n"
+            f"2. 優先度上位3件の修正手順 (具体的なコード例を含む)\n"
+            f"3. 推奨 WAF ルールまたは HTTP セキュリティヘッダー設定\n"
+            f"4. アプリケーション全体のリスク評価 (Critical/High/Medium/Low)"
+            + chain_section
         )
+        full_text = ""
         try:
             resp_text = await self._call_llm_text(prompt)
             if resp_text:
-                analysis_path = self.output_dir / "ai_analysis.md"
-                analysis_path.write_text(resp_text, encoding="utf-8")
-                console.print(f"  [dim cyan][A-1][/dim cyan] AI analysis saved → {analysis_path}")
-                return resp_text
+                full_text += resp_text
         except Exception as e:
             console.print(f"  [yellow][A-1] AI analysis failed: {e}[/yellow]")
-        return ""
+
+        # ── ⑨ Per-finding fix suggestions ────────────────────────────────
+        high_critical = [
+            f for f in self.all_findings
+            if f.severity in ("critical", "high")
+        ][:10]  # cap to avoid excessive LLM calls
+
+        finding_fixes: list[dict] = []
+        for f in high_critical:
+            fix_prompt = (
+                f"Security finding: [{f.severity.upper()}] {f.check_type}\n"
+                f"URL: {f.url}  Field: {f.field_name}\n"
+                f"Evidence: {f.evidence[:300]}\n\n"
+                f"Please respond in Japanese with:\n"
+                f"1. ビジネス影響 (非技術者向け、2〜3文)\n"
+                f"2. 修正コード例 (推定される言語/フレームワークで)\n"
+                f"3. OWASP トップ10 / CWE 参照番号と URL\n"
+                f"Keep the response under 400 words."
+            )
+            try:
+                fix_text = await self._call_llm_text(fix_prompt)
+                if fix_text:
+                    finding_fixes.append({
+                        "check_type": f.check_type,
+                        "url": f.url,
+                        "field_name": f.field_name,
+                        "severity": f.severity,
+                        "ai_fix": fix_text,
+                    })
+                    # Attach to the Finding object for the report renderer
+                    f.__dict__["ai_fix"] = fix_text
+            except Exception:
+                pass
+
+        if finding_fixes:
+            fixes_path = self.output_dir / "ai_finding_fixes.json"
+            fixes_path.write_text(
+                json.dumps(finding_fixes, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            full_text += (
+                f"\n\n---\n## Individual Finding AI Fixes\n"
+                f"See {fixes_path} for per-finding remediation details.\n"
+            )
+
+        if full_text:
+            analysis_path = self.output_dir / "ai_analysis.md"
+            analysis_path.write_text(full_text, encoding="utf-8")
+            console.print(
+                f"  [dim cyan][A-1][/dim cyan] AI analysis saved → {analysis_path}"
+            )
+
+        return full_text
 
     async def _call_llm_text(self, prompt: str) -> str:
         """Call the configured LLM and return raw text response."""

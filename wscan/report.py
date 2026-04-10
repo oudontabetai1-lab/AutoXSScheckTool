@@ -113,6 +113,17 @@ class ReportGenerator:
                     f'title="{self._escape(cvss_vector)}">CVSS {sc:.1f}</span>'
                 )
 
+            # ⑨ AI fix suggestion (attached to Finding by engine._ai_analysis_report)
+            ai_fix_text = f.__dict__.get("ai_fix", "")
+            ai_fix_html = ""
+            if ai_fix_text:
+                ai_fix_safe = self._escape(ai_fix_text).replace("\n", "<br>")
+                ai_fix_html = f"""
+                    <div class="finding-detail ai-fix-section">
+                        <h4>🤖 AI 推奨修正 (AI Fix Suggestion)</h4>
+                        <div class="ai-fix-body">{ai_fix_safe}</div>
+                    </div>"""
+
             findings_html += f"""
             <div class="finding-card" id="finding-{i}"
                  data-severity="{f.severity}" data-check="{f.check_type}"
@@ -141,6 +152,7 @@ class ReportGenerator:
                         {req_html}
                         {resp_html}
                     </div>
+                    {ai_fix_html}
                 </div>
             </div>"""
 
@@ -165,6 +177,9 @@ class ReportGenerator:
 
         # ── Page flow diagram section ─────────────────────────────────────
         page_flow_html = self._build_page_flow_html(page_graph)
+
+        # ⑧ Attack chain / AI analysis section (reads ai_analysis.md if present)
+        ai_analysis_html = self._build_ai_analysis_html()
 
         return f"""<!DOCTYPE html>
 <html lang="ja">
@@ -291,6 +306,19 @@ body {{ font-family: 'Segoe UI', system-ui, -apple-system, sans-serif; backgroun
 .ctf-flag-source {{ font-size:.78rem; color:#a0aec0; }}
 .ctf-flag-copy {{ display:inline-block; margin-top:4px; font-size:.75rem; color:#68d391; cursor:pointer; text-decoration:underline; }}
 .ctf-no-flags {{ color:#a0aec0; font-style:italic; }}
+/* ── AI Analysis / Attack Chains (⑧ ⑨) ── */
+.ai-analysis-section {{ background: linear-gradient(135deg,#1a1a2e 0%,#16213e 100%);
+    border-radius:12px; padding:24px; margin-bottom:24px;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.25); color:#e2e8f0; }}
+.ai-analysis-section h2 {{ color:#90cdf4; font-size:1.25rem; font-weight:800;
+    margin-bottom:16px; padding-bottom:10px; border-bottom:1px solid #2d3748; }}
+.ai-analysis-body {{ font-size:.9rem; line-height:1.8; white-space:pre-wrap;
+    word-break:break-word; color:#e2e8f0; }}
+.ai-fix-section {{ background:#f0fff4; border:1px solid #9ae6b4;
+    border-radius:8px; padding:14px 18px; }}
+.ai-fix-section h4 {{ color:#276749; font-size:.8rem; text-transform:uppercase;
+    letter-spacing:.08em; margin-bottom:8px; }}
+.ai-fix-body {{ font-size:.88rem; color:#1c4532; line-height:1.7; }}
 </style>
 </head>
 <body>
@@ -354,6 +382,9 @@ body {{ font-family: 'Segoe UI', system-ui, -apple-system, sans-serif; backgroun
             </div>
         </div>
     </div>
+
+    <!-- AI Analysis / Attack Chains (⑧ ⑨) -->
+    {ai_analysis_html}
 
     <!-- Attack Plans -->
     {attack_plan_html}
@@ -448,6 +479,28 @@ document.querySelectorAll('.plan-payloads-toggle').forEach(btn => {{
 </script>
 </body>
 </html>"""
+
+    def _build_ai_analysis_html(self) -> str:
+        """
+        ⑧ Render the AI Analysis / Attack Chain section.
+        Reads ai_analysis.md from the output directory (written by engine._ai_analysis_report).
+        """
+        analysis_path = self.output_dir / "ai_analysis.md"
+        if not analysis_path.exists():
+            return ""
+        try:
+            text = analysis_path.read_text(encoding="utf-8")
+        except Exception:
+            return ""
+        if not text.strip():
+            return ""
+
+        safe_text = self._escape(text)
+        return f"""
+    <div class="ai-analysis-section">
+        <h2>🤖 AI Security Analysis &amp; Attack Chains (⑧⑨)</h2>
+        <div class="ai-analysis-body">{safe_text}</div>
+    </div>"""
 
     def _build_ctf_flags_html(self, ctf_flags: list) -> str:
         """Render the CTF Flags section (only shown when CTF mode is active)."""

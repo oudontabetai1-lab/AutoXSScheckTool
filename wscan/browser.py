@@ -667,6 +667,234 @@ class BrowserManager:
         page.on("dialog", worker._on_dialog)
         return worker
 
+    # ------------------------------------------------------------------
+    # ① SPA/Dynamic content crawl exploration
+    # ------------------------------------------------------------------
+
+    async def explore_spa_interactions(
+        self,
+        page,
+        base_url: str,
+        max_clicks: int = 30,
+    ) -> list[str]:
+        """
+        Explore client-side navigation by:
+          1. Hooking history.pushState / history.replaceState to record URL changes.
+          2. Clicking interactive elements (buttons, role=tab, role=link, nav links).
+          3. Returning the list of newly discovered virtual routes.
+
+        Returns a de-duplicated list of URLs discovered via SPA routing.
+        """
+        discovered: list[str] = []
+
+        # Inject pushState hook before interacting
+        hook_script = """
+        (() => {
+            if (window.__wscan_spa_hooked) return;
+            window.__wscan_spa_hooked = true;
+            window.__wscan_spa_urls = [];
+            const _push = history.pushState.bind(history);
+            const _replace = history.replaceState.bind(history);
+            history.pushState = function(state, title, url) {
+                if (url) window.__wscan_spa_urls.push(String(url));
+                return _push(state, title, url);
+            };
+            history.replaceState = function(state, title, url) {
+                if (url) window.__wscan_spa_urls.push(String(url));
+                return _replace(state, title, url);
+            };
+            window.addEventListener('popstate', () => {
+                window.__wscan_spa_urls.push(window.location.href);
+            });
+        })();
+        """
+        try:
+            await page.evaluate(hook_script)
+        except Exception:
+            pass
+
+        # Collect interactive elements to click
+        selectors = [
+            "a[data-href]",
+            "[role='tab']",
+            "[role='link']",
+            "nav a",
+            "header a",
+            ".menu a",
+            ".nav a",
+            ".sidebar a",
+            "button[data-route]",
+            "button[data-path]",
+            "[data-page]",
+        ]
+
+        clicked = 0
+        seen_urls: set[str] = set()
+        current_url_before = page.url
+
+        for sel in selectors:
+            if clicked >= max_clicks:
+                break
+            try:
+                elements = await page.query_selector_all(sel)
+            except Exception:
+                continue
+
+            for el in elements[:10]:  # Cap per selector
+                if clicked >= max_clicks:
+                    break
+                try:
+                    # Don't click external links
+                    href = await el.get_attribute("href") or ""
+                    if href.startswith("http") and not href.startswith(
+                        urlparse(base_url).scheme + "://" + urlparse(base_url).netloc
+                    ):
+                        continue
+
+                    await el.click(timeout=3000)
+                    await page.wait_for_load_state("domcontentloaded", timeout=5000)
+                    clicked += 1
+
+                    new_url = page.url
+                    if new_url not in seen_urls and new_url != current_url_before:
+                        seen_urls.add(new_url)
+                        discovered.append(new_url)
+
+                    # Collect any pushState URLs
+                    spa_urls = await page.evaluate("window.__wscan_spa_urls || []")
+                    for su in spa_urls:
+                        if su not in seen_urls:
+                            seen_urls.add(su)
+                            # Resolve relative URLs
+                            full = urljoin(base_url, su)
+                            discovered.append(full)
+
+                    # Navigate back to not get lost
+                    if page.url != current_url_before:
+                        try:
+                            await page.go_back(timeout=5000)
+                            await page.wait_for_load_state("domcontentloaded", timeout=5000)
+                            # Re-inject hook after navigation
+                            await page.evaluate(hook_script)
+                        except Exception:
+                            pass
+
+                except Exception:
+                    continue
+
+        # Final flush of pushState-captured URLs
+        try:
+            spa_urls = await page.evaluate("window.__wscan_spa_urls || []")
+            for su in spa_urls:
+                full = urljoin(base_url, su)
+                if full not in seen_urls:
+                    seen_urls.add(full)
+                    discovered.append(full)
+        except Exception:
+            pass
+
+        return list(dict.fromkeys(discovered))  # preserve order, deduplicate
+
+    # ------------------------------------------------------------------
+    # A — Multi-account session management
+    # ------------------------------------------------------------------
+
+    async def create_session_for_account(
+        self,
+        username: str,
+        password: str,
+        login_url: str,
+        user_field: str = "username",
+        pass_field: str = "password",
+        success_indicator: str = "",
+    ) -> Optional[str]:
+        """
+        Open an isolated browser context, log in with the given credentials,
+        capture the resulting cookies, close the context, and return a
+        cookie string ("name=value; name2=value2") or None on failure.
+        """
+        if not self._browser:
+            return None
+
+        ctx = await self._browser.new_context(
+            ignore_https_errors=True,
+            proxy={"server": self.proxy} if self.proxy else None,
+        )
+        try:
+            page = await ctx.new_page()
+            page.set_default_timeout(self.timeout)
+
+            # Navigate to login page
+            await page.goto(login_url, wait_until="domcontentloaded")
+
+            # Fill credentials
+            await page.evaluate(
+                """([userField, passField, user, pw]) => {
+                    function _fill(sel, val) {
+                        const el = document.querySelector(
+                            `[name="${sel}"],[id="${sel}"]`
+                        );
+                        if (!el) return;
+                        el.value = val;
+                        ['input','change','blur'].forEach(e =>
+                            el.dispatchEvent(new Event(e, {bubbles:true}))
+                        );
+                    }
+                    _fill(userField, user);
+                    _fill(passField, pw);
+                }""",
+                [user_field, pass_field, username, password],
+            )
+
+            # Submit the form
+            await page.evaluate(
+                """([userField]) => {
+                    const el = document.querySelector(`[name="${userField}"],[id="${userField}"]`);
+                    if (!el) return;
+                    const form = el.closest('form');
+                    if (!form) return;
+                    const btn = form.querySelector(
+                        'button[type="submit"],input[type="submit"],[type="submit"]'
+                    ) || form.querySelector('button:not([type="button"])');
+                    if (btn) btn.click(); else form.submit();
+                }""",
+                [user_field],
+            )
+
+            await page.wait_for_load_state("domcontentloaded", timeout=15000)
+
+            post_url = page.url
+            post_body = ""
+            try:
+                post_body = await page.content()
+            except Exception:
+                pass
+
+            # Check success
+            if success_indicator:
+                if success_indicator not in post_url and success_indicator not in post_body:
+                    return None
+            else:
+                if post_url.rstrip("/") == login_url.rstrip("/"):
+                    return None
+
+            # Extract cookies
+            cookies = await ctx.cookies()
+            cookie_str = "; ".join(
+                f"{c['name']}={c['value']}"
+                for c in cookies
+                if c.get("name") and c.get("value") is not None
+            )
+            return cookie_str if cookie_str else None
+
+        except Exception:
+            return None
+        finally:
+            try:
+                await ctx.close()
+            except Exception:
+                pass
+
     async def close(self):
         """Close browser and playwright."""
         try:
