@@ -74,9 +74,6 @@ class XSSScanner(BaseScanner):
             # Reset dialog detector
             self.browser.reset_dialog()
 
-            # Take before screenshot
-            await self.browser.screenshot_b64(f"XSS test: {field_name}")
-
             # Apply payload
             source, pair = await self._apply_payload(
                 url, form_index, field_name, payload, is_url_param

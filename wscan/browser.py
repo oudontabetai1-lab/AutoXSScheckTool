@@ -87,6 +87,7 @@ class BrowserManager:
         auth_user: str = "",
         auth_pass: str = "",
         proxy: str = "",
+        sleep_factor: float = 1.0,
     ):
         self.headless = headless
         self.timeout = timeout * 1000  # ms
@@ -94,6 +95,7 @@ class BrowserManager:
         self.auth_user = auth_user
         self.auth_pass = auth_pass
         self.proxy = proxy  # e.g. "http://127.0.0.1:8080"
+        self.sleep_factor = sleep_factor
         self._playwright = None
         self._browser: Optional[Browser] = None
         self._context: Optional[BrowserContext] = None
@@ -349,7 +351,9 @@ class BrowserManager:
                 )
 
             await self.page.wait_for_load_state("domcontentloaded", timeout=10000)
-            await asyncio.sleep(0.5)  # short wait for any JS to run
+            _js_wait = 0.2 * self.sleep_factor
+            if _js_wait > 0:
+                await asyncio.sleep(_js_wait)
 
             source = await self.get_page_source()
             pair = self.network.latest() or {}
@@ -460,7 +464,9 @@ class BrowserManager:
                 )
 
             await self.page.wait_for_load_state("domcontentloaded", timeout=10000)
-            await asyncio.sleep(0.5)
+            _js_wait = 0.2 * self.sleep_factor
+            if _js_wait > 0:
+                await asyncio.sleep(_js_wait)
 
             source = await self.get_page_source()
             pair = self.network.latest() or {}
@@ -482,7 +488,9 @@ class BrowserManager:
         test_url = urlunparse(parsed._replace(query=new_query))
 
         await self.navigate(test_url)
-        await asyncio.sleep(0.3)
+        _nav_wait = 0.1 * self.sleep_factor
+        if _nav_wait > 0:
+            await asyncio.sleep(_nav_wait)
         source = await self.get_page_source()
         pair = self.network.latest() or {}
         return source, pair
@@ -691,6 +699,7 @@ class WorkerBrowser(BrowserManager):
         self.auth_user = real_browser.auth_user
         self.auth_pass = real_browser.auth_pass
         self.proxy = real_browser.proxy
+        self.sleep_factor = real_browser.sleep_factor
         self._playwright = real_browser._playwright
         self._browser = real_browser._browser
         self._context = real_browser._context      # Shared — cookies are inherited

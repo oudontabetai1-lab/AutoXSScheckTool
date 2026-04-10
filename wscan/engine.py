@@ -258,6 +258,7 @@ class ScanEngine:
             headless=headless, timeout=timeout, monitor=monitor,
             auth_user=auth_user, auth_pass=auth_pass,
             proxy=proxy,
+            sleep_factor=self.sleep_factor,
         )
         self._flow_runner = FlowRunner(self._browser)
         self.payload_gen = PayloadGenerator(
@@ -733,11 +734,12 @@ class ScanEngine:
         console.print(f"  Site map ({len(pages)} page(s)):")
         console.print(f"[dim]{site_map}[/dim]\n")
 
-        for page in pages:
-            if not page.forms and not page.url_params:
-                console.print(f"  [dim]No inputs on {page.url}, skipping[/dim]")
-                continue
+        pages_with_inputs = [p for p in pages if p.forms or p.url_params]
+        pages_no_inputs   = [p for p in pages if not p.forms and not p.url_params]
+        for p in pages_no_inputs:
+            console.print(f"  [dim]No inputs on {p.url}, skipping[/dim]")
 
+        async def _plan_one(page):
             console.print(f"  [dim cyan]Planning:[/dim cyan] {page.url}")
             plan = await self.attack_planner.analyze_page(
                 url=page.url,
@@ -746,11 +748,21 @@ class ScanEngine:
                 url_params=page.url_params,
                 site_map=site_map,
             )
-            plans[page.url] = plan
-            self.attack_plans.append(plan)
-
             if self.monitor:
                 await self.monitor.emit_status(f"Plan: {plan.page_purpose[:60]}")
+            return page.url, plan
+
+        results = await asyncio.gather(
+            *[_plan_one(p) for p in pages_with_inputs],
+            return_exceptions=True,
+        )
+        for r in results:
+            if isinstance(r, Exception):
+                console.print(f"  [yellow]Planning error: {r}[/yellow]")
+                continue
+            page_url, plan = r
+            plans[page_url] = plan
+            self.attack_plans.append(plan)
 
         # Print all plans summary (terminal log)
         if plans:
@@ -1744,6 +1756,15 @@ class ScanEngine:
             scanner = self.scanners.get(check_name)
             if scanner is None:
                 continue
+
+            # Early exit: if a critical finding was already confirmed for this field,
+            # skip remaining checks — critical is the highest severity so further
+            # testing would only duplicate evidence.
+            if any(
+                f.severity == "critical" and f.field_name == field_name and f.url == url
+                for f in self.all_findings
+            ):
+                break
 
             # Merge plan payloads with defaults (LLM extras come first, defaults appended)
             plan_payloads = field_plan.custom_payloads.get(check_name) if field_plan else None
