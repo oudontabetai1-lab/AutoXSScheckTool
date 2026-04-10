@@ -41,6 +41,21 @@ _CVSS_TABLE: dict[str, tuple[str, float]] = {
     "deserialization":   ("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H", 10.0),
     "request_smuggling": ("CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:C/C:H/I:H/A:N",  8.7),
     "ssrf":              ("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:N",  9.8),
+    # ② GraphQL scanner
+    "graphql_introspection": ("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N",  5.3),
+    "graphql_injection":     ("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H", 10.0),
+    "graphql_batch":         ("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:L",  5.3),
+    "graphql_sensitive":     ("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N",  5.3),
+    # ④ JWT scanner
+    "jwt_alg_none":      ("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:N",  9.6),
+    "jwt_weak_secret":   ("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:N",  9.6),
+    "jwt_kid_injection": ("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H", 10.0),
+    "jwt_payload_tamper":("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:N",  9.6),
+    "jwt_no_expiry":     ("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N",  5.3),
+    "jwt_sensitive_data":("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N",  5.3),
+    # A: Additional privesc check types
+    "privesc_param_idor":("CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:N",  6.5),
+    "privesc_cross_acct":("CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:N",  8.1),
 }
 
 
@@ -144,10 +159,12 @@ class BaseScanner(ABC):
             url=url,
             custom_payloads=self.engine.custom_payloads.get(self.CHECK_TYPE),
         )
-        # A-3: re-order by historical success rate (if learning enabled)
+        # A-3 / ⑩: re-order by historical success rate (domain-aware)
         learner = getattr(self.engine, "payload_learner", None)
         if learner and getattr(self.engine, "enable_payload_learning", True):
-            payloads = learner.sort_payloads(self.CHECK_TYPE, payloads)
+            from urllib.parse import urlparse as _up
+            _domain = _up(getattr(self.engine, "target_url", "")).hostname or None
+            payloads = learner.sort_payloads(self.CHECK_TYPE, payloads, domain=_domain)
         # Fast mode: cap payload count (highest-priority payloads are already first)
         cap = getattr(self.engine, "max_payloads", 0)
         if cap > 0:
