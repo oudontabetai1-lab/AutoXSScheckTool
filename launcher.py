@@ -85,6 +85,19 @@ _ALL_CHECKS = {
     "clickjacking":     "クリックジャッキング               (IPA 1.9)",
     "open_redirect":    "オープンリダイレクト               (IPA 1.11)",
     "ssti":             "サーバーサイドテンプレートインジェクション",
+    "dom_xss":          "DOM ベース XSS",
+    "stored_xss":       "蓄積型 XSS (二次攻撃)",
+    "privesc":          "権限昇格",
+    "cors":             "CORS 設定不備",
+    "info_disclosure":  "情報漏えい",
+    "host_header":      "Host ヘッダ攻撃",
+    "security_headers": "セキュリティヘッダ不備",
+    "nosql":            "NoSQL インジェクション",
+    "deserialization":  "デシリアライゼーション脆弱性",
+    "request_smuggling":"HTTP リクエストスマグリング",
+    "ssrf":             "SSRF (サーバーサイドリクエストフォージェリ)",
+    "graphql":          "GraphQL インジェクション",
+    "jwt":              "JWT 脆弱性",
 }
 
 _DEFAULT_CHECKS = ["sqli", "xss", "os"]
@@ -161,7 +174,7 @@ def _section_checks() -> list[str]:
     if not raw:
         return list(_DEFAULT_CHECKS)
     if raw.strip().lower() == "all":
-        _ok("全 11 項目を選択しました")
+        _ok("全 24 項目を選択しました")
         return keys
 
     selected = []
