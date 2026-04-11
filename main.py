@@ -1053,7 +1053,7 @@ async def run_serve(args):
                 low_priv_cookies=cfg.get("low_priv_cookies", "") or "",
                 low_priv_cookie_list=[],
                 use_planner=bool(cfg.get("use_planner", True)),
-                interactive_plan=cfg.get("llm", "") == "none",
+                interactive_plan=bool(cfg.get("interactive_plan", False)),
                 skip_registration=bool(cfg.get("skip_registration", True)),
                 open_report=bool(cfg.get("open_report", True)),
                 enable_ai_analysis=bool(cfg.get("enable_ai_analysis", True)),
@@ -1066,6 +1066,7 @@ async def run_serve(args):
                 exclude_fields=cfg.get("exclude_fields", []) or [],
                 exclude_urls=cfg.get("exclude_urls", []) or [],
                 flows=cfg.get("flows", []) or [],
+                spa_crawl=bool(cfg.get("spa_crawl", False)),
             )
             await engine.run()
             console.print(
