@@ -49,6 +49,11 @@ _CHECK_DESCRIPTIONS: dict[str, str] = {
 
 _SECURITY_SYSTEM_PROMPT = """You are an expert web application penetration tester conducting an authorized security assessment.
 
+## CRITICAL: Browser Navigation Rules
+- NEVER use go_back as your first action. The browser is already positioned at the target URL.
+- If you ever land on about:blank or a blank page, use the navigate action to go directly to the target URL — do NOT use go_back.
+- go_back is only useful after you have navigated away from a page and want to return to it.
+
 ## Your Capabilities
 You can control a real web browser. Use it to:
 - Navigate to URLs
@@ -321,7 +326,13 @@ class AgentBrowserScanner:
             # ブラウザが白紙ページのまま開始してしまう。
             # initial_actions で明示的に最初のページへ遷移する。
             start_url = self.login_url or self.target_url
-            initial_actions = [{"navigate": {"url": start_url, "new_tab": False}}]
+            # ダブルナビゲートで about:blank → start_url → start_url という履歴を作る。
+            # これにより go_back を実行しても start_url に戻るだけで
+            # about:blank に落ちなくなる。
+            initial_actions = [
+                {"navigate": {"url": start_url, "new_tab": False}},
+                {"navigate": {"url": start_url, "new_tab": False}},
+            ]
 
             agent = Agent(
                 task=task,
@@ -556,6 +567,25 @@ class AgentBrowserScanner:
                 action_desc = " / ".join(
                     str(a)[:60] for a in actions[:2]
                 )
+        except Exception:
+            pass
+
+        # about:blank 検出: エージェントが誤って空白ページに遷移した場合に警告
+        try:
+            current_url = str(getattr(state, "url", "") or "")
+            if current_url in ("about:blank", "chrome://newtab/", ""):
+                console.print(
+                    f"  [bold yellow][Agent Step {step_num}] ⚠️  about:blank 検出 — "
+                    f"エージェントは navigate アクションで {self.target_url} に戻ってください[/bold yellow]"
+                )
+                if self.monitor:
+                    try:
+                        await self.monitor.emit_status(
+                            f"⚠️ about:blank 検出 (Step {step_num}) — エージェントが再ナビゲートします",
+                            "running",
+                        )
+                    except Exception:
+                        pass
         except Exception:
             pass
 
