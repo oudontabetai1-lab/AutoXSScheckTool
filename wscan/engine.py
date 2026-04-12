@@ -145,6 +145,7 @@ class ScanEngine:
         ollama_model: str = "llama3",
         openai_model: str = "gpt-4o-mini",
         gemini_model: str = "gemini-2.0-flash",
+        claude_model: str = "claude-haiku-4-5-20251001",
         checks: Optional[list] = None,
         output_dir: Optional[str] = None,
         timeout: int = 30,
@@ -188,6 +189,8 @@ class ScanEngine:
         auto_register_count: int = 2,         # how many accounts to auto-register
         # ①: SPA crawl enhancement
         spa_crawl: bool = False,
+        # ハイブリッドモード: Agent偵察で発見したURLをクロールのシードに使う
+        seed_urls: Optional[list] = None,
     ):
         self.target_url = url.rstrip("/")
         self.monitor = monitor
@@ -225,6 +228,8 @@ class ScanEngine:
         self.account_sessions: list = []
         # ①: SPA crawl
         self.spa_crawl = spa_crawl
+        # ハイブリッドモード用シード URL (Agent偵察で発見したURL)
+        self.seed_urls: list = list(seed_urls or [])
 
         self.use_planner = use_planner
         self.interactive_plan = interactive_plan
@@ -282,6 +287,7 @@ class ScanEngine:
             ollama_model=ollama_model,
             openai_model=openai_model,
             gemini_model=gemini_model,
+            claude_model=claude_model,
             default_payloads=payloads_data,
             prompt_templates=prompt_templates,
             enable_web_browsing=enable_llm_web_browsing,
@@ -607,6 +613,20 @@ class ScanEngine:
                 if su not in self.visited_urls:
                     self.visited_urls.add(su)
                     queue.append((su, 0, self.target_url))  # depth=0: treat as root-level
+
+        # ハイブリッドモード: Agent偵察で発見したURLをシードとして追加
+        if self.seed_urls:
+            added = 0
+            for su in self.seed_urls:
+                if su not in self.visited_urls and not self._is_url_excluded(su):
+                    self.visited_urls.add(su)
+                    queue.append((su, 0, self.target_url))
+                    added += 1
+            if added:
+                console.print(
+                    f"  [dim cyan][Hybrid] Agent偵察シード:[/dim cyan] "
+                    f"{added} URL をクロールキューに追加"
+                )
 
         while queue:
             url, depth, parent_url = queue.popleft()

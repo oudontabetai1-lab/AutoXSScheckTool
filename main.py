@@ -969,6 +969,16 @@ async def run_serve(args):
     ))
 
     monitor = MonitorServer(port=port)
+    # /api/auto-config エンドポイント用に LLM 設定をキャッシュ
+    _llm_section = _CFG.get("llm", {}) if isinstance(_CFG.get("llm"), dict) else {}
+    monitor.llm_cfg = {
+        "provider":     _CFG.get("llm_provider", _llm_section.get("provider", "none")),
+        "ollama_model": _CFG.get("ollama_model", _llm_section.get("ollama_model", "llama3")),
+        "ollama_url":   _CFG.get("ollama_url",   _llm_section.get("ollama_url", "http://localhost:11434")),
+        "openai_model": _CFG.get("openai_model", _llm_section.get("openai_model", "gpt-4o-mini")),
+        "gemini_model": _CFG.get("gemini_model", _llm_section.get("gemini_model", "gemini-2.0-flash")),
+        "claude_model": _CFG.get("claude_model", _llm_section.get("claude_model", "claude-haiku-4-5-20251001")),
+    }
     config = uvicorn.Config(app=monitor.app, host="0.0.0.0", port=port, log_level="error")
     server = uvicorn.Server(config)
 
@@ -988,6 +998,16 @@ async def run_serve(args):
             return
 
         checks = cfg.get("checks", ["sqli", "xss", "os"]) or ["sqli", "xss", "os"]
+        # ダッシュボードで選択された LLM 設定を auto-config エンドポイント用にも反映
+        if cfg.get("llm"):
+            monitor.llm_cfg.update({
+                "provider":     cfg.get("llm", "none"),
+                "ollama_model": cfg.get("ollama_model", "llama3"),
+                "ollama_url":   cfg.get("ollama_url", "http://localhost:11434"),
+                "openai_model": cfg.get("openai_model", "gpt-4o-mini"),
+                "gemini_model": cfg.get("gemini_model", "gemini-2.0-flash"),
+                "claude_model": cfg.get("claude_model", "claude-haiku-4-5-20251001"),
+            })
         await monitor.emit_scan_started(cfg)
 
         # ── Agent Browser mode ─────────────────────────────────────
@@ -1022,6 +1042,39 @@ async def run_serve(args):
                 server.should_exit = True
             return
 
+        # ── Hybrid Mode: Agent偵察 (Phase 1) → 通常スキャン (Phase 2) ────
+        seed_urls: list = []
+        if cfg.get("hybrid_mode"):
+            from wscan.agent_engine import AgentEngine
+            await monitor.emit_status("🔀 ハイブリッド Phase 1: Agent偵察中...", "running")
+            try:
+                recon_engine = AgentEngine(
+                    url=url,
+                    llm_provider=cfg.get("hybrid_llm", "claude") or "claude",
+                    llm_model=cfg.get("hybrid_model", "") or "",
+                    ollama_url=cfg.get("hybrid_ollama_url", "http://localhost:11434") or "http://localhost:11434",
+                    checks=[],
+                    headless=bool(cfg.get("headless", True)),
+                    auth_user=cfg.get("auth_user", "") or "",
+                    auth_pass=cfg.get("auth_pass", "") or "",
+                    login_url=cfg.get("login_url", "") or "",
+                    max_steps=int(cfg.get("hybrid_max_steps", 30)),
+                    open_report=False,
+                    monitor=monitor,
+                    port=port,
+                )
+                handoff = await recon_engine.run_recon()
+                seed_urls = handoff.discovered_urls
+                await monitor.emit_status(
+                    f"🔀 Phase 2: {len(seed_urls)} URL 発見済み。通常スキャン開始...", "running"
+                )
+            except Exception as exc:
+                console.print(
+                    f"[yellow]⚠ 偵察フェーズ失敗 ({exc})。"
+                    f"URL シードなしで通常スキャンを続行します。[/yellow]"
+                )
+                seed_urls = []
+
         await monitor.emit_status(f"Starting scan of {url}", "running")
 
         try:
@@ -1038,6 +1091,7 @@ async def run_serve(args):
                 ollama_model=cfg.get("ollama_model", "llama3") or "llama3",
                 openai_model=cfg.get("openai_model", "gpt-4o-mini") or "gpt-4o-mini",
                 gemini_model=cfg.get("gemini_model", "gemini-2.0-flash") or "gemini-2.0-flash",
+                claude_model=cfg.get("claude_model", "claude-haiku-4-5-20251001") or "claude-haiku-4-5-20251001",
                 auth_user=cfg.get("auth_user", "") or "",
                 auth_pass=cfg.get("auth_pass", "") or "",
                 cookies=cfg.get("cookies", "") or "",
@@ -1067,6 +1121,12 @@ async def run_serve(args):
                 exclude_urls=cfg.get("exclude_urls", []) or [],
                 flows=cfg.get("flows", []) or [],
                 spa_crawl=bool(cfg.get("spa_crawl", False)),
+                fast_mode=bool(cfg.get("fast_mode", False)),
+                max_payloads=int(cfg.get("max_payloads", 0)),
+                accounts=cfg.get("accounts", []) or [],
+                auto_register=bool(cfg.get("auto_register", False)),
+                auto_register_count=int(cfg.get("auto_register_count", 2)),
+                seed_urls=seed_urls or None,
             )
             await engine.run()
             console.print(

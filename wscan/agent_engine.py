@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import datetime
 import webbrowser
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, TYPE_CHECKING
 
@@ -23,6 +24,16 @@ if TYPE_CHECKING:
     from wscan.monitor import MonitorServer
 
 console = Console()
+
+
+@dataclass
+class AgentHandoffData:
+    """偵察フェーズで収集したデータ（通常スキャンへの引き渡しデータ）。"""
+    discovered_urls: list = field(default_factory=list)
+    auth_user: str = ""
+    auth_pass: str = ""
+    login_url: str = ""
+    summary: str = ""
 
 # Base output directory (same convention as ScanEngine)
 OUTPUT_BASE = Path(__file__).parent.parent / "output"
@@ -190,3 +201,64 @@ class AgentEngine:
                     pass
 
         return result
+
+    # ------------------------------------------------------------------
+    # Recon-only mode (ハイブリッドスキャンの Phase 1)
+    # ------------------------------------------------------------------
+
+    async def run_recon(self) -> AgentHandoffData:
+        """
+        偵察モードでエージェントを実行し、発見したURLとサイト情報を返す。
+        脆弱性テストは行わない。ハイブリッドスキャンの Phase 1 として使用。
+        """
+        from wscan.llm_agent_browser import AgentBrowserScanner
+
+        console.print(Panel.fit(
+            f"[bold cyan]WScan — Agent Recon Mode (Phase 1)[/bold cyan]\n"
+            f"Target  : [yellow]{self.url}[/yellow]\n"
+            f"LLM     : [blue]{self.llm_provider}[/blue]"
+            + (f" / {self.llm_model}" if self.llm_model else "") + "\n"
+            f"Steps   : [dim]max {self.max_steps}[/dim]",
+            border_style="cyan",
+        ))
+
+        if self.monitor:
+            await self.monitor.emit_status(
+                f"Agent偵察 Phase 1: {self.url} を探索中", "running"
+            )
+
+        scanner = AgentBrowserScanner(
+            target_url=self.url,
+            llm_provider=self.llm_provider,
+            llm_model=self.llm_model,
+            ollama_url=self.ollama_url,
+            checks=[],   # 偵察モードでは脆弱性テストなし
+            headless=self.headless,
+            auth_user=self.auth_user,
+            auth_pass=self.auth_pass,
+            login_url=self.login_url,
+            max_steps=self.max_steps,
+            monitor=self.monitor,
+            recon_mode=True,
+        )
+
+        result = await scanner.run()
+
+        # URL リストを生成: ターゲット URL を先頭に、重複を除去
+        all_urls = [self.url]
+        for u in result.memory.visited_urls:
+            if u not in all_urls:
+                all_urls.append(u)
+
+        console.print(
+            f"\n[bold cyan]Agent偵察完了:[/bold cyan] "
+            f"[cyan]{len(all_urls)}[/cyan] URL 発見"
+        )
+
+        return AgentHandoffData(
+            discovered_urls=all_urls,
+            auth_user=self.auth_user,
+            auth_pass=self.auth_pass,
+            login_url=self.login_url,
+            summary=result.final_summary,
+        )

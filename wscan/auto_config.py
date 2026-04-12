@@ -422,6 +422,56 @@ async def run_wizard(payload_gen) -> Optional[WizardResult]:
     return result
 
 
+async def generate_from_description(payload_gen, description: str) -> Optional[dict]:
+    """
+    Web向けAPI: 自然言語の説明文から設定 dict を生成する（対話なし）。
+    dashboard.html の AI設定生成ボタンから呼ばれる。
+
+    Parameters
+    ----------
+    payload_gen : PayloadGenerator  LLM 呼び出しに使うペイロードジェネレーター。
+    description : str               ユーザーが入力した自然言語の要求文。
+
+    Returns
+    -------
+    dict or None
+        設定 dict。LLM が利用不可またはパース失敗の場合は None。
+    """
+    if not await payload_gen._check_llm_available():
+        return None
+
+    user_prompt = (
+        "以下の要望に基づいてWebセキュリティスキャン設定を生成してください。\n\n"
+        f"【要望】\n{description}\n\n"
+        "要望から検査項目・深さ・ヘッドレス・除外URLなどを判断して最適な設定JSONを返してください。\n"
+        "ユーザーが特定の技術スタック（Django / Rails / PHP / React 等）や\n"
+        "特定の検査項目を言及した場合は、それを優先してください。\n"
+        "禁止事項・注意事項がある場合は warnings フィールドに必ず記載してください。"
+    )
+
+    llm_text = await _call_llm(payload_gen, user_prompt)
+    if not llm_text:
+        return None
+
+    data = _parse_llm_response(llm_text)
+    if not data:
+        return None
+
+    result = _build_result(data)
+    return {
+        "checks":            result.checks,
+        "depth":             result.depth,
+        "headless":          result.headless,
+        "skip_registration": result.skip_registration,
+        "exclude_urls":      result.exclude_urls,
+        "exclude_fields":    result.exclude_fields,
+        "max_forms":         result.max_forms,
+        "timeout":           result.timeout,
+        "notes":             result.notes,
+        "warnings":          result.warnings,
+    }
+
+
 def apply_to_args(result: WizardResult, args) -> None:
     """
     WizardResult の値を argparse.Namespace に上書き適用する。

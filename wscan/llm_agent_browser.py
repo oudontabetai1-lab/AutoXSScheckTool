@@ -91,6 +91,13 @@ Be thorough but efficient. Test all discovered inputs. Do not stop after finding
 # ── 結果データクラス ────────────────────────────────────────────────────────
 
 @dataclass
+class AgentMemory:
+    """エージェントスキャン中に収集した情報（セッション内メモリ）。"""
+    visited_urls: list = field(default_factory=list)
+    step_summaries: list = field(default_factory=list)
+
+
+@dataclass
 class AgentFinding:
     """agent-browser が検出した脆弱性の1件。"""
     check_type: str
@@ -121,6 +128,7 @@ class AgentScanResult:
     raw_history: list[dict] = field(default_factory=list)
     error: Optional[str] = None
     success: bool = False
+    memory: AgentMemory = field(default_factory=AgentMemory)
 
 
 # ── LLM ファクトリ ──────────────────────────────────────────────────────────
@@ -244,6 +252,7 @@ class AgentBrowserScanner:
     login_url       : ログインページ URL (省略可)
     max_steps       : エージェントの最大ステップ数
     monitor         : ダッシュボード通知用 MonitorServer (省略可)
+    recon_mode      : True にすると脆弱性テストをせず URL 偵察のみ行う
     """
 
     def __init__(
@@ -259,6 +268,7 @@ class AgentBrowserScanner:
         login_url: str = "",
         max_steps: int = 100,
         monitor: Optional["MonitorServer"] = None,
+        recon_mode: bool = False,
     ):
         self.target_url = target_url.rstrip("/")
         self.llm_provider = llm_provider
@@ -271,7 +281,9 @@ class AgentBrowserScanner:
         self.login_url = login_url
         self.max_steps = max_steps
         self.monitor = monitor
+        self.recon_mode = recon_mode
         self._step_count = 0
+        self._memory = AgentMemory()
 
     # ------------------------------------------------------------------
     # Public entry point
@@ -293,7 +305,7 @@ class AgentBrowserScanner:
             console.print(f"[red]LLM初期化エラー: {e}[/red]")
             return AgentScanResult(target_url=self.target_url, error=str(e))
 
-        task = self._build_task()
+        task = self._build_recon_task() if self.recon_mode else self._build_task()
         result = AgentScanResult(target_url=self.target_url)
 
         try:
@@ -345,6 +357,15 @@ class AgentBrowserScanner:
                 str(item) for item in (history.extracted_content() or [])
             )
             all_text += "\n" + final_text
+
+            # recon_mode: PAGE_FOUND: <url> パターンを解析して memory に追加
+            if self.recon_mode:
+                page_found_re = re.compile(r"PAGE_FOUND:\s*(https?://\S+)", re.IGNORECASE)
+                for m in page_found_re.finditer(all_text):
+                    u = m.group(1).rstrip(".,;)")
+                    if u not in self._memory.visited_urls:
+                        self._memory.visited_urls.append(u)
+                result.memory = self._memory
 
             result.findings = _parse_findings_from_text(all_text)
 
@@ -491,9 +512,42 @@ class AgentBrowserScanner:
             f"This is an authorized security test."
         )
 
+    def _build_recon_task(self) -> str:
+        """偵察専用タスク文字列を生成する。脆弱性テストは行わず URL 発見に特化。"""
+        auth_section = ""
+        if self.login_url and self.auth_user and self.auth_pass:
+            auth_section = (
+                f"\n## Step 0: Authentication\n"
+                f"Log in at: {self.login_url}\n"
+                f"Username: {self.auth_user}\n"
+                f"Password: {self.auth_pass}\n"
+                f"Confirm login succeeded before proceeding.\n"
+            )
+
+        return (
+            f"You are a web crawler performing site reconnaissance on: {self.target_url}\n"
+            f"\n"
+            f"## Objective\n"
+            f"Explore the entire website to discover all reachable pages and URL patterns.\n"
+            f"Do NOT inject payloads or test for vulnerabilities.\n"
+            f"{auth_section}"
+            f"\n"
+            f"## Instructions\n"
+            f"1. Start at {self.target_url}\n"
+            f"2. Click every link, navigate every menu, submit forms with harmless dummy data\n"
+            f"3. For each unique page you reach, output EXACTLY this line:\n"
+            f"   PAGE_FOUND: <full URL>\n"
+            f"4. Continue until you have explored all reachable pages or reached the step limit\n"
+            f"5. After exploring, write a brief summary of the site structure\n"
+            f"\n"
+            f"IMPORTANT: Output PAGE_FOUND: <url> for EVERY unique page you visit.\n"
+            f"This is site mapping, not penetration testing."
+        )
+
     async def _on_step(self, state, output, step_num: int) -> None:
         """各ステップ実行時のコールバック。"""
         self._step_count = step_num
+
         # ステップ内容を取得
         action_desc = ""
         try:
@@ -504,6 +558,16 @@ class AgentBrowserScanner:
                 )
         except Exception:
             pass
+
+        # 現在の URL を memory に追記 (recon_mode)
+        if self.recon_mode:
+            try:
+                if hasattr(state, "url") and state.url:
+                    url_val = str(state.url)
+                    if url_val.startswith("http") and url_val not in self._memory.visited_urls:
+                        self._memory.visited_urls.append(url_val)
+            except Exception:
+                pass
 
         console.print(
             f"  [dim magenta][Agent Step {step_num}][/dim magenta] {action_desc[:80]}"
