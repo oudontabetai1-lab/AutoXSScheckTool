@@ -1038,6 +1038,7 @@ async def run_serve(args):
                 ollama_model=cfg.get("ollama_model", "llama3") or "llama3",
                 openai_model=cfg.get("openai_model", "gpt-4o-mini") or "gpt-4o-mini",
                 gemini_model=cfg.get("gemini_model", "gemini-2.0-flash") or "gemini-2.0-flash",
+                claude_model=cfg.get("claude_model", "claude-haiku-4-5-20251001") or "claude-haiku-4-5-20251001",
                 auth_user=cfg.get("auth_user", "") or "",
                 auth_pass=cfg.get("auth_pass", "") or "",
                 cookies=cfg.get("cookies", "") or "",
@@ -1067,6 +1068,11 @@ async def run_serve(args):
                 exclude_urls=cfg.get("exclude_urls", []) or [],
                 flows=cfg.get("flows", []) or [],
                 spa_crawl=bool(cfg.get("spa_crawl", False)),
+                fast_mode=bool(cfg.get("fast_mode", False)),
+                max_payloads=int(cfg.get("max_payloads", 0)),
+                accounts=cfg.get("accounts", []) or [],
+                auto_register=bool(cfg.get("auto_register", False)),
+                auto_register_count=int(cfg.get("auto_register_count", 2)),
             )
             await engine.run()
             console.print(

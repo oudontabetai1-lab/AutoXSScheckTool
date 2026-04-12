@@ -644,6 +644,10 @@ body {
             <input type="number" id="cfgConcurrency" value="1" min="1" max="8">
           </div>
           <div class="cfg-field">
+            <label>ペイロード上限/フィールド (0=無制限)</label>
+            <input type="number" id="cfgMaxPayloads" value="0" min="0" max="200">
+          </div>
+          <div class="cfg-field">
             <label>ダッシュボードポート</label>
             <input type="number" id="cfgPortDisp" value="8765" readonly style="opacity:0.5;cursor:not-allowed">
           </div>
@@ -651,8 +655,13 @@ body {
             <label>プロキシ URL</label>
             <input type="text" id="cfgProxy" placeholder="http://127.0.0.1:8080">
           </div>
+          <div class="cfg-field">
+            <label>出力ディレクトリ (空=自動)</label>
+            <input type="text" id="cfgOutputDir" placeholder="/path/to/reports">
+          </div>
         </div>
         <div class="cfg-toggle-row" style="margin-top:14px">
+          <div class="cfg-toggle off" id="tog-fast_mode" onclick="toggleCfg('fast_mode')" title="深さ1・ペイロード12・遅延0の高速スキャン">⚡ 高速モード</div>
           <div class="cfg-toggle off" id="tog-headless" onclick="toggleCfg('headless')">ヘッドレスモード</div>
           <div class="cfg-toggle on" id="tog-skip_registration" onclick="toggleCfg('skip_registration')">登録フォームをスキップ</div>
           <div class="cfg-toggle on" id="tog-open_report" onclick="toggleCfg('open_report')">スキャン後レポートを開く</div>
@@ -732,6 +741,19 @@ body {
           <label>低権限セッションCookie (privescテストで使用)</label>
           <input type="text" id="cfgLowPrivCookies" placeholder="session=lowprivtoken; role=user">
         </div>
+        <div class="cfg-section-title" style="margin-top:16px">マルチアカウント権限昇格</div>
+        <div style="font-size:0.78rem;color:var(--text-muted);margin-bottom:10px">
+          複数アカウントのCookieを登録して水平/垂直権限昇格を自動テストします。
+        </div>
+        <div id="accountsList"></div>
+        <button onclick="addAccount()" style="font-size:0.78rem;padding:4px 12px;background:var(--accent);color:#fff;border:none;border-radius:4px;cursor:pointer;margin-bottom:12px">＋ アカウント追加</button>
+        <div class="cfg-toggle-row">
+          <div class="cfg-toggle off" id="tog-auto_register" onclick="toggleCfg('auto_register')">アカウント自動登録</div>
+        </div>
+        <div class="cfg-field" style="margin-top:8px;max-width:160px">
+          <label>自動登録アカウント数</label>
+          <input type="number" id="cfgAutoRegisterCount" value="2" min="1" max="10">
+        </div>
       </div>
 
       <!-- Tab: LLM -->
@@ -758,6 +780,10 @@ body {
           <div class="cfg-field" id="cfgGeminiModelField" style="display:none">
             <label>Geminiモデル名</label>
             <input type="text" id="cfgGeminiModel" value="gemini-2.0-flash">
+          </div>
+          <div class="cfg-field" id="cfgClaudeModelField" style="display:none">
+            <label>Claudeモデル名</label>
+            <input type="text" id="cfgClaudeModel" value="claude-haiku-4-5-20251001">
           </div>
         </div>
         <div class="cfg-section-title" style="margin-top:18px">🌐 LLM Web検索</div>
@@ -796,6 +822,14 @@ body {
 
       <!-- Tab: Exclusions -->
       <div id="cfgTab-exclusions" class="cfg-panel">
+        <div class="cfg-section-title" style="margin-top:10px">カスタムペイロード</div>
+        <div class="cfg-grid" style="margin-bottom:14px">
+          <div class="cfg-field" style="grid-column:1/-1">
+            <label>カスタムペイロードファイル (YAMLパス、空=デフォルト)</label>
+            <input type="text" id="cfgPayloadsFile" placeholder="/path/to/my_payloads.yaml">
+          </div>
+        </div>
+        <div class="cfg-section-title">除外設定</div>
         <div class="cfg-grid" style="margin-top:10px">
           <div class="cfg-field" style="grid-column:1/-1">
             <label>除外フィールド名 (カンマ区切り)</label>
@@ -1157,6 +1191,8 @@ const cfgToggles = {
   ctf_mode: false,
   interactive_plan: false,
   spa_crawl: false,
+  fast_mode: false,
+  auto_register: false,
 };
 
 const CHECK_GROUPS = {
@@ -1242,6 +1278,7 @@ function updateLlmModelField() {
   document.getElementById('cfgOllamaModelField').style.display = llm === 'ollama' ? '' : 'none';
   document.getElementById('cfgOpenaiModelField').style.display = llm === 'openai' ? '' : 'none';
   document.getElementById('cfgGeminiModelField').style.display = llm === 'gemini' ? '' : 'none';
+  document.getElementById('cfgClaudeModelField').style.display = llm === 'claude' ? '' : 'none';
 }
 
 function submitScanConfig() {
@@ -1276,6 +1313,7 @@ function submitScanConfig() {
     ollama_model:  document.getElementById('cfgOllamaModel').value.trim() || 'llama3',
     openai_model:  document.getElementById('cfgOpenaiModel').value.trim() || 'gpt-4o-mini',
     gemini_model:  document.getElementById('cfgGeminiModel').value.trim() || 'gemini-2.0-flash',
+    claude_model:  document.getElementById('cfgClaudeModel').value.trim() || 'claude-haiku-4-5-20251001',
     auth_user:   document.getElementById('cfgAuthUser').value.trim(),
     auth_pass:   document.getElementById('cfgAuthPass').value,
     login_url:   document.getElementById('cfgLoginUrl').value.trim(),
@@ -1286,6 +1324,13 @@ function submitScanConfig() {
     low_priv_cookies: document.getElementById('cfgLowPrivCookies').value.trim(),
     interactive_plan: cfgToggles.interactive_plan,
     spa_crawl:    cfgToggles.spa_crawl,
+    fast_mode:    cfgToggles.fast_mode,
+    max_payloads: parseInt(document.getElementById('cfgMaxPayloads').value) || 0,
+    output_dir:   document.getElementById('cfgOutputDir').value.trim(),
+    payloads_file: document.getElementById('cfgPayloadsFile').value.trim(),
+    accounts:     collectAccounts(),
+    auto_register: cfgToggles.auto_register,
+    auto_register_count: parseInt(document.getElementById('cfgAutoRegisterCount').value) || 2,
     exclude_fields: excludeFieldsRaw ? excludeFieldsRaw.split(',').map(s=>s.trim()).filter(Boolean) : [],
     exclude_urls:   excludeUrlsRaw ? excludeUrlsRaw.split('\n').map(s=>s.trim()).filter(Boolean) : [],
     flows: collectFlows(),
@@ -1518,6 +1563,30 @@ function updateFlowStepUI(sid, action, initial) {
 
 function _esc(s) {
   return String(s || '').replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;');
+}
+
+// ─── Multi-account privilege escalation ─────────────────────────
+let _accountId = 0;
+function addAccount() {
+  const id = ++_accountId;
+  const div = document.createElement('div');
+  div.id = 'account-' + id;
+  div.style.cssText = 'display:flex;gap:6px;align-items:center;margin-bottom:6px';
+  div.innerHTML = `
+    <input type="text"  placeholder="ユーザー名" style="flex:1;padding:4px 6px;border-radius:4px;border:1px solid var(--border);background:var(--surface2);color:var(--text)" class="acc-user">
+    <input type="password" placeholder="パスワード" style="flex:1;padding:4px 6px;border-radius:4px;border:1px solid var(--border);background:var(--surface2);color:var(--text)" class="acc-pass">
+    <select style="padding:4px 6px;border-radius:4px;border:1px solid var(--border);background:var(--surface2);color:var(--text)" class="acc-role">
+      <option value="user">user</option><option value="admin">admin</option><option value="moderator">moderator</option>
+    </select>
+    <button onclick="document.getElementById('account-${id}').remove()" style="border:none;background:none;color:var(--text-muted);cursor:pointer;font-size:0.9rem">✕</button>`;
+  document.getElementById('accountsList').appendChild(div);
+}
+function collectAccounts() {
+  return [...document.querySelectorAll('#accountsList > div')].map(div => ({
+    username: div.querySelector('.acc-user').value.trim(),
+    password: div.querySelector('.acc-pass').value,
+    role:     div.querySelector('.acc-role').value,
+  })).filter(a => a.username);
 }
 
 function collectFlows() {

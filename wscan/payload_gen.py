@@ -24,6 +24,7 @@ class PayloadGenerator:
         ollama_url: str = "http://localhost:11434",
         openai_model: str = "gpt-4o-mini",
         gemini_model: str = "gemini-2.0-flash",
+        claude_model: str = "claude-haiku-4-5-20251001",
         default_payloads: Optional[dict] = None,
         prompt_templates: Optional[dict] = None,
         enable_web_browsing: bool = False,
@@ -33,6 +34,7 @@ class PayloadGenerator:
         self.ollama_url = ollama_url
         self.openai_model = openai_model
         self.gemini_model = gemini_model
+        self.claude_model = claude_model
         self.default_payloads = default_payloads or {}
         self.prompt_templates = prompt_templates or {}
         self.enable_web_browsing = enable_web_browsing
@@ -119,7 +121,7 @@ class PayloadGenerator:
             response = await loop.run_in_executor(
                 None,
                 lambda: client.messages.create(
-                    model="claude-haiku-4-5-20251001",
+                    model=self.claude_model,
                     max_tokens=500,
                     messages=[{"role": "user", "content": prompt}],
                 ),
