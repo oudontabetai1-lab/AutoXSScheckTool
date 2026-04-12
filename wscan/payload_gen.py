@@ -260,3 +260,105 @@ class PayloadGenerator:
         if self.provider == "gemini":
             return await self._generate_with_gemini(prompt)
         return await self._generate_with_ollama(prompt)
+
+    # ------------------------------------------------------------------
+    # Screenshot vision analysis
+    # ------------------------------------------------------------------
+
+    async def analyze_screenshot_for_vuln(
+        self, screenshot_b64: str, page_url: str
+    ) -> Optional[str]:
+        """
+        スクリーンショット画像を LLM ビジョン API で解析し、
+        画面上に見えるセキュリティ上の問題を検出する。
+
+        対応プロバイダー: claude, openai
+        それ以外 (ollama / gemini / none) の場合は None を返す。
+
+        Parameters
+        ----------
+        screenshot_b64 : base64 エンコードされた PNG 画像文字列
+        page_url       : 画像の元になったページ URL (プロンプトに含める)
+
+        Returns
+        -------
+        str  : LLM の分析テキスト (100 語以内)
+        None : ビジョン未対応 / API キー未設定 / エラー時
+        """
+        vision_prompt = (
+            f"This is a screenshot of the web page at {page_url}.\n"
+            "As a web security tester, identify any VISIBLE security issues:\n"
+            "- Error messages leaking stack traces, file paths, or DB info\n"
+            "- Unescaped HTML or <script> tags rendered in the page\n"
+            "- Sensitive data exposure (tokens, keys, PII)\n"
+            "- Unusual warning dialogs or unexpected redirects\n"
+            "Reply in under 100 words. If no issues visible, reply 'No visible issues'."
+        )
+
+        if self.provider == "claude":
+            client = self._get_anthropic_client()
+            if not client:
+                return None
+            try:
+                import asyncio
+                loop = asyncio.get_event_loop()
+                msg = await loop.run_in_executor(
+                    None,
+                    lambda: client.messages.create(
+                        model=self.claude_model,
+                        max_tokens=300,
+                        messages=[{
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "image",
+                                    "source": {
+                                        "type": "base64",
+                                        "media_type": "image/png",
+                                        "data": screenshot_b64,
+                                    },
+                                },
+                                {"type": "text", "text": vision_prompt},
+                            ],
+                        }],
+                    ),
+                )
+                return msg.content[0].text if msg.content else None
+            except Exception as exc:
+                console.print(f"[dim yellow]Screenshot analysis error (claude): {exc}[/dim yellow]")
+                return None
+
+        elif self.provider == "openai":
+            api_key = os.environ.get("OPENAI_API_KEY")
+            if not api_key:
+                return None
+            try:
+                async with httpx.AsyncClient(timeout=30.0) as hc:
+                    r = await hc.post(
+                        "https://api.openai.com/v1/chat/completions",
+                        headers={"Authorization": f"Bearer {api_key}"},
+                        json={
+                            "model": self.openai_model,
+                            "max_tokens": 300,
+                            "messages": [{
+                                "role": "user",
+                                "content": [
+                                    {
+                                        "type": "image_url",
+                                        "image_url": {
+                                            "url": f"data:image/png;base64,{screenshot_b64}"
+                                        },
+                                    },
+                                    {"type": "text", "text": vision_prompt},
+                                ],
+                            }],
+                        },
+                    )
+                    r.raise_for_status()
+                    return r.json()["choices"][0]["message"]["content"]
+            except Exception as exc:
+                console.print(f"[dim yellow]Screenshot analysis error (openai): {exc}[/dim yellow]")
+                return None
+
+        # ollama / gemini / none: ビジョン未対応
+        return None

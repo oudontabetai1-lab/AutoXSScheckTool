@@ -603,6 +603,21 @@ body {
   </div>
 
   <div class="cfg-body">
+    <!-- ✨ AI自然言語設定 -->
+    <div style="margin-bottom:12px">
+      <div style="font-size:0.72rem;color:var(--text-muted);font-weight:600;text-transform:uppercase;letter-spacing:0.03em;margin-bottom:6px">✨ AI設定生成 (LLM設定タブでプロバイダーを選択後に使用)</div>
+      <div style="display:flex;gap:8px;align-items:center">
+        <input type="text" id="cfgNlpDesc"
+          placeholder="例: DjangoのECサイト。ログイン後のカート・決済ページのXSSとSQLiを深さ3でheadlessで検査して"
+          style="flex:1;padding:8px 10px;border-radius:6px;border:1px solid var(--border);background:var(--surface2);color:var(--text);font-size:0.85rem">
+        <button onclick="runAutoConfig()" id="btnAutoConfig"
+          style="padding:8px 16px;background:linear-gradient(135deg,#7c3aed,#4f46e5);color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:0.82rem;font-weight:600;white-space:nowrap">
+          🤖 AI設定生成
+        </button>
+      </div>
+      <div id="cfgNlpStatus" style="font-size:0.75rem;color:var(--text-muted);margin-top:4px;min-height:16px"></div>
+    </div>
+
     <!-- URL row -->
     <div>
       <div style="font-size:0.72rem;color:var(--text-muted);font-weight:600;text-transform:uppercase;letter-spacing:0.03em;margin-bottom:6px">Target URL</div>
@@ -622,6 +637,7 @@ body {
         <button class="cfg-tab" onclick="showCfgTab('exclusions',this)">🚫 除外設定</button>
         <button class="cfg-tab" onclick="showCfgTab('flows',this)">🔄 攻撃フロー</button>
         <button class="cfg-tab" onclick="showCfgTab('agent',this)">🧠 Agent Browser</button>
+        <button class="cfg-tab" onclick="showCfgTab('hybrid',this)">🔀 ハイブリッド</button>
       </div>
 
       <!-- Tab: Basic -->
@@ -918,6 +934,51 @@ body {
           🧠 Agent Browser スキャン開始
         </button>
       </div>
+
+      <!-- Tab: Hybrid -->
+      <div id="cfgTab-hybrid" class="cfg-panel">
+        <div class="cfg-section-title">🔀 ハイブリッドスキャン (Agent偵察 → 通常スキャン)</div>
+        <div style="font-size:0.78rem;color:var(--text-muted);margin-bottom:14px;line-height:1.6">
+          <strong>Phase 1:</strong> Agent Browser がサイトを探索し、ページ・フォーム・URLを発見します。<br>
+          <strong>Phase 2:</strong> 発見した全URLをシードにして通常スキャンを実行します。<br>
+          複雑な認証フロー・SPA・動的ページの発見と、網羅的なペイロードテストを組み合わせます。<br>
+          <span style="color:var(--accent)">必要:</span> <code>pip install browser-use</code> と LLM API キー
+        </div>
+
+        <div class="cfg-section-title">Agent偵察設定</div>
+        <div class="cfg-grid" style="margin-bottom:14px">
+          <div class="cfg-field">
+            <label>LLM プロバイダー (偵察用)</label>
+            <select id="hybridLlm">
+              <option value="claude">Claude (Anthropic) — 推奨</option>
+              <option value="openai">OpenAI</option>
+              <option value="ollama">Ollama (ローカル)</option>
+            </select>
+          </div>
+          <div class="cfg-field">
+            <label>モデル名 (空=デフォルト)</label>
+            <input type="text" id="hybridModel" placeholder="claude-sonnet-4-5-20250929">
+          </div>
+          <div class="cfg-field">
+            <label>偵察ステップ数上限</label>
+            <input type="number" id="hybridMaxSteps" value="30" min="5" max="100">
+          </div>
+          <div class="cfg-field">
+            <label>Ollama URL</label>
+            <input type="text" id="hybridOllamaUrl" value="http://localhost:11434">
+          </div>
+        </div>
+
+        <div style="font-size:0.78rem;color:var(--text-muted);margin-bottom:12px">
+          ※ 認証情報・検査項目は「認証・Cookie」タブと「検査項目」タブの設定を引き継ぎます。
+        </div>
+
+        <button onclick="submitHybridScan()"
+          style="padding:10px 28px;background:linear-gradient(135deg,#059669,#0891b2);color:#fff;border:none;border-radius:6px;cursor:pointer;font-size:0.9rem;font-weight:600;letter-spacing:0.03em">
+          🔀 ハイブリッドスキャン開始
+        </button>
+      </div>
+
     </div><!-- /tabs container -->
   </div><!-- /cfg-body -->
 
@@ -2317,6 +2378,122 @@ function showAiAnalysis(text) {
     </div>`;
   document.body.appendChild(modal);
   modal.addEventListener('click', e => { if (e.target === modal) modal.remove(); });
+}
+
+// ─── AI 自然言語設定生成 ──────────────────────────────────────────
+async function runAutoConfig() {
+  const desc = (document.getElementById('cfgNlpDesc').value || '').trim();
+  if (!desc) { alert('設定の説明を入力してください'); return; }
+  const statusEl = document.getElementById('cfgNlpStatus');
+  const btn      = document.getElementById('btnAutoConfig');
+  statusEl.textContent = '⏳ AI設定生成中...';
+  btn.disabled = true;
+  try {
+    const resp = await fetch('/api/auto-config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ description: desc }),
+    });
+    const data = await resp.json();
+    if (!resp.ok) {
+      statusEl.textContent = '❌ ' + (data.error || 'エラーが発生しました');
+      return;
+    }
+    applyAutoConfig(data);
+    let msg = '✅ AI設定を適用しました。内容を確認してスキャンを開始してください。';
+    if (data.warnings && data.warnings.length) {
+      msg += '  ⚠️ ' + data.warnings.slice(0, 2).join(' / ');
+    }
+    statusEl.textContent = msg;
+  } catch (e) {
+    statusEl.textContent = '❌ ネットワークエラー: ' + e.message;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function applyAutoConfig(cfg) {
+  // checks: チェックボックスを cfg.checks に合わせる
+  if (cfg.checks && Array.isArray(cfg.checks)) {
+    document.querySelectorAll('.check-item input[type=checkbox]').forEach(cb => {
+      cb.checked = cfg.checks.includes(cb.value);
+    });
+  }
+  // depth
+  if (cfg.depth != null) {
+    const el = document.getElementById('cfgDepth');
+    if (el) el.value = cfg.depth;
+  }
+  // headless
+  if (cfg.headless != null) {
+    const v = !!cfg.headless;
+    cfgToggles.headless = v;
+    const el = document.getElementById('tog-headless');
+    if (el) { el.classList.toggle('on', v); el.classList.toggle('off', !v); }
+  }
+  // max_forms
+  if (cfg.max_forms != null) {
+    const el = document.getElementById('cfgMaxForms');
+    if (el) el.value = cfg.max_forms;
+  }
+  // timeout
+  if (cfg.timeout != null) {
+    const el = document.getElementById('cfgTimeoutInput');
+    if (el) el.value = cfg.timeout;
+  }
+  // exclude_urls
+  if (cfg.exclude_urls && Array.isArray(cfg.exclude_urls)) {
+    const el = document.getElementById('cfgExcludeUrls');
+    if (el) el.value = cfg.exclude_urls.join('\n');
+  }
+  // exclude_fields
+  if (cfg.exclude_fields && Array.isArray(cfg.exclude_fields)) {
+    const el = document.getElementById('cfgExcludeFields');
+    if (el) el.value = cfg.exclude_fields.join(', ');
+  }
+}
+
+// ─── ハイブリッドスキャン送信 ────────────────────────────────────
+function submitHybridScan() {
+  if (!state.ws || state.ws.readyState !== WebSocket.OPEN) {
+    alert('WebSocket が接続されていません。ページをリロードしてください。');
+    return;
+  }
+  const url = (document.getElementById('cfgInputUrl')?.value || '').trim();
+  if (!url || !url.startsWith('http')) {
+    alert('スキャン対象 URL を入力してください（http / https で始まる URL）');
+    document.getElementById('cfgInputUrl')?.focus();
+    return;
+  }
+  const checks = getSelectedChecks();
+  const config = {
+    url,
+    hybrid_mode:       true,
+    hybrid_llm:        document.getElementById('hybridLlm').value,
+    hybrid_model:      (document.getElementById('hybridModel').value || '').trim(),
+    hybrid_max_steps:  parseInt(document.getElementById('hybridMaxSteps').value) || 30,
+    hybrid_ollama_url: (document.getElementById('hybridOllamaUrl').value || '').trim() || 'http://localhost:11434',
+    // 検査項目・認証は通常設定から引き継ぐ
+    checks:       checks.length ? checks : ['sqli', 'xss', 'os'],
+    headless:     cfgToggles.headless,
+    depth:        parseInt(document.getElementById('cfgDepth').value) || 2,
+    timeout:      parseInt(document.getElementById('cfgTimeoutInput').value) || 30,
+    concurrency:  parseInt(document.getElementById('cfgConcurrency').value) || 1,
+    auth_user:    (document.getElementById('cfgAuthUser')?.value || '').trim(),
+    auth_pass:    (document.getElementById('cfgAuthPass')?.value || ''),
+    login_url:    (document.getElementById('cfgLoginUrl')?.value || '').trim(),
+    cookies:      (document.getElementById('cfgCookies')?.value || '').trim(),
+    llm:          document.getElementById('cfgLlm')?.value || 'none',
+    ollama_model: (document.getElementById('cfgOllamaModel')?.value || '').trim() || 'llama3',
+    openai_model: (document.getElementById('cfgOpenaiModel')?.value || '').trim() || 'gpt-4o-mini',
+    gemini_model: (document.getElementById('cfgGeminiModel')?.value || '').trim() || 'gemini-2.0-flash',
+    claude_model: (document.getElementById('cfgClaudeModel')?.value || '').trim() || 'claude-haiku-4-5-20251001',
+    fast_mode:    cfgToggles.fast_mode,
+    max_payloads: parseInt(document.getElementById('cfgMaxPayloads')?.value) || 0,
+  };
+  state.ws.send(JSON.stringify({ action: 'start_scan', config }));
+  document.getElementById('scanConfigOverlay').classList.remove('active');
+  setStatus('🔀 ハイブリッドスキャン開始リクエスト送信中...', 'running');
 }
 
 // ─── WAF detected event ─────────────────────────────────────────

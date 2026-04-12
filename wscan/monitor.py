@@ -8,8 +8,8 @@ import time
 from pathlib import Path
 from typing import Set, Any, Optional
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 
@@ -39,6 +39,8 @@ class MonitorServer:
         # Scan config submitted from the dashboard (serve mode)
         self.scan_request_event: asyncio.Event = asyncio.Event()
         self.scan_request_data: dict = {}
+        # LLM config for auto-config HTTP endpoint (set by main.py after init)
+        self.llm_cfg: dict = {}
 
     def _create_app(self) -> FastAPI:
         app = FastAPI(title="WScan Monitor", docs_url=None, redoc_url=None)
@@ -74,6 +76,47 @@ class MonitorServer:
         @app.get("/health")
         async def health():
             return {"status": "ok", "clients": len(self.clients)}
+
+        @app.post("/api/auto-config")
+        async def api_auto_config(request: Request):
+            """自然言語の説明からスキャン設定を生成するHTTPエンドポイント。"""
+            try:
+                body = await request.json()
+            except Exception:
+                return JSONResponse({"error": "Invalid JSON"}, status_code=400)
+
+            description = (body.get("description") or "").strip()
+            if not description:
+                return JSONResponse({"error": "description is required"}, status_code=400)
+
+            cfg = self.llm_cfg
+            if not cfg or cfg.get("provider", "none") == "none":
+                return JSONResponse(
+                    {"error": "LLMが設定されていません。LLM設定タブでプロバイダーを選択してください。"},
+                    status_code=400,
+                )
+
+            try:
+                from wscan.payload_gen import PayloadGenerator
+                from wscan.auto_config import generate_from_description
+
+                gen = PayloadGenerator(
+                    provider=cfg.get("provider", "none"),
+                    ollama_model=cfg.get("ollama_model", "llama3"),
+                    ollama_url=cfg.get("ollama_url", "http://localhost:11434"),
+                    openai_model=cfg.get("openai_model", "gpt-4o-mini"),
+                    gemini_model=cfg.get("gemini_model", "gemini-2.0-flash"),
+                    claude_model=cfg.get("claude_model", "claude-haiku-4-5-20251001"),
+                )
+                result = await generate_from_description(gen, description)
+                if result is None:
+                    return JSONResponse(
+                        {"error": "LLMが応答しませんでした。APIキーとプロバイダー設定を確認してください。"},
+                        status_code=500,
+                    )
+                return JSONResponse(result)
+            except Exception as exc:
+                return JSONResponse({"error": str(exc)}, status_code=500)
 
         return app
 
