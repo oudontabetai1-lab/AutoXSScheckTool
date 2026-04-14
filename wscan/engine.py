@@ -80,6 +80,7 @@ from .scanners.request_smuggling import RequestSmugglingScanner
 from .scanners.ssrf import SSRFScanner
 from .scanners.graphql import GraphQLScanner
 from .scanners.jwt_scanner import JWTScanner
+from .scanners.cms import CmsScanner
 from .waf_detector import WAFDetector
 from .payload_learning import PayloadLearner
 from .flow_runner import ScanFlow, FlowRunner
@@ -191,6 +192,8 @@ class ScanEngine:
         spa_crawl: bool = False,
         # ハイブリッドモード: Agent偵察で発見したURLをクロールのシードに使う
         seed_urls: Optional[list] = None,
+        # I: 差分スキャン — 前回出力ディレクトリのパス
+        previous_scan_dir: Optional[str] = None,
     ):
         self.target_url = url.rstrip("/")
         self.monitor = monitor
@@ -230,6 +233,10 @@ class ScanEngine:
         self.spa_crawl = spa_crawl
         # ハイブリッドモード用シード URL (Agent偵察で発見したURL)
         self.seed_urls: list = list(seed_urls or [])
+        # I: 差分スキャン
+        self.previous_scan_dir: Optional[str] = previous_scan_dir
+        # C: CMS 検出結果 (crawl時に設定)
+        self.detected_cms = None
 
         self.use_planner = use_planner
         self.interactive_plan = interactive_plan
@@ -318,6 +325,7 @@ class ScanEngine:
             "ssrf":               SSRFScanner,
             "graphql":            GraphQLScanner,
             "jwt":                JWTScanner,
+            "cms":                CmsScanner,
         }
         self.scanners = {n: cls(self) for n, cls in scanner_map.items() if n in self.checks}
 
@@ -578,6 +586,16 @@ class ScanEngine:
             pass
         return []
 
+    @staticmethod
+    def _page_fingerprint(html: str) -> str:
+        """
+        A: HTML の構造的フィンガープリント。
+        テキスト・属性値を除いたタグ列の先頭 50 個を MD5 ハッシュして返す。
+        """
+        import hashlib
+        tags = re.findall(r'<\w+', html.lower())
+        return hashlib.md5(''.join(tags[:50]).encode()).hexdigest()[:12]
+
     def _extract_sitemap_locs(self, xml_text: str) -> list[str]:
         """Extract <loc> URLs from a sitemap XML string."""
         urls: list[str] = []
@@ -601,6 +619,9 @@ class ScanEngine:
         pages: list = []
         queue: deque = deque([(self.target_url, 0, None)])  # (url, depth, parent_url)
         self.visited_urls.add(self.target_url)
+        # A: DOM構造フィンガープリントで類似ページを検出
+        self._seen_page_fingerprints: set[str] = set()
+        _first_page = True  # CMS 検出は最初のページのみ
 
         # C-3: Seed crawl queue from sitemap.xml / robots.txt (if enabled)
         sitemap_urls = await self._fetch_sitemap_urls() if self.enable_sitemap_crawl else []
@@ -649,6 +670,45 @@ class ScanEngine:
                 html = await self.browser.page.content()
             except Exception:
                 html = ""
+
+            # A: 重複ページスキップ (DOM構造フィンガープリント)
+            if html:
+                fp = self._page_fingerprint(html)
+                if fp in self._seen_page_fingerprints:
+                    console.print(f"  [dim]重複ページスキップ: {url} (同一構造を検出)[/dim]")
+                    # リンクは抽出するが、スキャン対象には追加しない
+                    if depth < self.depth:
+                        try:
+                            links = await self.browser.collect_links(url, same_domain=True)
+                            for link in links:
+                                clean = link.split("#")[0].split("?")[0]
+                                if clean not in self.visited_urls and not self._is_url_excluded(clean):
+                                    self.visited_urls.add(clean)
+                                    queue.append((link, depth + 1, url))
+                        except Exception:
+                            pass
+                    continue
+                self._seen_page_fingerprints.add(fp)
+
+            # C: CMS 検出 (最初のページのみ)
+            if _first_page:
+                _first_page = False
+                try:
+                    from wscan.cms_detect import detect_cms
+                    # HTTP ヘッダはブラウザ経由では取得困難なため空辞書で渡す
+                    self.detected_cms = detect_cms(html, {}, url)
+                    if self.detected_cms.is_known:
+                        console.print(
+                            f"  [cyan][CMS] 検出:[/cyan] {self.detected_cms.name}"
+                            + (f" v{self.detected_cms.version}" if self.detected_cms.version else "")
+                            + f" (信頼度: {self.detected_cms.confidence})"
+                        )
+                        # CMS スキャナーを自動有効化
+                        if "cms" not in self.scanners:
+                            from wscan.scanners.cms import CmsScanner
+                            self.scanners["cms"] = CmsScanner(self)
+                except Exception:
+                    pass
 
             forms = await self.browser.find_forms()
             url_params = await self.browser.get_url_params()
@@ -2198,7 +2258,18 @@ class ScanEngine:
                 pass
 
     async def _phase_report_async(self):
-        """Async wrapper for report phase — runs A-1 AI analysis after report."""
+        """Async wrapper for report phase — runs A-1 AI analysis + J remediation after report."""
+        # J: LLM リメディエーション提案
+        if self.enable_ai_analysis and self.all_findings:
+            try:
+                from wscan.remediation import generate_fix
+                for finding in self.all_findings:
+                    if not getattr(finding, "ai_fix", ""):
+                        fix_text = await generate_fix(finding, self.payload_gen)
+                        finding.ai_fix = fix_text
+            except Exception:
+                pass
+
         self._phase_report()
         # A-1: post-scan AI analysis (if enabled)
         if self.enable_ai_analysis:
@@ -2207,13 +2278,28 @@ class ScanEngine:
                 await self.monitor.emit("ai_analysis", {"text": ai_text})
 
     def _save_evidence(self):
+        findings_dicts = [f.to_dict() for f in self.all_findings]
+
+        # I: 差分スキャン
+        diff_data: dict = {}
+        if self.previous_scan_dir:
+            try:
+                from wscan.diff_scan import load_previous, diff as _diff
+                old_findings = load_previous(self.previous_scan_dir)
+                diff_result = _diff(old_findings, findings_dicts)
+                diff_data = diff_result.to_dict()
+                console.print(f"  [cyan][Diff][/cyan] {diff_result.summary()}")
+            except Exception as exc:
+                console.print(f"  [yellow]差分スキャン失敗: {exc}[/yellow]")
+
         evidence = {
             "target": self.target_url,
             "scan_date": datetime.datetime.now().isoformat(),
             "checks": self.checks,
             "visited_urls": list(self.visited_urls),
-            "findings": [f.to_dict() for f in self.all_findings],
+            "findings": findings_dicts,
             "ctf_flags": [{"flag": flag, "source": src} for flag, src in self.ctf_found_flags],
+            "diff": diff_data,
             "attack_plans": [
                 {
                     "url": p.url,
@@ -2241,6 +2327,19 @@ class ScanEngine:
         import webbrowser
         from .report import ReportGenerator
         gen = ReportGenerator(self.output_dir)
+
+        # 差分スキャン結果を読み込む (evidence.json に書き込み済み)
+        diff_result = None
+        if self.previous_scan_dir:
+            try:
+                from wscan.diff_scan import load_previous, diff as _diff
+                old_findings = load_previous(self.previous_scan_dir)
+                findings_dicts = [f.to_dict() for f in self.all_findings]
+                diff_result = _diff(old_findings, findings_dicts)
+            except Exception:
+                pass
+
+        # F: マルチテンプレートレポート (audit + executive + developer)
         report_path = gen.generate(
             target=self.target_url,
             findings=self.all_findings,
@@ -2249,7 +2348,30 @@ class ScanEngine:
             attack_plans=self.attack_plans,
             ctf_flags=self.ctf_found_flags,
             page_graph=self.page_graph,
+            template="audit",
+            diff_result=diff_result,
         )
+        # Executive / Developer テンプレートも生成
+        for tmpl in ("executive", "developer"):
+            try:
+                gen.generate(
+                    target=self.target_url,
+                    findings=self.all_findings,
+                    visited_urls=list(self.visited_urls),
+                    checks=self.checks,
+                    attack_plans=self.attack_plans,
+                    ctf_flags=self.ctf_found_flags,
+                    page_graph=self.page_graph,
+                    template=tmpl,
+                    diff_result=diff_result,
+                )
+            except Exception:
+                pass
+
+        # D: CI/CD API — レポートパスを monitor に登録
+        if self.monitor:
+            self.monitor.api_report_path = str(report_path)
+
         if self.open_report:
             try:
                 webbrowser.open(report_path.as_uri())

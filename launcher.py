@@ -98,6 +98,7 @@ _ALL_CHECKS = {
     "ssrf":             "SSRF (サーバーサイドリクエストフォージェリ)",
     "graphql":          "GraphQL インジェクション",
     "jwt":              "JWT 脆弱性",
+    "cms":              "CMS 固有脆弱性 (WordPress/Drupal 等)",
 }
 
 _DEFAULT_CHECKS = ["sqli", "xss", "os"]
