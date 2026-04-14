@@ -397,6 +397,16 @@ Examples:
         ),
     )
 
+    # I: Diff scan — previous output directory
+    scan.add_argument(
+        "--previous-scan", metavar="DIR",
+        default=None,
+        help=(
+            "Path to a previous scan output directory (containing evidence.json). "
+            "When specified, the report will highlight new / fixed / persistent findings."
+        ),
+    )
+
     # Auto-config wizard
     _ac_default = _CFG.get("auto_config", False)
     _ac_group = scan.add_mutually_exclusive_group()
@@ -558,6 +568,21 @@ Examples:
                        default=_CFG.get("llm_provider", "ollama"))
     setup.add_argument("--ollama-model", default=_CFG.get("ollama_model", "llama3"), metavar="MODEL")
     setup.add_argument("--ollama-url", default=_CFG.get("ollama_url", "http://localhost:11434"), metavar="URL")
+
+    # H: Flow recorder subcommand
+    record = sub.add_parser(
+        "record",
+        help="Record browser interactions as a replayable JSON flow file",
+    )
+    record.add_argument("url", help="Start URL to navigate to when recording begins")
+    record.add_argument(
+        "--output", "-o", default="flows/recording.json", metavar="FILE",
+        help="Output path for the recorded flow JSON (default: flows/recording.json)",
+    )
+    record.add_argument(
+        "--headless", action="store_true", default=False,
+        help="Run in headless mode (not recommended for recording)",
+    )
 
     return parser.parse_args()
 
@@ -884,6 +909,8 @@ async def run_scan(args):
             auto_register_count=getattr(args, "auto_register_count", 2),
             # ①: SPA crawl
             spa_crawl=getattr(args, "spa_crawl", False),
+            # I: 差分スキャン
+            previous_scan_dir=getattr(args, "previous_scan", None),
         )
 
     if args.no_monitor:
@@ -1273,6 +1300,30 @@ async def run_setup(args):
     console.print(f"[dim]Crawl depth: {depth}[/dim]")
 
 
+async def run_record(args):
+    """H: ブラウザ操作を記録して JSON フロー ファイルに保存する。"""
+    from wscan.flow_recorder import FlowRecorder
+
+    recorder = FlowRecorder()
+    console.print(f"\n[bold cyan][FlowRecorder] 記録モード開始[/bold cyan]")
+    console.print(f"  対象 URL: [cyan]{args.url}[/cyan]")
+    console.print(f"  出力先:   [cyan]{args.output}[/cyan]")
+    console.print(f"  ブラウザ操作後、Ctrl+C で記録を終了してください。\n")
+    try:
+        steps = await recorder.record_interactive(
+            start_url=args.url,
+            output_path=args.output,
+            headless=getattr(args, "headless", False),
+        )
+        console.print(f"\n[bold green]✓ {len(steps)} ステップを保存しました:[/bold green] {args.output}")
+        console.print(
+            f"\n[dim]このフロー ファイルをスキャンで使用するには:[/dim]\n"
+            f"  python main.py scan <URL> --flows {args.output}"
+        )
+    except Exception as exc:
+        console.print(f"[red]記録中にエラーが発生しました: {exc}[/red]")
+
+
 def main():
     args = parse_args()
     try:
@@ -1284,6 +1335,8 @@ def main():
             asyncio.run(run_serve(args))
         elif args.command == "agent":
             asyncio.run(run_agent(args))
+        elif args.command == "record":
+            asyncio.run(run_record(args))
         else:
             asyncio.run(run_scan(args))
     except KeyboardInterrupt:

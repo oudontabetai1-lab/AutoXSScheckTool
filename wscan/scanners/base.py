@@ -82,6 +82,7 @@ class Finding:
     timestamp: float = field(default_factory=time.time)
     verified: bool = True            # False = could not reproduce on second attempt
     verification_note: str = ""      # Reason when verified=False
+    confidence: str = "tentative"   # "confirmed" | "likely" | "tentative"
 
     @property
     def cvss_vector(self) -> str:
@@ -92,6 +93,7 @@ class Finding:
         return _cvss_for(self.check_type)[1]
 
     def to_dict(self) -> dict:
+        from wscan.compliance_map import get_refs
         return {
             "check_type": self.check_type,
             "severity": self.severity,
@@ -110,6 +112,8 @@ class Finding:
             "cvss_score": self.cvss_score,
             "verified": self.verified,
             "verification_note": self.verification_note,
+            "confidence": self.confidence,
+            "compliance_refs": get_refs(self.check_type),
         }
 
 
@@ -212,6 +216,17 @@ class BaseScanner(ABC):
             return None  # duplicate
         self.engine._finding_dedup.add(dedup_key)
 
+        # Auto-assign confidence level
+        if dialog_confirmed:
+            confidence = "confirmed"
+        else:
+            resp_body = pair.get("response", {}).get("body", "") or ""
+            base_body = pair.get("baseline_response", {}).get("body", "") or ""
+            if resp_body and (len(resp_body) - len(base_body)) > 100:
+                confidence = "likely"
+            else:
+                confidence = "tentative"
+
         finding = Finding(
             check_type=self.CHECK_TYPE,
             severity=severity or self.SEVERITY,
@@ -224,6 +239,7 @@ class BaseScanner(ABC):
             screenshot_b64=screenshot_b64,
             dialog_confirmed=dialog_confirmed,
             dialog_message=dialog_message,
+            confidence=confidence,
         )
         self.findings.append(finding)
         self.engine.all_findings.append(finding)

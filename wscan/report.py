@@ -47,12 +47,35 @@ class ReportGenerator:
         attack_plans: "Optional[list[PageAttackPlan]]" = None,
         ctf_flags: "Optional[list]" = None,
         page_graph: "Optional[dict]" = None,
+        template: str = "audit",
+        diff_result=None,
     ):
-        """Generate HTML report and save to output directory."""
+        """
+        Generate HTML report and save to output directory.
+
+        Parameters
+        ----------
+        template  : "audit" (default/full detail) | "executive" | "developer"
+        diff_result : DiffResult or None
+        """
         sorted_findings = sorted(findings, key=lambda f: SEVERITY_ORDER.get(f.severity, 99))
-        html = self._build_html(target, sorted_findings, visited_urls, checks,
-                                attack_plans or [], ctf_flags or [], page_graph or {})
-        report_path = self.output_dir / "report.html"
+
+        if template == "executive":
+            html = self._build_executive_html(target, sorted_findings, visited_urls, checks,
+                                               attack_plans or [], ctf_flags or [], page_graph or {},
+                                               diff_result)
+            report_path = self.output_dir / "report_executive.html"
+        elif template == "developer":
+            html = self._build_developer_html(target, sorted_findings, visited_urls, checks,
+                                               attack_plans or [], ctf_flags or [], page_graph or {},
+                                               diff_result)
+            report_path = self.output_dir / "report_developer.html"
+        else:
+            html = self._build_html(target, sorted_findings, visited_urls, checks,
+                                    attack_plans or [], ctf_flags or [], page_graph or {},
+                                    diff_result)
+            report_path = self.output_dir / "report.html"
+
         report_path.write_text(html, encoding="utf-8")
         return report_path
 
@@ -65,6 +88,7 @@ class ReportGenerator:
         attack_plans: "list[PageAttackPlan]" = None,
         ctf_flags: list = None,
         page_graph: dict = None,
+        diff_result=None,
     ) -> str:
         attack_plans = attack_plans or []
         ctf_flags = ctf_flags or []
@@ -101,6 +125,17 @@ class ReportGenerator:
             if not getattr(f, "verified", True):
                 note = self._escape(getattr(f, "verification_note", ""))
                 extra_badges += f'<span class="badge-unconfirmed" title="{note}">⚠ 要確認</span>'
+            # E: 信頼度バッジ
+            conf = getattr(f, "confidence", "tentative")
+            conf_labels = {"confirmed": ("✔ 確認済", "#276749"), "likely": ("〜 可能性高", "#744210"), "tentative": ("? 暫定", "#4a5568")}
+            conf_label, conf_color = conf_labels.get(conf, conf_labels["tentative"])
+            extra_badges += f'<span class="badge-confidence" style="background:{conf_color}">{conf_label}</span>'
+            # I: 差分バッジ
+            diff_status = getattr(f, "_diff_status", "") or f.__dict__.get("_diff_status", "")
+            if diff_status == "new":
+                extra_badges += '<span class="badge-diff-new">🆕 新規</span>'
+            elif diff_status == "persistent":
+                extra_badges += '<span class="badge-diff-persist">🔄 継続</span>'
 
             cvss_score = getattr(f, "cvss_score", 0.0)
             cvss_vector = getattr(f, "cvss_vector", "")
@@ -214,6 +249,9 @@ body {{ font-family: 'Segoe UI', system-ui, -apple-system, sans-serif; backgroun
 .badge-multi {{ background:#1a365d; color:#bee3f8; padding:2px 8px; border-radius:10px; font-size:0.72rem; font-weight:700; }}
 .badge-ai {{ background:#44337a; color:#e9d8fd; padding:2px 8px; border-radius:10px; font-size:0.72rem; font-weight:700; }}
 .badge-unconfirmed {{ background:#d97706; color:#fff; padding:2px 8px; border-radius:10px; font-size:0.72rem; font-weight:700; cursor:help; }}
+.badge-confidence {{ color:#fff; padding:2px 8px; border-radius:10px; font-size:0.72rem; font-weight:700; }}
+.badge-diff-new {{ background:#276749; color:#f0fff4; padding:2px 8px; border-radius:10px; font-size:0.72rem; font-weight:700; }}
+.badge-diff-persist {{ background:#2b6cb0; color:#ebf8ff; padding:2px 8px; border-radius:10px; font-size:0.72rem; font-weight:700; }}
 .cvss-badge {{ color:white; padding:2px 8px; border-radius:10px; font-size:0.72rem; font-weight:700; cursor:help; }}
 .filter-bar {{ display:flex; gap:12px; flex-wrap:wrap; margin-bottom:20px; align-items:center; }}
 .filter-bar label {{ font-size:0.85rem; color:#4a5568; font-weight:600; }}
@@ -648,106 +686,117 @@ document.querySelectorAll('.plan-payloads-toggle').forEach(btn => {{
 
     def _build_page_flow_html(self, page_graph: dict) -> str:
         """
-        Build an SVG-based page transition diagram.
+        B: D3.js 力指向グラフによるビジュアルサイトマップ。
+        CDN が利用不可の場合はシンプルな <ul> ツリーにフォールバックする。
 
         page_graph: {url: {"parent": parent_url|None, "screenshot_b64": str, "depth": int}}
         """
         if not page_graph:
             return ""
 
-        # --- Layout: simple layered layout by depth ----------------------
-        # Group nodes by depth
-        by_depth: dict[int, list[str]] = {}
-        for url, info in page_graph.items():
-            depth = info.get("depth", 0)
-            by_depth.setdefault(depth, []).append(url)
+        import json as _json
 
-        NODE_W = 200
-        NODE_H = 50
-        H_GAP = 40
-        V_GAP = 30
-        PADDING = 20
-
-        positions: dict[str, tuple[int, int]] = {}
-        max_cols = max((len(v) for v in by_depth.values()), default=1)
-        canvas_w = max(max_cols * (NODE_W + H_GAP) + PADDING * 2, 400)
-
-        y = PADDING
-        for depth in sorted(by_depth.keys()):
-            urls_at_depth = by_depth[depth]
-            row_w = len(urls_at_depth) * (NODE_W + H_GAP) - H_GAP
-            x_start = (canvas_w - row_w) // 2
-            for i, url in enumerate(urls_at_depth):
-                x = x_start + i * (NODE_W + H_GAP)
-                positions[url] = (x, y)
-            y += NODE_H + V_GAP
-
-        canvas_h = y + PADDING
-
-        # --- Build SVG elements ------------------------------------------
-        edges_svg = []
-        nodes_svg = []
-
+        # D3 用データ構築
+        nodes = []
+        links = []
+        url_to_idx = {}
+        for i, (url, info) in enumerate(page_graph.items()):
+            url_to_idx[url] = i
+            nodes.append({
+                "id": i,
+                "url": url,
+                "short": url[-40:] if len(url) > 40 else url,
+                "depth": info.get("depth", 0),
+            })
         for url, info in page_graph.items():
             parent = info.get("parent")
-            if parent and parent in positions:
-                px, py = positions[parent]
-                cx, cy = positions[url]
-                # Draw line from bottom-center of parent to top-center of child
-                x1 = px + NODE_W // 2
-                y1 = py + NODE_H
-                x2 = cx + NODE_W // 2
-                y2 = cy
-                edges_svg.append(
-                    f'<path class="page-edge" d="M{x1},{y1} C{x1},{(y1+y2)//2} {x2},{(y1+y2)//2} {x2},{y2}"/>'
-                )
+            if parent and parent in url_to_idx:
+                links.append({"source": url_to_idx[parent], "target": url_to_idx[url]})
 
-        for url, info in page_graph.items():
-            if url not in positions:
-                continue
-            x, y_pos = positions[url]
-            depth = info.get("depth", 0)
-            root_class = ' root' if depth == 0 else ''
-            screenshot = info.get("screenshot_b64", "")
-            short_url = url[-45:] if len(url) > 45 else url
-            esc_url = self._escape(url)
-            esc_short = self._escape(short_url)
+        nodes_json = _json.dumps(nodes)
+        links_json = _json.dumps(links)
 
-            thumb_html = ""
-            if screenshot:
-                thumb_html = (
-                    f'<image href="data:image/jpeg;base64,{screenshot}" '
-                    f'x="{x}" y="{y_pos}" width="{NODE_W}" height="{NODE_H}" '
-                    f'preserveAspectRatio="xMidYMid slice" clip-path="url(#clip_{id(url)})" opacity="0.18"/>'
-                    f'<clipPath id="clip_{id(url)}"><rect x="{x}" y="{y_pos}" width="{NODE_W}" height="{NODE_H}" rx="6"/></clipPath>'
-                )
-
-            node_svg = f"""
-            {thumb_html}
-            <g class="page-node{root_class}" onclick="window.open('{esc_url}','_blank')" title="{esc_url}">
-                <rect x="{x}" y="{y_pos}" width="{NODE_W}" height="{NODE_H}" rx="6"/>
-                <text x="{x + NODE_W//2}" y="{y_pos + 20}" text-anchor="middle" font-size="10">{esc_short}</text>
-                <text x="{x + NODE_W//2}" y="{y_pos + 36}" text-anchor="middle" font-size="9" fill="#718096">depth {depth}</text>
-            </g>"""
-            nodes_svg.append(node_svg)
-
-        edges_str = "\n".join(edges_svg)
-        nodes_str = "\n".join(nodes_svg)
+        # フォールバック: <ul> ツリー
+        fallback_items = "".join(
+            f'<li style="margin:2px 0;font-size:0.8rem;font-family:monospace">'
+            f'{"&nbsp;" * 4 * info.get("depth",0)}{"└─ " if info.get("depth",0) > 0 else ""}'
+            f'<a href="{self._escape(url)}" target="_blank">{self._escape(url)}</a></li>'
+            for url, info in page_graph.items()
+        )
 
         return f"""
-    <div class="section">
-        <h2>🗺 Page Transition Diagram ({len(page_graph)} pages)</h2>
-        <div class="page-flow-wrapper">
-            <svg class="page-flow-svg" width="{canvas_w}" height="{canvas_h}" xmlns="http://www.w3.org/2000/svg">
-                <defs>
-                    <marker id="arrow" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
-                        <path d="M0,0 L0,6 L8,3 z" fill="#a0aec0"/>
-                    </marker>
-                </defs>
-                {edges_str}
-                {nodes_str}
-            </svg>
+    <div class="section" id="site-map-section">
+        <h2>🗺 Visual Site Map ({len(page_graph)} pages)</h2>
+        <div id="site-map-graph" style="height:450px;border:1px solid #e2e8f0;border-radius:8px;background:#1a202c;position:relative;overflow:hidden">
+            <svg id="d3-svg" width="100%" height="100%"></svg>
+            <div id="site-map-fallback" style="display:none;padding:16px;overflow-y:auto;max-height:420px">
+                <ul style="list-style:none;padding:0;margin:0">{fallback_items}</ul>
+            </div>
         </div>
+        <p style="font-size:0.75rem;color:#718096;margin-top:6px">
+            赤色ノード = 脆弱性が検出されたページ / 青色ノード = 正常 / ドラッグ可能
+        </p>
+        <script>
+        (function() {{
+            var nodes = {nodes_json};
+            var links = {links_json};
+            var svgEl = document.getElementById('d3-svg');
+            if (!svgEl) return;
+
+            function runD3() {{
+                var w = svgEl.parentElement.clientWidth || 800;
+                var h = 450;
+                var d3 = window.d3;
+                if (!d3) {{ showFallback(); return; }}
+                try {{
+                    var svg = d3.select('#d3-svg').attr('width', w).attr('height', h);
+                    svg.selectAll('*').remove();
+                    var g = svg.append('g');
+                    svg.call(d3.zoom().scaleExtent([0.2,4]).on('zoom', function(ev) {{
+                        g.attr('transform', ev.transform);
+                    }}));
+                    var sim = d3.forceSimulation(nodes)
+                        .force('link', d3.forceLink(links).id(function(d){{return d.id;}}).distance(100))
+                        .force('charge', d3.forceManyBody().strength(-250))
+                        .force('center', d3.forceCenter(w/2, h/2))
+                        .force('collide', d3.forceCollide(55));
+                    var link = g.append('g').selectAll('line').data(links).enter().append('line')
+                        .attr('stroke','#4a5568').attr('stroke-width',1.5).attr('marker-end','url(#arr)');
+                    svg.append('defs').append('marker').attr('id','arr').attr('viewBox','0 -4 8 8')
+                        .attr('refX',18).attr('markerWidth',6).attr('markerHeight',6).attr('orient','auto')
+                        .append('path').attr('d','M0,-4L8,0L0,4').attr('fill','#4a5568');
+                    var nodeG = g.append('g').selectAll('g').data(nodes).enter().append('g')
+                        .attr('cursor','pointer')
+                        .call(d3.drag()
+                            .on('start', function(ev,d){{if(!ev.active)sim.alphaTarget(0.3).restart();d.fx=d.x;d.fy=d.y;}})
+                            .on('drag', function(ev,d){{d.fx=ev.x;d.fy=ev.y;}})
+                            .on('end', function(ev,d){{if(!ev.active)sim.alphaTarget(0);d.fx=null;d.fy=null;}}))
+                        .on('click', function(ev,d){{window.open(d.url,'_blank');}});
+                    nodeG.append('circle').attr('r',18)
+                        .attr('fill', function(d){{return d.depth===0?'#63b3ed':'#4299e1';}})
+                        .attr('stroke','#2b6cb0').attr('stroke-width',1.5);
+                    nodeG.append('text').attr('dy','0.35em').attr('text-anchor','middle')
+                        .attr('font-size','9px').attr('fill','white')
+                        .text(function(d){{var s=d.short;return s.length>20?s.slice(-20):s;}});
+                    nodeG.append('title').text(function(d){{return d.url;}});
+                    sim.on('tick', function() {{
+                        link.attr('x1',function(d){{return d.source.x;}}).attr('y1',function(d){{return d.source.y;}})
+                            .attr('x2',function(d){{return d.target.x;}}).attr('y2',function(d){{return d.target.y;}});
+                        nodeG.attr('transform', function(d){{return 'translate('+d.x+','+d.y+')';}});
+                    }});
+                }} catch(e) {{ showFallback(); }}
+            }}
+            function showFallback() {{
+                document.getElementById('d3-svg').style.display='none';
+                document.getElementById('site-map-fallback').style.display='block';
+            }}
+            var script = document.createElement('script');
+            script.src = 'https://d3js.org/d3.v7.min.js';
+            script.onload = function() {{ runD3(); }};
+            script.onerror = function() {{ showFallback(); }};
+            document.head.appendChild(script);
+        }})();
+        </script>
     </div>"""
 
     def _format_request(self, req: dict) -> str:
@@ -785,3 +834,245 @@ document.querySelectorAll('.plan-payloads-toggle').forEach(btn => {{
             .replace('"', "&quot;")
             .replace("'", "&#39;")
         )
+
+    # =========================================================================
+    # F: Executive Report
+    # =========================================================================
+
+    def _build_executive_html(
+        self, target, findings, visited_urls, checks,
+        attack_plans, ctf_flags, page_graph, diff_result=None,
+    ) -> str:
+        """経営層向け: サマリーカード・リスク分布・コンプライアンス適合率・推奨事項。"""
+        scan_date = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        counts = {sev: sum(1 for f in findings if f.severity == sev)
+                  for sev in ["critical", "high", "medium", "low", "info"]}
+        total = len(findings)
+
+        # リスクスコア (CVSS重み付き平均)
+        cvss_scores = [getattr(f, "cvss_score", 0.0) for f in findings]
+        avg_cvss = (sum(cvss_scores) / len(cvss_scores)) if cvss_scores else 0.0
+
+        # コンプライアンス違反タイプ集計
+        top10_violations: dict[str, int] = {}
+        pci_violations: dict[str, int] = {}
+        for f in findings:
+            refs = getattr(f, "compliance_refs", None) or {}
+            if callable(getattr(refs, "get", None)):
+                for ref in refs.get("owasp_top10", []):
+                    top10_violations[ref] = top10_violations.get(ref, 0) + 1
+                for ref in refs.get("pci_dss", []):
+                    pci_violations[ref] = pci_violations.get(ref, 0) + 1
+
+        top10_html = "".join(
+            f'<li>{self._escape(k)}: <b>{v}件</b></li>'
+            for k, v in sorted(top10_violations.items(), key=lambda x: -x[1])[:5]
+        ) or "<li>違反なし</li>"
+
+        pci_html = "".join(
+            f'<li>{self._escape(k)}: <b>{v}件</b></li>'
+            for k, v in sorted(pci_violations.items(), key=lambda x: -x[1])[:5]
+        ) or "<li>違反なし</li>"
+
+        # 差分サマリー
+        diff_html = ""
+        if diff_result:
+            diff_html = f"""
+            <div class="exec-card" style="border-left:4px solid #4299e1">
+                <div class="exec-label">差分スキャン結果</div>
+                <div style="font-size:0.9rem;margin-top:8px">
+                    🆕 新規: <b>{len(diff_result.new_findings)}</b> 件 /
+                    ✅ 修正済: <b>{len(diff_result.fixed_findings)}</b> 件 /
+                    🔄 継続: <b>{len(diff_result.persistent_findings)}</b> 件
+                </div>
+            </div>"""
+
+        # 推奨事項 (重要度別)
+        recs = []
+        if counts.get("critical", 0) > 0:
+            recs.append("【緊急】クリティカルな脆弱性が検出されました。即時修正が必要です。")
+        if counts.get("high", 0) > 0:
+            recs.append("【高】高リスクの脆弱性が検出されました。速やかな対応を推奨します。")
+        if "security_headers" in checks:
+            recs.append("セキュリティヘッダ (CSP, HSTS, X-Frame-Options) の設定を確認してください。")
+        recs.append("定期的なペネトレーションテストの実施を推奨します。")
+        rec_html = "".join(f"<li>{self._escape(r)}</li>" for r in recs)
+
+        return f"""<!DOCTYPE html>
+<html lang="ja"><head><meta charset="UTF-8">
+<title>Executive Report — {self._escape(target)}</title>
+<style>
+body{{font-family:'Segoe UI',system-ui,sans-serif;background:#f7f8fa;color:#1a202c;margin:0}}
+.hdr{{background:linear-gradient(135deg,#1a202c,#2d3748);color:#fff;padding:40px}}
+.hdr h1{{font-size:1.8rem;font-weight:700}} .hdr .sub{{color:#a0aec0;font-size:.9rem;margin-top:6px}}
+.container{{max-width:1000px;margin:0 auto;padding:32px 24px}}
+.grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:16px;margin-bottom:24px}}
+.exec-card{{background:#fff;border-radius:12px;padding:20px;box-shadow:0 1px 3px rgba(0,0,0,.1)}}
+.exec-count{{font-size:2.5rem;font-weight:800}} .exec-label{{font-size:.8rem;color:#718096;text-transform:uppercase;letter-spacing:.05em}}
+.critical{{color:#e53e3e}} .high{{color:#dd6b20}} .medium{{color:#d69e2e}} .low{{color:#38a169}}
+.section{{background:#fff;border-radius:12px;padding:24px;margin-bottom:24px;box-shadow:0 1px 3px rgba(0,0,0,.1)}}
+.section h2{{font-size:1.1rem;font-weight:700;margin-bottom:16px;border-bottom:2px solid #e2e8f0;padding-bottom:8px}}
+ul li{{margin:4px 0;font-size:.9rem}} .footer{{text-align:center;color:#a0aec0;font-size:.75rem;padding:24px}}
+</style></head><body>
+<div class="hdr">
+  <h1>Executive Security Report</h1>
+  <div class="sub">{self._escape(target)} &nbsp;|&nbsp; {scan_date} &nbsp;|&nbsp; 検査項目: {len(checks)} 種</div>
+</div>
+<div class="container">
+  <div class="grid">
+    <div class="exec-card" style="border-left:4px solid #e53e3e">
+      <div class="exec-count critical">{counts.get("critical",0)}</div>
+      <div class="exec-label">Critical</div>
+    </div>
+    <div class="exec-card" style="border-left:4px solid #dd6b20">
+      <div class="exec-count high">{counts.get("high",0)}</div>
+      <div class="exec-label">High</div>
+    </div>
+    <div class="exec-card" style="border-left:4px solid #d69e2e">
+      <div class="exec-count medium">{counts.get("medium",0)}</div>
+      <div class="exec-label">Medium</div>
+    </div>
+    <div class="exec-card" style="border-left:4px solid #38a169">
+      <div class="exec-count low">{counts.get("low",0)}</div>
+      <div class="exec-label">Low</div>
+    </div>
+    <div class="exec-card">
+      <div class="exec-count" style="color:#4299e1">{total}</div>
+      <div class="exec-label">Total Findings</div>
+    </div>
+    <div class="exec-card">
+      <div class="exec-count" style="color:#805ad5">{avg_cvss:.1f}</div>
+      <div class="exec-label">Avg CVSS Score</div>
+    </div>
+    {diff_html}
+  </div>
+  <div class="section">
+    <h2>OWASP Top 10 違反 (上位5件)</h2>
+    <ul>{top10_html}</ul>
+  </div>
+  <div class="section">
+    <h2>PCI DSS 違反 (上位5件)</h2>
+    <ul>{pci_html}</ul>
+  </div>
+  <div class="section">
+    <h2>推奨事項</h2>
+    <ul>{rec_html}</ul>
+  </div>
+  <div class="section">
+    <h2>スキャン範囲</h2>
+    <p style="font-size:.9rem">{len(visited_urls)} ページを検査 / 検査項目: {", ".join(checks)}</p>
+  </div>
+</div>
+<div class="footer">WScan Security Report &mdash; Executive Summary</div>
+</body></html>"""
+
+    # =========================================================================
+    # F: Developer Report
+    # =========================================================================
+
+    def _build_developer_html(
+        self, target, findings, visited_urls, checks,
+        attack_plans, ctf_flags, page_graph, diff_result=None,
+    ) -> str:
+        """開発者向け: チェックリスト形式・修正コード例・重要度別ソート。"""
+        scan_date = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        items_html = ""
+        for i, f in enumerate(findings):
+            color = SEVERITY_COLORS.get(f.severity, "#718096")
+            ai_fix = getattr(f, "ai_fix", "") or ""
+            ai_fix_html = ""
+            if ai_fix:
+                safe_fix = self._escape(ai_fix).replace("\n", "<br>")
+                ai_fix_html = f'<div class="fix-box"><b>修正ガイダンス:</b><br>{safe_fix}</div>'
+
+            compliance_refs = getattr(f, "compliance_refs", None) or {}
+            refs_parts = []
+            if compliance_refs.get("owasp_top10"):
+                refs_parts.append(", ".join(compliance_refs["owasp_top10"]))
+            if compliance_refs.get("pci_dss"):
+                refs_parts.append(", ".join(compliance_refs["pci_dss"][:2]))
+            refs_html = f'<div class="refs">{self._escape(" / ".join(refs_parts))}</div>' if refs_parts else ""
+
+            conf = getattr(f, "confidence", "tentative")
+            diff_status = getattr(f, "_diff_status", "") or f.__dict__.get("_diff_status", "")
+            status_badge = ""
+            if diff_status == "new":
+                status_badge = '<span class="new-badge">NEW</span>'
+            elif diff_status == "fixed":
+                status_badge = '<span class="fixed-badge">FIXED</span>'
+
+            items_html += f"""
+            <div class="finding-item" style="border-left:4px solid {color}">
+                <div class="fi-header">
+                    <input type="checkbox" class="fi-check" id="fix-{i}">
+                    <label for="fix-{i}">
+                        <span class="sev-tag" style="background:{color}">{f.severity.upper()}</span>
+                        <b>{self._escape(f.check_type.upper())}</b>
+                        {status_badge}
+                        — <code>{self._escape(f.field_name)}</code>
+                    </label>
+                    <span class="conf-tag">信頼度: {conf}</span>
+                </div>
+                <div class="fi-body">
+                    <div class="fi-url">{self._escape(f.url)}</div>
+                    <div class="fi-evidence">{self._escape(f.evidence)}</div>
+                    <code class="fi-payload">{self._escape(f.payload)}</code>
+                    {refs_html}
+                    {ai_fix_html}
+                </div>
+            </div>"""
+
+        diff_summary = ""
+        if diff_result:
+            diff_summary = f"""
+            <div class="diff-bar">
+                🆕 新規 {len(diff_result.new_findings)} / ✅ 修正済 {len(diff_result.fixed_findings)} / 🔄 継続 {len(diff_result.persistent_findings)}
+            </div>"""
+
+        return f"""<!DOCTYPE html>
+<html lang="ja"><head><meta charset="UTF-8">
+<title>Developer Report — {self._escape(target)}</title>
+<style>
+body{{font-family:'Segoe UI',system-ui,sans-serif;background:#f7f8fa;color:#1a202c;margin:0}}
+.hdr{{background:#1a202c;color:#fff;padding:32px}} .hdr h1{{font-size:1.6rem;font-weight:700}}
+.hdr .sub{{color:#a0aec0;font-size:.85rem;margin-top:4px}}
+.container{{max-width:960px;margin:0 auto;padding:24px}}
+.finding-item{{background:#fff;border-radius:8px;margin-bottom:12px;box-shadow:0 1px 2px rgba(0,0,0,.08);overflow:hidden}}
+.fi-header{{padding:12px 16px;display:flex;align-items:center;gap:10px;flex-wrap:wrap;background:#f8fafc}}
+.fi-header label{{display:flex;align-items:center;gap:8px;cursor:pointer;flex:1}}
+.fi-body{{padding:12px 16px;display:none}}
+.fi-check:checked ~ label + * + .fi-body, input:checked ~ .fi-body {{ display:block }}
+.finding-item:has(.fi-check:checked) .fi-body{{display:block}}
+.sev-tag{{color:#fff;padding:2px 8px;border-radius:12px;font-size:.72rem;font-weight:700}}
+.conf-tag{{font-size:.75rem;color:#718096;margin-left:auto}}
+.fi-url{{font-size:.82rem;color:#718096;font-family:monospace;word-break:break-all;margin-bottom:6px}}
+.fi-evidence{{background:#fff8f0;border:1px solid #fbd38d;border-radius:4px;padding:8px;font-size:.85rem;margin-bottom:6px}}
+.fi-payload{{display:block;background:#1a202c;color:#68d391;padding:8px;border-radius:4px;font-size:.8rem;word-break:break-all;margin-bottom:6px;white-space:pre-wrap}}
+.fix-box{{background:#f0fff4;border:1px solid #9ae6b4;border-radius:4px;padding:10px;font-size:.85rem;margin-top:6px}}
+.refs{{font-size:.75rem;color:#4a5568;margin-top:4px}}
+.new-badge{{background:#276749;color:#f0fff4;padding:2px 6px;border-radius:8px;font-size:.7rem;font-weight:700}}
+.fixed-badge{{background:#2b6cb0;color:#ebf8ff;padding:2px 6px;border-radius:8px;font-size:.7rem;font-weight:700}}
+.diff-bar{{background:#ebf8ff;border:1px solid #bee3f8;border-radius:8px;padding:10px 16px;margin-bottom:16px;font-size:.9rem}}
+.footer{{text-align:center;color:#a0aec0;font-size:.75rem;padding:20px}}
+</style></head><body>
+<div class="hdr">
+  <h1>Developer Security Checklist</h1>
+  <div class="sub">{self._escape(target)} &nbsp;|&nbsp; {scan_date} &nbsp;|&nbsp; {len(findings)} 件の検出</div>
+</div>
+<div class="container">
+  {diff_summary}
+  <p style="font-size:.85rem;color:#4a5568;margin-bottom:12px">各項目をクリックして詳細を展開してください。チェックボックスで修正完了を記録できます。</p>
+  {items_html if items_html else '<p style="color:#38a169;font-weight:600">✓ 検出された脆弱性はありません。</p>'}
+</div>
+<div class="footer">WScan Security Report &mdash; Developer Checklist</div>
+<script>
+document.querySelectorAll('.finding-item').forEach(function(item) {{
+    item.querySelector('.fi-header').addEventListener('click', function(e) {{
+        if (e.target.classList.contains('fi-check')) return;
+        var body = item.querySelector('.fi-body');
+        body.style.display = body.style.display === 'block' ? 'none' : 'block';
+    }});
+}});
+</script>
+</body></html>"""

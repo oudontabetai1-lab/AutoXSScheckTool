@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Set, Any, Optional
 
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 
 
@@ -41,6 +41,11 @@ class MonitorServer:
         self.scan_request_data: dict = {}
         # LLM config for auto-config HTTP endpoint (set by main.py after init)
         self.llm_cfg: dict = {}
+        # D: CI/CD REST API state
+        self.api_scan_id: str = ""
+        self.api_scan_status: str = "idle"   # idle / scanning / done / error
+        self.api_findings: list[dict] = []   # emit_finding() で自動蓄積
+        self.api_report_path: Optional[str] = None
 
     def _create_app(self) -> FastAPI:
         app = FastAPI(title="WScan Monitor", docs_url=None, redoc_url=None)
@@ -118,6 +123,81 @@ class MonitorServer:
             except Exception as exc:
                 return JSONResponse({"error": str(exc)}, status_code=500)
 
+        # ── D: CI/CD REST API ─────────────────────────────────────────────────
+
+        @app.post("/api/v1/scan")
+        async def api_scan_start(request: Request):
+            """
+            スキャン開始エンドポイント。
+            Body: {"config": {url, checks, depth, ...}}  (config キーはなくても可)
+            Returns: {"status": "accepted", "scan_id": "<timestamp>"}
+            """
+            try:
+                body = await request.json()
+            except Exception:
+                return JSONResponse({"error": "Invalid JSON"}, status_code=400)
+
+            config = body.get("config", body)
+            if not config.get("url"):
+                return JSONResponse({"error": "url is required"}, status_code=400)
+
+            self.scan_request_data = config
+            self.scan_request_event.set()
+            self.api_scan_id = str(int(time.time()))
+            self.api_scan_status = "scanning"
+            self.api_findings = []
+            return JSONResponse({
+                "status": "accepted",
+                "scan_id": self.api_scan_id,
+                "message": "スキャンを開始しました。/api/v1/scan/status でステータスを確認してください。",
+            })
+
+        @app.get("/api/v1/scan/status")
+        async def api_scan_status():
+            """スキャンステータスを返す。"""
+            return JSONResponse({
+                "status": self.api_scan_status,
+                "scan_id": self.api_scan_id,
+                "findings_count": len(self.api_findings),
+            })
+
+        @app.get("/api/v1/scan/findings")
+        async def api_scan_findings():
+            """検出結果を JSON で返す (スキャン中も随時取得可)。"""
+            return JSONResponse({
+                "scan_id": self.api_scan_id,
+                "status": self.api_scan_status,
+                "findings": self.api_findings,
+                "findings_count": len(self.api_findings),
+            })
+
+        @app.get("/api/v1/scan/report")
+        async def api_scan_report():
+            """生成済み HTML レポートをファイルとして返す。"""
+            if not self.api_report_path or not Path(self.api_report_path).exists():
+                return JSONResponse(
+                    {"error": "レポートがまだ生成されていません。スキャン完了後に再試行してください。"},
+                    status_code=404,
+                )
+            return FileResponse(
+                self.api_report_path,
+                media_type="text/html",
+                filename="report.html",
+            )
+
+        @app.get("/api/v1/scan/results")
+        async def api_scan_results():
+            """findings + metadata をまとめて返す (CI/CD パイプライン用)。"""
+            return JSONResponse({
+                "scan_id": self.api_scan_id,
+                "status": self.api_scan_status,
+                "findings": self.api_findings,
+                "findings_count": len(self.api_findings),
+                "critical_count": sum(1 for f in self.api_findings if f.get("severity") == "critical"),
+                "high_count": sum(1 for f in self.api_findings if f.get("severity") == "high"),
+                "report_available": bool(self.api_report_path and Path(self.api_report_path).exists()),
+            })
+
         return app
 
     # ------------------------------------------------------------------
@@ -176,9 +256,18 @@ class MonitorServer:
         self.clients -= dead
 
     async def emit_status(self, message: str, state: str = "running"):
+        # D: CI/CD API — ステータス自動更新
+        if state == "done":
+            self.api_scan_status = "done"
+        elif state == "error":
+            self.api_scan_status = "error"
+        elif state == "running" and self.api_scan_status == "idle":
+            self.api_scan_status = "scanning"
         await self.emit("status", {"message": message, "state": state})
 
     async def emit_finding(self, finding: dict):
+        # D: CI/CD API — findings を自動蓄積
+        self.api_findings.append(finding)
         await self.emit("finding", finding)
 
     async def emit_screenshot(self, screenshot_b64: str, label: str = ""):

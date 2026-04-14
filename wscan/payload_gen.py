@@ -213,9 +213,11 @@ class PayloadGenerator:
 
         Priority:
         1. Custom payloads (if provided)
-        2. LLM-generated payloads
-        3. Default payloads from YAML
+        2. LLM-generated payloads + auto encoded variants
+        3. Default payloads + auto encoded variants
         """
+        from wscan.payload_encoder import expand_payloads, ENCODING_EXAMPLES
+
         if custom_payloads:
             return custom_payloads
 
@@ -224,7 +226,11 @@ class PayloadGenerator:
         if self.provider != "none" and await self._check_llm_available():
             template = self.prompt_templates.get(check_type, "")
             if template:
+                # エンコード例を LLM プロンプトに注入して Ollama の出力を豊かにする
+                encoding_hint = ENCODING_EXAMPLES.get(check_type, "")
                 prompt = template.format(field_name=field_name, url=url)
+                if encoding_hint:
+                    prompt = encoding_hint + "\n" + prompt
 
                 # ── Web intelligence enrichment ──────────────────────────
                 if self.enable_web_browsing:
@@ -247,9 +253,15 @@ class PayloadGenerator:
                     console.print(
                         f"[dim]LLM generated {len(llm_payloads)} payloads for {field_name}[/dim]"
                     )
-                    return llm_payloads + [p for p in defaults if p not in llm_payloads]
+                    # LLM ペイロードをエンコードバリアントで展開
+                    expanded = expand_payloads(llm_payloads, check_type, max_variants_per_payload=2)
+                    # デフォルトのうち未収録のものを末尾に追加
+                    seen = set(expanded)
+                    tail = [p for p in defaults if p not in seen]
+                    return expanded + tail
 
-        return defaults
+        # LLM なし/失敗 → デフォルトペイロードをエンコード展開して返す
+        return expand_payloads(defaults, check_type, max_variants_per_payload=1, max_total=40)
 
     async def _call_llm(self, prompt: str) -> Optional[list[str]]:
         """Route to the appropriate LLM backend."""
