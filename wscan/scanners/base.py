@@ -245,4 +245,6 @@ class BaseScanner(ABC):
         self.engine.all_findings.append(finding)
         if self.monitor:
             await self.monitor.emit_finding(finding.to_dict())
+            # リアルタイムサイトマップに脆弱性ノードをマーク
+            await self.monitor.emit("page_graph_vuln", {"url": url})
         return finding
