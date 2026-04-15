@@ -1995,8 +1995,20 @@ function handleEvent(event) {
     case 'phase': {
       const ph = data.phase;
       updatePhaseBar(ph);
-      // Record phase start time for duration calculation
       if (['crawl','plan','attack','report'].includes(ph)) {
+        // Close timing of previous phase when a new one starts
+        const PHASE_ORDER = ['crawl','plan','attack','report'];
+        const prevIdx = PHASE_ORDER.indexOf(ph) - 1;
+        if (prevIdx >= 0) {
+          const prevPh = PHASE_ORDER[prevIdx];
+          if (state.phaseStartTs[prevPh] != null && state.phaseTimes[prevPh] == null) {
+            const durSec = (timestamp * 1000 - state.phaseStartTs[prevPh]) / 1000;
+            state.phaseTimes[prevPh] = durSec;
+            updatePhaseTimingStrip();
+            const timingEl = document.getElementById('ph-timing-' + prevPh);
+            if (timingEl) timingEl.textContent = formatDuration(durSec);
+          }
+        }
         state.phaseStartTs[ph] = timestamp * 1000;
         if (ph === 'attack') state.attackStartTime = timestamp * 1000;
       }
@@ -2137,6 +2149,16 @@ function handleEvent(event) {
       state.scanDone = true;
       document.getElementById('statRemain').textContent = '完了';
       document.getElementById('statETA').textContent = '—';
+      // Close timing for any phase that started but didn't get a "next phase" event
+      { ['crawl','plan','attack','report'].forEach(p => {
+          if (state.phaseStartTs[p] != null && state.phaseTimes[p] == null) {
+            const durSec = (timestamp * 1000 - state.phaseStartTs[p]) / 1000;
+            state.phaseTimes[p] = durSec;
+            const tEl = document.getElementById('ph-timing-' + p);
+            if (tEl) tEl.textContent = formatDuration(durSec);
+          }
+        });
+        updatePhaseTimingStrip(); }
       break;
 
     case 'plan_review':
@@ -2960,12 +2982,14 @@ function updatePhaseTimingStrip() {
 
 // ─── Sub-phase display ───────────────────────────────────────────
 function _showSubphase(sub, label) {
+  // sub is already '3a','3b','3c','3d' — do NOT prepend another '3'
+  const text = `Phase ${sub}` + (label && label !== sub ? ` — ${label}` : '');
   // In the phase bar
   const pb = document.getElementById('subphaseBadge');
-  if (pb) { pb.textContent = `Phase 3${sub}` + (label && label !== sub ? ` — ${label}` : ''); pb.style.display = ''; }
+  if (pb) { pb.textContent = text; pb.style.display = ''; }
   // In the progress tab
   const dp = document.getElementById('dpSubphase');
-  if (dp) { dp.textContent = `Phase 3${sub}` + (label && label !== sub ? ` — ${label}` : ''); dp.style.display = ''; }
+  if (dp) { dp.textContent = text; dp.style.display = ''; }
   // Annotate the Attack phase dot
   const phEl = document.getElementById('ph-attack');
   if (phEl) {
@@ -2976,7 +3000,7 @@ function _showSubphase(sub, label) {
       subEl.style.cssText = 'font-size:.6rem;color:#c4b5fd;margin-left:4px';
       phEl.appendChild(subEl);
     }
-    subEl.textContent = `(3${sub})`;
+    subEl.textContent = `(${sub})`;
   }
 }
 
