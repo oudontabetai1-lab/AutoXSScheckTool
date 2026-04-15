@@ -125,10 +125,16 @@ class BaseScanner(ABC):
 
     def __init__(self, engine: "ScanEngine"):
         self.engine = engine
-        self.browser = engine.browser
         self.monitor = engine.monitor
         self.payload_gen = engine.payload_gen
         self.findings: list[Finding] = []
+
+    @property
+    def browser(self):
+        """現在の並列ワーカーに対応するブラウザを動的に返す。
+        _CURRENT_WORKER ContextVar が設定されている（=ワーカータスク内）なら
+        WorkerBrowser を、それ以外はメインブラウザを返す。"""
+        return self.engine.browser
 
     @abstractmethod
     async def scan_field(
@@ -245,4 +251,6 @@ class BaseScanner(ABC):
         self.engine.all_findings.append(finding)
         if self.monitor:
             await self.monitor.emit_finding(finding.to_dict())
+            # リアルタイムサイトマップに脆弱性ノードをマーク
+            await self.monitor.emit("page_graph_vuln", {"url": url})
         return finding

@@ -591,6 +591,90 @@ body {
 .flow-step-del { background:none; border:none; color:var(--text-muted); cursor:pointer; font-size:0.9rem; }
 .flow-step-del:hover { color:var(--critical); }
 .flow-add-step { font-size:0.78rem; color:var(--accent); background:none; border:none; cursor:pointer; padding:2px 4px; }
+
+/* ─── Site Map Panel ─────────────────────────────────────────── */
+#sitemapContainer {
+  width: 100%; height: 100%;
+  background: #0a0c0f;
+  position: relative;
+  flex: 1;
+  overflow: hidden;
+}
+#sitemapSvg { width: 100%; height: 100%; }
+#sitemapFallback {
+  display: none; padding: 12px;
+  overflow-y: auto; height: 100%;
+  font-size: .75rem; color: var(--text-muted);
+}
+.sm-node-tooltip {
+  position: absolute; background: rgba(13,17,23,0.95);
+  border: 1px solid var(--border); border-radius: 6px;
+  padding: 6px 10px; font-size: .72rem; pointer-events: none;
+  display: none; z-index: 10; max-width: 300px; word-break: break-all;
+}
+
+/* ─── Phase Timing Strip ─────────────────────────────────────── */
+.phase-timing-strip {
+  display: flex; gap: 12px; flex-wrap: wrap;
+  padding: 4px 16px; background: var(--surface2);
+  border-bottom: 1px solid var(--border);
+  font-size: .72rem; color: var(--text-muted);
+  flex-shrink: 0;
+}
+.phase-timing-strip strong { color: var(--text); }
+.ph-timing { font-size: .62rem; color: var(--text-muted); margin-left: 2px; }
+
+/* ─── Sub-phase Badge ────────────────────────────────────────── */
+.subphase-badge {
+  font-size: .68rem; font-weight: 800;
+  padding: 2px 8px; border-radius: 10px;
+  background: rgba(124,58,237,.2); color: #c4b5fd;
+  border: 1px solid #7c3aed;
+  animation: phasePulse 1s infinite;
+}
+
+/* ─── Check Progress Bars ────────────────────────────────────── */
+.check-progress-bar-wrap {
+  display: flex; align-items: center; gap: 6px; margin-bottom: 3px;
+}
+.cp-label {
+  width: 60px; font-size: .65rem; text-transform: uppercase;
+  letter-spacing: .04em; color: var(--text-muted); flex-shrink: 0;
+  text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.cp-bar-bg {
+  flex: 1; height: 5px; background: var(--surface2);
+  border-radius: 3px; overflow: hidden;
+}
+.cp-bar-fill {
+  height: 100%; background: var(--accent);
+  border-radius: 3px; transition: width .3s ease;
+}
+.cp-count { font-size: .65rem; color: var(--text-muted); width: 32px; text-align: right; flex-shrink: 0; }
+
+/* ─── Attack Speed Pill ──────────────────────────────────────── */
+.attack-speed-pill {
+  display: inline-flex; align-items: center; gap: 5px;
+  background: var(--surface2); border: 1px solid var(--border);
+  border-radius: 12px; padding: 2px 10px; font-size: .72rem;
+}
+.attack-speed-pill .speed-val { color: var(--accent); font-weight: 700; }
+
+/* ─── Center Tab Bar ─────────────────────────────────────────── */
+.center-tab-bar {
+  display: flex; border-bottom: 1px solid var(--border); flex-shrink: 0;
+  background: var(--surface);
+}
+.center-tab {
+  flex: 1; text-align: center; padding: 7px 4px;
+  font-size: .72rem; font-weight: 600;
+  color: var(--text-muted); cursor: pointer;
+  border-bottom: 2px solid transparent;
+  text-transform: uppercase; letter-spacing: .05em;
+}
+.center-tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+.center-tab-view { display: none; flex-direction: column; flex: 1; overflow: hidden; }
+.center-tab-view.active { display: flex; }
 </style>
 </head>
 <body>
@@ -1055,14 +1139,20 @@ body {
 </div>
 
 <!-- ─── Phase Timeline ──────────────────────────────────────── -->
-<div id="phaseBar" style="display:flex;align-items:center;gap:8px;padding:6px 16px;background:#1e1e2e;border-bottom:1px solid #333">
-  <div class="ph-step" id="ph-crawl"><span class="ph-dot"></span><span class="ph-label">Crawl</span></div>
+<div id="phaseBar" style="display:flex;align-items:center;gap:8px;padding:6px 16px;background:#1e1e2e;border-bottom:1px solid #333;flex-wrap:wrap">
+  <div class="ph-step" id="ph-crawl"><span class="ph-dot"></span><div style="display:flex;flex-direction:column;line-height:1.2"><span class="ph-label">Crawl</span><span class="ph-timing" id="ph-timing-crawl"></span></div></div>
   <div class="ph-arrow">→</div>
-  <div class="ph-step" id="ph-plan"><span class="ph-dot"></span><span class="ph-label">Plan</span></div>
+  <div class="ph-step" id="ph-plan"><span class="ph-dot"></span><div style="display:flex;flex-direction:column;line-height:1.2"><span class="ph-label">Plan</span><span class="ph-timing" id="ph-timing-plan"></span></div></div>
   <div class="ph-arrow">→</div>
-  <div class="ph-step" id="ph-attack"><span class="ph-dot"></span><span class="ph-label">Attack</span></div>
+  <div class="ph-step" id="ph-attack"><span class="ph-dot"></span><div style="display:flex;flex-direction:column;line-height:1.2"><span class="ph-label">Attack</span><span class="ph-timing" id="ph-timing-attack"></span></div></div>
   <div class="ph-arrow">→</div>
-  <div class="ph-step" id="ph-report"><span class="ph-dot"></span><span class="ph-label">Report</span></div>
+  <div class="ph-step" id="ph-report"><span class="ph-dot"></span><div style="display:flex;flex-direction:column;line-height:1.2"><span class="ph-label">Report</span><span class="ph-timing" id="ph-timing-report"></span></div></div>
+  <div style="margin-left:auto;display:flex;align-items:center;gap:8px">
+    <span id="subphaseBadge" class="subphase-badge" style="display:none">—</span>
+    <span class="attack-speed-pill" id="speedPill" style="display:none">
+      <span class="speed-val" id="speedValue">—</span> fields/min
+    </span>
+  </div>
 </div>
 
 <!-- ─── Progress ───────────────────────────────────────────── -->
@@ -1099,31 +1189,79 @@ body {
     </div>
   </div>
 
-  <!-- Center: Screenshot + Current Test -->
+  <!-- Center: Tabbed view (Browser | Site Map | Progress) -->
   <div class="panel center-panel" style="border-right:1px solid var(--border)">
-    <div class="panel-header">Live Browser View</div>
-    <div class="screenshot-area" id="screenshotArea">
-      <div class="screenshot-placeholder">
-        <div class="icon">🔍</div>
-        <p>Browser screenshots will appear here</p>
+
+    <!-- Tab bar -->
+    <div class="center-tab-bar">
+      <div class="center-tab active" id="ctab-browser" onclick="switchCenterTab('browser',this)">Live Browser</div>
+      <div class="center-tab" id="ctab-sitemap" onclick="switchCenterTab('sitemap',this)">
+        Site Map <span id="sitemapNodeCount" class="panel-badge" style="margin-left:3px;font-size:.6rem">0</span>
+      </div>
+      <div class="center-tab" id="ctab-progress" onclick="switchCenterTab('progress',this)">Progress</div>
+    </div>
+
+    <!-- ── Browser view (existing content) ── -->
+    <div class="center-tab-view active" id="ctview-browser">
+      <div class="screenshot-area" id="screenshotArea">
+        <div class="screenshot-placeholder">
+          <div class="icon">🔍</div>
+          <p>Browser screenshots will appear here</p>
+        </div>
+      </div>
+      <div class="current-test">
+        <div class="ct-label">Current Test</div>
+        <div class="ct-row-item"><span class="ct-meta-label">URL</span><span id="ctUrl" class="ct-url-val" title="">—</span></div>
+        <div class="ct-row-item"><span class="ct-meta-label">Field</span><span id="ctField" class="ct-field">—</span></div>
+        <div class="ct-row-item"><span class="ct-meta-label">Check</span><span id="ctCheckType" style="font-size:.8rem;color:var(--text-muted)">—</span></div>
+        <div class="ct-row-item" style="align-items:flex-start">
+          <span class="ct-meta-label" style="padding-top:2px">Payload</span>
+          <span id="ctPayload" class="ct-payload" style="flex:1;min-width:0">—</span>
+          <button id="ctPayloadToggle" onclick="togglePayloadExpand()" style="display:none;background:none;border:1px solid #444;color:#aaa;border-radius:3px;padding:1px 5px;cursor:pointer;font-size:.7rem;margin-left:4px;flex-shrink:0">▼</button>
+        </div>
+        <div id="ctPayloadFull" style="display:none;margin:4px 0 0 0;padding:6px 8px;background:#0d0d1a;border:1px solid #2a2a3e;border-radius:4px;font-family:monospace;font-size:.75rem;color:#e879f9;word-break:break-all;white-space:pre-wrap"></div>
+        <div class="check-badges" id="checkBadges"></div>
+        <div id="checkCounters" style="display:flex;flex-wrap:wrap;gap:5px;margin-top:6px"></div>
       </div>
     </div>
-    <div class="current-test">
-      <div class="ct-label">Current Test</div>
-      <div class="ct-row-item"><span class="ct-meta-label">URL</span><span id="ctUrl" class="ct-url-val" title="">—</span></div>
-      <div class="ct-row-item"><span class="ct-meta-label">Field</span><span id="ctField" class="ct-field">—</span></div>
-      <div class="ct-row-item"><span class="ct-meta-label">Check</span><span id="ctCheckType" style="font-size:.8rem;color:var(--text-muted)">—</span></div>
-      <div class="ct-row-item" style="align-items:flex-start">
-        <span class="ct-meta-label" style="padding-top:2px">Payload</span>
-        <span id="ctPayload" class="ct-payload" style="flex:1;min-width:0">—</span>
-        <button id="ctPayloadToggle" onclick="togglePayloadExpand()" style="display:none;background:none;border:1px solid #444;color:#aaa;border-radius:3px;padding:1px 5px;cursor:pointer;font-size:.7rem;margin-left:4px;flex-shrink:0">▼</button>
+
+    <!-- ── Site Map view ── -->
+    <div class="center-tab-view" id="ctview-sitemap" style="position:relative">
+      <div id="sitemapContainer">
+        <svg id="sitemapSvg"></svg>
+        <div id="sitemapFallback"></div>
       </div>
-      <div id="ctPayloadFull" style="display:none;margin:4px 0 0 0;padding:6px 8px;background:#0d0d1a;border:1px solid #2a2a3e;border-radius:4px;font-family:monospace;font-size:.75rem;color:#e879f9;word-break:break-all;white-space:pre-wrap"></div>
-      <div class="check-badges" id="checkBadges">
-        <!-- Dynamically populated from scan_config event -->
-      </div>
-      <div id="checkCounters" style="display:flex;flex-wrap:wrap;gap:5px;margin-top:6px"></div>
+      <div class="sm-node-tooltip" id="smTooltip"></div>
     </div>
+
+    <!-- ── Progress Detail view ── -->
+    <div class="center-tab-view" id="ctview-progress">
+      <!-- Phase durations strip -->
+      <div class="phase-timing-strip" id="phaseTimingStrip">
+        <span style="color:var(--text-muted)">Phase durations will appear here after each phase completes.</span>
+      </div>
+      <!-- Sub-phase + attack speed row -->
+      <div style="padding:5px 14px;display:flex;gap:12px;align-items:center;background:var(--surface);border-bottom:1px solid var(--border);flex-shrink:0;font-size:.75rem">
+        <span>Sub-phase: <span id="dpSubphase" class="subphase-badge" style="display:none">—</span></span>
+      </div>
+      <!-- Currently attacking -->
+      <div style="background:var(--surface2);border-bottom:1px solid var(--border);padding:8px 14px;flex-shrink:0">
+        <div style="font-size:.65rem;color:var(--text-muted);text-transform:uppercase;letter-spacing:.08em;margin-bottom:5px">Currently Attacking</div>
+        <div class="ct-row-item"><span class="ct-meta-label">URL</span><span id="dpCtUrl" class="ct-url-val">—</span></div>
+        <div class="ct-row-item"><span class="ct-meta-label">Field</span><span id="dpCtField" style="font-size:.82rem;font-weight:600">—</span></div>
+        <div class="ct-row-item"><span class="ct-meta-label">Check</span><span id="dpCtCheck" style="font-size:.78rem;color:var(--text-muted)">—</span></div>
+        <div class="ct-row-item" style="align-items:flex-start">
+          <span class="ct-meta-label" style="padding-top:2px">Payload</span>
+          <span id="dpCtPayload" style="font-family:monospace;font-size:.72rem;color:var(--high);flex:1;min-width:0;word-break:break-all">—</span>
+        </div>
+      </div>
+      <!-- Per-check-type progress bars -->
+      <div style="padding:10px 14px;flex:1;overflow-y:auto">
+        <div style="font-size:.65rem;color:var(--text-muted);text-transform:uppercase;letter-spacing:.08em;margin-bottom:6px">Per-Check Progress</div>
+        <div id="checkProgressBars"><span style="color:var(--text-muted);font-size:.75rem">Waiting for scan to start…</span></div>
+      </div>
+    </div>
+
   </div>
 
   <!-- Right: Findings + Network -->
@@ -1236,6 +1374,17 @@ const state = {
   urlStatuses: {},   // { url: 'pending'|'scanning'|'done'|'vuln' }
   urlOrder: [],      // discovery order
   checkCounts: {},   // { xss: 12, sqli: 8, ... }
+  // ── Site Map ─────────────────────────────────────────
+  graphNodes: {},    // { url: {id, url, parent, depth, status} }
+  graphLinks: [],    // [{source: url, target: url}]
+  d3Loaded: false,
+  _d3: null,         // D3 internals after initSiteMapD3()
+  // ── Detailed Progress ─────────────────────────────────
+  phaseTimes: {},    // { crawl: elapsedSec, plan: elapsedSec, ... }
+  phaseStartTs: {},  // { crawl: timestampMs } — set when phase begins
+  checkStats: {},    // { xss: {done: N}, sqli: {done: N}, ... }
+  attackStartTime: null, // ms timestamp when attack phase started
+  urlFindingCounts: {}, // { url: N } — findings per URL
 };
 
 // ─── Config form state ───────────────────────────────────────────
@@ -1826,12 +1975,61 @@ function handleEvent(event) {
       if (data.check_type) {
         state.checkCounts[data.check_type] = (state.checkCounts[data.check_type] || 0) + 1;
         renderCheckCounters();
+        // Update progress tab check stats
+        if (!state.checkStats[data.check_type]) state.checkStats[data.check_type] = {done: 0};
+        state.checkStats[data.check_type].done++;
+        renderCheckProgressBars();
       }
+      // Mirror into progress tab
+      { const dpUrl = document.getElementById('dpCtUrl');
+        const dpField = document.getElementById('dpCtField');
+        const dpCheck = document.getElementById('dpCtCheck');
+        const dpPayload = document.getElementById('dpCtPayload');
+        if (dpUrl) { dpUrl.textContent = data.url || '—'; dpUrl.title = data.url || ''; }
+        if (dpField) dpField.textContent = data.field || '—';
+        if (dpCheck) dpCheck.textContent = data.check_type || '—';
+        if (dpPayload) dpPayload.textContent = (data.payload || '—').substring(0, 100); }
       addEventLog('payload', `[${data.check_type.toUpperCase()}] ${data.field}: ${data.payload.substring(0,50)}`);
       break;
 
-    case 'phase':
-      updatePhaseBar(data.phase);
+    case 'phase': {
+      const ph = data.phase;
+      updatePhaseBar(ph);
+      // Record phase start time for duration calculation
+      if (['crawl','plan','attack','report'].includes(ph)) {
+        state.phaseStartTs[ph] = timestamp * 1000;
+        if (ph === 'attack') state.attackStartTime = timestamp * 1000;
+      }
+      // Sub-phase display (attack_3a / attack_3b / attack_3c / attack_3d)
+      if (ph && ph.startsWith('attack_')) {
+        const sub = ph.replace('attack_', '');
+        const label = data.label || sub;
+        _showSubphase(sub, label);
+      }
+      break;
+    }
+
+    case 'page_graph_update':
+      addSiteMapNode(data.url, data.parent, data.depth);
+      break;
+
+    case 'page_graph_vuln':
+      markSiteMapVuln(data.url);
+      break;
+
+    case 'subphase': {
+      const sub = data.subphase || '';
+      _showSubphase(sub, data.label || sub);
+      break;
+    }
+
+    case 'phase_timing':
+      if (data.phase && data.elapsed_sec != null) {
+        state.phaseTimes[data.phase] = data.elapsed_sec;
+        updatePhaseTimingStrip();
+        const timingEl = document.getElementById('ph-timing-' + data.phase);
+        if (timingEl) timingEl.textContent = formatDuration(data.elapsed_sec);
+      }
       break;
 
     case 'url_start': {
@@ -1845,6 +2043,11 @@ function handleEvent(event) {
         if (state.urlStatuses[k] === 'scanning') state.urlStatuses[k] = 'done';
       }
       state.urlStatuses[u] = 'scanning';
+      // Update site map node status
+      if (state.graphNodes[u] && state.graphNodes[u].status !== 'vuln') {
+        state.graphNodes[u].status = 'scanning';
+        _sitemapRerender();
+      }
       renderUrlList();
       break;
     }
@@ -1852,6 +2055,10 @@ function handleEvent(event) {
     case 'url_complete': {
       const u = data.url;
       if (state.urlStatuses[u] === 'scanning') state.urlStatuses[u] = 'done';
+      if (state.graphNodes[u] && state.graphNodes[u].status === 'scanning') {
+        state.graphNodes[u].status = 'done';
+        _sitemapRerender();
+      }
       renderUrlList();
       break;
     }
@@ -1867,9 +2074,11 @@ function handleEvent(event) {
       document.getElementById('findingCount').textContent = state.findingCount;
       addFinding(data);
       addEventLog('finding', `[FINDING] ${data.check_type?.toUpperCase()} on "${data.field_name}" — ${(data.evidence||'').substring(0,60)}`);
-      // Mark the finding's URL as vuln in the URL list
-      if (data.url && state.urlStatuses[data.url]) {
+      // Mark the finding's URL as vuln in the URL list + site map
+      if (data.url) {
         state.urlStatuses[data.url] = 'vuln';
+        state.urlFindingCounts[data.url] = (state.urlFindingCounts[data.url] || 0) + 1;
+        markSiteMapVuln(data.url);
         renderUrlList();
       }
       break;
@@ -1899,6 +2108,22 @@ function handleEvent(event) {
       ['etaBlock', 'remainBlock', 'etaTimeBlock'].forEach(id =>
         document.getElementById(id).style.display = ''
       );
+      // Attack speed calculation
+      if (state.attackStartTime && data.current > 0) {
+        const elapsedMin = (timestamp * 1000 - state.attackStartTime) / 60000;
+        if (elapsedMin > 0) {
+          const fpm = Math.round(data.current / elapsedMin);
+          const pill = document.getElementById('speedPill');
+          const val  = document.getElementById('speedValue');
+          if (pill) pill.style.display = '';
+          if (val)  val.textContent = fpm;
+        }
+      }
+      // Per-check stats from backend (if provided)
+      if (data.check_stats) {
+        state.checkStats = data.check_stats;
+        renderCheckProgressBars();
+      }
       break;
     }
 
@@ -1957,6 +2182,30 @@ function handleEvent(event) {
       state.urlStatuses = {};
       state.urlOrder = [];
       state.checkCounts = {};
+      // Reset new state
+      state.graphNodes = {};
+      state.graphLinks = [];
+      state.phaseTimes = {};
+      state.phaseStartTs = {};
+      state.checkStats = {};
+      state.attackStartTime = null;
+      state.urlFindingCounts = {};
+      document.getElementById('sitemapNodeCount').textContent = '0';
+      { const sp = document.getElementById('speedPill'); if (sp) sp.style.display = 'none'; }
+      { const sb = document.getElementById('subphaseBadge'); if (sb) sb.style.display = 'none'; }
+      // Reset phase timing labels
+      ['crawl','plan','attack','report'].forEach(p => {
+        const el = document.getElementById('ph-timing-' + p);
+        if (el) el.textContent = '';
+      });
+      document.getElementById('phaseTimingStrip').innerHTML =
+        '<span style="color:var(--text-muted)">Phase durations will appear here after each phase completes.</span>';
+      document.getElementById('checkProgressBars').innerHTML =
+        '<span style="color:var(--text-muted);font-size:.75rem">Waiting for scan to start…</span>';
+      // Reset D3 simulation
+      if (state._d3) { try { state._d3.sim.stop(); } catch(e) {} state._d3 = null; state.d3Loaded = false; }
+      document.getElementById('sitemapSvg').innerHTML = '';
+      document.getElementById('sitemapFallback').innerHTML = '';
       updatePhaseBar('');
       renderUrlList();
       renderCheckCounters();
@@ -2500,6 +2749,258 @@ function submitHybridScan() {
 function handleWafDetected(data) {
   const waf = data.waf || 'Unknown WAF';
   addEventLog('status', `🛡 WAF Detected: ${waf}. Hints: ${(data.hints||[]).slice(0,2).join('; ')}`);
+}
+
+// ─── Center Tab Switching ────────────────────────────────────────
+function switchCenterTab(name, btn) {
+  ['browser','sitemap','progress'].forEach(n => {
+    const view = document.getElementById('ctview-' + n);
+    const tab  = document.getElementById('ctab-' + n);
+    if (view) view.classList.toggle('active', n === name);
+    if (tab)  tab.classList.toggle('active', n === name);
+  });
+  if (name === 'sitemap') {
+    // Lazy-load D3 on first open
+    if (!state.d3Loaded && !state._d3) loadD3();
+    else if (state._d3) { try { state._d3.sim.alpha(0.1).restart(); } catch(e) {} }
+  }
+}
+
+// ─── Site Map: D3.js lazy loader ────────────────────────────────
+function loadD3() {
+  if (window.d3) { state.d3Loaded = true; initSiteMapD3(); return; }
+  const script = document.createElement('script');
+  script.src = 'https://d3js.org/d3.v7.min.js';
+  script.onload  = () => { state.d3Loaded = true; initSiteMapD3(); };
+  script.onerror = () => { showSiteMapFallback(); };
+  document.head.appendChild(script);
+}
+
+function initSiteMapD3() {
+  const d3 = window.d3;
+  if (!d3) { showSiteMapFallback(); return; }
+  const svgEl = document.getElementById('sitemapSvg');
+  if (!svgEl) return;
+  const container = document.getElementById('sitemapContainer');
+  const w = container.clientWidth  || 600;
+  const h = container.clientHeight || 380;
+
+  const svg = d3.select('#sitemapSvg').attr('width', w).attr('height', h);
+  svg.selectAll('*').remove();
+
+  // Zoom/pan
+  const g = svg.append('g');
+  svg.call(d3.zoom().scaleExtent([0.1, 8])
+    .on('zoom', ev => g.attr('transform', ev.transform)));
+
+  // Arrow marker
+  svg.append('defs').append('marker')
+    .attr('id', 'sm-arr').attr('viewBox', '0 -4 8 8')
+    .attr('refX', 24).attr('markerWidth', 6).attr('markerHeight', 6)
+    .attr('orient', 'auto')
+    .append('path').attr('d', 'M0,-4L8,0L0,4').attr('fill', '#4a5568');
+
+  const linkLayer = g.append('g').attr('id', 'sm-links');
+  const nodeLayer = g.append('g').attr('id', 'sm-nodes');
+
+  const sim = d3.forceSimulation([])
+    .force('link', d3.forceLink([]).id(d => d.id).distance(90))
+    .force('charge', d3.forceManyBody().strength(-220))
+    .force('center', d3.forceCenter(w / 2, h / 2))
+    .force('collide', d3.forceCollide(28));
+
+  state._d3 = { d3, svg, g, linkLayer, nodeLayer, sim };
+
+  sim.on('tick', () => {
+    linkLayer.selectAll('line')
+      .attr('x1', d => d.source.x).attr('y1', d => d.source.y)
+      .attr('x2', d => d.target.x).attr('y2', d => d.target.y);
+    nodeLayer.selectAll('g.sm-node')
+      .attr('transform', d => `translate(${d.x ?? 0},${d.y ?? 0})`);
+  });
+
+  // Render any nodes that arrived before D3 loaded
+  _sitemapRerender();
+}
+
+function _sitemapRerender() {
+  if (!state._d3) return;
+  const { d3, linkLayer, nodeLayer, sim } = state._d3;
+  const nodes = Object.values(state.graphNodes);
+  const links = state.graphLinks.slice();
+
+  sim.nodes(nodes);
+  sim.force('link').links(links);
+  sim.alpha(0.3).restart();
+
+  // Links
+  const linkSel = linkLayer.selectAll('line')
+    .data(links, d => (typeof d.source === 'object' ? d.source.id : d.source) + '→' + (typeof d.target === 'object' ? d.target.id : d.target));
+  linkSel.exit().remove();
+  linkSel.enter().append('line')
+    .attr('stroke', '#4a5568').attr('stroke-width', 1.5)
+    .attr('marker-end', 'url(#sm-arr)');
+
+  // Nodes
+  const nodeSel = nodeLayer.selectAll('g.sm-node').data(nodes, d => d.id);
+  nodeSel.exit().remove();
+
+  const nodeEnter = nodeSel.enter().append('g').attr('class', 'sm-node')
+    .style('cursor', 'pointer')
+    .on('click', (ev, d) => window.open(d.url, '_blank'))
+    .on('mouseover', (ev, d) => _showSmTooltip(ev, d))
+    .on('mouseout', () => _hideSmTooltip())
+    .call(d3.drag()
+      .on('start', (ev, d) => { if (!ev.active) sim.alphaTarget(0.3).restart(); d.fx = d.x; d.fy = d.y; })
+      .on('drag',  (ev, d) => { d.fx = ev.x; d.fy = ev.y; })
+      .on('end',   (ev, d) => { if (!ev.active) sim.alphaTarget(0); d.fx = null; d.fy = null; }));
+
+  nodeEnter.append('circle').attr('r', 18);
+  nodeEnter.append('text')
+    .attr('dy', '0.35em').attr('text-anchor', 'middle')
+    .attr('font-size', '8px').attr('fill', 'white').attr('pointer-events', 'none');
+
+  // Update all (enter + existing)
+  nodeLayer.selectAll('g.sm-node circle')
+    .attr('fill', d => _smNodeColor(d))
+    .attr('stroke', d => d.depth === 0 ? '#79c0ff' : '#2b6cb0')
+    .attr('stroke-width', 1.5);
+  nodeLayer.selectAll('g.sm-node text').text(d => {
+    try { const p = new URL(d.url).pathname; return p.length > 18 ? '…' + p.slice(-16) : p; }
+    catch(e) { return d.url.slice(-16); }
+  });
+}
+
+function _smNodeColor(d) {
+  switch (d.status) {
+    case 'vuln':     return '#f85149';
+    case 'scanning': return '#f0883e';
+    case 'done':     return '#388bfd';
+    default:         return '#3a3f4a';
+  }
+}
+
+function addSiteMapNode(url, parent, depth) {
+  if (state.graphNodes[url]) return; // already exists
+  const node = { id: url, url, parent, depth: depth || 0, status: 'pending' };
+  state.graphNodes[url] = node;
+
+  if (parent && state.graphNodes[parent]) {
+    state.graphLinks.push({ source: parent, target: url });
+  }
+
+  // Update count badge
+  const cnt = document.getElementById('sitemapNodeCount');
+  if (cnt) cnt.textContent = Object.keys(state.graphNodes).length;
+
+  // Update fallback list
+  _updateSiteMapFallback();
+
+  // Live D3 update
+  if (state._d3) _sitemapRerender();
+}
+
+function markSiteMapVuln(url) {
+  if (!state.graphNodes[url]) return;
+  state.graphNodes[url].status = 'vuln';
+  if (state._d3) _sitemapRerender();
+  _updateSiteMapFallback();
+}
+
+function showSiteMapFallback() {
+  const svg = document.getElementById('sitemapSvg');
+  const fb  = document.getElementById('sitemapFallback');
+  if (svg) svg.style.display = 'none';
+  if (fb)  fb.style.display  = 'block';
+  _updateSiteMapFallback();
+}
+
+function _updateSiteMapFallback() {
+  const fb = document.getElementById('sitemapFallback');
+  if (!fb || fb.style.display === 'none') return;
+  const nodes = Object.values(state.graphNodes);
+  fb.innerHTML = '<ul style="list-style:none;padding:0;margin:0">' +
+    nodes.map(n => {
+      const indent = '&nbsp;'.repeat(n.depth * 3);
+      const c = n.status === 'vuln' ? 'var(--critical)' : n.status === 'done' ? 'var(--low)' : 'var(--text-muted)';
+      return `<li style="padding:2px 0;color:${c}">${indent}↳ ${escapeHtml(n.url)}</li>`;
+    }).join('') + '</ul>';
+}
+
+function _showSmTooltip(ev, d) {
+  const tt = document.getElementById('smTooltip');
+  if (!tt) return;
+  const fc = state.urlFindingCounts[d.url] || 0;
+  tt.innerHTML = `<strong>Depth ${d.depth}</strong><br>${escapeHtml(d.url)}` +
+    (fc > 0 ? `<br><span style="color:var(--critical)">${fc} finding${fc > 1 ? 's' : ''}</span>` : '');
+  tt.style.display = 'block';
+  // Tooltip position relative to container
+  const rect = document.getElementById('sitemapContainer').getBoundingClientRect();
+  tt.style.left = (ev.clientX - rect.left + 12) + 'px';
+  tt.style.top  = (ev.clientY - rect.top  + 12) + 'px';
+}
+function _hideSmTooltip() {
+  const tt = document.getElementById('smTooltip');
+  if (tt) tt.style.display = 'none';
+}
+
+// ─── Phase Timing Strip ──────────────────────────────────────────
+function updatePhaseTimingStrip() {
+  const strip = document.getElementById('phaseTimingStrip');
+  if (!strip) return;
+  const parts = ['crawl','plan','attack','report'].map(p => {
+    const t = state.phaseTimes[p];
+    if (t == null) return null;
+    return `<span><strong>${p.charAt(0).toUpperCase() + p.slice(1)}:</strong> ${formatDuration(t)}</span>`;
+  }).filter(Boolean);
+  if (parts.length) {
+    strip.innerHTML = parts.join('<span style="color:var(--border);margin:0 4px">|</span>');
+  }
+}
+
+// ─── Sub-phase display ───────────────────────────────────────────
+function _showSubphase(sub, label) {
+  // In the phase bar
+  const pb = document.getElementById('subphaseBadge');
+  if (pb) { pb.textContent = `Phase 3${sub}` + (label && label !== sub ? ` — ${label}` : ''); pb.style.display = ''; }
+  // In the progress tab
+  const dp = document.getElementById('dpSubphase');
+  if (dp) { dp.textContent = `Phase 3${sub}` + (label && label !== sub ? ` — ${label}` : ''); dp.style.display = ''; }
+  // Annotate the Attack phase dot
+  const phEl = document.getElementById('ph-attack');
+  if (phEl) {
+    let subEl = phEl.querySelector('.ph-subphase');
+    if (!subEl) {
+      subEl = document.createElement('span');
+      subEl.className = 'ph-subphase';
+      subEl.style.cssText = 'font-size:.6rem;color:#c4b5fd;margin-left:4px';
+      phEl.appendChild(subEl);
+    }
+    subEl.textContent = `(3${sub})`;
+  }
+}
+
+// ─── Per-check Progress Bars ─────────────────────────────────────
+function renderCheckProgressBars() {
+  const el = document.getElementById('checkProgressBars');
+  if (!el) return;
+  const entries = Object.entries(state.checkStats);
+  if (!entries.length) {
+    el.innerHTML = '<span style="color:var(--text-muted);font-size:.75rem">Waiting for scan to start…</span>';
+    return;
+  }
+  const maxDone = Math.max(...entries.map(([, v]) => v.done || 0), 1);
+  el.innerHTML = entries
+    .sort(([, a], [, b]) => (b.done || 0) - (a.done || 0))
+    .map(([ct, info]) => {
+      const done = info.done || 0;
+      const pct  = Math.round(done / maxDone * 100);
+      return `<div class="check-progress-bar-wrap">
+        <span class="cp-label" title="${ct}">${ct}</span>
+        <div class="cp-bar-bg"><div class="cp-bar-fill" style="width:${pct}%"></div></div>
+        <span class="cp-count">${done}</span>
+      </div>`;
+    }).join('');
 }
 
 // ─── Init ────────────────────────────────────────────────────────
