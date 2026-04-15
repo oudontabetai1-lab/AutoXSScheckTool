@@ -309,14 +309,6 @@ class MonitorServer:
     async def emit_page_start(self, url: str):
         await self.emit("page_start", {"url": url})
 
-    async def emit_page_graph_update(self, url: str, parent: Optional[str], depth: int):
-        """クロール時に1ページ分のグラフ情報をリアルタイム送信する。"""
-        await self.emit("page_graph_update", {
-            "url": url,
-            "parent": parent,
-            "depth": depth,
-        })
-
     async def emit_payload_test(self, field: str, payload: str, check_type: str, url: str = "") -> None:
         await self.emit("payload_test", {
             "field": field,

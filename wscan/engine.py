@@ -720,9 +720,6 @@ class ScanEngine:
                 "screenshot_b64": screenshot_b64,
                 "depth": depth,
             }
-            # B: リアルタイムサイトマップ更新
-            if self.monitor:
-                await self.monitor.emit_page_graph_update(url, parent_url, depth)
 
             # CTF: scan page HTML for flags even during crawl
             if self.flag_finder:
@@ -1195,8 +1192,6 @@ class ScanEngine:
             await self._phase_attack_serial(pages, plans)
 
         # Phase 3c: chain / stored vulnerability detection (runs after ALL pages attacked)
-        if self.monitor:
-            await self.monitor.emit("phase", {"phase": "attack_3c", "label": "Chain Scan"})
         chain_findings = await self.chain_scanner.run(
             source_pages=[p for p in pages if p.forms],
             observation_pages=pages,
@@ -1610,13 +1605,9 @@ class ScanEngine:
         plan = plans.get(page.url)
 
         # Phase 3a + 3b: individual field scan + adaptive AI
-        if self.monitor:
-            await self.monitor.emit("phase", {"phase": "attack_3a", "label": "Standard Payloads"})
         await self._attack_page(page, plan)
 
         # Phase 3d: multi-parameter simultaneous injection
-        if self.monitor:
-            await self.monitor.emit("phase", {"phase": "attack_3d", "label": "MultiParam"})
         await self._phase_multi_param(page, plan)
 
     async def _attack_page(self, page: CrawledPage, plan: Optional[PageAttackPlan]):
@@ -1959,8 +1950,6 @@ class ScanEngine:
         already_critical = any(f.severity in ("critical",) for f in field_findings)
 
         if self.adaptive_enabled and not already_critical:
-            if self.monitor:
-                await self.monitor.emit("phase", {"phase": "attack_3b", "label": "AdaptiveAI"})
             await self._adaptive_attack_field(
                 url, form_index, field, is_url_param, ordered_checks, field_plan
             )
