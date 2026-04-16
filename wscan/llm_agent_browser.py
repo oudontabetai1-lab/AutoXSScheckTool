@@ -275,7 +275,15 @@ class AgentBrowserScanner:
         monitor: Optional["MonitorServer"] = None,
         recon_mode: bool = False,
     ):
-        self.target_url = target_url.rstrip("/")
+        # Ensure URLs carry a scheme — CDP rejects scheme-less URLs with error -32000,
+        # and browser_use's SecurityWatchdog raises ValueError parsing them.
+        def _normalize_url(u: str) -> str:
+            u = u.rstrip("/")
+            if u and not re.match(r'^https?://', u, re.IGNORECASE):
+                u = 'http://' + u
+            return u
+
+        self.target_url = _normalize_url(target_url)
         self.llm_provider = llm_provider
         self.llm_model = llm_model
         self.ollama_url = ollama_url
@@ -283,7 +291,7 @@ class AgentBrowserScanner:
         self.headless = headless
         self.auth_user = auth_user
         self.auth_pass = auth_pass
-        self.login_url = login_url
+        self.login_url = _normalize_url(login_url) if login_url else login_url
         self.max_steps = max_steps
         self.monitor = monitor
         self.recon_mode = recon_mode
@@ -316,15 +324,26 @@ class AgentBrowserScanner:
         try:
             from browser_use import Agent, Browser
 
-            browser = Browser(
-                headless=self.headless,
-                disable_security=True,
-            )
+            # browser_use ≥ 0.2 uses BrowserConfig; older versions accept direct kwargs.
+            # BrowserConfig's disable_security properly disables SecurityWatchdog,
+            # while the legacy Browser(disable_security=True) only affects Playwright flags.
+            try:
+                from browser_use import BrowserConfig
+                browser = Browser(config=BrowserConfig(
+                    headless=self.headless,
+                    disable_security=True,
+                ))
+            except (ImportError, TypeError):
+                browser = Browser(
+                    headless=self.headless,
+                    disable_security=True,
+                )
 
             # タスク文字列には SSRF/redirect ペイロードとして複数の URL が含まれる。
             # directly_open_url=True (デフォルト) は「複数 URL 検出 → スキップ」する仕様のため、
             # ブラウザが白紙ページのまま開始してしまう。
             # initial_actions で明示的に最初のページへ遷移する。
+            # start_url is already scheme-normalized in __init__.
             start_url = self.login_url or self.target_url
             # ダブルナビゲートで about:blank → start_url → start_url という履歴を作る。
             # これにより go_back を実行しても start_url に戻るだけで

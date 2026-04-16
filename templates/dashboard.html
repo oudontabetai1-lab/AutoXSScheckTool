@@ -1830,8 +1830,56 @@ function handleEvent(event) {
       addEventLog('payload', `[${data.check_type.toUpperCase()}] ${data.field}: ${data.payload.substring(0,50)}`);
       break;
 
-    case 'phase':
-      updatePhaseBar(data.phase);
+    case 'phase': {
+      const ph = data.phase;
+      updatePhaseBar(ph);
+      if (['crawl','plan','attack','report'].includes(ph)) {
+        // Close timing of previous phase when a new one starts
+        const PHASE_ORDER = ['crawl','plan','attack','report'];
+        const prevIdx = PHASE_ORDER.indexOf(ph) - 1;
+        if (prevIdx >= 0) {
+          const prevPh = PHASE_ORDER[prevIdx];
+          if (state.phaseStartTs[prevPh] != null && state.phaseTimes[prevPh] == null) {
+            const durSec = (timestamp * 1000 - state.phaseStartTs[prevPh]) / 1000;
+            state.phaseTimes[prevPh] = durSec;
+            updatePhaseTimingStrip();
+            const timingEl = document.getElementById('ph-timing-' + prevPh);
+            if (timingEl) timingEl.textContent = formatDuration(durSec);
+          }
+        }
+        state.phaseStartTs[ph] = timestamp * 1000;
+        if (ph === 'attack') state.attackStartTime = timestamp * 1000;
+      }
+      // Sub-phase display (attack_3a / attack_3b / attack_3c / attack_3d)
+      if (ph && ph.startsWith('attack_')) {
+        const sub = ph.replace('attack_', '');
+        const label = data.label || sub;
+        _showSubphase(sub, label);
+      }
+      break;
+    }
+
+    case 'page_graph_update':
+      addSiteMapNode(data.url, data.parent, data.depth);
+      break;
+
+    case 'page_graph_vuln':
+      markSiteMapVuln(data.url);
+      break;
+
+    case 'subphase': {
+      const sub = data.subphase || '';
+      _showSubphase(sub, data.label || sub);
+      break;
+    }
+
+    case 'phase_timing':
+      if (data.phase && data.elapsed_sec != null) {
+        state.phaseTimes[data.phase] = data.elapsed_sec;
+        updatePhaseTimingStrip();
+        const timingEl = document.getElementById('ph-timing-' + data.phase);
+        if (timingEl) timingEl.textContent = formatDuration(data.elapsed_sec);
+      }
       break;
 
     case 'url_start': {
@@ -1912,6 +1960,16 @@ function handleEvent(event) {
       state.scanDone = true;
       document.getElementById('statRemain').textContent = '完了';
       document.getElementById('statETA').textContent = '—';
+      // Close timing for any phase that started but didn't get a "next phase" event
+      { ['crawl','plan','attack','report'].forEach(p => {
+          if (state.phaseStartTs[p] != null && state.phaseTimes[p] == null) {
+            const durSec = (timestamp * 1000 - state.phaseStartTs[p]) / 1000;
+            state.phaseTimes[p] = durSec;
+            const tEl = document.getElementById('ph-timing-' + p);
+            if (tEl) tEl.textContent = formatDuration(durSec);
+          }
+        });
+        updatePhaseTimingStrip(); }
       break;
 
     case 'plan_review':
@@ -2500,6 +2558,260 @@ function submitHybridScan() {
 function handleWafDetected(data) {
   const waf = data.waf || 'Unknown WAF';
   addEventLog('status', `🛡 WAF Detected: ${waf}. Hints: ${(data.hints||[]).slice(0,2).join('; ')}`);
+}
+
+// ─── Center Tab Switching ────────────────────────────────────────
+function switchCenterTab(name, btn) {
+  ['browser','sitemap','progress'].forEach(n => {
+    const view = document.getElementById('ctview-' + n);
+    const tab  = document.getElementById('ctab-' + n);
+    if (view) view.classList.toggle('active', n === name);
+    if (tab)  tab.classList.toggle('active', n === name);
+  });
+  if (name === 'sitemap') {
+    // Lazy-load D3 on first open
+    if (!state.d3Loaded && !state._d3) loadD3();
+    else if (state._d3) { try { state._d3.sim.alpha(0.1).restart(); } catch(e) {} }
+  }
+}
+
+// ─── Site Map: D3.js lazy loader ────────────────────────────────
+function loadD3() {
+  if (window.d3) { state.d3Loaded = true; initSiteMapD3(); return; }
+  const script = document.createElement('script');
+  script.src = 'https://d3js.org/d3.v7.min.js';
+  script.onload  = () => { state.d3Loaded = true; initSiteMapD3(); };
+  script.onerror = () => { showSiteMapFallback(); };
+  document.head.appendChild(script);
+}
+
+function initSiteMapD3() {
+  const d3 = window.d3;
+  if (!d3) { showSiteMapFallback(); return; }
+  const svgEl = document.getElementById('sitemapSvg');
+  if (!svgEl) return;
+  const container = document.getElementById('sitemapContainer');
+  const w = container.clientWidth  || 600;
+  const h = container.clientHeight || 380;
+
+  const svg = d3.select('#sitemapSvg').attr('width', w).attr('height', h);
+  svg.selectAll('*').remove();
+
+  // Zoom/pan
+  const g = svg.append('g');
+  svg.call(d3.zoom().scaleExtent([0.1, 8])
+    .on('zoom', ev => g.attr('transform', ev.transform)));
+
+  // Arrow marker
+  svg.append('defs').append('marker')
+    .attr('id', 'sm-arr').attr('viewBox', '0 -4 8 8')
+    .attr('refX', 24).attr('markerWidth', 6).attr('markerHeight', 6)
+    .attr('orient', 'auto')
+    .append('path').attr('d', 'M0,-4L8,0L0,4').attr('fill', '#4a5568');
+
+  const linkLayer = g.append('g').attr('id', 'sm-links');
+  const nodeLayer = g.append('g').attr('id', 'sm-nodes');
+
+  const sim = d3.forceSimulation([])
+    .force('link', d3.forceLink([]).id(d => d.id).distance(90))
+    .force('charge', d3.forceManyBody().strength(-220))
+    .force('center', d3.forceCenter(w / 2, h / 2))
+    .force('collide', d3.forceCollide(28));
+
+  state._d3 = { d3, svg, g, linkLayer, nodeLayer, sim };
+
+  sim.on('tick', () => {
+    linkLayer.selectAll('line')
+      .attr('x1', d => d.source.x).attr('y1', d => d.source.y)
+      .attr('x2', d => d.target.x).attr('y2', d => d.target.y);
+    nodeLayer.selectAll('g.sm-node')
+      .attr('transform', d => `translate(${d.x ?? 0},${d.y ?? 0})`);
+  });
+
+  // Render any nodes that arrived before D3 loaded
+  _sitemapRerender();
+}
+
+function _sitemapRerender() {
+  if (!state._d3) return;
+  const { d3, linkLayer, nodeLayer, sim } = state._d3;
+  const nodes = Object.values(state.graphNodes);
+  const links = state.graphLinks.slice();
+
+  sim.nodes(nodes);
+  sim.force('link').links(links);
+  sim.alpha(0.3).restart();
+
+  // Links
+  const linkSel = linkLayer.selectAll('line')
+    .data(links, d => (typeof d.source === 'object' ? d.source.id : d.source) + '→' + (typeof d.target === 'object' ? d.target.id : d.target));
+  linkSel.exit().remove();
+  linkSel.enter().append('line')
+    .attr('stroke', '#4a5568').attr('stroke-width', 1.5)
+    .attr('marker-end', 'url(#sm-arr)');
+
+  // Nodes
+  const nodeSel = nodeLayer.selectAll('g.sm-node').data(nodes, d => d.id);
+  nodeSel.exit().remove();
+
+  const nodeEnter = nodeSel.enter().append('g').attr('class', 'sm-node')
+    .style('cursor', 'pointer')
+    .on('click', (ev, d) => window.open(d.url, '_blank'))
+    .on('mouseover', (ev, d) => _showSmTooltip(ev, d))
+    .on('mouseout', () => _hideSmTooltip())
+    .call(d3.drag()
+      .on('start', (ev, d) => { if (!ev.active) sim.alphaTarget(0.3).restart(); d.fx = d.x; d.fy = d.y; })
+      .on('drag',  (ev, d) => { d.fx = ev.x; d.fy = ev.y; })
+      .on('end',   (ev, d) => { if (!ev.active) sim.alphaTarget(0); d.fx = null; d.fy = null; }));
+
+  nodeEnter.append('circle').attr('r', 18);
+  nodeEnter.append('text')
+    .attr('dy', '0.35em').attr('text-anchor', 'middle')
+    .attr('font-size', '8px').attr('fill', 'white').attr('pointer-events', 'none');
+
+  // Update all (enter + existing)
+  nodeLayer.selectAll('g.sm-node circle')
+    .attr('fill', d => _smNodeColor(d))
+    .attr('stroke', d => d.depth === 0 ? '#79c0ff' : '#2b6cb0')
+    .attr('stroke-width', 1.5);
+  nodeLayer.selectAll('g.sm-node text').text(d => {
+    try { const p = new URL(d.url).pathname; return p.length > 18 ? '…' + p.slice(-16) : p; }
+    catch(e) { return d.url.slice(-16); }
+  });
+}
+
+function _smNodeColor(d) {
+  switch (d.status) {
+    case 'vuln':     return '#f85149';
+    case 'scanning': return '#f0883e';
+    case 'done':     return '#388bfd';
+    default:         return '#3a3f4a';
+  }
+}
+
+function addSiteMapNode(url, parent, depth) {
+  if (state.graphNodes[url]) return; // already exists
+  const node = { id: url, url, parent, depth: depth || 0, status: 'pending' };
+  state.graphNodes[url] = node;
+
+  if (parent && state.graphNodes[parent]) {
+    state.graphLinks.push({ source: parent, target: url });
+  }
+
+  // Update count badge
+  const cnt = document.getElementById('sitemapNodeCount');
+  if (cnt) cnt.textContent = Object.keys(state.graphNodes).length;
+
+  // Update fallback list
+  _updateSiteMapFallback();
+
+  // Live D3 update
+  if (state._d3) _sitemapRerender();
+}
+
+function markSiteMapVuln(url) {
+  if (!state.graphNodes[url]) return;
+  state.graphNodes[url].status = 'vuln';
+  if (state._d3) _sitemapRerender();
+  _updateSiteMapFallback();
+}
+
+function showSiteMapFallback() {
+  const svg = document.getElementById('sitemapSvg');
+  const fb  = document.getElementById('sitemapFallback');
+  if (svg) svg.style.display = 'none';
+  if (fb)  fb.style.display  = 'block';
+  _updateSiteMapFallback();
+}
+
+function _updateSiteMapFallback() {
+  const fb = document.getElementById('sitemapFallback');
+  if (!fb || fb.style.display === 'none') return;
+  const nodes = Object.values(state.graphNodes);
+  fb.innerHTML = '<ul style="list-style:none;padding:0;margin:0">' +
+    nodes.map(n => {
+      const indent = '&nbsp;'.repeat(n.depth * 3);
+      const c = n.status === 'vuln' ? 'var(--critical)' : n.status === 'done' ? 'var(--low)' : 'var(--text-muted)';
+      return `<li style="padding:2px 0;color:${c}">${indent}↳ ${escapeHtml(n.url)}</li>`;
+    }).join('') + '</ul>';
+}
+
+function _showSmTooltip(ev, d) {
+  const tt = document.getElementById('smTooltip');
+  if (!tt) return;
+  const fc = state.urlFindingCounts[d.url] || 0;
+  tt.innerHTML = `<strong>Depth ${d.depth}</strong><br>${escapeHtml(d.url)}` +
+    (fc > 0 ? `<br><span style="color:var(--critical)">${fc} finding${fc > 1 ? 's' : ''}</span>` : '');
+  tt.style.display = 'block';
+  // Tooltip position relative to container
+  const rect = document.getElementById('sitemapContainer').getBoundingClientRect();
+  tt.style.left = (ev.clientX - rect.left + 12) + 'px';
+  tt.style.top  = (ev.clientY - rect.top  + 12) + 'px';
+}
+function _hideSmTooltip() {
+  const tt = document.getElementById('smTooltip');
+  if (tt) tt.style.display = 'none';
+}
+
+// ─── Phase Timing Strip ──────────────────────────────────────────
+function updatePhaseTimingStrip() {
+  const strip = document.getElementById('phaseTimingStrip');
+  if (!strip) return;
+  const parts = ['crawl','plan','attack','report'].map(p => {
+    const t = state.phaseTimes[p];
+    if (t == null) return null;
+    return `<span><strong>${p.charAt(0).toUpperCase() + p.slice(1)}:</strong> ${formatDuration(t)}</span>`;
+  }).filter(Boolean);
+  if (parts.length) {
+    strip.innerHTML = parts.join('<span style="color:var(--border);margin:0 4px">|</span>');
+  }
+}
+
+// ─── Sub-phase display ───────────────────────────────────────────
+function _showSubphase(sub, label) {
+  // sub is already '3a','3b','3c','3d' — do NOT prepend another '3'
+  const text = `Phase ${sub}` + (label && label !== sub ? ` — ${label}` : '');
+  // In the phase bar
+  const pb = document.getElementById('subphaseBadge');
+  if (pb) { pb.textContent = text; pb.style.display = ''; }
+  // In the progress tab
+  const dp = document.getElementById('dpSubphase');
+  if (dp) { dp.textContent = text; dp.style.display = ''; }
+  // Annotate the Attack phase dot
+  const phEl = document.getElementById('ph-attack');
+  if (phEl) {
+    let subEl = phEl.querySelector('.ph-subphase');
+    if (!subEl) {
+      subEl = document.createElement('span');
+      subEl.className = 'ph-subphase';
+      subEl.style.cssText = 'font-size:.6rem;color:#c4b5fd;margin-left:4px';
+      phEl.appendChild(subEl);
+    }
+    subEl.textContent = `(${sub})`;
+  }
+}
+
+// ─── Per-check Progress Bars ─────────────────────────────────────
+function renderCheckProgressBars() {
+  const el = document.getElementById('checkProgressBars');
+  if (!el) return;
+  const entries = Object.entries(state.checkStats);
+  if (!entries.length) {
+    el.innerHTML = '<span style="color:var(--text-muted);font-size:.75rem">Waiting for scan to start…</span>';
+    return;
+  }
+  const maxDone = Math.max(...entries.map(([, v]) => v.done || 0), 1);
+  el.innerHTML = entries
+    .sort(([, a], [, b]) => (b.done || 0) - (a.done || 0))
+    .map(([ct, info]) => {
+      const done = info.done || 0;
+      const pct  = Math.round(done / maxDone * 100);
+      return `<div class="check-progress-bar-wrap">
+        <span class="cp-label" title="${ct}">${ct}</span>
+        <div class="cp-bar-bg"><div class="cp-bar-fill" style="width:${pct}%"></div></div>
+        <span class="cp-count">${done}</span>
+      </div>`;
+    }).join('');
 }
 
 // ─── Init ────────────────────────────────────────────────────────
