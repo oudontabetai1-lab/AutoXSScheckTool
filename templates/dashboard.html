@@ -591,90 +591,6 @@ body {
 .flow-step-del { background:none; border:none; color:var(--text-muted); cursor:pointer; font-size:0.9rem; }
 .flow-step-del:hover { color:var(--critical); }
 .flow-add-step { font-size:0.78rem; color:var(--accent); background:none; border:none; cursor:pointer; padding:2px 4px; }
-
-/* ─── Site Map Panel ─────────────────────────────────────────── */
-#sitemapContainer {
-  width: 100%; height: 100%;
-  background: #0a0c0f;
-  position: relative;
-  flex: 1;
-  overflow: hidden;
-}
-#sitemapSvg { width: 100%; height: 100%; }
-#sitemapFallback {
-  display: none; padding: 12px;
-  overflow-y: auto; height: 100%;
-  font-size: .75rem; color: var(--text-muted);
-}
-.sm-node-tooltip {
-  position: absolute; background: rgba(13,17,23,0.95);
-  border: 1px solid var(--border); border-radius: 6px;
-  padding: 6px 10px; font-size: .72rem; pointer-events: none;
-  display: none; z-index: 10; max-width: 300px; word-break: break-all;
-}
-
-/* ─── Phase Timing Strip ─────────────────────────────────────── */
-.phase-timing-strip {
-  display: flex; gap: 12px; flex-wrap: wrap;
-  padding: 4px 16px; background: var(--surface2);
-  border-bottom: 1px solid var(--border);
-  font-size: .72rem; color: var(--text-muted);
-  flex-shrink: 0;
-}
-.phase-timing-strip strong { color: var(--text); }
-.ph-timing { font-size: .62rem; color: var(--text-muted); margin-left: 2px; }
-
-/* ─── Sub-phase Badge ────────────────────────────────────────── */
-.subphase-badge {
-  font-size: .68rem; font-weight: 800;
-  padding: 2px 8px; border-radius: 10px;
-  background: rgba(124,58,237,.2); color: #c4b5fd;
-  border: 1px solid #7c3aed;
-  animation: phasePulse 1s infinite;
-}
-
-/* ─── Check Progress Bars ────────────────────────────────────── */
-.check-progress-bar-wrap {
-  display: flex; align-items: center; gap: 6px; margin-bottom: 3px;
-}
-.cp-label {
-  width: 60px; font-size: .65rem; text-transform: uppercase;
-  letter-spacing: .04em; color: var(--text-muted); flex-shrink: 0;
-  text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-}
-.cp-bar-bg {
-  flex: 1; height: 5px; background: var(--surface2);
-  border-radius: 3px; overflow: hidden;
-}
-.cp-bar-fill {
-  height: 100%; background: var(--accent);
-  border-radius: 3px; transition: width .3s ease;
-}
-.cp-count { font-size: .65rem; color: var(--text-muted); width: 32px; text-align: right; flex-shrink: 0; }
-
-/* ─── Attack Speed Pill ──────────────────────────────────────── */
-.attack-speed-pill {
-  display: inline-flex; align-items: center; gap: 5px;
-  background: var(--surface2); border: 1px solid var(--border);
-  border-radius: 12px; padding: 2px 10px; font-size: .72rem;
-}
-.attack-speed-pill .speed-val { color: var(--accent); font-weight: 700; }
-
-/* ─── Center Tab Bar ─────────────────────────────────────────── */
-.center-tab-bar {
-  display: flex; border-bottom: 1px solid var(--border); flex-shrink: 0;
-  background: var(--surface);
-}
-.center-tab {
-  flex: 1; text-align: center; padding: 7px 4px;
-  font-size: .72rem; font-weight: 600;
-  color: var(--text-muted); cursor: pointer;
-  border-bottom: 2px solid transparent;
-  text-transform: uppercase; letter-spacing: .05em;
-}
-.center-tab.active { color: var(--accent); border-bottom-color: var(--accent); }
-.center-tab-view { display: none; flex-direction: column; flex: 1; overflow: hidden; }
-.center-tab-view.active { display: flex; }
 </style>
 </head>
 <body>
@@ -1139,20 +1055,14 @@ body {
 </div>
 
 <!-- ─── Phase Timeline ──────────────────────────────────────── -->
-<div id="phaseBar" style="display:flex;align-items:center;gap:8px;padding:6px 16px;background:#1e1e2e;border-bottom:1px solid #333;flex-wrap:wrap">
-  <div class="ph-step" id="ph-crawl"><span class="ph-dot"></span><div style="display:flex;flex-direction:column;line-height:1.2"><span class="ph-label">Crawl</span><span class="ph-timing" id="ph-timing-crawl"></span></div></div>
+<div id="phaseBar" style="display:flex;align-items:center;gap:8px;padding:6px 16px;background:#1e1e2e;border-bottom:1px solid #333">
+  <div class="ph-step" id="ph-crawl"><span class="ph-dot"></span><span class="ph-label">Crawl</span></div>
   <div class="ph-arrow">→</div>
-  <div class="ph-step" id="ph-plan"><span class="ph-dot"></span><div style="display:flex;flex-direction:column;line-height:1.2"><span class="ph-label">Plan</span><span class="ph-timing" id="ph-timing-plan"></span></div></div>
+  <div class="ph-step" id="ph-plan"><span class="ph-dot"></span><span class="ph-label">Plan</span></div>
   <div class="ph-arrow">→</div>
-  <div class="ph-step" id="ph-attack"><span class="ph-dot"></span><div style="display:flex;flex-direction:column;line-height:1.2"><span class="ph-label">Attack</span><span class="ph-timing" id="ph-timing-attack"></span></div></div>
+  <div class="ph-step" id="ph-attack"><span class="ph-dot"></span><span class="ph-label">Attack</span></div>
   <div class="ph-arrow">→</div>
-  <div class="ph-step" id="ph-report"><span class="ph-dot"></span><div style="display:flex;flex-direction:column;line-height:1.2"><span class="ph-label">Report</span><span class="ph-timing" id="ph-timing-report"></span></div></div>
-  <div style="margin-left:auto;display:flex;align-items:center;gap:8px">
-    <span id="subphaseBadge" class="subphase-badge" style="display:none">—</span>
-    <span class="attack-speed-pill" id="speedPill" style="display:none">
-      <span class="speed-val" id="speedValue">—</span> fields/min
-    </span>
-  </div>
+  <div class="ph-step" id="ph-report"><span class="ph-dot"></span><span class="ph-label">Report</span></div>
 </div>
 
 <!-- ─── Progress ───────────────────────────────────────────── -->
@@ -1189,79 +1099,31 @@ body {
     </div>
   </div>
 
-  <!-- Center: Tabbed view (Browser | Site Map | Progress) -->
+  <!-- Center: Screenshot + Current Test -->
   <div class="panel center-panel" style="border-right:1px solid var(--border)">
-
-    <!-- Tab bar -->
-    <div class="center-tab-bar">
-      <div class="center-tab active" id="ctab-browser" onclick="switchCenterTab('browser',this)">Live Browser</div>
-      <div class="center-tab" id="ctab-sitemap" onclick="switchCenterTab('sitemap',this)">
-        Site Map <span id="sitemapNodeCount" class="panel-badge" style="margin-left:3px;font-size:.6rem">0</span>
-      </div>
-      <div class="center-tab" id="ctab-progress" onclick="switchCenterTab('progress',this)">Progress</div>
-    </div>
-
-    <!-- ── Browser view (existing content) ── -->
-    <div class="center-tab-view active" id="ctview-browser">
-      <div class="screenshot-area" id="screenshotArea">
-        <div class="screenshot-placeholder">
-          <div class="icon">🔍</div>
-          <p>Browser screenshots will appear here</p>
-        </div>
-      </div>
-      <div class="current-test">
-        <div class="ct-label">Current Test</div>
-        <div class="ct-row-item"><span class="ct-meta-label">URL</span><span id="ctUrl" class="ct-url-val" title="">—</span></div>
-        <div class="ct-row-item"><span class="ct-meta-label">Field</span><span id="ctField" class="ct-field">—</span></div>
-        <div class="ct-row-item"><span class="ct-meta-label">Check</span><span id="ctCheckType" style="font-size:.8rem;color:var(--text-muted)">—</span></div>
-        <div class="ct-row-item" style="align-items:flex-start">
-          <span class="ct-meta-label" style="padding-top:2px">Payload</span>
-          <span id="ctPayload" class="ct-payload" style="flex:1;min-width:0">—</span>
-          <button id="ctPayloadToggle" onclick="togglePayloadExpand()" style="display:none;background:none;border:1px solid #444;color:#aaa;border-radius:3px;padding:1px 5px;cursor:pointer;font-size:.7rem;margin-left:4px;flex-shrink:0">▼</button>
-        </div>
-        <div id="ctPayloadFull" style="display:none;margin:4px 0 0 0;padding:6px 8px;background:#0d0d1a;border:1px solid #2a2a3e;border-radius:4px;font-family:monospace;font-size:.75rem;color:#e879f9;word-break:break-all;white-space:pre-wrap"></div>
-        <div class="check-badges" id="checkBadges"></div>
-        <div id="checkCounters" style="display:flex;flex-wrap:wrap;gap:5px;margin-top:6px"></div>
+    <div class="panel-header">Live Browser View</div>
+    <div class="screenshot-area" id="screenshotArea">
+      <div class="screenshot-placeholder">
+        <div class="icon">🔍</div>
+        <p>Browser screenshots will appear here</p>
       </div>
     </div>
-
-    <!-- ── Site Map view ── -->
-    <div class="center-tab-view" id="ctview-sitemap" style="position:relative">
-      <div id="sitemapContainer">
-        <svg id="sitemapSvg"></svg>
-        <div id="sitemapFallback"></div>
+    <div class="current-test">
+      <div class="ct-label">Current Test</div>
+      <div class="ct-row-item"><span class="ct-meta-label">URL</span><span id="ctUrl" class="ct-url-val" title="">—</span></div>
+      <div class="ct-row-item"><span class="ct-meta-label">Field</span><span id="ctField" class="ct-field">—</span></div>
+      <div class="ct-row-item"><span class="ct-meta-label">Check</span><span id="ctCheckType" style="font-size:.8rem;color:var(--text-muted)">—</span></div>
+      <div class="ct-row-item" style="align-items:flex-start">
+        <span class="ct-meta-label" style="padding-top:2px">Payload</span>
+        <span id="ctPayload" class="ct-payload" style="flex:1;min-width:0">—</span>
+        <button id="ctPayloadToggle" onclick="togglePayloadExpand()" style="display:none;background:none;border:1px solid #444;color:#aaa;border-radius:3px;padding:1px 5px;cursor:pointer;font-size:.7rem;margin-left:4px;flex-shrink:0">▼</button>
       </div>
-      <div class="sm-node-tooltip" id="smTooltip"></div>
+      <div id="ctPayloadFull" style="display:none;margin:4px 0 0 0;padding:6px 8px;background:#0d0d1a;border:1px solid #2a2a3e;border-radius:4px;font-family:monospace;font-size:.75rem;color:#e879f9;word-break:break-all;white-space:pre-wrap"></div>
+      <div class="check-badges" id="checkBadges">
+        <!-- Dynamically populated from scan_config event -->
+      </div>
+      <div id="checkCounters" style="display:flex;flex-wrap:wrap;gap:5px;margin-top:6px"></div>
     </div>
-
-    <!-- ── Progress Detail view ── -->
-    <div class="center-tab-view" id="ctview-progress">
-      <!-- Phase durations strip -->
-      <div class="phase-timing-strip" id="phaseTimingStrip">
-        <span style="color:var(--text-muted)">Phase durations will appear here after each phase completes.</span>
-      </div>
-      <!-- Sub-phase + attack speed row -->
-      <div style="padding:5px 14px;display:flex;gap:12px;align-items:center;background:var(--surface);border-bottom:1px solid var(--border);flex-shrink:0;font-size:.75rem">
-        <span>Sub-phase: <span id="dpSubphase" class="subphase-badge" style="display:none">—</span></span>
-      </div>
-      <!-- Currently attacking -->
-      <div style="background:var(--surface2);border-bottom:1px solid var(--border);padding:8px 14px;flex-shrink:0">
-        <div style="font-size:.65rem;color:var(--text-muted);text-transform:uppercase;letter-spacing:.08em;margin-bottom:5px">Currently Attacking</div>
-        <div class="ct-row-item"><span class="ct-meta-label">URL</span><span id="dpCtUrl" class="ct-url-val">—</span></div>
-        <div class="ct-row-item"><span class="ct-meta-label">Field</span><span id="dpCtField" style="font-size:.82rem;font-weight:600">—</span></div>
-        <div class="ct-row-item"><span class="ct-meta-label">Check</span><span id="dpCtCheck" style="font-size:.78rem;color:var(--text-muted)">—</span></div>
-        <div class="ct-row-item" style="align-items:flex-start">
-          <span class="ct-meta-label" style="padding-top:2px">Payload</span>
-          <span id="dpCtPayload" style="font-family:monospace;font-size:.72rem;color:var(--high);flex:1;min-width:0;word-break:break-all">—</span>
-        </div>
-      </div>
-      <!-- Per-check-type progress bars -->
-      <div style="padding:10px 14px;flex:1;overflow-y:auto">
-        <div style="font-size:.65rem;color:var(--text-muted);text-transform:uppercase;letter-spacing:.08em;margin-bottom:6px">Per-Check Progress</div>
-        <div id="checkProgressBars"><span style="color:var(--text-muted);font-size:.75rem">Waiting for scan to start…</span></div>
-      </div>
-    </div>
-
   </div>
 
   <!-- Right: Findings + Network -->
@@ -1374,17 +1236,6 @@ const state = {
   urlStatuses: {},   // { url: 'pending'|'scanning'|'done'|'vuln' }
   urlOrder: [],      // discovery order
   checkCounts: {},   // { xss: 12, sqli: 8, ... }
-  // ── Site Map ─────────────────────────────────────────
-  graphNodes: {},    // { url: {id, url, parent, depth, status} }
-  graphLinks: [],    // [{source: url, target: url}]
-  d3Loaded: false,
-  _d3: null,         // D3 internals after initSiteMapD3()
-  // ── Detailed Progress ─────────────────────────────────
-  phaseTimes: {},    // { crawl: elapsedSec, plan: elapsedSec, ... }
-  phaseStartTs: {},  // { crawl: timestampMs } — set when phase begins
-  checkStats: {},    // { xss: {done: N}, sqli: {done: N}, ... }
-  attackStartTime: null, // ms timestamp when attack phase started
-  urlFindingCounts: {}, // { url: N } — findings per URL
 };
 
 // ─── Config form state ───────────────────────────────────────────
@@ -1975,20 +1826,7 @@ function handleEvent(event) {
       if (data.check_type) {
         state.checkCounts[data.check_type] = (state.checkCounts[data.check_type] || 0) + 1;
         renderCheckCounters();
-        // Update progress tab check stats
-        if (!state.checkStats[data.check_type]) state.checkStats[data.check_type] = {done: 0};
-        state.checkStats[data.check_type].done++;
-        renderCheckProgressBars();
       }
-      // Mirror into progress tab
-      { const dpUrl = document.getElementById('dpCtUrl');
-        const dpField = document.getElementById('dpCtField');
-        const dpCheck = document.getElementById('dpCtCheck');
-        const dpPayload = document.getElementById('dpCtPayload');
-        if (dpUrl) { dpUrl.textContent = data.url || '—'; dpUrl.title = data.url || ''; }
-        if (dpField) dpField.textContent = data.field || '—';
-        if (dpCheck) dpCheck.textContent = data.check_type || '—';
-        if (dpPayload) dpPayload.textContent = (data.payload || '—').substring(0, 100); }
       addEventLog('payload', `[${data.check_type.toUpperCase()}] ${data.field}: ${data.payload.substring(0,50)}`);
       break;
 
@@ -2055,11 +1893,6 @@ function handleEvent(event) {
         if (state.urlStatuses[k] === 'scanning') state.urlStatuses[k] = 'done';
       }
       state.urlStatuses[u] = 'scanning';
-      // Update site map node status
-      if (state.graphNodes[u] && state.graphNodes[u].status !== 'vuln') {
-        state.graphNodes[u].status = 'scanning';
-        _sitemapRerender();
-      }
       renderUrlList();
       break;
     }
@@ -2067,10 +1900,6 @@ function handleEvent(event) {
     case 'url_complete': {
       const u = data.url;
       if (state.urlStatuses[u] === 'scanning') state.urlStatuses[u] = 'done';
-      if (state.graphNodes[u] && state.graphNodes[u].status === 'scanning') {
-        state.graphNodes[u].status = 'done';
-        _sitemapRerender();
-      }
       renderUrlList();
       break;
     }
@@ -2086,11 +1915,9 @@ function handleEvent(event) {
       document.getElementById('findingCount').textContent = state.findingCount;
       addFinding(data);
       addEventLog('finding', `[FINDING] ${data.check_type?.toUpperCase()} on "${data.field_name}" — ${(data.evidence||'').substring(0,60)}`);
-      // Mark the finding's URL as vuln in the URL list + site map
-      if (data.url) {
+      // Mark the finding's URL as vuln in the URL list
+      if (data.url && state.urlStatuses[data.url]) {
         state.urlStatuses[data.url] = 'vuln';
-        state.urlFindingCounts[data.url] = (state.urlFindingCounts[data.url] || 0) + 1;
-        markSiteMapVuln(data.url);
         renderUrlList();
       }
       break;
@@ -2120,22 +1947,6 @@ function handleEvent(event) {
       ['etaBlock', 'remainBlock', 'etaTimeBlock'].forEach(id =>
         document.getElementById(id).style.display = ''
       );
-      // Attack speed calculation
-      if (state.attackStartTime && data.current > 0) {
-        const elapsedMin = (timestamp * 1000 - state.attackStartTime) / 60000;
-        if (elapsedMin > 0) {
-          const fpm = Math.round(data.current / elapsedMin);
-          const pill = document.getElementById('speedPill');
-          const val  = document.getElementById('speedValue');
-          if (pill) pill.style.display = '';
-          if (val)  val.textContent = fpm;
-        }
-      }
-      // Per-check stats from backend (if provided)
-      if (data.check_stats) {
-        state.checkStats = data.check_stats;
-        renderCheckProgressBars();
-      }
       break;
     }
 
@@ -2204,30 +2015,6 @@ function handleEvent(event) {
       state.urlStatuses = {};
       state.urlOrder = [];
       state.checkCounts = {};
-      // Reset new state
-      state.graphNodes = {};
-      state.graphLinks = [];
-      state.phaseTimes = {};
-      state.phaseStartTs = {};
-      state.checkStats = {};
-      state.attackStartTime = null;
-      state.urlFindingCounts = {};
-      document.getElementById('sitemapNodeCount').textContent = '0';
-      { const sp = document.getElementById('speedPill'); if (sp) sp.style.display = 'none'; }
-      { const sb = document.getElementById('subphaseBadge'); if (sb) sb.style.display = 'none'; }
-      // Reset phase timing labels
-      ['crawl','plan','attack','report'].forEach(p => {
-        const el = document.getElementById('ph-timing-' + p);
-        if (el) el.textContent = '';
-      });
-      document.getElementById('phaseTimingStrip').innerHTML =
-        '<span style="color:var(--text-muted)">Phase durations will appear here after each phase completes.</span>';
-      document.getElementById('checkProgressBars').innerHTML =
-        '<span style="color:var(--text-muted);font-size:.75rem">Waiting for scan to start…</span>';
-      // Reset D3 simulation
-      if (state._d3) { try { state._d3.sim.stop(); } catch(e) {} state._d3 = null; state.d3Loaded = false; }
-      document.getElementById('sitemapSvg').innerHTML = '';
-      document.getElementById('sitemapFallback').innerHTML = '';
       updatePhaseBar('');
       renderUrlList();
       renderCheckCounters();
