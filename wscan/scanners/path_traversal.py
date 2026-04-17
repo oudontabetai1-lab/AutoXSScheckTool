@@ -69,12 +69,19 @@ class PathTraversalScanner(BaseScanner):
 
             match = self.check_response_for_patterns(source, PATH_TRAVERSAL_PATTERNS)
             if match:
-                # Only flag if this pattern was NOT already present in the baseline response
-                baseline_match = self.check_response_for_patterns(
-                    baseline_source, PATH_TRAVERSAL_PATTERNS
-                ) if baseline_source else None
-                if baseline_match:
-                    continue  # Pattern pre-existed — not caused by our payload
+                # Skip when baseline already contained the same pattern.
+                # When baseline retrieval failed (baseline_source is empty) we fall
+                # through and flag — but we note this as a lower confidence case
+                # below via evidence text.
+                if baseline_source:
+                    baseline_match = self.check_response_for_patterns(
+                        baseline_source, PATH_TRAVERSAL_PATTERNS
+                    )
+                    if baseline_match:
+                        continue  # Pattern pre-existed — not caused by our payload
+                evidence_suffix = (
+                    "" if baseline_source else " (baseline unavailable — verify manually)"
+                )
 
                 finding = await self.record_finding(
                     url=url,
@@ -82,6 +89,7 @@ class PathTraversalScanner(BaseScanner):
                     payload=payload,
                     evidence=(
                         f"Path traversal successful — file content in response: '{match}'"
+                        f"{evidence_suffix}"
                     ),
                     pair=pair,
                     severity="high",
@@ -107,5 +115,9 @@ class PathTraversalScanner(BaseScanner):
                 return await self.browser.fill_and_submit_form(
                     form_index, field_name, payload
                 )
-        except Exception:
+        except Exception as exc:
+            if self.monitor:
+                await self.monitor.emit_status(
+                    f"[warn] path_traversal: _apply_payload failed on {field_name} @ {url}: {exc}"
+                )
             return "", {}

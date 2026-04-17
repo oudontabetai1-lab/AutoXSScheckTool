@@ -64,8 +64,11 @@ class XSSScanner(BaseScanner):
         try:
             await self.browser.navigate(url)
             baseline_source = await self.browser.page.content()
-        except Exception:
-            pass
+        except Exception as exc:
+            if self.monitor:
+                await self.monitor.emit_status(
+                    f"[warn] xss: baseline fetch failed on {url}: {exc}"
+                )
 
         for payload in payloads:
             if self.monitor:
@@ -179,5 +182,9 @@ class XSSScanner(BaseScanner):
                 return await self.browser.fill_and_submit_form(
                     form_index, field_name, payload
                 )
-        except Exception:
+        except Exception as exc:
+            if self.monitor:
+                await self.monitor.emit_status(
+                    f"[warn] xss: _apply_payload failed on {field_name} @ {url}: {exc}"
+                )
             return "", {}

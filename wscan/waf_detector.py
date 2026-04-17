@@ -4,6 +4,7 @@ Detects WAF presence from HTTP response headers and body patterns,
 then suggests WAF-specific bypass encodings via LLM or built-in rules.
 """
 import re
+import time
 from typing import Optional
 
 import httpx
@@ -27,6 +28,8 @@ _WAF_SIGNATURES: list[tuple[str, str, str]] = [
     ("FortiWeb",         r"fortiwafsid=",                     r"fortiweb"),
     ("Wallarm",          r"x-wallarm-",                       r"wallarm"),
     ("Wordfence",        r"",                                 r"wordfence"),
+    ("DataDome",         r"x-datadome|datadome",              r"datadome|protected by datadome"),
+    ("PerimeterX",       r"_pxhd|x-px-",                     r"perimeterx|px-block"),
     ("Generic WAF",      r"",                                 r"web application firewall|access denied|blocked by"),
 ]
 
@@ -53,6 +56,18 @@ _WAF_BYPASSES: dict[str, list[str]] = {
         "URL encoding mix: %u0053ELECT",
         "Operator substitution: 1 LIKE 1 instead of 1=1",
     ],
+    "DataDome": [
+        "Rotate user-agent to a legitimate browser string",
+        "Add Accept-Language and Accept-Encoding headers matching real browsers",
+        "Slow request rate; DataDome scores on traffic velocity",
+        "Use residential proxy or real browser fingerprint",
+    ],
+    "PerimeterX": [
+        "Execute JavaScript to obtain a valid _px cookie before probing",
+        "Match browser TLS fingerprint (JA3 / JA4) to a real browser",
+        "Mimic mouse-movement and page-interaction events",
+        "Avoid headless browser fingerprint indicators (navigator.webdriver)",
+    ],
     "Generic WAF": [
         "URL encoding: %3Cscript%3E",
         "Double URL encoding: %253Cscript%253E",
@@ -64,22 +79,26 @@ _WAF_BYPASSES: dict[str, list[str]] = {
 }
 
 
+_DETECTION_TTL = 300  # seconds — re-probe if stale
+
+
 class WAFDetector:
     """Detects WAF presence and suggests bypass strategies."""
 
     def __init__(self, payload_gen=None):
         self.payload_gen = payload_gen
         self._detected: Optional[str] = None
-        self._checked: bool = False
+        self._checked_at: float = 0.0  # epoch seconds of last probe
 
     async def detect(self, url: str, timeout: float = 10.0) -> Optional[str]:
         """
         Probe the target URL and detect WAF type.
         Returns the detected WAF name or None.
+        Cached for _DETECTION_TTL seconds to avoid redundant probes.
         """
-        if self._checked:
+        if self._checked_at and (time.monotonic() - self._checked_at) < _DETECTION_TTL:
             return self._detected
-        self._checked = True
+        self._checked_at = time.monotonic()
 
         try:
             async with httpx.AsyncClient(
@@ -87,13 +106,15 @@ class WAFDetector:
                 verify=False,
                 follow_redirects=True,
             ) as client:
-                # First: normal request
+                # First: normal request (collect always-present WAF headers)
                 resp = await client.get(url)
                 normal_headers = {k.lower(): v.lower() for k, v in resp.headers.items()}
                 normal_body = resp.text[:5000].lower()
 
-                # Second: obviously malicious request to trigger WAF
-                probe_url = url + "?test=<script>alert(1)</script>&id=1' OR '1'='1"
+                # Second: benign-looking anomaly probe — path traversal fragment and
+                # a custom tag are enough to trigger most WAF rule sets without
+                # resembling a real exploit that IDS/abuse filters flag.
+                probe_url = url + "?wscan=..%2F..%2F&x=%00<wscan-probe>"
                 resp2 = await client.get(probe_url)
                 waf_headers = {k.lower(): v.lower() for k, v in resp2.headers.items()}
                 waf_body = resp2.text[:5000].lower()

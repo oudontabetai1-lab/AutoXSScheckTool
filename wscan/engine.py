@@ -300,34 +300,9 @@ class ScanEngine:
             enable_web_browsing=enable_llm_web_browsing,
         )
 
-        scanner_map = {
-            "sqli":             SQLiScanner,
-            "xss":              XSSScanner,
-            "dom_xss":          DOMXSSScanner,
-            "os":               OSInjectionScanner,
-            "ssti":             SSTIScanner,
-            "path_traversal":   PathTraversalScanner,
-            "csrf":             CSRFScanner,
-            "header_injection": HeaderInjectionScanner,
-            "mail_header":      MailHeaderInjectionScanner,
-            "open_redirect":    OpenRedirectScanner,
-            "clickjacking":       ClickjackingScanner,
-            "session":            SessionScanner,
-            "privesc":            PrivEscScanner,
-            "stored_xss":         StoredXSSScanner,
-            "cors":               CORSScanner,
-            "info_disclosure":    InfoDisclosureScanner,
-            "host_header":        HostHeaderScanner,
-            "security_headers":   SecurityHeadersScanner,
-            "nosql":              NoSQLInjectionScanner,
-            "deserialization":    DeserializationScanner,
-            "request_smuggling":  RequestSmugglingScanner,
-            "ssrf":               SSRFScanner,
-            "graphql":            GraphQLScanner,
-            "jwt":                JWTScanner,
-            "cms":                CmsScanner,
-        }
-        self.scanners = {n: cls(self) for n, cls in scanner_map.items() if n in self.checks}
+        # Central registry lives in wscan/scanners/__init__.py
+        from .scanners import SCANNERS as _SCANNERS
+        self.scanners = {n: cls(self) for n, cls in _SCANNERS.items() if n in self.checks}
 
         # Always enable privilege-escalation scanner when auth cookies are provided,
         # even if the user didn't explicitly list "privesc" in --checks.
@@ -1319,8 +1294,16 @@ class ScanEngine:
             # they will exit cleanly at the top-of-loop _abort_event check.
             results = await asyncio.gather(*tasks, return_exceptions=True)
         finally:
+            # Even if gather() propagates a cancellation, try to close every
+            # worker so their browser contexts don't leak. Exceptions from one
+            # worker must not prevent the next one from closing.
             for w in extra_workers:
-                await w.close()
+                try:
+                    await w.close()
+                except Exception as _close_exc:
+                    console.print(
+                        f"  [yellow][Worker cleanup] close() failed: {_close_exc}[/yellow]"
+                    )
 
         # Propagate AbortScan to the caller (_phase_attack → run)
         if _abort_event.is_set():
@@ -2710,7 +2693,7 @@ class ScanEngine:
                 response = await loop.run_in_executor(
                     None,
                     lambda: client.messages.create(
-                        model="claude-haiku-4-5-20251001",
+                        model=self.claude_model,
                         max_tokens=1500,
                         messages=[{"role": "user", "content": prompt}],
                     ),

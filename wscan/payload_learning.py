@@ -29,6 +29,8 @@ Back-compat: legacy files written with the old flat schema
 ``{"global": {...}, "domains": {}}`` on first load.
 """
 import json
+import os
+import tempfile
 from pathlib import Path
 from typing import Optional
 
@@ -75,10 +77,20 @@ class PayloadLearner:
 
     def save(self) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        self._path.write_text(
-            json.dumps(self._data, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        payload = json.dumps(self._data, ensure_ascii=False, indent=2)
+        # Atomic write: write to a temp file in the same directory then rename,
+        # so concurrent saves never leave a partially-written JSON file.
+        fd, tmp = tempfile.mkstemp(dir=self._path.parent, prefix=".payload_learning_")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(payload)
+            os.replace(tmp, self._path)
+        except Exception:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
 
     # ------------------------------------------------------------------
     # Recording

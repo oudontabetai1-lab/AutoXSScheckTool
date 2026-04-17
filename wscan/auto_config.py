@@ -118,10 +118,11 @@ async def _call_llm(payload_gen, prompt: str) -> Optional[str]:
                 return None
             import asyncio as _aio
             loop = _aio.get_event_loop()
+            model = getattr(payload_gen, "claude_model", "claude-haiku-4-5-20251001")
             response = await loop.run_in_executor(
                 None,
                 lambda: client.messages.create(
-                    model="claude-haiku-4-5-20251001",
+                    model=model,
                     max_tokens=1200,
                     system=_SYSTEM_PROMPT,
                     messages=[{"role": "user", "content": prompt}],

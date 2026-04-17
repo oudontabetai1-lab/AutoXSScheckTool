@@ -25,7 +25,8 @@ class MonitorServer:
         self._queue: asyncio.Queue = asyncio.Queue()
         self.app = self._create_app()
         self._started = False
-        self.event_history: list[dict] = []
+        import collections
+        self.event_history: collections.deque = collections.deque(maxlen=1000)
 
         # ── Intervention / plan-confirm channels ──────────────────────
         # Commands arriving from the web UI (pause / resume / skip_field / skip_page / abort)
@@ -245,8 +246,6 @@ class MonitorServer:
             "data": data or {},
         }
         self.event_history.append(event)
-        if len(self.event_history) > 2000:
-            self.event_history = self.event_history[-1000:]  # trim to last 1000
         dead = set()
         for client in list(self.clients):
             try:
@@ -357,9 +356,11 @@ class MonitorServer:
     async def wait_for_plan_confirm(self, timeout: float = 600.0) -> dict:
         """
         Block until the operator clicks 'Start Attack' in the web UI.
-        Auto-confirms with no edits after `timeout` seconds so the scan
-        never hangs when no dashboard client is connected.
-        Returns the edits dict (may be empty if no changes were made).
+        If *timeout* elapses without confirmation, a warning is emitted and
+        the method returns without auto-starting the scan (callers should
+        treat an empty dict with plan_confirm_event not set as "not confirmed").
+        Returns the edits dict (may be empty if no changes were made or
+        if the operator did not confirm within the timeout).
         """
         try:
             await asyncio.wait_for(
@@ -367,5 +368,9 @@ class MonitorServer:
                 timeout=timeout,
             )
         except asyncio.TimeoutError:
-            pass  # auto-confirm
+            await self.emit_status(
+                f"[warn] Plan confirm timed out after {timeout:.0f}s — "
+                "operator confirmation required to start the scan.",
+                "warning",
+            )
         return self.confirmed_plan_edits

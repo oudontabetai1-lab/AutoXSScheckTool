@@ -138,9 +138,12 @@ class NoSQLInjectionScanner(BaseScanner):
                     findings.append(finding)
                     break
 
-                # Boolean-based: significant response length difference
+                # Boolean-based: significant response length difference.
+                # Threshold scales with baseline so that tiny/huge responses
+                # aren't false-positive-prone. 500 bytes is the floor.
                 delta = abs(len(src) - baseline_len)
-                if delta > 500 and len(src) > baseline_len:
+                min_delta = max(500, int(baseline_len * 0.25))
+                if delta > min_delta and len(src) > baseline_len:
                     finding = await self.record_finding(
                         url=url,
                         field_name=field_name,
@@ -156,7 +159,11 @@ class NoSQLInjectionScanner(BaseScanner):
                     findings.append(finding)
                     break
 
-            except Exception:
+            except Exception as exc:
+                if self.monitor:
+                    await self.monitor.emit_status(
+                        f"[warn] nosql: probe failed on {field_name} @ {url}: {exc}"
+                    )
                 continue
             await asyncio.sleep(0.2 * self.sleep_factor)
 

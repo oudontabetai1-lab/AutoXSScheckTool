@@ -58,7 +58,11 @@ class SessionScanner(BaseScanner):
 
         try:
             cookies = await self.browser._context.cookies()
-        except Exception:
+        except Exception as exc:
+            if self.monitor:
+                await self.monitor.emit_status(
+                    f"[warn] session: failed to read cookies on {url}: {exc}"
+                )
             return []
 
         for cookie in cookies:
@@ -85,7 +89,18 @@ class SessionScanner(BaseScanner):
                 )
 
             samesite = (cookie.get("sameSite") or "").upper()
-            if samesite not in ("STRICT", "LAX"):
+            # SameSite=None is acceptable ONLY when paired with the Secure flag
+            # (required by modern browsers for cross-site APIs). Flag it only
+            # when Secure is absent.
+            if samesite in ("STRICT", "LAX"):
+                pass
+            elif samesite == "NONE":
+                if not cookie.get("secure"):
+                    issues.append(
+                        "SameSite=None without Secure — modern browsers reject "
+                        "this and it still permits CSRF over HTTP"
+                    )
+            else:
                 label = samesite if samesite else "unset"
                 issues.append(
                     f"SameSite={label} — cookie sent on cross-site requests (CSRF risk)"

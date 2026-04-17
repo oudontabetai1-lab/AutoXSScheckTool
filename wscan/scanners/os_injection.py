@@ -99,15 +99,28 @@ class OSInjectionScanner(BaseScanner):
             # --- Check 1: Command output in response (not pre-existing in baseline) ---
             match = self.check_response_for_patterns(source, OS_OUTPUT_PATTERNS)
             if match:
-                baseline_match = self.check_response_for_patterns(
-                    baseline_source, OS_OUTPUT_PATTERNS
-                ) if baseline_source else None
-                if not baseline_match:
+                # If baseline request failed (empty body), we can't reliably say
+                # whether the pattern was pre-existing. Skip the baseline check
+                # only when baseline was actually captured.
+                pattern_pre_existed = False
+                if baseline_source:
+                    baseline_match = self.check_response_for_patterns(
+                        baseline_source, OS_OUTPUT_PATTERNS
+                    )
+                    if baseline_match:
+                        pattern_pre_existed = True
+                if not pattern_pre_existed:
+                    evidence_suffix = (
+                        "" if baseline_source else " (baseline unavailable — verify manually)"
+                    )
                     finding = await self.record_finding(
                         url=url,
                         field_name=field_name,
                         payload=payload,
-                        evidence=f"OS command output detected in response: '{match}'",
+                        evidence=(
+                            f"OS command output detected in response: '{match}'"
+                            f"{evidence_suffix}"
+                        ),
                         pair=pair,
                         severity="critical",
                     )
@@ -148,5 +161,9 @@ class OSInjectionScanner(BaseScanner):
                 return await self.browser.fill_and_submit_form(
                     form_index, field_name, payload
                 )
-        except Exception:
+        except Exception as exc:
+            if self.monitor:
+                await self.monitor.emit_status(
+                    f"[warn] os: _apply_payload failed on {field_name} @ {url}: {exc}"
+                )
             return "", {}

@@ -328,7 +328,11 @@ class SQLiScanner(BaseScanner):
                 return await self.browser.fill_and_submit_form(
                     form_index, field_name, "baseline_test"
                 )
-        except Exception:
+        except Exception as exc:
+            if self.monitor:
+                await self.monitor.emit_status(
+                    f"[warn] sqli: baseline failed on {field_name} @ {url}: {exc}"
+                )
             return "", {}
 
     async def _apply_payload(
@@ -349,5 +353,9 @@ class SQLiScanner(BaseScanner):
                 return await self.browser.fill_and_submit_form(
                     form_index, field_name, payload
                 )
-        except Exception:
+        except Exception as exc:
+            if self.monitor:
+                await self.monitor.emit_status(
+                    f"[warn] sqli: _apply_payload failed on {field_name} @ {url}: {exc}"
+                )
             return "", {}
