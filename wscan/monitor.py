@@ -3,6 +3,7 @@ WScan Monitor Server
 FastAPI + WebSocket server for real-time scan monitoring dashboard.
 """
 import asyncio
+import collections
 import json
 import time
 from pathlib import Path
@@ -25,7 +26,6 @@ class MonitorServer:
         self._queue: asyncio.Queue = asyncio.Queue()
         self.app = self._create_app()
         self._started = False
-        import collections
         self.event_history: collections.deque = collections.deque(maxlen=1000)
 
         # ── Intervention / plan-confirm channels ──────────────────────
@@ -64,7 +64,7 @@ class MonitorServer:
             self.clients.add(ws)
             # Send event history to newly connected client
             try:
-                for event in self.event_history[-200:]:
+                for event in list(self.event_history)[-200:]:
                     await ws.send_text(json.dumps(event))
                 # Keep connection alive and process incoming messages
                 while True:
