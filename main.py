@@ -36,7 +36,12 @@ def _load_config(path: Path = _CONFIG_PATH) -> dict:
     try:
         import yaml
         raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-    except Exception:
+    except Exception as _yaml_exc:
+        import sys
+        print(
+            f"[wscan] WARNING: failed to parse {path}: {_yaml_exc} — using defaults.",
+            file=sys.stderr,
+        )
         return cfg
 
     # ── Flatten into a single namespace ──────────────────────────
@@ -409,17 +414,15 @@ Examples:
 
     # Auto-config wizard
     _ac_default = _CFG.get("auto_config", False)
-    _ac_group = scan.add_mutually_exclusive_group()
-    _ac_group.add_argument(
-        "--auto-config", action="store_true", default=_ac_default,
+    scan.add_argument(
+        "--auto-config",
+        action=argparse.BooleanOptionalAction,
+        default=_ac_default,
         help=(
             "Run the LLM-powered scan configuration wizard before scanning. "
-            "Interviews you about the target and auto-generates optimal settings."
+            "Interviews you about the target and auto-generates optimal settings. "
+            "Use --no-auto-config to disable."
         ),
-    )
-    _ac_group.add_argument(
-        "--no-auto-config", action="store_true", default=not _ac_default,
-        help="Disable the auto-config wizard (default).",
     )
 
     # ── agent subcommand ───────────────────────────────────────────
@@ -766,7 +769,7 @@ async def run_scan(args):
     ))
 
     # ── Auto-config wizard (opt-in) ────────────────────────────────
-    _run_auto_config = getattr(args, "auto_config", False) and not getattr(args, "no_auto_config", False)
+    _run_auto_config = bool(getattr(args, "auto_config", False))
     if _run_auto_config:
         from wscan.payload_gen import PayloadGenerator
         from wscan.auto_config import run_wizard, apply_to_args
@@ -1302,8 +1305,10 @@ async def run_setup(args):
 
 async def run_record(args):
     """H: ブラウザ操作を記録して JSON フロー ファイルに保存する。"""
+    from rich.console import Console
     from wscan.flow_recorder import FlowRecorder
 
+    console = Console()
     recorder = FlowRecorder()
     console.print(f"\n[bold cyan][FlowRecorder] 記録モード開始[/bold cyan]")
     console.print(f"  対象 URL: [cyan]{args.url}[/cyan]")

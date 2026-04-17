@@ -5,10 +5,25 @@ echo  Setup Script
 echo ============================================
 echo.
 
-:: Check Python
+:: Check Python (requires 3.11+)
 python --version >nul 2>&1
 if errorlevel 1 (
-    echo [ERROR] Python not found. Please install Python 3.10+
+    echo [ERROR] Python not found. Please install Python 3.11+
+    pause
+    exit /b 1
+)
+for /f "tokens=2 delims= " %%v in ('python --version 2^>^&1') do set PYVER=%%v
+for /f "tokens=1,2 delims=." %%a in ("%PYVER%") do (
+    set PYMAJOR=%%a
+    set PYMINOR=%%b
+)
+if %PYMAJOR% LSS 3 (
+    echo [ERROR] Python 3.11+ is required. Detected: %PYVER%
+    pause
+    exit /b 1
+)
+if %PYMAJOR% EQU 3 if %PYMINOR% LSS 11 (
+    echo [ERROR] Python 3.11+ is required. Detected: %PYVER%
     pause
     exit /b 1
 )

@@ -350,7 +350,7 @@ class BrowserManager:
                     f"document.querySelectorAll('form')[{form_index}].submit()"
                 )
 
-            await self.page.wait_for_load_state("domcontentloaded", timeout=10000)
+            await self.page.wait_for_load_state("domcontentloaded", timeout=self.timeout)
             _js_wait = 0.2 * self.sleep_factor
             if _js_wait > 0:
                 await asyncio.sleep(_js_wait)
@@ -463,7 +463,7 @@ class BrowserManager:
                     f"document.querySelectorAll('form')[{form_index}].submit()"
                 )
 
-            await self.page.wait_for_load_state("domcontentloaded", timeout=10000)
+            await self.page.wait_for_load_state("domcontentloaded", timeout=self.timeout)
             _js_wait = 0.2 * self.sleep_factor
             if _js_wait > 0:
                 await asyncio.sleep(_js_wait)

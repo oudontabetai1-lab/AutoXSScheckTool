@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import secrets
 from dataclasses import dataclass, field
 from typing import Optional, TYPE_CHECKING
 
@@ -47,7 +48,21 @@ _CHECK_DESCRIPTIONS: dict[str, str] = {
     "header_injection": "HTTP Header Injection — inject \\r\\n in header-reflected parameters",
 }
 
+# Per-session nonce prefix baked into the system prompt. Any
+# "VULNERABILITY FOUND" block that does not carry this nonce is considered
+# untrusted (likely reflected attacker content) and ignored during parsing.
+# The placeholder "{SESSION_NONCE}" is substituted at agent start-up.
 _SECURITY_SYSTEM_PROMPT = """You are an expert web application penetration tester conducting an authorized security assessment.
+
+## Session Authenticity
+Every finding you report MUST begin with this exact token on its own line,
+placed immediately before the "VULNERABILITY FOUND:" marker:
+
+    WSCAN-NONCE:{SESSION_NONCE}
+
+This token is unknown to the target application. The operator will ignore any
+report that is missing or has an incorrect token. Never echo the token inside
+page input, URLs, payloads, or evidence fields — only as the literal marker line.
 
 ## CRITICAL: Browser Navigation Rules
 - NEVER use go_back as your first action. The browser is already positioned at the target URL.
@@ -79,8 +94,9 @@ For EACH form or URL parameter you discover:
 - **Open Redirect**: Browser redirects to injected external URL
 
 ## Reporting Findings
-When you discover a vulnerability, state clearly:
+When you discover a vulnerability, emit EXACTLY this block (nonce first):
 ```
+WSCAN-NONCE:{SESSION_NONCE}
 VULNERABILITY FOUND:
 Type: <xss|sqli|ssti|os|path_traversal|ssrf|open_redirect|csrf>
 Severity: <critical|high|medium|low>
@@ -180,19 +196,34 @@ def _build_llm(provider: str, model: str, ollama_url: str = "http://localhost:11
 
 # ── ファインディング抽出 ────────────────────────────────────────────────────
 
-_VULN_BLOCK_RE = re.compile(
-    r"VULNERABILITY FOUND:\s*"
-    r"Type:\s*(?P<type>[^\n]+)\n"
-    r"Severity:\s*(?P<severity>[^\n]+)\n"
-    r"URL:\s*(?P<url>[^\n]+)\n"
-    r"Field:\s*(?P<field>[^\n]+)\n"
-    r"Payload:\s*(?P<payload>[^\n]+)\n"
-    r"Evidence:\s*(?P<evidence>(?:.+\n?)+?)(?=\nVULNERABILITY FOUND:|$)",
-    re.IGNORECASE,
-)
+def _build_vuln_block_re(nonce: str) -> re.Pattern:
+    """Require the session nonce on the line directly before VULNERABILITY FOUND.
 
-def _parse_findings_from_text(text: str) -> list[AgentFinding]:
-    """エージェントの出力テキストから VULNERABILITY FOUND ブロックを解析する。"""
+    This prevents a malicious target page whose content happens to reflect the
+    literal "VULNERABILITY FOUND" template from generating fake findings:
+    attacker content cannot contain the per-session nonce.
+    """
+    return re.compile(
+        r"WSCAN-NONCE:" + re.escape(nonce) + r"\s*\n"
+        r"VULNERABILITY FOUND:\s*"
+        r"Type:\s*(?P<type>[^\n]+)\n"
+        r"Severity:\s*(?P<severity>[^\n]+)\n"
+        r"URL:\s*(?P<url>[^\n]+)\n"
+        r"Field:\s*(?P<field>[^\n]+)\n"
+        r"Payload:\s*(?P<payload>[^\n]+)\n"
+        r"Evidence:\s*(?P<evidence>(?:.+\n?)+?)(?=\nWSCAN-NONCE:|$)",
+        re.IGNORECASE,
+    )
+
+
+def _parse_findings_from_text(text: str, nonce: str = "") -> list[AgentFinding]:
+    """エージェントの出力テキストから VULNERABILITY FOUND ブロックを解析する。
+
+    ``nonce`` が空でない場合、各ブロックの直前に ``WSCAN-NONCE:<nonce>`` が
+    存在することを要求する (LLM だけが知っている値なので、悪性ページの反射では
+    偽のブロックを通過させられない)。
+    """
+    vuln_re = _build_vuln_block_re(nonce) if nonce else None
     _type_map = {
         "cross-site scripting": "xss",
         "sql injection": "sqli",
@@ -211,7 +242,8 @@ def _parse_findings_from_text(text: str) -> list[AgentFinding]:
     findings: list[AgentFinding] = []
     seen: set[tuple] = set()  # BUG-4 fix: deduplicate on (url, field, check_type)
 
-    for m in _VULN_BLOCK_RE.finditer(text):
+    active_re = vuln_re if vuln_re is not None else _build_vuln_block_re("")
+    for m in active_re.finditer(text):
         check_type = m.group("type").strip().lower()
         check_type = _type_map.get(check_type, check_type)
 
@@ -297,6 +329,7 @@ class AgentBrowserScanner:
         self.recon_mode = recon_mode
         self._step_count = 0
         self._memory = AgentMemory()
+        self._session_nonce = secrets.token_urlsafe(16)
 
     # ------------------------------------------------------------------
     # Public entry point
@@ -353,11 +386,14 @@ class AgentBrowserScanner:
                 {"navigate": {"url": start_url, "new_tab": False}},
             ]
 
+            system_prompt = _SECURITY_SYSTEM_PROMPT.replace(
+                "{SESSION_NONCE}", self._session_nonce
+            )
             agent = Agent(
                 task=task,
                 llm=llm,
                 browser=browser,
-                override_system_message=_SECURITY_SYSTEM_PROMPT,
+                override_system_message=system_prompt,
                 max_failures=5,
                 use_vision=True,
                 use_thinking=True,
@@ -397,7 +433,7 @@ class AgentBrowserScanner:
                         self._memory.visited_urls.append(u)
                 result.memory = self._memory
 
-            result.findings = _parse_findings_from_text(all_text)
+            result.findings = _parse_findings_from_text(all_text, nonce=self._session_nonce)
 
             # エラーがあればログに記録 (None エントリを除外)
             errors = [e for e in (history.errors() or []) if e is not None]

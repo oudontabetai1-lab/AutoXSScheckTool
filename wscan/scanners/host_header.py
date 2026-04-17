@@ -25,6 +25,18 @@ if TYPE_CHECKING:
 
 _CANARY_HOST = "evil.wscan-test.example.com"
 
+# Regex that matches the canary only when it appears as a hostname / URL, not
+# as a substring of a larger domain (e.g. "trustedhost.evil.wscan-test.example.com.attacker"
+# would otherwise trigger a false positive). The canary must be bounded by:
+#   - a protocol delimiter "://", "//" or whitespace / quote / "="
+#   - followed by end, "/", ":", quote, whitespace, or ">"
+_CANARY_RE = re.compile(
+    r"""(?:^|//|https?://|\s|['"=])"""
+    + re.escape(_CANARY_HOST)
+    + r"""(?:[/:?#'"\s>]|$)""",
+    re.IGNORECASE,
+)
+
 # Override headers that some reverse proxies honour
 _OVERRIDE_HEADERS = [
     "X-Forwarded-Host",
@@ -90,10 +102,11 @@ class HostHeaderScanner(BaseScanner):
                     r = await client.get(url, headers=extra_headers)
                     body = r.text
 
-                    # Check if canary domain appears anywhere in the HTML
-                    if _CANARY_HOST in body:
-                        # Try to extract the context
-                        idx = body.find(_CANARY_HOST)
+                    # Check if canary appears as a genuine URL/hostname, not
+                    # merely as a substring inside another domain.
+                    m = _CANARY_RE.search(body)
+                    if m:
+                        idx = m.start()
                         snippet = body[max(0, idx - 60):idx + len(_CANARY_HOST) + 60]
 
                         pair = {
@@ -119,7 +132,11 @@ class HostHeaderScanner(BaseScanner):
                         findings.append(finding)
                         break  # One confirmed finding is enough
 
-                except Exception:
+                except Exception as exc:
+                    if self.monitor:
+                        await self.monitor.emit_status(
+                            f"[warn] host_header: {description} failed on {url}: {exc}"
+                        )
                     continue
 
         return findings

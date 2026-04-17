@@ -82,7 +82,11 @@ class OpenRedirectScanner(BaseScanner):
             # Check 1: browser actually navigated to the canary host
             try:
                 current_url = self.browser.page.url
-            except Exception:
+            except Exception as exc:
+                if self.monitor:
+                    await self.monitor.emit_status(
+                        f"[warn] open_redirect: current_url read failed on {url}: {exc}"
+                    )
                 current_url = ""
 
             if _CANARY_HOST in current_url:
@@ -133,5 +137,9 @@ class OpenRedirectScanner(BaseScanner):
                 return await self.browser.fill_and_submit_form(
                     form_index, field_name, payload
                 )
-        except Exception:
+        except Exception as exc:
+            if self.monitor:
+                await self.monitor.emit_status(
+                    f"[warn] open_redirect: _apply_payload failed on {field_name} @ {url}: {exc}"
+                )
             return "", {}

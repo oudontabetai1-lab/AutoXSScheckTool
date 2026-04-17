@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import secrets
 import time
 from pathlib import Path
 from typing import Optional
@@ -78,33 +79,39 @@ class FlowRecorder:
             page.on("framenavigated", on_navigate)
 
             # フォーム送信の追跡 (input change)
-            await page.expose_function("_wscan_record_fill", lambda selector, value: steps.append(
+            # Use random token in function names so malicious page JS cannot
+            # inject fake steps by calling the predictable global names.
+            _tok = secrets.token_hex(12)
+            _fn_fill = f"__wscan_fill_{_tok}__"
+            _fn_click = f"__wscan_click_{_tok}__"
+
+            await page.expose_function(_fn_fill, lambda selector, value: steps.append(
                 {"action": "fill", "selector": selector, "value": value}
             ))
-            await page.expose_function("_wscan_record_click", lambda selector: steps.append(
+            await page.expose_function(_fn_click, lambda selector: steps.append(
                 {"action": "click", "selector": selector}
             ))
 
             # ページに監視スクリプト注入
-            await page.add_init_script("""
-                document.addEventListener('change', function(e) {
+            await page.add_init_script(f"""
+                document.addEventListener('change', function(e) {{
                     const el = e.target;
-                    if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT') {
+                    if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT') {{
                         const sel = el.id ? '#' + el.id : (el.name ? '[name="' + el.name + '"]' : el.tagName.toLowerCase());
-                        if (typeof window._wscan_record_fill === 'function') {
-                            window._wscan_record_fill(sel, el.value);
-                        }
-                    }
-                }, true);
-                document.addEventListener('click', function(e) {
+                        if (typeof window['{_fn_fill}'] === 'function') {{
+                            window['{_fn_fill}'](sel, el.value);
+                        }}
+                    }}
+                }}, true);
+                document.addEventListener('click', function(e) {{
                     const el = e.target;
-                    if (el.tagName === 'BUTTON' || el.type === 'submit' || el.tagName === 'A') {
+                    if (el.tagName === 'BUTTON' || el.type === 'submit' || el.tagName === 'A') {{
                         const sel = el.id ? '#' + el.id : (el.type === 'submit' ? 'button[type=submit]' : el.tagName.toLowerCase());
-                        if (typeof window._wscan_record_click === 'function') {
-                            window._wscan_record_click(sel);
-                        }
-                    }
-                }, true);
+                        if (typeof window['{_fn_click}'] === 'function') {{
+                            window['{_fn_click}'](sel);
+                        }}
+                    }}
+                }}, true);
             """)
 
             await page.goto(start_url)

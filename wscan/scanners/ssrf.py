@@ -156,5 +156,9 @@ class SSRFScanner(BaseScanner):
                 return await self.browser.fill_and_submit_form(
                     form_index, field_name, payload
                 )
-        except Exception:
+        except Exception as exc:
+            if self.monitor:
+                await self.monitor.emit_status(
+                    f"[warn] ssrf: _apply_payload failed on {field_name} @ {url}: {exc}"
+                )
             return "", {}

@@ -240,6 +240,30 @@ COMPLIANCE_REFS: dict[str, dict[str, list[str]]] = {
         "owasp_top10": ["A06:2021 Vulnerable and Outdated Components"],
         "ipa":         ["IPA CMS 既知の脆弱性"],
     },
+    "xxe": {
+        "pci_dss":     ["PCI DSS v4.0 §6.2.4"],
+        "owasp_asvs":  ["ASVS V5.5.2"],
+        "owasp_top10": ["A05:2021 Security Misconfiguration"],
+        "ipa":         ["IPA XML外部エンティティ参照 (XXE)"],
+    },
+    "ldap": {
+        "pci_dss":     ["PCI DSS v4.0 §6.2.4", "PCI DSS v4.0 §6.3.2"],
+        "owasp_asvs":  ["ASVS V5.3.4"],
+        "owasp_top10": ["A03:2021 Injection"],
+        "ipa":         ["IPA LDAPインジェクション"],
+    },
+    "file_upload": {
+        "pci_dss":     ["PCI DSS v4.0 §6.2.4", "PCI DSS v4.0 §6.3.1"],
+        "owasp_asvs":  ["ASVS V12.2.1", "ASVS V12.3.1"],
+        "owasp_top10": ["A04:2021 Insecure Design", "A05:2021 Security Misconfiguration"],
+        "ipa":         ["IPA ファイルアップロード不備"],
+    },
+    "race_condition": {
+        "pci_dss":     ["PCI DSS v4.0 §6.2.4"],
+        "owasp_asvs":  ["ASVS V11.1.6"],
+        "owasp_top10": ["A04:2021 Insecure Design"],
+        "ipa":         ["IPA 競合状態 (TOCTOU)"],
+    },
 }
 
 

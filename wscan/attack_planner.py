@@ -343,7 +343,8 @@ Consider stored / second-order attacks carefully:
         client = self.payload_gen._get_anthropic_client()
         if not client:
             return None
-        _thinking_header("Claude", "claude-haiku-4-5-20251001")
+        _model = getattr(self.payload_gen, "claude_model", "claude-haiku-4-5-20251001")
+        _thinking_header("Claude", _model)
         try:
             import asyncio
             full = ""
@@ -351,7 +352,7 @@ Consider stored / second-order attacks carefully:
             def _stream_sync():
                 nonlocal full
                 with client.messages.stream(
-                    model="claude-haiku-4-5-20251001",
+                    model=_model,
                     max_tokens=2000,
                     messages=[{"role": "user", "content": prompt}],
                 ) as stream:

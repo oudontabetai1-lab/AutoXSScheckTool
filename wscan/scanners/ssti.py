@@ -64,9 +64,11 @@ class SSTIScanner(BaseScanner):
             if not source or expected not in source:
                 continue
 
-            # Reduce false positives: only flag if the expected value count increased
-            # after injection (not just pre-existing in baseline response).
-            if baseline_source and source.count(expected) <= baseline_source.count(expected):
+            # Reduce false positives: only skip if baseline already contained the
+            # expected value at least as many times. When baseline has 0 occurrences,
+            # any appearance after injection is evidence of SSTI.
+            base_count = baseline_source.count(expected) if baseline_source else 0
+            if base_count > 0 and source.count(expected) <= base_count:
                 continue
 
             finding = await self.record_finding(
@@ -101,5 +103,9 @@ class SSTIScanner(BaseScanner):
                 return await self.browser.fill_and_submit_form(
                     form_index, field_name, payload
                 )
-        except Exception:
+        except Exception as exc:
+            if self.monitor:
+                await self.monitor.emit_status(
+                    f"[warn] ssti: _apply_payload failed on {field_name} @ {url}: {exc}"
+                )
             return "", {}

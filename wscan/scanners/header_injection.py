@@ -77,8 +77,9 @@ class HeaderInjectionScanner(BaseScanner):
                 findings.append(finding)
                 break
 
-            # Secondary: injected Set-Cookie appeared in cookies
-            if "set-cookie" in resp_headers and "wscan_session=injected" in resp_headers.get("set-cookie", ""):
+            # Secondary: injected Set-Cookie appeared in cookies (case-insensitive value check)
+            _sc_val = resp_headers.get("set-cookie", "").lower()
+            if "set-cookie" in resp_headers and "wscan_session=injected" in _sc_val:
                 finding = await self.record_finding(
                     url=url,
                     field_name=field_name,
@@ -111,5 +112,9 @@ class HeaderInjectionScanner(BaseScanner):
                 return await self.browser.fill_and_submit_form(
                     form_index, field_name, payload
                 )
-        except Exception:
+        except Exception as exc:
+            if self.monitor:
+                await self.monitor.emit_status(
+                    f"[warn] header_injection: _apply_payload failed on {field_name} @ {url}: {exc}"
+                )
             return "", {}

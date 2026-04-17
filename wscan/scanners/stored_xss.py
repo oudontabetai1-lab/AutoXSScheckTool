@@ -35,6 +35,9 @@ class StoredXSSScanner(BaseScanner):
         # marker → {"url": injection_url, "field": field_name, "payload": payload_str}
         self._injected: dict[str, dict] = {}
         self._detected_markers: set[str] = set()
+        # Protects concurrent _detected_markers reads/writes when multiple
+        # page-workers invoke scan_page() in parallel.
+        self._detect_lock = asyncio.Lock()
 
     # ------------------------------------------------------------------
     # Field-level: inject uniquely-tagged payloads
@@ -74,8 +77,11 @@ class StoredXSSScanner(BaseScanner):
                     await self.browser.fill_and_submit_form(
                         form_index, field_name, payload
                     )
-            except Exception:
-                pass
+            except Exception as exc:
+                if self.monitor:
+                    await self.monitor.emit_status(
+                        f"[warn] stored_xss: probe injection failed on {field_name} @ {url}: {exc}"
+                    )
             await asyncio.sleep(0.3 * self.sleep_factor)
 
         return []  # Findings are emitted in scan_page
@@ -96,9 +102,6 @@ class StoredXSSScanner(BaseScanner):
 
         findings = []
         for marker, meta in list(self._injected.items()):
-            if marker in self._detected_markers:
-                continue
-
             marker_encoded = _html.escape(marker)
             in_raw = marker in source
             in_encoded = marker_encoded in source
@@ -110,7 +113,12 @@ class StoredXSSScanner(BaseScanner):
             if url == meta["url"]:
                 continue
 
-            self._detected_markers.add(marker)
+            # Atomically claim this marker so concurrent workers cannot both
+            # record a finding for the same marker.
+            async with self._detect_lock:
+                if marker in self._detected_markers:
+                    continue
+                self._detected_markers.add(marker)
             pair = self.browser.network.latest() or {}
 
             # Distinguish executable XSS (raw tags) from stored HTML injection (encoded)

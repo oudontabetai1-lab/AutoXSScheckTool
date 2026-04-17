@@ -117,7 +117,10 @@ class CORSScanner(BaseScanner):
                 )
                 findings.append(finding)
 
-        except Exception:
-            pass
+        except Exception as exc:
+            if self.monitor:
+                await self.monitor.emit_status(
+                    f"[warn] cors: arbitrary-origin probe failed on {url}: {exc}"
+                )
 
         return findings
