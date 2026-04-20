@@ -30,6 +30,8 @@ WScan は、IPA「**安全なウェブサイトの作り方**」の全脆弱性�
 | — | 安全でないデシリアライズ | `deserialization` | PHP/Java/Python pickle プローブ |
 | — | HTTP リクエストスマグリング | `request_smuggling` | CL.TE / TE.CL / TE.TE タイミング検出 |
 | — | SSTI (オプション) | `ssti` | テンプレートエンジン数式評価確認 |
+| — | GraphQL 脆弱性（イントロスペクション / インジェクション） | `graphql` | スキーマ列挙・フィールドインジェクション・バッチクエリ |
+| — | JWT 脆弱性（署名なし / 弱シークレット / kid インジェクション） | `jwt` | alg:none 攻撃・HMAC ブルートフォース・ペイロード改ざん |
 
 ---
 
@@ -49,17 +51,24 @@ WScan は、IPA「**安全なウェブサイトの作り方**」の全脆弱性�
 - **安全でないデシリアライズ検出** — PHP/Java/Python pickle/YAML プローブでエラーパターンを検出
 - **HTTP リクエストスマグリング** — CL.TE / TE.CL / TE.TE(難読化) をタイミング差で検出
 - **Host ヘッダインジェクション** — パスワードリセット汚染シナリオを自動テスト
+- **GraphQL セキュリティテスト** — `/graphql` 等 8 種のエンドポイントを自動探索。イントロスペクション公開・バッチクエリによるレート制限回避・フィールドへの XSS/SQLi/SSTI インジェクション・スキーマ内機密情報（パスワード・トークン等フィールド名）を検出
+- **JWT 脆弱性スキャン** — Cookie・Authorization ヘッダ・URL パラメータから JWT を自動検出。`alg:none` 攻撃・弱シークレット（60+ 種ブルートフォース）・`kid` パラメータ SQLi/パストラバーサル・ペイロード改ざん・期限なし JWT・JWT 内 PII 漏洩を検出
+- **パラメータ IDOR 検出** — クエリパラメータ/POST ボディの `user_id`・`order_id`・`id` 等の数値を ±1 変化、UUID 末尾変更でアクセス試行し、他ユーザーのリソース露出を検出
+- **複数アカウント権限昇格** — `--accounts` で複数アカウントを一括指定、または `--auto-register` で登録フォームを自動検出してテストアカウントを作成。アカウント間でのリソース横断アクセス（IDOR）・垂直権限昇格を自動検証
 - **フィールドレベル検査**と**ページレベル検査**の 2 層構造
 
 ### AI / 自動化強化
 
 - **WAF 自動検出** — スキャン前にプローブを送り Cloudflare / AWS WAF / ModSecurity 等を判定。LLM がバイパス戦略を提案
-- **ペイロード継続学習** — 成功・失敗ペイロードを JSON で記録し、次回スキャン時に成功率の高いものを優先使用
+- **ペイロード継続学習（ドメイン別）** — 成功・失敗ペイロードをグローバル + ドメイン別に JSON 記録し、同一ターゲットへの再スキャン時にドメイン固有の成功ペイロードを 2 倍の重みで優先使用
+- **脆弱性チェーン推論** — 全 Finding を LLM に渡し、多段攻撃シナリオ（最大 3 チェーン）を推論。各チェーンにステップ・使用脆弱性・最終的なビジネス影響を含む
+- **Finding 別 AI 修正提案** — Critical/High の各 Finding に対し LLM がビジネス影響（非技術者向け）・修正コード例・OWASP/CWE 参照を生成し HTML レポートに組み込む
 - **スキャン後 AI 総合分析** — 全 Finding を LLM に渡し、攻撃シナリオ・優先修正順位・推奨 WAF ルールを自然言語レポートとして生成
 - **自動設定ウィザード** (`--auto-config`) — ターゲットの説明・禁止事項・必須チェックを入力すると LLM が最適なスキャン設定を生成しレビュー後に適用
 
 ### クロール・対象拡大
 
+- **SPA クロール強化** — `--spa-crawl` で React/Vue/Angular SPA の動的ルートを収集。`history.pushState` フック + クリック操作で通常クローラーが見逃すページを発見
 - **BFS クローラー** — 設定可能な深さで同一ドメインリンクを自動収集
 - **sitemap.xml / robots.txt 活用** — クロール時に自動取得して未リンクページを発見
 - **ログイン自動化** — `--login-url` でログインフォームを自動入力してセッションを取得
@@ -185,6 +194,47 @@ python main.py scan https://example.com --ctf --headless --no-monitor
 python main.py scan https://example.com --exclude csrf_token __RequestVerificationToken
 ```
 
+### GraphQL + JWT スキャン
+
+```bash
+python main.py scan https://example.com --checks graphql jwt
+```
+
+### 複数アカウント権限昇格テスト（手動指定）
+
+```bash
+python main.py scan https://example.com \
+  --checks privesc \
+  --accounts "admin:admin123,user1:pass1" \
+  --login-url https://example.com/login
+```
+
+### 自動アカウント登録 + 権限昇格テスト
+
+```bash
+# 登録フォームを自動検出し、テストアカウントを 2 つ自動作成して権限昇格テストを実行
+python main.py scan https://example.com \
+  --checks privesc \
+  --auto-register --auto-register-count 2 \
+  --login-url https://example.com/login
+```
+
+### SPA クロール（React/Vue/Angular 対応）
+
+```bash
+# history.pushState フック + クリック操作で動的ルートを収集
+python main.py scan https://example.com --spa-crawl --depth 3
+```
+
+### 全機能込みスキャン
+
+```bash
+python main.py scan https://example.com \
+  --checks sqli xss privesc graphql jwt \
+  --accounts "admin:pass1,user:pass2" \
+  --spa-crawl --llm claude --headless
+```
+
 ### 自然言語でスキャン設定を確認（setupコマンド）
 
 ```bash
@@ -208,6 +258,7 @@ usage: main.py scan [オプション] URL
                                    clickjacking open_redirect ssti privesc
                                    cors info_disclosure host_header security_headers
                                    file_upload nosql deserialization request_smuggling
+                                   graphql jwt
   --depth N                クロール深度 (デフォルト: 2)
   --headless               ブラウザをヘッドレスモードで起動
   --no-monitor             リアルタイム監視ダッシュボードを無効化
@@ -238,9 +289,15 @@ usage: main.py scan [オプション] URL
   --low-priv-cookies STR   垂直権限昇格テスト用の低権限セッション Cookie
   --low-priv-cookie-file F 低権限セッション Cookie JSON ファイル
   --include-registration   登録/サインアップフォームもテスト対象に含める
+  --accounts USER:PASS,... 複数アカウントをカンマ区切りで指定（権限昇格テスト用）
+                           例: "admin:admin123,user1:pass1"
+  --accounts-file FILE     アカウント一覧 YAML ファイル
+  --auto-register          登録フォームを自動検出してテストアカウントを作成
+  --auto-register-count N  自動作成するアカウント数 (デフォルト: 2)
 
 機能 On/Off:
   --dom-xss                DOM-based XSS 検出を有効化
+  --spa-crawl              SPA の動的ルートをクリック操作で収集（React/Vue/Angular 対応）
   --auto-config            LLM 設定ウィザードを起動してスキャン設定を自動生成
   --no-auto-config         設定ウィザードを無効化 (デフォルト)
   --no-ai-analysis         スキャン後 AI 総合分析レポートを無効化
@@ -285,8 +342,14 @@ features:
   waf_detection: true
   payload_learning: true
   sitemap_crawl: true
-  auto_config: false   # --auto-config のデフォルト
+  spa_crawl: false         # --spa-crawl のデフォルト
+  auto_config: false       # --auto-config のデフォルト
   open_report: true
+
+accounts:
+  auto_register: false     # --auto-register のデフォルト
+  auto_register_count: 2   # 自動作成アカウント数
+  list: []                 # 事前定義アカウントリスト
 ```
 
 ---
@@ -296,12 +359,14 @@ features:
 ```
 output/
 └── 20240101_120000/
-    ├── report.html          # 自己完結型 HTML レポート（ブラウザで開く）
-    ├── evidence.json        # 全検出結果 JSON
-    └── screenshots/         # スキャン中スクリーンショット
+    ├── report.html             # 自己完結型 HTML レポート（ブラウザで開く）
+    ├── evidence.json           # 全検出結果 JSON
+    ├── ai_analysis.md          # AI 攻撃チェーン分析・総合レポート（Markdown）
+    ├── ai_finding_fixes.json   # Finding 別 AI 修正提案（ビジネス影響・修正コード・CWE 参照）
+    └── screenshots/            # スキャン中スクリーンショット
 
 config/
-└── payload_learning.json    # ペイロード学習データ（累積）
+└── payload_learning.json    # ペイロード学習データ（グローバル + ドメイン別、累積）
 ```
 
 ### 深刻度と CVSS スコアの目安
@@ -352,16 +417,28 @@ path_traversal:
 
 ---
 
-## ペイロード継続学習 (A-3)
+## ペイロード継続学習 (A-3 / ⑩)
 
 スキャンを重ねるごとに成功ペイロードが `config/payload_learning.json` に記録され、
 次回スキャン時に成功率の高いペイロードが優先使用されます。
 
+バージョン 2 からはドメイン別学習をサポート。同一ターゲットへの再スキャン時は
+`domains[hostname]` の成功率を 2 倍の重みで優先します。
+
 ```json
 {
-  "xss": {
-    "<img src=x onerror=alert(1)>": {"hits": 4, "tries": 5},
-    "<script>alert(1)</script>":    {"hits": 1, "tries": 5}
+  "global": {
+    "xss": {
+      "<img src=x onerror=alert(1)>": {"hits": 4, "tries": 5},
+      "<script>alert(1)</script>":    {"hits": 1, "tries": 5}
+    }
+  },
+  "domains": {
+    "example.com": {
+      "xss": {
+        "<svg onload=alert(1)>": {"hits": 3, "tries": 3}
+      }
+    }
   }
 }
 ```
@@ -410,7 +487,9 @@ wscan/
             ├── file_upload.py             # ファイルアップロード脆弱性 ← NEW
             ├── nosql_injection.py         # NoSQLインジェクション ← NEW
             ├── deserialization.py         # 安全でないデシリアライズ ← NEW
-            └── request_smuggling.py       # HTTPリクエストスマグリング ← NEW
+            ├── request_smuggling.py       # HTTPリクエストスマグリング ← NEW
+            ├── graphql.py                 # GraphQL イントロスペクション・インジェクション ← NEW
+            └── jwt_scanner.py             # JWT 脆弱性 (alg:none/弱シークレット/kid injection) ← NEW
 ```
 
 ---
@@ -434,6 +513,27 @@ wscan/
 1. **未認証アクセス (High/Medium)**: Cookie なしで管理系パスが HTTP 200 を返す場合
 2. **垂直権限昇格 (Critical)**: 低権限セッションで高権限リソースにアクセス可能
 3. **水平権限昇格 / IDOR (High)**: URL パスの数値 ID を ±1/±5 変化させ他ユーザーのリソースが取得できるか確認
+4. **パラメータ IDOR (High)**: クエリパラメータ/POST ボディ内の `user_id`・`order_id`・`id` 等を ±1 変化、UUID 末尾変更でテスト
+5. **複数アカウント間 IDOR (High)**: アカウント A のリソース URL にアカウント B のセッションでアクセスし、コンテンツ差異を検出
+
+### GraphQL セキュリティ検査 (`graphql`)
+1. **イントロスペクション公開 (Medium)**: `__schema` クエリで完全なスキーマが取得できるか確認
+2. **バッチクエリ (Low)**: 配列形式のバッチリクエストが受け入れられてレート制限を回避できるか確認
+3. **フィールドインジェクション (Critical)**: 文字列型引数に XSS・SQLi・SSTI ペイロードを注入してエコーバックを検出
+4. **スキーマ内機密情報 (Low)**: フィールド・型名に `password`・`token`・`secret`・`credit_card` 等を含む場合に報告
+
+エンドポイントは `/graphql`・`/api/graphql`・`/v1/graphql` 等 8 種のパスを自動探索し、
+`{ __typename }` クエリで GraphQL サーバーを確認してから各テストを実施します。
+
+### JWT 脆弱性検査 (`jwt`)
+1. **alg:none 攻撃 (Critical)**: アルゴリズムを `none` に書き換えた署名なし JWT を送信し、受け入れられるか確認
+2. **弱シークレット (Critical)**: HMAC 署名を 60+ 種の一般的なパスワードでブルートフォース
+3. **kid インジェクション (Critical)**: `kid` ヘッダに SQLi (`' OR 1=1--`) / パストラバーサル (`../../dev/null`) を設定
+4. **ペイロード改ざん (Critical)**: `role: "user"` → `"admin"` / `sub` 変更後に再エンコードして送信
+5. **期限なし JWT (Medium)**: `exp` クレームが存在しない JWT を検出
+6. **PII 漏洩 (Medium)**: ペイロード内に `email`・`password`・`ssn`・`credit_card` 等を含む場合に報告
+
+JWT は Cookie・Authorization ヘッダ・URL パラメータ・レスポンスボディから自動検出します。
 
 ### WAF 検出 (A-2)
 - スキャン前プローブで Cloudflare・AWS WAF・ModSecurity・Akamai・Imperva 等を判定
@@ -443,16 +543,16 @@ wscan/
 
 | チェック名 | CVSS スコア | 深刻度 |
 |-----------|------------|--------|
-| `sqli`, `os`, `ssti` | 10.0 | Critical |
-| `file_upload`, `deserialization` | 10.0 | Critical |
-| `stored_xss` | 9.6 | Critical |
+| `sqli`, `os`, `ssti`, `deserialization`, `file_upload`, `graphql_injection` | 10.0 | Critical |
+| `jwt_alg_none`, `jwt_weak_secret`, `jwt_payload_tamper`, `stored_xss` | 9.6 | Critical |
+| `jwt_kid_injection` | 10.0 | Critical |
 | `nosql`, `privesc_unauth` | 9.1 | High |
 | `request_smuggling` | 8.7 | High |
-| `xss`, `dom_xss`, `privesc_vertical` | 8.1–8.8 | High |
+| `xss`, `dom_xss`, `privesc_vertical`, `privesc_cross_acct` | 8.1–8.8 | High |
 | `path_traversal`, `info_disclosure`, `cors` | 7.4–7.5 | High |
-| `session`, `privesc_horizontal` | 6.5–7.4 | High/Medium |
+| `session`, `privesc_horizontal`, `privesc_param_idor` | 6.5–7.4 | High/Medium |
 | `csrf`, `open_redirect`, `host_header` | 5.4–6.5 | Medium |
-| `header_injection`, `mail_header` | 5.3 | Medium |
+| `header_injection`, `mail_header`, `graphql_introspection`, `graphql_batch`, `graphql_sensitive`, `jwt_no_expiry`, `jwt_sensitive_data` | 5.3 | Medium |
 | `clickjacking`, `security_headers` | 3.1–4.3 | Low/Medium |
 
 ---
