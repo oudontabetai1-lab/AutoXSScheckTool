@@ -255,7 +255,7 @@ def _section_api_key(env_name: str, placeholder: str):
 
 def _section_depth() -> int:
     _header("クロール深度")
-    _print("  リンクを何階層まで辿るか (深いほど時間がかかります / 推奨: 2)")
+    _print("  何階層まで検査するか (1=このページのみ, 2=リンク先1階層まで / 推奨: 2)")
     while True:
         d = _ask("深度 (1〜5)", "2")
         try:
