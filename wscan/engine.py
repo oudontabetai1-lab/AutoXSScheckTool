@@ -632,7 +632,7 @@ class ScanEngine:
                 console.print(f"  [dim yellow]Skip (excluded URL):[/dim yellow] {url}")
                 continue
 
-            console.print(f"  [dim]Crawling[/dim] ({depth}/{self.depth}): {url}")
+            console.print(f"  [dim]Crawling[/dim] ({depth + 1}/{self.depth}): {url}")
             if self.monitor:
                 await self.monitor.emit_page_start(url)
 
@@ -652,7 +652,7 @@ class ScanEngine:
                 if fp in self._seen_page_fingerprints:
                     console.print(f"  [dim]重複ページスキップ: {url} (同一構造を検出)[/dim]")
                     # リンクは抽出するが、スキャン対象には追加しない
-                    if depth < self.depth:
+                    if depth + 1 < self.depth:
                         try:
                             links = await self.browser.collect_links(url, same_domain=True)
                             for link in links:
@@ -740,7 +740,7 @@ class ScanEngine:
                 except Exception:
                     pass
 
-            if depth < self.depth:
+            if depth + 1 < self.depth:
                 links = await self.browser.collect_links(url, same_domain=True)
                 url_cap = max(200, self.depth * 50)
                 _cap_warned = False
@@ -1399,7 +1399,7 @@ class ScanEngine:
                 continue
 
             console.print(
-                f"  [dim][Post-Auth][/dim] Crawling ({depth}/{self.depth}): {url}"
+                f"  [dim][Post-Auth][/dim] Crawling ({depth + 1}/{self.depth}): {url}"
             )
             if self.monitor:
                 await self.monitor.emit_page_start(url)
@@ -1463,7 +1463,7 @@ class ScanEngine:
                 auth_visited.add(actual_url)
 
             # BFS: collect links from actual page
-            if depth < self.depth:
+            if depth + 1 < self.depth:
                 try:
                     links = await self._browser.collect_links(actual_url, same_domain=True)
                 except Exception:
