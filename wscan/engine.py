@@ -194,6 +194,15 @@ class ScanEngine:
         seed_urls: Optional[list] = None,
         # I: 差分スキャン — 前回出力ディレクトリのパス
         previous_scan_dir: Optional[str] = None,
+        # N: リクエスト間の待機秒数 (0 = 無制限)
+        request_delay: float = 0.5,
+        # K: SARIF 出力を有効にするか
+        sarif: bool = True,
+        # L: Webhook/Slack 通知
+        webhook_url: str = "",
+        notify_min_severity: str = "high",
+        # O: HAR ファイルインポート
+        har_path: str = "",
     ):
         self.target_url = url.rstrip("/")
         self.monitor = monitor
@@ -211,6 +220,9 @@ class ScanEngine:
             self.sleep_factor = 0.5
         else:
             self.sleep_factor = 1.0
+        # N: effective delay = request_delay * sleep_factor
+        # fast_mode forces 0; ctf_mode halves the delay
+        self._effective_delay: float = request_delay * self.sleep_factor
         self.cookies = cookies
         self.cookie_list: list = list(cookie_list or [])
         # Normalise low-privilege cookies: prefer list form when both are given
@@ -235,6 +247,19 @@ class ScanEngine:
         self.seed_urls: list = list(seed_urls or [])
         # I: 差分スキャン
         self.previous_scan_dir: Optional[str] = previous_scan_dir
+        # K: SARIF 出力フラグ
+        self.sarif: bool = sarif
+        # O: HAR インポートパス
+        self.har_path: str = har_path
+        # L: Webhook/Slack 通知マネージャー
+        if webhook_url:
+            from wscan.notification import NotificationManager
+            self._notifier = NotificationManager(
+                webhook_url=webhook_url,
+                min_severity=notify_min_severity,
+            )
+        else:
+            self._notifier = None
         # C: CMS 検出結果 (crawl時に設定)
         self.detected_cms = None
 
@@ -597,6 +622,24 @@ class ScanEngine:
         # A: DOM構造フィンガープリントで類似ページを検出
         self._seen_page_fingerprints: set[str] = set()
         _first_page = True  # CMS 検出は最初のページのみ
+
+        # O: HAR ファイルインポート — URL シードと Cookie を注入
+        if self.har_path:
+            try:
+                from wscan.har_importer import HarImporter
+                har_seed = HarImporter().load(self.har_path)
+                console.print(
+                    f"  [dim cyan][O-HAR][/dim cyan] {len(har_seed.urls)} URL, "
+                    f"{len(har_seed.cookies)} Cookie を読み込みました: {self.har_path}"
+                )
+                for _hurl in har_seed.urls:
+                    if _hurl not in self.visited_urls:
+                        self.visited_urls.add(_hurl)
+                        queue.append((_hurl, 0, self.target_url))
+                if har_seed.cookies:
+                    await self.browser.page.context.add_cookies(har_seed.cookies)
+            except Exception as _har_err:
+                console.print(f"  [yellow][O-HAR] HAR 読み込み失敗: {_har_err}[/yellow]")
 
         # C-3: Seed crawl queue from sitemap.xml / robots.txt (if enabled)
         sitemap_urls = await self._fetch_sitemap_urls() if self.enable_sitemap_crawl else []
@@ -1765,7 +1808,7 @@ class ScanEngine:
                 self.browser.reset_dialog()
 
                 source, pair = await self.browser.fill_and_submit_form_multi(fi, field_payloads)
-                await asyncio.sleep(0.5 * self.sleep_factor)
+                await asyncio.sleep(self._effective_delay)
 
                 # CTF flag check on combined result
                 if self.flag_finder and source:
@@ -2101,6 +2144,11 @@ class ScanEngine:
             return   # duplicate — skip
         self._finding_dedup.add(dedup_key)
         self.all_findings.append(f)
+        # L: 重大度閾値を超えた場合に Webhook 通知 (fire-and-forget)
+        if self._notifier:
+            asyncio.ensure_future(
+                self._notifier.notify_finding(f, self.target_url)
+            )
         label = f.check_type.upper()
         loc = f" on [yellow]{source}[/yellow]" if source else ""
         console.print(
@@ -2197,7 +2245,7 @@ class ScanEngine:
             source, pair = await scanner._apply_payload(
                 f.url, 0, f.field_name, f.payload, is_url_param
             )
-            await asyncio.sleep(0.5 * self.sleep_factor)
+            await asyncio.sleep(self._effective_delay)
 
             if f.check_type == "xss":
                 return self.browser.dialog_fired or bool(
@@ -2305,6 +2353,47 @@ class ScanEngine:
         with open(evidence_path, "w", encoding="utf-8") as fp:
             json.dump(evidence, fp, ensure_ascii=False, indent=2)
         console.print(f"  [dim]Evidence:[/dim] {evidence_path}")
+
+        # K: SARIF 2.1.0 出力
+        sarif_out = ""
+        if self.sarif:
+            try:
+                from wscan.sarif import write_sarif
+                sarif_path = write_sarif(
+                    self.all_findings,
+                    target_url=self.target_url,
+                    output_path=self.output_dir / "report.sarif",
+                )
+                sarif_out = str(sarif_path)
+                console.print(f"  [dim]SARIF:   [/dim] {sarif_path}")
+            except Exception as _sarif_err:
+                console.print(f"  [yellow][SARIF] 書き出し失敗: {_sarif_err}[/yellow]")
+
+        # L: スキャン完了通知
+        if self._notifier and self._notifier.notify_complete:
+            _counts: dict[str, int] = {}
+            for _f in self.all_findings:
+                _counts[_f.severity] = _counts.get(_f.severity, 0) + 1
+            _summary = {
+                "total": len(self.all_findings),
+                "critical": _counts.get("critical", 0),
+                "high":     _counts.get("high", 0),
+                "medium":   _counts.get("medium", 0),
+                "low":      _counts.get("low", 0),
+            }
+            try:
+                import asyncio as _asyncio
+                _loop = _asyncio.get_event_loop()
+                _loop.run_until_complete(
+                    self._notifier.notify_scan_complete(
+                        _summary,
+                        target_url=self.target_url,
+                        report_path=str(self.output_dir / "report.html"),
+                        sarif_path=sarif_out,
+                    )
+                )
+            except Exception as _notify_err:
+                console.print(f"  [yellow][Notification] 完了通知失敗: {_notify_err}[/yellow]")
 
     def _generate_report(self):
         import webbrowser

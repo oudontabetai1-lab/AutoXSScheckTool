@@ -1,6 +1,6 @@
 # AeyeScan / VEX 相当機能 — 詳細調査レポート
 
-コミット `b1d1128` で実装された10機能の詳細分析。
+元々 `b1d1128` で実装された A〜J の 10 機能に加え、K〜P の 6 機能を追加実装。合計 16 機能。
 
 ---
 
@@ -18,6 +18,12 @@
 | H | フロー記録・再生 | `wscan/flow_recorder.py`, `main.py` | 実装済み |
 | I | 差分スキャン | `wscan/diff_scan.py`, `wscan/engine.py` | 実装済み |
 | J | LLMリメディエーション提案 | `wscan/remediation.py` | 実装済み |
+| K | SARIF 2.1.0 出力 | `wscan/sarif.py`, `wscan/engine.py` | 実装済み |
+| L | Webhook/Slack 通知 | `wscan/notification.py`, `wscan/engine.py` | 実装済み |
+| M | マルチターゲット一括スキャン | `wscan/batch_runner.py`, `main.py` | 実装済み |
+| N | リクエストレート制御 | `wscan/engine.py`, `main.py` | 実装済み |
+| O | HAR ファイルインポート | `wscan/har_importer.py`, `wscan/engine.py` | 実装済み |
+| P | WebSocket インジェクション | `wscan/scanners/websocket.py` | 実装済み |
 
 ---
 
@@ -321,6 +327,198 @@ fix_text = await generate_fix(finding, engine.payload_gen)
 
 ---
 
+---
+
+## K. SARIF 2.1.0 出力
+
+**ファイル**: `wscan/sarif.py`, `wscan/engine.py:_save_evidence()`
+
+### 目的
+GitHub Advanced Security / VS Code / Azure DevOps 等の CI ツールにネイティブ統合できる標準フォーマット (SARIF 2.1.0) でスキャン結果を出力する。
+
+### 実装
+
+- `SarifExporter.export()` が `findings_dicts` リストから SARIF 2.1.0 JSON を生成
+- `write_sarif()` が `Finding` オブジェクトまたは dict を受け取り `report.sarif` に書き出す
+- `_save_evidence()` の末尾で自動出力（`--no-sarif` で無効化可能）
+
+### SARIF マッピング
+
+| Finding フィールド | SARIF フィールド |
+|-------------------|----------------|
+| `check_type` | `ruleId` + `tool.driver.rules[].id` |
+| `severity` (critical/high) | `level: error` |
+| `severity` (medium) | `level: warning` |
+| `url` | `locations[0].physicalLocation.artifactLocation.uri` |
+| `evidence` + `field_name` + `payload` | `message.text` |
+| `cvss_score`, `confidence`, `compliance_refs` | `properties` |
+
+### 使い方
+
+```bash
+# デフォルト有効 (output/<timestamp>/report.sarif に自動出力)
+python main.py scan https://target.example.com
+
+# 無効化
+python main.py scan --no-sarif https://target.example.com
+```
+
+---
+
+## L. Webhook / Slack 通知
+
+**ファイル**: `wscan/notification.py`, `wscan/engine.py:_record_finding()`
+
+### 目的
+重大な脆弱性検出時にリアルタイムで Slack / 汎用 Webhook に通知し、CI/CD でのアラートを即時に促す。
+
+### 実装
+
+- `NotificationManager.notify_finding()` — Finding ごとの通知（重複防止あり）
+- `NotificationManager.notify_scan_complete()` — スキャン完了サマリー通知
+- `_record_finding()` に `asyncio.ensure_future()` でフックを注入（スキャン処理をブロックしない）
+- Slack Block Kit 形式 + 汎用 JSON の両対応
+
+### 使い方
+
+```bash
+# Slack Incoming Webhook
+python main.py scan --notify-webhook https://hooks.slack.com/... https://target.example.com
+
+# 通知閾値を medium に下げる
+python main.py scan --notify-webhook URL --notify-severity medium https://target.example.com
+```
+
+---
+
+## M. マルチターゲット一括スキャン
+
+**ファイル**: `wscan/batch_runner.py`, `main.py` (`batch` サブコマンド)
+
+### 目的
+複数の URL を 1 コマンドで順次スキャンし、統合サマリー (`batch_summary.json`) を生成する。
+
+### バッチ定義 YAML フォーマット
+
+```yaml
+global:
+  depth: 2
+  checks: [sqli, xss, os]
+  headless: true
+
+targets:
+  - url: https://app1.example.com
+    label: "App1 Production"
+    auth_user: admin
+    auth_pass: secret
+  - url: https://app2.example.com
+    label: "App2 Staging"
+    depth: 3
+```
+
+### 使い方
+
+```bash
+python main.py batch targets.yaml
+python main.py batch targets.yaml --output ./batch_results
+```
+
+### 出力
+
+- `output/batch_<timestamp>/<sanitized_host>/` に各ターゲットの結果
+- `output/batch_<timestamp>/batch_summary.json` に統合サマリー
+
+---
+
+## N. リクエストレート制御
+
+**ファイル**: `wscan/engine.py`, `main.py`, `config/wscan.yaml`
+
+### 目的
+リクエスト間隔を `--delay` で任意に設定し、本番環境への負荷を制御する。
+
+### 実装
+
+`_effective_delay = request_delay * sleep_factor` として全 `asyncio.sleep()` 呼び出しを統一。
+
+| モード | sleep_factor | delay=0.5 の場合 |
+|--------|-------------|----------------|
+| 通常   | 1.0 | 0.5 秒 |
+| CTF    | 0.5 | 0.25 秒 |
+| Fast   | 0.0 | 0 秒（強制上書き） |
+
+### 使い方
+
+```bash
+# 2秒間隔でスキャン
+python main.py scan --delay 2.0 https://target.example.com
+
+# 制限なし (fast と同等)
+python main.py scan --delay 0 https://target.example.com
+```
+
+---
+
+## O. HAR ファイルインポート
+
+**ファイル**: `wscan/har_importer.py`, `wscan/engine.py:_phase_crawl()`
+
+### 目的
+ブラウザの DevTools や Burp Suite でキャプチャした HAR ファイルからエンドポイント・Cookie・ヘッダをスキャンのシードとして読み込む。
+
+### 抽出内容
+
+| HAR フィールド | 用途 |
+|---------------|------|
+| `request.url` | BFS クロールキューに追加 |
+| `response.headers[Set-Cookie]` | Playwright Cookie として設定 |
+| `request.headers[Cookie]` | Playwright Cookie として設定 |
+| `request.headers[Authorization]` | `HarSeedData.headers` に保持 |
+
+### 使い方
+
+```bash
+# DevTools でキャプチャした HAR をシードに使用
+python main.py scan --har captured.har https://target.example.com
+```
+
+---
+
+## P. WebSocket インジェクションスキャナー
+
+**ファイル**: `wscan/scanners/websocket.py`, `wscan/scanners/__init__.py`
+
+### 目的
+Playwright の WebSocket イベントフックを使い、WS エンドポイントへのメッセージにペイロードを注入してインジェクション脆弱性を検査する。
+
+### 検査パターン
+
+| check_type | ペイロード例 | 検出方法 |
+|------------|------------|---------|
+| `xss` | `<script>alert('wsxss')</script>` | レスポンスにタグが反射 |
+| `sqli` | `' OR '1'='1` | SQL エラーメッセージ |
+| `os` | `; echo wsostest123;` | エコー結果 |
+| `ssti` | `{{7*7}}` | `49` の計算結果 |
+
+### 動作フロー
+
+1. `scan_page()` でページをナビゲートし WS 接続を観測
+2. 接続された WS メッセージの JSON 構造を推定
+3. 各フィールドにペイロードを注入した WS メッセージを送信
+4. レスポンスをパターンマッチで検査
+
+### 使い方
+
+```bash
+# WebSocket スキャンを有効化
+python main.py scan --checks websocket https://target.example.com
+
+# 他のチェックと組み合わせ
+python main.py scan --checks xss sqli websocket https://target.example.com
+```
+
+---
+
 ## 実装品質評価
 
 | 機能 | 完成度 | 備考 |
@@ -335,3 +533,9 @@ fix_text = await generate_fix(finding, engine.payload_gen)
 | H フロー記録・再生 | ★★★★☆ | セキュアなトークン実装あり |
 | I 差分スキャン | ★★★★☆ | キー設計がシンプルで信頼性高い |
 | J LLMリメディエーション | ★★★★☆ | 静的フォールバック充実 |
+| K SARIF 出力 | ★★★★★ | SARIF 2.1.0 完全準拠、remediation テキスト自動付与 |
+| L Webhook/Slack 通知 | ★★★★☆ | Block Kit 対応、fire-and-forget で非ブロッキング |
+| M マルチターゲット一括スキャン | ★★★★☆ | YAML定義、JSON サマリー生成 |
+| N リクエストレート制御 | ★★★★★ | sleep_factor との統合がクリーン |
+| O HAR インポート | ★★★★☆ | Set-Cookie/Authorization 自動抽出 |
+| P WebSocket スキャナー | ★★★☆☆ | JSON フィールド注入対応、WS 切断時は不安定の可能性 |

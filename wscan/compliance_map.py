@@ -264,6 +264,12 @@ COMPLIANCE_REFS: dict[str, dict[str, list[str]]] = {
         "owasp_top10": ["A04:2021 Insecure Design"],
         "ipa":         ["IPA 競合状態 (TOCTOU)"],
     },
+    "websocket": {
+        "pci_dss":     ["PCI DSS v4.0 §6.2.4"],
+        "owasp_asvs":  ["ASVS V5.3.3", "ASVS V14.5.4"],
+        "owasp_top10": ["A03:2021 Injection", "A07:2021 Identification and Authentication Failures"],
+        "ipa":         ["IPA 1.5 クロスサイト・スクリプティング", "IPA 1.1 SQLインジェクション"],
+    },
 }
 
 
