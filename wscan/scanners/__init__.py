@@ -32,6 +32,7 @@ from .xxe import XXEScanner
 from .ldap_injection import LDAPScanner
 from .file_upload import FileUploadScanner
 from .race_condition import RaceConditionScanner
+from .websocket import WebSocketScanner
 
 
 # check-type string → scanner class
@@ -65,6 +66,7 @@ SCANNERS: dict[str, type] = {
     "ldap":              LDAPScanner,
     "file_upload":       FileUploadScanner,
     "race_condition":    RaceConditionScanner,
+    "websocket":         WebSocketScanner,
 }
 
 
@@ -79,4 +81,5 @@ __all__ = [
     "SessionScanner", "SQLiScanner", "SSRFScanner", "SSTIScanner",
     "StoredXSSScanner", "XSSScanner",
     "XXEScanner", "LDAPScanner", "FileUploadScanner", "RaceConditionScanner",
+    "WebSocketScanner",
 ]

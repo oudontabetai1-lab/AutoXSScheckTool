@@ -362,6 +362,30 @@ Examples:
             "--fast 時のデフォルトは 12。単独でも指定可能。"
         ),
     )
+    scan.add_argument(
+        "--delay", type=float, default=0.5, metavar="SECS",
+        help=(
+            "リクエスト間の待機秒数 (デフォルト: 0.5)。"
+            "--fast 指定時は 0 に上書きされる。本番環境への負荷軽減に活用。"
+        ),
+    )
+    scan.add_argument(
+        "--no-sarif", action="store_true", default=False,
+        help="SARIF 2.1.0 レポートファイル (report.sarif) の出力を無効にする。",
+    )
+    scan.add_argument(
+        "--notify-webhook", metavar="URL", default="",
+        help="脆弱性検出時に通知を POST する Slack / Webhook の URL。",
+    )
+    scan.add_argument(
+        "--notify-severity", choices=["critical", "high", "medium", "low"],
+        default="high", metavar="LEVEL",
+        help="通知する最低重大度 (デフォルト: high)。",
+    )
+    scan.add_argument(
+        "--har", metavar="FILE", default="",
+        help="HAR ファイルからエンドポイントと Cookie をインポートしてスキャンのシードに使用する。",
+    )
     # A: Multi-account privilege escalation
     scan.add_argument(
         "--accounts", metavar="USER:PASS,...",
@@ -572,6 +596,21 @@ Examples:
     setup.add_argument("--ollama-model", default=_CFG.get("ollama_model", "llama3"), metavar="MODEL")
     setup.add_argument("--ollama-url", default=_CFG.get("ollama_url", "http://localhost:11434"), metavar="URL")
 
+    # M: Batch scan subcommand
+    batch_cmd = sub.add_parser(
+        "batch",
+        help="複数ターゲットを YAML ファイルで一括スキャンする",
+        description="YAML ファイルに定義された複数 URL を順次スキャンし、統合サマリーを生成します。",
+    )
+    batch_cmd.add_argument(
+        "targets_file", metavar="TARGETS_YAML",
+        help="バッチ定義 YAML ファイルのパス",
+    )
+    batch_cmd.add_argument(
+        "--output", "-o", metavar="DIR", default="",
+        help="統合レポートの出力ベースディレクトリ (デフォルト: output/batch_<timestamp>/)",
+    )
+
     # H: Flow recorder subcommand
     record = sub.add_parser(
         "record",
@@ -742,6 +781,7 @@ async def run_scan(args):
         if not getattr(args, "no_sitemap_crawl",  False): args.no_sitemap_crawl  = True
         if not getattr(args, "no_ai_analysis",    False): args.no_ai_analysis    = True
         if getattr(args, "max_payloads", 0) == 0:         args.max_payloads      = 12
+        args.delay = 0.0  # fast mode forces zero delay
         console.print(
             "[bold yellow]⚡ FAST MODE[/bold yellow] — "
             f"ペイロード上限 {args.max_payloads}、遅延 0、深さ {args.depth}"
@@ -914,6 +954,15 @@ async def run_scan(args):
             spa_crawl=getattr(args, "spa_crawl", False),
             # I: 差分スキャン
             previous_scan_dir=getattr(args, "previous_scan", None),
+            # N: リクエストレート制御
+            request_delay=getattr(args, "delay", 0.5),
+            # K: SARIF 出力
+            sarif=not getattr(args, "no_sarif", False),
+            # L: Webhook/Slack 通知
+            webhook_url=getattr(args, "notify_webhook", "") or "",
+            notify_min_severity=getattr(args, "notify_severity", "high"),
+            # O: HAR インポート
+            har_path=getattr(args, "har", "") or "",
         )
 
     if args.no_monitor:
@@ -1303,6 +1352,27 @@ async def run_setup(args):
     console.print(f"[dim]Crawl depth: {depth}[/dim]")
 
 
+async def run_batch(args):
+    """M: 複数ターゲットを YAML バッチ定義ファイルでスキャンする。"""
+    from rich.console import Console
+    from pathlib import Path
+    from wscan.batch_runner import BatchRunner
+
+    console = Console()
+    console.print(f"\n[bold cyan][Batch] バッチスキャン開始[/bold cyan]")
+    console.print(f"  定義ファイル: [cyan]{args.targets_file}[/cyan]")
+
+    runner = BatchRunner.load_from_yaml(args.targets_file)
+    if getattr(args, "output", ""):
+        runner.output_base = Path(args.output)
+
+    await runner.run()
+
+    console.print(runner.summary_text())
+    summary_path = runner.save_batch_summary_json()
+    console.print(f"\n  [dim]Batch summary:[/dim] {summary_path}")
+
+
 async def run_record(args):
     """H: ブラウザ操作を記録して JSON フロー ファイルに保存する。"""
     from rich.console import Console
@@ -1342,6 +1412,8 @@ def main():
             asyncio.run(run_agent(args))
         elif args.command == "record":
             asyncio.run(run_record(args))
+        elif args.command == "batch":
+            asyncio.run(run_batch(args))
         else:
             asyncio.run(run_scan(args))
     except KeyboardInterrupt:
