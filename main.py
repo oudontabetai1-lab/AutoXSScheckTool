@@ -62,6 +62,7 @@ def _load_config(path: Path = _CONFIG_PATH) -> dict:
     cfg["timeout"]                 = int(s.get("timeout",   30))
     cfg["exclude_fields"]          = list(s.get("exclude_fields", []))
     cfg["exclude_urls"]            = list(s.get("exclude_urls",   []))
+    cfg["manual_crawl_file"]       = str(s.get("manual_crawl_file", "") or "")
 
     cfg["headless"]                = bool(b.get("headless", False))
     cfg["proxy"]                   = str(b.get("proxy", "") or "")
@@ -408,6 +409,10 @@ Examples:
         "--har", metavar="FILE", default="",
         help="HAR ファイルからエンドポイントと Cookie をインポートしてスキャンのシードに使用する。",
     )
+    scan.add_argument(
+        "--manual-crawl", metavar="FILE", default=_CFG.get("manual_crawl_file", ""),
+        help="手動巡回で保存した JSON から URL と Cookie をインポートしてスキャンのシードに使用する。",
+    )
     # A: Multi-account privilege escalation
     scan.add_argument(
         "--accounts", metavar="USER:PASS,...",
@@ -656,6 +661,24 @@ Examples:
     record.add_argument(
         "--headless", action="store_true", default=False,
         help="Run in headless mode (not recommended for recording)",
+    )
+
+    manual = sub.add_parser(
+        "manual-crawl",
+        help="Open a visible browser, record manual browsing, and save scan seed JSON",
+    )
+    manual.add_argument("url", help="Start URL to navigate to when manual crawling begins")
+    manual.add_argument(
+        "--output", "-o", default="flows/manual_crawl.json", metavar="FILE",
+        help="Output path for the manual crawl JSON (default: flows/manual_crawl.json)",
+    )
+    manual.add_argument(
+        "--headless", action="store_true", default=False,
+        help="Run in headless mode (not recommended for manual crawling)",
+    )
+    manual.add_argument(
+        "--proxy", metavar="URL", default=_CFG.get("proxy", ""),
+        help="HTTP proxy URL for the manual crawl browser",
     )
 
     args = parser.parse_args()
@@ -1092,6 +1115,7 @@ async def run_scan(args):
             notify_min_severity=getattr(args, "notify_severity", "high"),
             # O: HAR インポート
             har_path=getattr(args, "har", "") or "",
+            manual_crawl_path=getattr(args, "manual_crawl", "") or "",
         )
 
     if args.no_monitor:
@@ -1336,6 +1360,7 @@ async def run_serve(args):
                 auto_register=bool(cfg.get("auto_register", False)),
                 auto_register_count=int(cfg.get("auto_register_count", 2)),
                 seed_urls=seed_urls or None,
+                manual_crawl_path=cfg.get("manual_crawl_file", "") or "",
             )
             await engine.run()
             console.print(
@@ -1535,6 +1560,42 @@ async def run_record(args):
         console.print(f"[red]記録中にエラーが発生しました: {exc}[/red]")
 
 
+async def run_manual_crawl(args):
+    """Visible-browser manual crawl recording for scan seeding."""
+    from rich.console import Console
+    from wscan.manual_crawl import ManualCrawlSession
+
+    console = Console()
+    session = ManualCrawlSession()
+    console.print(f"\n[bold cyan][Manual Crawl] 手動巡回を開始します[/bold cyan]")
+    console.print(f"  対象 URL: [cyan]{args.url}[/cyan]")
+    console.print(f"  出力先:   [cyan]{args.output}[/cyan]")
+    console.print("  ブラウザで対象サイトを操作し、終了したら Ctrl+C を押してください。\n")
+    try:
+        await session.start(
+            start_url=args.url,
+            output_path=args.output,
+            headless=getattr(args, "headless", False),
+            proxy=getattr(args, "proxy", "") or "",
+        )
+        while True:
+            await asyncio.sleep(1)
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        status = await session.stop()
+        console.print(
+            f"\n[bold green]✓ 手動巡回を保存しました:[/bold green] {args.output}\n"
+            f"  URL: [cyan]{status.get('url_count', 0)}[/cyan]  "
+            f"Steps: [cyan]{status.get('step_count', 0)}[/cyan]"
+        )
+        console.print(
+            f"\n[dim]この巡回結果をスキャンで使用するには:[/dim]\n"
+            f"  python main.py scan {args.url} --manual-crawl {args.output}"
+        )
+    except Exception as exc:
+        await session.stop()
+        console.print(f"[red]手動巡回中にエラーが発生しました: {exc}[/red]")
+
+
 def main():
     args = parse_args()
     try:
@@ -1544,6 +1605,8 @@ def main():
             asyncio.run(run_triage(args))
         elif args.command == "serve":
             asyncio.run(run_serve(args))
+        elif args.command == "manual-crawl":
+            asyncio.run(run_manual_crawl(args))
         elif args.command == "agent":
             asyncio.run(run_agent(args))
         elif args.command == "record":
