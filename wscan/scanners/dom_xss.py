@@ -161,6 +161,18 @@ class DOMXSSScanner(BaseScanner):
                     ),
                     pair=pair,
                     severity="critical",
+                    confidence="confirmed",
+                    evidence_type="dom_xss_sink",
+                    evidence_details={
+                        "sink": sink,
+                        "marker": marker,
+                        "data_excerpt": data[:200],
+                    },
+                    reproduction_steps=[
+                        f"Open {url}",
+                        f"Inject the payload into field '{field_name}'.",
+                        f"Observe that the marker reaches DOM sink '{sink}'.",
+                    ],
                 )
                 findings.append(finding)
                 break  # One sink is enough evidence
@@ -176,6 +188,17 @@ class DOMXSSScanner(BaseScanner):
                 severity="critical",
                 dialog_confirmed=True,
                 dialog_message=self.browser.dialog_message,
+                confidence="confirmed",
+                evidence_type="dom_xss_dialog",
+                evidence_details={
+                    "marker": marker,
+                    "dialog_message": self.browser.dialog_message,
+                },
+                reproduction_steps=[
+                    f"Open {url}",
+                    f"Inject the payload into field '{field_name}'.",
+                    "Observe the browser JavaScript dialog.",
+                ],
             )
             findings.append(finding)
 

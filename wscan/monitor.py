@@ -95,7 +95,10 @@ class MonitorServer:
             if not description:
                 return JSONResponse({"error": "description is required"}, status_code=400)
 
-            cfg = self.llm_cfg
+            cfg = dict(self.llm_cfg or {})
+            body_cfg = body.get("llm_config") or {}
+            if isinstance(body_cfg, dict):
+                cfg.update(body_cfg)
             if not cfg or cfg.get("provider", "none") == "none":
                 return JSONResponse(
                     {"error": "LLMが設定されていません。LLM設定タブでプロバイダーを選択してください。"},
@@ -113,6 +116,7 @@ class MonitorServer:
                     openai_model=cfg.get("openai_model", "gpt-4o-mini"),
                     gemini_model=cfg.get("gemini_model", "gemini-2.0-flash"),
                     claude_model=cfg.get("claude_model", "claude-haiku-4-5-20251001"),
+                    role_models=cfg.get("role_models", {}) or {},
                 )
                 result = await generate_from_description(gen, description)
                 if result is None:
@@ -307,6 +311,27 @@ class MonitorServer:
 
     async def emit_page_start(self, url: str):
         await self.emit("page_start", {"url": url})
+
+    async def emit_page_graph_update(
+        self,
+        url: str,
+        parent: str = "",
+        depth: int = 0,
+        forms: int = 0,
+        inputs: int = 0,
+        params: int = 0,
+        status: str = "done",
+    ):
+        """Emit a crawl graph node for the live screen-transition map."""
+        await self.emit("page_graph_update", {
+            "url": url,
+            "parent": parent,
+            "depth": depth,
+            "forms": forms,
+            "inputs": inputs,
+            "params": params,
+            "status": status,
+        })
 
     async def emit_payload_test(self, field: str, payload: str, check_type: str, url: str = "") -> None:
         await self.emit("payload_test", {

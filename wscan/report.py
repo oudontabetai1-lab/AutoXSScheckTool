@@ -47,6 +47,8 @@ class ReportGenerator:
         attack_plans: "Optional[list[PageAttackPlan]]" = None,
         ctf_flags: "Optional[list]" = None,
         page_graph: "Optional[dict]" = None,
+        scan_matrix: "Optional[list[dict]]" = None,
+        llm_summary: "Optional[dict]" = None,
         template: str = "audit",
         diff_result=None,
     ):
@@ -63,17 +65,17 @@ class ReportGenerator:
         if template == "executive":
             html = self._build_executive_html(target, sorted_findings, visited_urls, checks,
                                                attack_plans or [], ctf_flags or [], page_graph or {},
-                                               diff_result)
+                                               diff_result, scan_matrix or [])
             report_path = self.output_dir / "report_executive.html"
         elif template == "developer":
             html = self._build_developer_html(target, sorted_findings, visited_urls, checks,
                                                attack_plans or [], ctf_flags or [], page_graph or {},
-                                               diff_result)
+                                               diff_result, scan_matrix or [])
             report_path = self.output_dir / "report_developer.html"
         else:
             html = self._build_html(target, sorted_findings, visited_urls, checks,
                                     attack_plans or [], ctf_flags or [], page_graph or {},
-                                    diff_result)
+                                    diff_result, scan_matrix or [], llm_summary or {})
             report_path = self.output_dir / "report.html"
 
         report_path.write_text(html, encoding="utf-8")
@@ -89,10 +91,14 @@ class ReportGenerator:
         ctf_flags: list = None,
         page_graph: dict = None,
         diff_result=None,
+        scan_matrix: list = None,
+        llm_summary: dict = None,
     ) -> str:
         attack_plans = attack_plans or []
         ctf_flags = ctf_flags or []
         page_graph = page_graph or {}
+        scan_matrix = scan_matrix or []
+        llm_summary = llm_summary or {}
         scan_date = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         total = len(findings)
         counts = {}
@@ -114,6 +120,7 @@ class ReportGenerator:
             resp = f.response or {}
             req_html = self._format_request(req)
             resp_html = self._format_response(resp, f)
+            structured_evidence_html = self._format_structured_evidence(f)
 
             extra_badges = ""
             if "[ChainDetect]" in f.evidence:
@@ -178,6 +185,7 @@ class ReportGenerator:
                         <h4>Evidence</h4>
                         <p class="evidence-text">{self._escape(f.evidence)}</p>
                     </div>
+                    {structured_evidence_html}
                     <div class="finding-detail">
                         <h4>Payload Used</h4>
                         <code class="payload-code">{self._escape(f.payload)}</code>
@@ -216,12 +224,17 @@ class ReportGenerator:
         # ⑧ Attack chain / AI analysis section (reads ai_analysis.md if present)
         ai_analysis_html = self._build_ai_analysis_html()
 
+        checklist_html = self._build_scan_checklist_html(scan_matrix)
+        remediation_summary_html = self._build_remediation_summary_html(findings)
+        llm_summary_html = self._build_llm_summary_html(llm_summary)
+
         return f"""<!DOCTYPE html>
 <html lang="ja">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>WScan Security Report — {self._escape(target)}</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%231a202c'/%3E%3Cpath d='M4 4h8v2H6v2h5v2H6v2h6v2H4z' fill='%2363b3ed'/%3E%3C/svg%3E">
 <style>
 * {{ box-sizing: border-box; margin: 0; padding: 0; }}
 body {{ font-family: 'Segoe UI', system-ui, -apple-system, sans-serif; background: #f7f8fa; color: #1a202c; line-height: 1.6; }}
@@ -263,6 +276,11 @@ body {{ font-family: 'Segoe UI', system-ui, -apple-system, sans-serif; backgroun
 .finding-body {{ padding: 20px; display: flex; flex-direction: column; gap: 16px; }}
 .finding-detail h4 {{ font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.08em; color: #718096; margin-bottom: 8px; }}
 .evidence-text {{ background: #fff8f0; border: 1px solid #fbd38d; border-radius: 6px; padding: 10px 14px; font-size: 0.9rem; color: #744210; }}
+.evidence-grid {{ display:grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap:10px; margin-top:8px; }}
+.evidence-cell {{ border:1px solid #e2e8f0; border-radius:8px; padding:10px; background:#f8fafc; }}
+.evidence-cell .k {{ font-size:.7rem; color:#718096; text-transform:uppercase; letter-spacing:.05em; margin-bottom:4px; }}
+.evidence-cell .v {{ font-size:.85rem; color:#1a202c; word-break:break-word; }}
+.repro-list {{ margin:8px 0 0 18px; color:#2d3748; font-size:.9rem; }}
 .payload-code {{ display: block; background: #1a202c; color: #68d391; padding: 10px 14px; border-radius: 6px; font-family: 'Cascadia Code', 'Consolas', monospace; font-size: 0.85rem; word-break: break-all; white-space: pre-wrap; }}
 .network-grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }}
 @media (max-width: 768px) {{ .network-grid {{ grid-template-columns: 1fr; }} }}
@@ -327,8 +345,9 @@ body {{ font-family: 'Segoe UI', system-ui, -apple-system, sans-serif; backgroun
 .no-plans {{ color:#a0aec0; font-size:.9rem; padding:16px 0; }}
 @media (max-width:768px) {{ .plan-cols-header,.plan-field-row {{ grid-template-columns:1fr 44px 1fr; }} .plan-rationale-col {{ display:none; }} }}
 /* ── Page Flow Diagram styles ── */
-.page-flow-wrapper {{ overflow-x: auto; }}
-.page-flow-svg {{ min-width: 100%; }}
+.page-flow-wrapper {{ overflow-x: auto; max-width:100%; }}
+.page-flow-svg {{ width:100%; max-width:100%; min-width:0; }}
+#site-map-graph svg {{ display:block; width:100% !important; max-width:100%; }}
 .page-node {{ cursor: pointer; }}
 .page-node rect {{ fill: #ebf8ff; stroke: #4299e1; stroke-width: 1.5; rx: 6; }}
 .page-node.root rect {{ fill: #fefcbf; stroke: #d69e2e; stroke-width: 2; }}
@@ -357,6 +376,44 @@ body {{ font-family: 'Segoe UI', system-ui, -apple-system, sans-serif; backgroun
 .ai-fix-section h4 {{ color:#276749; font-size:.8rem; text-transform:uppercase;
     letter-spacing:.08em; margin-bottom:8px; }}
 .ai-fix-body {{ font-size:.88rem; color:#1c4532; line-height:1.7; }}
+.table-scroll {{ max-width:100%; overflow-x:auto; }}
+.checklist-table {{ width:100%; border-collapse:collapse; font-size:.85rem; }}
+.checklist-table th {{ text-align:left; background:#f8fafc; color:#4a5568; padding:8px 10px; border-bottom:1px solid #e2e8f0; }}
+.checklist-table td {{ padding:8px 10px; border-bottom:1px solid #edf2f7; vertical-align:top; }}
+.status-pill {{ display:inline-block; padding:2px 8px; border-radius:999px; font-weight:700; font-size:.72rem; }}
+.status-tested {{ background:#ebf8ff; color:#2b6cb0; }}
+.status-finding {{ background:#fed7d7; color:#c53030; }}
+.status-error {{ background:#fff5f5; color:#9b2c2c; }}
+.status-skipped {{ background:#edf2f7; color:#4a5568; }}
+.remediation-grid {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(260px,1fr)); gap:14px; }}
+.remediation-card {{ border:1px solid #e2e8f0; border-radius:10px; padding:16px; background:#f8fafc; }}
+.remediation-card.p0 {{ border-color:#feb2b2; background:#fff5f5; }}
+.remediation-card.p1 {{ border-color:#fbd38d; background:#fffaf0; }}
+.remediation-card.p2 {{ border-color:#bee3f8; background:#ebf8ff; }}
+.remediation-card.p3 {{ border-color:#c6f6d5; background:#f0fff4; }}
+.remediation-head {{ display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-bottom:8px; }}
+.priority-pill {{ color:white; background:#4a5568; border-radius:999px; padding:2px 9px; font-size:.72rem; font-weight:800; }}
+.priority-pill.p0 {{ background:#c53030; }} .priority-pill.p1 {{ background:#dd6b20; }} .priority-pill.p2 {{ background:#2b6cb0; }} .priority-pill.p3 {{ background:#2f855a; }}
+.remediation-title {{ font-weight:800; color:#1a202c; }}
+.remediation-meta {{ display:flex; flex-wrap:wrap; gap:6px; margin:8px 0; }}
+.remediation-meta span {{ background:white; border:1px solid #e2e8f0; border-radius:999px; padding:2px 8px; font-size:.72rem; color:#4a5568; }}
+.remediation-evidence {{ font-size:.82rem; color:#4a5568; margin-top:8px; }}
+.remediation-related {{ margin-top:8px; font-size:.78rem; color:#718096; }}
+.review-list {{ margin-top:18px; border-top:1px solid #e2e8f0; padding-top:14px; }}
+.review-item {{ padding:10px 12px; border:1px dashed #cbd5e0; border-radius:8px; margin-top:8px; background:#fff; font-size:.85rem; }}
+@media (max-width:640px) {{
+  .header {{ padding:32px 24px; }}
+  .header h1 {{ font-size:2rem; }}
+  .container {{ padding:24px 12px; }}
+  .section {{ padding:24px 16px; }}
+  .stats-grid {{ grid-template-columns:repeat(2,minmax(0,1fr)); gap:14px; }}
+  .stat-card {{ padding:22px 12px; }}
+  .remediation-grid {{ grid-template-columns:1fr; }}
+  .evidence-grid {{ grid-template-columns:1fr; }}
+  .network-grid {{ grid-template-columns:1fr; }}
+  .checklist-table {{ min-width:640px; }}
+  #site-map-graph {{ height:320px !important; }}
+}}
 </style>
 </head>
 <body>
@@ -418,14 +475,31 @@ body {{ font-family: 'Segoe UI', system-ui, -apple-system, sans-serif; backgroun
                 <span class="meta-label">Tool</span>
                 <span class="meta-value">WScan v1.0</span>
             </div>
+            <div class="meta-item">
+                <span class="meta-label">Reproduction Package</span>
+                <span class="meta-value"><a href="reproduction.json">reproduction.json</a> / <a href="reproduce.sh">reproduce.sh</a></span>
+            </div>
+            <div class="meta-item">
+                <span class="meta-label">Remediation Plan</span>
+                <span class="meta-value"><a href="remediation_plan.md">remediation_plan.md</a> / <a href="remediation_tasks.json">remediation_tasks.json</a></span>
+            </div>
         </div>
     </div>
 
     <!-- AI Analysis / Attack Chains (⑧ ⑨) -->
     {ai_analysis_html}
 
+    <!-- LLM Runtime Summary -->
+    {llm_summary_html}
+
     <!-- Attack Plans -->
     {attack_plan_html}
+
+    <!-- Remediation Summary -->
+    {remediation_summary_html}
+
+    <!-- Scan Checklist -->
+    {checklist_html}
 
     <!-- Findings -->
     <div class="section">
@@ -824,6 +898,217 @@ document.querySelectorAll('.plan-payloads-toggle').forEach(btn => {{
             content += f"\n\n{body[:1000]}"
         return f'<div class="network-box"><h4>HTTP Response</h4><div class="network-content">{self._escape(content)}</div></div>'
 
+    def _format_structured_evidence(self, finding: Finding) -> str:
+        evidence_type = getattr(finding, "evidence_type", "") or finding.check_type
+        details = getattr(finding, "evidence_details", {}) or {}
+        steps = getattr(finding, "reproduction_steps", []) or []
+        if not details and not steps and not evidence_type:
+            return ""
+
+        cells = [
+            ("Evidence Type", evidence_type),
+            ("Confidence", getattr(finding, "confidence", "tentative")),
+            ("Verification", "reproduced/assumed" if getattr(finding, "verified", True) else "not reproduced"),
+        ]
+        for key, value in list(details.items())[:8]:
+            cells.append((str(key).replace("_", " ").title(), value))
+
+        cells_html = "".join(
+            '<div class="evidence-cell">'
+            f'<div class="k">{self._escape(k)}</div>'
+            f'<div class="v">{self._escape(self._short_value(v))}</div>'
+            '</div>'
+            for k, v in cells
+        )
+        steps_html = ""
+        if steps:
+            steps_html = "<ol class=\"repro-list\">" + "".join(
+                f"<li>{self._escape(step)}</li>" for step in steps[:8]
+            ) + "</ol>"
+        return f"""
+        <div class="finding-detail">
+            <h4>Structured Evidence</h4>
+            <div class="evidence-grid">{cells_html}</div>
+            {steps_html}
+        </div>"""
+
+    def _short_value(self, value) -> str:
+        if isinstance(value, (dict, list)):
+            text = json.dumps(value, ensure_ascii=False)
+        else:
+            text = str(value)
+        return text if len(text) <= 240 else text[:237] + "..."
+
+    def _build_remediation_summary_html(self, findings: list[Finding]) -> str:
+        if not findings:
+            return ""
+        try:
+            from .action_plan import build_action_plan
+            plan = build_action_plan(findings)
+        except Exception:
+            return ""
+
+        tasks = plan.get("tasks", [])
+        review_items = plan.get("review_items", [])
+        if not tasks and not review_items:
+            return ""
+
+        task_cards = ""
+        for task in tasks:
+            priority = self._escape(task.get("priority", "P3"))
+            priority_class = priority.lower()
+            related = task.get("related_findings", [])
+            related_html = ""
+            if related:
+                related_html = (
+                    f'<div class="remediation-related">Related findings: '
+                    f'{len(related)} additional path(s)</div>'
+                )
+            task_cards += f"""
+            <div class="remediation-card {priority_class}">
+                <div class="remediation-head">
+                    <span class="priority-pill {priority_class}">{priority}</span>
+                    <span class="remediation-title">{self._escape(task.get("title", ""))}</span>
+                </div>
+                <div class="remediation-meta">
+                    <span>{self._escape(task.get("check_type", ""))}</span>
+                    <span>{self._escape(task.get("severity", ""))}</span>
+                    <span>{self._escape(task.get("confidence", ""))}</span>
+                    <span>{self._escape(task.get("evidence_type", ""))}</span>
+                </div>
+                <div><code>{self._escape(task.get("field_name", ""))}</code></div>
+                <div class="remediation-evidence">{self._escape(task.get("evidence", ""))}</div>
+                {related_html}
+            </div>"""
+
+        review_html = ""
+        if review_items:
+            rows = ""
+            for item in review_items[:20]:
+                rows += f"""
+                <div class="review-item">
+                    <b>{self._escape(item.get("id", ""))}</b>
+                    {self._escape(item.get("check_type", ""))}
+                    / <code>{self._escape(item.get("field_name", ""))}</code>
+                    / {self._escape(item.get("confidence", ""))}
+                    / verified={self._escape(str(item.get("verified", "")))}
+                    / related={len(item.get("related_signals", []))}
+                    <br>{self._escape(item.get("reason", ""))}
+                </div>"""
+            if len(review_items) > 20:
+                rows += f'<div class="review-item">Showing first 20 of {len(review_items)} review-only signals.</div>'
+            review_html = f"""
+            <div class="review-list">
+                <h3>Review-only Signals ({len(review_items)})</h3>
+                {rows}
+            </div>"""
+
+        return f"""
+        <div class="section">
+            <h2>Remediation Summary ({len(tasks)} tasks)</h2>
+            <p class="note" style="margin-bottom:14px">
+                Confirmed or likely findings are grouped by fix target. Tentative or unreproduced signals are kept separate for manual review.
+            </p>
+            <div class="remediation-grid">
+                {task_cards}
+            </div>
+            {review_html}
+        </div>"""
+
+    def _build_scan_checklist_html(self, scan_matrix: list[dict]) -> str:
+        if not scan_matrix:
+            return ""
+        summary: dict[str, int] = {}
+        for row in scan_matrix:
+            status = row.get("status", "tested")
+            summary[status] = summary.get(status, 0) + 1
+
+        summary_html = " ".join(
+            f'<span class="status-pill status-{self._escape(status)}">{self._escape(status)}: {count}</span>'
+            for status, count in sorted(summary.items())
+        )
+        rows_html = ""
+        for row in scan_matrix[:500]:
+            status = row.get("status", "tested")
+            rows_html += f"""
+            <tr>
+                <td><span class="status-pill status-{self._escape(status)}">{self._escape(status)}</span></td>
+                <td>{self._escape(row.get("check", ""))}</td>
+                <td>{self._escape(row.get("location", ""))}</td>
+                <td><code>{self._escape(row.get("field_name", ""))}</code></td>
+                <td>{self._escape(row.get("url", ""))}</td>
+                <td>{self._escape(row.get("severity", "") or row.get("note", ""))}</td>
+            </tr>"""
+
+        truncated = ""
+        if len(scan_matrix) > 500:
+            truncated = f"<p class=\"note\">Showing first 500 of {len(scan_matrix)} checklist rows.</p>"
+
+        return f"""
+        <div class="section">
+            <h2>Scan Checklist ({len(scan_matrix)} checks)</h2>
+            <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px">{summary_html}</div>
+            <div class="table-scroll">
+            <table class="checklist-table">
+                <thead>
+                    <tr>
+                        <th>Status</th>
+                        <th>Check</th>
+                        <th>Location</th>
+                        <th>Field</th>
+                        <th>URL</th>
+                        <th>Severity / Note</th>
+                    </tr>
+                </thead>
+                <tbody>{rows_html}</tbody>
+            </table>
+            </div>
+            {truncated}
+        </div>"""
+
+    def _build_llm_summary_html(self, summary: dict) -> str:
+        if not summary:
+            return ""
+        provider = summary.get("provider", "none")
+        if provider == "none":
+            return ""
+        fields = [
+            ("Provider", provider),
+            ("Model", summary.get("model", "")),
+            ("Plans", summary.get("total_plans", 0)),
+            ("LLM Plans", summary.get("llm_plans", 0)),
+            ("Fallback Plans", summary.get("heuristic_plans", 0)),
+        ]
+        cells = "".join(
+            '<div class="meta-item">'
+            f'<span class="meta-label">{self._escape(label)}</span>'
+            f'<span class="meta-value">{self._escape(value)}</span>'
+            '</div>'
+            for label, value in fields
+        )
+        role_models = summary.get("role_models") or {}
+        role_html = ""
+        if role_models:
+            role_cells = "".join(
+                '<div class="meta-item">'
+                f'<span class="meta-label">{self._escape(role.title())}</span>'
+                f'<span class="meta-value">{self._escape(model)}</span>'
+                '</div>'
+                for role, model in sorted(role_models.items())
+            )
+            role_html = f"""
+            <h3 style="margin:16px 0 8px;font-size:1rem;color:#2d3748">Role Models</h3>
+            <div class="scan-meta">{role_cells}</div>"""
+        note = summary.get("note", "")
+        note_html = f'<p class="note" style="margin-top:12px">{self._escape(note)}</p>' if note else ""
+        return f"""
+        <div class="section">
+            <h2>LLM Runtime Summary</h2>
+            <div class="scan-meta">{cells}</div>
+            {role_html}
+            {note_html}
+        </div>"""
+
     @staticmethod
     def _escape(text: str) -> str:
         return (
@@ -841,7 +1126,7 @@ document.querySelectorAll('.plan-payloads-toggle').forEach(btn => {{
 
     def _build_executive_html(
         self, target, findings, visited_urls, checks,
-        attack_plans, ctf_flags, page_graph, diff_result=None,
+        attack_plans, ctf_flags, page_graph, diff_result=None, scan_matrix=None,
     ) -> str:
         """経営層向け: サマリーカード・リスク分布・コンプライアンス適合率・推奨事項。"""
         scan_date = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -972,7 +1257,7 @@ ul li{{margin:4px 0;font-size:.9rem}} .footer{{text-align:center;color:#a0aec0;f
 
     def _build_developer_html(
         self, target, findings, visited_urls, checks,
-        attack_plans, ctf_flags, page_graph, diff_result=None,
+        attack_plans, ctf_flags, page_graph, diff_result=None, scan_matrix=None,
     ) -> str:
         """開発者向け: チェックリスト形式・修正コード例・重要度別ソート。"""
         scan_date = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")

@@ -70,6 +70,31 @@ def _cvss_for(check_type: str) -> tuple[str, float]:
     return _CVSS_TABLE.get(check_type) or _CVSS_TABLE.get(base, ("", 0.0))
 
 
+def finding_dedup_key(
+    check_type: str,
+    url: str,
+    field_name: str,
+    evidence_type: str = "",
+) -> tuple[str, str, str, str]:
+    """
+    Deduplicate exact evidence, not entire inputs.
+
+    A single parameter can legitimately produce distinct vulnerability evidence
+    (for example SQL error disclosure and authentication bypass).  Treating the
+    whole (url, field, check) tuple as duplicate loses those findings.
+    """
+    return (url, field_name, check_type, evidence_type or check_type)
+
+
+def finding_dedup_key_for(finding: "Finding") -> tuple[str, str, str, str]:
+    return finding_dedup_key(
+        finding.check_type,
+        finding.url,
+        finding.field_name,
+        finding.evidence_type,
+    )
+
+
 @dataclass
 class Finding:
     """A security vulnerability finding."""
@@ -88,6 +113,9 @@ class Finding:
     verified: bool = True            # False = could not reproduce on second attempt
     verification_note: str = ""      # Reason when verified=False
     confidence: str = "tentative"   # "confirmed" | "likely" | "tentative"
+    evidence_type: str = ""          # Structured signal, e.g. xss_dialog, sqli_error
+    evidence_details: dict = field(default_factory=dict)
+    reproduction_steps: list[str] = field(default_factory=list)
 
     @property
     def cvss_vector(self) -> str:
@@ -118,6 +146,9 @@ class Finding:
             "verified": self.verified,
             "verification_note": self.verification_note,
             "confidence": self.confidence,
+            "evidence_type": self.evidence_type,
+            "evidence_details": self.evidence_details,
+            "reproduction_steps": self.reproduction_steps,
             "compliance_refs": get_refs(self.check_type),
         }
 
@@ -154,6 +185,15 @@ class BaseScanner(ABC):
         Default: returns empty list (no-op).
         """
         return []
+
+    async def verify_finding(self, finding: Finding) -> Optional[bool]:
+        """
+        Scanner-specific reproduction check.
+
+        Return True/False when the scanner can verify the finding, or None to
+        let the engine use its generic fallback.
+        """
+        return None
 
     @property
     def sleep_factor(self) -> float:
@@ -209,22 +249,32 @@ class BaseScanner(ABC):
         screenshot_b64: Optional[str] = None,
         dialog_confirmed: bool = False,
         dialog_message: str = "",
+        confidence: Optional[str] = None,
+        evidence_type: str = "",
+        evidence_details: Optional[dict] = None,
+        reproduction_steps: Optional[list[str]] = None,
     ) -> Finding:
         """Create and record a finding."""
         if screenshot_b64 is None:
             screenshot_b64 = await self.browser.screenshot_b64(
                 label=f"[FINDING] {self.CHECK_TYPE} on {field_name}"
             )
-        # Dedup: skip if the same (url, field_name, check_type) was already recorded
-        dedup_key = (url, field_name, self.CHECK_TYPE)
+        # Dedup: skip exact evidence repeats while preserving distinct signals
+        # on the same input.
+        dedup_key = finding_dedup_key(
+            self.CHECK_TYPE,
+            url,
+            field_name,
+            evidence_type,
+        )
         if dedup_key in self.engine._finding_dedup:
             return None  # duplicate
         self.engine._finding_dedup.add(dedup_key)
 
         # Auto-assign confidence level
-        if dialog_confirmed:
+        if confidence is None and dialog_confirmed:
             confidence = "confirmed"
-        else:
+        elif confidence is None:
             resp_body = pair.get("response", {}).get("body", "") or ""
             base_body = pair.get("baseline_response", {}).get("body", "") or ""
             if resp_body and (len(resp_body) - len(base_body)) > 100:
@@ -245,9 +295,21 @@ class BaseScanner(ABC):
             dialog_confirmed=dialog_confirmed,
             dialog_message=dialog_message,
             confidence=confidence,
+            evidence_type=evidence_type or self.CHECK_TYPE,
+            evidence_details=evidence_details or {},
+            reproduction_steps=reproduction_steps or self._default_reproduction_steps(
+                url, field_name, payload
+            ),
         )
         self.findings.append(finding)
         self.engine.all_findings.append(finding)
         if self.monitor:
             await self.monitor.emit_finding(finding.to_dict())
         return finding
+
+    def _default_reproduction_steps(self, url: str, field_name: str, payload: str) -> list[str]:
+        return [
+            f"Open {url}",
+            f"Submit payload to field or parameter '{field_name}'",
+            "Compare the resulting response and browser behavior with the baseline.",
+        ]

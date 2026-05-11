@@ -136,6 +136,22 @@ class StoredXSSScanner(BaseScanner):
                 ),
                 pair=pair,
                 severity=severity,
+                confidence="confirmed" if is_executable else "likely",
+                evidence_type="stored_xss_marker" if is_executable else "stored_html_marker",
+                evidence_details={
+                    "marker": marker,
+                    "injection_url": meta["url"],
+                    "sink_url": url,
+                    "raw_marker_present": in_raw,
+                    "encoded_marker_present": in_encoded,
+                    "executable": is_executable,
+                },
+                reproduction_steps=[
+                    f"Open {meta['url']}",
+                    f"Submit the payload into field '{meta['field']}'.",
+                    f"Open {url}",
+                    f"Confirm marker '{marker}' is rendered from persistent storage.",
+                ],
             )
             findings.append(finding)
 

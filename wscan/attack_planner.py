@@ -1,7 +1,7 @@
 """
 Attack Planner
 ==============
-AeyeScan / VEX-style AI-driven attack-strategy planning.
+AI-driven attack-strategy planning.
 
 Before payload injection starts, the planner:
 
@@ -324,14 +324,15 @@ Consider stored / second-order attacks carefully:
 
         raw: Optional[str] = None
         provider = self.payload_gen.provider
-        if provider == "claude":
-            raw = await self._call_claude(prompt)
-        elif provider == "openai":
-            raw = await self._call_openai(prompt)
-        elif provider == "gemini":
-            raw = await self._call_gemini(prompt)
-        else:
-            raw = await self._call_ollama(prompt)
+        with self.payload_gen.use_role("planner"):
+            if provider == "claude":
+                raw = await self._call_claude(prompt)
+            elif provider == "openai":
+                raw = await self._call_openai(prompt)
+            elif provider == "gemini":
+                raw = await self._call_gemini(prompt)
+            else:
+                raw = await self._call_ollama(prompt)
 
         if not raw:
             return None

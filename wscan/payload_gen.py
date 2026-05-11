@@ -7,11 +7,21 @@ import json
 import os
 import re
 import httpx
+from contextlib import contextmanager
 from typing import Optional
 
 from rich.console import Console
 
 console = Console()
+
+
+def _format_prompt_template(template: str, *, field_name: str, url: str) -> str:
+    """Fill only WScan placeholders, leaving payload syntax such as ${IFS} intact."""
+    return (
+        template
+        .replace("{field_name}", field_name)
+        .replace("{url}", url)
+    )
 
 
 class PayloadGenerator:
@@ -27,6 +37,7 @@ class PayloadGenerator:
         claude_model: str = "claude-haiku-4-5-20251001",
         default_payloads: Optional[dict] = None,
         prompt_templates: Optional[dict] = None,
+        role_models: Optional[dict] = None,
         enable_web_browsing: bool = False,
     ):
         self.provider = provider
@@ -37,9 +48,57 @@ class PayloadGenerator:
         self.claude_model = claude_model
         self.default_payloads = default_payloads or {}
         self.prompt_templates = prompt_templates or {}
+        self.role_models = {
+            str(k): str(v).strip()
+            for k, v in (role_models or {}).items()
+            if str(v).strip()
+        }
         self.enable_web_browsing = enable_web_browsing
         self._anthropic_client = None
         self._llm_available: Optional[bool] = None
+
+    def get_model(self, role: str = "payload") -> str:
+        """Return the configured model for a role, falling back to the provider default."""
+        role_model = self.role_models.get(role) or self.role_models.get("default")
+        if role_model:
+            return role_model
+        if self.provider == "claude":
+            return self.claude_model
+        if self.provider == "openai":
+            return self.openai_model
+        if self.provider == "gemini":
+            return self.gemini_model
+        if self.provider == "ollama":
+            return self.ollama_model
+        return ""
+
+    def role_model_summary(self) -> dict:
+        roles = ["planner", "payload", "adaptive", "triage", "report"]
+        return {role: self.get_model(role) for role in roles if self.get_model(role)}
+
+    @contextmanager
+    def use_role(self, role: str):
+        """Temporarily expose a role-specific model through legacy attributes."""
+        if self.provider == "none":
+            yield
+            return
+        attr = {
+            "claude": "claude_model",
+            "openai": "openai_model",
+            "gemini": "gemini_model",
+            "ollama": "ollama_model",
+        }.get(self.provider)
+        if not attr:
+            yield
+            return
+        original = getattr(self, attr)
+        model = self.get_model(role)
+        if model:
+            setattr(self, attr, model)
+        try:
+            yield
+        finally:
+            setattr(self, attr, original)
 
     # ------------------------------------------------------------------
     # Client / availability helpers
@@ -228,7 +287,9 @@ class PayloadGenerator:
             if template:
                 # エンコード例を LLM プロンプトに注入して Ollama の出力を豊かにする
                 encoding_hint = ENCODING_EXAMPLES.get(check_type, "")
-                prompt = template.format(field_name=field_name, url=url)
+                prompt = _format_prompt_template(
+                    template, field_name=field_name, url=url
+                )
                 if encoding_hint:
                     prompt = encoding_hint + "\n" + prompt
 
@@ -248,7 +309,8 @@ class PayloadGenerator:
                     except Exception:
                         pass
 
-                llm_payloads = await self._call_llm(prompt)
+                with self.use_role("payload"):
+                    llm_payloads = await self._call_llm(prompt)
                 if llm_payloads:
                     console.print(
                         f"[dim]LLM generated {len(llm_payloads)} payloads for {field_name}[/dim]"
