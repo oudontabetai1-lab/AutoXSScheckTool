@@ -448,14 +448,15 @@ class AdaptivePayloadEngine:
         _adaptive_header(check_type, field_name, provider)
 
         raw: Optional[str] = None
-        if provider == "claude":
-            raw = await self._stream_claude(prompt)
-        elif provider == "openai":
-            raw = await self._stream_openai(prompt)
-        elif provider == "gemini":
-            raw = await self._call_gemini(prompt)
-        else:
-            raw = await self._stream_ollama(prompt)
+        with self.pg.use_role("adaptive"):
+            if provider == "claude":
+                raw = await self._stream_claude(prompt)
+            elif provider == "openai":
+                raw = await self._stream_openai(prompt)
+            elif provider == "gemini":
+                raw = await self._call_gemini(prompt)
+            else:
+                raw = await self._stream_ollama(prompt)
 
         _adaptive_footer()
 

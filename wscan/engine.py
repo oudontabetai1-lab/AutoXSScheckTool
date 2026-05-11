@@ -55,7 +55,7 @@ from .ctf_flag_finder import FlagFinder
 from .intervention import ScanController, AbortScan, SkipField, SkipPage
 from .monitor import MonitorServer
 from .payload_gen import PayloadGenerator
-from .scanners.base import Finding
+from .scanners.base import Finding, finding_dedup_key_for
 from .scanners.sqli import SQLiScanner, SQL_ERROR_PATTERNS
 from .scanners.xss import XSSScanner
 from .scanners.os_injection import OSInjectionScanner
@@ -147,6 +147,7 @@ class ScanEngine:
         openai_model: str = "gpt-4o-mini",
         gemini_model: str = "gemini-2.0-flash",
         claude_model: str = "claude-haiku-4-5-20251001",
+        role_models: Optional[dict] = None,
         checks: Optional[list] = None,
         output_dir: Optional[str] = None,
         timeout: int = 30,
@@ -175,6 +176,7 @@ class ScanEngine:
         enable_ai_analysis: bool = True,
         enable_waf_detection: bool = True,
         enable_payload_learning: bool = True,
+        enable_adaptive_payloads: bool = True,
         enable_sitemap_crawl: bool = True,
         enable_llm_web_browsing: bool = False,
         # Concurrent scanning
@@ -276,6 +278,7 @@ class ScanEngine:
         self.enable_ai_analysis = enable_ai_analysis
         self.enable_waf_detection = enable_waf_detection
         self.enable_payload_learning = enable_payload_learning
+        self.enable_adaptive_payloads = enable_adaptive_payloads
         self.enable_sitemap_crawl = enable_sitemap_crawl
         self.enable_llm_web_browsing = enable_llm_web_browsing
         self.concurrency = max(1, concurrency)
@@ -320,6 +323,7 @@ class ScanEngine:
             openai_model=openai_model,
             gemini_model=gemini_model,
             claude_model=claude_model,
+            role_models=role_models,
             default_payloads=payloads_data,
             prompt_templates=prompt_templates,
             enable_web_browsing=enable_llm_web_browsing,
@@ -350,7 +354,7 @@ class ScanEngine:
         # Adaptive AI payload refinement — runs a second pass per field
         # using LLM analysis of the page's filtering behavior
         self.adaptive_engine = AdaptivePayloadEngine(self.payload_gen)
-        self.adaptive_enabled = llm_provider != "none"
+        self.adaptive_enabled = enable_adaptive_payloads and llm_provider != "none"
 
         # Chain / stored vulnerability scanner (Phase 3c)
         self.chain_scanner = ChainScanner(
@@ -369,6 +373,7 @@ class ScanEngine:
         self._scanned_forms_lock = asyncio.Lock()   # guards scanned_forms in concurrent mode
         self.completed_fields: int = 0
         self.total_fields: int = 0
+        self.scan_matrix: list[dict] = []
         # page_graph: {url: {"parent": parent_url|None, "screenshot_b64": str, "depth": int}}
         self.page_graph: dict = {}
         # Scan controller (intervention system)
@@ -377,6 +382,29 @@ class ScanEngine:
         self.auth_bypass_detected: bool = False
         self.auth_bypass_login_url: str = ""
         self.auth_bypass_post_url: str = ""
+
+    def _record_scan_matrix(
+        self,
+        url: str,
+        field_name: str,
+        check_name: str,
+        status: str,
+        location: str = "",
+        severity: str = "",
+        finding_count: int = 0,
+        note: str = "",
+    ) -> None:
+        """Record per-target scan execution for checklist-style reports."""
+        self.scan_matrix.append({
+            "url": url,
+            "field_name": field_name,
+            "check": check_name,
+            "status": status,
+            "location": location,
+            "severity": severity,
+            "finding_count": finding_count,
+            "note": note,
+        })
 
     # =========================================================================
     # browser property — transparently returns the current worker's browser
@@ -691,6 +719,8 @@ class ScanEngine:
 
             # A: 重複ページスキップ (DOM構造フィンガープリント)
             if html:
+                if self.flag_finder:
+                    self._check_page_for_flags(html, url)
                 fp = self._page_fingerprint(html)
                 if fp in self._seen_page_fingerprints:
                     console.print(f"  [dim]重複ページスキップ: {url} (同一構造を検出)[/dim]")
@@ -699,7 +729,7 @@ class ScanEngine:
                         try:
                             links = await self.browser.collect_links(url, same_domain=True)
                             for link in links:
-                                clean = link.split("#")[0].split("?")[0]
+                                clean = link.split("#")[0]
                                 if clean not in self.visited_urls and not self._is_url_excluded(clean):
                                     self.visited_urls.add(clean)
                                     queue.append((link, depth + 1, url))
@@ -740,7 +770,7 @@ class ScanEngine:
             }
 
             # CTF: scan page HTML for flags even during crawl
-            if self.flag_finder:
+            if self.flag_finder and not html:
                 self._check_page_for_flags(html, url)
 
             # Count and flag registration forms during crawl (informational only;
@@ -755,6 +785,16 @@ class ScanEngine:
                     reg_form_count = len(forms)  # whole page will be skipped
 
             input_count = sum(len(f.get("inputs", [])) for f in forms) + len(url_params)
+            if self.monitor:
+                await self.monitor.emit_page_graph_update(
+                    url=url,
+                    parent=parent_url,
+                    depth=depth,
+                    forms=len(forms),
+                    inputs=input_count,
+                    params=len(url_params),
+                    status="done",
+                )
             reg_note = (
                 f"  [dim yellow]({reg_form_count} registration form(s) will be skipped)[/dim yellow]"
                 if reg_form_count else ""
@@ -776,7 +816,7 @@ class ScanEngine:
                         self._browser.page, url, max_clicks=20
                     )
                     for spa_link in spa_links:
-                        clean_spa = spa_link.split("#")[0].split("?")[0]
+                        clean_spa = spa_link.split("#")[0]
                         if clean_spa not in self.visited_urls and not self._is_url_excluded(clean_spa):
                             self.visited_urls.add(clean_spa)
                             queue.append((spa_link, depth + 1, url))
@@ -788,7 +828,7 @@ class ScanEngine:
                 url_cap = max(200, self.depth * 50)
                 _cap_warned = False
                 for link in links:
-                    clean = link.split("#")[0].split("?")[0]
+                    clean = link.split("#")[0]
                     if len(self.visited_urls) >= url_cap:
                         if not _cap_warned:
                             console.print(
@@ -926,7 +966,7 @@ class ScanEngine:
             if edits:
                 self._apply_plan_edits(plans, edits)
                 console.print("  [dim]プラン編集が適用されました。[/dim]")
-        else:
+        elif self.interactive_plan:
             # Terminal fallback: show interactive editor then wait for Enter
             if plans:
                 self._interactive_plan_editor(plans)
@@ -939,6 +979,8 @@ class ScanEngine:
                 await asyncio.get_event_loop().run_in_executor(None, input, "  → ")
             except (KeyboardInterrupt, EOFError):
                 raise SystemExit("\nAborted by user.")
+        elif plans:
+            console.print("  [dim]Plan review skipped — non-interactive scan continues.[/dim]")
 
         return plans
 
@@ -1939,6 +1981,14 @@ class ScanEngine:
                 f.severity == "critical" and f.field_name == field_name and f.url == url
                 for f in self.all_findings
             ):
+                self._record_scan_matrix(
+                    url=url,
+                    field_name=field_name,
+                    check_name=check_name,
+                    status="skipped",
+                    location=location,
+                    note="Skipped because a critical finding was already confirmed for this field.",
+                )
                 break
 
             # Merge plan payloads with defaults (LLM extras come first, defaults appended)
@@ -1950,10 +2000,34 @@ class ScanEngine:
                 self.custom_payloads[check_name] = merged
 
             try:
+                before_count = len(self.all_findings)
                 findings = await scanner.scan_field(url, form_index, field, is_url_param)
                 for f in (findings or []):
+                    if f is None:
+                        continue
                     self._record_finding(f, source=field_name)
+                new_findings = [
+                    f for f in self.all_findings[before_count:]
+                    if f.url == url and f.field_name == field_name and f.check_type == check_name
+                ]
+                self._record_scan_matrix(
+                    url=url,
+                    field_name=field_name,
+                    check_name=check_name,
+                    status="finding" if new_findings else "tested",
+                    location=location,
+                    severity=max((f.severity for f in new_findings), default=""),
+                    finding_count=len(new_findings),
+                )
             except Exception as e:
+                self._record_scan_matrix(
+                    url=url,
+                    field_name=field_name,
+                    check_name=check_name,
+                    status="error",
+                    location=location,
+                    note=str(e)[:240],
+                )
                 console.print(f"    [yellow]Scanner error ({check_name}): {e}[/yellow]")
             finally:
                 if plan_payloads:
@@ -2044,12 +2118,14 @@ class ScanEngine:
             try:
                 findings = await scanner.scan_field(url, form_index, field, is_url_param)
                 for f in (findings or []):
+                    if f is None:
+                        continue
                     # Tag adaptive findings so they're identifiable
                     f.evidence = f"[AdaptiveAI] {f.evidence}"
                     self._record_finding(f, source=f"{field_name}[adaptive]")
 
                 # Stop adaptive passes for this field if critical hit confirmed
-                if any(f.severity == "critical" for f in (findings or [])):
+                if any(f is not None and f.severity == "critical" for f in (findings or [])):
                     self.custom_payloads[check_name] = _prev if _prev is not None else self.custom_payloads.pop(check_name, None)
                     break
             except Exception as e:
@@ -2139,7 +2215,9 @@ class ScanEngine:
                 console.print()
 
     def _record_finding(self, f: Finding, source: str = ""):
-        dedup_key = (f.url, f.field_name, f.check_type)
+        if f is None:
+            return
+        dedup_key = finding_dedup_key_for(f)
         if dedup_key in self._finding_dedup:
             return   # duplicate — skip
         self._finding_dedup.add(dedup_key)
@@ -2234,6 +2312,12 @@ class ScanEngine:
         if scanner is None:
             return True  # no scanner available → assume confirmed
 
+        verifier = getattr(scanner, "verify_finding", None)
+        if verifier:
+            scanner_result = await verifier(f)
+            if scanner_result is not None:
+                return bool(scanner_result)
+
         # Determine URL-param vs form-field injection context
         is_url_param = f.field_name in parse_qs(
             urlparse(f.url).query, keep_blank_values=True
@@ -2323,12 +2407,15 @@ class ScanEngine:
             except Exception as exc:
                 console.print(f"  [yellow]差分スキャン失敗: {exc}[/yellow]")
 
+        llm_summary = self._llm_runtime_summary()
         evidence = {
             "target": self.target_url,
             "scan_date": datetime.datetime.now().isoformat(),
             "checks": self.checks,
             "visited_urls": list(self.visited_urls),
+            "llm_summary": llm_summary,
             "findings": findings_dicts,
+            "scan_matrix": self.scan_matrix,
             "ctf_flags": [{"flag": flag, "source": src} for flag, src in self.ctf_found_flags],
             "diff": diff_data,
             "attack_plans": [
@@ -2353,6 +2440,31 @@ class ScanEngine:
         with open(evidence_path, "w", encoding="utf-8") as fp:
             json.dump(evidence, fp, ensure_ascii=False, indent=2)
         console.print(f"  [dim]Evidence:[/dim] {evidence_path}")
+        if llm_summary.get("provider") != "none":
+            console.print(
+                "  [dim]LLM:     [/dim]"
+                f"{llm_summary.get('provider')} / {llm_summary.get('model')} "
+                f"(plans: {llm_summary.get('llm_plans')}"
+                f" LLM, {llm_summary.get('heuristic_plans')} fallback)"
+            )
+
+        # Reproduction package: machine-readable steps + curl script.
+        try:
+            from wscan.reproduction import write_reproduction_package
+            repro = write_reproduction_package(self.all_findings, self.output_dir)
+            console.print(f"  [dim]Repro:   [/dim] {repro['json']}")
+            console.print(f"  [dim]Curl:    [/dim] {repro['shell']}")
+        except Exception as _repro_err:
+            console.print(f"  [yellow][Repro] 書き出し失敗: {_repro_err}[/yellow]")
+
+        # Developer-oriented remediation task export.
+        try:
+            from wscan.action_plan import write_action_plan
+            action_plan = write_action_plan(self.all_findings, self.output_dir)
+            console.print(f"  [dim]Actions: [/dim] {action_plan['markdown']}")
+            console.print(f"  [dim]Tasks:   [/dim] {action_plan['json']}")
+        except Exception as _plan_err:
+            console.print(f"  [yellow][ActionPlan] 書き出し失敗: {_plan_err}[/yellow]")
 
         # K: SARIF 2.1.0 出力
         sarif_out = ""
@@ -2420,6 +2532,8 @@ class ScanEngine:
             attack_plans=self.attack_plans,
             ctf_flags=self.ctf_found_flags,
             page_graph=self.page_graph,
+            scan_matrix=self.scan_matrix,
+            llm_summary=self._llm_runtime_summary(),
             template="audit",
             diff_result=diff_result,
         )
@@ -2434,6 +2548,8 @@ class ScanEngine:
                     attack_plans=self.attack_plans,
                     ctf_flags=self.ctf_found_flags,
                     page_graph=self.page_graph,
+                    scan_matrix=self.scan_matrix,
+                    llm_summary=self._llm_runtime_summary(),
                     template=tmpl,
                     diff_result=diff_result,
                 )
@@ -2449,6 +2565,33 @@ class ScanEngine:
                 webbrowser.open(report_path.as_uri())
             except Exception:
                 pass
+
+    def _llm_runtime_summary(self) -> dict:
+        provider = getattr(self.payload_gen, "provider", "none")
+        model = ""
+        if provider == "ollama":
+            model = getattr(self.payload_gen, "ollama_model", "")
+        elif provider == "openai":
+            model = getattr(self.payload_gen, "openai_model", "")
+        elif provider == "gemini":
+            model = getattr(self.payload_gen, "gemini_model", "")
+        elif provider == "claude":
+            model = getattr(self.payload_gen, "claude_model", "")
+        total = len(self.attack_plans)
+        llm_plans = sum(1 for p in self.attack_plans if getattr(p, "planned_by", "") == "llm")
+        heuristic_plans = sum(1 for p in self.attack_plans if getattr(p, "planned_by", "") != "llm")
+        note = ""
+        if provider != "none" and heuristic_plans:
+            note = "Some pages used heuristic fallback because the LLM response was unavailable or invalid."
+        return {
+            "provider": provider,
+            "model": model,
+            "role_models": self.payload_gen.role_model_summary(),
+            "total_plans": total,
+            "llm_plans": llm_plans,
+            "heuristic_plans": heuristic_plans,
+            "note": note,
+        }
 
     async def _manual_payload_listener(self) -> None:
         """U-3: Background coroutine — executes manual payloads requested from dashboard."""
@@ -2485,6 +2628,8 @@ class ScanEngine:
                     else:
                         self.custom_payloads[check_type] = prev
                     for f in (findings or []):
+                        if f is None:
+                            continue
                         f.evidence = f"[ManualExec] {f.evidence}"
                         self._record_finding(f, source=f"manual:{field_name}")
                 else:
@@ -2774,57 +2919,58 @@ class ScanEngine:
     async def _call_llm_text(self, prompt: str) -> str:
         """Call the configured LLM and return raw text response."""
         provider = self.payload_gen.provider
-        if provider == "claude":
-            client = self.payload_gen._get_anthropic_client()
-            if client:
-                import asyncio as _aio
-                loop = _aio.get_event_loop()
-                response = await loop.run_in_executor(
-                    None,
-                    lambda: client.messages.create(
-                        model=self.claude_model,
-                        max_tokens=1500,
-                        messages=[{"role": "user", "content": prompt}],
-                    ),
-                )
-                return response.content[0].text
-        elif provider == "openai":
-            import httpx, os
-            api_key = os.environ.get("OPENAI_API_KEY", "")
-            if api_key:
+        with self.payload_gen.use_role("report"):
+            if provider == "claude":
+                client = self.payload_gen._get_anthropic_client()
+                if client:
+                    import asyncio as _aio
+                    loop = _aio.get_event_loop()
+                    response = await loop.run_in_executor(
+                        None,
+                        lambda: client.messages.create(
+                            model=self.payload_gen.claude_model,
+                            max_tokens=1500,
+                            messages=[{"role": "user", "content": prompt}],
+                        ),
+                    )
+                    return response.content[0].text
+            elif provider == "openai":
+                import httpx, os
+                api_key = os.environ.get("OPENAI_API_KEY", "")
+                if api_key:
+                    async with httpx.AsyncClient(timeout=60.0) as client:
+                        resp = await client.post(
+                            "https://api.openai.com/v1/chat/completions",
+                            headers={"Authorization": f"Bearer {api_key}"},
+                            json={"model": self.payload_gen.openai_model,
+                                  "messages": [{"role": "user", "content": prompt}],
+                                  "max_tokens": 1500},
+                        )
+                        if resp.status_code == 200:
+                            return resp.json()["choices"][0]["message"]["content"]
+            elif provider == "gemini":
+                import httpx, os
+                api_key = os.environ.get("GEMINI_API_KEY", "")
+                if api_key:
+                    url = (
+                        f"https://generativelanguage.googleapis.com/v1beta/models/"
+                        f"{self.payload_gen.gemini_model}:generateContent?key={api_key}"
+                    )
+                    async with httpx.AsyncClient(timeout=60.0) as client:
+                        resp = await client.post(url, json={"contents": [{"parts": [{"text": prompt}]}]})
+                        if resp.status_code == 200:
+                            return resp.json()["candidates"][0]["content"]["parts"][0]["text"]
+            else:
+                # Ollama
+                import httpx
                 async with httpx.AsyncClient(timeout=60.0) as client:
                     resp = await client.post(
-                        "https://api.openai.com/v1/chat/completions",
-                        headers={"Authorization": f"Bearer {api_key}"},
-                        json={"model": self.payload_gen.openai_model,
-                              "messages": [{"role": "user", "content": prompt}],
-                              "max_tokens": 1500},
+                        f"{self.payload_gen.ollama_url}/api/generate",
+                        json={"model": self.payload_gen.ollama_model, "prompt": prompt,
+                              "stream": False, "options": {"num_predict": 1500}},
                     )
                     if resp.status_code == 200:
-                        return resp.json()["choices"][0]["message"]["content"]
-        elif provider == "gemini":
-            import httpx, os
-            api_key = os.environ.get("GEMINI_API_KEY", "")
-            if api_key:
-                url = (
-                    f"https://generativelanguage.googleapis.com/v1beta/models/"
-                    f"{self.payload_gen.gemini_model}:generateContent?key={api_key}"
-                )
-                async with httpx.AsyncClient(timeout=60.0) as client:
-                    resp = await client.post(url, json={"contents": [{"parts": [{"text": prompt}]}]})
-                    if resp.status_code == 200:
-                        return resp.json()["candidates"][0]["content"]["parts"][0]["text"]
-        else:
-            # Ollama
-            import httpx
-            async with httpx.AsyncClient(timeout=60.0) as client:
-                resp = await client.post(
-                    f"{self.payload_gen.ollama_url}/api/generate",
-                    json={"model": self.payload_gen.ollama_model, "prompt": prompt,
-                          "stream": False, "options": {"num_predict": 1500}},
-                )
-                if resp.status_code == 200:
-                    return resp.json().get("response", "")
+                        return resp.json().get("response", "")
         return ""
 
     def _print_summary(self):

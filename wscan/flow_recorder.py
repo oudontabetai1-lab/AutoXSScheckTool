@@ -4,7 +4,7 @@ Flow Recorder / Replayer
 Playwright のナビゲーション・フォーム送信を JSON ステップとして記録し、
 記録した手順を再生してペイロードを注入する。
 
-VEX の「シナリオ記録/再生」機能相当。
+シナリオ記録/再生により、ログイン後や複数画面にまたがる操作を再利用する。
 
 記録コマンド:
     python main.py record --output flows/login_flow.json http://example.com/login

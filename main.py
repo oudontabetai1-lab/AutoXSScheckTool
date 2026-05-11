@@ -71,6 +71,12 @@ def _load_config(path: Path = _CONFIG_PATH) -> dict:
     cfg["ollama_url"]              = str(l.get("ollama_url",   "http://localhost:11434"))
     cfg["openai_model"]            = str(l.get("openai_model", "gpt-4o-mini"))
     cfg["gemini_model"]            = str(l.get("gemini_model", "gemini-2.0-flash"))
+    cfg["claude_model"]            = str(l.get("claude_model", "claude-haiku-4-5-20251001"))
+    cfg["role_models"]             = {
+        str(k): str(v).strip()
+        for k, v in (l.get("models", {}) or {}).items()
+        if str(v).strip()
+    }
 
     cfg["monitor_enabled"]         = bool(m.get("enabled", True))
     cfg["port"]                    = int(m.get("port", 8765))
@@ -187,6 +193,17 @@ Examples:
         "--gemini-model", default=_CFG.get("gemini_model", "gemini-2.0-flash"), metavar="MODEL",
         help=f"Google Gemini model name (default: {_CFG.get('gemini_model','gemini-2.0-flash')})",
     )
+    scan.add_argument(
+        "--claude-model", default=_CFG.get("claude_model", "claude-haiku-4-5-20251001"), metavar="MODEL",
+        help=f"Claude model name (default: {_CFG.get('claude_model','claude-haiku-4-5-20251001')})",
+    )
+    for role in ("planner", "payload", "adaptive", "triage", "report"):
+        scan.add_argument(
+            f"--{role}-model",
+            default=_CFG.get("role_models", {}).get(role, ""),
+            metavar="MODEL",
+            help=f"Override the {role} LLM model. Defaults to the provider model.",
+        )
     scan.add_argument(
         "--output", "-o", metavar="DIR",
         default=_CFG.get("output_dir") or None,
@@ -334,6 +351,11 @@ Examples:
         "--no-payload-learning", action="store_true",
         default=not _CFG.get("payload_learning", True),
         help="Disable payload continuous learning (don't load/save success rates).",
+    )
+    scan.add_argument(
+        "--no-adaptive-payloads", action="store_true",
+        default=False,
+        help="Disable the second-pass LLM adaptive payload refinement per field.",
     )
     scan.add_argument(
         "--no-sitemap-crawl", action="store_true",
@@ -573,6 +595,16 @@ Examples:
         "--gemini-model", default=_CFG.get("gemini_model", "gemini-2.0-flash"), metavar="MODEL",
     )
     triage.add_argument(
+        "--claude-model", default=_CFG.get("claude_model", "claude-haiku-4-5-20251001"), metavar="MODEL",
+    )
+    for role in ("planner", "payload", "adaptive", "triage", "report"):
+        triage.add_argument(
+            f"--{role}-model",
+            default=_CFG.get("role_models", {}).get(role, ""),
+            metavar="MODEL",
+            help=f"Override the {role} LLM model. Defaults to the provider model.",
+        )
+    triage.add_argument(
         "--output", "-o", metavar="FILE",
         help="Save triage report as JSON to this file path",
     )
@@ -626,7 +658,24 @@ Examples:
         help="Run in headless mode (not recommended for recording)",
     )
 
-    return parser.parse_args()
+    args = parser.parse_args()
+    args.ollama_model_explicit = any(
+        a == "--ollama-model" or a.startswith("--ollama-model=")
+        for a in sys.argv[1:]
+    )
+    args.role_model_explicit = {
+        role: any(
+            a == f"--{role}-model" or a.startswith(f"--{role}-model=")
+            for a in sys.argv[1:]
+        )
+        for role in ("planner", "payload", "adaptive", "triage", "report")
+    }
+    args.role_models = {
+        role: getattr(args, f"{role}_model", "").strip()
+        for role in ("planner", "payload", "adaptive", "triage", "report")
+        if getattr(args, f"{role}_model", "").strip()
+    }
+    return args
 
 
 def _load_cookie_file(path: str, console) -> list:
@@ -652,15 +701,88 @@ def _load_cookie_file(path: str, console) -> list:
 
 def _llm_model_display(args) -> str:
     """Return a short model info string for the startup banner."""
+    role_models = getattr(args, "role_models", {}) or {}
+    role_suffix = ""
+    if role_models:
+        role_suffix = "  [dim]roles: " + ", ".join(
+            f"{role}={model}" for role, model in sorted(role_models.items())
+        ) + "[/dim]"
     if args.llm == "ollama":
-        return f"Model    : [blue]{args.ollama_model}[/blue] (Ollama)"
+        return f"Model    : [blue]{args.ollama_model}[/blue] (Ollama){role_suffix}"
     if args.llm == "openai":
-        return f"Model    : [blue]{args.openai_model}[/blue] (OpenAI)"
+        return f"Model    : [blue]{args.openai_model}[/blue] (OpenAI){role_suffix}"
     if args.llm == "gemini":
-        return f"Model    : [blue]{args.gemini_model}[/blue] (Gemini)"
+        return f"Model    : [blue]{args.gemini_model}[/blue] (Gemini){role_suffix}"
     if args.llm == "claude":
-        return "Model    : [blue]claude-haiku-4-5-20251001[/blue] (Claude)"
+        return f"Model    : [blue]{args.claude_model}[/blue] (Claude){role_suffix}"
     return "Model    : [dim]none[/dim]"
+
+
+async def _resolve_ollama_model(args, console) -> None:
+    """Choose an installed Ollama model when the user did not specify one."""
+    if getattr(args, "llm", "") != "ollama":
+        return
+
+    try:
+        import httpx
+        async with httpx.AsyncClient(timeout=3.0) as client:
+            resp = await client.get(f"{getattr(args, 'ollama_url', 'http://localhost:11434')}/api/tags")
+        if resp.status_code != 200:
+            return
+        names = [m.get("name", "") for m in resp.json().get("models", []) if m.get("name")]
+    except Exception:
+        return
+
+    if not names:
+        return
+
+    def _select(current: str) -> str:
+        if current in names:
+            return current
+        preferred_exact = [
+            "qwen2.5-coder:latest",
+            "qwen2.5-coder",
+            "qwen3:8b",
+            "qwen3:latest",
+            "llama3.1:8b",
+            "llama3.1:latest",
+            "llama3:latest",
+        ]
+        selected = next((name for name in preferred_exact if name in names), "")
+        if not selected:
+            for prefix in ("qwen2.5-coder", "qwen3", "llama3.1", "llama3", "gemma3"):
+                selected = next((name for name in names if name.startswith(prefix)), "")
+                if selected:
+                    break
+        return selected or current
+
+    if not getattr(args, "ollama_model_explicit", False):
+        selected = _select(getattr(args, "ollama_model", ""))
+        if selected != getattr(args, "ollama_model", ""):
+            console.print(
+                f"[cyan]Ollama model auto-selected:[/cyan] "
+                f"[green]{selected}[/green] "
+                f"[dim](configured default '{args.ollama_model}' is not installed)[/dim]"
+            )
+            args.ollama_model = selected
+
+    role_models = dict(getattr(args, "role_models", {}) or {})
+    explicit = getattr(args, "role_model_explicit", {}) or {}
+    changed_roles = []
+    for role, model in list(role_models.items()):
+        if explicit.get(role):
+            continue
+        selected = _select(model)
+        if selected != model:
+            role_models[role] = selected
+            changed_roles.append(f"{role}={selected}")
+            setattr(args, f"{role}_model", selected)
+    if changed_roles:
+        console.print(
+            "[cyan]Ollama role model auto-selected:[/cyan] "
+            + "[green]" + ", ".join(changed_roles) + "[/green]"
+        )
+    args.role_models = role_models
 
 
 async def run_agent(args):
@@ -787,6 +909,8 @@ async def run_scan(args):
             f"ペイロード上限 {args.max_payloads}、遅延 0、深さ {args.depth}"
         )
 
+    await _resolve_ollama_model(args, console)
+
     checks_display = ', '.join(args.checks) if args.checks else "all IPA checks"
     planner_display = "off" if getattr(args, "no_planner", False) else "on (AI-driven)"
     concurrency_val = getattr(args, "concurrency", 1)
@@ -819,6 +943,8 @@ async def run_scan(args):
             ollama_url=getattr(args, "ollama_url", "http://localhost:11434"),
             openai_model=getattr(args, "openai_model", "gpt-4o-mini"),
             gemini_model=getattr(args, "gemini_model", "gemini-2.0-flash"),
+            claude_model=getattr(args, "claude_model", "claude-haiku-4-5-20251001"),
+            role_models=getattr(args, "role_models", {}),
         )
         _wizard_result = await run_wizard(_pg)
         if _wizard_result is not None:
@@ -912,6 +1038,8 @@ async def run_scan(args):
             ollama_model=args.ollama_model,
             openai_model=args.openai_model,
             gemini_model=args.gemini_model,
+            claude_model=args.claude_model,
+            role_models=getattr(args, "role_models", {}),
             checks=checks_list,
             output_dir=args.output,
             timeout=args.timeout,
@@ -927,7 +1055,7 @@ async def run_scan(args):
             auth_user=getattr(args, "auth_user", "") or "",
             auth_pass=getattr(args, "auth_pass", "") or "",
             use_planner=not getattr(args, "no_planner", False),
-            interactive_plan=getattr(args, "interactive_plan", False) or args.llm == "none",
+            interactive_plan=getattr(args, "interactive_plan", False),
             skip_registration=not getattr(args, "include_registration", False),
             open_report=not getattr(args, "no_open_report", False),
             proxy=getattr(args, "proxy", "") or "",
@@ -940,6 +1068,7 @@ async def run_scan(args):
             enable_ai_analysis=not getattr(args, "no_ai_analysis", False),
             enable_waf_detection=not getattr(args, "no_waf_detection", False),
             enable_payload_learning=not getattr(args, "no_payload_learning", False),
+            enable_adaptive_payloads=not getattr(args, "no_adaptive_payloads", False),
             enable_sitemap_crawl=not getattr(args, "no_sitemap_crawl", False),
             enable_llm_web_browsing=getattr(args, "llm_web_browsing", False),
             concurrency=getattr(args, "concurrency", 1),
@@ -968,10 +1097,8 @@ async def run_scan(args):
     if args.no_monitor:
         # Simple mode - no web dashboard
         from wscan.engine import ScanEngine
-        from wscan.monitor import MonitorServer
 
-        monitor = MonitorServer(port=args.port)
-        engine = ScanEngine(**_engine_kwargs(monitor))
+        engine = ScanEngine(**_engine_kwargs(None))
         await engine.run()
         return
 
@@ -1057,6 +1184,7 @@ async def run_serve(args):
         "openai_model": _CFG.get("openai_model", _llm_section.get("openai_model", "gpt-4o-mini")),
         "gemini_model": _CFG.get("gemini_model", _llm_section.get("gemini_model", "gemini-2.0-flash")),
         "claude_model": _CFG.get("claude_model", _llm_section.get("claude_model", "claude-haiku-4-5-20251001")),
+        "role_models":  _CFG.get("role_models", _llm_section.get("models", {}) or {}),
     }
     config = uvicorn.Config(app=monitor.app, host="0.0.0.0", port=port, log_level="error")
     server = uvicorn.Server(config)
@@ -1086,6 +1214,7 @@ async def run_serve(args):
                 "openai_model": cfg.get("openai_model", "gpt-4o-mini"),
                 "gemini_model": cfg.get("gemini_model", "gemini-2.0-flash"),
                 "claude_model": cfg.get("claude_model", "claude-haiku-4-5-20251001"),
+                "role_models":  cfg.get("role_models", {}) or {},
             })
         await monitor.emit_scan_started(cfg)
 
@@ -1171,6 +1300,7 @@ async def run_serve(args):
                 openai_model=cfg.get("openai_model", "gpt-4o-mini") or "gpt-4o-mini",
                 gemini_model=cfg.get("gemini_model", "gemini-2.0-flash") or "gemini-2.0-flash",
                 claude_model=cfg.get("claude_model", "claude-haiku-4-5-20251001") or "claude-haiku-4-5-20251001",
+                role_models=cfg.get("role_models", {}) or {},
                 auth_user=cfg.get("auth_user", "") or "",
                 auth_pass=cfg.get("auth_pass", "") or "",
                 cookies=cfg.get("cookies", "") or "",
@@ -1252,6 +1382,8 @@ async def run_triage(args):
         ollama_model=getattr(args, "ollama_model", "llama3"),
         openai_model=getattr(args, "openai_model", "gpt-4o-mini"),
         gemini_model=getattr(args, "gemini_model", "gemini-2.0-flash"),
+        claude_model=getattr(args, "claude_model", "claude-haiku-4-5-20251001"),
+        role_models=getattr(args, "role_models", {}),
     )
 
     report = await engine.run()
@@ -1310,6 +1442,10 @@ async def run_setup(args):
         provider=args.llm,
         ollama_model=args.ollama_model,
         ollama_url=getattr(args, "ollama_url", "http://localhost:11434"),
+        openai_model=getattr(args, "openai_model", "gpt-4o-mini"),
+        gemini_model=getattr(args, "gemini_model", "gemini-2.0-flash"),
+        claude_model=getattr(args, "claude_model", "claude-haiku-4-5-20251001"),
+        role_models=getattr(args, "role_models", {}),
     )
 
     suggestion = None

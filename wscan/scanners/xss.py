@@ -4,6 +4,7 @@ Detects reflected and DOM-based XSS vulnerabilities.
 """
 import asyncio
 import html
+import re
 from typing import TYPE_CHECKING
 
 from .base import BaseScanner, Finding
@@ -95,6 +96,17 @@ class XSSScanner(BaseScanner):
                     severity="critical",
                     dialog_confirmed=True,
                     dialog_message=self.browser.dialog_message,
+                    confidence="confirmed",
+                    evidence_type="xss_dialog",
+                    evidence_details={
+                        "execution_signal": "browser_dialog",
+                        "dialog_message": self.browser.dialog_message,
+                    },
+                    reproduction_steps=[
+                        f"Open {url}",
+                        f"Submit the payload to '{field_name}'",
+                        "Observe that the browser fires a JavaScript dialog.",
+                    ],
                 )
                 findings.append(finding)
                 self.browser.reset_dialog()
@@ -102,15 +114,30 @@ class XSSScanner(BaseScanner):
 
             # --- Check 2: Payload reflected without HTML encoding ---
             if source:
-                reflected = self._check_reflected(source, payload, baseline_source)
-                if reflected:
+                reflection = self._analyze_reflection(source, payload, baseline_source)
+                if reflection:
+                    context = reflection.get("context", "unknown")
+                    confidence = reflection.get("confidence", "tentative")
+                    severity = "high" if confidence == "likely" else "medium"
                     finding = await self.record_finding(
                         url=url,
                         field_name=field_name,
                         payload=payload,
-                        evidence=f"XSS payload reflected unencoded in response: '{reflected[:100]}'",
+                        evidence=(
+                            f"XSS payload reflected unencoded in {context} context: "
+                            f"'{reflection.get('snippet', '')[:100]}'"
+                        ),
                         pair=pair,
-                        severity="high",
+                        severity=severity,
+                        confidence=confidence,
+                        evidence_type="xss_reflection",
+                        evidence_details=reflection,
+                        reproduction_steps=[
+                            f"Open {url}",
+                            f"Submit the payload to '{field_name}'",
+                            f"Confirm the payload is reflected in {context} context without complete encoding.",
+                            "Escalate manually with a context-specific event or script payload if no dialog fires.",
+                        ],
                     )
                     findings.append(finding)
                     break
@@ -125,12 +152,35 @@ class XSSScanner(BaseScanner):
         Uses baseline comparison to avoid false positives from pre-existing page content.
         Returns the matched snippet or empty string.
         """
-        # --- Priority check: full payload present verbatim (most reliable) ---
+        reflection = self._analyze_reflection(source, payload, baseline_source)
+        if reflection:
+            return reflection.get("snippet", "")
+        return ""
+
+    def _analyze_reflection(
+        self, source: str, payload: str, baseline_source: str = ""
+    ) -> dict:
+        """
+        Return structured reflection evidence.
+
+        Reflection alone is not always executable XSS.  This classifies the
+        reflected location so the report can distinguish executable-looking
+        contexts from weaker text-node reflections.
+        """
         if payload and len(payload) > 5 and payload in source:
             idx = source.find(payload)
             preceding = source.lower()[max(0, idx - 300):idx]
             if not (preceding.rfind("<!--") > preceding.rfind("-->")):
-                return source[max(0, idx - 10):idx + len(payload) + 50]
+                return {
+                    "context": self._classify_reflection_context(source, idx),
+                    "match": "full_payload",
+                    "snippet": source[max(0, idx - 10):idx + len(payload) + 50],
+                    "confidence": self._confidence_for_context(
+                        self._classify_reflection_context(source, idx)
+                    ),
+                    "raw_payload_present": True,
+                    "baseline_marker_delta": None,
+                }
 
         source_lower = source.lower()
         baseline_lower = baseline_source.lower() if baseline_source else ""
@@ -162,9 +212,66 @@ class XSSScanner(BaseScanner):
             if preceding.rfind("<!--") > preceding.rfind("-->"):
                 continue
 
-            return source[max(0, idx - 20):idx + len(marker) + 50]
+            context = self._classify_reflection_context(source, idx)
+            delta = None
+            if baseline_lower:
+                delta = source_lower.count(marker_lower) - baseline_lower.count(marker_lower)
+            return {
+                "context": context,
+                "match": marker,
+                "snippet": source[max(0, idx - 20):idx + len(marker) + 50],
+                "confidence": self._confidence_for_context(context),
+                "raw_payload_present": False,
+                "baseline_marker_delta": delta,
+            }
 
-        return ""
+        return {}
+
+    def _classify_reflection_context(self, source: str, idx: int) -> str:
+        before = source[max(0, idx - 500):idx].lower()
+        after = source[idx:idx + 500].lower()
+        last_lt = before.rfind("<")
+        last_gt = before.rfind(">")
+        in_tag = last_lt > last_gt
+        tag_fragment = before[last_lt:] if in_tag else ""
+
+        if before.rfind("<!--") > before.rfind("-->"):
+            return "html_comment"
+        if "<script" in before and "</script" not in before.split("<script")[-1]:
+            return "script"
+        if in_tag:
+            if re.search(r"\son[a-z]+\s*=\s*['\"]?$", tag_fragment):
+                return "event_handler_attribute"
+            if re.search(r"\s(?:href|src|action|formaction)\s*=\s*['\"]?$", tag_fragment):
+                return "url_attribute"
+            return "html_attribute"
+        if after.startswith("</script"):
+            return "script"
+        return "html_text"
+
+    def _confidence_for_context(self, context: str) -> str:
+        if context in {"script", "event_handler_attribute", "url_attribute"}:
+            return "likely"
+        if context in {"html_attribute", "html_text"}:
+            return "tentative"
+        return "tentative"
+
+    async def verify_finding(self, finding: Finding) -> bool | None:
+        from urllib.parse import parse_qs, urlparse
+        is_url_param = finding.field_name in parse_qs(
+            urlparse(finding.url).query, keep_blank_values=True
+        )
+        source, _ = await self._apply_payload(
+            finding.url,
+            0,
+            finding.field_name,
+            finding.payload,
+            is_url_param,
+        )
+        await asyncio.sleep(0.5 * self.sleep_factor)
+        if self.browser.dialog_fired:
+            return True
+        return bool(source and self._analyze_reflection(source, finding.payload))
 
     async def _apply_payload(
         self,

@@ -3,7 +3,9 @@ SQL Injection Scanner
 Detects error-based, boolean-based, time-based, and authentication-bypass SQL injection.
 """
 import asyncio
+import re
 import time
+from difflib import SequenceMatcher
 from typing import TYPE_CHECKING
 
 from .base import BaseScanner, Finding
@@ -68,7 +70,7 @@ BOOLEAN_PAIRS = [
 
 # Payloads that are specifically useful for SQL injection authentication bypass.
 # These are always tested against fields that look like username/password fields.
-AUTH_BYPASS_PAYLOADS = frozenset([
+AUTH_BYPASS_PAYLOADS = (
     "' OR '1'='1",
     "' OR '1'='1' --",
     "' OR '1'='1' #",
@@ -89,7 +91,8 @@ AUTH_BYPASS_PAYLOADS = frozenset([
     "') OR ('x'='x",
     "' OR ''='",
     "1' OR '1'='1",
-])
+)
+AUTH_BYPASS_PAYLOAD_SET = frozenset(AUTH_BYPASS_PAYLOADS)
 
 # Field name substrings that indicate a login/authentication field.
 _LOGIN_FIELD_KEYWORDS = frozenset([
@@ -136,6 +139,20 @@ class SQLiScanner(BaseScanner):
         n = field_name.lower()
         return any(kw in n for kw in _LOGIN_FIELD_KEYWORDS)
 
+    def _prioritize_login_payloads(self, field_name: str, payloads: list[str]) -> list[str]:
+        """
+        Keep auth-bypass payloads inside small max-payload scans.
+
+        Without this, --max-payloads can spend the entire SQLi budget on generic
+        syntax probes and never test the payloads that matter for login forms.
+        """
+        if not self._is_login_field(field_name):
+            return payloads
+        merged = list(AUTH_BYPASS_PAYLOADS)
+        merged.extend(p for p in payloads if p not in AUTH_BYPASS_PAYLOAD_SET)
+        cap = getattr(self.engine, "max_payloads", 0)
+        return merged[:cap] if cap and cap > 0 else merged
+
     def _detect_auth_bypass(self, original_url: str, source: str) -> tuple[bool, str]:
         """
         Check whether the browser was redirected to an authenticated area after
@@ -178,6 +195,7 @@ class SQLiScanner(BaseScanner):
         findings = []
         field_name = field.get("name", "unknown")
         payloads = await self.get_payloads(field_name, url)
+        payloads = self._prioritize_login_payloads(field_name, payloads)
 
         if self.monitor:
             await self.monitor.emit_status(
@@ -227,6 +245,18 @@ class SQLiScanner(BaseScanner):
                     evidence=f"SQL error message detected: '{match}'",
                     pair=pair,
                     severity="critical",
+                    confidence="confirmed",
+                    evidence_type="sqli_error",
+                    evidence_details={
+                        "matched_error": match,
+                        "baseline_length": baseline_len,
+                        "attack_length": len(source),
+                    },
+                    reproduction_steps=[
+                        f"Open {url}",
+                        f"Submit the payload to '{field_name}'",
+                        "Confirm that the response contains a database error message.",
+                    ],
                 )
                 findings.append(finding)
                 break  # Found vulnerability, move to next field
@@ -243,6 +273,8 @@ class SQLiScanner(BaseScanner):
                 )
                 true_src = source if payload == true_payload else partner_source
                 false_src = partner_source if payload == true_payload else source
+                sim_true_base = self._body_similarity(true_src, baseline_source)
+                sim_false_base = self._body_similarity(false_src, baseline_source)
                 # True condition should resemble baseline; false should differ significantly.
                 diff_true_base = abs(len(true_src) - baseline_len)
                 diff_false_base = abs(len(false_src) - baseline_len)
@@ -253,6 +285,8 @@ class SQLiScanner(BaseScanner):
                     baseline_len > 0
                     and diff_false_base > min_threshold
                     and diff_true_base < diff_false_base * 0.5
+                    and sim_true_base >= 0.85
+                    and sim_false_base <= 0.80
                 ):
                     finding = await self.record_finding(
                         url=url,
@@ -265,6 +299,24 @@ class SQLiScanner(BaseScanner):
                         ),
                         pair=pair,
                         severity="high",
+                        confidence="likely",
+                        evidence_type="sqli_boolean",
+                        evidence_details={
+                            "true_payload": true_payload,
+                            "false_payload": false_payload,
+                            "baseline_length": baseline_len,
+                            "true_length": len(true_src),
+                            "false_length": len(false_src),
+                            "baseline_variance": baseline_variance,
+                            "similarity_true_to_baseline": round(sim_true_base, 4),
+                            "similarity_false_to_baseline": round(sim_false_base, 4),
+                        },
+                        reproduction_steps=[
+                            f"Open {url}",
+                            f"Submit true-condition payload to '{field_name}': {true_payload}",
+                            f"Submit false-condition payload to '{field_name}': {false_payload}",
+                            "Confirm that the true response resembles baseline while the false response differs materially.",
+                        ],
                     )
                     findings.append(finding)
                     break
@@ -281,6 +333,18 @@ class SQLiScanner(BaseScanner):
                         evidence=f"Time-based blind SQLi: response delayed (>3s)",
                         pair=pair,
                         severity="high",
+                        confidence="likely",
+                        evidence_type="sqli_time",
+                        evidence_details={
+                            "baseline_time_seconds": round(baseline_time, 4),
+                            "threshold_seconds": round(time_threshold, 4),
+                            "payload": payload,
+                        },
+                        reproduction_steps=[
+                            f"Open {url}",
+                            f"Submit the time-delay payload to '{field_name}'",
+                            "Confirm that response time exceeds the measured baseline threshold.",
+                        ],
                     )
                     findings.append(finding)
                     break
@@ -291,7 +355,7 @@ class SQLiScanner(BaseScanner):
             if (
                 not is_url_param
                 and self._is_login_field(field_name)
-                and payload in AUTH_BYPASS_PAYLOADS
+                and payload in AUTH_BYPASS_PAYLOAD_SET
             ):
                 bypassed, post_url = self._detect_auth_bypass(url, source)
                 if bypassed:
@@ -305,6 +369,17 @@ class SQLiScanner(BaseScanner):
                         ),
                         pair=pair,
                         severity="critical",
+                        confidence="confirmed",
+                        evidence_type="sqli_auth_bypass",
+                        evidence_details={
+                            "post_login_url": post_url,
+                            "original_url": url,
+                        },
+                        reproduction_steps=[
+                            f"Open login form {url}",
+                            f"Submit auth-bypass payload to '{field_name}'",
+                            f"Confirm the browser is redirected to authenticated page {post_url}",
+                        ],
                     )
                     findings.append(finding)
                     # Notify the engine so it can re-crawl the authenticated surface
@@ -316,6 +391,22 @@ class SQLiScanner(BaseScanner):
             await asyncio.sleep(0.2 * self.sleep_factor)
 
         return findings
+
+    def _normalise_body(self, body: str) -> str:
+        text = body or ""
+        text = re.sub(r"(?is)<script[^>]*>.*?</script>", "", text)
+        text = re.sub(r"(?is)<style[^>]*>.*?</style>", "", text)
+        text = re.sub(r"\b\d{10,}\b", "0", text)
+        text = re.sub(r"\b[0-9a-f]{8,}\b", "x", text, flags=re.IGNORECASE)
+        text = re.sub(r"\s+", " ", text)
+        return text.strip()[:20000]
+
+    def _body_similarity(self, a: str, b: str) -> float:
+        na = self._normalise_body(a)
+        nb = self._normalise_body(b)
+        if not na or not nb:
+            return 0.0
+        return SequenceMatcher(None, na, nb).ratio()
 
     async def _get_baseline(
         self, url: str, form_index: int, field_name: str, is_url_param: bool
@@ -334,6 +425,80 @@ class SQLiScanner(BaseScanner):
                     f"[warn] sqli: baseline failed on {field_name} @ {url}: {exc}"
                 )
             return "", {}
+
+    async def verify_finding(self, finding: Finding) -> bool | None:
+        from urllib.parse import parse_qs, urlparse
+        is_url_param = finding.field_name in parse_qs(
+            urlparse(finding.url).query, keep_blank_values=True
+        )
+        source, pair = await self._apply_payload(
+            finding.url,
+            0,
+            finding.field_name,
+            finding.payload,
+            is_url_param,
+        )
+        body = pair.get("response", {}).get("body", "") or source or ""
+        etype = getattr(finding, "evidence_type", "")
+        if etype == "sqli_error":
+            return bool(self.check_response_for_patterns(body, SQL_ERROR_PATTERNS))
+        if etype == "sqli_time":
+            threshold = float(finding.evidence_details.get("threshold_seconds", 2.5))
+            return self.response_time_exceeded(pair, threshold=threshold)
+        if etype == "sqli_auth_bypass":
+            fresh_result = await self._verify_auth_bypass_fresh_context(finding)
+            if fresh_result is not None:
+                return fresh_result
+            bypassed, _ = self._detect_auth_bypass(finding.url, source)
+            return bypassed
+        if etype == "sqli_boolean":
+            details = finding.evidence_details or {}
+            true_payload = details.get("true_payload")
+            false_payload = details.get("false_payload")
+            if not true_payload or not false_payload:
+                return None
+            baseline_source, _ = await self._get_baseline(finding.url, 0, finding.field_name, is_url_param)
+            true_src, _ = await self._apply_payload(finding.url, 0, finding.field_name, true_payload, is_url_param)
+            false_src, _ = await self._apply_payload(finding.url, 0, finding.field_name, false_payload, is_url_param)
+            return (
+                self._body_similarity(true_src, baseline_source) >= 0.85
+                and self._body_similarity(false_src, baseline_source) <= 0.80
+                and abs(len(false_src) - len(baseline_source)) > 200
+            )
+        return None
+
+    async def _verify_auth_bypass_fresh_context(self, finding: Finding) -> bool | None:
+        """Re-test auth bypass in a clean browser context to avoid session/dialog noise."""
+        try:
+            from wscan.browser import BrowserManager
+            timeout_seconds = max(1, int(getattr(self.browser, "timeout", 30000) / 1000))
+            browser = BrowserManager(
+                headless=getattr(self.browser, "headless", True),
+                timeout=timeout_seconds,
+                monitor=None,
+                auth_user=getattr(self.browser, "auth_user", ""),
+                auth_pass=getattr(self.browser, "auth_pass", ""),
+                proxy=getattr(self.browser, "proxy", ""),
+                sleep_factor=getattr(self.browser, "sleep_factor", 1.0),
+            )
+            await browser.init()
+            previous_browser = self.browser
+            self.browser = browser
+            try:
+                source, _ = await self._apply_payload(
+                    finding.url,
+                    0,
+                    finding.field_name,
+                    finding.payload,
+                    False,
+                )
+                bypassed, _ = self._detect_auth_bypass(finding.url, source)
+                return bypassed
+            finally:
+                self.browser = previous_browser
+                await browser.close()
+        except Exception:
+            return None
 
     async def _apply_payload(
         self,

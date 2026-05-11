@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>WScan — Live Monitor</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%23161b22'/%3E%3Cpath d='M4 4h8v2H6v2h5v2H6v2h6v2H4z' fill='%23388bfd'/%3E%3C/svg%3E">
 <style>
 /* ─── Reset & Base ─────────────────────────────────────────── */
 * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -201,6 +202,87 @@ body {
 }
 .screenshot-placeholder .icon { font-size: 3rem; margin-bottom: 12px; opacity: 0.3; }
 .screenshot-placeholder p { font-size: 0.85rem; }
+.center-tabs {
+  display:flex;
+  gap:4px;
+  padding:6px 10px;
+  background:var(--surface);
+  border-bottom:1px solid var(--border);
+  flex-shrink:0;
+}
+.center-tab {
+  border:1px solid var(--border);
+  background:var(--surface2);
+  color:var(--text-muted);
+  border-radius:6px;
+  padding:4px 10px;
+  font-size:.72rem;
+  font-weight:700;
+  cursor:pointer;
+}
+.center-tab.active {
+  color:var(--accent);
+  border-color:var(--accent);
+  background:var(--accent-glow);
+}
+.center-view { display:none; flex:1; min-height:0; overflow:hidden; }
+.center-view.active { display:flex; flex-direction:column; }
+.sitemap-container {
+  flex:1;
+  min-height:0;
+  background:#0a0c0f;
+  position:relative;
+  overflow:hidden;
+}
+.sitemap-toolbar {
+  position:absolute;
+  top:8px;
+  left:8px;
+  right:8px;
+  z-index:2;
+  display:flex;
+  align-items:center;
+  gap:8px;
+  pointer-events:none;
+}
+.sitemap-pill {
+  background:rgba(13,17,23,.82);
+  border:1px solid var(--border);
+  color:var(--text-muted);
+  border-radius:999px;
+  padding:4px 10px;
+  font-size:.7rem;
+  font-weight:700;
+}
+.sitemap-legend { margin-left:auto; display:flex; gap:6px; }
+.sm-dot { width:8px; height:8px; border-radius:50%; display:inline-block; margin-right:4px; }
+.sm-tooltip {
+  position:absolute;
+  z-index:3;
+  display:none;
+  max-width:320px;
+  background:rgba(13,17,23,.94);
+  border:1px solid var(--border);
+  color:var(--text);
+  border-radius:6px;
+  padding:6px 8px;
+  font-size:.72rem;
+  pointer-events:none;
+  box-shadow:0 8px 24px rgba(0,0,0,.35);
+}
+.sitemap-fallback {
+  display:none;
+  position:absolute;
+  inset:42px 10px 10px 10px;
+  overflow:auto;
+  color:var(--text-muted);
+  font-size:.76rem;
+}
+.check-progress-bar-wrap { display:grid; grid-template-columns:110px 1fr 42px; gap:8px; align-items:center; margin-bottom:8px; }
+.cp-label { color:var(--text); font-size:.75rem; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.cp-bar-bg { height:8px; background:var(--surface2); border:1px solid var(--border); border-radius:999px; overflow:hidden; }
+.cp-bar-fill { height:100%; background:linear-gradient(90deg,var(--accent),#79c0ff); }
+.cp-count { color:var(--text-muted); font-size:.72rem; text-align:right; font-family:monospace; }
 
 /* Current Test Info */
 .current-test {
@@ -273,6 +355,19 @@ body {
 .fc-url { font-size: 0.7rem; color: var(--text-muted); font-family: monospace; word-break: break-all; }
 .fc-payload { font-family: monospace; font-size: 0.7rem; color: var(--high); background: var(--surface); padding: 4px 8px; border-radius: 4px; margin-top: 4px; word-break: break-all; }
 .fc-screenshot { width: 100%; border-radius: 4px; margin-top: 8px; cursor: pointer; border: 1px solid var(--border); }
+.fc-meta-grid { display:grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap:6px; margin:8px 0; }
+.fc-meta { background:var(--surface); border:1px solid var(--border); border-radius:6px; padding:6px 8px; min-width:0; }
+.fc-meta-label { font-size:.62rem; color:var(--text-muted); text-transform:uppercase; letter-spacing:.06em; margin-bottom:2px; }
+.fc-meta-value { font-size:.72rem; color:var(--text); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.fc-confidence { font-size:.65rem; font-weight:800; padding:2px 8px; border-radius:10px; text-transform:uppercase; letter-spacing:.05em; border:1px solid transparent; }
+.fc-confidence-confirmed { color:#86efac; background:rgba(63,185,80,.16); border-color:rgba(63,185,80,.35); }
+.fc-confidence-likely { color:#facc15; background:rgba(210,153,34,.15); border-color:rgba(210,153,34,.35); }
+.fc-confidence-tentative { color:#a5d6ff; background:rgba(56,139,253,.12); border-color:rgba(56,139,253,.3); }
+.fc-verified { font-size:.65rem; color:#86efac; background:rgba(63,185,80,.12); border:1px solid rgba(63,185,80,.25); padding:2px 8px; border-radius:10px; }
+.fc-unverified { font-size:.65rem; color:#facc15; background:rgba(210,153,34,.12); border:1px solid rgba(210,153,34,.35); padding:2px 8px; border-radius:10px; }
+.fc-details { margin-top:8px; border-top:1px solid var(--border); padding-top:8px; }
+.fc-details summary { cursor:pointer; color:var(--accent); font-size:.72rem; font-weight:700; }
+.fc-detail-list { margin-top:6px; display:flex; flex-direction:column; gap:3px; font-family:monospace; font-size:.68rem; color:var(--text-muted); }
 .no-findings-msg { color: var(--text-muted); text-align: center; padding: 32px 16px; font-size: 0.85rem; }
 
 /* ─── Network Panel ──────────────────────────────────────────── */
@@ -579,6 +674,29 @@ body {
 }
 .cfg-start-btn:hover { opacity: 0.85; }
 .cfg-hint { font-size: 0.75rem; color: var(--text-muted); }
+.cfg-presets {
+  display:grid;
+  grid-template-columns:repeat(auto-fit,minmax(180px,1fr));
+  gap:10px;
+}
+.cfg-preset {
+  background:var(--surface2);
+  border:1px solid var(--border);
+  border-radius:8px;
+  padding:10px 12px;
+  cursor:pointer;
+  text-align:left;
+  color:var(--text);
+}
+.cfg-preset:hover { border-color:var(--accent); background:var(--accent-glow); }
+.cfg-preset-title { font-size:.82rem; font-weight:800; margin-bottom:4px; }
+.cfg-preset-desc { font-size:.72rem; color:var(--text-muted); line-height:1.45; }
+.cfg-profile-note {
+  font-size:.75rem;
+  color:var(--success);
+  min-height:18px;
+  margin-top:6px;
+}
 /* ── Flow builder ─────────────────────────────────────── */
 .flow-card { background:var(--surface); border:1px solid var(--border); border-radius:8px; padding:12px; margin-bottom:12px; }
 .flow-card-header { display:flex; align-items:center; gap:8px; margin-bottom:10px; }
@@ -616,6 +734,34 @@ body {
         </button>
       </div>
       <div id="cfgNlpStatus" style="font-size:0.75rem;color:var(--text-muted);margin-top:4px;min-height:16px"></div>
+    </div>
+
+    <!-- Scan profile presets -->
+    <div>
+      <div style="font-size:0.72rem;color:var(--text-muted);font-weight:600;text-transform:uppercase;letter-spacing:0.03em;margin-bottom:6px">Scan Profile</div>
+      <div class="cfg-presets">
+        <button class="cfg-preset" onclick="applyScanProfile('triage')">
+          <div class="cfg-preset-title">高速トリアージ</div>
+          <div class="cfg-preset-desc">深さ1・少数ペイロードで XSS/SQLi/OS を素早く確認</div>
+        </button>
+        <button class="cfg-preset" onclick="applyScanProfile('standard')">
+          <div class="cfg-preset-title">標準Web診断</div>
+          <div class="cfg-preset-desc">IPA主要カテゴリを中心に巡回・検査・レポート生成</div>
+        </button>
+        <button class="cfg-preset" onclick="applyScanProfile('auth')">
+          <div class="cfg-preset-title">認証あり診断</div>
+          <div class="cfg-preset-desc">ログイン後画面と権限昇格/IDORを重視</div>
+        </button>
+        <button class="cfg-preset" onclick="applyScanProfile('precision')">
+          <div class="cfg-preset-title">精度重視診断</div>
+          <div class="cfg-preset-desc">深めの巡回、DOM/Stored XSS、JWT/GraphQL、証跡重視</div>
+        </button>
+        <button class="cfg-preset" onclick="applyScanProfile('ctf')">
+          <div class="cfg-preset-title">CTF/演習</div>
+          <div class="cfg-preset-desc">高速・SSTI/OS/SSRF/Flag探索向け</div>
+        </button>
+      </div>
+      <div class="cfg-profile-note" id="cfgProfileNote"></div>
     </div>
 
     <!-- URL row -->
@@ -800,6 +946,32 @@ body {
           <div class="cfg-field" id="cfgClaudeModelField" style="display:none">
             <label>Claudeモデル名</label>
             <input type="text" id="cfgClaudeModel" value="claude-haiku-4-5-20251001">
+          </div>
+        </div>
+        <div class="cfg-section-title" style="margin-top:18px">役割別モデル</div>
+        <div style="font-size:0.78rem;color:var(--text-muted);margin-bottom:10px;line-height:1.6">
+          空欄の役割は上の標準モデルを使います。検査中の計画・ペイロード生成と、レポート文章化を別モデルに分けられます。
+        </div>
+        <div class="cfg-grid" id="cfgRoleModelsGrid">
+          <div class="cfg-field">
+            <label>Planner (攻撃計画)</label>
+            <input type="text" id="cfgPlannerModel" placeholder="標準モデルを使用">
+          </div>
+          <div class="cfg-field">
+            <label>Payload (ペイロード生成)</label>
+            <input type="text" id="cfgPayloadModel" placeholder="標準モデルを使用">
+          </div>
+          <div class="cfg-field">
+            <label>Adaptive (バイパス生成)</label>
+            <input type="text" id="cfgAdaptiveModel" placeholder="標準モデルを使用">
+          </div>
+          <div class="cfg-field">
+            <label>Triage (判定/整理)</label>
+            <input type="text" id="cfgTriageModel" placeholder="標準モデルを使用">
+          </div>
+          <div class="cfg-field">
+            <label>Report (レポート文章化)</label>
+            <input type="text" id="cfgReportModel" placeholder="標準モデルを使用">
           </div>
         </div>
         <div class="cfg-section-title" style="margin-top:18px">🌐 LLM Web検索</div>
@@ -1099,13 +1271,42 @@ body {
     </div>
   </div>
 
-  <!-- Center: Screenshot + Current Test -->
+  <!-- Center: Crawl map + Screenshot + Current Test -->
   <div class="panel center-panel" style="border-right:1px solid var(--border)">
-    <div class="panel-header">Live Browser View</div>
-    <div class="screenshot-area" id="screenshotArea">
-      <div class="screenshot-placeholder">
-        <div class="icon">🔍</div>
-        <p>Browser screenshots will appear here</p>
+    <div class="panel-header">Scan Workspace</div>
+    <div class="center-tabs">
+      <button class="center-tab active" id="ctab-sitemap" onclick="switchCenterTab('sitemap', this)">巡回マップ</button>
+      <button class="center-tab" id="ctab-browser" onclick="switchCenterTab('browser', this)">ブラウザ</button>
+      <button class="center-tab" id="ctab-progress" onclick="switchCenterTab('progress', this)">進捗</button>
+    </div>
+    <div class="center-view active" id="ctview-sitemap">
+      <div class="sitemap-container" id="sitemapContainer">
+        <div class="sitemap-toolbar">
+          <span class="sitemap-pill">画面遷移図 <span id="sitemapNodeCount">0</span></span>
+          <span class="sitemap-pill">巡回を先に見える化</span>
+          <div class="sitemap-legend">
+            <span class="sitemap-pill"><span class="sm-dot" style="background:#f0883e"></span>巡回中</span>
+            <span class="sitemap-pill"><span class="sm-dot" style="background:#388bfd"></span>完了</span>
+            <span class="sitemap-pill"><span class="sm-dot" style="background:#f85149"></span>検出</span>
+          </div>
+        </div>
+        <svg id="sitemapSvg" style="width:100%;height:100%"></svg>
+        <div class="sitemap-fallback" id="sitemapFallback"></div>
+        <div class="sm-tooltip" id="smTooltip"></div>
+      </div>
+    </div>
+    <div class="center-view" id="ctview-browser">
+      <div class="screenshot-area" id="screenshotArea">
+        <div class="screenshot-placeholder">
+          <div class="icon">🔍</div>
+          <p>Browser screenshots will appear here</p>
+        </div>
+      </div>
+    </div>
+    <div class="center-view" id="ctview-progress">
+      <div style="padding:14px;overflow:auto;background:#0a0c0f;flex:1">
+        <div style="font-size:.78rem;color:var(--text-muted);font-weight:700;text-transform:uppercase;letter-spacing:.08em;margin-bottom:10px">Check Progress</div>
+        <div id="checkProgressBars"></div>
       </div>
     </div>
     <div class="current-test">
@@ -1233,9 +1434,17 @@ const state = {
   scanStartTime: null,  // Unix ms of first progress event (attack phase start)
   scanDone: false,      // true after scan_complete — stop ETA updates
   phase: null,
+  phaseStartTs: {},
+  phaseTimes: {},
   urlStatuses: {},   // { url: 'pending'|'scanning'|'done'|'vuln' }
   urlOrder: [],      // discovery order
   checkCounts: {},   // { xss: 12, sqli: 8, ... }
+  graphNodes: {},    // { url: {id,url,parent,depth,status,forms,inputs} }
+  graphLinks: [],    // [{source,target}]
+  urlFindingCounts: {},
+  d3Loaded: false,
+  _d3: null,
+  checkStats: {},
 };
 
 // ─── Config form state ───────────────────────────────────────────
@@ -1318,6 +1527,19 @@ function selectAllChecks(on) {
   });
 }
 
+function setSelectedChecks(checks) {
+  const selected = new Set(checks);
+  document.querySelectorAll('.cfg-check-item').forEach(el => {
+    el.classList.toggle('checked', selected.has(el.dataset.check));
+  });
+}
+
+function setCfgToggle(key, value) {
+  cfgToggles[key] = Boolean(value);
+  const el = document.getElementById('tog-' + key);
+  if (el) el.className = 'cfg-toggle ' + (cfgToggles[key] ? 'on' : 'off');
+}
+
 function toggleCfg(key) {
   cfgToggles[key] = !cfgToggles[key];
   const el = document.getElementById('tog-' + key);
@@ -1334,12 +1556,94 @@ function showCfgTab(name, btn) {
   if (btn) btn.classList.add('active');
 }
 
+function applyScanProfile(profile) {
+  const profiles = {
+    triage: {
+      label: '高速トリアージ',
+      checks: ['sqli', 'xss', 'os', 'security_headers', 'info_disclosure'],
+      depth: 1, maxPayloads: 8, concurrency: 1, llm: 'none',
+      toggles: {fast_mode: true, headless: true, use_planner: false, interactive_plan: false, enable_ai_analysis: false, enable_waf_detection: false, enable_payload_learning: false, spa_crawl: false, ctf_mode: false},
+    },
+    standard: {
+      label: '標準Web診断',
+      checks: ['sqli', 'xss', 'os', 'path_traversal', 'csrf', 'open_redirect', 'clickjacking', 'session', 'cors', 'security_headers', 'info_disclosure'],
+      depth: 2, maxPayloads: 0, concurrency: 1, llm: 'ollama',
+      toggles: {fast_mode: false, headless: true, use_planner: true, interactive_plan: false, enable_ai_analysis: true, enable_waf_detection: true, enable_payload_learning: true, enable_sitemap_crawl: true, spa_crawl: false, ctf_mode: false},
+    },
+    auth: {
+      label: '認証あり診断',
+      checks: ['sqli', 'xss', 'csrf', 'session', 'privesc', 'open_redirect', 'cors', 'security_headers', 'jwt'],
+      depth: 2, maxPayloads: 0, concurrency: 1, llm: 'ollama',
+      toggles: {fast_mode: false, headless: true, use_planner: true, interactive_plan: true, enable_ai_analysis: true, enable_waf_detection: true, enable_payload_learning: true, enable_sitemap_crawl: true, spa_crawl: false, ctf_mode: false},
+      tab: 'auth',
+    },
+    precision: {
+      label: '精度重視診断',
+      checks: ['sqli', 'xss', 'dom_xss', 'stored_xss', 'os', 'ssti', 'path_traversal', 'csrf', 'header_injection', 'open_redirect', 'session', 'privesc', 'cors', 'security_headers', 'info_disclosure', 'ssrf', 'graphql', 'jwt'],
+      depth: 3, maxPayloads: 0, concurrency: 1, llm: 'ollama',
+      toggles: {fast_mode: false, headless: true, use_planner: true, interactive_plan: true, enable_ai_analysis: true, enable_waf_detection: true, enable_payload_learning: true, enable_sitemap_crawl: true, spa_crawl: true, ctf_mode: false},
+    },
+    ctf: {
+      label: 'CTF/演習',
+      checks: ['xss', 'sqli', 'ssti', 'os', 'path_traversal', 'ssrf', 'open_redirect'],
+      depth: 1, maxPayloads: 12, concurrency: 1, llm: 'none',
+      toggles: {fast_mode: true, headless: true, use_planner: false, interactive_plan: false, enable_ai_analysis: false, enable_waf_detection: false, enable_payload_learning: false, enable_sitemap_crawl: true, spa_crawl: false, ctf_mode: true},
+    },
+  };
+  const p = profiles[profile];
+  if (!p) return;
+  setSelectedChecks(p.checks);
+  document.getElementById('cfgDepth').value = p.depth;
+  document.getElementById('cfgMaxPayloads').value = p.maxPayloads;
+  document.getElementById('cfgConcurrency').value = p.concurrency;
+  document.getElementById('cfgLlm').value = p.llm;
+  updateLlmModelField();
+  Object.entries(p.toggles).forEach(([key, val]) => setCfgToggle(key, val));
+  if (p.tab) {
+    const btn = document.querySelector(`.cfg-tab[onclick*="'${p.tab}'"]`);
+    showCfgTab(p.tab, btn);
+  }
+  const note = document.getElementById('cfgProfileNote');
+  if (note) note.textContent = p.label + ' を適用しました。必要な項目だけ微調整して開始できます。';
+}
+
 function updateLlmModelField() {
   const llm = document.getElementById('cfgLlm').value;
   document.getElementById('cfgOllamaModelField').style.display = llm === 'ollama' ? '' : 'none';
   document.getElementById('cfgOpenaiModelField').style.display = llm === 'openai' ? '' : 'none';
   document.getElementById('cfgGeminiModelField').style.display = llm === 'gemini' ? '' : 'none';
   document.getElementById('cfgClaudeModelField').style.display = llm === 'claude' ? '' : 'none';
+  document.getElementById('cfgRoleModelsGrid').style.display = llm === 'none' ? 'none' : '';
+}
+
+function collectRoleModels() {
+  const fields = {
+    planner: 'cfgPlannerModel',
+    payload: 'cfgPayloadModel',
+    adaptive: 'cfgAdaptiveModel',
+    triage: 'cfgTriageModel',
+    report: 'cfgReportModel',
+  };
+  const models = {};
+  Object.entries(fields).forEach(([role, id]) => {
+    const value = (document.getElementById(id)?.value || '').trim();
+    if (value) models[role] = value;
+  });
+  return models;
+}
+
+function restoreRoleModels(models) {
+  if (!models) return;
+  const fields = {
+    planner: 'cfgPlannerModel',
+    payload: 'cfgPayloadModel',
+    adaptive: 'cfgAdaptiveModel',
+    triage: 'cfgTriageModel',
+    report: 'cfgReportModel',
+  };
+  Object.entries(fields).forEach(([role, id]) => {
+    if (models[role]) document.getElementById(id).value = models[role];
+  });
 }
 
 function submitScanConfig() {
@@ -1375,6 +1679,7 @@ function submitScanConfig() {
     openai_model:  document.getElementById('cfgOpenaiModel').value.trim() || 'gpt-4o-mini',
     gemini_model:  document.getElementById('cfgGeminiModel').value.trim() || 'gemini-2.0-flash',
     claude_model:  document.getElementById('cfgClaudeModel').value.trim() || 'claude-haiku-4-5-20251001',
+    role_models:   collectRoleModels(),
     auth_user:   document.getElementById('cfgAuthUser').value.trim(),
     auth_pass:   document.getElementById('cfgAuthPass').value,
     login_url:   document.getElementById('cfgLoginUrl').value.trim(),
@@ -1482,6 +1787,8 @@ function saveConfigToStorage() {
       ollama_model: document.getElementById('cfgOllamaModel').value,
       openai_model: document.getElementById('cfgOpenaiModel').value,
       gemini_model: document.getElementById('cfgGeminiModel').value,
+      claude_model: document.getElementById('cfgClaudeModel').value,
+      role_models: collectRoleModels(),
       auth_user: document.getElementById('cfgAuthUser').value,
       auth_pass: document.getElementById('cfgAuthPass').value,
       login_url: document.getElementById('cfgLoginUrl').value,
@@ -1515,6 +1822,8 @@ function loadConfigFromStorage() {
     if (cfg.ollama_model) document.getElementById('cfgOllamaModel').value = cfg.ollama_model;
     if (cfg.openai_model) document.getElementById('cfgOpenaiModel').value = cfg.openai_model;
     if (cfg.gemini_model) document.getElementById('cfgGeminiModel').value = cfg.gemini_model;
+    if (cfg.claude_model) document.getElementById('cfgClaudeModel').value = cfg.claude_model;
+    if (cfg.role_models) restoreRoleModels(cfg.role_models);
     if (cfg.auth_user) document.getElementById('cfgAuthUser').value = cfg.auth_user;
     if (cfg.auth_pass) document.getElementById('cfgAuthPass').value = cfg.auth_pass;
     if (cfg.login_url) document.getElementById('cfgLoginUrl').value = cfg.login_url;
@@ -1825,7 +2134,10 @@ function handleEvent(event) {
       // Check counters
       if (data.check_type) {
         state.checkCounts[data.check_type] = (state.checkCounts[data.check_type] || 0) + 1;
+        state.checkStats[data.check_type] = state.checkStats[data.check_type] || {done: 0};
+        state.checkStats[data.check_type].done++;
         renderCheckCounters();
+        renderCheckProgressBars();
       }
       addEventLog('payload', `[${data.check_type.toUpperCase()}] ${data.field}: ${data.payload.substring(0,50)}`);
       break;
@@ -1833,6 +2145,8 @@ function handleEvent(event) {
     case 'phase': {
       const ph = data.phase;
       updatePhaseBar(ph);
+      if (ph === 'crawl') switchCenterTab('sitemap', document.getElementById('ctab-sitemap'));
+      if (ph === 'attack') switchCenterTab('browser', document.getElementById('ctab-browser'));
       if (['crawl','plan','attack','report'].includes(ph)) {
         // Close timing of previous phase when a new one starts
         const PHASE_ORDER = ['crawl','plan','attack','report'];
@@ -1860,7 +2174,7 @@ function handleEvent(event) {
     }
 
     case 'page_graph_update':
-      addSiteMapNode(data.url, data.parent, data.depth);
+      addSiteMapNode(data.url, data.parent, data.depth, data);
       break;
 
     case 'page_graph_vuln':
@@ -1915,6 +2229,8 @@ function handleEvent(event) {
       document.getElementById('findingCount').textContent = state.findingCount;
       addFinding(data);
       addEventLog('finding', `[FINDING] ${data.check_type?.toUpperCase()} on "${data.field_name}" — ${(data.evidence||'').substring(0,60)}`);
+      if (data.url) state.urlFindingCounts[data.url] = (state.urlFindingCounts[data.url] || 0) + 1;
+      if (data.url) markSiteMapVuln(data.url);
       // Mark the finding's URL as vuln in the URL list
       if (data.url && state.urlStatuses[data.url]) {
         state.urlStatuses[data.url] = 'vuln';
@@ -2000,29 +2316,80 @@ function handleEvent(event) {
     case 'scan_started':
       // Hide config overlay once scan begins
       document.getElementById('scanConfigOverlay').classList.remove('active');
+      resetLiveScanState();
+      state.eventCount = 1;
+      document.getElementById('eventCount').textContent = state.eventCount;
       setStatus(`スキャン開始: ${data.url || ''}`, 'running');
-      // Reset ETA state for new scan
-      state.scanStartTime = null;
-      state.scanDone = false;
-      document.getElementById('statElapsed').textContent = '—';
-      document.getElementById('statRemain').textContent = '—';
-      document.getElementById('statETA').textContent = '—';
-      ['etaBlock', 'remainBlock', 'etaTimeBlock'].forEach(id =>
-        document.getElementById(id).style.display = 'none'
-      );
-      // Reset phase/URL state
-      state.phase = null;
-      state.urlStatuses = {};
-      state.urlOrder = [];
-      state.checkCounts = {};
-      updatePhaseBar('');
-      renderUrlList();
-      renderCheckCounters();
+      addEventLog('status', `Scan started: ${data.url || 'target'}`);
       break;
   }
 }
 
 // ─── Phase / URL / Payload helpers ──────────────────────────────
+function resetLiveScanState() {
+  state.eventCount = 0;
+  state.findingCount = 0;
+  state.pageCount = 0;
+  state.testCount = 0;
+  state.scanStartTime = null;
+  state.scanDone = false;
+  state.phase = null;
+  state.urlStatuses = {};
+  state.urlOrder = [];
+  state.checkCounts = {};
+  state.graphNodes = {};
+  state.graphLinks = [];
+  state.urlFindingCounts = {};
+  state.checkStats = {};
+  state.phaseStartTs = {};
+  state.phaseTimes = {};
+
+  const textDefaults = {
+    eventCount: '0', statPages: '0', statFindings: '0', findingCount: '0',
+    statPct: '―%', statElapsed: '—', statRemain: '—', statETA: '—',
+    statCurrent: '0', statTotal: '', ctUrl: '—', ctField: '—',
+    ctCheckType: '—', ctPayload: '—', reqContent: 'No request captured yet.',
+    respContent: 'No response captured yet.', sitemapNodeCount: '0'
+  };
+  Object.entries(textDefaults).forEach(([id, value]) => {
+    const el = document.getElementById(id);
+    if (el) el.textContent = value;
+  });
+  const ctUrl = document.getElementById('ctUrl');
+  if (ctUrl) ctUrl.title = '';
+  const payloadFull = document.getElementById('ctPayloadFull');
+  if (payloadFull) { payloadFull.textContent = ''; payloadFull.style.display = 'none'; }
+  const payloadToggle = document.getElementById('ctPayloadToggle');
+  if (payloadToggle) payloadToggle.style.display = 'none';
+
+  const progressBar = document.getElementById('progressBar');
+  if (progressBar) progressBar.style.width = '0%';
+  const stripe = document.getElementById('progressStripe');
+  if (stripe) stripe.style.display = 'none';
+  ['etaBlock', 'remainBlock', 'etaTimeBlock'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.style.display = 'none';
+  });
+
+  const findingsPanel = document.getElementById('findingsPanel');
+  if (findingsPanel) findingsPanel.innerHTML = '<div class="no-findings-msg">No vulnerabilities detected yet.</div>';
+  const eventLog = document.getElementById('eventLog');
+  if (eventLog) eventLog.innerHTML = '<div class="no-findings-msg">Waiting for scan to start...</div>';
+  const screenshotArea = document.getElementById('screenshotArea');
+  if (screenshotArea) {
+    screenshotArea.innerHTML = '<div class="screenshot-placeholder"><div class="icon">🔍</div><p>Browser screenshots will appear here</p></div>';
+  }
+  const svg = document.getElementById('sitemapSvg');
+  if (svg) svg.innerHTML = '';
+  const fallback = document.getElementById('sitemapFallback');
+  if (fallback) fallback.innerHTML = '';
+
+  updatePhaseBar('');
+  renderUrlList();
+  renderCheckCounters();
+  renderCheckProgressBars();
+}
+
 function updatePhaseBar(phase) {
   const PHASES = ['crawl', 'plan', 'attack', 'report'];
   const idx = PHASES.indexOf(phase);
@@ -2152,9 +2519,20 @@ function addFinding(data) {
   if (placeholder) placeholder.remove();
 
   const sev = (data.severity || 'medium').toLowerCase();
+  const confidence = (data.confidence || 'tentative').toLowerCase();
+  const verified = data.verified !== false;
+  const evidenceType = data.evidence_type || data.check_type || '';
+  const details = data.evidence_details || {};
+  const detailRows = Object.entries(details).slice(0, 8).map(([k, v]) =>
+    `<div><span style="color:var(--accent)">${escapeHtml(k)}</span>: ${escapeHtml(typeof v === 'object' ? JSON.stringify(v) : String(v))}</div>`
+  ).join('');
+  const steps = (data.reproduction_steps || []).slice(0, 6).map((s, i) =>
+    `<div>${i + 1}. ${escapeHtml(s)}</div>`
+  ).join('');
   const card = document.createElement('div');
   card.className = 'finding-card';
   card.dataset.severity = sev;
+  card.dataset.confidence = confidence;
 
   // XSS confirmed: show prominent alert banner
   let alertBanner = '';
@@ -2191,12 +2569,19 @@ function addFinding(data) {
     ${alertBanner}
     <div class="fc-top">
       <span class="sev-badge sev-${sev}">${sev}</span>
+      <span class="fc-confidence fc-confidence-${confidence}">${confidence}</span>
+      <span class="${verified ? 'fc-verified' : 'fc-unverified'}">${verified ? 'reproduced/assumed' : 'not reproduced'}</span>
       <span class="fc-type">${escapeHtml(data.check_type?.toUpperCase() || '')}</span>
       <span class="fc-field">Field: ${escapeHtml(data.field_name || '')}</span>
+    </div>
+    <div class="fc-meta-grid">
+      <div class="fc-meta"><div class="fc-meta-label">Evidence Type</div><div class="fc-meta-value">${escapeHtml(evidenceType)}</div></div>
+      <div class="fc-meta"><div class="fc-meta-label">Signal</div><div class="fc-meta-value">${escapeHtml(details.execution_signal || details.matched_error || details.context || 'response analysis')}</div></div>
     </div>
     <div class="fc-evidence">${escapeHtml(data.evidence || '')}</div>
     <div class="fc-url">${escapeHtml(data.url || '')}</div>
     <div class="fc-payload">${escapeHtml(data.payload || '')}</div>
+    ${(detailRows || steps) ? `<details class="fc-details"><summary>Evidence details / reproduction</summary><div class="fc-detail-list">${detailRows}${steps ? '<div style="height:4px"></div>' + steps : ''}</div></details>` : ''}
     ${ssHtml}
   `;
   panel.insertBefore(card, panel.firstChild);
@@ -2450,7 +2835,17 @@ async function runAutoConfig() {
     const resp = await fetch('/api/auto-config', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ description: desc }),
+      body: JSON.stringify({
+        description: desc,
+        llm_config: {
+          provider: document.getElementById('cfgLlm')?.value || 'none',
+          ollama_model: (document.getElementById('cfgOllamaModel')?.value || '').trim() || 'llama3',
+          openai_model: (document.getElementById('cfgOpenaiModel')?.value || '').trim() || 'gpt-4o-mini',
+          gemini_model: (document.getElementById('cfgGeminiModel')?.value || '').trim() || 'gemini-2.0-flash',
+          claude_model: (document.getElementById('cfgClaudeModel')?.value || '').trim() || 'claude-haiku-4-5-20251001',
+          role_models: collectRoleModels(),
+        },
+      }),
     });
     const data = await resp.json();
     if (!resp.ok) {
@@ -2546,6 +2941,7 @@ function submitHybridScan() {
     openai_model: (document.getElementById('cfgOpenaiModel')?.value || '').trim() || 'gpt-4o-mini',
     gemini_model: (document.getElementById('cfgGeminiModel')?.value || '').trim() || 'gemini-2.0-flash',
     claude_model: (document.getElementById('cfgClaudeModel')?.value || '').trim() || 'claude-haiku-4-5-20251001',
+    role_models:  collectRoleModels(),
     fast_mode:    cfgToggles.fast_mode,
     max_payloads: parseInt(document.getElementById('cfgMaxPayloads')?.value) || 0,
   };
@@ -2569,114 +2965,112 @@ function switchCenterTab(name, btn) {
     if (tab)  tab.classList.toggle('active', n === name);
   });
   if (name === 'sitemap') {
-    // Lazy-load D3 on first open
-    if (!state.d3Loaded && !state._d3) loadD3();
-    else if (state._d3) { try { state._d3.sim.alpha(0.1).restart(); } catch(e) {} }
+    if (!state._d3) initSiteMapD3();
+    else _sitemapRerender();
   }
 }
 
-// ─── Site Map: D3.js lazy loader ────────────────────────────────
+// ─── Site Map: native SVG renderer ───────────────────────────────
 function loadD3() {
-  if (window.d3) { state.d3Loaded = true; initSiteMapD3(); return; }
-  const script = document.createElement('script');
-  script.src = 'https://d3js.org/d3.v7.min.js';
-  script.onload  = () => { state.d3Loaded = true; initSiteMapD3(); };
-  script.onerror = () => { showSiteMapFallback(); };
-  document.head.appendChild(script);
+  initSiteMapD3();
 }
 
 function initSiteMapD3() {
-  const d3 = window.d3;
-  if (!d3) { showSiteMapFallback(); return; }
   const svgEl = document.getElementById('sitemapSvg');
   if (!svgEl) return;
   const container = document.getElementById('sitemapContainer');
   const w = container.clientWidth  || 600;
   const h = container.clientHeight || 380;
-
-  const svg = d3.select('#sitemapSvg').attr('width', w).attr('height', h);
-  svg.selectAll('*').remove();
-
-  // Zoom/pan
-  const g = svg.append('g');
-  svg.call(d3.zoom().scaleExtent([0.1, 8])
-    .on('zoom', ev => g.attr('transform', ev.transform)));
-
-  // Arrow marker
-  svg.append('defs').append('marker')
-    .attr('id', 'sm-arr').attr('viewBox', '0 -4 8 8')
-    .attr('refX', 24).attr('markerWidth', 6).attr('markerHeight', 6)
-    .attr('orient', 'auto')
-    .append('path').attr('d', 'M0,-4L8,0L0,4').attr('fill', '#4a5568');
-
-  const linkLayer = g.append('g').attr('id', 'sm-links');
-  const nodeLayer = g.append('g').attr('id', 'sm-nodes');
-
-  const sim = d3.forceSimulation([])
-    .force('link', d3.forceLink([]).id(d => d.id).distance(90))
-    .force('charge', d3.forceManyBody().strength(-220))
-    .force('center', d3.forceCenter(w / 2, h / 2))
-    .force('collide', d3.forceCollide(28));
-
-  state._d3 = { d3, svg, g, linkLayer, nodeLayer, sim };
-
-  sim.on('tick', () => {
-    linkLayer.selectAll('line')
-      .attr('x1', d => d.source.x).attr('y1', d => d.source.y)
-      .attr('x2', d => d.target.x).attr('y2', d => d.target.y);
-    nodeLayer.selectAll('g.sm-node')
-      .attr('transform', d => `translate(${d.x ?? 0},${d.y ?? 0})`);
-  });
-
-  // Render any nodes that arrived before D3 loaded
+  svgEl.style.display = '';
+  svgEl.setAttribute('width', w);
+  svgEl.setAttribute('height', h);
+  state.d3Loaded = true;
+  state._d3 = { svgEl, container };
   _sitemapRerender();
 }
 
 function _sitemapRerender() {
   if (!state._d3) return;
-  const { d3, linkLayer, nodeLayer, sim } = state._d3;
+  const { svgEl, container } = state._d3;
   const nodes = Object.values(state.graphNodes);
   const links = state.graphLinks.slice();
+  const w = container.clientWidth || 600;
+  const h = container.clientHeight || 380;
+  svgEl.setAttribute('width', w);
+  svgEl.setAttribute('height', h);
+  svgEl.innerHTML = `
+    <defs>
+      <marker id="sm-arr" viewBox="0 -4 8 8" refX="23" markerWidth="6" markerHeight="6" orient="auto">
+        <path d="M0,-4L8,0L0,4" fill="#4a5568"></path>
+      </marker>
+    </defs>`;
+  if (!nodes.length) return;
 
-  sim.nodes(nodes);
-  sim.force('link').links(links);
-  sim.alpha(0.3).restart();
+  const byDepth = new Map();
+  nodes.forEach(n => {
+    const d = Number(n.depth || 0);
+    if (!byDepth.has(d)) byDepth.set(d, []);
+    byDepth.get(d).push(n);
+  });
+  const depths = [...byDepth.keys()].sort((a, b) => a - b);
+  const maxDepth = Math.max(...depths, 1);
+  const marginX = 48;
+  const marginY = 64;
+  depths.forEach(depth => {
+    const bucket = byDepth.get(depth).sort((a, b) => a.url.localeCompare(b.url));
+    const x = marginX + (w - marginX * 2) * (depth / maxDepth);
+    bucket.forEach((n, i) => {
+      n.x = x;
+      n.y = marginY + (h - marginY * 2) * ((i + 1) / (bucket.length + 1));
+    });
+  });
 
-  // Links
-  const linkSel = linkLayer.selectAll('line')
-    .data(links, d => (typeof d.source === 'object' ? d.source.id : d.source) + '→' + (typeof d.target === 'object' ? d.target.id : d.target));
-  linkSel.exit().remove();
-  linkSel.enter().append('line')
-    .attr('stroke', '#4a5568').attr('stroke-width', 1.5)
-    .attr('marker-end', 'url(#sm-arr)');
+  const ns = 'http://www.w3.org/2000/svg';
+  links.forEach(link => {
+    const s = state.graphNodes[link.source] || link.source;
+    const t = state.graphNodes[link.target] || link.target;
+    if (!s || !t || s.x == null || t.x == null) return;
+    const line = document.createElementNS(ns, 'line');
+    line.setAttribute('x1', s.x);
+    line.setAttribute('y1', s.y);
+    line.setAttribute('x2', t.x);
+    line.setAttribute('y2', t.y);
+    line.setAttribute('stroke', '#4a5568');
+    line.setAttribute('stroke-width', '1.5');
+    line.setAttribute('marker-end', 'url(#sm-arr)');
+    svgEl.appendChild(line);
+  });
 
-  // Nodes
-  const nodeSel = nodeLayer.selectAll('g.sm-node').data(nodes, d => d.id);
-  nodeSel.exit().remove();
+  nodes.forEach(n => {
+    const g = document.createElementNS(ns, 'g');
+    g.setAttribute('class', 'sm-node');
+    g.setAttribute('transform', `translate(${n.x},${n.y})`);
+    g.style.cursor = 'pointer';
+    g.addEventListener('click', () => window.open(n.url, '_blank'));
+    g.addEventListener('mousemove', ev => _showSmTooltip(ev, n));
+    g.addEventListener('mouseleave', _hideSmTooltip);
 
-  const nodeEnter = nodeSel.enter().append('g').attr('class', 'sm-node')
-    .style('cursor', 'pointer')
-    .on('click', (ev, d) => window.open(d.url, '_blank'))
-    .on('mouseover', (ev, d) => _showSmTooltip(ev, d))
-    .on('mouseout', () => _hideSmTooltip())
-    .call(d3.drag()
-      .on('start', (ev, d) => { if (!ev.active) sim.alphaTarget(0.3).restart(); d.fx = d.x; d.fy = d.y; })
-      .on('drag',  (ev, d) => { d.fx = ev.x; d.fy = ev.y; })
-      .on('end',   (ev, d) => { if (!ev.active) sim.alphaTarget(0); d.fx = null; d.fy = null; }));
+    const circle = document.createElementNS(ns, 'circle');
+    circle.setAttribute('r', '18');
+    circle.setAttribute('fill', _smNodeColor(n));
+    circle.setAttribute('stroke', n.depth === 0 ? '#79c0ff' : '#2b6cb0');
+    circle.setAttribute('stroke-width', '1.5');
+    g.appendChild(circle);
 
-  nodeEnter.append('circle').attr('r', 18);
-  nodeEnter.append('text')
-    .attr('dy', '0.35em').attr('text-anchor', 'middle')
-    .attr('font-size', '8px').attr('fill', 'white').attr('pointer-events', 'none');
-
-  // Update all (enter + existing)
-  nodeLayer.selectAll('g.sm-node circle')
-    .attr('fill', d => _smNodeColor(d))
-    .attr('stroke', d => d.depth === 0 ? '#79c0ff' : '#2b6cb0')
-    .attr('stroke-width', 1.5);
-  nodeLayer.selectAll('g.sm-node text').text(d => {
-    try { const p = new URL(d.url).pathname; return p.length > 18 ? '…' + p.slice(-16) : p; }
-    catch(e) { return d.url.slice(-16); }
+    const text = document.createElementNS(ns, 'text');
+    text.setAttribute('dy', '0.35em');
+    text.setAttribute('text-anchor', 'middle');
+    text.setAttribute('font-size', '8px');
+    text.setAttribute('fill', 'white');
+    text.setAttribute('pointer-events', 'none');
+    try {
+      const p = new URL(n.url).pathname || '/';
+      text.textContent = p.length > 18 ? '…' + p.slice(-16) : p;
+    } catch(e) {
+      text.textContent = n.url.slice(-16);
+    }
+    g.appendChild(text);
+    svgEl.appendChild(g);
   });
 }
 
@@ -2689,9 +3083,30 @@ function _smNodeColor(d) {
   }
 }
 
-function addSiteMapNode(url, parent, depth) {
-  if (state.graphNodes[url]) return; // already exists
-  const node = { id: url, url, parent, depth: depth || 0, status: 'pending' };
+function addSiteMapNode(url, parent, depth, meta = {}) {
+  if (state.graphNodes[url]) {
+    Object.assign(state.graphNodes[url], {
+      parent: parent || state.graphNodes[url].parent,
+      depth: depth ?? state.graphNodes[url].depth,
+      forms: meta.forms ?? state.graphNodes[url].forms,
+      inputs: meta.inputs ?? state.graphNodes[url].inputs,
+      params: meta.params ?? state.graphNodes[url].params,
+      status: meta.status || state.graphNodes[url].status || 'done',
+    });
+    if (state._d3) _sitemapRerender();
+    _updateSiteMapFallback();
+    return;
+  }
+  const node = {
+    id: url,
+    url,
+    parent,
+    depth: depth || 0,
+    status: meta.status || 'done',
+    forms: meta.forms || 0,
+    inputs: meta.inputs || 0,
+    params: meta.params || 0,
+  };
   state.graphNodes[url] = node;
 
   if (parent && state.graphNodes[parent]) {
@@ -2706,6 +3121,7 @@ function addSiteMapNode(url, parent, depth) {
   _updateSiteMapFallback();
 
   // Live D3 update
+  if (!state.d3Loaded && !state._d3) loadD3();
   if (state._d3) _sitemapRerender();
 }
 
@@ -2732,7 +3148,7 @@ function _updateSiteMapFallback() {
     nodes.map(n => {
       const indent = '&nbsp;'.repeat(n.depth * 3);
       const c = n.status === 'vuln' ? 'var(--critical)' : n.status === 'done' ? 'var(--low)' : 'var(--text-muted)';
-      return `<li style="padding:2px 0;color:${c}">${indent}↳ ${escapeHtml(n.url)}</li>`;
+      return `<li style="padding:2px 0;color:${c}">${indent}↳ ${escapeHtml(n.url)} <span style="color:var(--text-muted)">(${n.forms || 0} forms / ${n.inputs || 0} inputs)</span></li>`;
     }).join('') + '</ul>';
 }
 
@@ -2741,6 +3157,7 @@ function _showSmTooltip(ev, d) {
   if (!tt) return;
   const fc = state.urlFindingCounts[d.url] || 0;
   tt.innerHTML = `<strong>Depth ${d.depth}</strong><br>${escapeHtml(d.url)}` +
+    `<br><span style="color:var(--text-muted)">${d.forms || 0} forms / ${d.inputs || 0} inputs / ${d.params || 0} params</span>` +
     (fc > 0 ? `<br><span style="color:var(--critical)">${fc} finding${fc > 1 ? 's' : ''}</span>` : '');
   tt.style.display = 'block';
   // Tooltip position relative to container
@@ -2817,6 +3234,8 @@ function renderCheckProgressBars() {
 // ─── Init ────────────────────────────────────────────────────────
 initConfigOverlay();
 loadConfigFromStorage();
+loadD3();
+renderCheckProgressBars();
 connect();
 </script>
 </body>

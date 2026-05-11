@@ -429,7 +429,7 @@ class ChainScanner:
     ) -> Optional[ChainFinding]:
         screenshot = await self.browser.screenshot_b64("[ChainDetect] XSS")
         f = Finding(
-            check_type="xss",
+            check_type="stored_xss",
             severity=severity,
             url=trigger_url,
             field_name=probe.field_name if probe else "unknown",
@@ -438,6 +438,22 @@ class ChainScanner:
             screenshot_b64=screenshot,
             dialog_confirmed=(severity == "critical"),
             dialog_message=self.browser.dialog_message if severity == "critical" else "",
+            confidence="confirmed" if severity == "critical" else "likely",
+            evidence_type="stored_xss_chain_dialog" if severity == "critical" else "stored_xss_chain_title",
+            evidence_details={
+                "chain_type": "stored_xss",
+                "source_url": probe.source_url if probe else "",
+                "source_field": probe.field_name if probe else "",
+                "trigger_url": trigger_url,
+                "probe_uid": probe.uid if probe else "",
+                "dialog_message": self.browser.dialog_message if severity == "critical" else "",
+            },
+            reproduction_steps=[
+                f"Open {probe.source_url}" if probe else "Open the source page.",
+                f"Submit the stored-XSS probe into field '{probe.field_name}'." if probe else "Submit the probe payload.",
+                f"Open {trigger_url}",
+                "Observe the stored payload execution signal.",
+            ],
         )
         return ChainFinding(
             finding=f,
@@ -455,13 +471,28 @@ class ChainScanner:
     ) -> Optional[ChainFinding]:
         screenshot = await self.browser.screenshot_b64("[ChainDetect] HTML injection")
         f = Finding(
-            check_type="xss",
+            check_type="stored_xss",
             severity="medium",
             url=trigger_url,
             field_name=probe.field_name,
             payload=probe.payload,
             evidence=evidence,
             screenshot_b64=screenshot,
+            confidence="likely",
+            evidence_type="stored_html_chain_marker",
+            evidence_details={
+                "chain_type": "html_injection",
+                "source_url": probe.source_url,
+                "source_field": probe.field_name,
+                "trigger_url": trigger_url,
+                "probe_uid": probe.uid,
+            },
+            reproduction_steps=[
+                f"Open {probe.source_url}",
+                f"Submit the probe into field '{probe.field_name}'.",
+                f"Open {trigger_url}",
+                "Confirm the stored marker is rendered unencoded.",
+            ],
         )
         return ChainFinding(
             finding=f,
@@ -486,6 +517,22 @@ class ChainScanner:
             payload=probe.payload,
             evidence=evidence,
             screenshot_b64=screenshot,
+            confidence="confirmed",
+            evidence_type="ssti_chain_eval",
+            evidence_details={
+                "chain_type": "ssti_chain",
+                "source_url": probe.source_url,
+                "source_field": probe.field_name,
+                "trigger_url": trigger_url,
+                "probe_uid": probe.uid,
+                "expected_output": f"49wscc_{probe.uid}",
+            },
+            reproduction_steps=[
+                f"Open {probe.source_url}",
+                f"Submit the SSTI probe into field '{probe.field_name}'.",
+                f"Open {trigger_url}",
+                f"Confirm rendered output contains '49wscc_{probe.uid}'.",
+            ],
         )
         return ChainFinding(
             finding=f,

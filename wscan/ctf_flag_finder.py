@@ -11,7 +11,7 @@ DEFAULT_CTF_PATTERN = (
     r'(?:'
     r'FLAG|CTF|flag|ctf|DUCTF|HTB|HTB\{|ictf|picoCTF|PICO|'
     r'pctf|KCTF|nahamcon|NahamCon|cyber|CYBER|'
-    r'[A-Z0-9]{2,10}'   # arbitrary prefix like "ACSC", "DEF", etc.
+    r'[A-Z][A-Z0-9_]{1,15}'   # arbitrary uppercase prefix like "ACSC", "DEF", etc.
     r')\{[^}]{1,300}\}'
 )
 
@@ -32,11 +32,11 @@ class FlagFinder:
     def __init__(self, pattern: str = ""):
         raw = pattern.strip() if pattern and pattern.strip() else DEFAULT_CTF_PATTERN
         try:
-            self._re = re.compile(raw, re.IGNORECASE)
+            self._re = re.compile(raw)
             self.pattern = raw
         except re.error:
             # Fall back to default if user supplied an invalid regex
-            self._re = re.compile(DEFAULT_CTF_PATTERN, re.IGNORECASE)
+            self._re = re.compile(DEFAULT_CTF_PATTERN)
             self.pattern = DEFAULT_CTF_PATTERN
 
     def find(self, text: str) -> list:

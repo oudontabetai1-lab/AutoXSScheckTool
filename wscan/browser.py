@@ -144,7 +144,12 @@ class BrowserManager:
         """Capture alert dialogs (XSS indicator)."""
         self.dialog_fired = True
         self.dialog_message = dialog.message
-        await dialog.dismiss()
+        try:
+            await dialog.dismiss()
+        except Exception:
+            # The page may already have navigated or been closed by a parallel
+            # worker. The dialog signal is still useful evidence.
+            pass
 
     def reset_dialog(self):
         self.dialog_fired = False

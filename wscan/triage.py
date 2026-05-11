@@ -385,6 +385,8 @@ class TriageEngine:
         ollama_model: str = "llama3",
         openai_model: str = "gpt-4o-mini",
         gemini_model: str = "gemini-2.0-flash",
+        claude_model: str = "claude-haiku-4-5-20251001",
+        role_models: Optional[dict] = None,
     ):
         self.target_url = url.rstrip("/")
         self.depth = depth
@@ -395,6 +397,12 @@ class TriageEngine:
         self.ollama_model = ollama_model
         self.openai_model = openai_model
         self.gemini_model = gemini_model
+        self.claude_model = claude_model
+        self.role_models = {
+            str(k): str(v).strip()
+            for k, v in (role_models or {}).items()
+            if str(v).strip()
+        }
 
         self.report = TriageReport(target_url=self.target_url)
         self._visited: set[str] = set()
@@ -506,6 +514,8 @@ class TriageEngine:
                 ollama_model=self.ollama_model,
                 openai_model=self.openai_model,
                 gemini_model=self.gemini_model,
+                claude_model=self.claude_model,
+                role_models=self.role_models,
             )
             if not await pg._check_llm_available():
                 return ""
@@ -532,7 +542,8 @@ class TriageEngine:
                 "Mention which specific fields to target first and why."
             )
 
-            results = await pg._call_llm(prompt)
+            with pg.use_role("triage"):
+                results = await pg._call_llm(prompt)
             if isinstance(results, list):
                 return "\n".join(str(r) for r in results)
             return str(results)
