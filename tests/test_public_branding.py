@@ -43,6 +43,23 @@ class PublicBrandingTests(unittest.TestCase):
             with self.subTest(marker=marker):
                 self.assertIn(marker, text)
 
+    def test_dashboard_exposes_manual_crawl_controls(self):
+        text = Path("templates/dashboard.html").read_text(encoding="utf-8")
+        expected = (
+            "cfgTab-manualcrawl",
+            "cfgManualCrawlFile",
+            "manualCrawlOutput",
+            "startManualCrawl()",
+            "stopManualCrawl()",
+            "/api/v1/manual-crawl/start",
+            "/api/v1/manual-crawl/stop",
+            "manual_crawl_file",
+        )
+
+        for marker in expected:
+            with self.subTest(marker=marker):
+                self.assertIn(marker, text)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -205,6 +205,8 @@ class ScanEngine:
         notify_min_severity: str = "high",
         # O: HAR ファイルインポート
         har_path: str = "",
+        # 手動巡回ファイルインポート
+        manual_crawl_path: str = "",
     ):
         self.target_url = url.rstrip("/")
         self.monitor = monitor
@@ -253,6 +255,8 @@ class ScanEngine:
         self.sarif: bool = sarif
         # O: HAR インポートパス
         self.har_path: str = har_path
+        # 手動巡回インポートパス
+        self.manual_crawl_path: str = manual_crawl_path
         # L: Webhook/Slack 通知マネージャー
         if webhook_url:
             from wscan.notification import NotificationManager
@@ -668,6 +672,24 @@ class ScanEngine:
                     await self.browser.page.context.add_cookies(har_seed.cookies)
             except Exception as _har_err:
                 console.print(f"  [yellow][O-HAR] HAR 読み込み失敗: {_har_err}[/yellow]")
+
+        # 手動巡回インポート — 操作者が実際に辿った画面をクロールシードにする
+        if self.manual_crawl_path:
+            try:
+                from wscan.manual_crawl import load_manual_crawl_seed
+                manual_seed = load_manual_crawl_seed(self.manual_crawl_path, self.target_url)
+                console.print(
+                    f"  [dim cyan][Manual Crawl][/dim cyan] {len(manual_seed.urls)} URL, "
+                    f"{len(manual_seed.cookies)} Cookie を読み込みました: {self.manual_crawl_path}"
+                )
+                for _murl in manual_seed.urls:
+                    if _murl not in self.visited_urls:
+                        self.visited_urls.add(_murl)
+                        queue.append((_murl, 0, self.target_url))
+                if manual_seed.cookies:
+                    await self.browser.page.context.add_cookies(manual_seed.cookies)
+            except Exception as _manual_err:
+                console.print(f"  [yellow][Manual Crawl] 読み込み失敗: {_manual_err}[/yellow]")
 
         # C-3: Seed crawl queue from sitemap.xml / robots.txt (if enabled)
         sitemap_urls = await self._fetch_sitemap_urls() if self.enable_sitemap_crawl else []

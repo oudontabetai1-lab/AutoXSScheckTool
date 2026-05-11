@@ -32,6 +32,9 @@ scan:
   # 除外URLプレフィックス
   exclude_urls: []
 
+  # 手動巡回で保存した JSON を巡回シードとして使用する場合のパス
+  manual_crawl_file: ""
+
   # N: リクエスト間の待機秒数 (0=制限なし, --fast 時は 0 に上書き)
   request_delay: 0.5
 

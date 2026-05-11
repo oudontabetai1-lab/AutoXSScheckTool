@@ -47,6 +47,7 @@ class MonitorServer:
         self.api_scan_status: str = "idle"   # idle / scanning / done / error
         self.api_findings: list[dict] = []   # emit_finding() で自動蓄積
         self.api_report_path: Optional[str] = None
+        self.manual_crawl_session = None
 
     def _create_app(self) -> FastAPI:
         app = FastAPI(title="WScan Monitor", docs_url=None, redoc_url=None)
@@ -202,6 +203,58 @@ class MonitorServer:
                 "high_count": sum(1 for f in self.api_findings if f.get("severity") == "high"),
                 "report_available": bool(self.api_report_path and Path(self.api_report_path).exists()),
             })
+
+        @app.post("/api/v1/manual-crawl/start")
+        async def api_manual_crawl_start(request: Request):
+            """Start a visible manual crawl recorder."""
+            try:
+                body = await request.json()
+            except Exception:
+                return JSONResponse({"error": "Invalid JSON"}, status_code=400)
+
+            url = (body.get("url") or "").strip()
+            if not url:
+                return JSONResponse({"error": "url is required"}, status_code=400)
+            output_path = (body.get("output_path") or "flows/manual_crawl.json").strip()
+            headless = bool(body.get("headless", False))
+            proxy = (body.get("proxy") or "").strip()
+
+            try:
+                from wscan.manual_crawl import ManualCrawlSession
+                if self.manual_crawl_session and self.manual_crawl_session.running:
+                    return JSONResponse(
+                        {"error": "manual crawl is already running", "status": self.manual_crawl_session.status()},
+                        status_code=409,
+                    )
+                self.manual_crawl_session = ManualCrawlSession()
+                status = await self.manual_crawl_session.start(
+                    start_url=url,
+                    output_path=output_path,
+                    headless=headless,
+                    proxy=proxy,
+                )
+                await self.emit("manual_crawl_status", status)
+                return JSONResponse(status)
+            except Exception as exc:
+                return JSONResponse({"error": str(exc)}, status_code=500)
+
+        @app.post("/api/v1/manual-crawl/stop")
+        async def api_manual_crawl_stop():
+            """Stop the active manual crawl recorder and save JSON."""
+            if not self.manual_crawl_session:
+                return JSONResponse({"error": "manual crawl is not running"}, status_code=404)
+            try:
+                status = await self.manual_crawl_session.stop()
+                await self.emit("manual_crawl_status", status)
+                return JSONResponse(status)
+            except Exception as exc:
+                return JSONResponse({"error": str(exc)}, status_code=500)
+
+        @app.get("/api/v1/manual-crawl/status")
+        async def api_manual_crawl_status():
+            if not self.manual_crawl_session:
+                return JSONResponse({"running": False})
+            return JSONResponse(self.manual_crawl_session.status())
 
         return app
 

@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "start_url": "http://127.0.0.1:8999/",
+  "seed_urls": [
+    "http://127.0.0.1:8999/",
+    "http://127.0.0.1:8999/search?q=manual"
+  ],
+  "urls": [
+    "http://127.0.0.1:8999/",
+    "http://127.0.0.1:8999/search?q=manual"
+  ],
+  "events": [
+    {
+      "type": "url",
+      "source": "fixture",
+      "url": "http://127.0.0.1:8999/search?q=manual",
+      "ts": 0
+    }
+  ],
+  "steps": [],
+  "forms_by_url": {},
+  "cookies": []
+}

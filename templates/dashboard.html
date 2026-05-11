@@ -781,6 +781,7 @@ body {
         <button class="cfg-tab" onclick="showCfgTab('llm',this)">🤖 LLM設定</button>
         <button class="cfg-tab" onclick="showCfgTab('features',this)">🧩 機能フラグ</button>
         <button class="cfg-tab" onclick="showCfgTab('exclusions',this)">🚫 除外設定</button>
+        <button class="cfg-tab" onclick="showCfgTab('manualcrawl',this)">🧭 手動巡回</button>
         <button class="cfg-tab" onclick="showCfgTab('flows',this)">🔄 攻撃フロー</button>
         <button class="cfg-tab" onclick="showCfgTab('agent',this)">🧠 Agent Browser</button>
         <button class="cfg-tab" onclick="showCfgTab('hybrid',this)">🔀 ハイブリッド</button>
@@ -1039,6 +1040,37 @@ body {
         </div>
         <div id="flowsList"></div>
         <button onclick="addFlow()" style="margin-top:8px;padding:6px 14px;background:var(--accent);color:#fff;border:none;border-radius:4px;cursor:pointer;font-size:0.82rem">＋ フローを追加</button>
+      </div>
+
+      <!-- Tab: Manual Crawl -->
+      <div id="cfgTab-manualcrawl" class="cfg-panel">
+        <div class="cfg-section-title">手動巡回</div>
+        <div style="font-size:0.78rem;color:var(--text-muted);margin-bottom:12px;line-height:1.6">
+          別Chromiumを開いて実際に画面を操作し、訪問URL・フォーム・Cookieを記録します。
+          停止後に保存されたJSONを通常スキャンの巡回シードとして取り込めます。
+        </div>
+        <div class="cfg-grid">
+          <div class="cfg-field" style="grid-column:1/-1">
+            <label>手動巡回JSON (スキャン取り込み用)</label>
+            <input type="text" id="cfgManualCrawlFile" placeholder="flows/manual_crawl.json">
+          </div>
+          <div class="cfg-field">
+            <label>保存先</label>
+            <input type="text" id="manualCrawlOutput" value="flows/manual_crawl.json">
+          </div>
+          <div class="cfg-field">
+            <label>状態</label>
+            <input type="text" id="manualCrawlStatus" value="未実行" readonly style="opacity:0.75;cursor:not-allowed">
+          </div>
+        </div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px">
+          <button onclick="startManualCrawl()" style="padding:7px 14px;background:var(--accent);color:#fff;border:none;border-radius:4px;cursor:pointer;font-size:0.82rem">手動巡回を開始</button>
+          <button onclick="stopManualCrawl()" style="padding:7px 14px;background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:4px;cursor:pointer;font-size:0.82rem">停止して保存</button>
+          <button onclick="useManualCrawlOutput()" style="padding:7px 14px;background:var(--accent-glow);color:var(--accent);border:1px solid var(--accent);border-radius:4px;cursor:pointer;font-size:0.82rem">このJSONをスキャンに使用</button>
+        </div>
+        <div id="manualCrawlUrls" style="margin-top:12px;padding:10px;background:var(--bg);border:1px solid var(--border);border-radius:6px;max-height:120px;overflow:auto;font-size:0.75rem;color:var(--text-muted)">
+          記録されたURLはここに表示されます。
+        </div>
       </div>
       <!-- Tab: Agent Browser -->
       <div id="cfgTab-agent" class="cfg-panel">
@@ -1646,6 +1678,70 @@ function restoreRoleModels(models) {
   });
 }
 
+function renderManualCrawlStatus(status) {
+  const statusEl = document.getElementById('manualCrawlStatus');
+  const urlsEl = document.getElementById('manualCrawlUrls');
+  if (!statusEl || !urlsEl || !status) return;
+  const label = status.running
+    ? `記録中: ${status.url_count || 0} URL / ${status.step_count || 0} steps`
+    : `停止: ${status.url_count || 0} URL / ${status.step_count || 0} steps`;
+  statusEl.value = label;
+  if (status.output_path) {
+    document.getElementById('manualCrawlOutput').value = status.output_path;
+    document.getElementById('cfgManualCrawlFile').value = status.output_path;
+  }
+  const urls = status.urls || [];
+  urlsEl.innerHTML = urls.length
+    ? urls.map(u => `<div style="padding:2px 0;word-break:break-all">${_esc(u)}</div>`).join('')
+    : '記録されたURLはここに表示されます。';
+}
+
+async function startManualCrawl() {
+  const url = document.getElementById('cfgInputUrl').value.trim();
+  if (!url || !url.startsWith('http')) {
+    alert('Target URL を入力してください。');
+    return;
+  }
+  const outputPath = document.getElementById('manualCrawlOutput').value.trim() || 'flows/manual_crawl.json';
+  const proxy = document.getElementById('cfgProxy').value.trim();
+  document.getElementById('manualCrawlStatus').value = '起動中...';
+  try {
+    const res = await fetch('/api/v1/manual-crawl/start', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({url, output_path: outputPath, proxy, headless: false}),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'manual crawl start failed');
+    renderManualCrawlStatus(data);
+    addEventLog('status', `手動巡回を開始: ${url}`);
+  } catch (e) {
+    document.getElementById('manualCrawlStatus').value = '開始失敗';
+    alert('手動巡回を開始できませんでした: ' + e.message);
+  }
+}
+
+async function stopManualCrawl() {
+  document.getElementById('manualCrawlStatus').value = '保存中...';
+  try {
+    const res = await fetch('/api/v1/manual-crawl/stop', {method: 'POST'});
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'manual crawl stop failed');
+    renderManualCrawlStatus(data);
+    addEventLog('status', `手動巡回を保存: ${data.output_path || ''}`);
+  } catch (e) {
+    document.getElementById('manualCrawlStatus').value = '停止失敗';
+    alert('手動巡回を停止できませんでした: ' + e.message);
+  }
+}
+
+function useManualCrawlOutput() {
+  const outputPath = document.getElementById('manualCrawlOutput').value.trim();
+  if (outputPath) document.getElementById('cfgManualCrawlFile').value = outputPath;
+  const btn = document.querySelector(`.cfg-tab[onclick*="'basic'"]`);
+  showCfgTab('basic', btn);
+}
+
 function submitScanConfig() {
   const url = document.getElementById('cfgInputUrl').value.trim();
   if (!url || !url.startsWith('http')) {
@@ -1694,6 +1790,7 @@ function submitScanConfig() {
     max_payloads: parseInt(document.getElementById('cfgMaxPayloads').value) || 0,
     output_dir:   document.getElementById('cfgOutputDir').value.trim(),
     payloads_file: document.getElementById('cfgPayloadsFile').value.trim(),
+    manual_crawl_file: document.getElementById('cfgManualCrawlFile').value.trim(),
     accounts:     collectAccounts(),
     auto_register: cfgToggles.auto_register,
     auto_register_count: parseInt(document.getElementById('cfgAutoRegisterCount').value) || 2,
@@ -1799,6 +1896,8 @@ function saveConfigToStorage() {
       exclude_fields: document.getElementById('cfgExcludeFields').value,
       exclude_urls: document.getElementById('cfgExcludeUrls').value,
       ctf_flag_pattern: document.getElementById('cfgCtfFlagPattern').value,
+      manual_crawl_file: document.getElementById('cfgManualCrawlFile').value,
+      manual_crawl_output: document.getElementById('manualCrawlOutput').value,
       checks: getSelectedChecks(),
       flows: collectFlows(),
     };
@@ -1834,6 +1933,8 @@ function loadConfigFromStorage() {
     if (cfg.exclude_fields) document.getElementById('cfgExcludeFields').value = cfg.exclude_fields;
     if (cfg.exclude_urls) document.getElementById('cfgExcludeUrls').value = cfg.exclude_urls;
     if (cfg.ctf_flag_pattern) document.getElementById('cfgCtfFlagPattern').value = cfg.ctf_flag_pattern;
+    if (cfg.manual_crawl_file) document.getElementById('cfgManualCrawlFile').value = cfg.manual_crawl_file;
+    if (cfg.manual_crawl_output) document.getElementById('manualCrawlOutput').value = cfg.manual_crawl_output;
     if (cfg.flows && cfg.flows.length) restoreFlows(cfg.flows);
     // Restore toggle UI
     Object.keys(cfgToggles).forEach(k => {
@@ -2296,6 +2397,11 @@ function handleEvent(event) {
 
     case 'intervention_state':
       setPauseState(!!data.paused);
+      break;
+
+    case 'manual_crawl_status':
+      renderManualCrawlStatus(data);
+      addEventLog('status', data.running ? '手動巡回中' : '手動巡回を保存しました');
       break;
 
     case 'ai_analysis':
@@ -2942,6 +3048,7 @@ function submitHybridScan() {
     gemini_model: (document.getElementById('cfgGeminiModel')?.value || '').trim() || 'gemini-2.0-flash',
     claude_model: (document.getElementById('cfgClaudeModel')?.value || '').trim() || 'claude-haiku-4-5-20251001',
     role_models:  collectRoleModels(),
+    manual_crawl_file: (document.getElementById('cfgManualCrawlFile')?.value || '').trim(),
     fast_mode:    cfgToggles.fast_mode,
     max_payloads: parseInt(document.getElementById('cfgMaxPayloads')?.value) || 0,
   };
