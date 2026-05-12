@@ -6,6 +6,7 @@ from wscan.ctf_flag_finder import FlagFinder
 from wscan.engine import ScanEngine
 from wscan.payload_gen import PayloadGenerator, _format_prompt_template
 from wscan.scanners.base import BaseScanner, Finding, finding_dedup_key_for
+from wscan.scanners.security_headers import SecurityHeadersScanner
 from wscan.scanners.sqli import SQLiScanner
 from wscan.scanners.ssti import SSTIScanner
 from wscan.scanners.xss import XSSScanner
@@ -279,6 +280,58 @@ class DetectionEvidenceTests(unittest.TestCase):
         pair = capture.latest_for_url("http://fixture.test/search", match_query=False)
 
         self.assertEqual(pair["request"]["url"], "http://fixture.test/search?q=%3Cscript%3E")
+
+    def test_network_capture_matches_empty_root_path_to_slash(self):
+        capture = NetworkCapture()
+        capture.pairs = [
+            {
+                "request": {"url": "http://fixture.test/"},
+                "response": {"url": "http://fixture.test/"},
+            },
+            {
+                "request": {"url": "http://fixture.test/static/app.js"},
+                "response": {"url": "http://fixture.test/static/app.js"},
+            },
+        ]
+
+        pair = capture.latest_for_url("http://fixture.test", match_query=False)
+
+        self.assertEqual(pair["request"]["url"], "http://fixture.test/")
+
+    def test_page_level_scanner_uses_document_pair_over_later_asset(self):
+        async def run():
+            engine = _DummyEngine()
+            engine.browser.network = NetworkCapture()
+            engine.browser.network.pairs = [
+                {
+                    "request": {"url": "http://fixture.test/"},
+                    "response": {
+                        "url": "http://fixture.test/",
+                        "headers": {
+                            "Strict-Transport-Security": "max-age=31536000; includeSubDomains",
+                            "Content-Security-Policy": "default-src 'self'",
+                            "X-Content-Type-Options": "nosniff",
+                            "Referrer-Policy": "strict-origin-when-cross-origin",
+                            "Permissions-Policy": "geolocation=()",
+                            "Cross-Origin-Opener-Policy": "same-origin",
+                        },
+                    },
+                },
+                {
+                    "request": {"url": "http://fixture.test/static/app.js"},
+                    "response": {
+                        "url": "http://fixture.test/static/app.js",
+                        "headers": {},
+                    },
+                },
+            ]
+            scanner = SecurityHeadersScanner(engine)
+
+            findings = await scanner.scan_page("http://fixture.test/")
+
+            self.assertEqual(findings, [])
+
+        self.run_async(run())
 
     def test_payload_generator_returns_role_specific_models(self):
         gen = PayloadGenerator(

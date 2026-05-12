@@ -189,7 +189,7 @@ class InfoDisclosureScanner(BaseScanner):
 
     async def _check_tech_headers(self, url: str) -> list[Finding]:
         """Check response headers for technology version disclosure."""
-        pair = self.browser.network.latest() or {}
+        pair = self.current_page_pair(url)
         resp_headers = {
             k.lower(): v
             for k, v in pair.get("response", {}).get("headers", {}).items()
@@ -226,7 +226,7 @@ class InfoDisclosureScanner(BaseScanner):
 
         for pattern, label in _CONTENT_PATTERNS.items():
             if re.search(pattern, source, re.IGNORECASE | re.DOTALL):
-                pair = self.browser.network.latest() or {}
+                pair = self.current_page_pair(url)
                 finding = await self.record_finding(
                     url=url,
                     field_name="(page HTML)",

@@ -84,10 +84,12 @@ class NetworkCapture:
             if not match_query:
                 for candidate in (req_url, resp_url):
                     parsed = urlparse(candidate)
+                    target_path = target_parsed.path or "/"
+                    candidate_path = parsed.path or "/"
                     if (
                         parsed.scheme == target_parsed.scheme
                         and parsed.netloc == target_parsed.netloc
-                        and parsed.path == target_parsed.path
+                        and candidate_path == target_path
                     ):
                         return pair
         return None

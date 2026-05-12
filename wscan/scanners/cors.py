@@ -48,7 +48,7 @@ class CORSScanner(BaseScanner):
         findings = []
 
         # ── Check 1: wildcard ACAO + credentials ──────────────────────
-        pair = self.browser.network.latest() or {}
+        pair = self.current_page_pair(url)
         resp_headers = {
             k.lower(): v
             for k, v in pair.get("response", {}).get("headers", {}).items()

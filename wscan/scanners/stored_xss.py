@@ -119,7 +119,7 @@ class StoredXSSScanner(BaseScanner):
                 if marker in self._detected_markers:
                     continue
                 self._detected_markers.add(marker)
-            pair = self.browser.network.latest() or {}
+            pair = self.current_page_pair(url)
 
             # Distinguish executable XSS (raw tags) from stored HTML injection (encoded)
             is_executable = in_raw

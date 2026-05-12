@@ -77,7 +77,7 @@ class RaceConditionScanner(BaseScanner):
         timeout = getattr(self.engine, "timeout", 15)
 
         # Capture the last form submission body from the browser's network log
-        pair = self.browser.network.latest() or {}
+        pair = self.current_page_pair(url)
         req = pair.get("request", {})
         method = req.get("method", "GET").upper()
         body = req.get("post_data") or req.get("body") or ""

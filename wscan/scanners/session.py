@@ -108,7 +108,7 @@ class SessionScanner(BaseScanner):
 
             if issues:
                 self._reported_cookies.add(name_key)
-                pair = self.browser.network.latest() or {}
+                pair = self.current_page_pair(url)
                 finding = await self.record_finding(
                     url=url,
                     field_name=f"Cookie: {name}",

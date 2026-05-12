@@ -46,7 +46,7 @@ class ClickjackingScanner(BaseScanner):
         if self.monitor:
             await self.monitor.emit_status(f"Clickjacking check on {url}")
 
-        pair = self.browser.network.latest() or {}
+        pair = self.current_page_pair(url)
         headers = {
             k.lower(): v
             for k, v in pair.get("response", {}).get("headers", {}).items()
