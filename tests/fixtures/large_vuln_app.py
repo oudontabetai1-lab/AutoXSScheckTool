@@ -23,6 +23,7 @@ def _layout(title: str, body: str) -> str:
             '<a href="/tools">Tools</a>',
             '<a href="/template?name=guest">Template</a>',
             '<a href="/download?file=readme.txt">Download</a>',
+            '<a href="/go?next=/catalog">Continue</a>',
             '<a href="/login">Login</a>',
             '<a href="/admin/actions">Admin Actions</a>',
             '<a href="/ctf">CTF</a>',
@@ -171,6 +172,10 @@ def create_app(page_count: int = 48) -> FastAPI:
         if "flag" in decoded:
             return "FLAG{large_fixture_lfi_flag}"
         return f"Documentation for {file}"
+
+    @app.get("/go")
+    async def go(next: str = Query("/")):
+        return RedirectResponse(next, status_code=302)
 
     @app.get("/template", response_class=HTMLResponse)
     async def template(name: str = Query("")):

@@ -668,6 +668,30 @@ class ScanEngine:
         material = "".join(tags[:50]) + "|".join(sorted(form_sigs)) + route_sig
         return hashlib.md5(material.encode()).hexdigest()[:12]
 
+    @staticmethod
+    def _merge_url_params(current_params: list[str], queued_url: str) -> list[str]:
+        """
+        Preserve query inputs from the queued URL even if navigation redirects.
+
+        Open redirect and post-login redirect endpoints often immediately move
+        the browser away from the vulnerable URL.  Browser-side
+        window.location.search then describes the destination page, not the
+        original URL that should be attacked.
+        """
+        merged: list[str] = []
+        seen: set[str] = set()
+        parsed = urlparse(queued_url)
+        queued_params = [
+            part.split("=", 1)[0]
+            for part in parsed.query.split("&")
+            if part.split("=", 1)[0]
+        ]
+        for name in [*(current_params or []), *queued_params]:
+            if name and name not in seen:
+                seen.add(name)
+                merged.append(name)
+        return merged
+
     def _extract_sitemap_locs(self, xml_text: str) -> list[str]:
         """Extract <loc> URLs from a sitemap XML string."""
         urls: list[str] = []
@@ -866,7 +890,7 @@ class ScanEngine:
                     pass
 
             forms = await self.browser.find_forms()
-            url_params = await self.browser.get_url_params()
+            url_params = self._merge_url_params(await self.browser.get_url_params(), url)
             screenshot_b64 = await self.browser.screenshot_b64(f"Crawl: {url}")
 
             # Record in page_graph for the transition diagram
@@ -1617,7 +1641,7 @@ class ScanEngine:
                 html = ""
 
             forms = await self._browser.find_forms()
-            url_params = await self._browser.get_url_params()
+            url_params = self._merge_url_params(await self._browser.get_url_params(), url)
             screenshot_b64 = await self._browser.screenshot_b64(
                 f"Post-Auth Crawl: {actual_url}"
             )

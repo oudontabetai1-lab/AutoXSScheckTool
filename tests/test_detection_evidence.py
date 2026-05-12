@@ -212,6 +212,19 @@ class DetectionEvidenceTests(unittest.TestCase):
             ScanEngine._page_fingerprint(html, "http://fixture.test/ctf/bundle-hidden?token=from-bundle"),
         )
 
+    def test_merge_url_params_preserves_redirect_source_query_inputs(self):
+        params = ScanEngine._merge_url_params([], "http://fixture.test/go?next=/catalog")
+
+        self.assertEqual(params, ["next"])
+
+    def test_merge_url_params_keeps_current_and_queued_query_inputs(self):
+        params = ScanEngine._merge_url_params(
+            ["page"],
+            "http://fixture.test/go?next=/catalog&page=1",
+        )
+
+        self.assertEqual(params, ["page", "next"])
+
     def test_ssti_verifier_uses_detected_probe_expected_value(self):
         async def run():
             scanner = SSTIScanner(_DummyEngine())

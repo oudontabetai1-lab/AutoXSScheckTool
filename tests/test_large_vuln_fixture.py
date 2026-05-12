@@ -68,6 +68,15 @@ class LargeVulnerableFixtureTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("root:x:0:0", passwd_resp.text)
         self.assertIn("FLAG{large_fixture_lfi_flag}", flag_resp.text)
 
+    async def test_open_redirect_target_reflects_external_location(self):
+        resp = await self.client.get(
+            "/go",
+            params={"next": "https://evil.wscan-test.example.com"},
+        )
+
+        self.assertEqual(resp.status_code, 302)
+        self.assertEqual(resp.headers["location"], "https://evil.wscan-test.example.com")
+
     async def test_os_command_target_returns_command_like_output(self):
         resp = await self.client.get("/ping", params={"host": "127.0.0.1; ls -la"})
 
