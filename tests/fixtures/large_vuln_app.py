@@ -151,6 +151,7 @@ def create_app(page_count: int = 48) -> FastAPI:
               <input name="file" value="readme.txt">
               <button>Download</button>
             </form>
+            <a href="/header-echo?ref=safe">Header Echo</a>
             """,
         )
 
@@ -176,6 +177,16 @@ def create_app(page_count: int = 48) -> FastAPI:
     @app.get("/go")
     async def go(next: str = Query("/")):
         return RedirectResponse(next, status_code=302)
+
+    @app.get("/header-echo", response_class=PlainTextResponse)
+    async def header_echo(ref: str = Query("")):
+        response = PlainTextResponse(f"Header echo for {ref}")
+        decoded = unquote(unquote(ref))
+        if "X-WscanHdrInject" in decoded:
+            response.headers["X-WscanHdrInject"] = "1"
+        if "wscan_session=injected" in decoded:
+            response.headers["Set-Cookie"] = "wscan_session=injected; Path=/"
+        return response
 
     @app.get("/template", response_class=HTMLResponse)
     async def template(name: str = Query("")):

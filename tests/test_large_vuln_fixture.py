@@ -77,6 +77,14 @@ class LargeVulnerableFixtureTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(resp.status_code, 302)
         self.assertEqual(resp.headers["location"], "https://evil.wscan-test.example.com")
 
+    async def test_header_injection_target_reflects_injected_header(self):
+        resp = await self.client.get(
+            "/header-echo",
+            params={"ref": "%0d%0aX-WscanHdrInject:%201"},
+        )
+
+        self.assertEqual(resp.headers["x-wscanhdrinject"], "1")
+
     async def test_os_command_target_returns_command_like_output(self):
         resp = await self.client.get("/ping", params={"host": "127.0.0.1; ls -la"})
 
