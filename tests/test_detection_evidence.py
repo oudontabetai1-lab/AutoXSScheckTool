@@ -8,6 +8,7 @@ from wscan.payload_gen import PayloadGenerator, _format_prompt_template
 from wscan.scanners.base import BaseScanner, Finding, finding_dedup_key_for
 from wscan.scanners.header_injection import HeaderInjectionScanner
 from wscan.scanners.open_redirect import OpenRedirectScanner
+from wscan.scanners.os_injection import OSInjectionScanner
 from wscan.scanners.path_traversal import PathTraversalScanner
 from wscan.scanners.security_headers import SecurityHeadersScanner
 from wscan.scanners.sqli import SQLiScanner
@@ -370,6 +371,64 @@ class DetectionEvidenceTests(unittest.TestCase):
                 field_name="file",
                 payload="../../../../etc/passwd",
                 evidence="passwd leaked",
+            )
+
+            result = await scanner.verify_finding(finding)
+
+            self.assertFalse(result)
+
+        self.run_async(run())
+
+    def test_os_verifier_replays_baseline_and_payload_body(self):
+        async def run():
+            scanner = OSInjectionScanner(_DummyEngine())
+            scanner._apply_payload = AsyncMock(side_effect=[
+                ("PING baseline_os_test", {"response": {"body": "PING baseline_os_test"}}),
+                ("", {"response": {"body": "uid=1000(wscan) gid=1000(wscan)"}}),
+            ])
+            finding = Finding(
+                check_type="os",
+                severity="critical",
+                url="http://fixture.test/ping?host=127.0.0.1",
+                field_name="host",
+                payload="; id",
+                evidence="command output",
+            )
+
+            result = await scanner.verify_finding(finding)
+
+            self.assertTrue(result)
+            scanner._apply_payload.assert_any_await(
+                finding.url,
+                0,
+                "host",
+                "baseline_os_test",
+                True,
+            )
+            scanner._apply_payload.assert_any_await(
+                finding.url,
+                0,
+                "host",
+                "; id",
+                True,
+            )
+
+        self.run_async(run())
+
+    def test_os_verifier_rejects_preexisting_command_output(self):
+        async def run():
+            scanner = OSInjectionScanner(_DummyEngine())
+            scanner._apply_payload = AsyncMock(side_effect=[
+                ("uid=1000(wscan)", {"response": {"body": "uid=1000(wscan)"}}),
+                ("uid=1000(wscan)", {"response": {"body": "uid=1000(wscan)"}}),
+            ])
+            finding = Finding(
+                check_type="os",
+                severity="critical",
+                url="http://fixture.test/ping?host=127.0.0.1",
+                field_name="host",
+                payload="; id",
+                evidence="command output",
             )
 
             result = await scanner.verify_finding(finding)
