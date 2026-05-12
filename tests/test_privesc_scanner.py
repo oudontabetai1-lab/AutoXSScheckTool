@@ -10,6 +10,7 @@ class _DummyEngine:
         self.payload_gen = None
         self.proxy = ""
         self.timeout = 30
+        self.cookies = ""
         self.all_findings = []
         self.monitor = None
         self.low_priv_cookies = ""
@@ -153,6 +154,91 @@ class PrivEscScannerTests(unittest.IsolatedAsyncioTestCase):
         findings = await scanner._test_state_changing_forms(page)
 
         self.assertEqual(findings, [])
+
+    async def test_path_idor_ignores_generic_identical_200_page(self):
+        scanner = PrivEscScanner(_DummyEngine())
+        generic = "<html><h1>Portal</h1><p>Use the left menu to open records.</p></html>" * 3
+        scanner._get = AsyncMock(side_effect=[
+            (200, generic),
+            (200, generic),
+            (200, generic),
+            (200, generic),
+            (200, generic),
+        ])
+
+        findings = await scanner._test_horizontal_privesc(
+            "http://fixture.test/orders/100",
+            "sid=alice",
+            timeout=3,
+        )
+
+        self.assertEqual(findings, [])
+
+    async def test_path_idor_flags_object_specific_candidate_response(self):
+        scanner = PrivEscScanner(_DummyEngine())
+
+        async def fake_get(url, cookies, timeout):
+            order_id = url.rsplit("/", 1)[-1]
+            if order_id == "100":
+                return 200, "<html><h1>Order 100</h1><p>Owner: alice</p><p>Total 12000</p></html>"
+            return 200, f"<html><h1>Order {order_id}</h1><p>Owner: bob</p><p>Total 9200</p></html>"
+
+        scanner._get = AsyncMock(side_effect=fake_get)
+
+        findings = await scanner._test_horizontal_privesc(
+            "http://fixture.test/orders/100",
+            "sid=alice",
+            timeout=3,
+        )
+
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0].check_type, "privesc_horizontal")
+        self.assertEqual(findings[0].response["confidence_reason"], "candidate object identifier is present in response")
+
+    async def test_param_idor_ignores_not_found_200_page(self):
+        scanner = PrivEscScanner(_DummyEngine())
+        scanner._get = AsyncMock(side_effect=[
+            (200, "<html><h1>Invoice 100</h1><p>Owner: alice</p><p>Total 12000</p></html>"),
+            (200, "<html><h1>Not found</h1><p>No such record exists.</p></html>"),
+            (200, "<html><h1>Not found</h1><p>No such record exists.</p></html>"),
+            (200, "<html><h1>Not found</h1><p>No such record exists.</p></html>"),
+            (200, "<html><h1>Not found</h1><p>No such record exists.</p></html>"),
+        ])
+
+        findings = await scanner._test_param_idor(
+            "http://fixture.test/invoices?invoice_id=100",
+            "sid=alice",
+            timeout=3,
+        )
+
+        self.assertEqual(findings, [])
+
+    async def test_scan_page_skips_public_catalog_path_idor(self):
+        engine = _DummyEngine()
+        engine.cookies = "sid=alice"
+        scanner = PrivEscScanner(engine)
+        scanner._test_unauth = AsyncMock(return_value=None)
+        scanner._test_horizontal_privesc = AsyncMock(return_value=[])
+        scanner._test_param_idor = AsyncMock(return_value=[])
+
+        findings = await scanner.scan_page("http://fixture.test/product/100")
+
+        self.assertEqual(findings, [])
+        scanner._test_horizontal_privesc.assert_not_awaited()
+        scanner._test_param_idor.assert_not_awaited()
+
+    async def test_scan_page_keeps_sensitive_query_idor_probe(self):
+        engine = _DummyEngine()
+        engine.cookies = "sid=alice"
+        scanner = PrivEscScanner(engine)
+        scanner._test_unauth = AsyncMock(return_value=None)
+        scanner._test_horizontal_privesc = AsyncMock(return_value=[])
+        scanner._test_param_idor = AsyncMock(return_value=[])
+
+        await scanner.scan_page("http://fixture.test/view?order_id=100")
+
+        scanner._test_horizontal_privesc.assert_not_awaited()
+        scanner._test_param_idor.assert_awaited_once()
 
 
 if __name__ == "__main__":

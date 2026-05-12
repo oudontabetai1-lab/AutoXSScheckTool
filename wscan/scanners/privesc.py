@@ -73,6 +73,12 @@ LOGIN_GATE_RE = re.compile(
     re.IGNORECASE,
 )
 
+NON_RESOURCE_RE = re.compile(
+    r"(not\s*found|no\s+such|does\s+not\s+exist|missing|unknown\s+(resource|record|object)"
+    r"|404|見つかりません|存在しません)",
+    re.IGNORECASE,
+)
+
 # Query-parameter names that commonly carry user/object identifiers
 _IDOR_PARAM_RE = re.compile(
     r"^(user_?id|userid|owner_?id|ownerid|account_?id|accountid|member_?id|memberid"
@@ -161,6 +167,58 @@ def _url_has_object_identifier(url: str) -> bool:
     return any(_IDOR_PARAM_RE.match(param) for param in qs)
 
 
+def _has_sensitive_idor_param(url: str) -> bool:
+    parsed = urlparse(url)
+    qs = parse_qs(parsed.query, keep_blank_values=True)
+    for param in qs:
+        if not _IDOR_PARAM_RE.match(param):
+            continue
+        if param.lower() != "id" or PROTECTED_PATH_RE.search(parsed.path):
+            return True
+    return False
+
+
+def _body_contains_identifier(body: str, identifier: str) -> bool:
+    if not body or not identifier:
+        return False
+    if identifier.isdigit():
+        return bool(re.search(rf"(?<!\d){re.escape(identifier)}(?!\d)", body))
+    return identifier.lower() in body.lower()
+
+
+def _idor_response_confidence(
+    original_body: str,
+    candidate_body: str,
+    original_identifier: str,
+    candidate_identifier: str,
+) -> tuple[bool, str, float]:
+    """Return whether a mutated object-id response looks like real object access."""
+    if len(candidate_body) < 50:
+        return False, "short candidate response", 0.0
+    if LOGIN_GATE_RE.search(candidate_body):
+        return False, "authentication gate", 0.0
+    if NON_RESOURCE_RE.search(candidate_body):
+        return False, "not-found response", 0.0
+
+    norm_original = _normalize_response_body(original_body)
+    norm_candidate = _normalize_response_body(candidate_body)
+    if norm_original == norm_candidate:
+        return False, "generic identical response", 1.0
+
+    similarity = _body_similarity(original_body, candidate_body)
+    candidate_id_seen = _body_contains_identifier(candidate_body, candidate_identifier)
+    original_id_seen = _body_contains_identifier(original_body, original_identifier)
+
+    if candidate_id_seen:
+        return True, "candidate object identifier is present in response", similarity
+    if original_id_seen and 0.45 <= similarity <= 0.985:
+        return True, "response shape matches original object but content changed", similarity
+    if 0.70 <= similarity <= 0.985 and abs(len(candidate_body) - len(original_body)) >= 20:
+        return True, "similar object template returned different content", similarity
+
+    return False, "insufficient object-specific evidence", similarity
+
+
 # ---------------------------------------------------------------------------
 # Scanner
 # ---------------------------------------------------------------------------
@@ -229,13 +287,19 @@ class PrivEscScanner(BaseScanner):
         # Build the primary session cookie string
         cookies_str = self._get_primary_cookies()
 
-        if has_auth and cookies_str:
+        should_probe_path_idor = has_auth and cookies_str and is_privileged
+        should_probe_param_idor = has_auth and cookies_str and (
+            is_privileged or _has_sensitive_idor_param(url)
+        )
+
+        if should_probe_path_idor:
             # ── Test 3: Horizontal privilege escalation (path IDOR) ───
             horiz_findings = await self._test_horizontal_privesc(url, cookies_str, timeout)
             for hf in horiz_findings:
                 findings.append(hf)
                 await self._emit(hf)
 
+        if should_probe_param_idor:
             # ── Test 4: Query-parameter IDOR (③) ──────────────────────
             param_findings = await self._test_param_idor(url, cookies_str, timeout)
             for pf in param_findings:
@@ -467,9 +531,10 @@ class PrivEscScanner(BaseScanner):
 
                     if status not in range(200, 300):
                         continue
-                    if LOGIN_GATE_RE.search(body):
-                        continue
-                    if len(body) < 100:
+                    confident, confidence_reason, similarity = _idor_response_confidence(
+                        own_body, body, str(original_id), str(cid)
+                    )
+                    if not confident:
                         continue
 
                     findings.append(Finding(
@@ -482,16 +547,26 @@ class PrivEscScanner(BaseScanner):
                             f"Horizontal privilege escalation (IDOR): "
                             f"Changed numeric ID {original_id}→{cid} in '{path}' "
                             f"returned HTTP {status} ({len(body)} bytes). "
+                            f"{confidence_reason}; response similarity={similarity:.3f}. "
                             f"Possible access to another user's resource."
                         ),
                         request={"url": candidate_url, "method": "GET",
                                  "headers": {"Cookie": "<session-token>"}},
-                        response={"status": status, "url": candidate_url},
+                        response={
+                            "status": status,
+                            "url": candidate_url,
+                            "similarity": round(similarity, 3),
+                            "confidence_reason": confidence_reason,
+                        },
                     ))
                     break  # one confirmation per segment
 
             # ── UUID in path ────────────────────────────────────────────
             elif _UUID_RE.match(seg):
+                own_status, own_body = await self._get(url, cookies, timeout)
+                if own_status not in range(200, 300):
+                    continue
+
                 mutated = _mutate_uuid(seg)
                 new_segs = list(segments)
                 new_segs[seg_idx] = mutated
@@ -500,9 +575,10 @@ class PrivEscScanner(BaseScanner):
 
                 if status not in range(200, 300):
                     continue
-                if LOGIN_GATE_RE.search(body):
-                    continue
-                if len(body) < 100:
+                confident, confidence_reason, similarity = _idor_response_confidence(
+                    own_body, body, seg, mutated
+                )
+                if not confident:
                     continue
 
                 findings.append(Finding(
@@ -515,11 +591,17 @@ class PrivEscScanner(BaseScanner):
                         f"Horizontal privilege escalation (UUID IDOR): "
                         f"Mutated UUID '{seg[:8]}...' → '{mutated[:8]}...' in path "
                         f"returned HTTP {status}. "
+                        f"{confidence_reason}; response similarity={similarity:.3f}. "
                         f"Possible access to another user's resource via UUID guessing."
                     ),
                     request={"url": candidate_url, "method": "GET",
                              "headers": {"Cookie": "<session-token>"}},
-                    response={"status": status, "url": candidate_url},
+                    response={
+                        "status": status,
+                        "url": candidate_url,
+                        "similarity": round(similarity, 3),
+                        "confidence_reason": confidence_reason,
+                    },
                 ))
 
         return findings
@@ -575,9 +657,10 @@ class PrivEscScanner(BaseScanner):
 
                         if status not in range(200, 300):
                             continue
-                        if LOGIN_GATE_RE.search(body):
-                            continue
-                        if len(body) < 50:
+                        confident, confidence_reason, similarity = _idor_response_confidence(
+                            own_body, body, str(original_id), str(cid)
+                        )
+                        if not confident:
                             continue
 
                         findings.append(Finding(
@@ -590,16 +673,26 @@ class PrivEscScanner(BaseScanner):
                                 f"Parameter IDOR: Changed query parameter "
                                 f"'{param}' from {original_id} to {cid} — "
                                 f"server returned HTTP {status} ({len(body)} bytes). "
+                                f"{confidence_reason}; response similarity={similarity:.3f}. "
                                 f"Possible access to another user's data via parameter manipulation."
                             ),
                             request={"url": candidate_url, "method": "GET",
                                      "headers": {"Cookie": "<session-token>"}},
-                            response={"status": status, "url": candidate_url},
+                            response={
+                                "status": status,
+                                "url": candidate_url,
+                                "similarity": round(similarity, 3),
+                                "confidence_reason": confidence_reason,
+                            },
                         ))
                         break
 
                 # ── UUID parameter value ────────────────────────────────
                 elif _UUID_RE.match(val):
+                    own_status, own_body = await self._get(url, cookies, timeout)
+                    if own_status not in range(200, 300):
+                        continue
+
                     mutated = _mutate_uuid(val)
                     new_qs = dict(qs)
                     new_qs[param] = [mutated]
@@ -610,9 +703,10 @@ class PrivEscScanner(BaseScanner):
 
                     if status not in range(200, 300):
                         continue
-                    if LOGIN_GATE_RE.search(body):
-                        continue
-                    if len(body) < 50:
+                    confident, confidence_reason, similarity = _idor_response_confidence(
+                        own_body, body, val, mutated
+                    )
+                    if not confident:
                         continue
 
                     findings.append(Finding(
@@ -625,11 +719,17 @@ class PrivEscScanner(BaseScanner):
                             f"Parameter UUID-IDOR: Changed query parameter "
                             f"'{param}' UUID from '{val[:8]}...' to '{mutated[:8]}...' — "
                             f"server returned HTTP {status} ({len(body)} bytes). "
+                            f"{confidence_reason}; response similarity={similarity:.3f}. "
                             f"Possible access to another object via UUID guessing."
                         ),
                         request={"url": candidate_url, "method": "GET",
                                  "headers": {"Cookie": "<session-token>"}},
-                        response={"status": status, "url": candidate_url},
+                        response={
+                            "status": status,
+                            "url": candidate_url,
+                            "similarity": round(similarity, 3),
+                            "confidence_reason": confidence_reason,
+                        },
                     ))
 
         return findings
