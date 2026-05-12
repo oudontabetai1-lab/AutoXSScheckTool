@@ -72,6 +72,16 @@ class NetworkCapture:
     def latest(self) -> Optional[dict]:
         return self.pairs[-1] if self.pairs else None
 
+    def latest_for_url(self, url: str) -> Optional[dict]:
+        """Return the newest captured pair for a specific URL, ignoring assets loaded later."""
+        target = (url or "").split("#", 1)[0]
+        for pair in reversed(self.pairs):
+            req_url = (pair.get("request", {}).get("url") or "").split("#", 1)[0]
+            resp_url = (pair.get("response", {}).get("url") or "").split("#", 1)[0]
+            if req_url == target or resp_url == target:
+                return pair
+        return None
+
     def clear(self):
         self.pairs.clear()
         self._pending.clear()
@@ -500,7 +510,7 @@ class BrowserManager:
         if _nav_wait > 0:
             await asyncio.sleep(_nav_wait)
         source = await self.get_page_source()
-        pair = self.network.latest() or {}
+        pair = self.network.latest_for_url(test_url) or self.network.latest() or {}
         return source, pair
 
     async def collect_links(self, base_url: str, same_domain: bool = True) -> list[str]:

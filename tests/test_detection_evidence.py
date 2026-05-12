@@ -1,6 +1,7 @@
 import unittest
 from unittest.mock import AsyncMock, patch
 
+from wscan.browser import NetworkCapture
 from wscan.ctf_flag_finder import FlagFinder
 from wscan.engine import ScanEngine
 from wscan.payload_gen import PayloadGenerator, _format_prompt_template
@@ -239,6 +240,28 @@ class DetectionEvidenceTests(unittest.TestCase):
 
         import asyncio
         asyncio.run(run())
+
+    def test_network_capture_prefers_target_url_over_later_assets(self):
+        capture = NetworkCapture()
+        capture.pairs = [
+            {
+                "request": {"url": "http://fixture.test/template?name=%7B%7B2654435761%2A2654435761%7D%7D"},
+                "response": {"url": "http://fixture.test/template?name=%7B%7B2654435761%2A2654435761%7D%7D"},
+            },
+            {
+                "request": {"url": "http://fixture.test/static/app.js"},
+                "response": {"url": "http://fixture.test/static/app.js"},
+            },
+        ]
+
+        pair = capture.latest_for_url(
+            "http://fixture.test/template?name=%7B%7B2654435761%2A2654435761%7D%7D"
+        )
+
+        self.assertEqual(
+            pair["request"]["url"],
+            "http://fixture.test/template?name=%7B%7B2654435761%2A2654435761%7D%7D",
+        )
 
     def test_payload_generator_returns_role_specific_models(self):
         gen = PayloadGenerator(
