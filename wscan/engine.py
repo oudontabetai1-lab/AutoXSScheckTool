@@ -2415,7 +2415,7 @@ class ScanEngine:
         vulnerability is still reproducible.  Returns True if confirmed,
         True if verification could not be performed (don't penalise for nav errors).
         """
-        from urllib.parse import parse_qs, urlparse
+        from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
         import re as _re
 
         scanner = self.scanners.get(f.check_type)
@@ -2426,12 +2426,57 @@ class ScanEngine:
         if verifier:
             scanner_result = await verifier(f)
             if scanner_result is not None:
-                return bool(scanner_result)
+                # SSTI has an HTTP-level fallback below for URL parameters. Use
+                # it when browser-based scanner verification could not reproduce
+                # the finding, because loaded assets can make the latest browser
+                # response pair point at a script rather than the vulnerable URL.
+                if f.check_type == "ssti" and scanner_result is False:
+                    pass
+                else:
+                    return bool(scanner_result)
 
         # Determine URL-param vs form-field injection context
         is_url_param = f.field_name in parse_qs(
             urlparse(f.url).query, keep_blank_values=True
         )
+
+        if f.check_type == "ssti" and is_url_param:
+            try:
+                import httpx
+                from wscan.scanners.ssti import SSTI_PROBES
+                expected_values = [
+                    expected for probe, expected, _engine in SSTI_PROBES
+                    if probe == f.payload
+                ]
+                if expected_values:
+                    parsed = urlparse(f.url)
+                    qs = parse_qs(parsed.query, keep_blank_values=True)
+
+                    def _with_value(value: str) -> str:
+                        new_qs = dict(qs)
+                        new_qs[f.field_name] = [value]
+                        return urlunparse(parsed._replace(query=urlencode(new_qs, doseq=True)))
+
+                    headers = {"Cookie": self.cookies} if self.cookies else {}
+                    async with httpx.AsyncClient(
+                        follow_redirects=True,
+                        timeout=self.timeout,
+                        verify=False,
+                        headers=headers,
+                    ) as client:
+                        baseline_resp = await client.get(_with_value("wscan_ssti_baseline"))
+                        probe_resp = await client.get(_with_value(f.payload))
+                    baseline_text = baseline_resp.text
+                    probe_text = probe_resp.text
+                    for expected in expected_values:
+                        base_count = baseline_text.count(expected)
+                        if expected in probe_text and (
+                            base_count == 0 or probe_text.count(expected) > base_count
+                        ):
+                            return True
+                    return False
+            except Exception:
+                pass
 
         try:
             await self.browser.navigate(f.url)
@@ -2458,7 +2503,15 @@ class ScanEngine:
                 )
 
             elif f.check_type == "ssti":
-                return "49" in (source or "") or "7777777" in (source or "")
+                try:
+                    from wscan.scanners.ssti import SSTI_PROBES
+                    expected_values = [
+                        expected for probe, expected, _engine in SSTI_PROBES
+                        if probe == f.payload
+                    ] or [expected for _probe, expected, _engine in SSTI_PROBES]
+                except Exception:
+                    expected_values = ["49", "7777777", "7045744422742119121"]
+                return any(expected in (source or "") for expected in expected_values)
 
             else:
                 return True  # path_traversal etc. — difficult to re-check, assume confirmed

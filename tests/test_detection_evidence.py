@@ -6,6 +6,7 @@ from wscan.engine import ScanEngine
 from wscan.payload_gen import PayloadGenerator, _format_prompt_template
 from wscan.scanners.base import BaseScanner, Finding, finding_dedup_key_for
 from wscan.scanners.sqli import SQLiScanner
+from wscan.scanners.ssti import SSTIScanner
 from wscan.scanners.xss import XSSScanner
 
 
@@ -208,6 +209,36 @@ class DetectionEvidenceTests(unittest.TestCase):
             ScanEngine._page_fingerprint(html, "http://fixture.test/ctf/js-hidden?token=from-script"),
             ScanEngine._page_fingerprint(html, "http://fixture.test/ctf/bundle-hidden?token=from-bundle"),
         )
+
+    def test_ssti_verifier_uses_detected_probe_expected_value(self):
+        async def run():
+            scanner = SSTIScanner(_DummyEngine())
+            scanner._apply_payload = AsyncMock(side_effect=[
+                ("<html>baseline</html>", {}),
+                ("<html>7045744422742119121</html>", {}),
+            ])
+            finding = Finding(
+                check_type="ssti",
+                severity="critical",
+                url="http://fixture.test/template?name=guest",
+                field_name="name",
+                payload="{{2654435761*2654435761}}",
+                evidence="SSTI detected",
+            )
+
+            result = await scanner.verify_finding(finding)
+
+            self.assertTrue(result)
+            scanner._apply_payload.assert_any_await(
+                finding.url,
+                0,
+                "name",
+                "{{2654435761*2654435761}}",
+                True,
+            )
+
+        import asyncio
+        asyncio.run(run())
 
     def test_payload_generator_returns_role_specific_models(self):
         gen = PayloadGenerator(
