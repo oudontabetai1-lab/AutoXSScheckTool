@@ -263,6 +263,23 @@ class DetectionEvidenceTests(unittest.TestCase):
             "http://fixture.test/template?name=%7B%7B2654435761%2A2654435761%7D%7D",
         )
 
+    def test_network_capture_can_match_form_action_without_query(self):
+        capture = NetworkCapture()
+        capture.pairs = [
+            {
+                "request": {"url": "http://fixture.test/search?q=%3Cscript%3E"},
+                "response": {"url": "http://fixture.test/search?q=%3Cscript%3E"},
+            },
+            {
+                "request": {"url": "http://fixture.test/static/app.js"},
+                "response": {"url": "http://fixture.test/static/app.js"},
+            },
+        ]
+
+        pair = capture.latest_for_url("http://fixture.test/search", match_query=False)
+
+        self.assertEqual(pair["request"]["url"], "http://fixture.test/search?q=%3Cscript%3E")
+
     def test_payload_generator_returns_role_specific_models(self):
         gen = PayloadGenerator(
             provider="ollama",

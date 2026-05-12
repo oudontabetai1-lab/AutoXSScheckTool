@@ -72,14 +72,24 @@ class NetworkCapture:
     def latest(self) -> Optional[dict]:
         return self.pairs[-1] if self.pairs else None
 
-    def latest_for_url(self, url: str) -> Optional[dict]:
+    def latest_for_url(self, url: str, *, match_query: bool = True) -> Optional[dict]:
         """Return the newest captured pair for a specific URL, ignoring assets loaded later."""
         target = (url or "").split("#", 1)[0]
+        target_parsed = urlparse(target)
         for pair in reversed(self.pairs):
             req_url = (pair.get("request", {}).get("url") or "").split("#", 1)[0]
             resp_url = (pair.get("response", {}).get("url") or "").split("#", 1)[0]
-            if req_url == target or resp_url == target:
+            if match_query and (req_url == target or resp_url == target):
                 return pair
+            if not match_query:
+                for candidate in (req_url, resp_url):
+                    parsed = urlparse(candidate)
+                    if (
+                        parsed.scheme == target_parsed.scheme
+                        and parsed.netloc == target_parsed.netloc
+                        and parsed.path == target_parsed.path
+                    ):
+                        return pair
         return None
 
     def clear(self):
@@ -345,7 +355,11 @@ class BrowserManager:
                         dispatchEvents(target);
                     }
 
-                    return {success: true};
+                    return {
+                        success: true,
+                        action: form.action || window.location.href,
+                        method: (form.method || 'GET').toUpperCase()
+                    };
                 }
                 """,
                 [form_index, field_name, payload, safe_values or {}, self.auth_user, self.auth_pass],
@@ -374,7 +388,8 @@ class BrowserManager:
                 await asyncio.sleep(_js_wait)
 
             source = await self.get_page_source()
-            pair = self.network.latest() or {}
+            action_url = result.get("action") or self.page.url
+            pair = self.network.latest_for_url(action_url, match_query=False) or self.network.latest() or {}
             return source, pair
         except Exception as e:
             source = await self.get_page_source()
@@ -395,12 +410,12 @@ class BrowserManager:
         self.reset_dialog()
         self.network.clear()
         try:
-            await self.page.evaluate(
+            result = await self.page.evaluate(
                 """
                 async ([formIndex, fieldPayloads, authUser, authPass]) => {
                     const forms = document.querySelectorAll('form');
                     const form = forms[formIndex];
-                    if (!form) return;
+                    if (!form) return {success: false, error: 'form not found'};
 
                     function getSafeValue(el) {
                         const type = (el.type || 'text').toLowerCase();
@@ -465,10 +480,19 @@ class BrowserManager:
                         );
                         if (target) { target.value = payload; dispatchEvents(target); }
                     }
+                    return {
+                        success: true,
+                        action: form.action || window.location.href,
+                        method: (form.method || 'GET').toUpperCase()
+                    };
                 }
                 """,
                 [form_index, field_payloads, self.auth_user, self.auth_pass],
             )
+
+            if not result or not result.get("success"):
+                source = await self.get_page_source()
+                return source, {}
 
             submit_btn = await self.page.query_selector(
                 f"form:nth-of-type({form_index + 1}) [type=submit], "
@@ -487,7 +511,8 @@ class BrowserManager:
                 await asyncio.sleep(_js_wait)
 
             source = await self.get_page_source()
-            pair = self.network.latest() or {}
+            action_url = result.get("action") or self.page.url
+            pair = self.network.latest_for_url(action_url, match_query=False) or self.network.latest() or {}
             return source, pair
         except Exception:
             source = await self.get_page_source()
