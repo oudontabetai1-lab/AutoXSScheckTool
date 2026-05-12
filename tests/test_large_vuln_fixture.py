@@ -85,6 +85,20 @@ class LargeVulnerableFixtureTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(resp.headers["x-wscanhdrinject"], "1")
 
+    async def test_fetch_url_simulates_ssrf_metadata_response(self):
+        baseline_resp = await self.client.get(
+            "/fetch",
+            params={"url": "http://wscan-baseline-test.invalid/"},
+        )
+        metadata_resp = await self.client.get(
+            "/fetch",
+            params={"url": "http://169.254.169.254/latest/meta-data/"},
+        )
+
+        self.assertNotIn("instance-id", baseline_resp.text)
+        self.assertIn("instance-id", metadata_resp.text)
+        self.assertIn("local-ipv4", metadata_resp.text)
+
     async def test_os_command_target_returns_command_like_output(self):
         resp = await self.client.get("/ping", params={"host": "127.0.0.1; ls -la"})
 

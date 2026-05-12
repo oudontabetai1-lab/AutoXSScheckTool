@@ -13,6 +13,7 @@ from wscan.scanners.os_injection import OSInjectionScanner
 from wscan.scanners.path_traversal import PathTraversalScanner
 from wscan.scanners.security_headers import SecurityHeadersScanner
 from wscan.scanners.sqli import SQLiScanner
+from wscan.scanners.ssrf import SSRFScanner
 from wscan.scanners.ssti import SSTIScanner
 from wscan.scanners.xss import XSSScanner
 
@@ -271,6 +272,52 @@ class DetectionEvidenceTests(unittest.TestCase):
             result = await scanner.verify_finding(finding)
 
             self.assertFalse(result)
+
+        self.run_async(run())
+
+    def test_ssrf_verifier_rejects_preexisting_marker(self):
+        async def run():
+            scanner = SSRFScanner(_DummyEngine())
+            scanner._apply_payload = AsyncMock(side_effect=[
+                ("instance-id already present", {}),
+                ("instance-id already present", {}),
+            ])
+            finding = Finding(
+                check_type="ssrf",
+                severity="critical",
+                url="http://fixture.test/fetch?url=http://example.test/",
+                field_name="url",
+                payload="http://169.254.169.254/latest/meta-data/",
+                evidence="SSRF marker",
+                evidence_type="ssrf_internal_marker",
+            )
+
+            result = await scanner.verify_finding(finding)
+
+            self.assertFalse(result)
+
+        self.run_async(run())
+
+    def test_ssrf_verifier_confirms_probe_only_marker(self):
+        async def run():
+            scanner = SSRFScanner(_DummyEngine())
+            scanner._apply_payload = AsyncMock(side_effect=[
+                ("Fetched public resource", {}),
+                ("instance-id\ni-1234567890abcdef0", {}),
+            ])
+            finding = Finding(
+                check_type="ssrf",
+                severity="critical",
+                url="http://fixture.test/fetch?url=http://example.test/",
+                field_name="url",
+                payload="http://169.254.169.254/latest/meta-data/",
+                evidence="SSRF marker",
+                evidence_type="ssrf_internal_marker",
+            )
+
+            result = await scanner.verify_finding(finding)
+
+            self.assertTrue(result)
 
         self.run_async(run())
 

@@ -25,6 +25,7 @@ def _layout(title: str, body: str) -> str:
             '<a href="/download?file=readme.txt">Download</a>',
             '<a href="/go?next=/catalog">Continue</a>',
             '<a href="/nosql-login">NoSQL Login</a>',
+            '<a href="/fetch?url=http://example.test/">Fetch URL</a>',
             '<a href="/login">Login</a>',
             '<a href="/admin/actions">Admin Actions</a>',
             '<a href="/ctf">CTF</a>',
@@ -188,6 +189,17 @@ def create_app(page_count: int = 48) -> FastAPI:
         if "wscan_session=injected" in decoded:
             response.headers["Set-Cookie"] = "wscan_session=injected; Path=/"
         return response
+
+    @app.get("/fetch", response_class=PlainTextResponse)
+    async def fetch_url(url: str = Query("")):
+        decoded = unquote(unquote(url))
+        if "169.254.169.254/latest/meta-data" in decoded:
+            return "instance-id\ni-1234567890abcdef0\ninstance-type\nlocal-ipv4"
+        if decoded.startswith("file:///etc/passwd"):
+            return "root:x:0:0:root:/root:/bin/bash\nnobody:x:65534:65534:nobody:/nonexistent:/usr/sbin/nologin"
+        if "127.0.0.1" in decoded or "localhost" in decoded:
+            return "<html><title>Internal Admin</title><body>Server: fixture</body></html>"
+        return f"Fetched public resource: {decoded}"
 
     @app.get("/template", response_class=HTMLResponse)
     async def template(name: str = Query("")):
