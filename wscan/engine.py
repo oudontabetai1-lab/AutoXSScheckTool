@@ -739,6 +739,31 @@ class ScanEngine:
                 console.print(f"  [yellow]  ✘ could not load[/yellow]")
                 continue
 
+            # Detect session expiry: if we've been redirected to the login page,
+            # re-authenticate before collecting forms from this page.
+            if self.login_url and self._browser.is_on_login_page(self.login_url):
+                console.print(
+                    "  [yellow][Auth] Session expired during crawl — re-authenticating...[/yellow]"
+                )
+                ok = await self._browser.auto_login(
+                    self.login_url,
+                    user_field=self.login_user_field,
+                    pass_field=self.login_pass_field,
+                    success_indicator=self.login_success_indicator,
+                )
+                if ok:
+                    console.print("  [green][Auth] Re-login successful — resuming crawl.[/green]")
+                    # Navigate back to the intended page after re-login
+                    success = await self.browser.navigate(url)
+                    if not success:
+                        console.print(f"  [yellow]  ✘ could not re-load after login[/yellow]")
+                        continue
+                else:
+                    console.print(
+                        "  [yellow][Auth] Re-login may have failed — skipping page.[/yellow]"
+                    )
+                    continue
+
             try:
                 html = await self.browser.page.content()
             except Exception:
