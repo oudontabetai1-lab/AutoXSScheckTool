@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import re
 import uuid
+from difflib import SequenceMatcher
 from typing import TYPE_CHECKING, Optional
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
@@ -102,6 +103,55 @@ def _mutate_uuid(u: str) -> str:
     replacement = "a" if original != "a" else "b"
     parts[idx] = replacement
     return "".join(parts)
+
+
+def _normalize_response_body(body: str) -> str:
+    """Remove common dynamic noise before comparing authorization responses."""
+    text = body.lower()
+    text = re.sub(r"\b[0-9a-f]{8,}\b", "<hex>", text)
+    text = re.sub(r"\b\d{5,}\b", "<num>", text)
+    text = re.sub(r"(csrf|nonce|token|timestamp|ts)[\"'=:\s-]+[^\"'<>\s]+", r"\1=<dyn>", text)
+    text = re.sub(r"\s+", " ", text)
+    return text[:6000]
+
+
+def _body_similarity(left: str, right: str) -> float:
+    if not left or not right:
+        return 0.0
+    return SequenceMatcher(None, _normalize_response_body(left), _normalize_response_body(right)).ratio()
+
+
+def _identity_markers(username: str) -> set[str]:
+    """Return stable owner markers that should not be visible to another account."""
+    raw = (username or "").strip().lower()
+    if not raw:
+        return set()
+    markers = {raw}
+    if "@" in raw:
+        markers.add(raw.split("@", 1)[0])
+    # Avoid overly generic markers that appear in navigation or labels.
+    return {m for m in markers if len(m) >= 4 and m not in {"user", "admin", "test", "demo"}}
+
+
+def _role_rank(role: str) -> int:
+    role_l = (role or "").strip().lower()
+    if role_l in {"root", "superuser", "owner"}:
+        return 4
+    if role_l in {"admin", "administrator"}:
+        return 3
+    if role_l in {"staff", "operator", "moderator", "manager"}:
+        return 2
+    if role_l in {"registered", "member", "user"}:
+        return 1
+    return 0
+
+
+def _url_has_object_identifier(url: str) -> bool:
+    parsed = urlparse(url)
+    if any(seg.isdigit() or _UUID_RE.match(seg) for seg in parsed.path.split("/") if seg):
+        return True
+    qs = parse_qs(parsed.query, keep_blank_values=True)
+    return any(_IDOR_PARAM_RE.match(param) for param in qs)
 
 
 # ---------------------------------------------------------------------------
@@ -569,6 +619,7 @@ class PrivEscScanner(BaseScanner):
         for i, account_a in enumerate(account_sessions):
             cookies_a = account_a.get("cookies", "")
             user_a = account_a.get("username", f"account[{i}]")
+            role_a = account_a.get("role", "")
 
             if not cookies_a:
                 continue
@@ -583,6 +634,7 @@ class PrivEscScanner(BaseScanner):
                     continue
                 cookies_b = account_b.get("cookies", "")
                 user_b = account_b.get("username", f"account[{j}]")
+                role_b = account_b.get("role", "")
                 if not cookies_b:
                     continue
 
@@ -593,9 +645,10 @@ class PrivEscScanner(BaseScanner):
                 if len(body_b) < 50:
                     continue
 
-                # Vertical: account_a is first (presumed higher-priv) and
-                # account_b (later registered / lower-priv) reached privileged path
-                if i == 0 and j > 0 and is_privileged:
+                # Vertical: lower-ranked account reached a resource that was
+                # also accessible to a higher-ranked account. Do not infer role
+                # solely from list order; same-role accounts are horizontal only.
+                if _role_rank(role_a) > _role_rank(role_b) and is_privileged:
                     findings.append(Finding(
                         check_type="privesc_cross_acct",
                         severity="critical",
@@ -614,9 +667,22 @@ class PrivEscScanner(BaseScanner):
                     ))
                 else:
                     # Horizontal: two different user accounts accessing same resource
-                    # Only flag if the response bodies differ (different user's data)
-                    # and the access was not intended to be shared
-                    if body_a != body_b and abs(len(body_a) - len(body_b)) > 20:
+                    # Flag when account B appears to receive account A's resource.
+                    # A per-user dashboard often returns HTTP 200 with different
+                    # content for each user; that is expected and should not be
+                    # treated as IDOR. Stronger evidence is either account A's
+                    # identity marker in B's response or near-identical content.
+                    owner_markers = _identity_markers(user_a)
+                    body_b_lower = body_b.lower()
+                    owner_marker_seen = any(marker in body_b_lower for marker in owner_markers)
+                    similarity = _body_similarity(body_a, body_b)
+                    same_resource_seen = similarity >= 0.92 and _url_has_object_identifier(url)
+                    if owner_marker_seen or same_resource_seen:
+                        evidence_reason = (
+                            f"owner marker from '{user_a}' is present in '{user_b}' response"
+                            if owner_marker_seen
+                            else f"response is highly similar to '{user_a}' resource"
+                        )
                         findings.append(Finding(
                             check_type="privesc_cross_acct",
                             severity="high",
@@ -625,14 +691,19 @@ class PrivEscScanner(BaseScanner):
                             payload=f"{user_b} session cookie",
                             evidence=(
                                 f"Horizontal privilege escalation (cross-account): "
-                                f"Account '{user_b}' can access '{path}' and receives "
-                                f"different content than account '{user_a}' "
-                                f"({len(body_b)} vs {len(body_a)} bytes). "
-                                f"This may indicate access to another user's private data."
+                                f"Account '{user_b}' can access '{path}' for "
+                                f"account '{user_a}' (HTTP {status_b}); "
+                                f"{evidence_reason}. "
+                                f"This indicates access to another user's private data."
                             ),
                             request={"url": url, "method": "GET",
                                      "headers": {"Cookie": f"<{user_b}-token>"}},
-                            response={"status": status_b, "url": url},
+                            response={
+                                "status": status_b,
+                                "url": url,
+                                "similarity": round(similarity, 3),
+                                "owner_marker_seen": owner_marker_seen,
+                            },
                         ))
                         break  # One finding per (url, account_a) pair is enough
 
