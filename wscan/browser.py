@@ -503,20 +503,46 @@ class BrowserManager:
         return source, pair
 
     async def collect_links(self, base_url: str, same_domain: bool = True) -> list[str]:
-        """Collect all links on the current page."""
+        """Collect navigable URLs from links, forms, data attributes, and inline JS."""
         try:
             links = await self.page.evaluate("""
                 (baseUrl) => {
                     const parsed = new URL(baseUrl);
                     const links = new Set();
-                    document.querySelectorAll('a[href]').forEach(a => {
+                    const ignoredExt = /\\.(?:png|jpe?g|gif|svg|webp|ico|css|woff2?|ttf|map|pdf|zip)(?:[?#].*)?$/i;
+
+                    function addCandidate(raw) {
+                        if (!raw || typeof raw !== 'string') return;
+                        let candidate = raw.trim();
+                        if (!candidate || candidate === '#' || candidate.startsWith('javascript:') || candidate.startsWith('mailto:') || candidate.startsWith('tel:')) return;
+                        candidate = candidate.replace(/[\\s"'`<>)}\\],;]+$/g, '');
                         try {
-                            const url = new URL(a.href, baseUrl);
+                            const url = new URL(candidate, baseUrl);
                             if (url.protocol === 'http:' || url.protocol === 'https:') {
+                                if (ignoredExt.test(url.pathname)) return;
                                 links.add(url.href.split('#')[0]);
                             }
                         } catch(e) {}
+                    }
+
+                    document.querySelectorAll('a[href], area[href], form[action], iframe[src], frame[src]').forEach(el => {
+                        addCandidate(el.getAttribute('href') || el.getAttribute('action') || el.getAttribute('src') || '');
                     });
+
+                    document.querySelectorAll('[data-href], [data-url], [data-route], [data-path], [data-api], [data-endpoint]').forEach(el => {
+                        ['data-href', 'data-url', 'data-route', 'data-path', 'data-api', 'data-endpoint'].forEach(attr => {
+                            addCandidate(el.getAttribute(attr) || '');
+                        });
+                    });
+
+                    const urlRe = /(?:https?:\\/\\/[^\\s"'`<>\\)\\]}]+|(?:\\.\\.\\/|\\.\\/|\\/)[A-Za-z0-9_~!$&()*+,;=:@.%\\/?-]+)/g;
+                    document.querySelectorAll('script:not([src])').forEach(script => {
+                        const text = script.textContent || '';
+                        for (const match of text.matchAll(urlRe)) {
+                            addCandidate(match[0]);
+                        }
+                    });
+
                     return [...links];
                 }
             """, base_url)

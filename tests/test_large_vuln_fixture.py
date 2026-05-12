@@ -2,7 +2,13 @@ import unittest
 
 import httpx
 
-from tests.fixtures.large_vuln_app import FLAG_ADMIN, FLAG_HOME, FLAG_SSTI, create_app
+from tests.fixtures.large_vuln_app import (
+    FLAG_ADMIN,
+    FLAG_HOME,
+    FLAG_JS_DISCOVERY,
+    FLAG_SSTI,
+    create_app,
+)
 
 
 class LargeVulnerableFixtureTests(unittest.IsolatedAsyncioTestCase):
@@ -93,6 +99,13 @@ class LargeVulnerableFixtureTests(unittest.IsolatedAsyncioTestCase):
         resp = await self.client.get("/ctf/public")
 
         self.assertIn("CTF{large_fixture_ctf_public}", resp.text)
+
+    async def test_js_discovered_ctf_route_requires_script_url(self):
+        home_resp = await self.client.get("/")
+        flag_resp = await self.client.get("/ctf/js-hidden", params={"token": "from-script"})
+
+        self.assertIn("/ctf/js-hidden?token=from-script", home_resp.text)
+        self.assertIn(FLAG_JS_DISCOVERY, flag_resp.text)
 
 
 if __name__ == "__main__":

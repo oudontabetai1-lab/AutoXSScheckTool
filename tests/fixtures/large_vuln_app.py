@@ -9,6 +9,7 @@ from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse
 FLAG_HOME = "FLAG{large_fixture_public_flag}"
 FLAG_SSTI = "FLAG{large_fixture_ssti_flag}"
 FLAG_ADMIN = "FLAG{large_fixture_admin_panel}"
+FLAG_JS_DISCOVERY = "FLAG{large_fixture_js_discovered_flag}"
 
 
 def _layout(title: str, body: str) -> str:
@@ -55,6 +56,11 @@ def create_app(page_count: int = 48) -> FastAPI:
               <input name="q" value="">
               <button>Search</button>
             </form>
+            <script>
+              window.largeFixtureApi = {{
+                hiddenCtf: "/ctf/js-hidden?token=from-script"
+              }};
+            </script>
             <ul>{links}</ul>
             """,
         )
@@ -235,5 +241,11 @@ def create_app(page_count: int = 48) -> FastAPI:
     @app.get("/ctf/public", response_class=HTMLResponse)
     async def ctf_public():
         return _layout("Public Flag", "<code>CTF{large_fixture_ctf_public}</code>")
+
+    @app.get("/ctf/js-hidden", response_class=HTMLResponse)
+    async def ctf_js_hidden(token: str = Query("")):
+        if token == "from-script":
+            return _layout("Script Discovered Flag", f"<code>{FLAG_JS_DISCOVERY}</code>")
+        return _layout("Script Discovered Flag", "<p>missing token</p>")
 
     return app
