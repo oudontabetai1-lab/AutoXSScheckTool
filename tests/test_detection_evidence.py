@@ -201,6 +201,14 @@ class DetectionEvidenceTests(unittest.TestCase):
             ScanEngine._page_fingerprint(same_layout_other_action),
         )
 
+    def test_page_fingerprint_preserves_distinct_url_inputs(self):
+        html = "<html><body><h1>Lookup</h1><p>missing token</p></body></html>"
+
+        self.assertNotEqual(
+            ScanEngine._page_fingerprint(html, "http://fixture.test/ctf/js-hidden?token=from-script"),
+            ScanEngine._page_fingerprint(html, "http://fixture.test/ctf/bundle-hidden?token=from-bundle"),
+        )
+
     def test_payload_generator_returns_role_specific_models(self):
         gen = PayloadGenerator(
             provider="ollama",

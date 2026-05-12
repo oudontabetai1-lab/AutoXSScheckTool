@@ -4,6 +4,7 @@ Playwright-based browser automation with evidence collection.
 """
 import asyncio
 import base64
+import re
 import time
 from urllib.parse import urlparse as _urlparse
 from typing import Optional, Callable, Any
@@ -546,12 +547,53 @@ class BrowserManager:
                     return [...links];
                 }
             """, base_url)
+            links.extend(self._collect_urls_from_loaded_assets(base_url))
             if same_domain:
                 base = urlparse(base_url)
                 links = [l for l in links if urlparse(l).netloc == base.netloc]
-            return links
+            return list(dict.fromkeys(links))
         except Exception:
             return []
+
+    def _collect_urls_from_loaded_assets(self, base_url: str) -> list[str]:
+        """Extract same-site route/API candidates from loaded JS/JSON assets."""
+        discovered: list[str] = []
+        ignored_ext = re.compile(
+            r"\.(?:png|jpe?g|gif|svg|webp|ico|css|woff2?|ttf|map|pdf|zip)(?:[?#].*)?$",
+            re.IGNORECASE,
+        )
+        url_re = re.compile(
+            r"(?:https?://[^\s\"'`<>\)\]\}]+|(?:\.\./|\./|/)[A-Za-z0-9_~!$&()*+,;=:@.%/?-]+)"
+        )
+        for pair in list(self.network.pairs):
+            resp = pair.get("response", {}) if isinstance(pair, dict) else {}
+            req = pair.get("request", {}) if isinstance(pair, dict) else {}
+            source_url = resp.get("url") or req.get("url") or ""
+            headers = resp.get("headers", {}) or {}
+            content_type = str(headers.get("content-type", "")).lower()
+            body = resp.get("body") or ""
+            if not body:
+                continue
+            is_text_asset = (
+                "javascript" in content_type
+                or "json" in content_type
+                or source_url.split("?", 1)[0].endswith((".js", ".mjs", ".json"))
+            )
+            if not is_text_asset:
+                continue
+            for match in url_re.findall(body[:200000]):
+                candidate = match.rstrip(" \t\r\n\"'`<>)}],;")
+                try:
+                    resolved = urljoin(base_url, candidate)
+                    parsed = urlparse(resolved)
+                    if parsed.scheme not in {"http", "https"}:
+                        continue
+                    if ignored_ext.search(parsed.path):
+                        continue
+                    discovered.append(resolved.split("#")[0])
+                except Exception:
+                    continue
+        return discovered
 
     async def set_cookies(self, cookies_str: str, url: str):
         """Set cookies from a 'name=value; name2=value2' string."""

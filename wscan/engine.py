@@ -630,11 +630,11 @@ class ScanEngine:
         return []
 
     @staticmethod
-    def _page_fingerprint(html: str) -> str:
+    def _page_fingerprint(html: str, url: str = "") -> str:
         """
         A: HTML の構造的フィンガープリント。
         テキスト・通常属性値を除いたタグ列に、フォームの method/action/name を加える。
-        同じレイアウトでも別 action のフォームは検査対象として残す。
+        同じレイアウトでも別 action のフォームや別 URL 入力面は検査対象として残す。
         """
         import hashlib
         html_l = html.lower()
@@ -653,7 +653,19 @@ class ScanEngine:
                 + ":"
                 + ",".join(sorted(names[:20]))
             )
-        material = "".join(tags[:50]) + "|".join(sorted(form_sigs))
+        route_sig = ""
+        if url:
+            parsed = urlparse(url)
+            query_names = sorted(
+                {
+                    part.split("=", 1)[0]
+                    for part in parsed.query.split("&")
+                    if part.split("=", 1)[0]
+                }
+            )
+            if query_names:
+                route_sig = f"route:{parsed.path}?{','.join(query_names[:20])}"
+        material = "".join(tags[:50]) + "|".join(sorted(form_sigs)) + route_sig
         return hashlib.md5(material.encode()).hexdigest()[:12]
 
     def _extract_sitemap_locs(self, xml_text: str) -> list[str]:
@@ -816,7 +828,7 @@ class ScanEngine:
             if html:
                 if self.flag_finder:
                     self._check_page_for_flags(html, url)
-                fp = self._page_fingerprint(html)
+                fp = self._page_fingerprint(html, url)
                 if fp in self._seen_page_fingerprints:
                     console.print(f"  [dim]重複ページスキップ: {url} (同一構造を検出)[/dim]")
                     # リンクは抽出するが、スキャン対象には追加しない

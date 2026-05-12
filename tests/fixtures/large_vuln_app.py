@@ -10,6 +10,7 @@ FLAG_HOME = "FLAG{large_fixture_public_flag}"
 FLAG_SSTI = "FLAG{large_fixture_ssti_flag}"
 FLAG_ADMIN = "FLAG{large_fixture_admin_panel}"
 FLAG_JS_DISCOVERY = "FLAG{large_fixture_js_discovered_flag}"
+FLAG_BUNDLE_DISCOVERY = "FLAG{large_fixture_bundle_discovered_flag}"
 
 
 def _layout(title: str, body: str) -> str:
@@ -29,7 +30,10 @@ def _layout(title: str, body: str) -> str:
     )
     return f"""
     <html>
-      <head><title>{title}</title></head>
+      <head>
+        <title>{title}</title>
+        <script src="/static/app.js"></script>
+      </head>
       <body>
         <header><h1>{title}</h1><nav>{nav}</nav></header>
         <main>{body}</main>
@@ -247,5 +251,19 @@ def create_app(page_count: int = 48) -> FastAPI:
         if token == "from-script":
             return _layout("Script Discovered Flag", f"<code>{FLAG_JS_DISCOVERY}</code>")
         return _layout("Script Discovered Flag", "<p>missing token</p>")
+
+    @app.get("/static/app.js", response_class=PlainTextResponse)
+    async def static_app_js():
+        return """
+        window.largeFixtureBundle = {
+          hiddenCtf: "/ctf/bundle-hidden?token=from-bundle"
+        };
+        """
+
+    @app.get("/ctf/bundle-hidden", response_class=HTMLResponse)
+    async def ctf_bundle_hidden(token: str = Query("")):
+        if token == "from-bundle":
+            return _layout("Bundle Discovered Flag", f"<code>{FLAG_BUNDLE_DISCOVERY}</code>")
+        return _layout("Bundle Discovered Flag", "<p>missing token</p>")
 
     return app

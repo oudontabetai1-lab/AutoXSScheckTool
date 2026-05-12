@@ -4,6 +4,7 @@ import httpx
 
 from tests.fixtures.large_vuln_app import (
     FLAG_ADMIN,
+    FLAG_BUNDLE_DISCOVERY,
     FLAG_HOME,
     FLAG_JS_DISCOVERY,
     FLAG_SSTI,
@@ -106,6 +107,13 @@ class LargeVulnerableFixtureTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("/ctf/js-hidden?token=from-script", home_resp.text)
         self.assertIn(FLAG_JS_DISCOVERY, flag_resp.text)
+
+    async def test_bundle_discovered_ctf_route_requires_loaded_script_url(self):
+        js_resp = await self.client.get("/static/app.js")
+        flag_resp = await self.client.get("/ctf/bundle-hidden", params={"token": "from-bundle"})
+
+        self.assertIn("/ctf/bundle-hidden?token=from-bundle", js_resp.text)
+        self.assertIn(FLAG_BUNDLE_DISCOVERY, flag_resp.text)
 
 
 if __name__ == "__main__":
