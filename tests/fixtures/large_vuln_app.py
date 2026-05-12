@@ -22,6 +22,7 @@ def _layout(title: str, body: str) -> str:
             '<a href="/template?name=guest">Template</a>',
             '<a href="/download?file=readme.txt">Download</a>',
             '<a href="/login">Login</a>',
+            '<a href="/admin/actions">Admin Actions</a>',
             '<a href="/ctf">CTF</a>',
         ]
     )
@@ -198,6 +199,26 @@ def create_app(page_count: int = 48) -> FastAPI:
     @app.get("/admin", response_class=HTMLResponse)
     async def admin():
         return _layout("Admin", f"<p>Admin dashboard secret. {FLAG_ADMIN}</p>")
+
+    @app.get("/admin/actions", response_class=HTMLResponse)
+    async def admin_actions():
+        return _layout(
+            "Admin Actions",
+            """
+            <form method="post" action="/admin/users/role">
+              <input name="user_id" value="42">
+              <input name="role" value="admin">
+              <button>Change role</button>
+            </form>
+            """,
+        )
+
+    @app.post("/admin/users/role", response_class=HTMLResponse)
+    async def admin_role_change(user_id: str = Form(""), role: str = Form("")):
+        return _layout(
+            "Role Changed",
+            f"<p>Changed user {user_id} to {role}. {FLAG_ADMIN}</p>",
+        )
 
     @app.get("/ctf", response_class=HTMLResponse)
     async def ctf():

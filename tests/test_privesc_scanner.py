@@ -12,6 +12,14 @@ class _DummyEngine:
         self.timeout = 30
         self.all_findings = []
         self.monitor = None
+        self.low_priv_cookies = ""
+        self.account_sessions = []
+
+
+class _DummyPage:
+    def __init__(self, url, forms):
+        self.url = url
+        self.forms = forms
 
 
 class PrivEscScannerTests(unittest.IsolatedAsyncioTestCase):
@@ -76,6 +84,73 @@ class PrivEscScannerTests(unittest.IsolatedAsyncioTestCase):
             ],
             timeout=3,
         )
+
+        self.assertEqual(findings, [])
+
+    async def test_state_changing_privileged_form_flags_low_priv_submission(self):
+        engine = _DummyEngine()
+        engine.low_priv_cookies = "sid=low"
+        scanner = PrivEscScanner(engine)
+        scanner._request_form = AsyncMock(return_value=(200, "<html>user promoted</html>"))
+        page = _DummyPage(
+            "http://fixture.test/admin/users",
+            [
+                {
+                    "method": "POST",
+                    "action": "http://fixture.test/admin/users/role",
+                    "inputs": [
+                        {"name": "user_id", "value": "42", "type": "text"},
+                        {"name": "role", "value": "admin", "type": "text"},
+                    ],
+                }
+            ],
+        )
+
+        findings = await scanner._test_state_changing_forms(page)
+
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0].check_type, "privesc_action")
+        self.assertIn("POST /admin/users/role", findings[0].evidence)
+        scanner._request_form.assert_awaited_once()
+
+    async def test_state_changing_form_ignores_unprivileged_action_path(self):
+        engine = _DummyEngine()
+        engine.low_priv_cookies = "sid=low"
+        scanner = PrivEscScanner(engine)
+        scanner._request_form = AsyncMock(return_value=(200, "ok"))
+        page = _DummyPage(
+            "http://fixture.test/support",
+            [
+                {
+                    "method": "POST",
+                    "action": "http://fixture.test/support",
+                    "inputs": [{"name": "message", "value": "hello", "type": "text"}],
+                }
+            ],
+        )
+
+        findings = await scanner._test_state_changing_forms(page)
+
+        self.assertEqual(findings, [])
+        scanner._request_form.assert_not_awaited()
+
+    async def test_state_changing_form_ignores_rejected_low_priv_submission(self):
+        engine = _DummyEngine()
+        engine.low_priv_cookies = "sid=low"
+        scanner = PrivEscScanner(engine)
+        scanner._request_form = AsyncMock(return_value=(403, "forbidden"))
+        page = _DummyPage(
+            "http://fixture.test/admin/users",
+            [
+                {
+                    "method": "POST",
+                    "action": "http://fixture.test/admin/users/role",
+                    "inputs": [{"name": "role", "value": "admin", "type": "text"}],
+                }
+            ],
+        )
+
+        findings = await scanner._test_state_changing_forms(page)
 
         self.assertEqual(findings, [])
 

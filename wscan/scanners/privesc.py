@@ -34,7 +34,7 @@ import re
 import uuid
 from difflib import SequenceMatcher
 from typing import TYPE_CHECKING, Optional
-from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
+from urllib.parse import parse_qs, urlencode, urljoin, urlparse, urlunparse
 
 import httpx
 
@@ -54,6 +54,13 @@ PROTECTED_PATH_RE = re.compile(
     r"|users?|members?|orders?|payment|billing|api/v\d|private|secure"
     r"|internal|panel|control|portal|staff|operator|moderator|superuser"
     r"|root|backup|logs?|audit|reports?|analytics|export|import)",
+    re.IGNORECASE,
+)
+
+ACTION_PATH_RE = re.compile(
+    r"/(admin|manage|settings|users?|members?|orders?|payment|billing|private"
+    r"|secure|internal|staff|moderator|approve|delete|remove|update|edit"
+    r"|create|export|import|role|permission)",
     re.IGNORECASE,
 )
 
@@ -247,6 +254,14 @@ class PrivEscScanner(BaseScanner):
 
         return findings
 
+    async def scan_page_context(self, page) -> list[Finding]:
+        """Run URL checks plus form/action authorization checks with page context."""
+        findings = await self.scan_page(page.url)
+        action_findings = await self._test_state_changing_forms(page)
+        for af in action_findings:
+            findings.append(af)
+        return findings
+
     # ------------------------------------------------------------------
     # Cookie helpers
     # ------------------------------------------------------------------
@@ -265,6 +280,31 @@ class PrivEscScanner(BaseScanner):
     def _client_proxy_kwargs(self) -> dict:
         proxy = getattr(self.engine, "proxy", "") or None
         return {"proxy": proxy} if proxy else {}
+
+    def _form_payload(self, form: dict) -> dict:
+        data: dict[str, str] = {}
+        for inp in form.get("inputs", []):
+            name = inp.get("name") or inp.get("id")
+            if not name:
+                continue
+            value = inp.get("value")
+            if value in (None, ""):
+                hint = f"{name} {inp.get('type', '')}".lower()
+                if "mail" in hint or "email" in hint:
+                    value = "wscan-action@example.test"
+                elif "user" in hint or "name" in hint:
+                    value = "wscan-action"
+                elif "amount" in hint or "price" in hint or "count" in hint:
+                    value = "1"
+                else:
+                    value = "wscan-action-probe"
+            data[name] = str(value)
+        data.setdefault("_wscan_probe", "1")
+        return data
+
+    def _action_url(self, page_url: str, form: dict) -> str:
+        action = form.get("action") or page_url
+        return urljoin(page_url, action)
 
     # ------------------------------------------------------------------
     # Test 1: Unauthenticated access
@@ -710,6 +750,89 @@ class PrivEscScanner(BaseScanner):
         return findings
 
     # ------------------------------------------------------------------
+    # Test 6: State-changing form/action authorization
+    # ------------------------------------------------------------------
+
+    async def _test_state_changing_forms(self, page) -> list[Finding]:
+        """Submit privileged-looking non-GET forms with lower-privilege sessions."""
+        findings: list[Finding] = []
+        forms = getattr(page, "forms", []) or []
+        if not forms:
+            return findings
+
+        timeout = float(getattr(self.engine, "timeout", 30))
+        low_priv_cookies: str = getattr(self.engine, "low_priv_cookies", "")
+        account_sessions: list[dict] = getattr(self.engine, "account_sessions", [])
+
+        probes: list[tuple[str, str, str]] = []
+        if low_priv_cookies:
+            probes.append(("low-privilege", low_priv_cookies, "user"))
+        for account in account_sessions:
+            cookies = account.get("cookies", "")
+            if not cookies:
+                continue
+            role = account.get("role", "")
+            if _role_rank(role) <= 1:
+                probes.append((account.get("username", "account"), cookies, role or "user"))
+
+        if not probes:
+            return findings
+
+        for form in forms:
+            method = (form.get("method") or "GET").upper()
+            if method == "GET":
+                continue
+            action_url = self._action_url(page.url, form)
+            action_path = urlparse(action_url).path
+            if not ACTION_PATH_RE.search(action_path):
+                continue
+            data = self._form_payload(form)
+            for actor, cookies, role in probes:
+                status, body = await self._request_form(method, action_url, data, cookies, timeout)
+                if status in (0, 401, 403):
+                    continue
+                if status in (301, 302, 303, 307, 308):
+                    # A redirect away from login/error after a state-changing request often
+                    # means the action was accepted.
+                    accepted = True
+                else:
+                    # Do not use the broad LOGIN_GATE_RE here: many normal pages
+                    # include a "Login" nav link even after a successful action.
+                    rejected = re.search(
+                        r"(unauthorized|forbidden|access\s*denied|invalid\s*login"
+                        r"|authentication\s*required|権限がありません|アクセス.*禁止)",
+                        body,
+                        re.IGNORECASE,
+                    )
+                    accepted = 200 <= status < 300 and not rejected
+                if not accepted:
+                    continue
+
+                findings.append(Finding(
+                    check_type="privesc_action",
+                    severity="high",
+                    url=page.url,
+                    field_name=f"(state-changing action: {method} {action_path})",
+                    payload=f"{actor} session submitted form",
+                    evidence=(
+                        f"State-changing authorization issue: low-privilege actor "
+                        f"'{actor}' ({role}) could submit {method} {action_path} "
+                        f"and received HTTP {status}. This action path appears "
+                        f"privileged and should enforce server-side authorization."
+                    ),
+                    request={
+                        "url": action_url,
+                        "method": method,
+                        "headers": {"Cookie": f"<{actor}-token>"},
+                        "body": data,
+                    },
+                    response={"status": status, "url": action_url},
+                ))
+                break
+
+        return findings
+
+    # ------------------------------------------------------------------
     # HTTP helper
     # ------------------------------------------------------------------
 
@@ -724,6 +847,28 @@ class PrivEscScanner(BaseScanner):
                 **self._client_proxy_kwargs(),
             ) as client:
                 resp = await client.get(url)
+                return resp.status_code, resp.text[:8000]
+        except Exception:
+            return 0, ""
+
+    async def _request_form(
+        self,
+        method: str,
+        url: str,
+        data: dict,
+        cookies: str,
+        timeout: float,
+    ) -> tuple[int, str]:
+        """Submit a form-like request and return (status_code, body_excerpt)."""
+        try:
+            async with httpx.AsyncClient(
+                follow_redirects=False,
+                timeout=timeout,
+                verify=False,
+                headers={**_HEADERS, "Cookie": cookies} if cookies else _HEADERS,
+                **self._client_proxy_kwargs(),
+            ) as client:
+                resp = await client.request(method, url, data=data)
                 return resp.status_code, resp.text[:8000]
         except Exception:
             return 0, ""

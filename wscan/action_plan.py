@@ -197,7 +197,15 @@ def _acceptance_criteria(f: Finding) -> list[str]:
         criteria.append("User-controlled output is contextually encoded or safely sanitized.")
     elif f.check_type.startswith("sqli") or f.check_type == "nosql":
         criteria.append("Database access uses parameter binding or a safe ORM query API.")
-    elif f.check_type in {"privesc", "privesc_unauth", "privesc_vertical", "privesc_horizontal"}:
+    elif f.check_type in {
+        "privesc",
+        "privesc_unauth",
+        "privesc_vertical",
+        "privesc_horizontal",
+        "privesc_param_idor",
+        "privesc_cross_acct",
+        "privesc_action",
+    }:
         criteria.append("Authorization checks are enforced server-side for the affected resource.")
     return criteria
 

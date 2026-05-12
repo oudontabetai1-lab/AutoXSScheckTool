@@ -77,6 +77,18 @@ class LargeVulnerableFixtureTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(login_resp.status_code, 302)
         self.assertIn(FLAG_ADMIN, admin_resp.text)
 
+    async def test_admin_action_form_allows_low_privilege_role_change(self):
+        form_resp = await self.client.get("/admin/actions")
+        action_resp = await self.client.post(
+            "/admin/users/role",
+            data={"user_id": "42", "role": "admin"},
+            headers={"Cookie": "session=lowpriv"},
+        )
+
+        self.assertIn("/admin/users/role", form_resp.text)
+        self.assertEqual(action_resp.status_code, 200)
+        self.assertIn(FLAG_ADMIN, action_resp.text)
+
     async def test_ctf_route_exposes_standard_flag_format(self):
         resp = await self.client.get("/ctf/public")
 

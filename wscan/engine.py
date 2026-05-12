@@ -633,11 +633,28 @@ class ScanEngine:
     def _page_fingerprint(html: str) -> str:
         """
         A: HTML の構造的フィンガープリント。
-        テキスト・属性値を除いたタグ列の先頭 50 個を MD5 ハッシュして返す。
+        テキスト・通常属性値を除いたタグ列に、フォームの method/action/name を加える。
+        同じレイアウトでも別 action のフォームは検査対象として残す。
         """
         import hashlib
-        tags = re.findall(r'<\w+', html.lower())
-        return hashlib.md5(''.join(tags[:50]).encode()).hexdigest()[:12]
+        html_l = html.lower()
+        tags = re.findall(r'<\w+', html_l)
+        form_sigs: list[str] = []
+        for form_html in re.findall(r'<form\b[^>]*>.*?</form>', html_l, flags=re.S):
+            open_tag = form_html.split(">", 1)[0]
+            method = re.search(r'\bmethod=["\']?([^"\'\s>]+)', open_tag)
+            action = re.search(r'\baction=["\']?([^"\'\s>]+)', open_tag)
+            names = re.findall(r'\bname=["\']?([^"\'\s>]+)', form_html)
+            form_sigs.append(
+                "form:"
+                + (method.group(1) if method else "get")
+                + ":"
+                + (action.group(1) if action else "")
+                + ":"
+                + ",".join(sorted(names[:20]))
+            )
+        material = "".join(tags[:50]) + "|".join(sorted(form_sigs))
+        return hashlib.md5(material.encode()).hexdigest()[:12]
 
     def _extract_sitemap_locs(self, xml_text: str) -> list[str]:
         """Extract <loc> URLs from a sitemap XML string."""
@@ -1690,7 +1707,10 @@ class ScanEngine:
         # ── Page-level checks (header inspection, clickjacking, session, etc.) ──
         for check_name, scanner in self.scanners.items():
             try:
-                page_findings = await scanner.scan_page(page.url)
+                if hasattr(scanner, "scan_page_context"):
+                    page_findings = await scanner.scan_page_context(page)
+                else:
+                    page_findings = await scanner.scan_page(page.url)
                 for f in (page_findings or []):
                     self._record_finding(f, source="page-level")
             except Exception as e:

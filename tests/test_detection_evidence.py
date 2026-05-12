@@ -2,6 +2,7 @@ import unittest
 from unittest.mock import AsyncMock, patch
 
 from wscan.ctf_flag_finder import FlagFinder
+from wscan.engine import ScanEngine
 from wscan.payload_gen import PayloadGenerator, _format_prompt_template
 from wscan.scanners.base import BaseScanner, Finding, finding_dedup_key_for
 from wscan.scanners.sqli import SQLiScanner
@@ -190,6 +191,15 @@ class DetectionEvidenceTests(unittest.TestCase):
         self.assertIn("FLAG{real_flag}", found)
         self.assertIn("CTF{also_real}", found)
         self.assertIn("ACSC{UPPER_PREFIX}", found)
+
+    def test_page_fingerprint_preserves_distinct_form_actions(self):
+        base = "<html><body><h1>Panel</h1><form method='post' action='/admin/users/role'><input name='role'></form></body></html>"
+        same_layout_other_action = "<html><body><h1>Panel</h1><form method='post' action='/support'><input name='role'></form></body></html>"
+
+        self.assertNotEqual(
+            ScanEngine._page_fingerprint(base),
+            ScanEngine._page_fingerprint(same_layout_other_action),
+        )
 
     def test_payload_generator_returns_role_specific_models(self):
         gen = PayloadGenerator(
