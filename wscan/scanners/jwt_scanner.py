@@ -160,6 +160,10 @@ class JWTScanner(BaseScanner):
         self._tested_tokens: set[str] = set()
         self._found_jwts: list[tuple[str, str, str]] = []  # (token, source, url)
 
+    def _client_proxy_kwargs(self) -> dict:
+        proxy = getattr(self.engine, "proxy", "") or None
+        return {"proxy": proxy} if proxy else {}
+
     async def scan_field(
         self,
         url: str,
@@ -189,6 +193,7 @@ class JWTScanner(BaseScanner):
                 timeout=timeout,
                 verify=False,
                 headers=req_headers,
+                **self._client_proxy_kwargs(),
             ) as client:
                 resp = await client.get(url)
         except Exception:
@@ -552,6 +557,7 @@ class JWTScanner(BaseScanner):
                     timeout=timeout,
                     verify=False,
                     headers=headers,
+                    **self._client_proxy_kwargs(),
                 ) as client:
                     resp = await client.get(url)
                     if 200 <= resp.status_code < 300:

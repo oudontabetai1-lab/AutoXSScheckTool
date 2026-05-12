@@ -116,6 +116,10 @@ class GraphQLScanner(BaseScanner):
         self._tested_endpoints: set[str] = set()
         self._confirmed_endpoints: list[str] = []
 
+    def _client_proxy_kwargs(self) -> dict:
+        proxy = getattr(self.engine, "proxy", "") or None
+        return {"proxy": proxy} if proxy else {}
+
     async def scan_field(
         self,
         url: str,
@@ -180,6 +184,7 @@ class GraphQLScanner(BaseScanner):
                 timeout=timeout,
                 verify=False,
                 headers=headers,
+                **self._client_proxy_kwargs(),
             ) as client:
                 resp = await client.post(endpoint, json=query)
                 if resp.status_code in (200, 400):
@@ -240,6 +245,7 @@ class GraphQLScanner(BaseScanner):
                 timeout=timeout,
                 verify=False,
                 headers=headers,
+                **self._client_proxy_kwargs(),
             ) as client:
                 resp = await client.post(endpoint, json=query)
                 if resp.status_code != 200:
@@ -289,6 +295,7 @@ class GraphQLScanner(BaseScanner):
                 timeout=timeout,
                 verify=False,
                 headers=headers,
+                **self._client_proxy_kwargs(),
             ) as client:
                 resp = await client.post(endpoint, json=batch_query)
                 if resp.status_code != 200:
@@ -369,6 +376,7 @@ class GraphQLScanner(BaseScanner):
                         timeout=timeout,
                         verify=False,
                         headers=headers,
+                        **self._client_proxy_kwargs(),
                     ) as client:
                         resp = await client.post(endpoint, json=gql_body)
                         body = resp.text[:4000]

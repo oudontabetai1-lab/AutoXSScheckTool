@@ -116,7 +116,7 @@ class CmsScanner(BaseScanner):
         proxy = getattr(self.engine, "proxy", "") or None
         client_kwargs: dict = {"timeout": 10.0, "follow_redirects": True}
         if proxy:
-            client_kwargs["proxies"] = {"all://": proxy}
+            client_kwargs["proxy"] = proxy
 
         async with httpx.AsyncClient(**client_kwargs) as client:
             for path, desc, severity in paths:

@@ -351,7 +351,7 @@ class ScanEngine:
         self.exclude_urls: set = set(exclude_urls or [])
 
         # A-2: WAF detection
-        self.waf_detector = WAFDetector(payload_gen=self.payload_gen)
+        self.waf_detector = WAFDetector(payload_gen=self.payload_gen, proxy=proxy)
         # A-3: Payload continuous learning
         self.payload_learner = PayloadLearner(learning_file=learning_file)
 
@@ -575,7 +575,12 @@ class ScanEngine:
         discovered: list[str] = []
         base = self.target_url.rstrip("/")
 
-        async with httpx.AsyncClient(timeout=10.0, verify=False, follow_redirects=True) as client:
+        async with httpx.AsyncClient(
+            timeout=10.0,
+            verify=False,
+            follow_redirects=True,
+            proxy=self.proxy or None,
+        ) as client:
             # robots.txt
             try:
                 r = await client.get(f"{base}/robots.txt")

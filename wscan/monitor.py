@@ -42,6 +42,7 @@ class MonitorServer:
         self.scan_request_data: dict = {}
         # LLM config for auto-config HTTP endpoint (set by main.py after init)
         self.llm_cfg: dict = {}
+        self.default_scan_cfg: dict = {}
         # D: CI/CD REST API state
         self.api_scan_id: str = ""
         self.api_scan_status: str = "idle"   # idle / scanning / done / error
@@ -83,6 +84,11 @@ class MonitorServer:
         @app.get("/health")
         async def health():
             return {"status": "ok", "clients": len(self.clients)}
+
+        @app.get("/api/config/defaults")
+        async def api_config_defaults():
+            """Return config/wscan.yaml-derived defaults for the dashboard form."""
+            return JSONResponse(self.default_scan_cfg or {})
 
         @app.post("/api/auto-config")
         async def api_auto_config(request: Request):

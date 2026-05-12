@@ -88,17 +88,19 @@ class FileUploadScanner(BaseScanner):
                     url, field_name, filename, self.CHECK_TYPE
                 )
             try:
-                kwargs: dict = {
+                request_kwargs: dict = {
                     "files": {field_name: (filename, io.BytesIO(content), "image/jpeg")},
+                }
+                client_kwargs: dict = {
                     "timeout": timeout,
                     "follow_redirects": True,
                     "verify": False,
                 }
                 if proxy:
-                    kwargs["proxy"] = proxy
+                    client_kwargs["proxy"] = proxy
 
-                async with httpx.AsyncClient() as client:
-                    r = await client.post(url, **kwargs)
+                async with httpx.AsyncClient(**client_kwargs) as client:
+                    r = await client.post(url, **request_kwargs)
                 body = r.text
 
             except Exception as exc:
