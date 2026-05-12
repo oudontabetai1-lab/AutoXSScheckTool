@@ -2398,6 +2398,7 @@ class ScanEngine:
         "ssrf",
         "deserialization",
         "ldap",
+        "xxe",
     })
 
     async def _phase_verify(self):

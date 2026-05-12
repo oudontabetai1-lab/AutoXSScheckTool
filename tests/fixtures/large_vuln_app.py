@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from urllib.parse import unquote
 
-from fastapi import FastAPI, Form, Query
+from fastapi import FastAPI, Form, Query, Request
 from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse
 
 
@@ -28,6 +28,7 @@ def _layout(title: str, body: str) -> str:
             '<a href="/fetch?url=http://example.test/">Fetch URL</a>',
             '<a href="/deserialize">Deserialize</a>',
             '<a href="/ldap-login">LDAP Login</a>',
+            '<a href="/xml">XML Import</a>',
             '<a href="/login">Login</a>',
             '<a href="/admin/actions">Admin Actions</a>',
             '<a href="/ctf">CTF</a>',
@@ -302,6 +303,27 @@ def create_app(page_count: int = 48) -> FastAPI:
         if "objectClass=*" in username or "uid=*" in username:
             return _layout("LDAP Admin Panel", f"<p>Authenticated admin panel. {FLAG_ADMIN}</p>")
         return _layout("LDAP Login Failed", "<p>invalid login</p>")
+
+    @app.get("/xml", response_class=HTMLResponse)
+    async def xml_form():
+        return _layout(
+            "XML Import",
+            """
+            <form method="post" action="/xml">
+              <textarea name="xml"></textarea>
+              <button>Import</button>
+            </form>
+            """,
+        )
+
+    @app.post("/xml", response_class=PlainTextResponse)
+    async def xml_import(request: Request):
+        body = (await request.body()).decode(errors="ignore")
+        if 'SYSTEM "file:///etc/passwd"' in body:
+            return "root:x:0:0:root:/root:/bin/bash\nnobody:x:65534:65534:nobody:/nonexistent:/usr/sbin/nologin"
+        if "<!ENTITY lol" in body:
+            return "lollollollol entity expanded"
+        return "XML import accepted"
 
     @app.get("/admin", response_class=HTMLResponse)
     async def admin():

@@ -160,6 +160,21 @@ class LargeVulnerableFixtureTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(FLAG_ADMIN, bypass_resp.text)
         self.assertIn("bad search filter", error_resp.text)
 
+    async def test_xml_endpoint_returns_probe_only_file_marker(self):
+        baseline_resp = await self.client.post(
+            "/xml",
+            content='<?xml version="1.0"?><root>wscan_xxe_baseline</root>',
+            headers={"Content-Type": "application/xml"},
+        )
+        probe_resp = await self.client.post(
+            "/xml",
+            content='<?xml version="1.0"?><!DOCTYPE foo [<!ENTITY xxe SYSTEM "file:///etc/passwd">]><root>&xxe;</root>',
+            headers={"Content-Type": "application/xml"},
+        )
+
+        self.assertNotIn("root:x:0:0", baseline_resp.text)
+        self.assertIn("root:x:0:0", probe_resp.text)
+
     async def test_admin_action_form_allows_low_privilege_role_change(self):
         form_resp = await self.client.get("/admin/actions")
         action_resp = await self.client.post(

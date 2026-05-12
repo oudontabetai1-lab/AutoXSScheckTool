@@ -18,6 +18,7 @@ from wscan.scanners.sqli import SQLiScanner
 from wscan.scanners.ssrf import SSRFScanner
 from wscan.scanners.ssti import SSTIScanner
 from wscan.scanners.xss import XSSScanner
+from wscan.scanners.xxe import XXEScanner
 
 
 class _DummyBrowser:
@@ -415,6 +416,54 @@ class DetectionEvidenceTests(unittest.TestCase):
                 payload="*))(|(objectClass=*",
                 evidence="LDAP auth bypass",
                 evidence_type="ldap_auth_bypass",
+            )
+
+            result = await scanner.verify_finding(finding)
+
+            self.assertTrue(result)
+
+        self.run_async(run())
+
+    def test_xxe_verifier_rejects_preexisting_file_marker(self):
+        async def run():
+            payload = '<?xml version="1.0"?><!DOCTYPE foo [<!ENTITY xxe SYSTEM "file:///etc/passwd">]><root>&xxe;</root>'
+            scanner = XXEScanner(_DummyEngine())
+            scanner._post_xml = AsyncMock(side_effect=[
+                ("root:x:0:0:root:/root:/bin/bash", 200, 0.01),
+                ("root:x:0:0:root:/root:/bin/bash", 200, 0.01),
+            ])
+            finding = Finding(
+                check_type="xxe",
+                severity="high",
+                url="http://fixture.test/xml",
+                field_name="xml",
+                payload=payload,
+                evidence="XXE file read",
+                evidence_type="xxe_file_read",
+            )
+
+            result = await scanner.verify_finding(finding)
+
+            self.assertFalse(result)
+
+        self.run_async(run())
+
+    def test_xxe_verifier_confirms_probe_only_file_marker(self):
+        async def run():
+            payload = '<?xml version="1.0"?><!DOCTYPE foo [<!ENTITY xxe SYSTEM "file:///etc/passwd">]><root>&xxe;</root>'
+            scanner = XXEScanner(_DummyEngine())
+            scanner._post_xml = AsyncMock(side_effect=[
+                ("XML import accepted", 200, 0.01),
+                ("root:x:0:0:root:/root:/bin/bash", 200, 0.01),
+            ])
+            finding = Finding(
+                check_type="xxe",
+                severity="high",
+                url="http://fixture.test/xml",
+                field_name="xml",
+                payload=payload,
+                evidence="XXE file read",
+                evidence_type="xxe_file_read",
             )
 
             result = await scanner.verify_finding(finding)
