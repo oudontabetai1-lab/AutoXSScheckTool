@@ -586,40 +586,69 @@ class BrowserManager:
             return False
         try:
             await self.navigate(login_url)
-            await self.page.evaluate(
-                """([userField, passField, user, pw]) => {
-                    function _fill(sel, val) {
-                        const el = document.querySelector(
-                            `[name="${sel}"],[id="${sel}"]`
-                        );
-                        if (!el) return false;
+
+            # Use Playwright's native fill() which properly triggers React/Vue/Angular
+            # synthetic event handlers — unlike direct JS `el.value = val` assignment.
+            user_selector = f'[name="{user_field}"],[id="{user_field}"]'
+            pass_selector = f'[name="{pass_field}"],[id="{pass_field}"]'
+            try:
+                await self.page.fill(user_selector, self.auth_user, timeout=5000)
+            except Exception:
+                # Fallback to JS assignment for unusual implementations
+                await self.page.evaluate(
+                    """([sel, val]) => {
+                        const el = document.querySelector(sel);
+                        if (!el) return;
                         el.value = val;
                         ['input','change','blur'].forEach(e =>
                             el.dispatchEvent(new Event(e, {bubbles:true}))
                         );
-                        return true;
-                    }
-                    _fill(userField, user);
-                    _fill(passField, pw);
-                }""",
-                [user_field, pass_field, self.auth_user, self.auth_pass],
-            )
+                    }""",
+                    [user_selector, self.auth_user],
+                )
+            try:
+                await self.page.fill(pass_selector, self.auth_pass, timeout=5000)
+            except Exception:
+                await self.page.evaluate(
+                    """([sel, val]) => {
+                        const el = document.querySelector(sel);
+                        if (!el) return;
+                        el.value = val;
+                        ['input','change','blur'].forEach(e =>
+                            el.dispatchEvent(new Event(e, {bubbles:true}))
+                        );
+                    }""",
+                    [pass_selector, self.auth_pass],
+                )
+
             # Submit — prefer clicking the button so JS frameworks receive the event
-            await self.page.evaluate(
-                """([userField]) => {
-                    const el = document.querySelector(`[name="${userField}"],[id="${userField}"]`);
-                    if (!el) return;
-                    const form = el.closest('form');
-                    if (!form) return;
-                    // Try submit button first (handles React/Vue event handlers)
-                    const btn = form.querySelector(
-                        'button[type="submit"],input[type="submit"],[type="submit"]'
-                    ) || form.querySelector('button:not([type="button"])');
-                    if (btn) { btn.click(); }
-                    else { form.submit(); }
-                }""",
-                [user_field],
-            )
+            submitted = False
+            try:
+                submit_btn = self.page.locator(
+                    f'[name="{user_field}"],[id="{user_field}"]'
+                ).locator("xpath=ancestor::form").locator(
+                    'button[type="submit"],input[type="submit"],[type="submit"],button:not([type="button"])'
+                ).first
+                await submit_btn.click(timeout=5000)
+                submitted = True
+            except Exception:
+                pass
+            if not submitted:
+                await self.page.evaluate(
+                    """([userField]) => {
+                        const el = document.querySelector(`[name="${userField}"],[id="${userField}"]`);
+                        if (!el) return;
+                        const form = el.closest('form');
+                        if (!form) return;
+                        const btn = form.querySelector(
+                            'button[type="submit"],input[type="submit"],[type="submit"]'
+                        ) || form.querySelector('button:not([type="button"])');
+                        if (btn) { btn.click(); }
+                        else { form.submit(); }
+                    }""",
+                    [user_field],
+                )
+
             await self.page.wait_for_load_state("domcontentloaded", timeout=15000)
             post_url = self.page.url
             post_body = await self.get_page_source()
