@@ -212,6 +212,10 @@ class PrivEscScanner(BaseScanner):
             )
         return cookies_str
 
+    def _client_proxy_kwargs(self) -> dict:
+        proxy = getattr(self.engine, "proxy", "") or None
+        return {"proxy": proxy} if proxy else {}
+
     # ------------------------------------------------------------------
     # Test 1: Unauthenticated access
     # ------------------------------------------------------------------
@@ -230,6 +234,7 @@ class PrivEscScanner(BaseScanner):
                 timeout=timeout,
                 verify=False,
                 headers=_HEADERS,
+                **self._client_proxy_kwargs(),
             ) as client:
                 resp = await client.get(url)
                 status = resp.status_code
@@ -296,6 +301,7 @@ class PrivEscScanner(BaseScanner):
                 timeout=timeout,
                 verify=False,
                 headers={**_HEADERS, "Cookie": low_priv_cookies},
+                **self._client_proxy_kwargs(),
             ) as client:
                 resp = await client.get(url)
                 status = resp.status_code
@@ -644,6 +650,7 @@ class PrivEscScanner(BaseScanner):
                 timeout=timeout,
                 verify=False,
                 headers={**_HEADERS, "Cookie": cookies} if cookies else _HEADERS,
+                **self._client_proxy_kwargs(),
             ) as client:
                 resp = await client.get(url)
                 return resp.status_code, resp.text[:8000]

@@ -1199,6 +1199,40 @@ async def run_serve(args):
     ))
 
     monitor = MonitorServer(port=port)
+    monitor.default_scan_cfg = {
+        "checks": _CFG.get("checks", ["sqli", "xss", "os"]),
+        "depth": _CFG.get("depth", 2),
+        "timeout": _CFG.get("timeout", 30),
+        "max_forms": _CFG.get("max_forms", 50),
+        "proxy": _CFG.get("proxy", ""),
+        "llm": _CFG.get("llm_provider", "ollama"),
+        "ollama_model": _CFG.get("ollama_model", "llama3"),
+        "openai_model": _CFG.get("openai_model", "gpt-4o-mini"),
+        "gemini_model": _CFG.get("gemini_model", "gemini-2.0-flash"),
+        "claude_model": _CFG.get("claude_model", "claude-haiku-4-5-20251001"),
+        "role_models": _CFG.get("role_models", {}),
+        "auth_user": _CFG.get("auth_user", ""),
+        "auth_pass": _CFG.get("auth_pass", ""),
+        "login_url": _CFG.get("login_url", ""),
+        "login_user_field": _CFG.get("login_user_field", "username"),
+        "login_pass_field": _CFG.get("login_pass_field", "password"),
+        "login_success_indicator": _CFG.get("login_success_indicator", ""),
+        "exclude_fields": ", ".join(_CFG.get("exclude_fields", []) or []),
+        "exclude_urls": "\n".join(_CFG.get("exclude_urls", []) or []),
+        "manual_crawl_file": _CFG.get("manual_crawl_file", ""),
+        "toggles": {
+            "headless": _CFG.get("headless", False),
+            "skip_registration": _CFG.get("skip_registration", True),
+            "open_report": _CFG.get("open_report", True),
+            "use_planner": _CFG.get("use_planner", True),
+            "interactive_plan": _CFG.get("interactive_plan", False),
+            "enable_ai_analysis": _CFG.get("ai_analysis", True),
+            "enable_waf_detection": _CFG.get("waf_detection", True),
+            "enable_payload_learning": _CFG.get("payload_learning", True),
+            "enable_sitemap_crawl": _CFG.get("sitemap_crawl", True),
+            "ctf_mode": _CFG.get("ctf_mode", False),
+        },
+    }
     # /api/auto-config エンドポイント用に LLM 設定をキャッシュ
     _llm_section = _CFG.get("llm", {}) if isinstance(_CFG.get("llm"), dict) else {}
     monitor.llm_cfg = {

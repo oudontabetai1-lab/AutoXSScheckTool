@@ -85,8 +85,9 @@ _DETECTION_TTL = 300  # seconds — re-probe if stale
 class WAFDetector:
     """Detects WAF presence and suggests bypass strategies."""
 
-    def __init__(self, payload_gen=None):
+    def __init__(self, payload_gen=None, proxy: str = ""):
         self.payload_gen = payload_gen
+        self.proxy = proxy or ""
         self._detected: Optional[str] = None
         self._checked_at: float = 0.0  # epoch seconds of last probe
 
@@ -105,6 +106,7 @@ class WAFDetector:
                 timeout=timeout,
                 verify=False,
                 follow_redirects=True,
+                proxy=self.proxy or None,
             ) as client:
                 # First: normal request (collect always-present WAF headers)
                 resp = await client.get(url)

@@ -60,6 +60,19 @@ class PublicBrandingTests(unittest.TestCase):
             with self.subTest(marker=marker):
                 self.assertIn(marker, text)
 
+    def test_dashboard_loads_config_defaults(self):
+        text = Path("templates/dashboard.html").read_text(encoding="utf-8")
+        expected = (
+            "/api/config/defaults",
+            "loadDefaultConfigFromServer",
+            "cfgProxy",
+            "bootDashboard()",
+        )
+
+        for marker in expected:
+            with self.subTest(marker=marker):
+                self.assertIn(marker, text)
+
 
 if __name__ == "__main__":
     unittest.main()

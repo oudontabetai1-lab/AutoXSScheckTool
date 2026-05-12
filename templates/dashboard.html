@@ -1951,6 +1951,40 @@ function loadConfigFromStorage() {
   } catch(e) {}
 }
 
+async function loadDefaultConfigFromServer() {
+  try {
+    const resp = await fetch('/api/config/defaults');
+    if (!resp.ok) return;
+    const cfg = await resp.json();
+    if (!cfg || typeof cfg !== 'object') return;
+    if (cfg.depth != null) document.getElementById('cfgDepth').value = cfg.depth;
+    if (cfg.timeout != null) document.getElementById('cfgTimeoutInput').value = cfg.timeout;
+    if (cfg.max_forms != null) document.getElementById('cfgMaxForms').value = cfg.max_forms;
+    if (cfg.proxy != null) document.getElementById('cfgProxy').value = cfg.proxy;
+    if (cfg.llm) { document.getElementById('cfgLlm').value = cfg.llm; updateLlmModelField(); }
+    if (cfg.ollama_model) document.getElementById('cfgOllamaModel').value = cfg.ollama_model;
+    if (cfg.openai_model) document.getElementById('cfgOpenaiModel').value = cfg.openai_model;
+    if (cfg.gemini_model) document.getElementById('cfgGeminiModel').value = cfg.gemini_model;
+    if (cfg.claude_model) document.getElementById('cfgClaudeModel').value = cfg.claude_model;
+    if (cfg.role_models) restoreRoleModels(cfg.role_models);
+    if (cfg.auth_user) document.getElementById('cfgAuthUser').value = cfg.auth_user;
+    if (cfg.auth_pass) document.getElementById('cfgAuthPass').value = cfg.auth_pass;
+    if (cfg.login_url) document.getElementById('cfgLoginUrl').value = cfg.login_url;
+    if (cfg.login_user_field) document.getElementById('cfgLoginUserField').value = cfg.login_user_field;
+    if (cfg.login_pass_field) document.getElementById('cfgLoginPassField').value = cfg.login_pass_field;
+    if (cfg.login_success_indicator) document.getElementById('cfgLoginSuccess').value = cfg.login_success_indicator;
+    if (cfg.exclude_fields) document.getElementById('cfgExcludeFields').value = cfg.exclude_fields;
+    if (cfg.exclude_urls) document.getElementById('cfgExcludeUrls').value = cfg.exclude_urls;
+    if (cfg.manual_crawl_file) document.getElementById('cfgManualCrawlFile').value = cfg.manual_crawl_file;
+    if (cfg.checks && cfg.checks.length) setSelectedChecks(cfg.checks);
+    if (cfg.toggles) {
+      Object.entries(cfg.toggles).forEach(([key, val]) => {
+        if (key in cfgToggles) setCfgToggle(key, val);
+      });
+    }
+  } catch(e) {}
+}
+
 // ─── Multi-step Attack Flow Builder ─────────────────────────────
 
 const FLOW_STEP_ACTIONS = [
@@ -3339,11 +3373,15 @@ function renderCheckProgressBars() {
 }
 
 // ─── Init ────────────────────────────────────────────────────────
-initConfigOverlay();
-loadConfigFromStorage();
-loadD3();
-renderCheckProgressBars();
-connect();
+async function bootDashboard() {
+  initConfigOverlay();
+  await loadDefaultConfigFromServer();
+  loadConfigFromStorage();
+  loadD3();
+  renderCheckProgressBars();
+  connect();
+}
+bootDashboard();
 </script>
 </body>
 </html>
