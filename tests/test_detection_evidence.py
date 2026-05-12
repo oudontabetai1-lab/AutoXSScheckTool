@@ -6,6 +6,7 @@ from wscan.ctf_flag_finder import FlagFinder
 from wscan.engine import ScanEngine
 from wscan.payload_gen import PayloadGenerator, _format_prompt_template
 from wscan.scanners.base import BaseScanner, Finding, finding_dedup_key_for
+from wscan.scanners.deserialization import DeserializationScanner
 from wscan.scanners.header_injection import HeaderInjectionScanner
 from wscan.scanners.nosql_injection import NoSQLInjectionScanner
 from wscan.scanners.open_redirect import OpenRedirectScanner
@@ -313,6 +314,60 @@ class DetectionEvidenceTests(unittest.TestCase):
                 payload="http://169.254.169.254/latest/meta-data/",
                 evidence="SSRF marker",
                 evidence_type="ssrf_internal_marker",
+            )
+
+            result = await scanner.verify_finding(finding)
+
+            self.assertTrue(result)
+
+        self.run_async(run())
+
+    def test_deserialization_verifier_rejects_preexisting_error(self):
+        async def run():
+            scanner = DeserializationScanner(_DummyEngine())
+            scanner._apply_payload = AsyncMock(side_effect=[
+                ("unserialize() already failing", {}),
+                ("unserialize() already failing", {}),
+            ])
+            finding = Finding(
+                check_type="deserialization",
+                severity="critical",
+                url="http://fixture.test/deserialize",
+                field_name="data",
+                payload='O:1:"A":1:{s:1:"a";R:99999999;}',
+                evidence="deserialization error",
+                evidence_type="deserialization_error",
+                evidence_details={
+                    "probe_id": "php_serialize_malformed",
+                    "transport": "field",
+                },
+            )
+
+            result = await scanner.verify_finding(finding)
+
+            self.assertFalse(result)
+
+        self.run_async(run())
+
+    def test_deserialization_verifier_confirms_probe_only_error(self):
+        async def run():
+            scanner = DeserializationScanner(_DummyEngine())
+            scanner._apply_payload = AsyncMock(side_effect=[
+                ("Loaded safe serialized value", {}),
+                ("PHP Warning: unserialize(): Error at offset 12", {}),
+            ])
+            finding = Finding(
+                check_type="deserialization",
+                severity="critical",
+                url="http://fixture.test/deserialize",
+                field_name="data",
+                payload='O:1:"A":1:{s:1:"a";R:99999999;}',
+                evidence="deserialization error",
+                evidence_type="deserialization_error",
+                evidence_details={
+                    "probe_id": "php_serialize_malformed",
+                    "transport": "field",
+                },
             )
 
             result = await scanner.verify_finding(finding)

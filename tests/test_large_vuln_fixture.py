@@ -129,6 +129,19 @@ class LargeVulnerableFixtureTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(FLAG_ADMIN, injection_resp.text)
         self.assertGreater(len(injection_resp.text) - len(baseline_resp.text), 500)
 
+    async def test_deserialize_endpoint_returns_probe_only_error(self):
+        baseline_resp = await self.client.post(
+            "/deserialize",
+            data={"data": "wscan_deser_baseline"},
+        )
+        probe_resp = await self.client.post(
+            "/deserialize",
+            data={"data": 'O:1:"A":1:{s:1:"a";R:99999999;}'},
+        )
+
+        self.assertNotIn("unserialize()", baseline_resp.text)
+        self.assertIn("unserialize()", probe_resp.text)
+
     async def test_admin_action_form_allows_low_privilege_role_change(self):
         form_resp = await self.client.get("/admin/actions")
         action_resp = await self.client.post(

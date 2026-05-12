@@ -26,6 +26,7 @@ def _layout(title: str, body: str) -> str:
             '<a href="/go?next=/catalog">Continue</a>',
             '<a href="/nosql-login">NoSQL Login</a>',
             '<a href="/fetch?url=http://example.test/">Fetch URL</a>',
+            '<a href="/deserialize">Deserialize</a>',
             '<a href="/login">Login</a>',
             '<a href="/admin/actions">Admin Actions</a>',
             '<a href="/ctf">CTF</a>',
@@ -257,6 +258,28 @@ def create_app(page_count: int = 48) -> FastAPI:
             )
             return _layout("NoSQL Admin Results", f"<ul>{records}</ul>")
         return _layout("NoSQL Login Failed", "<p>invalid login</p>")
+
+    @app.get("/deserialize", response_class=HTMLResponse)
+    async def deserialize_form():
+        return _layout(
+            "Deserialize",
+            """
+            <form method="post" action="/deserialize">
+              <input name="data">
+              <button>Load</button>
+            </form>
+            """,
+        )
+
+    @app.post("/deserialize", response_class=PlainTextResponse)
+    async def deserialize(data: str = Form("")):
+        if "R:99999999" in data:
+            return "PHP Warning: unserialize(): Error at offset 12 of 29 bytes"
+        if data.startswith("rO0ABQ"):
+            return "java.io.StreamCorruptedException: invalid stream header"
+        if data.startswith("gAI="):
+            return "_pickle.UnpicklingError: pickle data was truncated"
+        return "Loaded safe serialized value"
 
     @app.get("/admin", response_class=HTMLResponse)
     async def admin():

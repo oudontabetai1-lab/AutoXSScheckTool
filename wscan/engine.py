@@ -2396,6 +2396,7 @@ class ScanEngine:
         "header_injection",
         "nosql",
         "ssrf",
+        "deserialization",
     })
 
     async def _phase_verify(self):
