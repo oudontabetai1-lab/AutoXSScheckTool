@@ -27,6 +27,7 @@ def _layout(title: str, body: str) -> str:
             '<a href="/nosql-login">NoSQL Login</a>',
             '<a href="/fetch?url=http://example.test/">Fetch URL</a>',
             '<a href="/deserialize">Deserialize</a>',
+            '<a href="/ldap-login">LDAP Login</a>',
             '<a href="/login">Login</a>',
             '<a href="/admin/actions">Admin Actions</a>',
             '<a href="/ctf">CTF</a>',
@@ -280,6 +281,27 @@ def create_app(page_count: int = 48) -> FastAPI:
         if data.startswith("gAI="):
             return "_pickle.UnpicklingError: pickle data was truncated"
         return "Loaded safe serialized value"
+
+    @app.get("/ldap-login", response_class=HTMLResponse)
+    async def ldap_login_form():
+        return _layout(
+            "LDAP Login",
+            """
+            <form method="post" action="/ldap-login">
+              <input name="username">
+              <input name="password" type="password">
+              <button>Login</button>
+            </form>
+            """,
+        )
+
+    @app.post("/ldap-login", response_class=HTMLResponse)
+    async def ldap_login(username: str = Form(""), password: str = Form("")):
+        if ")(invalid" in username:
+            return _layout("LDAP Error", "<pre>javax.naming.NamingException: bad search filter</pre>")
+        if "objectClass=*" in username or "uid=*" in username:
+            return _layout("LDAP Admin Panel", f"<p>Authenticated admin panel. {FLAG_ADMIN}</p>")
+        return _layout("LDAP Login Failed", "<p>invalid login</p>")
 
     @app.get("/admin", response_class=HTMLResponse)
     async def admin():

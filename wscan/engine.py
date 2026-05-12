@@ -2397,6 +2397,7 @@ class ScanEngine:
         "nosql",
         "ssrf",
         "deserialization",
+        "ldap",
     })
 
     async def _phase_verify(self):

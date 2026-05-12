@@ -147,7 +147,8 @@ Examples:
         "clickjacking", "open_redirect", "ssti", "privesc",
         "cors", "info_disclosure", "host_header", "security_headers",
         "nosql", "deserialization", "request_smuggling", "ssrf",
-        "graphql", "jwt",
+        "graphql", "jwt", "cms", "xxe", "ldap", "file_upload",
+        "race_condition", "websocket",
     ]
     _default_checks = _CFG.get("checks", ["sqli", "xss", "os"])
     scan.add_argument(
@@ -1486,7 +1487,9 @@ async def run_setup(args):
         f"You are a web security scanner configuration assistant.\n"
         f"The user wants to scan this target: {description}\n\n"
         f"Available checks: sqli, xss, dom_xss, os, ssti, path_traversal, "
-        f"csrf, header_injection, mail_header, open_redirect, clickjacking, session, privesc\n\n"
+        f"csrf, header_injection, mail_header, open_redirect, clickjacking, session, privesc, "
+        f"nosql, deserialization, ssrf, graphql, jwt, cms, xxe, ldap, file_upload, "
+        f"race_condition, websocket\n\n"
         f"Based on the description, suggest the optimal scan command. "
         f"Return a JSON object with these fields:\n"
         f"  checks: list of check names to enable\n"

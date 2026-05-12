@@ -8,6 +8,7 @@ from wscan.payload_gen import PayloadGenerator, _format_prompt_template
 from wscan.scanners.base import BaseScanner, Finding, finding_dedup_key_for
 from wscan.scanners.deserialization import DeserializationScanner
 from wscan.scanners.header_injection import HeaderInjectionScanner
+from wscan.scanners.ldap_injection import LDAPScanner
 from wscan.scanners.nosql_injection import NoSQLInjectionScanner
 from wscan.scanners.open_redirect import OpenRedirectScanner
 from wscan.scanners.os_injection import OSInjectionScanner
@@ -368,6 +369,52 @@ class DetectionEvidenceTests(unittest.TestCase):
                     "probe_id": "php_serialize_malformed",
                     "transport": "field",
                 },
+            )
+
+            result = await scanner.verify_finding(finding)
+
+            self.assertTrue(result)
+
+        self.run_async(run())
+
+    def test_ldap_verifier_rejects_preexisting_error(self):
+        async def run():
+            scanner = LDAPScanner(_DummyEngine())
+            scanner._apply_payload = AsyncMock(side_effect=[
+                ("javax.naming.NamingException: bad search filter", {}),
+                ("javax.naming.NamingException: bad search filter", {}),
+            ])
+            finding = Finding(
+                check_type="ldap",
+                severity="high",
+                url="http://fixture.test/ldap-login",
+                field_name="username",
+                payload=")(invalid",
+                evidence="LDAP error",
+                evidence_type="ldap_error",
+            )
+
+            result = await scanner.verify_finding(finding)
+
+            self.assertFalse(result)
+
+        self.run_async(run())
+
+    def test_ldap_verifier_confirms_probe_only_bypass(self):
+        async def run():
+            scanner = LDAPScanner(_DummyEngine())
+            scanner._apply_payload = AsyncMock(side_effect=[
+                ("invalid login", {}),
+                ("Authenticated admin panel", {}),
+            ])
+            finding = Finding(
+                check_type="ldap",
+                severity="high",
+                url="http://fixture.test/ldap-login",
+                field_name="username",
+                payload="*))(|(objectClass=*",
+                evidence="LDAP auth bypass",
+                evidence_type="ldap_auth_bypass",
             )
 
             result = await scanner.verify_finding(finding)

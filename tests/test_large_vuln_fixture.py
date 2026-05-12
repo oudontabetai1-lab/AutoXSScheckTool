@@ -142,6 +142,24 @@ class LargeVulnerableFixtureTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("unserialize()", baseline_resp.text)
         self.assertIn("unserialize()", probe_resp.text)
 
+    async def test_ldap_login_returns_probe_only_success_or_error(self):
+        baseline_resp = await self.client.post(
+            "/ldap-login",
+            data={"username": "normaluser", "password": "x"},
+        )
+        bypass_resp = await self.client.post(
+            "/ldap-login",
+            data={"username": "*))(|(objectClass=*", "password": "x"},
+        )
+        error_resp = await self.client.post(
+            "/ldap-login",
+            data={"username": ")(invalid", "password": "x"},
+        )
+
+        self.assertIn("invalid login", baseline_resp.text)
+        self.assertIn(FLAG_ADMIN, bypass_resp.text)
+        self.assertIn("bad search filter", error_resp.text)
+
     async def test_admin_action_form_allows_low_privilege_role_change(self):
         form_resp = await self.client.get("/admin/actions")
         action_resp = await self.client.post(

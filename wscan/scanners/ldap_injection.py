@@ -47,6 +47,53 @@ class LDAPScanner(BaseScanner):
     CHECK_TYPE = "ldap"
     SEVERITY = "high"
 
+    async def _apply_payload(
+        self,
+        url: str,
+        form_index: int,
+        field_name: str,
+        payload: str,
+        is_url_param: bool,
+    ) -> tuple[str, dict]:
+        if is_url_param:
+            return await self.browser.test_url_param(url, field_name, payload)
+        await self.browser.navigate(url)
+        return await self.browser.fill_and_submit_form(form_index, field_name, payload)
+
+    def _classify(
+        self,
+        baseline_html: str,
+        probe_html: str,
+        payload: str,
+    ) -> tuple[str, str, dict] | None:
+        baseline_error = _ERROR_RE.search(baseline_html or "")
+        probe_error = _ERROR_RE.search(probe_html or "")
+        if probe_error and not baseline_error:
+            marker = probe_error.group(0)[:150]
+            return (
+                "ldap_error",
+                (
+                    f"LDAP injection: LDAP error or class name leaked in response "
+                    f"with payload {payload!r}"
+                ),
+                {"matched_error": marker},
+            )
+
+        baseline_success = _BYPASS_RE.search(baseline_html or "")
+        probe_success = _BYPASS_RE.search(probe_html or "")
+        if probe_success and not baseline_success:
+            marker = probe_success.group(0)[:150]
+            return (
+                "ldap_auth_bypass",
+                (
+                    f"LDAP injection: authentication bypass — success page appeared "
+                    f"only with payload {payload!r}"
+                ),
+                {"matched_success": marker},
+            )
+
+        return None
+
     async def scan_field(
         self,
         url: str,
@@ -59,8 +106,8 @@ class LDAPScanner(BaseScanner):
 
         # Obtain a baseline response first
         try:
-            baseline_html, _ = await self.browser.submit_form(
-                url, form_index, {field_name: "normaluser"}
+            baseline_html, _ = await self._apply_payload(
+                url, form_index, field_name, "normaluser", is_url_param
             )
         except Exception as exc:
             if self.monitor:
@@ -73,36 +120,30 @@ class LDAPScanner(BaseScanner):
             if self.monitor:
                 await self.monitor.emit_payload_test(url, field_name, payload, self.CHECK_TYPE)
             try:
-                html, _ = await self.browser.submit_form(
-                    url, form_index, {field_name: payload}
+                html, pair = await self._apply_payload(
+                    url, form_index, field_name, payload, is_url_param
                 )
             except Exception as exc:
                 if self.monitor:
                     await self.monitor.emit_status(
                         f"[warn] ldap: request failed on {url} ({field_name}): {exc}"
-                    )
+                )
                 continue
 
-            evidence = None
-            if _ERROR_RE.search(html):
-                evidence = (
-                    f"LDAP injection: LDAP error or class name leaked in response "
-                    f"with payload {payload!r}"
-                )
-            elif _BYPASS_RE.search(html) and not _BYPASS_RE.search(baseline_html):
-                evidence = (
-                    f"LDAP injection: authentication bypass — success page appeared "
-                    f"only with payload {payload!r}"
-                )
+            classified = self._classify(baseline_html, html, payload)
+            if classified:
+                evidence_type, evidence, evidence_details = classified
 
-            if evidence:
                 finding = await self.record_finding(
                     url=url,
                     field_name=field_name,
                     payload=payload,
                     evidence=evidence,
-                    pair={},
+                    pair=pair,
                     severity="high",
+                    confidence="likely",
+                    evidence_type=evidence_type,
+                    evidence_details=evidence_details,
                 )
                 findings.append(finding)
                 break  # one confirmed finding per field
@@ -111,3 +152,30 @@ class LDAPScanner(BaseScanner):
 
     async def scan_page(self, url: str) -> list[Finding]:
         return []
+
+    async def verify_finding(self, finding: Finding) -> bool | None:
+        from urllib.parse import parse_qs, urlparse
+
+        is_url_param = finding.field_name in parse_qs(
+            urlparse(finding.url).query, keep_blank_values=True
+        )
+        try:
+            baseline_html, _ = await self._apply_payload(
+                finding.url,
+                0,
+                finding.field_name,
+                "normaluser",
+                is_url_param,
+            )
+            probe_html, _ = await self._apply_payload(
+                finding.url,
+                0,
+                finding.field_name,
+                finding.payload,
+                is_url_param,
+            )
+        except Exception:
+            return None
+
+        classified = self._classify(baseline_html, probe_html, finding.payload)
+        return bool(classified and classified[0] == finding.evidence_type)
