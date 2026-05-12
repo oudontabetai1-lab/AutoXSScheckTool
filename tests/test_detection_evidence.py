@@ -171,6 +171,72 @@ class DetectionEvidenceTests(unittest.TestCase):
 
         self.assertEqual(prioritized, payloads)
 
+    def test_sqli_boolean_verifier_requires_true_response_to_stay_near_baseline(self):
+        async def run():
+            scanner = SQLiScanner(_DummyEngine())
+            baseline = "Y" * 1000
+            true_src = "Y" * 1500
+            false_src = "Z" * 1500
+            scanner._get_baseline = AsyncMock(return_value=(baseline, {}))
+            scanner._apply_payload = AsyncMock(side_effect=[
+                (true_src, {}),
+                (true_src, {}),
+                (false_src, {}),
+            ])
+            finding = Finding(
+                check_type="sqli",
+                severity="high",
+                url="http://fixture.test/item?id=1",
+                field_name="id",
+                payload="1 AND 1=1",
+                evidence="boolean sqli",
+                evidence_type="sqli_boolean",
+                evidence_details={
+                    "true_payload": "1 AND 1=1",
+                    "false_payload": "1 AND 1=2",
+                    "baseline_variance": 0,
+                },
+            )
+
+            result = await scanner.verify_finding(finding)
+
+            self.assertFalse(result)
+
+        self.run_async(run())
+
+    def test_sqli_boolean_verifier_accepts_detection_thresholds(self):
+        async def run():
+            scanner = SQLiScanner(_DummyEngine())
+            baseline = "Y" * 1000
+            true_src = "Y" * 990
+            false_src = "Z" * 1500
+            scanner._get_baseline = AsyncMock(return_value=(baseline, {}))
+            scanner._apply_payload = AsyncMock(side_effect=[
+                (true_src, {}),
+                (true_src, {}),
+                (false_src, {}),
+            ])
+            finding = Finding(
+                check_type="sqli",
+                severity="high",
+                url="http://fixture.test/item?id=1",
+                field_name="id",
+                payload="1 AND 1=1",
+                evidence="boolean sqli",
+                evidence_type="sqli_boolean",
+                evidence_details={
+                    "true_payload": "1 AND 1=1",
+                    "false_payload": "1 AND 1=2",
+                    "baseline_variance": 0,
+                },
+            )
+
+            result = await scanner.verify_finding(finding)
+
+            self.assertTrue(result)
+
+        self.run_async(run())
+
     def test_prompt_template_formatting_preserves_payload_braces(self):
         template = (
             'Generate for "{field_name}" at "{url}". '
