@@ -556,10 +556,12 @@ class ScanEngine:
 
         finally:
             self.controller.stop()
-            await self._browser.close()
 
             # ── Phase 4.5: Verification ──────────────────────────────────
-            await self._phase_verify()
+            try:
+                await self._phase_verify()
+            finally:
+                await self._browser.close()
 
             # ── Phase 4: Report ──────────────────────────────────────────
             if self.monitor: await self.monitor.emit_phase("report")
@@ -2384,7 +2386,15 @@ class ScanEngine:
     # Phase 4.5: Verification — re-test each finding to catch false positives
     # =========================================================================
 
-    _VERIFIABLE_CHECKS = frozenset({"xss", "sqli", "os", "ssti", "path_traversal"})
+    _VERIFIABLE_CHECKS = frozenset({
+        "xss",
+        "sqli",
+        "os",
+        "ssti",
+        "path_traversal",
+        "open_redirect",
+        "header_injection",
+    })
 
     async def _phase_verify(self):
         """

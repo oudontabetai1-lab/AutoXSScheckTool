@@ -6,6 +6,8 @@ from wscan.ctf_flag_finder import FlagFinder
 from wscan.engine import ScanEngine
 from wscan.payload_gen import PayloadGenerator, _format_prompt_template
 from wscan.scanners.base import BaseScanner, Finding, finding_dedup_key_for
+from wscan.scanners.header_injection import HeaderInjectionScanner
+from wscan.scanners.open_redirect import OpenRedirectScanner
 from wscan.scanners.security_headers import SecurityHeadersScanner
 from wscan.scanners.sqli import SQLiScanner
 from wscan.scanners.ssti import SSTIScanner
@@ -254,6 +256,68 @@ class DetectionEvidenceTests(unittest.TestCase):
 
         import asyncio
         asyncio.run(run())
+
+    def test_header_injection_verifier_replays_payload_and_checks_header(self):
+        async def run():
+            scanner = HeaderInjectionScanner(_DummyEngine())
+            scanner._apply_payload = AsyncMock(return_value=(
+                "ok",
+                {"response": {"headers": {"x-wscanhdrinject": "1"}}},
+            ))
+            finding = Finding(
+                check_type="header_injection",
+                severity="high",
+                url="http://fixture.test/header-echo?ref=safe",
+                field_name="ref",
+                payload="\r\nX-WscanHdrInject: 1",
+                evidence="header injected",
+            )
+
+            result = await scanner.verify_finding(finding)
+
+            self.assertTrue(result)
+            scanner._apply_payload.assert_awaited_with(
+                finding.url,
+                0,
+                "ref",
+                "\r\nX-WscanHdrInject: 1",
+                True,
+            )
+
+        self.run_async(run())
+
+    def test_open_redirect_verifier_replays_payload_and_checks_location(self):
+        async def run():
+            scanner = OpenRedirectScanner(_DummyEngine())
+            scanner._apply_payload = AsyncMock(return_value=(
+                "",
+                {
+                    "response": {
+                        "headers": {"Location": "https://evil.wscan-test.example.com"}
+                    }
+                },
+            ))
+            finding = Finding(
+                check_type="open_redirect",
+                severity="medium",
+                url="http://fixture.test/go?next=/catalog",
+                field_name="next",
+                payload="https://evil.wscan-test.example.com",
+                evidence="redirected",
+            )
+
+            result = await scanner.verify_finding(finding)
+
+            self.assertTrue(result)
+            scanner._apply_payload.assert_awaited_with(
+                finding.url,
+                0,
+                "next",
+                "https://evil.wscan-test.example.com",
+                True,
+            )
+
+        self.run_async(run())
 
     def test_network_capture_prefers_target_url_over_later_assets(self):
         capture = NetworkCapture()

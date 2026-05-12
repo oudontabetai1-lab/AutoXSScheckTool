@@ -4,6 +4,7 @@ Detects CRLF injection that allows arbitrary HTTP response header insertion (IPA
 """
 import asyncio
 from typing import TYPE_CHECKING
+from urllib.parse import parse_qs, urlparse
 
 from .base import BaseScanner, Finding
 
@@ -23,6 +24,24 @@ CRLF_PAYLOADS = [
     f"%0d%0a X-{_MARKER}:%201",    # with space (some WAF bypasses)
     f"\r\nSet-Cookie: wscan_session=injected; Path=/",  # also test cookie injection
 ]
+
+
+def _response_headers(pair: dict) -> dict:
+    return {
+        k.lower(): v
+        for k, v in pair.get("response", {}).get("headers", {}).items()
+    }
+
+
+def _injected_header_detected(pair: dict) -> tuple[bool, str]:
+    resp_headers = _response_headers(pair)
+    marker_lower = f"x-{_MARKER.lower()}"
+    if marker_lower in resp_headers:
+        return True, "marker_header"
+    set_cookie = resp_headers.get("set-cookie", "").lower()
+    if "wscan_session=injected" in set_cookie:
+        return True, "set_cookie"
+    return False, ""
 
 
 class HeaderInjectionScanner(BaseScanner):
@@ -55,14 +74,9 @@ class HeaderInjectionScanner(BaseScanner):
             )
             await asyncio.sleep(0.2 * self.sleep_factor)
 
-            resp_headers = {
-                k.lower(): v
-                for k, v in pair.get("response", {}).get("headers", {}).items()
-            }
-
             # Confirmed: injected header name appears in the response headers
-            marker_lower = f"x-{_MARKER.lower()}"
-            if marker_lower in resp_headers:
+            detected, signal = _injected_header_detected(pair)
+            if detected and signal == "marker_header":
                 finding = await self.record_finding(
                     url=url,
                     field_name=field_name,
@@ -78,8 +92,7 @@ class HeaderInjectionScanner(BaseScanner):
                 break
 
             # Secondary: injected Set-Cookie appeared in cookies (case-insensitive value check)
-            _sc_val = resp_headers.get("set-cookie", "").lower()
-            if "set-cookie" in resp_headers and "wscan_session=injected" in _sc_val:
+            if detected and signal == "set_cookie":
                 finding = await self.record_finding(
                     url=url,
                     field_name=field_name,
@@ -95,6 +108,20 @@ class HeaderInjectionScanner(BaseScanner):
                 break
 
         return findings
+
+    async def verify_finding(self, finding: Finding) -> bool | None:
+        is_url_param = finding.field_name in parse_qs(
+            urlparse(finding.url).query, keep_blank_values=True
+        )
+        _source, pair = await self._apply_payload(
+            finding.url,
+            0,
+            finding.field_name,
+            finding.payload,
+            is_url_param,
+        )
+        detected, _signal = _injected_header_detected(pair)
+        return detected
 
     async def _apply_payload(
         self,
