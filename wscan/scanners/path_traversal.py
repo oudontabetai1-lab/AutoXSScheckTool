@@ -4,6 +4,7 @@ Detects parameter-based directory traversal (IPA: 1.3 パス名パラメータ�
 """
 import asyncio
 from typing import TYPE_CHECKING
+from urllib.parse import parse_qs, urlparse
 
 from .base import BaseScanner, Finding
 
@@ -98,6 +99,36 @@ class PathTraversalScanner(BaseScanner):
                 break
 
         return findings
+
+    async def verify_finding(self, finding: Finding) -> bool | None:
+        is_url_param = finding.field_name in parse_qs(
+            urlparse(finding.url).query, keep_blank_values=True
+        )
+        baseline_source, _ = await self._apply_payload(
+            finding.url,
+            0,
+            finding.field_name,
+            "baseline_test_value",
+            is_url_param,
+        )
+        source, _pair = await self._apply_payload(
+            finding.url,
+            0,
+            finding.field_name,
+            finding.payload,
+            is_url_param,
+        )
+        match = self.check_response_for_patterns(source or "", PATH_TRAVERSAL_PATTERNS)
+        if not match:
+            return False
+        if baseline_source:
+            baseline_match = self.check_response_for_patterns(
+                baseline_source,
+                PATH_TRAVERSAL_PATTERNS,
+            )
+            if baseline_match:
+                return False
+        return True
 
     async def _apply_payload(
         self,

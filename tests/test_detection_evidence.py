@@ -8,6 +8,7 @@ from wscan.payload_gen import PayloadGenerator, _format_prompt_template
 from wscan.scanners.base import BaseScanner, Finding, finding_dedup_key_for
 from wscan.scanners.header_injection import HeaderInjectionScanner
 from wscan.scanners.open_redirect import OpenRedirectScanner
+from wscan.scanners.path_traversal import PathTraversalScanner
 from wscan.scanners.security_headers import SecurityHeadersScanner
 from wscan.scanners.sqli import SQLiScanner
 from wscan.scanners.ssti import SSTIScanner
@@ -316,6 +317,64 @@ class DetectionEvidenceTests(unittest.TestCase):
                 "https://evil.wscan-test.example.com",
                 True,
             )
+
+        self.run_async(run())
+
+    def test_path_traversal_verifier_replays_baseline_and_payload(self):
+        async def run():
+            scanner = PathTraversalScanner(_DummyEngine())
+            scanner._apply_payload = AsyncMock(side_effect=[
+                ("Documentation for baseline_test_value", {}),
+                ("root:x:0:0:root:/root:/bin/bash", {}),
+            ])
+            finding = Finding(
+                check_type="path_traversal",
+                severity="high",
+                url="http://fixture.test/download?file=readme.txt",
+                field_name="file",
+                payload="../../../../etc/passwd",
+                evidence="passwd leaked",
+            )
+
+            result = await scanner.verify_finding(finding)
+
+            self.assertTrue(result)
+            scanner._apply_payload.assert_any_await(
+                finding.url,
+                0,
+                "file",
+                "baseline_test_value",
+                True,
+            )
+            scanner._apply_payload.assert_any_await(
+                finding.url,
+                0,
+                "file",
+                "../../../../etc/passwd",
+                True,
+            )
+
+        self.run_async(run())
+
+    def test_path_traversal_verifier_rejects_baseline_pattern(self):
+        async def run():
+            scanner = PathTraversalScanner(_DummyEngine())
+            scanner._apply_payload = AsyncMock(side_effect=[
+                ("root:x:0:0:root:/root:/bin/bash", {}),
+                ("root:x:0:0:root:/root:/bin/bash", {}),
+            ])
+            finding = Finding(
+                check_type="path_traversal",
+                severity="high",
+                url="http://fixture.test/download?file=readme.txt",
+                field_name="file",
+                payload="../../../../etc/passwd",
+                evidence="passwd leaked",
+            )
+
+            result = await scanner.verify_finding(finding)
+
+            self.assertFalse(result)
 
         self.run_async(run())
 
