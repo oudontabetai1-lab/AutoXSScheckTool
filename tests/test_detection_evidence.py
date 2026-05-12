@@ -37,6 +37,20 @@ class _DummyScanner(BaseScanner):
         return []
 
 
+class _VerifierBrowser:
+    def __init__(self, baseline_html=""):
+        self.dialog_fired = False
+        self.page = type(
+            "Page",
+            (),
+            {"content": AsyncMock(return_value=baseline_html)},
+        )()
+        self.navigate = AsyncMock(return_value=True)
+
+    def reset_dialog(self):
+        self.dialog_fired = False
+
+
 class DetectionEvidenceTests(unittest.TestCase):
     def test_finding_serializes_structured_evidence(self):
         finding = Finding(
@@ -141,6 +155,51 @@ class DetectionEvidenceTests(unittest.TestCase):
 
         self.assertEqual(reflection["context"], "html_text")
         self.assertEqual(reflection["confidence"], "tentative")
+
+    def test_xss_verifier_resets_stale_dialog_state(self):
+        async def run():
+            scanner = XSSScanner(_DummyEngine())
+            scanner.browser = _VerifierBrowser("<html>baseline</html>")
+            scanner.browser.dialog_fired = True
+            scanner._apply_payload = AsyncMock(return_value=("<html>no payload</html>", {}))
+            finding = Finding(
+                check_type="xss",
+                severity="critical",
+                url="http://fixture.test/search?q=x",
+                field_name="q",
+                payload="<script>alert(1)</script>",
+                evidence="dialog fired",
+                evidence_type="xss_dialog",
+            )
+
+            result = await scanner.verify_finding(finding)
+
+            self.assertFalse(result)
+
+        self.run_async(run())
+
+    def test_xss_verifier_uses_baseline_for_reflection(self):
+        async def run():
+            payload = "<svg onload=alert(1)>"
+            html = f"<html><body>{payload}</body></html>"
+            scanner = XSSScanner(_DummyEngine())
+            scanner.browser = _VerifierBrowser(html)
+            scanner._apply_payload = AsyncMock(return_value=(html, {}))
+            finding = Finding(
+                check_type="xss",
+                severity="high",
+                url="http://fixture.test/search?q=x",
+                field_name="q",
+                payload=payload,
+                evidence="reflected",
+                evidence_type="xss_reflection",
+            )
+
+            result = await scanner.verify_finding(finding)
+
+            self.assertFalse(result)
+
+        self.run_async(run())
 
     def test_sqli_similarity_ignores_dynamic_noise(self):
         scanner = object.__new__(SQLiScanner)

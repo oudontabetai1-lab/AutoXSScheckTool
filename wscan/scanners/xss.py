@@ -168,6 +168,8 @@ class XSSScanner(BaseScanner):
         contexts from weaker text-node reflections.
         """
         if payload and len(payload) > 5 and payload in source:
+            if baseline_source and source.count(payload) <= baseline_source.count(payload):
+                return {}
             idx = source.find(payload)
             preceding = source.lower()[max(0, idx - 300):idx]
             if not (preceding.rfind("<!--") > preceding.rfind("-->")):
@@ -261,6 +263,14 @@ class XSSScanner(BaseScanner):
         is_url_param = finding.field_name in parse_qs(
             urlparse(finding.url).query, keep_blank_values=True
         )
+        baseline_source = ""
+        try:
+            self.browser.reset_dialog()
+            await self.browser.navigate(finding.url)
+            baseline_source = await self.browser.page.content()
+        except Exception:
+            baseline_source = ""
+        self.browser.reset_dialog()
         source, _ = await self._apply_payload(
             finding.url,
             0,
@@ -271,7 +281,9 @@ class XSSScanner(BaseScanner):
         await asyncio.sleep(0.5 * self.sleep_factor)
         if self.browser.dialog_fired:
             return True
-        return bool(source and self._analyze_reflection(source, finding.payload))
+        if getattr(finding, "evidence_type", "") == "xss_dialog":
+            return False
+        return bool(source and self._analyze_reflection(source, finding.payload, baseline_source))
 
     async def _apply_payload(
         self,
