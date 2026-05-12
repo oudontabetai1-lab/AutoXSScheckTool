@@ -217,7 +217,7 @@ class BrowserManager:
                     document.querySelectorAll('form').forEach((form, fi) => {
                         const inputs = [];
                         const els = form.querySelectorAll(
-                            'input:not([type=hidden]):not([type=submit]):not([type=button]):not([type=reset]):not([type=image]):not([type=file]):not([type=checkbox]):not([type=radio]), textarea'
+                            'input:not([type=hidden]):not([type=submit]):not([type=button]):not([type=reset]):not([type=image]):not([type=checkbox]):not([type=radio]), textarea'
                         );
                         els.forEach((el, ii) => {
                             inputs.push({

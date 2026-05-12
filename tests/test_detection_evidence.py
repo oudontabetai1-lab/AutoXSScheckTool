@@ -7,6 +7,7 @@ from wscan.engine import ScanEngine
 from wscan.payload_gen import PayloadGenerator, _format_prompt_template
 from wscan.scanners.base import BaseScanner, Finding, finding_dedup_key_for
 from wscan.scanners.deserialization import DeserializationScanner
+from wscan.scanners.file_upload import FileUploadScanner
 from wscan.scanners.header_injection import HeaderInjectionScanner
 from wscan.scanners.ldap_injection import LDAPScanner
 from wscan.scanners.nosql_injection import NoSQLInjectionScanner
@@ -469,6 +470,58 @@ class DetectionEvidenceTests(unittest.TestCase):
             result = await scanner.verify_finding(finding)
 
             self.assertTrue(result)
+
+        self.run_async(run())
+
+    def test_file_upload_verifier_replays_dangerous_filename(self):
+        async def run():
+            scanner = FileUploadScanner(_DummyEngine())
+            scanner._upload_file = AsyncMock(
+                return_value=(
+                    "uploaded and executed: wscan-probe-8.2",
+                    200,
+                    {"request": {}, "response": {}},
+                )
+            )
+            finding = Finding(
+                check_type="file_upload",
+                severity="critical",
+                url="http://fixture.test/upload",
+                field_name="file",
+                payload="wscan_probe.php",
+                evidence="upload executed",
+                evidence_type="file_upload_executable",
+            )
+
+            result = await scanner.verify_finding(finding)
+
+            self.assertTrue(result)
+
+        self.run_async(run())
+
+    def test_file_upload_verifier_rejects_changed_response(self):
+        async def run():
+            scanner = FileUploadScanner(_DummyEngine())
+            scanner._upload_file = AsyncMock(
+                return_value=(
+                    "rejected extension",
+                    400,
+                    {"request": {}, "response": {}},
+                )
+            )
+            finding = Finding(
+                check_type="file_upload",
+                severity="critical",
+                url="http://fixture.test/upload",
+                field_name="file",
+                payload="wscan_probe.php",
+                evidence="upload executed",
+                evidence_type="file_upload_executable",
+            )
+
+            result = await scanner.verify_finding(finding)
+
+            self.assertFalse(result)
 
         self.run_async(run())
 

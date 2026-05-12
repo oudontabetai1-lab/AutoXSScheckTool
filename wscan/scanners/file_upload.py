@@ -9,6 +9,7 @@ Detects insecure file upload endpoints that allow:
 import io
 import re
 from typing import TYPE_CHECKING
+from urllib.parse import urljoin
 
 import httpx
 
@@ -61,6 +62,86 @@ class FileUploadScanner(BaseScanner):
         super().__init__(engine)
         self._checked_forms: set[tuple] = set()
 
+    def _probe_by_filename(self, filename: str) -> tuple[str, bytes, str] | None:
+        for probe in _PROBE_FILES:
+            if probe[0] == filename:
+                return probe
+        return None
+
+    async def _form_action_url(self, page_url: str, form_index: int) -> str:
+        try:
+            await self.browser.navigate(page_url)
+            action = await self.browser.page.evaluate(
+                """
+                ([formIndex]) => {
+                    const form = document.querySelectorAll('form')[formIndex];
+                    return form ? (form.action || window.location.href) : window.location.href;
+                }
+                """,
+                [form_index],
+            )
+            return urljoin(page_url, action or page_url)
+        except Exception:
+            return page_url
+
+    async def _upload_file(
+        self,
+        url: str,
+        field_name: str,
+        filename: str,
+        content: bytes,
+    ) -> tuple[str, int, dict]:
+        proxy = getattr(self.engine, "proxy", "") or None
+        timeout = getattr(self.engine, "timeout", 15)
+        client_kwargs: dict = {
+            "timeout": timeout,
+            "follow_redirects": True,
+            "verify": False,
+        }
+        if proxy:
+            client_kwargs["proxy"] = proxy
+
+        request_kwargs = {
+            "files": {field_name: (filename, io.BytesIO(content), "image/jpeg")},
+        }
+        async with httpx.AsyncClient(**client_kwargs) as client:
+            response = await client.post(url, **request_kwargs)
+        pair = {
+            "request": {"url": url, "method": "POST", "filename": filename},
+            "response": {"status": response.status_code, "body": response.text[:1000]},
+        }
+        return response.text, response.status_code, pair
+
+    def _classify(
+        self,
+        body: str,
+        status_code: int,
+        filename: str,
+        description: str,
+    ) -> tuple[str, str, str, dict] | None:
+        if _SHELL_ECHO_RE.search(body or ""):
+            return (
+                "file_upload_executable",
+                "critical",
+                (
+                    f"File upload: uploaded file was executed as code — "
+                    f"server returned probe output. Filename: {filename!r}. "
+                    f"Description: {description}."
+                ),
+                {"filename": filename, "description": description},
+            )
+        if status_code in (200, 201) and _SUCCESS_RE.search(body or ""):
+            return (
+                "file_upload_dangerous_accept",
+                "high",
+                (
+                    f"File upload: server accepted {description} ({filename!r}) "
+                    f"without rejection. Verify whether the file is accessible/executable."
+                ),
+                {"filename": filename, "description": description},
+            )
+        return None
+
     async def scan_field(
         self,
         url: str,
@@ -78,9 +159,7 @@ class FileUploadScanner(BaseScanner):
 
         field_name = field.get("name") or field.get("id") or "file"
         findings: list[Finding] = []
-
-        proxy = getattr(self.engine, "proxy", "") or None
-        timeout = getattr(self.engine, "timeout", 15)
+        action_url = await self._form_action_url(url, form_index)
 
         for filename, content, description in _PROBE_FILES:
             if self.monitor:
@@ -88,20 +167,9 @@ class FileUploadScanner(BaseScanner):
                     url, field_name, filename, self.CHECK_TYPE
                 )
             try:
-                request_kwargs: dict = {
-                    "files": {field_name: (filename, io.BytesIO(content), "image/jpeg")},
-                }
-                client_kwargs: dict = {
-                    "timeout": timeout,
-                    "follow_redirects": True,
-                    "verify": False,
-                }
-                if proxy:
-                    client_kwargs["proxy"] = proxy
-
-                async with httpx.AsyncClient(**client_kwargs) as client:
-                    r = await client.post(url, **request_kwargs)
-                body = r.text
+                body, status_code, pair = await self._upload_file(
+                    action_url, field_name, filename, content
+                )
 
             except Exception as exc:
                 if self.monitor:
@@ -110,38 +178,42 @@ class FileUploadScanner(BaseScanner):
                     )
                 continue
 
-            severity = "critical"
-            evidence = None
+            classified = self._classify(body, status_code, filename, description)
 
-            if _SHELL_ECHO_RE.search(body):
-                evidence = (
-                    f"File upload: uploaded file was executed as code — "
-                    f"server returned probe output. Filename: {filename!r}. "
-                    f"Description: {description}."
-                )
-                severity = "critical"
-            elif r.status_code in (200, 201) and _SUCCESS_RE.search(body):
-                evidence = (
-                    f"File upload: server accepted {description} ({filename!r}) "
-                    f"without rejection. Verify whether the file is accessible/executable."
-                )
-                severity = "high"
-
-            if evidence:
+            if classified:
+                evidence_type, severity, evidence, evidence_details = classified
                 finding = await self.record_finding(
-                    url=url,
+                    url=action_url,
                     field_name=field_name,
                     payload=filename,
                     evidence=evidence,
-                    pair={
-                        "request": {"url": url, "method": "POST", "filename": filename},
-                        "response": {"status": r.status_code, "body": body[:1000]},
-                    },
+                    pair=pair,
                     severity=severity,
+                    confidence="likely",
+                    evidence_type=evidence_type,
+                    evidence_details=evidence_details,
                 )
                 findings.append(finding)
+                break
 
         return findings
 
     async def scan_page(self, url: str) -> list[Finding]:
         return []
+
+    async def verify_finding(self, finding: Finding) -> bool | None:
+        probe = self._probe_by_filename(finding.payload)
+        if not probe:
+            return None
+        filename, content, description = probe
+        try:
+            body, status_code, _pair = await self._upload_file(
+                finding.url,
+                finding.field_name,
+                filename,
+                content,
+            )
+        except Exception:
+            return None
+        classified = self._classify(body, status_code, filename, description)
+        return bool(classified and classified[0] == finding.evidence_type)

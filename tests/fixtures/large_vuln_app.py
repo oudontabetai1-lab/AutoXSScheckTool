@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from urllib.parse import unquote
 
-from fastapi import FastAPI, Form, Query, Request
+from fastapi import FastAPI, File, Form, Query, Request, UploadFile
 from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse
 
 
@@ -29,6 +29,7 @@ def _layout(title: str, body: str) -> str:
             '<a href="/deserialize">Deserialize</a>',
             '<a href="/ldap-login">LDAP Login</a>',
             '<a href="/xml">XML Import</a>',
+            '<a href="/upload">Upload</a>',
             '<a href="/login">Login</a>',
             '<a href="/admin/actions">Admin Actions</a>',
             '<a href="/ctf">CTF</a>',
@@ -324,6 +325,28 @@ def create_app(page_count: int = 48) -> FastAPI:
         if "<!ENTITY lol" in body:
             return "lollollollol entity expanded"
         return "XML import accepted"
+
+    @app.get("/upload", response_class=HTMLResponse)
+    async def upload_form():
+        return _layout(
+            "Upload",
+            """
+            <form method="post" action="/upload" enctype="multipart/form-data">
+              <input name="file" type="file">
+              <button>Upload</button>
+            </form>
+            """,
+        )
+
+    @app.post("/upload", response_class=PlainTextResponse)
+    async def upload(file: UploadFile = File(...)):
+        data = await file.read()
+        if file.filename and file.filename.endswith((".php", ".phtml", ".jsp", ".php.jpg")):
+            if b"wscan-probe-jsp" in data:
+                return "uploaded and executed: wscan-probe-jsp"
+            if b"wscan-probe-" in data:
+                return "uploaded and executed: wscan-probe-8.2"
+        return f"uploaded {file.filename}"
 
     @app.get("/admin", response_class=HTMLResponse)
     async def admin():

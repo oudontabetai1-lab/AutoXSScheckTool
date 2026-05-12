@@ -2399,6 +2399,7 @@ class ScanEngine:
         "deserialization",
         "ldap",
         "xxe",
+        "file_upload",
     })
 
     async def _phase_verify(self):

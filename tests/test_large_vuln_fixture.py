@@ -175,6 +175,14 @@ class LargeVulnerableFixtureTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("root:x:0:0", baseline_resp.text)
         self.assertIn("root:x:0:0", probe_resp.text)
 
+    async def test_upload_endpoint_executes_probe_file(self):
+        resp = await self.client.post(
+            "/upload",
+            files={"file": ("wscan_probe.php", b"<?php echo 'wscan-probe-' . phpversion(); ?>", "image/jpeg")},
+        )
+
+        self.assertIn("wscan-probe-8.2", resp.text)
+
     async def test_admin_action_form_allows_low_privilege_role_change(self):
         form_resp = await self.client.get("/admin/actions")
         action_resp = await self.client.post(
