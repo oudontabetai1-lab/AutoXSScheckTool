@@ -183,6 +183,22 @@ class LargeVulnerableFixtureTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("wscan-probe-8.2", resp.text)
 
+    async def test_coupon_endpoint_allows_parallel_successes(self):
+        import asyncio
+
+        await self.client.get("/coupon")
+        responses = await asyncio.gather(
+            *[
+                self.client.post("/coupon/apply", data={"coupon": "SAVE100"})
+                for _ in range(4)
+            ]
+        )
+
+        self.assertGreaterEqual(
+            sum("success coupon accepted" in resp.text for resp in responses),
+            2,
+        )
+
     async def test_admin_action_form_allows_low_privilege_role_change(self):
         form_resp = await self.client.get("/admin/actions")
         action_resp = await self.client.post(

@@ -14,6 +14,7 @@ from wscan.scanners.nosql_injection import NoSQLInjectionScanner
 from wscan.scanners.open_redirect import OpenRedirectScanner
 from wscan.scanners.os_injection import OSInjectionScanner
 from wscan.scanners.path_traversal import PathTraversalScanner
+from wscan.scanners.race_condition import RaceConditionScanner
 from wscan.scanners.security_headers import SecurityHeadersScanner
 from wscan.scanners.sqli import SQLiScanner
 from wscan.scanners.ssrf import SSRFScanner
@@ -517,6 +518,105 @@ class DetectionEvidenceTests(unittest.TestCase):
                 payload="wscan_probe.php",
                 evidence="upload executed",
                 evidence_type="file_upload_executable",
+            )
+
+            result = await scanner.verify_finding(finding)
+
+            self.assertFalse(result)
+
+        self.run_async(run())
+
+    def test_race_condition_verifier_replays_burst(self):
+        async def run():
+            class Resp:
+                def __init__(self, text):
+                    self.text = text
+
+            scanner = RaceConditionScanner(_DummyEngine())
+            scanner._send_burst = AsyncMock(return_value=[
+                Resp("success coupon accepted"),
+                Resp("success coupon accepted"),
+                Resp("already redeemed"),
+            ])
+            finding = Finding(
+                check_type="race_condition",
+                severity="high",
+                url="http://fixture.test/coupon/apply",
+                field_name="coupon",
+                payload="8x simultaneous POST requests",
+                evidence="race",
+                evidence_type="race_condition_burst",
+                evidence_details={
+                    "method": "POST",
+                    "body": "coupon=SAVE100",
+                    "headers": {"Content-Type": "application/x-www-form-urlencoded"},
+                },
+            )
+
+            result = await scanner.verify_finding(finding)
+
+            self.assertTrue(result)
+
+        self.run_async(run())
+
+    def test_race_condition_verifier_rejects_no_success(self):
+        async def run():
+            class Resp:
+                def __init__(self, text):
+                    self.text = text
+
+            scanner = RaceConditionScanner(_DummyEngine())
+            scanner._send_burst = AsyncMock(return_value=[
+                Resp("already redeemed"),
+                Resp("already redeemed"),
+                Resp("already redeemed"),
+            ])
+            finding = Finding(
+                check_type="race_condition",
+                severity="high",
+                url="http://fixture.test/coupon/apply",
+                field_name="coupon",
+                payload="8x simultaneous POST requests",
+                evidence="race",
+                evidence_type="race_condition_burst",
+                evidence_details={
+                    "method": "POST",
+                    "body": "coupon=SAVE100",
+                    "headers": {"Content-Type": "application/x-www-form-urlencoded"},
+                },
+            )
+
+            result = await scanner.verify_finding(finding)
+
+            self.assertFalse(result)
+
+        self.run_async(run())
+
+    def test_race_condition_verifier_rejects_single_success_with_duplicates(self):
+        async def run():
+            class Resp:
+                def __init__(self, text):
+                    self.text = text
+
+            scanner = RaceConditionScanner(_DummyEngine())
+            scanner._send_burst = AsyncMock(return_value=[
+                Resp("success coupon accepted"),
+                Resp("already redeemed"),
+                Resp("already redeemed"),
+            ])
+            finding = Finding(
+                check_type="race_condition",
+                severity="high",
+                url="http://fixture.test/coupon/apply",
+                field_name="coupon",
+                payload="8x simultaneous POST requests",
+                evidence="race",
+                evidence_type="race_condition_burst",
+                evidence_details={
+                    "method": "POST",
+                    "body": "coupon=SAVE100",
+                    "headers": {"Content-Type": "application/x-www-form-urlencoded"},
+                },
             )
 
             result = await scanner.verify_finding(finding)

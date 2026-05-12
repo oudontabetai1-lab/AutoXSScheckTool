@@ -30,6 +30,7 @@ def _layout(title: str, body: str) -> str:
             '<a href="/ldap-login">LDAP Login</a>',
             '<a href="/xml">XML Import</a>',
             '<a href="/upload">Upload</a>',
+            '<a href="/coupon">Coupon</a>',
             '<a href="/login">Login</a>',
             '<a href="/admin/actions">Admin Actions</a>',
             '<a href="/ctf">CTF</a>',
@@ -347,6 +348,29 @@ def create_app(page_count: int = 48) -> FastAPI:
             if b"wscan-probe-" in data:
                 return "uploaded and executed: wscan-probe-8.2"
         return f"uploaded {file.filename}"
+
+    @app.get("/coupon", response_class=HTMLResponse)
+    async def coupon_form():
+        app.state.coupon_claimed = False
+        return _layout(
+            "Coupon",
+            """
+            <form method="post" action="/coupon/apply">
+              <input name="coupon" value="SAVE100">
+              <button>Apply</button>
+            </form>
+            """,
+        )
+
+    @app.post("/coupon/apply", response_class=PlainTextResponse)
+    async def coupon_apply(coupon: str = Form("")):
+        if not getattr(app.state, "coupon_claimed", False):
+            import asyncio
+
+            await asyncio.sleep(0.05)
+            app.state.coupon_claimed = True
+            return f"success coupon accepted: {coupon}"
+        return "already redeemed"
 
     @app.get("/admin", response_class=HTMLResponse)
     async def admin():

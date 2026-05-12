@@ -2400,6 +2400,7 @@ class ScanEngine:
         "ldap",
         "xxe",
         "file_upload",
+        "race_condition",
     })
 
     async def _phase_verify(self):
