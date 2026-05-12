@@ -7,6 +7,7 @@ from wscan.engine import ScanEngine
 from wscan.payload_gen import PayloadGenerator, _format_prompt_template
 from wscan.scanners.base import BaseScanner, Finding, finding_dedup_key_for
 from wscan.scanners.header_injection import HeaderInjectionScanner
+from wscan.scanners.nosql_injection import NoSQLInjectionScanner
 from wscan.scanners.open_redirect import OpenRedirectScanner
 from wscan.scanners.os_injection import OSInjectionScanner
 from wscan.scanners.path_traversal import PathTraversalScanner
@@ -193,6 +194,78 @@ class DetectionEvidenceTests(unittest.TestCase):
                 payload=payload,
                 evidence="reflected",
                 evidence_type="xss_reflection",
+            )
+
+            result = await scanner.verify_finding(finding)
+
+            self.assertFalse(result)
+
+        self.run_async(run())
+
+    def test_nosql_boolean_verifier_requires_baseline_delta(self):
+        async def run():
+            scanner = NoSQLInjectionScanner(_DummyEngine())
+            scanner._apply_payload = AsyncMock(side_effect=[
+                ("A" * 1000, {}),
+                ("A" * 1000, {}),
+                ("A" * 1200, {}),
+            ])
+            finding = Finding(
+                check_type="nosql",
+                severity="high",
+                url="http://fixture.test/nosql-login",
+                field_name="username",
+                payload='{"$ne": ""}',
+                evidence="NoSQL boolean",
+                evidence_type="nosql_boolean",
+            )
+
+            result = await scanner.verify_finding(finding)
+
+            self.assertFalse(result)
+
+        self.run_async(run())
+
+    def test_nosql_boolean_verifier_confirms_large_replay_delta(self):
+        async def run():
+            scanner = NoSQLInjectionScanner(_DummyEngine())
+            scanner._apply_payload = AsyncMock(side_effect=[
+                ("A" * 1000, {}),
+                ("A" * 1005, {}),
+                ("B" * 1800, {}),
+            ])
+            finding = Finding(
+                check_type="nosql",
+                severity="high",
+                url="http://fixture.test/nosql-login",
+                field_name="username",
+                payload='{"$ne": ""}',
+                evidence="NoSQL boolean",
+                evidence_type="nosql_boolean",
+            )
+
+            result = await scanner.verify_finding(finding)
+
+            self.assertTrue(result)
+
+        self.run_async(run())
+
+    def test_nosql_error_verifier_rejects_preexisting_error(self):
+        async def run():
+            scanner = NoSQLInjectionScanner(_DummyEngine())
+            scanner._apply_payload = AsyncMock(side_effect=[
+                ("MongoServerError: preexisting", {}),
+                ("MongoServerError: preexisting", {}),
+                ("MongoServerError: preexisting", {}),
+            ])
+            finding = Finding(
+                check_type="nosql",
+                severity="high",
+                url="http://fixture.test/nosql-login",
+                field_name="username",
+                payload='{"$ne": ""}',
+                evidence="NoSQL error",
+                evidence_type="nosql_error",
             )
 
             result = await scanner.verify_finding(finding)

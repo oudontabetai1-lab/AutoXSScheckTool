@@ -24,6 +24,7 @@ def _layout(title: str, body: str) -> str:
             '<a href="/template?name=guest">Template</a>',
             '<a href="/download?file=readme.txt">Download</a>',
             '<a href="/go?next=/catalog">Continue</a>',
+            '<a href="/nosql-login">NoSQL Login</a>',
             '<a href="/login">Login</a>',
             '<a href="/admin/actions">Admin Actions</a>',
             '<a href="/ctf">CTF</a>',
@@ -221,6 +222,29 @@ def create_app(page_count: int = 48) -> FastAPI:
         if username == "admin" and password == "correct-password":
             return RedirectResponse("/admin", status_code=302)
         return _layout("Login Failed", "<p>invalid login</p>")
+
+    @app.get("/nosql-login", response_class=HTMLResponse)
+    async def nosql_login_form():
+        return _layout(
+            "NoSQL Login",
+            """
+            <form method="post" action="/nosql-login">
+              <input name="username">
+              <input name="password" type="password">
+              <button>Login</button>
+            </form>
+            """,
+        )
+
+    @app.post("/nosql-login", response_class=HTMLResponse)
+    async def nosql_login(username: str = Form(""), password: str = Form("")):
+        if any(token in username for token in ['"$ne"', '"$gt"', '"$regex"', "$ne", "$gt", "$regex"]):
+            records = "".join(
+                f"<li>user-{i}: sensitive record {FLAG_ADMIN}</li>"
+                for i in range(80)
+            )
+            return _layout("NoSQL Admin Results", f"<ul>{records}</ul>")
+        return _layout("NoSQL Login Failed", "<p>invalid login</p>")
 
     @app.get("/admin", response_class=HTMLResponse)
     async def admin():

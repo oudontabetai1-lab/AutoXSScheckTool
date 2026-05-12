@@ -101,6 +101,20 @@ class LargeVulnerableFixtureTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(login_resp.status_code, 302)
         self.assertIn(FLAG_ADMIN, admin_resp.text)
 
+    async def test_nosql_login_expands_results_for_operator_payload(self):
+        baseline_resp = await self.client.post(
+            "/nosql-login",
+            data={"username": "baseline_value_wscan", "password": "x"},
+        )
+        injection_resp = await self.client.post(
+            "/nosql-login",
+            data={"username": '{"$ne": ""}', "password": "x"},
+        )
+
+        self.assertIn("invalid login", baseline_resp.text)
+        self.assertIn(FLAG_ADMIN, injection_resp.text)
+        self.assertGreater(len(injection_resp.text) - len(baseline_resp.text), 500)
+
     async def test_admin_action_form_allows_low_privilege_role_change(self):
         form_resp = await self.client.get("/admin/actions")
         action_resp = await self.client.post(

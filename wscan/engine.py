@@ -2394,6 +2394,7 @@ class ScanEngine:
         "path_traversal",
         "open_redirect",
         "header_injection",
+        "nosql",
     })
 
     async def _phase_verify(self):
