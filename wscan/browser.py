@@ -104,6 +104,8 @@ class BrowserManager:
         self.dialog_fired: bool = False
         self.dialog_message: str = ""
         self.dialog_screenshot_b64: str = ""  # Screenshot taken right when alert fires
+        self.last_login_url: str = ""
+        self.last_login_success: bool = False
 
     async def init(self):
         """Launch browser and create page."""
@@ -585,77 +587,117 @@ class BrowserManager:
         if not self.auth_user or not self.auth_pass:
             return False
         try:
+            self.last_login_url = ""
+            self.last_login_success = False
             await self.navigate(login_url)
 
-            # Use Playwright's native fill() which properly triggers React/Vue/Angular
-            # synthetic event handlers — unlike direct JS `el.value = val` assignment.
+            # Use Playwright's native fill() where possible so JS framework
+            # handlers receive realistic input events; fall back to JS assignment
+            # for unusual fields.
+            async def _fill_field(selector: str, value: str) -> bool:
+                try:
+                    await self.page.fill(selector, value, timeout=5000)
+                    return True
+                except Exception:
+                    return bool(await self.page.evaluate(
+                        """([sel, val]) => {
+                            const el = document.querySelector(sel);
+                            if (!el) return false;
+                            el.focus();
+                            el.value = val;
+                            ['input','change','blur'].forEach(e =>
+                                el.dispatchEvent(new Event(e, {bubbles:true}))
+                            );
+                            return true;
+                        }""",
+                        [selector, value],
+                    ))
+
             user_selector = f'[name="{user_field}"],[id="{user_field}"]'
             pass_selector = f'[name="{pass_field}"],[id="{pass_field}"]'
-            try:
-                await self.page.fill(user_selector, self.auth_user, timeout=5000)
-            except Exception:
-                # Fallback to JS assignment for unusual implementations
-                await self.page.evaluate(
-                    """([sel, val]) => {
-                        const el = document.querySelector(sel);
-                        if (!el) return;
-                        el.value = val;
-                        ['input','change','blur'].forEach(e =>
-                            el.dispatchEvent(new Event(e, {bubbles:true}))
-                        );
-                    }""",
-                    [user_selector, self.auth_user],
-                )
-            try:
-                await self.page.fill(pass_selector, self.auth_pass, timeout=5000)
-            except Exception:
-                await self.page.evaluate(
-                    """([sel, val]) => {
-                        const el = document.querySelector(sel);
-                        if (!el) return;
-                        el.value = val;
-                        ['input','change','blur'].forEach(e =>
-                            el.dispatchEvent(new Event(e, {bubbles:true}))
-                        );
-                    }""",
-                    [pass_selector, self.auth_pass],
-                )
+            if not await _fill_field(user_selector, self.auth_user):
+                return False
+            if not await _fill_field(pass_selector, self.auth_pass):
+                return False
 
-            # Submit — prefer clicking the button so JS frameworks receive the event
             submitted = False
             try:
-                submit_btn = self.page.locator(
-                    f'[name="{user_field}"],[id="{user_field}"]'
-                ).locator("xpath=ancestor::form").locator(
+                submit_btn = self.page.locator(user_selector).locator("xpath=ancestor::form").locator(
                     'button[type="submit"],input[type="submit"],[type="submit"],button:not([type="button"])'
                 ).first
-                await submit_btn.click(timeout=5000)
+                await submit_btn.click(timeout=5000, no_wait_after=True)
                 submitted = True
             except Exception:
                 pass
-            if not submitted:
-                await self.page.evaluate(
-                    """([userField]) => {
-                        const el = document.querySelector(`[name="${userField}"],[id="${userField}"]`);
-                        if (!el) return;
-                        const form = el.closest('form');
-                        if (!form) return;
-                        const btn = form.querySelector(
-                            'button[type="submit"],input[type="submit"],[type="submit"]'
-                        ) || form.querySelector('button:not([type="button"])');
-                        if (btn) { btn.click(); }
-                        else { form.submit(); }
-                    }""",
-                    [user_field],
-                )
 
-            await self.page.wait_for_load_state("domcontentloaded", timeout=15000)
+            if not submitted:
+                submit_script = """([userField]) => {
+                    function _find(sel) {
+                        try {
+                            const direct = document.querySelector(sel);
+                            if (direct) return direct;
+                        } catch (e) {}
+                        return document.querySelector(
+                            `[name="${CSS.escape(sel)}"],[id="${CSS.escape(sel)}"]`
+                        );
+                    }
+                    const el = _find(userField);
+                    if (!el) return;
+                    const form = el.closest('form');
+                    if (!form) return;
+                    const btn = form.querySelector(
+                        'button[type="submit"],input[type="submit"],[type="submit"]'
+                    ) || form.querySelector('button:not([type="button"])');
+                    if (btn) { btn.click(); }
+                    else { form.submit(); }
+                }"""
+                try:
+                    async with self.page.expect_navigation(wait_until="domcontentloaded", timeout=15000):
+                        await self.page.evaluate(submit_script, [user_field])
+                except Exception:
+                    # AJAX logins or same-document updates may not navigate. The
+                    # polling loop below still evaluates the resulting body and URL.
+                    pass
+
+            login_url_norm = login_url.rstrip("/")
+            failure_markers = (
+                "invalid login",
+                "login failed",
+                "incorrect password",
+                "invalid password",
+                "invalid credentials",
+                "authentication failed",
+            )
+            deadline = time.monotonic() + 15.0
             post_url = self.page.url
-            post_body = await self.get_page_source()
-            if success_indicator:
-                return success_indicator in post_url or success_indicator in post_body
-            # Heuristic: no longer on the login URL → success
-            return post_url.rstrip("/") != login_url.rstrip("/")
+            post_body = ""
+            while time.monotonic() < deadline:
+                try:
+                    await self.page.wait_for_load_state("domcontentloaded", timeout=1000)
+                except Exception:
+                    pass
+                post_url = self.page.url
+                post_body = await self.get_page_source()
+                body_lower = post_body.lower()
+                if success_indicator:
+                    if success_indicator in post_url or success_indicator in post_body:
+                        self.last_login_url = post_url
+                        self.last_login_success = True
+                        return True
+                else:
+                    failed = any(marker in body_lower for marker in failure_markers)
+                    moved = post_url.rstrip("/") != login_url_norm
+                    if moved and not failed:
+                        self.last_login_url = post_url
+                        self.last_login_success = True
+                        return True
+                    if not self.is_on_login_page(login_url) and not failed:
+                        self.last_login_url = post_url
+                        self.last_login_success = True
+                        return True
+                await asyncio.sleep(0.25)
+            self.last_login_url = post_url
+            return False
         except Exception:
             return False
 

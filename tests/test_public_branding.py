@@ -73,6 +73,21 @@ class PublicBrandingTests(unittest.TestCase):
             with self.subTest(marker=marker):
                 self.assertIn(marker, text)
 
+    def test_dashboard_exposes_post_scan_crawl_actions(self):
+        text = Path("templates/dashboard.html").read_text(encoding="utf-8")
+        expected = (
+            "postScanActions",
+            "rerunLastScan()",
+            "openManualCrawlAfterScan()",
+            "lastScanConfig",
+            "再巡回",
+            "手動巡回を追加",
+        )
+
+        for marker in expected:
+            with self.subTest(marker=marker):
+                self.assertIn(marker, text)
+
 
 if __name__ == "__main__":
     unittest.main()

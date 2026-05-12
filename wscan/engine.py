@@ -386,6 +386,9 @@ class ScanEngine:
         self.auth_bypass_detected: bool = False
         self.auth_bypass_login_url: str = ""
         self.auth_bypass_post_url: str = ""
+        # Auto-login landing page. Seeded into the normal crawl so authenticated
+        # pages are not missed when the scan target itself is the login URL.
+        self.auth_landing_url: str = ""
 
     def _record_scan_matrix(
         self,
@@ -468,7 +471,10 @@ class ScanEngine:
                     success_indicator=self.login_success_indicator,
                 )
                 if success:
+                    self.auth_landing_url = getattr(self._browser, "last_login_url", "") or self._browser.page.url
                     console.print("  [green][Auth] Login successful — session cookies captured.[/green]")
+                    if self.auth_landing_url:
+                        console.print(f"  [dim][Auth] Authenticated landing:[/dim] {self.auth_landing_url}")
                 else:
                     console.print("  [yellow][Auth] Login may have failed — continuing anyway.[/yellow]")
 
@@ -659,6 +665,26 @@ class ScanEngine:
         # A: DOM構造フィンガープリントで類似ページを検出
         self._seen_page_fingerprints: set[str] = set()
         _first_page = True  # CMS 検出は最初のページのみ
+
+        # 認証後の到達ページを通常クロールにも戻す。ログイン URL を起点にした診断では、
+        # ここを入れないとログイン後画面を巡回しないまま攻撃フェーズへ進んでしまう。
+        if self.auth_landing_url:
+            try:
+                base_host = urlparse(self.target_url).netloc
+                landing_host = urlparse(self.auth_landing_url).netloc
+                if (
+                    landing_host == base_host
+                    and self.auth_landing_url not in self.visited_urls
+                    and not self._is_url_excluded(self.auth_landing_url)
+                ):
+                    self.visited_urls.add(self.auth_landing_url)
+                    queue.append((self.auth_landing_url, 0, self.target_url))
+                    console.print(
+                        f"  [dim cyan][Auth][/dim cyan] "
+                        f"ログイン後ページをクロールキューに追加: {self.auth_landing_url}"
+                    )
+            except Exception:
+                pass
 
         # O: HAR ファイルインポート — URL シードと Cookie を注入
         if self.har_path:
