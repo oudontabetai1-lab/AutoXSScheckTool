@@ -1277,6 +1277,12 @@ body {
          animation:stripe 0.8s linear infinite;display:none"></div>
   </div>
 </div>
+<div id="postScanActions" style="display:none;align-items:center;gap:8px;padding:8px 16px;background:#111827;border-bottom:1px solid #263244">
+  <span style="font-size:.78rem;color:var(--text-muted);font-weight:700;text-transform:uppercase">After Crawl</span>
+  <button onclick="rerunLastScan()" style="background:var(--accent);color:#001018;border:none;border-radius:4px;padding:6px 12px;font-weight:700;cursor:pointer">再巡回</button>
+  <button onclick="openManualCrawlAfterScan()" style="background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:6px 12px;font-weight:700;cursor:pointer">手動巡回を追加</button>
+  <span id="postScanHint" style="font-size:.76rem;color:var(--text-muted)">同じ設定で再実行、または手動巡回JSONを追加して再実行できます。</span>
+</div>
 <style>
 @keyframes stripe { from{background-position:0 0} to{background-position:32px 0} }
 </style>
@@ -1477,6 +1483,7 @@ const state = {
   d3Loaded: false,
   _d3: null,
   checkStats: {},
+  lastScanConfig: null,
 };
 
 // ─── Config form state ───────────────────────────────────────────
@@ -1740,6 +1747,37 @@ function useManualCrawlOutput() {
   if (outputPath) document.getElementById('cfgManualCrawlFile').value = outputPath;
   const btn = document.querySelector(`.cfg-tab[onclick*="'basic'"]`);
   showCfgTab('basic', btn);
+}
+
+function showPostScanActions(show) {
+  const el = document.getElementById('postScanActions');
+  if (el) el.style.display = show ? 'flex' : 'none';
+}
+
+function rerunLastScan() {
+  if (!state.lastScanConfig) {
+    alert('再巡回できるスキャン設定がありません。');
+    return;
+  }
+  if (!state.ws || state.ws.readyState !== WebSocket.OPEN) {
+    alert('WebSocket未接続。ページを再読み込みしてください。');
+    return;
+  }
+  showPostScanActions(false);
+  state.ws.send(JSON.stringify({ action: 'start_scan', config: state.lastScanConfig }));
+  setStatus('再巡回を開始しています...', 'running');
+  addEventLog('status', '前回設定で再巡回を開始');
+}
+
+function openManualCrawlAfterScan() {
+  document.getElementById('scanConfigOverlay').classList.add('active');
+  const btn = document.querySelector(`.cfg-tab[onclick*="'manualcrawl'"]`);
+  showCfgTab('manualcrawl', btn);
+  const url = state.lastScanConfig?.url || document.getElementById('cfgInputUrl').value.trim();
+  if (url) document.getElementById('cfgInputUrl').value = url;
+  const output = document.getElementById('manualCrawlOutput');
+  if (output && !output.value.trim()) output.value = 'flows/manual_crawl.json';
+  addEventLog('status', '手動巡回タブを開きました。記録後、JSONを使用して再巡回できます。');
 }
 
 function submitScanConfig() {
@@ -2411,6 +2449,7 @@ function handleEvent(event) {
       state.scanDone = true;
       document.getElementById('statRemain').textContent = '完了';
       document.getElementById('statETA').textContent = '—';
+      showPostScanActions(true);
       // Close timing for any phase that started but didn't get a "next phase" event
       { ['crawl','plan','attack','report'].forEach(p => {
           if (state.phaseStartTs[p] != null && state.phaseTimes[p] == null) {
@@ -2456,6 +2495,8 @@ function handleEvent(event) {
     case 'scan_started':
       // Hide config overlay once scan begins
       document.getElementById('scanConfigOverlay').classList.remove('active');
+      state.lastScanConfig = JSON.parse(JSON.stringify(data || {}));
+      showPostScanActions(false);
       resetLiveScanState();
       state.eventCount = 1;
       document.getElementById('eventCount').textContent = state.eventCount;
@@ -2483,6 +2524,7 @@ function resetLiveScanState() {
   state.checkStats = {};
   state.phaseStartTs = {};
   state.phaseTimes = {};
+  showPostScanActions(false);
 
   const textDefaults = {
     eventCount: '0', statPages: '0', statFindings: '0', findingCount: '0',
