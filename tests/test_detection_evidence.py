@@ -25,6 +25,7 @@ from wscan.scanners.security_headers import SecurityHeadersScanner
 from wscan.scanners.sqli import SQLiScanner
 from wscan.scanners.ssrf import SSRFScanner
 from wscan.scanners.ssti import SSTIScanner
+from wscan.scanners.stored_xss import StoredXSSScanner
 from wscan.scanners.websocket import WebSocketScanner
 from wscan.scanners.xss import XSSScanner
 from wscan.scanners.xxe import XXEScanner
@@ -84,6 +85,46 @@ class _DomVerifierBrowser:
 
     def reset_dialog(self):
         self.dialog_fired = bool(self.dialog_message)
+
+
+class _StoredVerifierPage:
+    def __init__(self, title="", url=""):
+        self.url = url
+        self.title = AsyncMock(return_value=title)
+
+
+class _StoredVerifierBrowser:
+    def __init__(self, html="", title="", dialog_message="", url=""):
+        self._html = html
+        self.dialog_fired = bool(dialog_message)
+        self.dialog_message = dialog_message
+        self.page = _StoredVerifierPage(title, url)
+        self.test_url_param = AsyncMock(return_value=("", {}))
+        self.navigate = AsyncMock(return_value=True)
+        self.fill_and_submit_form = AsyncMock(return_value=("", {}))
+        self.get_page_source = AsyncMock(return_value=html)
+
+    def reset_dialog(self):
+        self.dialog_fired = bool(self.dialog_message)
+
+
+class _StoredScanPage:
+    def __init__(self, url="", html=""):
+        self.url = url
+        self._html = html
+        self.content = AsyncMock(side_effect=lambda: self._html)
+
+
+class _StoredScanBrowser:
+    def __init__(self, url="", html=""):
+        self.page = _StoredScanPage(url, html)
+        self.navigate = AsyncMock(side_effect=self._navigate)
+        self.screenshot_b64 = AsyncMock(return_value="")
+
+    async def _navigate(self, url):
+        self.page.url = url
+        self.page._html = "<html><body>safe target page</body></html>"
+        return True
 
 
 class DetectionEvidenceTests(unittest.TestCase):
@@ -1109,6 +1150,93 @@ class DetectionEvidenceTests(unittest.TestCase):
             result = await scanner.verify_finding(finding)
 
             self.assertFalse(result)
+
+        self.run_async(run())
+
+    def test_stored_xss_verifier_replays_payload_and_checks_sink(self):
+        async def run():
+            marker = "wsxssabc12345"
+            payload = f'<script id="{marker}">/*{marker}*/</script>'
+            engine = _DummyEngine()
+            engine.browser = _StoredVerifierBrowser(
+                html=f"<article>{payload}</article>",
+            )
+            scanner = StoredXSSScanner(engine)
+            finding = Finding(
+                check_type="stored_xss",
+                severity="critical",
+                url="http://fixture.test/comments",
+                field_name="message",
+                payload=payload,
+                evidence="marker persisted",
+                evidence_type="stored_xss_marker",
+                evidence_details={
+                    "marker": marker,
+                    "injection_url": "http://fixture.test/feedback",
+                    "sink_url": "http://fixture.test/comments",
+                },
+            )
+
+            result = await scanner.verify_finding(finding)
+
+            self.assertTrue(result)
+            engine.browser.navigate.assert_any_await("http://fixture.test/feedback")
+            engine.browser.fill_and_submit_form.assert_awaited_once_with(
+                0,
+                "message",
+                payload,
+            )
+            engine.browser.navigate.assert_any_await("http://fixture.test/comments")
+
+        self.run_async(run())
+
+    def test_stored_xss_verifier_rejects_missing_marker(self):
+        async def run():
+            marker = "wsxssabc12345"
+            payload = f'<script id="{marker}">/*{marker}*/</script>'
+            engine = _DummyEngine()
+            engine.browser = _StoredVerifierBrowser(html="<article>safe</article>")
+            scanner = StoredXSSScanner(engine)
+            finding = Finding(
+                check_type="stored_xss",
+                severity="critical",
+                url="http://fixture.test/comments",
+                field_name="message",
+                payload=payload,
+                evidence="marker persisted",
+                evidence_type="stored_xss_marker",
+                evidence_details={
+                    "marker": marker,
+                    "injection_url": "http://fixture.test/feedback",
+                    "sink_url": "http://fixture.test/comments",
+                },
+            )
+
+            result = await scanner.verify_finding(finding)
+
+            self.assertFalse(result)
+
+        self.run_async(run())
+
+    def test_stored_xss_scan_page_navigates_before_checking_marker(self):
+        async def run():
+            marker = "wsxssabc12345"
+            engine = _DummyEngine()
+            engine.browser = _StoredScanBrowser(
+                url="http://fixture.test/comments",
+                html=f"<article>{marker}</article>",
+            )
+            scanner = StoredXSSScanner(engine)
+            scanner._injected[marker] = {
+                "url": "http://fixture.test/feedback",
+                "field": "message",
+                "payload": f'<script id="{marker}">/*{marker}*/</script>',
+            }
+
+            findings = await scanner.scan_page("http://fixture.test/search")
+
+            self.assertEqual(findings, [])
+            engine.browser.navigate.assert_awaited_once_with("http://fixture.test/search")
 
         self.run_async(run())
 

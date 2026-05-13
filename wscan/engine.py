@@ -2501,6 +2501,7 @@ class ScanEngine:
         "cors",
         "host_header",
         "dom_xss",
+        "stored_xss",
     })
 
     async def _phase_verify(self):
