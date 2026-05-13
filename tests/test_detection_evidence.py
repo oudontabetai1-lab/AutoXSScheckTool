@@ -13,6 +13,7 @@ from wscan.scanners.file_upload import FileUploadScanner
 from wscan.scanners.graphql import GraphQLScanner
 from wscan.scanners.header_injection import HeaderInjectionScanner
 from wscan.scanners.host_header import HostHeaderScanner
+from wscan.scanners.info_disclosure import InfoDisclosureScanner
 from wscan.scanners.jwt_scanner import JWTScanner, _build_jwt
 from wscan.scanners.ldap_injection import LDAPScanner
 from wscan.scanners.nosql_injection import NoSQLInjectionScanner
@@ -1237,6 +1238,70 @@ class DetectionEvidenceTests(unittest.TestCase):
 
             self.assertEqual(findings, [])
             engine.browser.navigate.assert_awaited_once_with("http://fixture.test/search")
+
+        self.run_async(run())
+
+    def test_info_disclosure_verifier_replays_sensitive_resource(self):
+        async def run():
+            scanner = InfoDisclosureScanner(_DummyEngine())
+            response = type(
+                "Resp",
+                (),
+                {
+                    "status_code": 200,
+                    "text": "APP_KEY=fixture\nDB_PASSWORD=secret\n",
+                    "headers": {"content-type": "text/plain"},
+                },
+            )()
+            scanner._get = AsyncMock(return_value=response)
+            finding = Finding(
+                check_type="info_disclosure",
+                severity="critical",
+                url="http://fixture.test/.env",
+                field_name="(sensitive file/directory)",
+                payload="(GET request — no payload)",
+                evidence="Sensitive resource accessible",
+                evidence_type="info_sensitive_resource",
+                evidence_details={"path": "/.env"},
+            )
+
+            result = await scanner.verify_finding(finding)
+
+            self.assertTrue(result)
+            scanner._get.assert_awaited_once_with(
+                "http://fixture.test/.env",
+                follow_redirects=False,
+            )
+
+        self.run_async(run())
+
+    def test_info_disclosure_verifier_rejects_missing_sensitive_resource(self):
+        async def run():
+            scanner = InfoDisclosureScanner(_DummyEngine())
+            response = type(
+                "Resp",
+                (),
+                {
+                    "status_code": 404,
+                    "text": "<html>not found</html>",
+                    "headers": {"content-type": "text/html"},
+                },
+            )()
+            scanner._get = AsyncMock(return_value=response)
+            finding = Finding(
+                check_type="info_disclosure",
+                severity="critical",
+                url="http://fixture.test/.env",
+                field_name="(sensitive file/directory)",
+                payload="(GET request — no payload)",
+                evidence="Sensitive resource accessible",
+                evidence_type="info_sensitive_resource",
+                evidence_details={"path": "/.env"},
+            )
+
+            result = await scanner.verify_finding(finding)
+
+            self.assertFalse(result)
 
         self.run_async(run())
 

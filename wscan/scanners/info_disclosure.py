@@ -179,6 +179,14 @@ class InfoDisclosureScanner(BaseScanner):
                         ),
                         pair=pair,
                         severity=severity,
+                        confidence="confirmed",
+                        evidence_type="info_sensitive_resource",
+                        evidence_details={
+                            "path": path,
+                            "matched_label": matched_label,
+                            "status": r.status_code,
+                            "content_type": ct,
+                        },
                     )
                     findings.append(finding)
 
@@ -214,6 +222,9 @@ class InfoDisclosureScanner(BaseScanner):
             ),
             pair=pair,
             severity="low",
+            confidence="likely",
+            evidence_type="info_tech_headers",
+            evidence_details={"headers": exposed},
         )
         return [finding]
 
@@ -234,7 +245,69 @@ class InfoDisclosureScanner(BaseScanner):
                     evidence=f"Sensitive information in page: {label}",
                     pair=pair,
                     severity="medium",
+                    confidence="likely",
+                    evidence_type="info_error_pattern",
+                    evidence_details={"matched_label": label, "pattern": pattern},
                 )
                 return [finding]
 
         return []
+
+    async def verify_finding(self, finding: Finding) -> bool | None:
+        if finding.evidence_type == "info_sensitive_resource":
+            try:
+                r = await self._get(finding.url, follow_redirects=False)
+            except Exception:
+                return None
+            if r.status_code not in (200, 206):
+                return False
+            return self._classify_sensitive_body(
+                r.text[:4000],
+                r.headers.get("content-type", ""),
+            ) is not None
+
+        if finding.evidence_type == "info_tech_headers":
+            try:
+                r = await self._get(finding.url, follow_redirects=True)
+            except Exception:
+                return None
+            headers = {k.lower(): v for k, v in r.headers.items()}
+            expected = (getattr(finding, "evidence_details", {}) or {}).get("headers", [])
+            if expected:
+                return all(
+                    ":" in item and headers.get(item.split(":", 1)[0].strip().lower(), "")
+                    for item in expected
+                )
+            return any(headers.get(header) for header in _TECH_HEADERS)
+
+        if finding.evidence_type == "info_error_pattern":
+            try:
+                r = await self._get(finding.url, follow_redirects=True)
+            except Exception:
+                return None
+            return self._classify_error_body(r.text[:8000]) is not None
+
+        return None
+
+    async def _get(self, url: str, follow_redirects: bool):
+        proxy = getattr(self.engine, "proxy", "") or None
+        timeout = getattr(self.engine, "timeout", 15)
+        kwargs: dict = {"timeout": timeout, "follow_redirects": follow_redirects}
+        if proxy:
+            kwargs["proxy"] = proxy
+        async with httpx.AsyncClient(**kwargs) as client:
+            return await client.get(url)
+
+    def _classify_sensitive_body(self, body: str, content_type: str) -> str | None:
+        for pattern, label in _CONTENT_PATTERNS.items():
+            if re.search(pattern, body, re.IGNORECASE | re.DOTALL):
+                return label
+        if "html" not in content_type and len((body or "").strip()) > 20:
+            return "non-HTML content (possible sensitive file)"
+        return None
+
+    def _classify_error_body(self, body: str) -> str | None:
+        for pattern, label in _CONTENT_PATTERNS.items():
+            if re.search(pattern, body, re.IGNORECASE | re.DOTALL):
+                return label
+        return None

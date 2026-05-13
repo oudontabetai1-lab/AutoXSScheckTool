@@ -532,6 +532,10 @@ def create_app(page_count: int = 48) -> FastAPI:
     async def admin():
         return _layout("Admin", f"<p>Admin dashboard secret. {FLAG_ADMIN}</p>")
 
+    @app.get("/.env", response_class=PlainTextResponse)
+    async def env_file():
+        return "APP_KEY=fixture-key\nDB_HOST=localhost\nDB_PASSWORD=fixture-password\n"
+
     @app.get("/admin/actions", response_class=HTMLResponse)
     async def admin_actions():
         return _layout(

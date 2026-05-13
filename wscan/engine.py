@@ -2508,6 +2508,7 @@ class ScanEngine:
         "privesc_param_idor",
         "privesc_cross_acct",
         "privesc_action",
+        "info_disclosure",
     })
 
     async def _phase_verify(self):

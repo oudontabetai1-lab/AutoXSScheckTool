@@ -146,6 +146,12 @@ class LargeVulnerableFixtureTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("https://evil.wscan-test.example.com/reset/confirm", resp.text)
 
+    async def test_env_fixture_exposes_sensitive_config(self):
+        resp = await self.client.get("/.env")
+
+        self.assertIn("DB_PASSWORD=fixture-password", resp.text)
+        self.assertEqual(resp.headers["content-type"].split(";", 1)[0], "text/plain")
+
     async def test_os_command_target_returns_command_like_output(self):
         resp = await self.client.get("/ping", params={"host": "127.0.0.1; ls -la"})
 
