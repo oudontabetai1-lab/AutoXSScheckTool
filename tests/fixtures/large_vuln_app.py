@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import base64
+import hashlib
+import hmac
+import json
 from urllib.parse import unquote
 
 from fastapi import FastAPI, File, Form, Query, Request, UploadFile, WebSocket, WebSocketDisconnect
@@ -11,6 +15,18 @@ FLAG_SSTI = "FLAG{large_fixture_ssti_flag}"
 FLAG_ADMIN = "FLAG{large_fixture_admin_panel}"
 FLAG_JS_DISCOVERY = "FLAG{large_fixture_js_discovered_flag}"
 FLAG_BUNDLE_DISCOVERY = "FLAG{large_fixture_bundle_discovered_flag}"
+
+
+def _b64url(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).rstrip(b"=").decode()
+
+
+def _fixture_jwt(payload: dict, secret: str = "secret") -> str:
+    header = {"alg": "HS256", "typ": "JWT"}
+    head = _b64url(json.dumps(header, separators=(",", ":")).encode())
+    body = _b64url(json.dumps(payload, separators=(",", ":")).encode())
+    sig = hmac.new(secret.encode(), f"{head}.{body}".encode(), hashlib.sha256).digest()
+    return f"{head}.{body}.{_b64url(sig)}"
 
 
 def _layout(title: str, body: str) -> str:
@@ -27,6 +43,7 @@ def _layout(title: str, body: str) -> str:
             '<a href="/nosql-login">NoSQL Login</a>',
             '<a href="/fetch?url=http://example.test/">Fetch URL</a>',
             '<a href="/graphql-lab">GraphQL Lab</a>',
+            '<a href="/jwt-lab">JWT Lab</a>',
             '<a href="/deserialize">Deserialize</a>',
             '<a href="/ldap-login">LDAP Login</a>',
             '<a href="/xml">XML Import</a>',
@@ -267,6 +284,23 @@ def create_app(page_count: int = 48) -> FastAPI:
         if isinstance(payload, list):
             return [handle(item) for item in payload]
         return handle(payload)
+
+    @app.get("/jwt-lab", response_class=HTMLResponse)
+    async def jwt_lab():
+        token = _fixture_jwt({
+            "sub": "fixture-user",
+            "role": "user",
+            "api_key": "fixture-secret-api-key",
+        })
+        response = HTMLResponse(_layout(
+            "JWT Lab",
+            f"""
+            <p>JWT regression page</p>
+            <code>{token}</code>
+            """,
+        ))
+        response.set_cookie("token", token, httponly=True)
+        return response
 
     @app.get("/template", response_class=HTMLResponse)
     async def template(name: str = Query("")):

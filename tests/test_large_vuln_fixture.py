@@ -117,6 +117,12 @@ class LargeVulnerableFixtureTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(batch_resp.text.strip().startswith("["))
         self.assertIn("49", injection_resp.text)
 
+    async def test_jwt_lab_exposes_weak_unsigned_payload_signals(self):
+        resp = await self.client.get("/jwt-lab")
+
+        self.assertIn("eyJ", resp.text)
+        self.assertIn("token=", resp.headers["set-cookie"])
+
     async def test_os_command_target_returns_command_like_output(self):
         resp = await self.client.get("/ping", params={"host": "127.0.0.1; ls -la"})
 

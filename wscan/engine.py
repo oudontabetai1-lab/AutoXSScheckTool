@@ -2492,6 +2492,12 @@ class ScanEngine:
         "graphql_batch",
         "graphql_injection",
         "graphql_sensitive",
+        "jwt_no_expiry",
+        "jwt_sensitive_data",
+        "jwt_weak_secret",
+        "jwt_alg_none",
+        "jwt_kid_injection",
+        "jwt_payload_tamper",
     })
 
     async def _phase_verify(self):
@@ -2550,7 +2556,12 @@ class ScanEngine:
         from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
         import re as _re
 
-        scanner_key = "graphql" if f.check_type.startswith("graphql_") else f.check_type
+        if f.check_type.startswith("graphql_"):
+            scanner_key = "graphql"
+        elif f.check_type.startswith("jwt_"):
+            scanner_key = "jwt"
+        else:
+            scanner_key = f.check_type
         scanner = self.scanners.get(scanner_key)
         if scanner is None:
             return True  # no scanner available → assume confirmed

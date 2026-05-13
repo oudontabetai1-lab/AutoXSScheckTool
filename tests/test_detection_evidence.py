@@ -10,6 +10,7 @@ from wscan.scanners.deserialization import DeserializationScanner
 from wscan.scanners.file_upload import FileUploadScanner
 from wscan.scanners.graphql import GraphQLScanner
 from wscan.scanners.header_injection import HeaderInjectionScanner
+from wscan.scanners.jwt_scanner import JWTScanner, _build_jwt
 from wscan.scanners.ldap_injection import LDAPScanner
 from wscan.scanners.nosql_injection import NoSQLInjectionScanner
 from wscan.scanners.open_redirect import OpenRedirectScanner
@@ -833,6 +834,112 @@ class DetectionEvidenceTests(unittest.TestCase):
                 field_name="(GraphQL batch)",
                 payload="[]",
                 evidence="batch",
+            )
+
+            result = await engine._verify_one(finding)
+
+            self.assertTrue(result)
+            scanner.verify_finding.assert_awaited_once()
+
+        self.run_async(run())
+
+    def test_jwt_verifier_confirms_no_expiry_and_sensitive_claims(self):
+        async def run():
+            token = _build_jwt(
+                {"alg": "HS256", "typ": "JWT"},
+                {"sub": "user", "api_key": "secret-value"},
+                secret="secret",
+            )
+            scanner = JWTScanner(_DummyEngine())
+            no_exp = Finding(
+                check_type="jwt_no_expiry",
+                severity="medium",
+                url="http://fixture.test/jwt-lab",
+                field_name="JWT",
+                payload=token,
+                evidence="no exp",
+                evidence_details={"token": token},
+            )
+            sensitive = Finding(
+                check_type="jwt_sensitive_data",
+                severity="medium",
+                url="http://fixture.test/jwt-lab",
+                field_name="JWT payload",
+                payload=token,
+                evidence="api_key",
+                evidence_details={"token": token, "sensitive_keys": ["api_key"]},
+            )
+
+            self.assertTrue(await scanner.verify_finding(no_exp))
+            self.assertTrue(await scanner.verify_finding(sensitive))
+
+        self.run_async(run())
+
+    def test_jwt_verifier_rejects_expiring_token_for_no_expiry(self):
+        async def run():
+            token = _build_jwt(
+                {"alg": "HS256", "typ": "JWT"},
+                {"sub": "user", "exp": 2000000000},
+                secret="secret",
+            )
+            scanner = JWTScanner(_DummyEngine())
+            finding = Finding(
+                check_type="jwt_no_expiry",
+                severity="medium",
+                url="http://fixture.test/jwt-lab",
+                field_name="JWT",
+                payload=token,
+                evidence="no exp",
+                evidence_details={"token": token},
+            )
+
+            self.assertFalse(await scanner.verify_finding(finding))
+
+        self.run_async(run())
+
+    def test_jwt_weak_secret_verifier_checks_signature(self):
+        async def run():
+            token = _build_jwt(
+                {"alg": "HS256", "typ": "JWT"},
+                {"sub": "user"},
+                secret="secret",
+            )
+            scanner = JWTScanner(_DummyEngine())
+            finding = Finding(
+                check_type="jwt_weak_secret",
+                severity="high",
+                url="http://fixture.test/jwt-lab",
+                field_name="JWT",
+                payload="secret='secret'",
+                evidence="weak",
+                evidence_details={"token": token, "secret": "secret"},
+            )
+
+            self.assertTrue(await scanner.verify_finding(finding))
+
+        self.run_async(run())
+
+    def test_engine_routes_jwt_subtype_to_jwt_verifier(self):
+        async def run():
+            engine = ScanEngine(
+                "http://fixture.test/",
+                checks=["jwt"],
+                llm_provider="none",
+                open_report=False,
+                enable_waf_detection=False,
+                enable_ai_analysis=False,
+                enable_payload_learning=False,
+                enable_adaptive_payloads=False,
+            )
+            scanner = engine.scanners["jwt"]
+            scanner.verify_finding = AsyncMock(return_value=True)
+            finding = Finding(
+                check_type="jwt_no_expiry",
+                severity="medium",
+                url="http://fixture.test/jwt-lab",
+                field_name="JWT",
+                payload="token",
+                evidence="no exp",
             )
 
             result = await engine._verify_one(finding)

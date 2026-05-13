@@ -27,6 +27,7 @@ import hashlib
 import hmac
 import json
 import re
+import secrets
 import time
 from typing import TYPE_CHECKING, Optional
 from urllib.parse import urlparse
@@ -283,9 +284,6 @@ class JWTScanner(BaseScanner):
             if tamper_finding:
                 findings.append(tamper_finding)
 
-        for f in findings:
-            await self._emit(f)
-
         return findings
 
     # ------------------------------------------------------------------
@@ -321,6 +319,13 @@ class JWTScanner(BaseScanner):
             ),
             request={"url": url, "method": "GET"},
             response={"status": 200, "url": url},
+            confidence="likely",
+            evidence_type="jwt_sensitive_data",
+            evidence_details={
+                "token": token,
+                "sensitive_keys": sensitive_keys,
+                "source": source,
+            },
         )
 
     async def _test_no_expiry(
@@ -350,6 +355,13 @@ class JWTScanner(BaseScanner):
             ),
             request={"url": url, "method": "GET"},
             response={"status": 200, "url": url},
+            confidence="likely",
+            evidence_type="jwt_no_expiry",
+            evidence_details={
+                "token": token,
+                "alg": header.get("alg", "unknown"),
+                "source": source,
+            },
         )
 
     async def _test_alg_none(
@@ -386,6 +398,15 @@ class JWTScanner(BaseScanner):
                     request={"url": url, "method": "GET",
                              "headers": {"Authorization": f"Bearer {none_token[:60]}..."}},
                     response={"status": 200, "url": url},
+                    confidence="likely",
+                    evidence_type="jwt_alg_none",
+                    evidence_details={
+                        "token": token,
+                        "probe_token": none_token,
+                        "none_variant": none_variant,
+                        "original_alg": header.get("alg"),
+                        "source": source,
+                    },
                 )
         return None
 
@@ -429,6 +450,16 @@ class JWTScanner(BaseScanner):
                     ),
                     request={"url": url, "method": "GET"},
                     response={"status": 200, "url": url},
+                    confidence="confirmed" if accepted else "likely",
+                    evidence_type="jwt_weak_secret",
+                    evidence_details={
+                        "token": token,
+                        "secret": secret,
+                        "algorithm": alg,
+                        "forged_token": forged,
+                        "server_accepted_forged": accepted,
+                        "source": source,
+                    },
                 )
         return None
 
@@ -470,6 +501,15 @@ class JWTScanner(BaseScanner):
                     ),
                     request={"url": url, "method": "GET"},
                     response={"status": 200, "url": url},
+                    confidence="likely",
+                    evidence_type="jwt_kid_injection",
+                    evidence_details={
+                        "token": token,
+                        "probe_token": injected_token,
+                        "kid": kid_val,
+                        "vuln_type": vuln_type,
+                        "source": source,
+                    },
                 )
         return None
 
@@ -523,6 +563,15 @@ class JWTScanner(BaseScanner):
             ),
             request={"url": url, "method": "GET"},
             response={"status": 200, "url": url},
+            confidence="likely",
+            evidence_type="jwt_payload_tamper",
+            evidence_details={
+                "token": token,
+                "probe_token": tampered_token,
+                "role_keys": role_keys,
+                "original_values": original_vals,
+                "source": source,
+            },
         )
 
     # ------------------------------------------------------------------
@@ -541,16 +590,34 @@ class JWTScanner(BaseScanner):
         and as a cookie named 'token'/'jwt'/'access_token') and return True
         if the server responds with a 2xx status and no login gate.
         """
+        if not await self._token_gets_access(url, token, base_headers, timeout):
+            return False
+
+        invalid = self._invalid_control_token()
+        return not await self._token_gets_access(url, invalid, base_headers, timeout)
+
+    def _invalid_control_token(self) -> str:
+        header = {"alg": "HS256", "typ": "JWT"}
+        payload = {"sub": f"wscan-invalid-{secrets.token_hex(4)}"}
+        return _build_jwt(header, payload, secret="definitely-not-the-real-secret")
+
+    async def _token_gets_access(
+        self,
+        url: str,
+        token: str,
+        base_headers: dict,
+        timeout: float,
+    ) -> bool:
         from .privesc import LOGIN_GATE_RE  # reuse existing heuristic
 
-        headers_variants = [
+        variants = [
             {**base_headers, "Authorization": f"Bearer {token}"},
             {**base_headers, "Cookie": f"token={token}"},
             {**base_headers, "Cookie": f"jwt={token}"},
             {**base_headers, "Cookie": f"access_token={token}"},
         ]
 
-        for headers in headers_variants:
+        for headers in variants:
             try:
                 async with httpx.AsyncClient(
                     follow_redirects=False,
@@ -567,9 +634,37 @@ class JWTScanner(BaseScanner):
                 continue
         return False
 
-    async def _emit(self, finding: Finding) -> None:
-        """Push finding to engine and monitor."""
-        self.findings.append(finding)
-        self.engine.all_findings.append(finding)
-        if self.monitor:
-            await self.monitor.emit_finding(finding.to_dict())
+    async def verify_finding(self, finding: Finding) -> bool | None:
+        details = getattr(finding, "evidence_details", {}) or {}
+        token = details.get("token")
+        parsed = _parse_jwt(token) if token else None
+
+        if finding.check_type == "jwt_no_expiry":
+            if not parsed:
+                return None
+            _, payload, _sig = parsed
+            return "exp" not in payload
+
+        if finding.check_type == "jwt_sensitive_data":
+            if not parsed:
+                return None
+            _, payload, _sig = parsed
+            keys = details.get("sensitive_keys") or []
+            return any(key in payload and _SENSITIVE_FIELDS_RE.search(key) for key in keys)
+
+        if finding.check_type == "jwt_weak_secret":
+            secret = details.get("secret")
+            return bool(token and secret and _verify_hs(token, secret))
+
+        if finding.check_type in {"jwt_alg_none", "jwt_kid_injection", "jwt_payload_tamper"}:
+            probe_token = details.get("probe_token")
+            if not probe_token:
+                return None
+            headers = dict(_HEADERS)
+            cookies_str = getattr(self.engine, "cookies", "") or ""
+            if cookies_str:
+                headers["Cookie"] = cookies_str
+            timeout = float(getattr(self.engine, "timeout", 30))
+            return await self._probe_token(finding.url, probe_token, headers, timeout)
+
+        return None
