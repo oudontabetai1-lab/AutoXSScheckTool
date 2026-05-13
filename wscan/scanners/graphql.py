@@ -97,6 +97,11 @@ _GQL_RESPONSE_RE = re.compile(
     re.IGNORECASE,
 )
 
+_SQL_ERROR_RE = re.compile(
+    r"(sql|syntax|mysql|sqlite|postgres|ora-[0-9]+|union|select)",
+    re.IGNORECASE,
+)
+
 
 # ---------------------------------------------------------------------------
 # Scanner
@@ -160,9 +165,6 @@ class GraphQLScanner(BaseScanner):
                     endpoint, req_headers, timeout
                 )
                 findings.extend(endpoint_findings)
-
-        for f in findings:
-            await self._emit(f)
 
         return findings
 
@@ -274,6 +276,9 @@ class GraphQLScanner(BaseScanner):
             ),
             request={"url": endpoint, "method": "POST", "body": json.dumps(query)},
             response={"status": 200, "url": endpoint},
+            confidence="likely",
+            evidence_type="graphql_introspection",
+            evidence_details={"type_count": type_count},
         ))
         return schema
 
@@ -322,6 +327,9 @@ class GraphQLScanner(BaseScanner):
             ),
             request={"url": endpoint, "method": "POST", "body": json.dumps(batch_query)},
             response={"status": 200, "url": endpoint},
+            confidence="likely",
+            evidence_type="graphql_batch",
+            evidence_details={"operation_count": len(batch_query)},
         ))
 
     async def _test_injection(
@@ -383,10 +391,10 @@ class GraphQLScanner(BaseScanner):
                 except Exception:
                     continue
 
-                # Check for reflection (XSS/SSTI) or error-based SQLi leakage
-                if payload_str in body or (
-                    vuln_type == "ssti" and ("49" in body or "7*7" not in body and "49" in body)
-                ):
+                matched, expected = self._classify_injection_response(
+                    vuln_type, payload_str, body
+                )
+                if matched:
                     findings.append(Finding(
                         check_type="graphql_injection",
                         severity="critical" if vuln_type in ("xss", "sqli") else "high",
@@ -403,8 +411,30 @@ class GraphQLScanner(BaseScanner):
                                  "body": json.dumps(gql_body)},
                         response={"status": resp.status_code, "url": endpoint,
                                   "body": body[:500]},
+                        confidence="likely",
+                        evidence_type=f"graphql_injection_{vuln_type}",
+                        evidence_details={
+                            "vuln_type": vuln_type,
+                            "type_name": type_name,
+                            "field_name": field_name,
+                            "arg_name": arg_name,
+                            "expected": expected,
+                        },
                     ))
                     break  # One finding per field is sufficient
+
+    def _classify_injection_response(
+        self,
+        vuln_type: str,
+        payload: str,
+        body: str,
+    ) -> tuple[bool, str]:
+        if vuln_type == "sqli":
+            match = _SQL_ERROR_RE.search(body or "")
+            return bool(match), match.group(0) if match else ""
+        if vuln_type == "ssti":
+            return "49" in (body or ""), "49"
+        return payload in (body or ""), payload
 
     def _test_sensitive_schema(
         self,
@@ -442,11 +472,101 @@ class GraphQLScanner(BaseScanner):
             ),
             request={"url": endpoint, "method": "POST"},
             response={"status": 200, "url": endpoint},
+            confidence="likely",
+            evidence_type="graphql_sensitive_schema",
+            evidence_details={"sensitive_names": sensitive_names[:20]},
         ))
 
-    async def _emit(self, finding: Finding) -> None:
-        """Push finding to engine and monitor."""
-        self.findings.append(finding)
-        self.engine.all_findings.append(finding)
-        if self.monitor:
-            await self.monitor.emit_finding(finding.to_dict())
+    async def verify_finding(self, finding: Finding) -> bool | None:
+        headers = dict(_HEADERS)
+        cookies_str = getattr(self.engine, "cookies", "") or ""
+        if cookies_str:
+            headers["Cookie"] = cookies_str
+        timeout = float(getattr(self.engine, "timeout", 30))
+
+        if finding.check_type == "graphql_introspection":
+            schema = await self._fetch_schema(finding.url, headers, timeout)
+            return bool(schema and schema.get("types"))
+
+        if finding.check_type == "graphql_batch":
+            body = (finding.request or {}).get("body")
+            try:
+                payload = json.loads(body) if body else [
+                    {"query": "{ __typename }"},
+                    {"query": "{ __typename }"},
+                ]
+            except json.JSONDecodeError:
+                payload = [{"query": "{ __typename }"}, {"query": "{ __typename }"}]
+            status, text = await self._post_json(finding.url, payload, headers, timeout)
+            return status == 200 and text.strip().startswith("[")
+
+        if finding.check_type == "graphql_injection":
+            body = (finding.request or {}).get("body")
+            if not body:
+                return None
+            try:
+                payload = json.loads(body)
+            except json.JSONDecodeError:
+                return None
+            status, text = await self._post_json(finding.url, payload, headers, timeout)
+            if status <= 0:
+                return None
+            details = getattr(finding, "evidence_details", {}) or {}
+            expected = details.get("expected") or finding.payload
+            vuln_type = details.get("vuln_type")
+            if vuln_type == "sqli":
+                return bool(_SQL_ERROR_RE.search(text))
+            return expected in text
+
+        if finding.check_type == "graphql_sensitive":
+            schema = await self._fetch_schema(finding.url, headers, timeout)
+            if not schema:
+                return None
+            names: list[str] = []
+            self._test_sensitive_schema(finding.url, schema, findings := [])
+            if findings:
+                names = findings[0].evidence_details.get("sensitive_names", [])
+            original = (getattr(finding, "evidence_details", {}) or {}).get("sensitive_names", [])
+            return bool(set(original).intersection(names)) if original else bool(names)
+
+        return None
+
+    async def _post_json(
+        self,
+        endpoint: str,
+        payload,
+        headers: dict,
+        timeout: float,
+    ) -> tuple[int, str]:
+        try:
+            async with httpx.AsyncClient(
+                follow_redirects=True,
+                timeout=timeout,
+                verify=False,
+                headers=headers,
+                **self._client_proxy_kwargs(),
+            ) as client:
+                resp = await client.post(endpoint, json=payload)
+                return resp.status_code, resp.text
+        except Exception:
+            return 0, ""
+
+    async def _fetch_schema(
+        self,
+        endpoint: str,
+        headers: dict,
+        timeout: float,
+    ) -> Optional[dict]:
+        status, text = await self._post_json(
+            endpoint,
+            {"query": _INTROSPECTION_QUERY},
+            headers,
+            timeout,
+        )
+        if status != 200:
+            return None
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError:
+            return None
+        return (data.get("data") or {}).get("__schema")

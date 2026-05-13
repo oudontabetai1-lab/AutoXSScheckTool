@@ -2403,6 +2403,10 @@ class ScanEngine:
         "race_condition",
         "request_smuggling",
         "websocket",
+        "graphql_introspection",
+        "graphql_batch",
+        "graphql_injection",
+        "graphql_sensitive",
     })
 
     async def _phase_verify(self):
@@ -2461,7 +2465,8 @@ class ScanEngine:
         from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
         import re as _re
 
-        scanner = self.scanners.get(f.check_type)
+        scanner_key = "graphql" if f.check_type.startswith("graphql_") else f.check_type
+        scanner = self.scanners.get(scanner_key)
         if scanner is None:
             return True  # no scanner available → assume confirmed
 

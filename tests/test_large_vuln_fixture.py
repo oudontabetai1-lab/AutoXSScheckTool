@@ -99,6 +99,24 @@ class LargeVulnerableFixtureTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("instance-id", metadata_resp.text)
         self.assertIn("local-ipv4", metadata_resp.text)
 
+    async def test_graphql_endpoint_exposes_schema_batch_and_injection_signals(self):
+        schema_resp = await self.client.post(
+            "/graphql",
+            json={"query": "{ __schema { queryType { name } types { name } } }"},
+        )
+        batch_resp = await self.client.post(
+            "/graphql",
+            json=[{"query": "{ __typename }"}, {"query": "{ __typename }"}],
+        )
+        injection_resp = await self.client.post(
+            "/graphql",
+            json={"query": '{ search(query: "{{7*7}}") }'},
+        )
+
+        self.assertIn("__schema", schema_resp.text)
+        self.assertTrue(batch_resp.text.strip().startswith("["))
+        self.assertIn("49", injection_resp.text)
+
     async def test_os_command_target_returns_command_like_output(self):
         resp = await self.client.get("/ping", params={"host": "127.0.0.1; ls -la"})
 

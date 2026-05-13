@@ -26,6 +26,7 @@ def _layout(title: str, body: str) -> str:
             '<a href="/go?next=/catalog">Continue</a>',
             '<a href="/nosql-login">NoSQL Login</a>',
             '<a href="/fetch?url=http://example.test/">Fetch URL</a>',
+            '<a href="/graphql-lab">GraphQL Lab</a>',
             '<a href="/deserialize">Deserialize</a>',
             '<a href="/ldap-login">LDAP Login</a>',
             '<a href="/xml">XML Import</a>',
@@ -206,6 +207,66 @@ def create_app(page_count: int = 48) -> FastAPI:
         if "127.0.0.1" in decoded or "localhost" in decoded:
             return "<html><title>Internal Admin</title><body>Server: fixture</body></html>"
         return f"Fetched public resource: {decoded}"
+
+    @app.get("/graphql-lab", response_class=HTMLResponse)
+    async def graphql_lab():
+        return _layout(
+            "GraphQL Lab",
+            """
+            <p>GraphQL endpoint for scanner regression tests.</p>
+            <code>/graphql</code>
+            """,
+        )
+
+    @app.post("/graphql")
+    async def graphql_endpoint(request: Request):
+        payload = await request.json()
+
+        def handle(operation):
+            raw = str(operation)
+            if "__schema" in raw:
+                return {
+                    "data": {
+                        "__schema": {
+                            "queryType": {"name": "Query"},
+                            "types": [
+                                {
+                                    "name": "Query",
+                                    "kind": "OBJECT",
+                                    "fields": [
+                                        {
+                                            "name": "search",
+                                            "args": [
+                                                {"name": "query", "type": {"name": "String", "kind": "SCALAR"}}
+                                            ],
+                                        },
+                                        {
+                                            "name": "user",
+                                            "args": [
+                                                {"name": "id", "type": {"name": "ID", "kind": "SCALAR"}}
+                                            ],
+                                        },
+                                        {"name": "apiToken", "args": []},
+                                    ],
+                                },
+                                {"name": "SecretCredential", "kind": "OBJECT", "fields": []},
+                            ],
+                        }
+                    }
+                }
+            if "__typename" in raw:
+                return {"data": {"__typename": "Query"}}
+            if "{{7*7}}" in raw or "${7*7}" in raw:
+                return {"data": {"search": "template result 49"}}
+            if "UNION SELECT" in raw or "' OR 1=1" in raw:
+                return {"errors": [{"message": "sqlite syntax error near injected query"}]}
+            if "wscan-graphql-xss" in raw:
+                return {"data": {"search": "<script>alert('wscan-graphql-xss')</script>"}}
+            return {"data": {"search": raw}}
+
+        if isinstance(payload, list):
+            return [handle(item) for item in payload]
+        return handle(payload)
 
     @app.get("/template", response_class=HTMLResponse)
     async def template(name: str = Query("")):

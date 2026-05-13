@@ -8,6 +8,7 @@ from wscan.payload_gen import PayloadGenerator, _format_prompt_template
 from wscan.scanners.base import BaseScanner, Finding, finding_dedup_key_for
 from wscan.scanners.deserialization import DeserializationScanner
 from wscan.scanners.file_upload import FileUploadScanner
+from wscan.scanners.graphql import GraphQLScanner
 from wscan.scanners.header_injection import HeaderInjectionScanner
 from wscan.scanners.ldap_injection import LDAPScanner
 from wscan.scanners.nosql_injection import NoSQLInjectionScanner
@@ -750,6 +751,94 @@ class DetectionEvidenceTests(unittest.TestCase):
             result = await scanner.verify_finding(finding)
 
             self.assertFalse(result)
+
+        self.run_async(run())
+
+    def test_graphql_verifier_confirms_introspection(self):
+        async def run():
+            scanner = GraphQLScanner(_DummyEngine())
+            scanner._fetch_schema = AsyncMock(return_value={"types": [{"name": "Query"}]})
+            finding = Finding(
+                check_type="graphql_introspection",
+                severity="medium",
+                url="http://fixture.test/graphql",
+                field_name="(GraphQL introspection)",
+                payload="introspection",
+                evidence="schema",
+                evidence_type="graphql_introspection",
+            )
+
+            result = await scanner.verify_finding(finding)
+
+            self.assertTrue(result)
+
+        self.run_async(run())
+
+    def test_graphql_verifier_rejects_unmatched_injection_replay(self):
+        async def run():
+            scanner = GraphQLScanner(_DummyEngine())
+            scanner._post_json = AsyncMock(return_value=(200, '{"data":{"search":"clean"}}'))
+            finding = Finding(
+                check_type="graphql_injection",
+                severity="high",
+                url="http://fixture.test/graphql",
+                field_name="Query.search(query)",
+                payload="{{7*7}}",
+                evidence="ssti",
+                request={
+                    "url": "http://fixture.test/graphql",
+                    "method": "POST",
+                    "body": '{"query":"{ search(query: \\"{{7*7}}\\") }"}',
+                },
+                evidence_type="graphql_injection_ssti",
+                evidence_details={"vuln_type": "ssti", "expected": "49"},
+            )
+
+            result = await scanner.verify_finding(finding)
+
+            self.assertFalse(result)
+
+        self.run_async(run())
+
+    def test_graphql_injection_classifier_detects_sqli_errors(self):
+        scanner = GraphQLScanner(_DummyEngine())
+
+        matched, expected = scanner._classify_injection_response(
+            "sqli",
+            "' OR 1=1--",
+            '{"errors":[{"message":"sqlite syntax error near injected query"}]}',
+        )
+
+        self.assertTrue(matched)
+        self.assertIn(expected.lower(), {"sqlite", "syntax", "sql"})
+
+    def test_engine_routes_graphql_subtype_to_graphql_verifier(self):
+        async def run():
+            engine = ScanEngine(
+                "http://fixture.test/",
+                checks=["graphql"],
+                llm_provider="none",
+                open_report=False,
+                enable_waf_detection=False,
+                enable_ai_analysis=False,
+                enable_payload_learning=False,
+                enable_adaptive_payloads=False,
+            )
+            scanner = engine.scanners["graphql"]
+            scanner.verify_finding = AsyncMock(return_value=True)
+            finding = Finding(
+                check_type="graphql_batch",
+                severity="low",
+                url="http://fixture.test/graphql",
+                field_name="(GraphQL batch)",
+                payload="[]",
+                evidence="batch",
+            )
+
+            result = await engine._verify_one(finding)
+
+            self.assertTrue(result)
+            scanner.verify_finding.assert_awaited_once()
 
         self.run_async(run())
 
