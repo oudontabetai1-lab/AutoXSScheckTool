@@ -23,6 +23,7 @@ from wscan.scanners.path_traversal import PathTraversalScanner
 from wscan.scanners.race_condition import RaceConditionScanner
 from wscan.scanners.request_smuggling import RequestSmugglingScanner
 from wscan.scanners.security_headers import SecurityHeadersScanner
+from wscan.scanners.session import SessionScanner
 from wscan.scanners.sqli import SQLiScanner
 from wscan.scanners.ssrf import SSRFScanner
 from wscan.scanners.ssti import SSTIScanner
@@ -126,6 +127,16 @@ class _StoredScanBrowser:
         self.page.url = url
         self.page._html = "<html><body>safe target page</body></html>"
         return True
+
+
+class _CookieContext:
+    def __init__(self, cookies):
+        self.cookies = AsyncMock(return_value=cookies)
+
+
+class _CookieBrowser:
+    def __init__(self, cookies):
+        self._context = _CookieContext(cookies)
 
 
 class DetectionEvidenceTests(unittest.TestCase):
@@ -1297,6 +1308,78 @@ class DetectionEvidenceTests(unittest.TestCase):
                 evidence="Sensitive resource accessible",
                 evidence_type="info_sensitive_resource",
                 evidence_details={"path": "/.env"},
+            )
+
+            result = await scanner.verify_finding(finding)
+
+            self.assertFalse(result)
+
+        self.run_async(run())
+
+    def test_session_verifier_rechecks_cookie_attributes(self):
+        async def run():
+            engine = _DummyEngine()
+            engine.browser = _CookieBrowser([
+                {
+                    "name": "token",
+                    "secure": False,
+                    "httpOnly": True,
+                    "sameSite": "Lax",
+                    "domain": "fixture.test",
+                    "path": "/",
+                }
+            ])
+            scanner = SessionScanner(engine)
+            finding = Finding(
+                check_type="session",
+                severity="medium",
+                url="http://fixture.test/jwt-lab",
+                field_name="Cookie: token",
+                payload="(no payload — cookie attribute analysis)",
+                evidence="Secure flag missing",
+                evidence_type="session_cookie_attributes",
+                evidence_details={
+                    "cookie_name": "token",
+                    "issues": [
+                        "Secure flag missing — cookie transmitted over unencrypted HTTP"
+                    ],
+                },
+            )
+
+            result = await scanner.verify_finding(finding)
+
+            self.assertTrue(result)
+
+        self.run_async(run())
+
+    def test_session_verifier_rejects_fixed_cookie(self):
+        async def run():
+            engine = _DummyEngine()
+            engine.browser = _CookieBrowser([
+                {
+                    "name": "token",
+                    "secure": True,
+                    "httpOnly": True,
+                    "sameSite": "Lax",
+                    "domain": "fixture.test",
+                    "path": "/",
+                }
+            ])
+            scanner = SessionScanner(engine)
+            finding = Finding(
+                check_type="session",
+                severity="medium",
+                url="http://fixture.test/jwt-lab",
+                field_name="Cookie: token",
+                payload="(no payload — cookie attribute analysis)",
+                evidence="Secure flag missing",
+                evidence_type="session_cookie_attributes",
+                evidence_details={
+                    "cookie_name": "token",
+                    "issues": [
+                        "Secure flag missing — cookie transmitted over unencrypted HTTP"
+                    ],
+                },
             )
 
             result = await scanner.verify_finding(finding)

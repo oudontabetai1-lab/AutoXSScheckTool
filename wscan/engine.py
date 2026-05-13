@@ -2509,6 +2509,7 @@ class ScanEngine:
         "privesc_cross_acct",
         "privesc_action",
         "info_disclosure",
+        "session",
     })
 
     async def _phase_verify(self):

@@ -77,34 +77,7 @@ class SessionScanner(BaseScanner):
             if name_key in self._reported_cookies:
                 continue
 
-            issues: list[str] = []
-
-            if not cookie.get("secure"):
-                issues.append(
-                    "Secure flag missing — cookie transmitted over unencrypted HTTP"
-                )
-            if not cookie.get("httpOnly"):
-                issues.append(
-                    "HttpOnly flag missing — accessible via JavaScript (amplifies XSS risk)"
-                )
-
-            samesite = (cookie.get("sameSite") or "").upper()
-            # SameSite=None is acceptable ONLY when paired with the Secure flag
-            # (required by modern browsers for cross-site APIs). Flag it only
-            # when Secure is absent.
-            if samesite in ("STRICT", "LAX"):
-                pass
-            elif samesite == "NONE":
-                if not cookie.get("secure"):
-                    issues.append(
-                        "SameSite=None without Secure — modern browsers reject "
-                        "this and it still permits CSRF over HTTP"
-                    )
-            else:
-                label = samesite if samesite else "unset"
-                issues.append(
-                    f"SameSite={label} — cookie sent on cross-site requests (CSRF risk)"
-                )
+            issues = self._cookie_issues(cookie)
 
             if issues:
                 self._reported_cookies.add(name_key)
@@ -119,7 +92,73 @@ class SessionScanner(BaseScanner):
                     ),
                     pair=pair,
                     severity="medium",
+                    confidence="likely",
+                    evidence_type="session_cookie_attributes",
+                    evidence_details={
+                        "cookie_name": name,
+                        "issues": issues,
+                        "secure": bool(cookie.get("secure")),
+                        "httpOnly": bool(cookie.get("httpOnly")),
+                        "sameSite": cookie.get("sameSite") or "",
+                        "domain": cookie.get("domain", ""),
+                        "path": cookie.get("path", ""),
+                    },
                 )
                 findings.append(finding)
 
         return findings
+
+    async def verify_finding(self, finding: Finding) -> bool | None:
+        if finding.evidence_type != "session_cookie_attributes":
+            return None
+
+        details = getattr(finding, "evidence_details", {}) or {}
+        cookie_name = details.get("cookie_name") or finding.field_name.replace("Cookie:", "").strip()
+        expected_issues = set(details.get("issues") or [])
+        if not cookie_name:
+            return None
+
+        try:
+            cookies = await self.browser._context.cookies()
+        except Exception:
+            return None
+
+        for cookie in cookies:
+            if (cookie.get("name", "") or "").lower() != cookie_name.lower():
+                continue
+            current_issues = set(self._cookie_issues(cookie))
+            return bool(current_issues) and (not expected_issues or expected_issues.issubset(current_issues))
+
+        return False
+
+    def _cookie_issues(self, cookie: dict) -> list[str]:
+        issues: list[str] = []
+
+        if not cookie.get("secure"):
+            issues.append(
+                "Secure flag missing — cookie transmitted over unencrypted HTTP"
+            )
+        if not cookie.get("httpOnly"):
+            issues.append(
+                "HttpOnly flag missing — accessible via JavaScript (amplifies XSS risk)"
+            )
+
+        samesite = (cookie.get("sameSite") or "").upper()
+        # SameSite=None is acceptable ONLY when paired with the Secure flag
+        # (required by modern browsers for cross-site APIs). Flag it only
+        # when Secure is absent.
+        if samesite in ("STRICT", "LAX"):
+            pass
+        elif samesite == "NONE":
+            if not cookie.get("secure"):
+                issues.append(
+                    "SameSite=None without Secure — modern browsers reject "
+                    "this and it still permits CSRF over HTTP"
+                )
+        else:
+            label = samesite if samesite else "unset"
+            issues.append(
+                f"SameSite={label} — cookie sent on cross-site requests (CSRF risk)"
+            )
+
+        return issues
