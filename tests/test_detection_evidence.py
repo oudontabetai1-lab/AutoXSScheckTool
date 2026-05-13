@@ -15,6 +15,7 @@ from wscan.scanners.open_redirect import OpenRedirectScanner
 from wscan.scanners.os_injection import OSInjectionScanner
 from wscan.scanners.path_traversal import PathTraversalScanner
 from wscan.scanners.race_condition import RaceConditionScanner
+from wscan.scanners.request_smuggling import RequestSmugglingScanner
 from wscan.scanners.security_headers import SecurityHeadersScanner
 from wscan.scanners.sqli import SQLiScanner
 from wscan.scanners.ssrf import SSRFScanner
@@ -624,6 +625,66 @@ class DetectionEvidenceTests(unittest.TestCase):
             self.assertFalse(result)
 
         self.run_async(run())
+
+    def test_request_smuggling_verifier_replays_timing_indicator(self):
+        async def run():
+            scanner = RequestSmugglingScanner(_DummyEngine())
+            scanner._measure_normal = AsyncMock(return_value=0.1)
+            scanner._send_probe = AsyncMock(return_value=(10.0, "", 0))
+            finding = Finding(
+                check_type="request_smuggling",
+                severity="high",
+                url="http://fixture.test/",
+                field_name="(HTTP request headers)",
+                payload="CL.TE",
+                evidence="timing",
+                evidence_type="request_smuggling_timing",
+                evidence_details={"probe_name": "CL.TE"},
+            )
+
+            result = await scanner.verify_finding(finding)
+
+            self.assertTrue(result)
+
+        self.run_async(run())
+
+    def test_request_smuggling_verifier_rejects_unreproduced_indicator(self):
+        async def run():
+            scanner = RequestSmugglingScanner(_DummyEngine())
+            scanner._measure_normal = AsyncMock(return_value=0.1)
+            scanner._send_probe = AsyncMock(return_value=(0.2, "OK", 200))
+            finding = Finding(
+                check_type="request_smuggling",
+                severity="high",
+                url="http://fixture.test/",
+                field_name="(HTTP request headers)",
+                payload="CL.TE",
+                evidence="timing",
+                evidence_type="request_smuggling_timing",
+                evidence_details={"probe_name": "CL.TE"},
+            )
+
+            result = await scanner.verify_finding(finding)
+
+            self.assertFalse(result)
+
+        self.run_async(run())
+
+    def test_request_smuggling_parser_error_records_tentative_evidence(self):
+        scanner = RequestSmugglingScanner(_DummyEngine())
+
+        classified = scanner._classify_probe(
+            "http://fixture.test/",
+            {"Transfer-Encoding": "chunked"},
+            "CL.TE",
+            0.1,
+            0.2,
+            "400 Bad Request: invalid chunk",
+            400,
+        )
+
+        self.assertEqual(classified[0], "request_smuggling_parser_error")
+        self.assertEqual(classified[1], "medium")
 
     def test_sqli_similarity_ignores_dynamic_noise(self):
         scanner = object.__new__(SQLiScanner)

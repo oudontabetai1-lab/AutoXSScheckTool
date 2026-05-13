@@ -2401,6 +2401,7 @@ class ScanEngine:
         "xxe",
         "file_upload",
         "race_condition",
+        "request_smuggling",
     })
 
     async def _phase_verify(self):
