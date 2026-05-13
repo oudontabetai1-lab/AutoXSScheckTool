@@ -8,6 +8,7 @@ from wscan.payload_gen import PayloadGenerator, _format_prompt_template
 from wscan.scanners.base import BaseScanner, Finding, finding_dedup_key_for
 from wscan.scanners.cors import CORSScanner
 from wscan.scanners.deserialization import DeserializationScanner
+from wscan.scanners.dom_xss import DOMXSSScanner
 from wscan.scanners.file_upload import FileUploadScanner
 from wscan.scanners.graphql import GraphQLScanner
 from wscan.scanners.header_injection import HeaderInjectionScanner
@@ -63,6 +64,26 @@ class _VerifierBrowser:
 
     def reset_dialog(self):
         self.dialog_fired = False
+
+
+class _DomVerifierPage:
+    def __init__(self, log):
+        self._log = log
+        self.add_init_script = AsyncMock()
+        self.evaluate = AsyncMock(return_value=log)
+
+
+class _DomVerifierBrowser:
+    def __init__(self, log=None, dialog_message=""):
+        self.dialog_fired = bool(dialog_message)
+        self.dialog_message = dialog_message
+        self.page = _DomVerifierPage(log or [])
+        self.test_url_param = AsyncMock(return_value=("", {}))
+        self.navigate = AsyncMock(return_value=True)
+        self.fill_and_submit_form = AsyncMock(return_value=("", {}))
+
+    def reset_dialog(self):
+        self.dialog_fired = bool(self.dialog_message)
 
 
 class DetectionEvidenceTests(unittest.TestCase):
@@ -1028,6 +1049,61 @@ class DetectionEvidenceTests(unittest.TestCase):
                     "header": "Host",
                     "value": "evil.wscan-test.example.com",
                 },
+            )
+
+            result = await scanner.verify_finding(finding)
+
+            self.assertFalse(result)
+
+        self.run_async(run())
+
+    def test_dom_xss_verifier_replays_sink_marker(self):
+        async def run():
+            marker = "__WSCAN_DOMXSS__abc12345"
+            engine = _DummyEngine()
+            engine.browser = _DomVerifierBrowser(
+                log=[{"sink": "innerHTML", "data": f"<div>{marker}</div>"}]
+            )
+            scanner = DOMXSSScanner(engine)
+            finding = Finding(
+                check_type="dom_xss",
+                severity="critical",
+                url="http://fixture.test/dom?next=hello",
+                field_name="next",
+                payload=f"{marker}<img src=x onerror=alert(1)>",
+                evidence="marker reached innerHTML",
+                evidence_type="dom_xss_sink",
+                evidence_details={"marker": marker, "sink": "innerHTML"},
+            )
+
+            result = await scanner.verify_finding(finding)
+
+            self.assertTrue(result)
+            engine.browser.test_url_param.assert_awaited_once_with(
+                "http://fixture.test/dom?next=hello",
+                "next",
+                f"{marker}<img src=x onerror=alert(1)>",
+            )
+
+        self.run_async(run())
+
+    def test_dom_xss_verifier_rejects_missing_marker(self):
+        async def run():
+            marker = "__WSCAN_DOMXSS__abc12345"
+            engine = _DummyEngine()
+            engine.browser = _DomVerifierBrowser(
+                log=[{"sink": "innerHTML", "data": "<div>safe</div>"}]
+            )
+            scanner = DOMXSSScanner(engine)
+            finding = Finding(
+                check_type="dom_xss",
+                severity="critical",
+                url="http://fixture.test/dom?next=hello",
+                field_name="next",
+                payload=f"{marker}<img src=x onerror=alert(1)>",
+                evidence="marker reached innerHTML",
+                evidence_type="dom_xss_sink",
+                evidence_details={"marker": marker, "sink": "innerHTML"},
             )
 
             result = await scanner.verify_finding(finding)

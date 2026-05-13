@@ -2500,6 +2500,7 @@ class ScanEngine:
         "jwt_payload_tamper",
         "cors",
         "host_header",
+        "dom_xss",
     })
 
     async def _phase_verify(self):
