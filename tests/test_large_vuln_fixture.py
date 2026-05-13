@@ -123,6 +123,21 @@ class LargeVulnerableFixtureTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("eyJ", resp.text)
         self.assertIn("token=", resp.headers["set-cookie"])
 
+    async def test_cors_fixture_exposes_reflection_and_wildcard_misconfigs(self):
+        reflect_resp = await self.client.get(
+            "/cors-reflect",
+            headers={"Origin": "https://evil.wscan-test.example.com"},
+        )
+        wildcard_resp = await self.client.get("/cors-wildcard")
+
+        self.assertEqual(
+            reflect_resp.headers["access-control-allow-origin"],
+            "https://evil.wscan-test.example.com",
+        )
+        self.assertEqual(reflect_resp.headers["access-control-allow-credentials"], "true")
+        self.assertEqual(wildcard_resp.headers["access-control-allow-origin"], "*")
+        self.assertEqual(wildcard_resp.headers["access-control-allow-credentials"], "true")
+
     async def test_os_command_target_returns_command_like_output(self):
         resp = await self.client.get("/ping", params={"host": "127.0.0.1; ls -la"})
 

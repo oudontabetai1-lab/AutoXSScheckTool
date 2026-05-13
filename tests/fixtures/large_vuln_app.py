@@ -44,6 +44,8 @@ def _layout(title: str, body: str) -> str:
             '<a href="/fetch?url=http://example.test/">Fetch URL</a>',
             '<a href="/graphql-lab">GraphQL Lab</a>',
             '<a href="/jwt-lab">JWT Lab</a>',
+            '<a href="/cors-reflect">CORS Reflect</a>',
+            '<a href="/cors-wildcard">CORS Wildcard</a>',
             '<a href="/deserialize">Deserialize</a>',
             '<a href="/ldap-login">LDAP Login</a>',
             '<a href="/xml">XML Import</a>',
@@ -300,6 +302,22 @@ def create_app(page_count: int = 48) -> FastAPI:
             """,
         ))
         response.set_cookie("token", token, httponly=True)
+        return response
+
+    @app.get("/cors-reflect", response_class=PlainTextResponse)
+    async def cors_reflect(request: Request):
+        origin = request.headers.get("origin", "")
+        response = PlainTextResponse("cors reflection fixture")
+        if origin:
+            response.headers["Access-Control-Allow-Origin"] = origin
+            response.headers["Access-Control-Allow-Credentials"] = "true"
+        return response
+
+    @app.get("/cors-wildcard", response_class=PlainTextResponse)
+    async def cors_wildcard():
+        response = PlainTextResponse("cors wildcard fixture")
+        response.headers["Access-Control-Allow-Origin"] = "*"
+        response.headers["Access-Control-Allow-Credentials"] = "true"
         return response
 
     @app.get("/template", response_class=HTMLResponse)

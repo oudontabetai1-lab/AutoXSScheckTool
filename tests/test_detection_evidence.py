@@ -6,6 +6,7 @@ from wscan.ctf_flag_finder import FlagFinder
 from wscan.engine import ScanEngine
 from wscan.payload_gen import PayloadGenerator, _format_prompt_template
 from wscan.scanners.base import BaseScanner, Finding, finding_dedup_key_for
+from wscan.scanners.cors import CORSScanner
 from wscan.scanners.deserialization import DeserializationScanner
 from wscan.scanners.file_upload import FileUploadScanner
 from wscan.scanners.graphql import GraphQLScanner
@@ -916,6 +917,63 @@ class DetectionEvidenceTests(unittest.TestCase):
             )
 
             self.assertTrue(await scanner.verify_finding(finding))
+
+        self.run_async(run())
+
+    def test_cors_verifier_replays_origin_reflection(self):
+        async def run():
+            scanner = CORSScanner(_DummyEngine())
+            response = type(
+                "Resp",
+                (),
+                {"headers": {
+                    "access-control-allow-origin": "https://evil.wscan-test.example.com",
+                    "access-control-allow-credentials": "true",
+                }},
+            )()
+            scanner._get_with_origin = AsyncMock(return_value=response)
+            finding = Finding(
+                check_type="cors",
+                severity="critical",
+                url="http://fixture.test/cors-reflect",
+                field_name="(CORS: Origin header)",
+                payload="Origin: https://evil.wscan-test.example.com",
+                evidence="origin reflected",
+                evidence_type="cors_origin_reflection",
+                evidence_details={
+                    "origin": "https://evil.wscan-test.example.com",
+                    "acac": "true",
+                },
+            )
+
+            result = await scanner.verify_finding(finding)
+
+            self.assertTrue(result)
+
+        self.run_async(run())
+
+    def test_cors_verifier_rejects_missing_reflection(self):
+        async def run():
+            scanner = CORSScanner(_DummyEngine())
+            response = type("Resp", (), {"headers": {}})()
+            scanner._get_with_origin = AsyncMock(return_value=response)
+            finding = Finding(
+                check_type="cors",
+                severity="critical",
+                url="http://fixture.test/cors-reflect",
+                field_name="(CORS: Origin header)",
+                payload="Origin: https://evil.wscan-test.example.com",
+                evidence="origin reflected",
+                evidence_type="cors_origin_reflection",
+                evidence_details={
+                    "origin": "https://evil.wscan-test.example.com",
+                    "acac": "true",
+                },
+            )
+
+            result = await scanner.verify_finding(finding)
+
+            self.assertFalse(result)
 
         self.run_async(run())
 

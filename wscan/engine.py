@@ -2498,6 +2498,7 @@ class ScanEngine:
         "jwt_alg_none",
         "jwt_kid_injection",
         "jwt_payload_tamper",
+        "cors",
     })
 
     async def _phase_verify(self):
