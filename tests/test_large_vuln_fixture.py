@@ -199,6 +199,12 @@ class LargeVulnerableFixtureTests(unittest.IsolatedAsyncioTestCase):
             2,
         )
 
+    async def test_websocket_lab_exposes_echo_endpoint(self):
+        resp = await self.client.get("/ws-lab")
+
+        self.assertIn("new WebSocket", resp.text)
+        self.assertIn("/ws/echo", resp.text)
+
     async def test_admin_action_form_allows_low_privilege_role_change(self):
         form_resp = await self.client.get("/admin/actions")
         action_resp = await self.client.post(

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from urllib.parse import unquote
 
-from fastapi import FastAPI, File, Form, Query, Request, UploadFile
+from fastapi import FastAPI, File, Form, Query, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse
 
 
@@ -31,6 +31,7 @@ def _layout(title: str, body: str) -> str:
             '<a href="/xml">XML Import</a>',
             '<a href="/upload">Upload</a>',
             '<a href="/coupon">Coupon</a>',
+            '<a href="/ws-lab">WebSocket Lab</a>',
             '<a href="/login">Login</a>',
             '<a href="/admin/actions">Admin Actions</a>',
             '<a href="/ctf">CTF</a>',
@@ -371,6 +372,36 @@ def create_app(page_count: int = 48) -> FastAPI:
             app.state.coupon_claimed = True
             return f"success coupon accepted: {coupon}"
         return "already redeemed"
+
+    @app.get("/ws-lab", response_class=HTMLResponse)
+    async def ws_lab():
+        return _layout(
+            "WebSocket Lab",
+            """
+            <script>
+              window.wsLab = new WebSocket(`ws://${location.host}/ws/echo`);
+              window.wsLab.onopen = () => window.wsLab.send(JSON.stringify({message: "hello"}));
+            </script>
+            <p>WebSocket echo lab</p>
+            """,
+        )
+
+    @app.websocket("/ws/echo")
+    async def ws_echo(ws: WebSocket):
+        await ws.accept()
+        try:
+            while True:
+                raw = await ws.receive_text()
+                if "{{7*7}}" in raw or "${7*7}" in raw:
+                    await ws.send_text("template result: 49")
+                elif "wsostest123" in raw:
+                    await ws.send_text("command output: wsostest123")
+                elif "UNION SELECT" in raw or "' OR '1'='1" in raw:
+                    await ws.send_text("sqlite syntax error near injected query")
+                else:
+                    await ws.send_text(raw)
+        except WebSocketDisconnect:
+            return
 
     @app.get("/admin", response_class=HTMLResponse)
     async def admin():

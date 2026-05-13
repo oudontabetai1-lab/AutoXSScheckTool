@@ -20,6 +20,7 @@ from wscan.scanners.security_headers import SecurityHeadersScanner
 from wscan.scanners.sqli import SQLiScanner
 from wscan.scanners.ssrf import SSRFScanner
 from wscan.scanners.ssti import SSTIScanner
+from wscan.scanners.websocket import WebSocketScanner
 from wscan.scanners.xss import XSSScanner
 from wscan.scanners.xxe import XXEScanner
 
@@ -36,6 +37,7 @@ class _DummyEngine:
         self.payload_gen = None
         self._finding_dedup = set()
         self.all_findings = []
+        self.checks = []
 
 
 class _DummyScanner(BaseScanner):
@@ -685,6 +687,71 @@ class DetectionEvidenceTests(unittest.TestCase):
 
         self.assertEqual(classified[0], "request_smuggling_parser_error")
         self.assertEqual(classified[1], "medium")
+
+    def test_websocket_check_enables_websocket_payloads(self):
+        engine = _DummyEngine()
+        engine.checks = ["websocket"]
+        scanner = WebSocketScanner(engine)
+
+        payloads = scanner._active_payloads()
+
+        self.assertGreaterEqual(len(payloads), 4)
+        self.assertIn("xss", {entry[0] for entry in payloads})
+        self.assertIn("ssti", {entry[0] for entry in payloads})
+
+    def test_websocket_verifier_replays_ws_probe(self):
+        async def run():
+            engine = _DummyEngine()
+            engine.checks = ["websocket"]
+            scanner = WebSocketScanner(engine)
+            scanner._send_ws_message = AsyncMock(return_value=["template result: 49"])
+            finding = Finding(
+                check_type="websocket",
+                severity="high",
+                url="http://fixture.test/ws-lab",
+                field_name="ws:message",
+                payload='{"message": "{{7*7}}"}',
+                evidence="ws ssti",
+                evidence_type="websocket_ssti_eval",
+                evidence_details={
+                    "ws_url": "ws://fixture.test/ws/echo",
+                    "pattern": "49",
+                    "sent": '{"message": "{{7*7}}"}',
+                },
+            )
+
+            result = await scanner.verify_finding(finding)
+
+            self.assertTrue(result)
+
+        self.run_async(run())
+
+    def test_websocket_verifier_rejects_unmatched_replay(self):
+        async def run():
+            engine = _DummyEngine()
+            engine.checks = ["websocket"]
+            scanner = WebSocketScanner(engine)
+            scanner._send_ws_message = AsyncMock(return_value=["unchanged"])
+            finding = Finding(
+                check_type="websocket",
+                severity="high",
+                url="http://fixture.test/ws-lab",
+                field_name="ws:message",
+                payload='{"message": "{{7*7}}"}',
+                evidence="ws ssti",
+                evidence_type="websocket_ssti_eval",
+                evidence_details={
+                    "ws_url": "ws://fixture.test/ws/echo",
+                    "pattern": "49",
+                    "sent": '{"message": "{{7*7}}"}',
+                },
+            )
+
+            result = await scanner.verify_finding(finding)
+
+            self.assertFalse(result)
+
+        self.run_async(run())
 
     def test_sqli_similarity_ignores_dynamic_noise(self):
         scanner = object.__new__(SQLiScanner)
