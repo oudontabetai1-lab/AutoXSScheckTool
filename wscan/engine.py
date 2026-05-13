@@ -194,6 +194,9 @@ class ScanEngine:
         spa_crawl: bool = False,
         # ハイブリッドモード: Agent偵察で発見したURLをクロールのシードに使う
         seed_urls: Optional[list] = None,
+        # Scope: URLs that are attacked vs. URLs that may be visited only
+        target_urls: Optional[list] = None,
+        access_urls: Optional[list] = None,
         # I: 差分スキャン — 前回出力ディレクトリのパス
         previous_scan_dir: Optional[str] = None,
         # N: リクエスト間の待機秒数 (0 = 無制限)
@@ -249,6 +252,14 @@ class ScanEngine:
         self.spa_crawl = spa_crawl
         # ハイブリッドモード用シード URL (Agent偵察で発見したURL)
         self.seed_urls: list = list(seed_urls or [])
+        primary_origin = self._origin_for(self.target_url)
+        self.additional_target_urls: list[str] = self._normalize_scope_urls(list(target_urls or []))
+        self.target_urls: list[str] = self._normalize_scope_urls(
+            [primary_origin] + self.additional_target_urls
+        )
+        self.access_urls: list[str] = self._normalize_scope_urls(
+            list(access_urls or []) + ([login_url] if login_url else [])
+        )
         # I: 差分スキャン
         self.previous_scan_dir: Optional[str] = previous_scan_dir
         # K: SARIF 出力フラグ
@@ -389,6 +400,44 @@ class ScanEngine:
         # Auto-login landing page. Seeded into the normal crawl so authenticated
         # pages are not missed when the scan target itself is the login URL.
         self.auth_landing_url: str = ""
+
+    @staticmethod
+    def _origin_for(url: str) -> str:
+        parsed = urlparse(url)
+        if parsed.scheme and parsed.netloc:
+            return f"{parsed.scheme}://{parsed.netloc}"
+        return url.rstrip("/")
+
+    @classmethod
+    def _normalize_scope_urls(cls, urls: list[str]) -> list[str]:
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for raw in urls:
+            value = str(raw or "").strip().rstrip("/")
+            if not value:
+                continue
+            if value not in seen:
+                seen.add(value)
+                normalized.append(value)
+        return normalized
+
+    def _url_matches_scope(self, url: str, scopes: list[str]) -> bool:
+        candidate = url.rstrip("/")
+        parsed = urlparse(candidate)
+        for scope in scopes:
+            if scope.startswith(("http://", "https://")):
+                if candidate == scope or candidate.startswith(scope + "/"):
+                    return True
+                continue
+            if parsed.path == scope or parsed.path.startswith(scope.rstrip("/") + "/"):
+                return True
+        return False
+
+    def _is_attack_target_url(self, url: str) -> bool:
+        return self._url_matches_scope(url, self.target_urls)
+
+    def _is_access_allowed_url(self, url: str) -> bool:
+        return self._is_attack_target_url(url) or self._url_matches_scope(url, self.access_urls)
 
     def _record_scan_matrix(
         self,
@@ -712,11 +761,22 @@ class ScanEngine:
     async def _phase_crawl(self) -> list:
         """BFS crawl — navigate every reachable page, collect forms/HTML. No payloads."""
         console.print(Rule("[bold blue] Phase 1 / 4  ·  Crawl [/bold blue]", style="blue"))
-        console.print(f"  Target: [cyan]{self.target_url}[/cyan]  depth={self.depth}\n")
+        console.print(f"  Target: [cyan]{self.target_url}[/cyan]  depth={self.depth}")
+        if len(self.target_urls) > 1 or self.access_urls:
+            console.print(
+                f"  Scope : [cyan]{len(self.target_urls)}[/cyan] attack scope(s), "
+                f"[cyan]{len(self.access_urls)}[/cyan] access-only scope(s)\n"
+            )
+        else:
+            console.print()
 
         pages: list = []
         queue: deque = deque([(self.target_url, 0, None)])  # (url, depth, parent_url)
         self.visited_urls.add(self.target_url)
+        for scope_url in self.additional_target_urls:
+            if scope_url.startswith(("http://", "https://")) and scope_url not in self.visited_urls:
+                self.visited_urls.add(scope_url)
+                queue.append((scope_url, 0, self.target_url))
         # A: DOM構造フィンガープリントで類似ページを検出
         self._seen_page_fingerprints: set[str] = set()
         _first_page = True  # CMS 検出は最初のページのみ
@@ -725,11 +785,9 @@ class ScanEngine:
         # ここを入れないとログイン後画面を巡回しないまま攻撃フェーズへ進んでしまう。
         if self.auth_landing_url:
             try:
-                base_host = urlparse(self.target_url).netloc
-                landing_host = urlparse(self.auth_landing_url).netloc
                 if (
-                    landing_host == base_host
-                    and self.auth_landing_url not in self.visited_urls
+                    self.auth_landing_url not in self.visited_urls
+                    and self._is_access_allowed_url(self.auth_landing_url)
                     and not self._is_url_excluded(self.auth_landing_url)
                 ):
                     self.visited_urls.add(self.auth_landing_url)
@@ -751,7 +809,7 @@ class ScanEngine:
                     f"{len(har_seed.cookies)} Cookie を読み込みました: {self.har_path}"
                 )
                 for _hurl in har_seed.urls:
-                    if _hurl not in self.visited_urls:
+                    if _hurl not in self.visited_urls and self._is_access_allowed_url(_hurl):
                         self.visited_urls.add(_hurl)
                         queue.append((_hurl, 0, self.target_url))
                 if har_seed.cookies:
@@ -763,13 +821,17 @@ class ScanEngine:
         if self.manual_crawl_path:
             try:
                 from wscan.manual_crawl import load_manual_crawl_seed
-                manual_seed = load_manual_crawl_seed(self.manual_crawl_path, self.target_url)
+                manual_seed = load_manual_crawl_seed(
+                    self.manual_crawl_path,
+                    self.target_url,
+                    allowed_scopes=[*self.target_urls, *self.access_urls],
+                )
                 console.print(
                     f"  [dim cyan][Manual Crawl][/dim cyan] {len(manual_seed.urls)} URL, "
                     f"{len(manual_seed.cookies)} Cookie を読み込みました: {self.manual_crawl_path}"
                 )
                 for _murl in manual_seed.urls:
-                    if _murl not in self.visited_urls:
+                    if _murl not in self.visited_urls and self._is_access_allowed_url(_murl):
                         self.visited_urls.add(_murl)
                         queue.append((_murl, 0, self.target_url))
                 if manual_seed.cookies:
@@ -785,7 +847,7 @@ class ScanEngine:
                 f"{len(sitemap_urls)} additional URL(s) discovered"
             )
             for su in sitemap_urls[:30]:  # cap at 30 seed URLs
-                if su not in self.visited_urls:
+                if su not in self.visited_urls and self._is_access_allowed_url(su):
                     self.visited_urls.add(su)
                     queue.append((su, 0, self.target_url))  # depth=0: treat as root-level
 
@@ -793,7 +855,11 @@ class ScanEngine:
         if self.seed_urls:
             added = 0
             for su in self.seed_urls:
-                if su not in self.visited_urls and not self._is_url_excluded(su):
+                if (
+                    su not in self.visited_urls
+                    and self._is_access_allowed_url(su)
+                    and not self._is_url_excluded(su)
+                ):
                     self.visited_urls.add(su)
                     queue.append((su, 0, self.target_url))
                     added += 1
@@ -809,6 +875,9 @@ class ScanEngine:
             # Skip excluded URLs (exact match or prefix match)
             if self._is_url_excluded(url):
                 console.print(f"  [dim yellow]Skip (excluded URL):[/dim yellow] {url}")
+                continue
+            if not self._is_access_allowed_url(url):
+                console.print(f"  [dim yellow]Skip (out of scope):[/dim yellow] {url}")
                 continue
 
             console.print(f"  [dim]Crawling[/dim] ({depth + 1}/{self.depth}): {url}")
@@ -860,10 +929,14 @@ class ScanEngine:
                     # リンクは抽出するが、スキャン対象には追加しない
                     if depth + 1 < self.depth:
                         try:
-                            links = await self.browser.collect_links(url, same_domain=True)
+                            links = await self.browser.collect_links(url, same_domain=False)
                             for link in links:
                                 clean = link.split("#")[0]
-                                if clean not in self.visited_urls and not self._is_url_excluded(clean):
+                                if (
+                                    clean not in self.visited_urls
+                                    and self._is_access_allowed_url(clean)
+                                    and not self._is_url_excluded(clean)
+                                ):
                                     self.visited_urls.add(clean)
                                     queue.append((link, depth + 1, url))
                         except Exception:
@@ -939,8 +1012,15 @@ class ScanEngine:
                 + (f"\n    {reg_note}" if reg_note else "")
             )
 
-            pages.append(CrawledPage(url=url, html=html, forms=forms,
-                                     url_params=url_params, depth=depth))
+            is_attack_target = self._is_attack_target_url(url)
+            if is_attack_target:
+                pages.append(CrawledPage(url=url, html=html, forms=forms,
+                                         url_params=url_params, depth=depth))
+            else:
+                console.print(
+                    f"    [dim cyan]access-only scope: forms and parameters were collected "
+                    f"for navigation context but will not be attacked[/dim cyan]"
+                )
 
             # ① SPA crawl: discover dynamically-rendered routes via click interaction
             if self.spa_crawl:
@@ -950,14 +1030,18 @@ class ScanEngine:
                     )
                     for spa_link in spa_links:
                         clean_spa = spa_link.split("#")[0]
-                        if clean_spa not in self.visited_urls and not self._is_url_excluded(clean_spa):
+                        if (
+                            clean_spa not in self.visited_urls
+                            and self._is_access_allowed_url(clean_spa)
+                            and not self._is_url_excluded(clean_spa)
+                        ):
                             self.visited_urls.add(clean_spa)
                             queue.append((spa_link, depth + 1, url))
                 except Exception:
                     pass
 
             if depth + 1 < self.depth:
-                links = await self.browser.collect_links(url, same_domain=True)
+                links = await self.browser.collect_links(url, same_domain=False)
                 url_cap = max(200, self.depth * 50)
                 _cap_warned = False
                 for link in links:
@@ -971,6 +1055,7 @@ class ScanEngine:
                             _cap_warned = True
                         break
                     if (clean not in self.visited_urls
+                            and self._is_access_allowed_url(clean)
                             and not self._is_url_excluded(clean)):
                         self.visited_urls.add(clean)
                         queue.append((link, depth + 1, url))

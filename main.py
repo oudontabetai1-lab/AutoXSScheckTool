@@ -62,6 +62,8 @@ def _load_config(path: Path = _CONFIG_PATH) -> dict:
     cfg["timeout"]                 = int(s.get("timeout",   30))
     cfg["exclude_fields"]          = list(s.get("exclude_fields", []))
     cfg["exclude_urls"]            = list(s.get("exclude_urls",   []))
+    cfg["target_urls"]             = list(s.get("target_urls",    []))
+    cfg["access_urls"]             = list(s.get("access_urls",    []))
     cfg["manual_crawl_file"]       = str(s.get("manual_crawl_file", "") or "")
 
     cfg["headless"]                = bool(b.get("headless", False))
@@ -238,6 +240,30 @@ Examples:
             "Text file with URLs/prefixes to skip during crawl and attack "
             "(one entry per line, lines starting with # are ignored)."
         ),
+    )
+    scan.add_argument(
+        "--target-url", dest="target_urls", action="append", default=[],
+        metavar="URL_OR_PREFIX",
+        help=(
+            "Additional URL/origin/prefix to crawl and attack. Repeat for multiple "
+            "applications or separate authenticated areas."
+        ),
+    )
+    scan.add_argument(
+        "--target-urls-file", metavar="FILE",
+        help="Text file with additional crawl-and-attack URL scopes, one per line.",
+    )
+    scan.add_argument(
+        "--access-url", dest="access_urls", action="append", default=[],
+        metavar="URL_OR_PREFIX",
+        help=(
+            "URL/origin/prefix that may be visited for login or supporting flows "
+            "but must not be attacked. Repeat for external IdP or utility domains."
+        ),
+    )
+    scan.add_argument(
+        "--access-urls-file", metavar="FILE",
+        help="Text file with access-only URL scopes, one per line.",
     )
     scan.add_argument(
         "--ctf", action="store_true", default=_CFG.get("ctf_mode", False),
@@ -1022,6 +1048,32 @@ async def run_scan(args):
         except Exception as ex:
             console.print(f"[yellow]Warning: Could not read exclude-urls file: {ex}[/yellow]")
 
+    def _read_scope_file(path: str) -> list[str]:
+        if not path:
+            return []
+        try:
+            lines = Path(path).read_text(encoding="utf-8").splitlines()
+            return [l.strip() for l in lines if l.strip() and not l.lstrip().startswith("#")]
+        except Exception as ex:
+            console.print(f"[yellow]Warning: Could not read scope file {path}: {ex}[/yellow]")
+            return []
+
+    target_urls = [
+        *_CFG.get("target_urls", []),
+        *(getattr(args, "target_urls", []) or []),
+        *_read_scope_file(getattr(args, "target_urls_file", "") or ""),
+    ]
+    access_urls = [
+        *_CFG.get("access_urls", []),
+        *(getattr(args, "access_urls", []) or []),
+        *_read_scope_file(getattr(args, "access_urls_file", "") or ""),
+    ]
+    if target_urls or access_urls:
+        console.print(
+            f"Scope           : [cyan]{len(target_urls)}[/cyan] additional attack, "
+            f"[cyan]{len(access_urls)}[/cyan] access-only"
+        )
+
     # Build checks list (add dom_xss if requested, allow wizard to have updated args.checks)
     checks_list = list(args.checks)
     if getattr(args, "dom_xss", False) and "dom_xss" not in checks_list:
@@ -1070,6 +1122,8 @@ async def run_scan(args):
             max_forms=args.max_forms,
             exclude_fields=exclude_fields,
             exclude_urls=exclude_urls,
+            target_urls=target_urls,
+            access_urls=access_urls,
             ctf_mode=getattr(args, "ctf", False),
             ctf_flag_pattern=getattr(args, "ctf_flag_format", "") or "",
             cookies=getattr(args, "cookie", "") or "",
@@ -1220,6 +1274,8 @@ async def run_serve(args):
         "login_success_indicator": _CFG.get("login_success_indicator", ""),
         "exclude_fields": ", ".join(_CFG.get("exclude_fields", []) or []),
         "exclude_urls": "\n".join(_CFG.get("exclude_urls", []) or []),
+        "target_urls": "\n".join(_CFG.get("target_urls", []) or []),
+        "access_urls": "\n".join(_CFG.get("access_urls", []) or []),
         "manual_crawl_file": _CFG.get("manual_crawl_file", ""),
         "toggles": {
             "headless": _CFG.get("headless", False),
@@ -1387,6 +1443,8 @@ async def run_serve(args):
                 ctf_flag_pattern=cfg.get("ctf_flag_pattern", "") or "",
                 exclude_fields=cfg.get("exclude_fields", []) or [],
                 exclude_urls=cfg.get("exclude_urls", []) or [],
+                target_urls=cfg.get("target_urls", []) or [],
+                access_urls=cfg.get("access_urls", []) or [],
                 flows=cfg.get("flows", []) or [],
                 spa_crawl=bool(cfg.get("spa_crawl", False)),
                 fast_mode=bool(cfg.get("fast_mode", False)),

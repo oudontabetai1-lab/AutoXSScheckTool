@@ -40,6 +40,32 @@ class ManualCrawlSeedTests(unittest.TestCase):
         self.assertIn("http://example.test/profile", seed.forms_by_url)
         self.assertEqual(seed.steps[0]["action"], "click")
 
+    def test_load_manual_crawl_seed_keeps_allowed_support_scope(self):
+        data = {
+            "seed_urls": [
+                "http://example.test/",
+                "https://auth.example.test/login",
+                "https://untrusted.example.test/out",
+            ],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "manual.json"
+            path.write_text(json.dumps(data), encoding="utf-8")
+
+            seed = load_manual_crawl_seed(
+                str(path),
+                "http://example.test/",
+                allowed_scopes=["https://auth.example.test"],
+            )
+
+        self.assertEqual(
+            seed.urls,
+            [
+                "http://example.test/",
+                "https://auth.example.test/login",
+            ],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

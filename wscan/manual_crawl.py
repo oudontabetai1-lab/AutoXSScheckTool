@@ -32,14 +32,30 @@ def _same_origin(url: str, origin: str) -> bool:
         return False
 
 
-def _unique_urls(values: list[str], origin: str = "") -> list[str]:
+def _matches_scope(url: str, scopes: list[str]) -> bool:
+    candidate = url.rstrip("/")
+    parsed = urlparse(candidate)
+    for raw in scopes:
+        scope = str(raw or "").strip().rstrip("/")
+        if not scope:
+            continue
+        if scope.startswith(("http://", "https://")):
+            if candidate == scope or candidate.startswith(scope + "/"):
+                return True
+        elif parsed.path == scope or parsed.path.startswith(scope + "/"):
+            return True
+    return False
+
+
+def _unique_urls(values: list[str], origin: str = "", allowed_scopes: list[str] | None = None) -> list[str]:
     seen: set[str] = set()
     urls: list[str] = []
+    allowed_scopes = allowed_scopes or []
     for raw in values:
         url = str(raw or "").split("#")[0].strip()
         if not url.startswith(("http://", "https://")):
             continue
-        if origin and not _same_origin(url, origin):
+        if origin and not _same_origin(url, origin) and not _matches_scope(url, allowed_scopes):
             continue
         if url in seen:
             continue
@@ -48,7 +64,11 @@ def _unique_urls(values: list[str], origin: str = "") -> list[str]:
     return urls
 
 
-def load_manual_crawl_seed(path: str, same_origin_as: str = "") -> ManualCrawlSeed:
+def load_manual_crawl_seed(
+    path: str,
+    same_origin_as: str = "",
+    allowed_scopes: list[str] | None = None,
+) -> ManualCrawlSeed:
     """Load a saved manual crawl JSON file and normalize seed URLs."""
     data = json.loads(Path(path).read_text(encoding="utf-8"))
     if not isinstance(data, dict):
@@ -62,7 +82,7 @@ def load_manual_crawl_seed(path: str, same_origin_as: str = "") -> ManualCrawlSe
             raw_urls.append(event["url"])
 
     return ManualCrawlSeed(
-        urls=_unique_urls(raw_urls, same_origin_as),
+        urls=_unique_urls(raw_urls, same_origin_as, allowed_scopes),
         cookies=data.get("cookies") or [],
         forms_by_url=data.get("forms_by_url") or {},
         steps=data.get("steps") or [],
