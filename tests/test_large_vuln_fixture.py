@@ -138,6 +138,14 @@ class LargeVulnerableFixtureTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(wildcard_resp.headers["access-control-allow-origin"], "*")
         self.assertEqual(wildcard_resp.headers["access-control-allow-credentials"], "true")
 
+    async def test_host_header_fixture_builds_reset_link_from_forwarded_host(self):
+        resp = await self.client.get(
+            "/host-reset",
+            headers={"X-Forwarded-Host": "evil.wscan-test.example.com"},
+        )
+
+        self.assertIn("https://evil.wscan-test.example.com/reset/confirm", resp.text)
+
     async def test_os_command_target_returns_command_like_output(self):
         resp = await self.client.get("/ping", params={"host": "127.0.0.1; ls -la"})
 

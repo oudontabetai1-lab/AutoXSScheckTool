@@ -78,12 +78,6 @@ class HostHeaderScanner(BaseScanner):
             await self.monitor.emit_status(f"Host header injection check on {url}")
 
         findings = []
-        proxy = getattr(self.engine, "proxy", "") or None
-        timeout = getattr(self.engine, "timeout", 15)
-
-        client_kwargs: dict = {"timeout": timeout, "follow_redirects": True}
-        if proxy:
-            client_kwargs["proxy"] = proxy
 
         tests = [
             # (description, headers_dict)
@@ -96,47 +90,80 @@ class HostHeaderScanner(BaseScanner):
             for h in _OVERRIDE_HEADERS
         ]
 
-        async with httpx.AsyncClient(**client_kwargs) as client:
-            for description, extra_headers in tests:
-                try:
-                    r = await client.get(url, headers=extra_headers)
-                    body = r.text
+        for description, extra_headers in tests:
+            try:
+                r = await self._get_with_headers(url, extra_headers)
+                body = r.text
 
-                    # Check if canary appears as a genuine URL/hostname, not
-                    # merely as a substring inside another domain.
-                    m = _CANARY_RE.search(body)
-                    if m:
-                        idx = m.start()
-                        snippet = body[max(0, idx - 60):idx + len(_CANARY_HOST) + 60]
+                # Check if canary appears as a genuine URL/hostname, not
+                # merely as a substring inside another domain.
+                m = _CANARY_RE.search(body)
+                if m:
+                    idx = m.start()
+                    snippet = body[max(0, idx - 60):idx + len(_CANARY_HOST) + 60]
+                    header_name = next(iter(extra_headers.keys()))
 
-                        pair = {
-                            "request": {"url": url, "headers": extra_headers},
-                            "response": {
-                                "status": r.status_code,
-                                "headers": dict(r.headers),
-                                "body": body[:2000],
-                            },
-                        }
-                        finding = await self.record_finding(
-                            url=url,
-                            field_name=f"(HTTP {list(extra_headers.keys())[0]})",
-                            payload=str(extra_headers),
-                            evidence=(
-                                f"Host Header Injection via {description}: "
-                                f"canary domain '{_CANARY_HOST}' reflected in response. "
-                                f"Context: ...{snippet}..."
-                            ),
-                            pair=pair,
-                            severity="medium",
-                        )
-                        findings.append(finding)
-                        break  # One confirmed finding is enough
+                    pair = {
+                        "request": {"url": url, "headers": extra_headers},
+                        "response": {
+                            "status": r.status_code,
+                            "headers": dict(r.headers),
+                            "body": body[:2000],
+                        },
+                    }
+                    finding = await self.record_finding(
+                        url=url,
+                        field_name=f"(HTTP {header_name})",
+                        payload=str(extra_headers),
+                        evidence=(
+                            f"Host Header Injection via {description}: "
+                            f"canary domain '{_CANARY_HOST}' reflected in response. "
+                            f"Context: ...{snippet}..."
+                        ),
+                        pair=pair,
+                        severity="medium",
+                        confidence="likely",
+                        evidence_type="host_header_reflection",
+                        evidence_details={
+                            "header": header_name,
+                            "value": _CANARY_HOST,
+                            "snippet": snippet,
+                        },
+                    )
+                    findings.append(finding)
+                    break  # One confirmed finding is enough
 
-                except Exception as exc:
-                    if self.monitor:
-                        await self.monitor.emit_status(
-                            f"[warn] host_header: {description} failed on {url}: {exc}"
-                        )
-                    continue
+            except Exception as exc:
+                if self.monitor:
+                    await self.monitor.emit_status(
+                        f"[warn] host_header: {description} failed on {url}: {exc}"
+                    )
+                continue
 
         return findings
+
+    async def _get_with_headers(self, url: str, headers: dict):
+        proxy = getattr(self.engine, "proxy", "") or None
+        timeout = getattr(self.engine, "timeout", 15)
+        client_kwargs: dict = {"timeout": timeout, "follow_redirects": True}
+        if proxy:
+            client_kwargs["proxy"] = proxy
+        async with httpx.AsyncClient(**client_kwargs) as client:
+            return await client.get(url, headers=headers)
+
+    async def verify_finding(self, finding: Finding) -> bool | None:
+        if finding.evidence_type != "host_header_reflection":
+            return None
+
+        details = getattr(finding, "evidence_details", {}) or {}
+        header = details.get("header")
+        value = details.get("value") or _CANARY_HOST
+        if not header:
+            return None
+
+        try:
+            r = await self._get_with_headers(finding.url, {header: value})
+        except Exception:
+            return None
+
+        return bool(_CANARY_RE.search(r.text or ""))

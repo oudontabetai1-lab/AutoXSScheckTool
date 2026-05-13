@@ -11,6 +11,7 @@ from wscan.scanners.deserialization import DeserializationScanner
 from wscan.scanners.file_upload import FileUploadScanner
 from wscan.scanners.graphql import GraphQLScanner
 from wscan.scanners.header_injection import HeaderInjectionScanner
+from wscan.scanners.host_header import HostHeaderScanner
 from wscan.scanners.jwt_scanner import JWTScanner, _build_jwt
 from wscan.scanners.ldap_injection import LDAPScanner
 from wscan.scanners.nosql_injection import NoSQLInjectionScanner
@@ -968,6 +969,64 @@ class DetectionEvidenceTests(unittest.TestCase):
                 evidence_details={
                     "origin": "https://evil.wscan-test.example.com",
                     "acac": "true",
+                },
+            )
+
+            result = await scanner.verify_finding(finding)
+
+            self.assertFalse(result)
+
+        self.run_async(run())
+
+    def test_host_header_verifier_replays_reflected_header(self):
+        async def run():
+            scanner = HostHeaderScanner(_DummyEngine())
+            response = type(
+                "Resp",
+                (),
+                {"text": '<a href="https://evil.wscan-test.example.com/reset">reset</a>'},
+            )()
+            scanner._get_with_headers = AsyncMock(return_value=response)
+            finding = Finding(
+                check_type="host_header",
+                severity="medium",
+                url="http://fixture.test/host-reset",
+                field_name="(HTTP X-Forwarded-Host)",
+                payload="{'X-Forwarded-Host': 'evil.wscan-test.example.com'}",
+                evidence="host reflected",
+                evidence_type="host_header_reflection",
+                evidence_details={
+                    "header": "X-Forwarded-Host",
+                    "value": "evil.wscan-test.example.com",
+                },
+            )
+
+            result = await scanner.verify_finding(finding)
+
+            self.assertTrue(result)
+            scanner._get_with_headers.assert_awaited_once_with(
+                "http://fixture.test/host-reset",
+                {"X-Forwarded-Host": "evil.wscan-test.example.com"},
+            )
+
+        self.run_async(run())
+
+    def test_host_header_verifier_rejects_missing_reflection(self):
+        async def run():
+            scanner = HostHeaderScanner(_DummyEngine())
+            response = type("Resp", (), {"text": "<p>reset link unavailable</p>"})()
+            scanner._get_with_headers = AsyncMock(return_value=response)
+            finding = Finding(
+                check_type="host_header",
+                severity="medium",
+                url="http://fixture.test/host-reset",
+                field_name="(HTTP Host)",
+                payload="{'Host': 'evil.wscan-test.example.com'}",
+                evidence="host reflected",
+                evidence_type="host_header_reflection",
+                evidence_details={
+                    "header": "Host",
+                    "value": "evil.wscan-test.example.com",
                 },
             )
 

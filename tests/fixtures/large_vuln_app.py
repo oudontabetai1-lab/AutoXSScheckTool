@@ -46,6 +46,7 @@ def _layout(title: str, body: str) -> str:
             '<a href="/jwt-lab">JWT Lab</a>',
             '<a href="/cors-reflect">CORS Reflect</a>',
             '<a href="/cors-wildcard">CORS Wildcard</a>',
+            '<a href="/host-reset">Host Reset</a>',
             '<a href="/deserialize">Deserialize</a>',
             '<a href="/ldap-login">LDAP Login</a>',
             '<a href="/xml">XML Import</a>',
@@ -319,6 +320,17 @@ def create_app(page_count: int = 48) -> FastAPI:
         response.headers["Access-Control-Allow-Origin"] = "*"
         response.headers["Access-Control-Allow-Credentials"] = "true"
         return response
+
+    @app.get("/host-reset", response_class=HTMLResponse)
+    async def host_reset(request: Request):
+        host = request.headers.get("x-forwarded-host") or request.headers.get("host", "")
+        return _layout(
+            "Host Reset",
+            f"""
+            <p>Password reset link preview</p>
+            <a href="https://{host}/reset/confirm?token=fixture">Reset password</a>
+            """,
+        )
 
     @app.get("/template", response_class=HTMLResponse)
     async def template(name: str = Query("")):

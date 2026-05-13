@@ -2499,6 +2499,7 @@ class ScanEngine:
         "jwt_kid_injection",
         "jwt_payload_tamper",
         "cors",
+        "host_header",
     })
 
     async def _phase_verify(self):
