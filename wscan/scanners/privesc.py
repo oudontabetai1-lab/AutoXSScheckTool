@@ -186,6 +186,24 @@ def _body_contains_identifier(body: str, identifier: str) -> bool:
     return identifier.lower() in body.lower()
 
 
+def _is_auth_gate(body: str) -> bool:
+    """Detect real auth gates without treating a normal Login nav link as a gate."""
+    body_l = (body or "").lower()
+    if re.search(
+        r"(please.*log\s*in|must.*log\s*in|authentication.*required"
+        r"|unauthorized|access.*denied|forbidden|session.*expired"
+        r"|ログイン.*してください|認証.*必要|ログインが必要"
+        r"|権限がありません|アクセス.*禁止)",
+        body_l,
+        re.IGNORECASE,
+    ):
+        return True
+    return bool(
+        re.search(r"<form[^>]+action=[\"'][^\"']*(?:login|signin|auth)", body_l, re.IGNORECASE)
+        and re.search(r"type=[\"']password[\"']", body_l, re.IGNORECASE)
+    )
+
+
 def _idor_response_confidence(
     original_body: str,
     candidate_body: str,
@@ -195,7 +213,7 @@ def _idor_response_confidence(
     """Return whether a mutated object-id response looks like real object access."""
     if len(candidate_body) < 50:
         return False, "short candidate response", 0.0
-    if LOGIN_GATE_RE.search(candidate_body):
+    if _is_auth_gate(candidate_body):
         return False, "authentication gate", 0.0
     if NON_RESOURCE_RE.search(candidate_body):
         return False, "not-found response", 0.0
@@ -400,7 +418,7 @@ class PrivEscScanner(BaseScanner):
             return None
         if not (200 <= status < 300):
             return None
-        if LOGIN_GATE_RE.search(body):
+        if _is_auth_gate(body):
             return None
 
         path = urlparse(url).path
@@ -467,7 +485,7 @@ class PrivEscScanner(BaseScanner):
             return None
         if not (200 <= status < 300):
             return None
-        if LOGIN_GATE_RE.search(body):
+        if _is_auth_gate(body):
             return None
 
         path = urlparse(url).path
@@ -766,7 +784,7 @@ class PrivEscScanner(BaseScanner):
 
             # Fetch the resource as account A
             status_a, body_a = await self._get(url, cookies_a, timeout)
-            if status_a not in range(200, 300) or LOGIN_GATE_RE.search(body_a):
+            if status_a not in range(200, 300) or _is_auth_gate(body_a):
                 continue
 
             for j, account_b in enumerate(account_sessions):
@@ -780,7 +798,7 @@ class PrivEscScanner(BaseScanner):
 
                 status_b, body_b = await self._get(url, cookies_b, timeout)
 
-                if status_b not in range(200, 300) or LOGIN_GATE_RE.search(body_b):
+                if status_b not in range(200, 300) or _is_auth_gate(body_b):
                     continue
                 if len(body_b) < 50:
                     continue
@@ -973,9 +991,131 @@ class PrivEscScanner(BaseScanner):
         except Exception:
             return 0, ""
 
+    async def verify_finding(self, finding: Finding) -> bool | None:
+        timeout = float(getattr(self.engine, "timeout", 30))
+
+        if finding.check_type == "privesc_unauth":
+            url = finding.request.get("url") or finding.url
+            status, body = await self._get(url, "", timeout)
+            return self._accessible_response(status, body)
+
+        if finding.check_type == "privesc_vertical":
+            cookies = getattr(self.engine, "low_priv_cookies", "")
+            if not cookies:
+                return None
+            status, body = await self._get(finding.url, cookies, timeout)
+            return self._accessible_response(status, body)
+
+        if finding.check_type in {"privesc_horizontal", "privesc_param_idor"}:
+            cookies = self._get_primary_cookies()
+            candidate_url = finding.request.get("url") or finding.response.get("url")
+            if not cookies or not candidate_url:
+                return None
+            own_status, own_body = await self._get(finding.url, cookies, timeout)
+            cand_status, cand_body = await self._get(candidate_url, cookies, timeout)
+            return self._verifies_idor_response(
+                own_status,
+                own_body,
+                cand_status,
+                cand_body,
+            )
+
+        if finding.check_type == "privesc_cross_acct":
+            account = self._account_for_finding(finding)
+            if not account:
+                return None
+            status, body = await self._get(finding.url, account.get("cookies", ""), timeout)
+            if not self._accessible_response(status, body):
+                return False
+            owner_user = self._owner_from_evidence(finding)
+            if owner_user:
+                owner_markers = _identity_markers(owner_user)
+                if owner_markers:
+                    return any(marker in body.lower() for marker in owner_markers)
+            return True
+
+        if finding.check_type == "privesc_action":
+            req = finding.request or {}
+            action_url = req.get("url")
+            method = req.get("method", "POST")
+            body = req.get("body") or {}
+            cookies = self._cookies_for_action_finding(finding)
+            if not action_url or not cookies:
+                return None
+            status, response_body = await self._request_form(
+                method,
+                action_url,
+                body,
+                cookies,
+                timeout,
+            )
+            return self._accepted_action_response(status, response_body)
+
+        return None
+
+    def _accessible_response(self, status: int, body: str) -> bool:
+        return (
+            status in range(200, 300)
+            and not _is_auth_gate(body or "")
+            and not NON_RESOURCE_RE.search(body or "")
+        )
+
+    def _verifies_idor_response(
+        self,
+        own_status: int,
+        own_body: str,
+        cand_status: int,
+        cand_body: str,
+    ) -> bool:
+        if not self._accessible_response(own_status, own_body):
+            return False
+        if not self._accessible_response(cand_status, cand_body):
+            return False
+        if len(cand_body or "") < 50:
+            return False
+        similarity = _body_similarity(own_body, cand_body)
+        return _normalize_response_body(own_body) != _normalize_response_body(cand_body) and similarity < 0.995
+
+    def _account_for_finding(self, finding: Finding) -> Optional[dict]:
+        actor = self._actor_from_payload(finding.payload)
+        if not actor:
+            return None
+        for account in getattr(self.engine, "account_sessions", []) or []:
+            if account.get("username") == actor:
+                return account
+        return None
+
+    def _cookies_for_action_finding(self, finding: Finding) -> str:
+        actor = self._actor_from_payload(finding.payload)
+        if not actor or actor == "low-privilege":
+            return getattr(self.engine, "low_priv_cookies", "")
+        for account in getattr(self.engine, "account_sessions", []) or []:
+            if account.get("username") == actor:
+                return account.get("cookies", "")
+        return ""
+
+    def _actor_from_payload(self, payload: str) -> str:
+        return (payload or "").split(" session", 1)[0].strip()
+
+    def _owner_from_evidence(self, finding: Finding) -> str:
+        match = re.search(r"account '([^']+)'", finding.evidence or "")
+        return match.group(1) if match else ""
+
+    def _accepted_action_response(self, status: int, body: str) -> bool:
+        if status in (0, 401, 403):
+            return False
+        if status in (301, 302, 303, 307, 308):
+            return True
+        rejected = re.search(
+            r"(unauthorized|forbidden|access\s*denied|invalid\s*login"
+            r"|authentication\s*required|権限がありません|アクセス.*禁止)",
+            body or "",
+            re.IGNORECASE,
+        )
+        return 200 <= status < 300 and not rejected
+
     async def _emit(self, finding: Finding) -> None:
-        """Push finding to the engine and monitor."""
+        """Keep scanner-local state and stream monitor updates."""
         self.findings.append(finding)
-        self.engine.all_findings.append(finding)
         if self.monitor:
             await self.monitor.emit_finding(finding.to_dict())

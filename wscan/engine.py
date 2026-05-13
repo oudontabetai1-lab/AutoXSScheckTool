@@ -2502,6 +2502,12 @@ class ScanEngine:
         "host_header",
         "dom_xss",
         "stored_xss",
+        "privesc_unauth",
+        "privesc_vertical",
+        "privesc_horizontal",
+        "privesc_param_idor",
+        "privesc_cross_acct",
+        "privesc_action",
     })
 
     async def _phase_verify(self):
@@ -2564,6 +2570,8 @@ class ScanEngine:
             scanner_key = "graphql"
         elif f.check_type.startswith("jwt_"):
             scanner_key = "jwt"
+        elif f.check_type.startswith("privesc_"):
+            scanner_key = "privesc"
         else:
             scanner_key = f.check_type
         scanner = self.scanners.get(scanner_key)
