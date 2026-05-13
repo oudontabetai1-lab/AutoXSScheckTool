@@ -29,20 +29,20 @@ from .base import BaseScanner, Finding
 if TYPE_CHECKING:
     from wscan.engine import ScanEngine
 
-# 検査ペイロード — (check_type, payload, detection_pattern)
-_WS_PAYLOADS: list[tuple[str, str, str]] = [
+# 検査ペイロード — (underlying_type, payload, detection_pattern, evidence_type)
+_WS_PAYLOADS: list[tuple[str, str, str, str]] = [
     # XSS
-    ("xss", "<script>alert('wsxss')</script>",    r"<script>alert\('wsxss'\)</script>"),
-    ("xss", "<img src=x onerror=alert('wsxss')>", r"onerror=alert\('wsxss'\)"),
+    ("xss", "<script>alert('wsxss')</script>",    r"<script>alert\('wsxss'\)</script>", "websocket_xss_reflection"),
+    ("xss", "<img src=x onerror=alert('wsxss')>", r"onerror=alert\('wsxss'\)", "websocket_xss_reflection"),
     # SQLi (エラーベース)
-    ("sqli", "' OR '1'='1",                       r"(?i)(sql|syntax|mysql|sqlite|postgres|ora-[0-9]+)"),
-    ("sqli", "1 UNION SELECT NULL--",             r"(?i)(sql|syntax|union|select)"),
+    ("sqli", "' OR '1'='1",                       r"(?i)(sql|syntax|mysql|sqlite|postgres|ora-[0-9]+)", "websocket_sqli_error"),
+    ("sqli", "1 UNION SELECT NULL--",             r"(?i)(sql|syntax|union|select)", "websocket_sqli_error"),
     # OS インジェクション (エコーベース)
-    ("os",   "; echo wsostest123;",               r"wsostest123"),
-    ("os",   "| echo wsostest123",                r"wsostest123"),
+    ("os",   "; echo wsostest123;",               r"wsostest123", "websocket_os_echo"),
+    ("os",   "| echo wsostest123",                r"wsostest123", "websocket_os_echo"),
     # SSTI
-    ("ssti", "{{7*7}}",                           r"49"),
-    ("ssti", "${7*7}",                            r"49"),
+    ("ssti", "{{7*7}}",                           r"49", "websocket_ssti_eval"),
+    ("ssti", "${7*7}",                            r"49", "websocket_ssti_eval"),
 ]
 
 # JSON フィールド注入対象 (よく使われる WS メッセージキー)
@@ -89,9 +89,10 @@ class WebSocketScanner(BaseScanner):
             self._ws_urls.add(ws.url)
 
             def on_message(data):
-                ws_messages.append({"ws": ws, "data": data, "ts": time.time()})
+                payload = data.get("payload", "") if isinstance(data, dict) else str(data)
+                ws_messages.append({"ws": ws, "data": payload, "ts": time.time()})
 
-            ws.on("framereceived", lambda payload: on_message(payload.get("payload", "")))
+            ws.on("framereceived", on_message)
 
         page.on("websocket", on_websocket)
 
@@ -138,34 +139,25 @@ class WebSocketScanner(BaseScanner):
         findings: list[Finding] = []
         ws_url = ws.url
 
-        for check_type, payload, detection_pattern in _WS_PAYLOADS:
-            if check_type not in self.engine.checks:
+        for underlying_type, payload, detection_pattern, evidence_type in self._active_payloads():
+            if any(
+                f.evidence_type == evidence_type
+                and f.evidence_details.get("underlying_type") == underlying_type
+                for f in findings
+            ):
                 continue
 
             # 注入メッセージを構築
             inject_messages = self._build_inject_messages(payload, sample_json)
 
             for inject_msg, inject_key in inject_messages:
-                responses: list[str] = []
-
-                def capture(data):
-                    responses.append(data.get("payload", "") if isinstance(data, dict) else str(data))
-
-                ws.on("framereceived", capture)
-                try:
-                    # ペイロードを WS に送信
-                    await ws.send(inject_msg)
-                    await asyncio.sleep(1.0 * self.sleep_factor)
-                except Exception:
-                    pass
-                finally:
-                    ws.remove_listener("framereceived", capture)
+                responses = await self._send_ws_message(ws_url, inject_msg)
 
                 # レスポンスをパターンマッチ
                 for resp in responses:
-                    if re.search(detection_pattern, resp):
+                    if self._response_matches(resp, detection_pattern):
                         finding = Finding(
-                            check_type=check_type,
+                            check_type=self.CHECK_TYPE,
                             severity=self.SEVERITY,
                             url=page_url,
                             field_name=f"ws:{inject_key or 'message'}",
@@ -177,15 +169,78 @@ class WebSocketScanner(BaseScanner):
                             request={"ws_url": ws_url, "sent": inject_msg[:500]},
                             response={"ws_url": ws_url, "received": resp[:500]},
                             confidence="likely",
+                            evidence_type=evidence_type,
+                            evidence_details={
+                                "ws_url": ws_url,
+                                "underlying_type": underlying_type,
+                                "inject_key": inject_key,
+                                "pattern": detection_pattern,
+                                "sent": inject_msg,
+                            },
                         )
                         findings.append(finding)
                         break  # このペイロードは確認済み、次へ
 
-                if findings:
+                if any(f.evidence_type == evidence_type for f in findings):
                     # 1件でも検出されたら次のペイロードへ
                     break
 
         return findings
+
+    def _active_payloads(self) -> list[tuple[str, str, str, str]]:
+        checks = set(getattr(self.engine, "checks", []) or [])
+        if self.CHECK_TYPE in checks:
+            return list(_WS_PAYLOADS)
+        return [entry for entry in _WS_PAYLOADS if entry[0] in checks]
+
+    def _response_matches(self, response: str, pattern: str) -> bool:
+        return bool(re.search(pattern, response or ""))
+
+    async def _send_ws_message(self, ws_url: str, message: str) -> list[str]:
+        wait_ms = max(250, int(1000 * self.sleep_factor))
+        try:
+            result = await self.browser.page.evaluate(
+                """
+                ({ wsUrl, message, waitMs }) => new Promise((resolve) => {
+                  const responses = [];
+                  let done = false;
+                  const finish = () => {
+                    if (done) return;
+                    done = true;
+                    try { socket.close(); } catch (_) {}
+                    resolve(responses);
+                  };
+                  let socket;
+                  try {
+                    socket = new WebSocket(wsUrl);
+                  } catch (_) {
+                    resolve([]);
+                    return;
+                  }
+                  socket.onmessage = (event) => responses.push(String(event.data));
+                  socket.onerror = finish;
+                  socket.onopen = () => {
+                    try { socket.send(message); } catch (_) { finish(); return; }
+                    setTimeout(finish, waitMs);
+                  };
+                  setTimeout(finish, waitMs + 1000);
+                })
+                """,
+                {"wsUrl": ws_url, "message": message, "waitMs": wait_ms},
+            )
+            return [str(item) for item in (result or [])]
+        except Exception:
+            return []
+
+    async def verify_finding(self, finding: Finding) -> bool | None:
+        details = getattr(finding, "evidence_details", {}) or {}
+        ws_url = details.get("ws_url") or (finding.request or {}).get("ws_url")
+        pattern = details.get("pattern")
+        sent = details.get("sent") or finding.payload
+        if not ws_url or not pattern or not sent:
+            return None
+        responses = await self._send_ws_message(ws_url, sent)
+        return any(self._response_matches(resp, pattern) for resp in responses)
 
     def _build_inject_messages(
         self,

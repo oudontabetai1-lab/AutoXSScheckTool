@@ -32,8 +32,9 @@ from __future__ import annotations
 
 import re
 import uuid
+from difflib import SequenceMatcher
 from typing import TYPE_CHECKING, Optional
-from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
+from urllib.parse import parse_qs, urlencode, urljoin, urlparse, urlunparse
 
 import httpx
 
@@ -56,12 +57,25 @@ PROTECTED_PATH_RE = re.compile(
     re.IGNORECASE,
 )
 
+ACTION_PATH_RE = re.compile(
+    r"/(admin|manage|settings|users?|members?|orders?|payment|billing|private"
+    r"|secure|internal|staff|moderator|approve|delete|remove|update|edit"
+    r"|create|export|import|role|permission)",
+    re.IGNORECASE,
+)
+
 # Keywords that indicate the server responded with a login / auth-required page
 LOGIN_GATE_RE = re.compile(
     r"(log\s*in|sign\s*in|please.*authenticate|authentication.*required"
     r"|you.*must.*log\s*in|unauthorized|access.*denied|forbidden"
     r"|session.*expired|セッション.*切れ|ログイン.*してください|認証.*必要"
     r"|ログインが必要|権限がありません|アクセス.*禁止)",
+    re.IGNORECASE,
+)
+
+NON_RESOURCE_RE = re.compile(
+    r"(not\s*found|no\s+such|does\s+not\s+exist|missing|unknown\s+(resource|record|object)"
+    r"|404|見つかりません|存在しません)",
     re.IGNORECASE,
 )
 
@@ -102,6 +116,125 @@ def _mutate_uuid(u: str) -> str:
     replacement = "a" if original != "a" else "b"
     parts[idx] = replacement
     return "".join(parts)
+
+
+def _normalize_response_body(body: str) -> str:
+    """Remove common dynamic noise before comparing authorization responses."""
+    text = body.lower()
+    text = re.sub(r"\b[0-9a-f]{8,}\b", "<hex>", text)
+    text = re.sub(r"\b\d{5,}\b", "<num>", text)
+    text = re.sub(r"(csrf|nonce|token|timestamp|ts)[\"'=:\s-]+[^\"'<>\s]+", r"\1=<dyn>", text)
+    text = re.sub(r"\s+", " ", text)
+    return text[:6000]
+
+
+def _body_similarity(left: str, right: str) -> float:
+    if not left or not right:
+        return 0.0
+    return SequenceMatcher(None, _normalize_response_body(left), _normalize_response_body(right)).ratio()
+
+
+def _identity_markers(username: str) -> set[str]:
+    """Return stable owner markers that should not be visible to another account."""
+    raw = (username or "").strip().lower()
+    if not raw:
+        return set()
+    markers = {raw}
+    if "@" in raw:
+        markers.add(raw.split("@", 1)[0])
+    # Avoid overly generic markers that appear in navigation or labels.
+    return {m for m in markers if len(m) >= 4 and m not in {"user", "admin", "test", "demo"}}
+
+
+def _role_rank(role: str) -> int:
+    role_l = (role or "").strip().lower()
+    if role_l in {"root", "superuser", "owner"}:
+        return 4
+    if role_l in {"admin", "administrator"}:
+        return 3
+    if role_l in {"staff", "operator", "moderator", "manager"}:
+        return 2
+    if role_l in {"registered", "member", "user"}:
+        return 1
+    return 0
+
+
+def _url_has_object_identifier(url: str) -> bool:
+    parsed = urlparse(url)
+    if any(seg.isdigit() or _UUID_RE.match(seg) for seg in parsed.path.split("/") if seg):
+        return True
+    qs = parse_qs(parsed.query, keep_blank_values=True)
+    return any(_IDOR_PARAM_RE.match(param) for param in qs)
+
+
+def _has_sensitive_idor_param(url: str) -> bool:
+    parsed = urlparse(url)
+    qs = parse_qs(parsed.query, keep_blank_values=True)
+    for param in qs:
+        if not _IDOR_PARAM_RE.match(param):
+            continue
+        if param.lower() != "id" or PROTECTED_PATH_RE.search(parsed.path):
+            return True
+    return False
+
+
+def _body_contains_identifier(body: str, identifier: str) -> bool:
+    if not body or not identifier:
+        return False
+    if identifier.isdigit():
+        return bool(re.search(rf"(?<!\d){re.escape(identifier)}(?!\d)", body))
+    return identifier.lower() in body.lower()
+
+
+def _is_auth_gate(body: str) -> bool:
+    """Detect real auth gates without treating a normal Login nav link as a gate."""
+    body_l = (body or "").lower()
+    if re.search(
+        r"(please.*log\s*in|must.*log\s*in|authentication.*required"
+        r"|unauthorized|access.*denied|forbidden|session.*expired"
+        r"|ログイン.*してください|認証.*必要|ログインが必要"
+        r"|権限がありません|アクセス.*禁止)",
+        body_l,
+        re.IGNORECASE,
+    ):
+        return True
+    return bool(
+        re.search(r"<form[^>]+action=[\"'][^\"']*(?:login|signin|auth)", body_l, re.IGNORECASE)
+        and re.search(r"type=[\"']password[\"']", body_l, re.IGNORECASE)
+    )
+
+
+def _idor_response_confidence(
+    original_body: str,
+    candidate_body: str,
+    original_identifier: str,
+    candidate_identifier: str,
+) -> tuple[bool, str, float]:
+    """Return whether a mutated object-id response looks like real object access."""
+    if len(candidate_body) < 50:
+        return False, "short candidate response", 0.0
+    if _is_auth_gate(candidate_body):
+        return False, "authentication gate", 0.0
+    if NON_RESOURCE_RE.search(candidate_body):
+        return False, "not-found response", 0.0
+
+    norm_original = _normalize_response_body(original_body)
+    norm_candidate = _normalize_response_body(candidate_body)
+    if norm_original == norm_candidate:
+        return False, "generic identical response", 1.0
+
+    similarity = _body_similarity(original_body, candidate_body)
+    candidate_id_seen = _body_contains_identifier(candidate_body, candidate_identifier)
+    original_id_seen = _body_contains_identifier(original_body, original_identifier)
+
+    if candidate_id_seen:
+        return True, "candidate object identifier is present in response", similarity
+    if original_id_seen and 0.45 <= similarity <= 0.985:
+        return True, "response shape matches original object but content changed", similarity
+    if 0.70 <= similarity <= 0.985 and abs(len(candidate_body) - len(original_body)) >= 20:
+        return True, "similar object template returned different content", similarity
+
+    return False, "insufficient object-specific evidence", similarity
 
 
 # ---------------------------------------------------------------------------
@@ -172,13 +305,19 @@ class PrivEscScanner(BaseScanner):
         # Build the primary session cookie string
         cookies_str = self._get_primary_cookies()
 
-        if has_auth and cookies_str:
+        should_probe_path_idor = has_auth and cookies_str and is_privileged
+        should_probe_param_idor = has_auth and cookies_str and (
+            is_privileged or _has_sensitive_idor_param(url)
+        )
+
+        if should_probe_path_idor:
             # ── Test 3: Horizontal privilege escalation (path IDOR) ───
             horiz_findings = await self._test_horizontal_privesc(url, cookies_str, timeout)
             for hf in horiz_findings:
                 findings.append(hf)
                 await self._emit(hf)
 
+        if should_probe_param_idor:
             # ── Test 4: Query-parameter IDOR (③) ──────────────────────
             param_findings = await self._test_param_idor(url, cookies_str, timeout)
             for pf in param_findings:
@@ -195,6 +334,14 @@ class PrivEscScanner(BaseScanner):
                 findings.append(cf)
                 await self._emit(cf)
 
+        return findings
+
+    async def scan_page_context(self, page) -> list[Finding]:
+        """Run URL checks plus form/action authorization checks with page context."""
+        findings = await self.scan_page(page.url)
+        action_findings = await self._test_state_changing_forms(page)
+        for af in action_findings:
+            findings.append(af)
         return findings
 
     # ------------------------------------------------------------------
@@ -215,6 +362,31 @@ class PrivEscScanner(BaseScanner):
     def _client_proxy_kwargs(self) -> dict:
         proxy = getattr(self.engine, "proxy", "") or None
         return {"proxy": proxy} if proxy else {}
+
+    def _form_payload(self, form: dict) -> dict:
+        data: dict[str, str] = {}
+        for inp in form.get("inputs", []):
+            name = inp.get("name") or inp.get("id")
+            if not name:
+                continue
+            value = inp.get("value")
+            if value in (None, ""):
+                hint = f"{name} {inp.get('type', '')}".lower()
+                if "mail" in hint or "email" in hint:
+                    value = "wscan-action@example.test"
+                elif "user" in hint or "name" in hint:
+                    value = "wscan-action"
+                elif "amount" in hint or "price" in hint or "count" in hint:
+                    value = "1"
+                else:
+                    value = "wscan-action-probe"
+            data[name] = str(value)
+        data.setdefault("_wscan_probe", "1")
+        return data
+
+    def _action_url(self, page_url: str, form: dict) -> str:
+        action = form.get("action") or page_url
+        return urljoin(page_url, action)
 
     # ------------------------------------------------------------------
     # Test 1: Unauthenticated access
@@ -246,7 +418,7 @@ class PrivEscScanner(BaseScanner):
             return None
         if not (200 <= status < 300):
             return None
-        if LOGIN_GATE_RE.search(body):
+        if _is_auth_gate(body):
             return None
 
         path = urlparse(url).path
@@ -313,7 +485,7 @@ class PrivEscScanner(BaseScanner):
             return None
         if not (200 <= status < 300):
             return None
-        if LOGIN_GATE_RE.search(body):
+        if _is_auth_gate(body):
             return None
 
         path = urlparse(url).path
@@ -377,9 +549,10 @@ class PrivEscScanner(BaseScanner):
 
                     if status not in range(200, 300):
                         continue
-                    if LOGIN_GATE_RE.search(body):
-                        continue
-                    if len(body) < 100:
+                    confident, confidence_reason, similarity = _idor_response_confidence(
+                        own_body, body, str(original_id), str(cid)
+                    )
+                    if not confident:
                         continue
 
                     findings.append(Finding(
@@ -392,16 +565,26 @@ class PrivEscScanner(BaseScanner):
                             f"Horizontal privilege escalation (IDOR): "
                             f"Changed numeric ID {original_id}→{cid} in '{path}' "
                             f"returned HTTP {status} ({len(body)} bytes). "
+                            f"{confidence_reason}; response similarity={similarity:.3f}. "
                             f"Possible access to another user's resource."
                         ),
                         request={"url": candidate_url, "method": "GET",
                                  "headers": {"Cookie": "<session-token>"}},
-                        response={"status": status, "url": candidate_url},
+                        response={
+                            "status": status,
+                            "url": candidate_url,
+                            "similarity": round(similarity, 3),
+                            "confidence_reason": confidence_reason,
+                        },
                     ))
                     break  # one confirmation per segment
 
             # ── UUID in path ────────────────────────────────────────────
             elif _UUID_RE.match(seg):
+                own_status, own_body = await self._get(url, cookies, timeout)
+                if own_status not in range(200, 300):
+                    continue
+
                 mutated = _mutate_uuid(seg)
                 new_segs = list(segments)
                 new_segs[seg_idx] = mutated
@@ -410,9 +593,10 @@ class PrivEscScanner(BaseScanner):
 
                 if status not in range(200, 300):
                     continue
-                if LOGIN_GATE_RE.search(body):
-                    continue
-                if len(body) < 100:
+                confident, confidence_reason, similarity = _idor_response_confidence(
+                    own_body, body, seg, mutated
+                )
+                if not confident:
                     continue
 
                 findings.append(Finding(
@@ -425,11 +609,17 @@ class PrivEscScanner(BaseScanner):
                         f"Horizontal privilege escalation (UUID IDOR): "
                         f"Mutated UUID '{seg[:8]}...' → '{mutated[:8]}...' in path "
                         f"returned HTTP {status}. "
+                        f"{confidence_reason}; response similarity={similarity:.3f}. "
                         f"Possible access to another user's resource via UUID guessing."
                     ),
                     request={"url": candidate_url, "method": "GET",
                              "headers": {"Cookie": "<session-token>"}},
-                    response={"status": status, "url": candidate_url},
+                    response={
+                        "status": status,
+                        "url": candidate_url,
+                        "similarity": round(similarity, 3),
+                        "confidence_reason": confidence_reason,
+                    },
                 ))
 
         return findings
@@ -485,9 +675,10 @@ class PrivEscScanner(BaseScanner):
 
                         if status not in range(200, 300):
                             continue
-                        if LOGIN_GATE_RE.search(body):
-                            continue
-                        if len(body) < 50:
+                        confident, confidence_reason, similarity = _idor_response_confidence(
+                            own_body, body, str(original_id), str(cid)
+                        )
+                        if not confident:
                             continue
 
                         findings.append(Finding(
@@ -500,16 +691,26 @@ class PrivEscScanner(BaseScanner):
                                 f"Parameter IDOR: Changed query parameter "
                                 f"'{param}' from {original_id} to {cid} — "
                                 f"server returned HTTP {status} ({len(body)} bytes). "
+                                f"{confidence_reason}; response similarity={similarity:.3f}. "
                                 f"Possible access to another user's data via parameter manipulation."
                             ),
                             request={"url": candidate_url, "method": "GET",
                                      "headers": {"Cookie": "<session-token>"}},
-                            response={"status": status, "url": candidate_url},
+                            response={
+                                "status": status,
+                                "url": candidate_url,
+                                "similarity": round(similarity, 3),
+                                "confidence_reason": confidence_reason,
+                            },
                         ))
                         break
 
                 # ── UUID parameter value ────────────────────────────────
                 elif _UUID_RE.match(val):
+                    own_status, own_body = await self._get(url, cookies, timeout)
+                    if own_status not in range(200, 300):
+                        continue
+
                     mutated = _mutate_uuid(val)
                     new_qs = dict(qs)
                     new_qs[param] = [mutated]
@@ -520,9 +721,10 @@ class PrivEscScanner(BaseScanner):
 
                     if status not in range(200, 300):
                         continue
-                    if LOGIN_GATE_RE.search(body):
-                        continue
-                    if len(body) < 50:
+                    confident, confidence_reason, similarity = _idor_response_confidence(
+                        own_body, body, val, mutated
+                    )
+                    if not confident:
                         continue
 
                     findings.append(Finding(
@@ -535,11 +737,17 @@ class PrivEscScanner(BaseScanner):
                             f"Parameter UUID-IDOR: Changed query parameter "
                             f"'{param}' UUID from '{val[:8]}...' to '{mutated[:8]}...' — "
                             f"server returned HTTP {status} ({len(body)} bytes). "
+                            f"{confidence_reason}; response similarity={similarity:.3f}. "
                             f"Possible access to another object via UUID guessing."
                         ),
                         request={"url": candidate_url, "method": "GET",
                                  "headers": {"Cookie": "<session-token>"}},
-                        response={"status": status, "url": candidate_url},
+                        response={
+                            "status": status,
+                            "url": candidate_url,
+                            "similarity": round(similarity, 3),
+                            "confidence_reason": confidence_reason,
+                        },
                     ))
 
         return findings
@@ -569,13 +777,14 @@ class PrivEscScanner(BaseScanner):
         for i, account_a in enumerate(account_sessions):
             cookies_a = account_a.get("cookies", "")
             user_a = account_a.get("username", f"account[{i}]")
+            role_a = account_a.get("role", "")
 
             if not cookies_a:
                 continue
 
             # Fetch the resource as account A
             status_a, body_a = await self._get(url, cookies_a, timeout)
-            if status_a not in range(200, 300) or LOGIN_GATE_RE.search(body_a):
+            if status_a not in range(200, 300) or _is_auth_gate(body_a):
                 continue
 
             for j, account_b in enumerate(account_sessions):
@@ -583,19 +792,21 @@ class PrivEscScanner(BaseScanner):
                     continue
                 cookies_b = account_b.get("cookies", "")
                 user_b = account_b.get("username", f"account[{j}]")
+                role_b = account_b.get("role", "")
                 if not cookies_b:
                     continue
 
                 status_b, body_b = await self._get(url, cookies_b, timeout)
 
-                if status_b not in range(200, 300) or LOGIN_GATE_RE.search(body_b):
+                if status_b not in range(200, 300) or _is_auth_gate(body_b):
                     continue
                 if len(body_b) < 50:
                     continue
 
-                # Vertical: account_a is first (presumed higher-priv) and
-                # account_b (later registered / lower-priv) reached privileged path
-                if i == 0 and j > 0 and is_privileged:
+                # Vertical: lower-ranked account reached a resource that was
+                # also accessible to a higher-ranked account. Do not infer role
+                # solely from list order; same-role accounts are horizontal only.
+                if _role_rank(role_a) > _role_rank(role_b) and is_privileged:
                     findings.append(Finding(
                         check_type="privesc_cross_acct",
                         severity="critical",
@@ -614,9 +825,22 @@ class PrivEscScanner(BaseScanner):
                     ))
                 else:
                     # Horizontal: two different user accounts accessing same resource
-                    # Only flag if the response bodies differ (different user's data)
-                    # and the access was not intended to be shared
-                    if body_a != body_b and abs(len(body_a) - len(body_b)) > 20:
+                    # Flag when account B appears to receive account A's resource.
+                    # A per-user dashboard often returns HTTP 200 with different
+                    # content for each user; that is expected and should not be
+                    # treated as IDOR. Stronger evidence is either account A's
+                    # identity marker in B's response or near-identical content.
+                    owner_markers = _identity_markers(user_a)
+                    body_b_lower = body_b.lower()
+                    owner_marker_seen = any(marker in body_b_lower for marker in owner_markers)
+                    similarity = _body_similarity(body_a, body_b)
+                    same_resource_seen = similarity >= 0.92 and _url_has_object_identifier(url)
+                    if owner_marker_seen or same_resource_seen:
+                        evidence_reason = (
+                            f"owner marker from '{user_a}' is present in '{user_b}' response"
+                            if owner_marker_seen
+                            else f"response is highly similar to '{user_a}' resource"
+                        )
                         findings.append(Finding(
                             check_type="privesc_cross_acct",
                             severity="high",
@@ -625,16 +849,104 @@ class PrivEscScanner(BaseScanner):
                             payload=f"{user_b} session cookie",
                             evidence=(
                                 f"Horizontal privilege escalation (cross-account): "
-                                f"Account '{user_b}' can access '{path}' and receives "
-                                f"different content than account '{user_a}' "
-                                f"({len(body_b)} vs {len(body_a)} bytes). "
-                                f"This may indicate access to another user's private data."
+                                f"Account '{user_b}' can access '{path}' for "
+                                f"account '{user_a}' (HTTP {status_b}); "
+                                f"{evidence_reason}. "
+                                f"This indicates access to another user's private data."
                             ),
                             request={"url": url, "method": "GET",
                                      "headers": {"Cookie": f"<{user_b}-token>"}},
-                            response={"status": status_b, "url": url},
+                            response={
+                                "status": status_b,
+                                "url": url,
+                                "similarity": round(similarity, 3),
+                                "owner_marker_seen": owner_marker_seen,
+                            },
                         ))
                         break  # One finding per (url, account_a) pair is enough
+
+        return findings
+
+    # ------------------------------------------------------------------
+    # Test 6: State-changing form/action authorization
+    # ------------------------------------------------------------------
+
+    async def _test_state_changing_forms(self, page) -> list[Finding]:
+        """Submit privileged-looking non-GET forms with lower-privilege sessions."""
+        findings: list[Finding] = []
+        forms = getattr(page, "forms", []) or []
+        if not forms:
+            return findings
+
+        timeout = float(getattr(self.engine, "timeout", 30))
+        low_priv_cookies: str = getattr(self.engine, "low_priv_cookies", "")
+        account_sessions: list[dict] = getattr(self.engine, "account_sessions", [])
+
+        probes: list[tuple[str, str, str]] = []
+        if low_priv_cookies:
+            probes.append(("low-privilege", low_priv_cookies, "user"))
+        for account in account_sessions:
+            cookies = account.get("cookies", "")
+            if not cookies:
+                continue
+            role = account.get("role", "")
+            if _role_rank(role) <= 1:
+                probes.append((account.get("username", "account"), cookies, role or "user"))
+
+        if not probes:
+            return findings
+
+        for form in forms:
+            method = (form.get("method") or "GET").upper()
+            if method == "GET":
+                continue
+            action_url = self._action_url(page.url, form)
+            action_path = urlparse(action_url).path
+            if not ACTION_PATH_RE.search(action_path):
+                continue
+            data = self._form_payload(form)
+            for actor, cookies, role in probes:
+                status, body = await self._request_form(method, action_url, data, cookies, timeout)
+                if status in (0, 401, 403):
+                    continue
+                if status in (301, 302, 303, 307, 308):
+                    # A redirect away from login/error after a state-changing request often
+                    # means the action was accepted.
+                    accepted = True
+                else:
+                    # Do not use the broad LOGIN_GATE_RE here: many normal pages
+                    # include a "Login" nav link even after a successful action.
+                    rejected = re.search(
+                        r"(unauthorized|forbidden|access\s*denied|invalid\s*login"
+                        r"|authentication\s*required|権限がありません|アクセス.*禁止)",
+                        body,
+                        re.IGNORECASE,
+                    )
+                    accepted = 200 <= status < 300 and not rejected
+                if not accepted:
+                    continue
+
+                findings.append(Finding(
+                    check_type="privesc_action",
+                    severity="high",
+                    url=page.url,
+                    field_name=f"(state-changing action: {method} {action_path})",
+                    payload=f"{actor} session submitted form",
+                    evidence=(
+                        f"State-changing authorization issue: low-privilege actor "
+                        f"'{actor}' ({role}) could submit {method} {action_path} "
+                        f"and received HTTP {status}. This action path appears "
+                        f"privileged and should enforce server-side authorization."
+                    ),
+                    request={
+                        "url": action_url,
+                        "method": method,
+                        "headers": {"Cookie": f"<{actor}-token>"},
+                        "body": data,
+                    },
+                    response={"status": status, "url": action_url},
+                ))
+                break
 
         return findings
 
@@ -657,9 +969,153 @@ class PrivEscScanner(BaseScanner):
         except Exception:
             return 0, ""
 
+    async def _request_form(
+        self,
+        method: str,
+        url: str,
+        data: dict,
+        cookies: str,
+        timeout: float,
+    ) -> tuple[int, str]:
+        """Submit a form-like request and return (status_code, body_excerpt)."""
+        try:
+            async with httpx.AsyncClient(
+                follow_redirects=False,
+                timeout=timeout,
+                verify=False,
+                headers={**_HEADERS, "Cookie": cookies} if cookies else _HEADERS,
+                **self._client_proxy_kwargs(),
+            ) as client:
+                resp = await client.request(method, url, data=data)
+                return resp.status_code, resp.text[:8000]
+        except Exception:
+            return 0, ""
+
+    async def verify_finding(self, finding: Finding) -> bool | None:
+        timeout = float(getattr(self.engine, "timeout", 30))
+
+        if finding.check_type == "privesc_unauth":
+            url = finding.request.get("url") or finding.url
+            status, body = await self._get(url, "", timeout)
+            return self._accessible_response(status, body)
+
+        if finding.check_type == "privesc_vertical":
+            cookies = getattr(self.engine, "low_priv_cookies", "")
+            if not cookies:
+                return None
+            status, body = await self._get(finding.url, cookies, timeout)
+            return self._accessible_response(status, body)
+
+        if finding.check_type in {"privesc_horizontal", "privesc_param_idor"}:
+            cookies = self._get_primary_cookies()
+            candidate_url = finding.request.get("url") or finding.response.get("url")
+            if not cookies or not candidate_url:
+                return None
+            own_status, own_body = await self._get(finding.url, cookies, timeout)
+            cand_status, cand_body = await self._get(candidate_url, cookies, timeout)
+            return self._verifies_idor_response(
+                own_status,
+                own_body,
+                cand_status,
+                cand_body,
+            )
+
+        if finding.check_type == "privesc_cross_acct":
+            account = self._account_for_finding(finding)
+            if not account:
+                return None
+            status, body = await self._get(finding.url, account.get("cookies", ""), timeout)
+            if not self._accessible_response(status, body):
+                return False
+            owner_user = self._owner_from_evidence(finding)
+            if owner_user:
+                owner_markers = _identity_markers(owner_user)
+                if owner_markers:
+                    return any(marker in body.lower() for marker in owner_markers)
+            return True
+
+        if finding.check_type == "privesc_action":
+            req = finding.request or {}
+            action_url = req.get("url")
+            method = req.get("method", "POST")
+            body = req.get("body") or {}
+            cookies = self._cookies_for_action_finding(finding)
+            if not action_url or not cookies:
+                return None
+            status, response_body = await self._request_form(
+                method,
+                action_url,
+                body,
+                cookies,
+                timeout,
+            )
+            return self._accepted_action_response(status, response_body)
+
+        return None
+
+    def _accessible_response(self, status: int, body: str) -> bool:
+        return (
+            status in range(200, 300)
+            and not _is_auth_gate(body or "")
+            and not NON_RESOURCE_RE.search(body or "")
+        )
+
+    def _verifies_idor_response(
+        self,
+        own_status: int,
+        own_body: str,
+        cand_status: int,
+        cand_body: str,
+    ) -> bool:
+        if not self._accessible_response(own_status, own_body):
+            return False
+        if not self._accessible_response(cand_status, cand_body):
+            return False
+        if len(cand_body or "") < 50:
+            return False
+        similarity = _body_similarity(own_body, cand_body)
+        return _normalize_response_body(own_body) != _normalize_response_body(cand_body) and similarity < 0.995
+
+    def _account_for_finding(self, finding: Finding) -> Optional[dict]:
+        actor = self._actor_from_payload(finding.payload)
+        if not actor:
+            return None
+        for account in getattr(self.engine, "account_sessions", []) or []:
+            if account.get("username") == actor:
+                return account
+        return None
+
+    def _cookies_for_action_finding(self, finding: Finding) -> str:
+        actor = self._actor_from_payload(finding.payload)
+        if not actor or actor == "low-privilege":
+            return getattr(self.engine, "low_priv_cookies", "")
+        for account in getattr(self.engine, "account_sessions", []) or []:
+            if account.get("username") == actor:
+                return account.get("cookies", "")
+        return ""
+
+    def _actor_from_payload(self, payload: str) -> str:
+        return (payload or "").split(" session", 1)[0].strip()
+
+    def _owner_from_evidence(self, finding: Finding) -> str:
+        match = re.search(r"account '([^']+)'", finding.evidence or "")
+        return match.group(1) if match else ""
+
+    def _accepted_action_response(self, status: int, body: str) -> bool:
+        if status in (0, 401, 403):
+            return False
+        if status in (301, 302, 303, 307, 308):
+            return True
+        rejected = re.search(
+            r"(unauthorized|forbidden|access\s*denied|invalid\s*login"
+            r"|authentication\s*required|権限がありません|アクセス.*禁止)",
+            body or "",
+            re.IGNORECASE,
+        )
+        return 200 <= status < 300 and not rejected
+
     async def _emit(self, finding: Finding) -> None:
-        """Push finding to the engine and monitor."""
+        """Keep scanner-local state and stream monitor updates."""
         self.findings.append(finding)
-        self.engine.all_findings.append(finding)
         if self.monitor:
             await self.monitor.emit_finding(finding.to_dict())

@@ -10,6 +10,7 @@ buy, register, transfer, submit, coupon, apply, vote, etc.).
 import asyncio
 import re
 from typing import TYPE_CHECKING
+from urllib.parse import urlencode, urljoin
 
 import httpx
 
@@ -54,43 +55,58 @@ class RaceConditionScanner(BaseScanner):
         super().__init__(engine)
         self._checked_urls: set[str] = set()
 
-    async def scan_field(
+    async def _form_request_template(
         self,
-        url: str,
+        page_url: str,
         form_index: int,
-        field: dict,
-        is_url_param: bool = False,
-    ) -> list[Finding]:
-        return []
-
-    async def scan_page(self, url: str) -> list[Finding]:
-        if url in self._checked_urls:
-            return []
-        if not _STATE_CHANGE_RE.search(url):
-            return []
-        self._checked_urls.add(url)
-
-        if self.monitor:
-            await self.monitor.emit_status(f"Race condition probe on {url}")
-
-        proxy = getattr(self.engine, "proxy", "") or None
-        timeout = getattr(self.engine, "timeout", 15)
-
-        # Capture the last form submission body from the browser's network log
-        pair = self.browser.network.latest() or {}
-        req = pair.get("request", {})
-        method = req.get("method", "GET").upper()
-        body = req.get("post_data") or req.get("body") or ""
+    ) -> tuple[str, str, str, dict]:
+        await self.browser.navigate(page_url)
+        form = await self.browser.page.evaluate(
+            """
+            ([formIndex]) => {
+                const form = document.querySelectorAll('form')[formIndex];
+                if (!form) return null;
+                const fields = {};
+                const els = form.querySelectorAll(
+                    'input:not([type=submit]):not([type=button]):not([type=reset]):not([type=image]):not([type=file]), textarea, select'
+                );
+                els.forEach((el) => {
+                    const name = el.name || el.id;
+                    if (!name || el.type === 'checkbox' || el.type === 'radio') return;
+                    fields[name] = el.value || 'wscan-race';
+                });
+                return {
+                    action: form.action || window.location.href,
+                    method: (form.method || 'GET').toUpperCase(),
+                    fields,
+                };
+            }
+            """,
+            [form_index],
+        )
+        if not form:
+            return page_url, "GET", "", {}
+        action_url = urljoin(page_url, form.get("action") or page_url)
+        method = (form.get("method") or "GET").upper()
+        body = urlencode(form.get("fields") or {})
         headers = {
-            k: v for k, v in req.get("headers", {}).items()
-            if k.lower() not in ("content-length",)
-        }
-        if not headers.get("User-Agent") and not headers.get("user-agent"):
-            headers["User-Agent"] = (
+            "Content-Type": "application/x-www-form-urlencoded",
+            "User-Agent": (
                 "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
                 "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-            )
+            ),
+        }
+        return action_url, method, body, headers
 
+    async def _send_burst(
+        self,
+        url: str,
+        method: str,
+        body: str,
+        headers: dict,
+    ) -> list:
+        proxy = getattr(self.engine, "proxy", "") or None
+        timeout = getattr(self.engine, "timeout", 15)
         client_kwargs: dict = {
             "timeout": timeout,
             "follow_redirects": False,
@@ -104,12 +120,123 @@ class RaceConditionScanner(BaseScanner):
                 return await session.post(url, content=body, headers=headers)
             return await session.get(url, headers=headers)
 
+        async with httpx.AsyncClient(**client_kwargs) as session:
+            return await asyncio.gather(
+                *[_one_request(session) for _ in range(_BURST_SIZE)],
+                return_exceptions=True,
+            )
+
+    def _classify_responses(self, responses: list, url: str) -> tuple[str, dict] | None:
+        ok_responses = [
+            r for r in responses
+            if not isinstance(r, Exception)
+            and hasattr(r, "text")
+            and _SUCCESS_RE.search(r.text)
+        ]
+        dup_responses = [
+            r for r in responses
+            if not isinstance(r, Exception)
+            and hasattr(r, "text")
+            and _DUPLICATE_RE.search(r.text)
+        ]
+        if len(ok_responses) >= 2:
+            evidence = (
+                f"Race condition: {len(ok_responses)}/{_BURST_SIZE} parallel requests "
+                f"to {url} returned a success response, "
+                + (f"while {len(dup_responses)} returned a duplicate/conflict error. " if dup_responses else "")
+                + "The endpoint may process the same state change multiple times under concurrent load."
+            )
+            return evidence, {
+                "success_count": len(ok_responses),
+                "duplicate_count": len(dup_responses),
+                "burst_size": _BURST_SIZE,
+            }
+        return None
+
+    async def scan_field(
+        self,
+        url: str,
+        form_index: int,
+        field: dict,
+        is_url_param: bool = False,
+    ) -> list[Finding]:
+        if is_url_param:
+            return []
+        action_url, method, body, headers = await self._form_request_template(url, form_index)
+        key = f"{method} {action_url} {body}"
+        if key in self._checked_urls:
+            return []
+        if not (
+            _STATE_CHANGE_RE.search(action_url)
+            or _looks_like_state_change(url, field)
+            or _STATE_CHANGE_RE.search(body)
+        ):
+            return []
+        self._checked_urls.add(key)
+
+        if self.monitor:
+            await self.monitor.emit_status(f"Race condition form probe on {action_url}")
+
         try:
-            async with httpx.AsyncClient(**client_kwargs) as session:
-                responses = await asyncio.gather(
-                    *[_one_request(session) for _ in range(_BURST_SIZE)],
-                    return_exceptions=True,
+            responses = await self._send_burst(action_url, method, body, headers)
+        except Exception as exc:
+            if self.monitor:
+                await self.monitor.emit_status(
+                    f"[warn] race_condition: form burst failed on {action_url}: {exc}"
                 )
+            return []
+
+        classified = self._classify_responses(responses, action_url)
+        if not classified:
+            return []
+        evidence, details = classified
+        details.update({"method": method, "body": body, "headers": headers})
+        finding = await self.record_finding(
+            url=action_url,
+            field_name=field.get("name") or field.get("id") or "(form race)",
+            payload=f"{_BURST_SIZE}x simultaneous {method} requests",
+            evidence=evidence,
+            pair={
+                "request": {"url": action_url, "method": method, "body": body},
+                "response": {
+                    "status": "mixed",
+                    "body": f"{details['success_count']} success, {details['duplicate_count']} duplicate",
+                },
+            },
+            severity="high",
+            confidence="likely",
+            evidence_type="race_condition_burst",
+            evidence_details=details,
+        )
+        return [finding]
+
+    async def scan_page(self, url: str) -> list[Finding]:
+        if url in self._checked_urls:
+            return []
+        if not _STATE_CHANGE_RE.search(url):
+            return []
+        self._checked_urls.add(url)
+
+        if self.monitor:
+            await self.monitor.emit_status(f"Race condition probe on {url}")
+
+        # Capture the last form submission body from the browser's network log
+        pair = self.current_page_pair(url)
+        req = pair.get("request", {})
+        method = req.get("method", "GET").upper()
+        body = req.get("post_data") or req.get("body") or ""
+        headers = {
+            k: v for k, v in req.get("headers", {}).items()
+            if k.lower() not in ("content-length",)
+        }
+        if not headers.get("User-Agent") and not headers.get("user-agent"):
+            headers["User-Agent"] = (
+                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            )
+
+        try:
+            responses = await self._send_burst(url, method, body, headers)
         except Exception as exc:
             if self.monitor:
                 await self.monitor.emit_status(
@@ -117,25 +244,10 @@ class RaceConditionScanner(BaseScanner):
                 )
             return []
 
-        ok_responses = [
-            r for r in responses
-            if isinstance(r, httpx.Response) and _SUCCESS_RE.search(r.text)
-        ]
-        dup_responses = [
-            r for r in responses
-            if isinstance(r, httpx.Response) and _DUPLICATE_RE.search(r.text)
-        ]
-
-        # Suspicious if multiple requests got "success" AND at least one got a
-        # duplicate/conflict error (server caught the race but too late)
-        # OR if all _BURST_SIZE returned success (server never deduped).
-        if len(ok_responses) >= 2 or (len(ok_responses) >= 1 and len(dup_responses) >= 1):
-            evidence = (
-                f"Race condition: {len(ok_responses)}/{_BURST_SIZE} parallel requests "
-                f"to {url} returned a success response, "
-                + (f"and {len(dup_responses)} returned a duplicate/conflict error. " if dup_responses else "")
-                + "The endpoint may process the same state change multiple times under concurrent load."
-            )
+        classified = self._classify_responses(responses, url)
+        if classified:
+            evidence, details = classified
+            details.update({"method": method, "body": body, "headers": headers})
             finding = await self.record_finding(
                 url=url,
                 field_name="(page-level race)",
@@ -143,7 +255,23 @@ class RaceConditionScanner(BaseScanner):
                 evidence=evidence,
                 pair=pair,
                 severity="high",
+                confidence="likely",
+                evidence_type="race_condition_burst",
+                evidence_details=details,
             )
             return [finding]
 
         return []
+
+    async def verify_finding(self, finding: Finding) -> bool | None:
+        details = getattr(finding, "evidence_details", {}) or {}
+        method = details.get("method")
+        body = details.get("body", "")
+        headers = details.get("headers", {})
+        if not method:
+            return None
+        try:
+            responses = await self._send_burst(finding.url, method, body, headers)
+        except Exception:
+            return None
+        return bool(self._classify_responses(responses, finding.url))

@@ -56,11 +56,13 @@ _CVSS_TABLE: dict[str, tuple[str, float]] = {
     # A: Additional privesc check types
     "privesc_param_idor":("CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:N/A:N",  6.5),
     "privesc_cross_acct":("CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:N",  8.1),
+    "privesc_action":    ("CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:N",  8.1),
     # Phase-4 new scanners
     "xxe":               ("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H", 10.0),
     "ldap":              ("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:N",  9.6),
     "file_upload":       ("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H", 10.0),
     "race_condition":    ("CVSS:3.1/AV:N/AC:H/PR:L/UI:N/S:U/C:H/I:H/A:N",  6.8),
+    "websocket":         ("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:N",  9.6),
 }
 
 
@@ -237,6 +239,23 @@ class BaseScanner(ABC):
         if req_ts and resp_ts:
             return (resp_ts - req_ts) >= threshold
         return False
+
+    def current_page_pair(self, url: str) -> dict:
+        """
+        Return the captured request/response for the page under test.
+
+        Page-level scanners run after navigation, when the browser may already
+        have loaded scripts, stylesheets, or images.  Falling back to the latest
+        network pair can make header/cookie findings describe an asset instead
+        of the document URL.
+        """
+        network = getattr(self.browser, "network", None)
+        if not network:
+            return {}
+        latest_for_url = getattr(network, "latest_for_url", None)
+        if latest_for_url:
+            return latest_for_url(url, match_query=False) or network.latest() or {}
+        return network.latest() or {}
 
     async def record_finding(
         self,

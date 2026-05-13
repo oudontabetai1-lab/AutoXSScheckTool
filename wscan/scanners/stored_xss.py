@@ -12,6 +12,7 @@ Flow:
 """
 import asyncio
 import html as _html
+import re
 import uuid
 from typing import TYPE_CHECKING
 
@@ -96,6 +97,12 @@ class StoredXSSScanner(BaseScanner):
             return []
 
         try:
+            current_url = getattr(self.browser.page, "url", "") or ""
+            if current_url.split("#")[0].rstrip("/") != url.split("#")[0].rstrip("/"):
+                ok = await self.browser.navigate(url)
+                if ok is False:
+                    return []
+                await asyncio.sleep(0.2 * self.sleep_factor)
             source = await self.browser.page.content()
         except Exception:
             return []
@@ -119,7 +126,7 @@ class StoredXSSScanner(BaseScanner):
                 if marker in self._detected_markers:
                     continue
                 self._detected_markers.add(marker)
-            pair = self.browser.network.latest() or {}
+            pair = self.current_page_pair(url)
 
             # Distinguish executable XSS (raw tags) from stored HTML injection (encoded)
             is_executable = in_raw
@@ -156,3 +163,82 @@ class StoredXSSScanner(BaseScanner):
             findings.append(finding)
 
         return findings
+
+    async def verify_finding(self, finding: Finding) -> bool | None:
+        if finding.evidence_type not in {
+            "stored_xss_marker",
+            "stored_html_marker",
+            "stored_xss_chain_title",
+            "stored_html_chain_marker",
+        }:
+            return None
+
+        details = getattr(finding, "evidence_details", {}) or {}
+        source_url = (
+            details.get("injection_url")
+            or details.get("source_url")
+            or finding.url
+        )
+        sink_url = (
+            details.get("sink_url")
+            or details.get("trigger_url")
+            or finding.url
+        )
+        field_name = details.get("source_field") or finding.field_name
+        marker = self._marker_for_finding(finding)
+        if not source_url or not sink_url or not field_name or not marker:
+            return None
+
+        try:
+            await self._submit_payload(source_url, field_name, finding.payload)
+            self.browser.reset_dialog()
+            ok = await self.browser.navigate(sink_url)
+            if ok is False:
+                return None
+            await asyncio.sleep(0.5 * self.sleep_factor)
+            html = await self.browser.get_page_source()
+        except Exception:
+            return None
+
+        if self.browser.dialog_fired and marker in self.browser.dialog_message:
+            return True
+
+        try:
+            title = await self.browser.page.title()
+            if marker in (title or ""):
+                return True
+        except Exception:
+            pass
+
+        return self._marker_in_html(marker, html or "")
+
+    async def _submit_payload(self, url: str, field_name: str, payload: str):
+        from urllib.parse import parse_qs, urlparse
+
+        is_url_param = field_name in parse_qs(
+            urlparse(url).query, keep_blank_values=True
+        )
+        if is_url_param:
+            return await self.browser.test_url_param(url, field_name, payload)
+
+        await self.browser.navigate(url)
+        return await self.browser.fill_and_submit_form(0, field_name, payload)
+
+    def _marker_for_finding(self, finding: Finding) -> str:
+        details = getattr(finding, "evidence_details", {}) or {}
+        marker = details.get("marker") or details.get("probe_uid")
+        if marker:
+            return str(marker)
+
+        match = re.search(r"(?:wsxss|wscc_|wscanchain_)[0-9a-fA-F]+", finding.payload or "")
+        return match.group(0) if match else ""
+
+    def _marker_in_html(self, marker: str, html: str) -> bool:
+        candidates = {
+            marker,
+            _html.escape(marker),
+            f"wscc_{marker}",
+            f"wscanchain_{marker}",
+            f'id="wscc_{marker}"',
+        }
+        return any(candidate in html for candidate in candidates)

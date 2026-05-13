@@ -66,6 +66,47 @@ class NoSQLInjectionScanner(BaseScanner):
     CHECK_TYPE = "nosql"
     SEVERITY = "high"
 
+    def _boolean_expansion(
+        self,
+        baseline_src: str,
+        probe_src: str,
+        baseline_src2: str = "",
+    ) -> tuple[bool, dict]:
+        baseline_len = len(baseline_src or "")
+        probe_len = len(probe_src or "")
+        baseline_variance = abs(baseline_len - len(baseline_src2 or "")) if baseline_src2 else 0
+        delta = probe_len - baseline_len
+        min_delta = max(500, int(baseline_len * 0.25), baseline_variance * 4)
+        return (
+            bool(baseline_len > 0 and delta > min_delta),
+            {
+                "baseline_length": baseline_len,
+                "probe_length": probe_len,
+                "delta": delta,
+                "baseline_variance": baseline_variance,
+                "min_delta": min_delta,
+            },
+        )
+
+    async def _apply_payload(
+        self,
+        url: str,
+        form_index: int,
+        field_name: str,
+        payload: str,
+        is_url_param: bool,
+    ) -> tuple[str, dict]:
+        if is_url_param:
+            if payload in _PARAM_PAYLOADS:
+                return await self.browser.test_url_param(
+                    url,
+                    field_name + "[$ne]",
+                    "wscan_invalid",
+                )
+            return await self.browser.test_url_param(url, field_name, payload)
+        await self.browser.navigate(url)
+        return await self.browser.fill_and_submit_form(form_index, field_name, payload)
+
     async def scan_field(
         self,
         url: str,
@@ -102,6 +143,19 @@ class NoSQLInjectionScanner(BaseScanner):
             return []
 
         baseline_len = len(baseline_src)
+        baseline_src2 = ""
+        try:
+            if is_url_param:
+                baseline_src2, _ = await self.browser.test_url_param(
+                    url, field_name, "baseline_value_wscan_2"
+                )
+            else:
+                await self.browser.navigate(url)
+                baseline_src2, _ = await self.browser.fill_and_submit_form(
+                    form_index, field_name, "baseline_value_wscan_2"
+                )
+        except Exception:
+            baseline_src2 = ""
 
         # ── Parameter pollution payloads ──────────────────────────────
         for payload in _PARAM_PAYLOADS:
@@ -134,27 +188,37 @@ class NoSQLInjectionScanner(BaseScanner):
                         ),
                         pair=pair,
                         severity="high",
+                        evidence_type="nosql_error",
+                        evidence_details={"matched_error": err[:150]},
                     )
                     findings.append(finding)
                     break
 
                 # Boolean-based: significant response length difference.
-                # Threshold scales with baseline so that tiny/huge responses
-                # aren't false-positive-prone. 500 bytes is the floor.
-                delta = abs(len(src) - baseline_len)
-                min_delta = max(500, int(baseline_len * 0.25))
-                if delta > min_delta and len(src) > baseline_len:
+                # Threshold scales with baseline and natural baseline variance.
+                expanded, details = self._boolean_expansion(
+                    baseline_src,
+                    src,
+                    baseline_src2,
+                )
+                if expanded:
                     finding = await self.record_finding(
                         url=url,
                         field_name=field_name,
                         payload=payload,
                         evidence=(
                             f"NoSQL injection (boolean-based): response size increased by "
-                            f"{delta} bytes with operator payload vs baseline. "
+                            f"{details['delta']} bytes with operator payload vs baseline. "
                             f"Possible authentication bypass or data exfiltration."
                         ),
                         pair=pair,
                         severity="high",
+                        confidence="likely",
+                        evidence_type="nosql_boolean",
+                        evidence_details={
+                            **details,
+                            "injected_param": field_name + "[$ne]" if is_url_param else field_name,
+                        },
                     )
                     findings.append(finding)
                     break
@@ -214,6 +278,8 @@ class NoSQLInjectionScanner(BaseScanner):
                         ),
                         pair=pair,
                         severity="high",
+                        evidence_type="nosql_json_error",
+                        evidence_details={"matched_error": err[:150]},
                     )
                     findings.append(finding)
                     break
@@ -221,3 +287,88 @@ class NoSQLInjectionScanner(BaseScanner):
                 continue
 
         return findings
+
+    async def verify_finding(self, finding: Finding) -> bool | None:
+        from urllib.parse import parse_qs, urlparse
+
+        evidence_type = getattr(finding, "evidence_type", "")
+        if evidence_type == "nosql_json_error":
+            return await self._verify_json_error(finding)
+
+        is_url_param = finding.field_name in parse_qs(
+            urlparse(finding.url).query, keep_blank_values=True
+        )
+        try:
+            baseline_src, _ = await self._apply_payload(
+                finding.url,
+                0,
+                finding.field_name,
+                "baseline_value_wscan",
+                is_url_param,
+            )
+            baseline_src2, _ = await self._apply_payload(
+                finding.url,
+                0,
+                finding.field_name,
+                "baseline_value_wscan_2",
+                is_url_param,
+            )
+            probe_src, _ = await self._apply_payload(
+                finding.url,
+                0,
+                finding.field_name,
+                finding.payload,
+                is_url_param,
+            )
+        except Exception:
+            return None
+
+        if evidence_type == "nosql_error":
+            baseline_err = self.check_response_for_patterns(
+                baseline_src or "",
+                _NOSQL_ERROR_PATTERNS,
+            )
+            probe_err = self.check_response_for_patterns(
+                probe_src or "",
+                _NOSQL_ERROR_PATTERNS,
+            )
+            return bool(probe_err and not baseline_err)
+
+        if evidence_type == "nosql_boolean":
+            expanded, _details = self._boolean_expansion(
+                baseline_src,
+                probe_src,
+                baseline_src2,
+            )
+            return expanded
+
+        return None
+
+    async def _verify_json_error(self, finding: Finding) -> bool | None:
+        proxy = getattr(self.engine, "proxy", "") or None
+        timeout = getattr(self.engine, "timeout", 15)
+        kwargs: dict = {
+            "timeout": timeout,
+            "follow_redirects": True,
+            "headers": {"Content-Type": "application/json"},
+        }
+        if proxy:
+            kwargs["proxy"] = proxy
+
+        try:
+            safe_body = json.dumps({finding.field_name: "baseline_value_wscan"})
+            async with httpx.AsyncClient(**kwargs) as client:
+                baseline_resp = await client.post(finding.url, content=safe_body)
+                probe_resp = await client.post(finding.url, content=finding.payload)
+        except Exception:
+            return None
+
+        baseline_err = self.check_response_for_patterns(
+            baseline_resp.text,
+            _NOSQL_ERROR_PATTERNS,
+        )
+        probe_err = self.check_response_for_patterns(
+            probe_resp.text,
+            _NOSQL_ERROR_PATTERNS,
+        )
+        return bool(probe_err and not baseline_err)

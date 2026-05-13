@@ -460,10 +460,17 @@ class SQLiScanner(BaseScanner):
             baseline_source, _ = await self._get_baseline(finding.url, 0, finding.field_name, is_url_param)
             true_src, _ = await self._apply_payload(finding.url, 0, finding.field_name, true_payload, is_url_param)
             false_src, _ = await self._apply_payload(finding.url, 0, finding.field_name, false_payload, is_url_param)
+            baseline_len = len(baseline_source)
+            diff_true_base = abs(len(true_src) - baseline_len)
+            diff_false_base = abs(len(false_src) - baseline_len)
+            baseline_variance = float(details.get("baseline_variance", 0) or 0)
+            min_threshold = max(200, baseline_variance * 4)
             return (
-                self._body_similarity(true_src, baseline_source) >= 0.85
+                baseline_len > 0
+                and diff_false_base > min_threshold
+                and diff_true_base < diff_false_base * 0.5
+                and self._body_similarity(true_src, baseline_source) >= 0.85
                 and self._body_similarity(false_src, baseline_source) <= 0.80
-                and abs(len(false_src) - len(baseline_source)) > 200
             )
         return None
 

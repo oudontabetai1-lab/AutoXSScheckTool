@@ -6,6 +6,7 @@ monitoring script captures any write to innerHTML, document.write, eval,
 location.href etc. that contains the marker, confirming DOM-based XSS.
 """
 import asyncio
+import re
 import uuid
 from typing import TYPE_CHECKING
 
@@ -203,3 +204,52 @@ class DOMXSSScanner(BaseScanner):
             findings.append(finding)
 
         return findings
+
+    async def verify_finding(self, finding: Finding) -> bool | None:
+        if finding.evidence_type not in {"dom_xss_sink", "dom_xss_dialog"}:
+            return None
+
+        marker = self._marker_for_finding(finding)
+        if not marker:
+            return None
+
+        try:
+            self.browser.reset_dialog()
+            await self.browser.page.add_init_script(_HOOK_SCRIPT)
+            await self._apply_payload(finding.url, finding.field_name, finding.payload)
+            await asyncio.sleep(0.5 * self.sleep_factor)
+            log = await self.browser.page.evaluate(
+                "() => window.__wscan_domxss_log || []"
+            )
+        except Exception:
+            return None
+
+        for entry in log or []:
+            if marker in (entry.get("data", "") or ""):
+                return True
+
+        if self.browser.dialog_fired and marker in self.browser.dialog_message:
+            return True
+
+        return False
+
+    async def _apply_payload(self, url: str, field_name: str, payload: str):
+        from urllib.parse import parse_qs, urlparse
+
+        is_url_param = field_name in parse_qs(
+            urlparse(url).query, keep_blank_values=True
+        )
+        if is_url_param:
+            return await self.browser.test_url_param(url, field_name, payload)
+
+        await self.browser.navigate(url)
+        return await self.browser.fill_and_submit_form(0, field_name, payload)
+
+    def _marker_for_finding(self, finding: Finding) -> str:
+        details = getattr(finding, "evidence_details", {}) or {}
+        marker = details.get("marker")
+        if marker:
+            return str(marker)
+
+        match = re.search(r"__WSCAN_DOMXSS__[0-9a-fA-F]+", finding.payload or "")
+        return match.group(0) if match else ""

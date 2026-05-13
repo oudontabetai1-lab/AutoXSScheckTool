@@ -60,6 +60,21 @@ class PublicBrandingTests(unittest.TestCase):
             with self.subTest(marker=marker):
                 self.assertIn(marker, text)
 
+    def test_dashboard_exposes_scope_controls(self):
+        text = Path("templates/dashboard.html").read_text(encoding="utf-8")
+        expected = (
+            "cfgTargetUrls",
+            "cfgAccessUrls",
+            "target_urls",
+            "access_urls",
+            "検査対象URLスコープ",
+            "アクセスのみ許可URLスコープ",
+        )
+
+        for marker in expected:
+            with self.subTest(marker=marker):
+                self.assertIn(marker, text)
+
     def test_dashboard_loads_config_defaults(self):
         text = Path("templates/dashboard.html").read_text(encoding="utf-8")
         expected = (

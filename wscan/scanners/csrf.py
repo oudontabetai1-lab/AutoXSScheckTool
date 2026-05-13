@@ -79,7 +79,7 @@ class CSRFScanner(BaseScanner):
             )
 
             if not has_csrf_token:
-                pair = self.browser.network.latest() or {}
+                pair = self.current_page_pair(url)
                 finding = await self.record_finding(
                     url=url,
                     field_name=f"form[{form['index']}]",

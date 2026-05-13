@@ -4,6 +4,7 @@ Playwright-based browser automation with evidence collection.
 """
 import asyncio
 import base64
+import re
 import time
 from urllib.parse import urlparse as _urlparse
 from typing import Optional, Callable, Any
@@ -70,6 +71,28 @@ class NetworkCapture:
 
     def latest(self) -> Optional[dict]:
         return self.pairs[-1] if self.pairs else None
+
+    def latest_for_url(self, url: str, *, match_query: bool = True) -> Optional[dict]:
+        """Return the newest captured pair for a specific URL, ignoring assets loaded later."""
+        target = (url or "").split("#", 1)[0]
+        target_parsed = urlparse(target)
+        for pair in reversed(self.pairs):
+            req_url = (pair.get("request", {}).get("url") or "").split("#", 1)[0]
+            resp_url = (pair.get("response", {}).get("url") or "").split("#", 1)[0]
+            if match_query and (req_url == target or resp_url == target):
+                return pair
+            if not match_query:
+                for candidate in (req_url, resp_url):
+                    parsed = urlparse(candidate)
+                    target_path = target_parsed.path or "/"
+                    candidate_path = parsed.path or "/"
+                    if (
+                        parsed.scheme == target_parsed.scheme
+                        and parsed.netloc == target_parsed.netloc
+                        and candidate_path == target_path
+                    ):
+                        return pair
+        return None
 
     def clear(self):
         self.pairs.clear()
@@ -194,7 +217,7 @@ class BrowserManager:
                     document.querySelectorAll('form').forEach((form, fi) => {
                         const inputs = [];
                         const els = form.querySelectorAll(
-                            'input:not([type=hidden]):not([type=submit]):not([type=button]):not([type=reset]):not([type=image]):not([type=file]):not([type=checkbox]):not([type=radio]), textarea'
+                            'input:not([type=hidden]):not([type=submit]):not([type=button]):not([type=reset]):not([type=image]):not([type=checkbox]):not([type=radio]), textarea'
                         );
                         els.forEach((el, ii) => {
                             inputs.push({
@@ -334,7 +357,11 @@ class BrowserManager:
                         dispatchEvents(target);
                     }
 
-                    return {success: true};
+                    return {
+                        success: true,
+                        action: form.action || window.location.href,
+                        method: (form.method || 'GET').toUpperCase()
+                    };
                 }
                 """,
                 [form_index, field_name, payload, safe_values or {}, self.auth_user, self.auth_pass],
@@ -363,7 +390,8 @@ class BrowserManager:
                 await asyncio.sleep(_js_wait)
 
             source = await self.get_page_source()
-            pair = self.network.latest() or {}
+            action_url = result.get("action") or self.page.url
+            pair = self.network.latest_for_url(action_url, match_query=False) or self.network.latest() or {}
             return source, pair
         except Exception as e:
             source = await self.get_page_source()
@@ -384,12 +412,12 @@ class BrowserManager:
         self.reset_dialog()
         self.network.clear()
         try:
-            await self.page.evaluate(
+            result = await self.page.evaluate(
                 """
                 async ([formIndex, fieldPayloads, authUser, authPass]) => {
                     const forms = document.querySelectorAll('form');
                     const form = forms[formIndex];
-                    if (!form) return;
+                    if (!form) return {success: false, error: 'form not found'};
 
                     function getSafeValue(el) {
                         const type = (el.type || 'text').toLowerCase();
@@ -454,10 +482,19 @@ class BrowserManager:
                         );
                         if (target) { target.value = payload; dispatchEvents(target); }
                     }
+                    return {
+                        success: true,
+                        action: form.action || window.location.href,
+                        method: (form.method || 'GET').toUpperCase()
+                    };
                 }
                 """,
                 [form_index, field_payloads, self.auth_user, self.auth_pass],
             )
+
+            if not result or not result.get("success"):
+                source = await self.get_page_source()
+                return source, {}
 
             submit_btn = await self.page.query_selector(
                 f"form:nth-of-type({form_index + 1}) [type=submit], "
@@ -476,7 +513,8 @@ class BrowserManager:
                 await asyncio.sleep(_js_wait)
 
             source = await self.get_page_source()
-            pair = self.network.latest() or {}
+            action_url = result.get("action") or self.page.url
+            pair = self.network.latest_for_url(action_url, match_query=False) or self.network.latest() or {}
             return source, pair
         except Exception:
             source = await self.get_page_source()
@@ -499,33 +537,100 @@ class BrowserManager:
         if _nav_wait > 0:
             await asyncio.sleep(_nav_wait)
         source = await self.get_page_source()
-        pair = self.network.latest() or {}
+        pair = self.network.latest_for_url(test_url) or self.network.latest() or {}
         return source, pair
 
     async def collect_links(self, base_url: str, same_domain: bool = True) -> list[str]:
-        """Collect all links on the current page."""
+        """Collect navigable URLs from links, forms, data attributes, and inline JS."""
         try:
             links = await self.page.evaluate("""
                 (baseUrl) => {
                     const parsed = new URL(baseUrl);
                     const links = new Set();
-                    document.querySelectorAll('a[href]').forEach(a => {
+                    const ignoredExt = /\\.(?:png|jpe?g|gif|svg|webp|ico|css|woff2?|ttf|map|pdf|zip)(?:[?#].*)?$/i;
+
+                    function addCandidate(raw) {
+                        if (!raw || typeof raw !== 'string') return;
+                        let candidate = raw.trim();
+                        if (!candidate || candidate === '#' || candidate.startsWith('javascript:') || candidate.startsWith('mailto:') || candidate.startsWith('tel:')) return;
+                        candidate = candidate.replace(/[\\s"'`<>)}\\],;]+$/g, '');
                         try {
-                            const url = new URL(a.href, baseUrl);
+                            const url = new URL(candidate, baseUrl);
                             if (url.protocol === 'http:' || url.protocol === 'https:') {
+                                if (ignoredExt.test(url.pathname)) return;
                                 links.add(url.href.split('#')[0]);
                             }
                         } catch(e) {}
+                    }
+
+                    document.querySelectorAll('a[href], area[href], form[action], iframe[src], frame[src]').forEach(el => {
+                        addCandidate(el.getAttribute('href') || el.getAttribute('action') || el.getAttribute('src') || '');
                     });
+
+                    document.querySelectorAll('[data-href], [data-url], [data-route], [data-path], [data-api], [data-endpoint]').forEach(el => {
+                        ['data-href', 'data-url', 'data-route', 'data-path', 'data-api', 'data-endpoint'].forEach(attr => {
+                            addCandidate(el.getAttribute(attr) || '');
+                        });
+                    });
+
+                    const urlRe = /(?:https?:\\/\\/[^\\s"'`<>\\)\\]}]+|(?:\\.\\.\\/|\\.\\/|\\/)[A-Za-z0-9_~!$&()*+,;=:@.%\\/?-]+)/g;
+                    document.querySelectorAll('script:not([src])').forEach(script => {
+                        const text = script.textContent || '';
+                        for (const match of text.matchAll(urlRe)) {
+                            addCandidate(match[0]);
+                        }
+                    });
+
                     return [...links];
                 }
             """, base_url)
+            links.extend(self._collect_urls_from_loaded_assets(base_url))
             if same_domain:
                 base = urlparse(base_url)
                 links = [l for l in links if urlparse(l).netloc == base.netloc]
-            return links
+            return list(dict.fromkeys(links))
         except Exception:
             return []
+
+    def _collect_urls_from_loaded_assets(self, base_url: str) -> list[str]:
+        """Extract same-site route/API candidates from loaded JS/JSON assets."""
+        discovered: list[str] = []
+        ignored_ext = re.compile(
+            r"\.(?:png|jpe?g|gif|svg|webp|ico|css|woff2?|ttf|map|pdf|zip)(?:[?#].*)?$",
+            re.IGNORECASE,
+        )
+        url_re = re.compile(
+            r"(?:https?://[^\s\"'`<>\)\]\}]+|(?:\.\./|\./|/)[A-Za-z0-9_~!$&()*+,;=:@.%/?-]+)"
+        )
+        for pair in list(self.network.pairs):
+            resp = pair.get("response", {}) if isinstance(pair, dict) else {}
+            req = pair.get("request", {}) if isinstance(pair, dict) else {}
+            source_url = resp.get("url") or req.get("url") or ""
+            headers = resp.get("headers", {}) or {}
+            content_type = str(headers.get("content-type", "")).lower()
+            body = resp.get("body") or ""
+            if not body:
+                continue
+            is_text_asset = (
+                "javascript" in content_type
+                or "json" in content_type
+                or source_url.split("?", 1)[0].endswith((".js", ".mjs", ".json"))
+            )
+            if not is_text_asset:
+                continue
+            for match in url_re.findall(body[:200000]):
+                candidate = match.rstrip(" \t\r\n\"'`<>)}],;")
+                try:
+                    resolved = urljoin(base_url, candidate)
+                    parsed = urlparse(resolved)
+                    if parsed.scheme not in {"http", "https"}:
+                        continue
+                    if ignored_ext.search(parsed.path):
+                        continue
+                    discovered.append(resolved.split("#")[0])
+                except Exception:
+                    continue
+        return discovered
 
     async def set_cookies(self, cookies_str: str, url: str):
         """Set cookies from a 'name=value; name2=value2' string."""

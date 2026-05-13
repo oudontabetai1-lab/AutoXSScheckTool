@@ -48,7 +48,7 @@ class CORSScanner(BaseScanner):
         findings = []
 
         # ── Check 1: wildcard ACAO + credentials ──────────────────────
-        pair = self.browser.network.latest() or {}
+        pair = self.current_page_pair(url)
         resp_headers = {
             k.lower(): v
             for k, v in pair.get("response", {}).get("headers", {}).items()
@@ -68,28 +68,16 @@ class CORSScanner(BaseScanner):
                 ),
                 pair=pair,
                 severity="high",
+                confidence="likely",
+                evidence_type="cors_wildcard_credentials",
+                evidence_details={"acao": acao, "acac": acac},
             )
             findings.append(finding)
 
         # ── Check 2: arbitrary Origin reflection ──────────────────────
         try:
-            proxy = getattr(self.engine, "proxy", "") or None
-            kwargs: dict = {
-                "headers": {
-                    "Origin": _CANARY_ORIGIN,
-                    "User-Agent": (
-                        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-                        "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-                    ),
-                },
-                "timeout": getattr(self.engine, "timeout", 15),
-                "follow_redirects": True,
-            }
-            if proxy:
-                kwargs["proxy"] = proxy
-
-            async with httpx.AsyncClient(**kwargs) as client:
-                r = await client.get(url)
+            req_headers = self._origin_headers(_CANARY_ORIGIN)
+            r = await self._get_with_origin(url, _CANARY_ORIGIN)
 
             reflected_acao = r.headers.get("access-control-allow-origin", "")
             reflected_acac = r.headers.get("access-control-allow-credentials", "").lower()
@@ -110,10 +98,17 @@ class CORSScanner(BaseScanner):
                             else " (unauthenticated data may be readable cross-origin)"
                         )
                     ),
-                    pair={"request": {"url": url, "headers": kwargs["headers"]},
+                    pair={"request": {"url": url, "headers": req_headers},
                           "response": {"status": r.status_code,
                                        "headers": dict(r.headers)}},
                     severity=severity,
+                    confidence="likely",
+                    evidence_type="cors_origin_reflection",
+                    evidence_details={
+                        "origin": _CANARY_ORIGIN,
+                        "acao": reflected_acao,
+                        "acac": reflected_acac,
+                    },
                 )
                 findings.append(finding)
 
@@ -124,3 +119,50 @@ class CORSScanner(BaseScanner):
                 )
 
         return findings
+
+    async def _get_with_origin(self, url: str, origin: str):
+        proxy = getattr(self.engine, "proxy", "") or None
+        headers = self._origin_headers(origin)
+        kwargs: dict = {
+            "headers": headers,
+            "timeout": getattr(self.engine, "timeout", 15),
+            "follow_redirects": True,
+        }
+        if proxy:
+            kwargs["proxy"] = proxy
+
+        async with httpx.AsyncClient(**kwargs) as client:
+            return await client.get(url)
+
+    def _origin_headers(self, origin: str) -> dict:
+        return {
+            "Origin": origin,
+            "User-Agent": (
+                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            ),
+        }
+
+    async def verify_finding(self, finding: Finding) -> bool | None:
+        details = getattr(finding, "evidence_details", {}) or {}
+        if finding.evidence_type == "cors_wildcard_credentials":
+            try:
+                r = await self._get_with_origin(finding.url, _CANARY_ORIGIN)
+            except Exception:
+                return None
+            acao = r.headers.get("access-control-allow-origin", "")
+            acac = r.headers.get("access-control-allow-credentials", "").lower()
+            return acao == "*" and acac == "true"
+
+        if finding.evidence_type == "cors_origin_reflection":
+            origin = details.get("origin") or _CANARY_ORIGIN
+            try:
+                r = await self._get_with_origin(finding.url, origin)
+            except Exception:
+                return None
+            acao = r.headers.get("access-control-allow-origin", "")
+            acac = r.headers.get("access-control-allow-credentials", "").lower()
+            expected_acac = details.get("acac", "")
+            return acao == origin and (not expected_acac or acac == expected_acac)
+
+        return None

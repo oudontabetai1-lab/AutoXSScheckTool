@@ -42,6 +42,7 @@ _XXE_PAYLOADS: list[tuple[str, str]] = [
 _PASSWD_RE = re.compile(r"root:.*:0:0:", re.DOTALL)
 _WIN_INI_RE = re.compile(r"\[(?:fonts|extensions|mci extensions|files)\]", re.IGNORECASE)
 _EXPANSION_RE = re.compile(r"lollol|entity.*expanded|billion.*laugh", re.IGNORECASE)
+_BASELINE_XML = '<?xml version="1.0"?><root>wscan_xxe_baseline</root>'
 
 
 def _looks_like_xml_endpoint(field: dict) -> bool:
@@ -62,6 +63,57 @@ class XXEScanner(BaseScanner):
         super().__init__(engine)
         self._checked_urls: set[str] = set()
 
+    async def _post_xml(self, url: str, payload: str) -> tuple[str, int, float]:
+        timeout = getattr(self.engine, "timeout", 15)
+        client_kwargs: dict = {
+            "timeout": timeout,
+            "follow_redirects": True,
+            "verify": False,
+        }
+        if proxy:
+            client_kwargs["proxy"] = proxy
+
+        async with httpx.AsyncClient(**client_kwargs) as client:
+            r = await client.post(
+                url,
+                content=payload,
+                headers={"Content-Type": "application/xml"},
+            )
+        return r.text, r.status_code, r.elapsed.total_seconds()
+
+    def _classify(
+        self,
+        baseline_body: str,
+        probe_body: str,
+        elapsed: float,
+        timeout: float,
+        description: str,
+    ) -> tuple[str, str, dict] | None:
+        checks = [
+            ("xxe_file_read", _PASSWD_RE, "/etc/passwd content"),
+            ("xxe_file_read", _WIN_INI_RE, "win.ini content"),
+            ("xxe_entity_expansion", _EXPANSION_RE, "entity expansion output"),
+        ]
+        for evidence_type, pattern, label in checks:
+            baseline_match = pattern.search(baseline_body or "")
+            probe_match = pattern.search(probe_body or "")
+            if probe_match and not baseline_match:
+                marker = probe_match.group(0)[:150]
+                return (
+                    evidence_type,
+                    f"XXE: {label} reflected in response - {description}",
+                    {"matched_marker": marker, "description": description},
+                )
+
+        if elapsed > timeout * 0.8 and "oob" in description.lower():
+            return (
+                "xxe_oob_timing",
+                f"XXE: response delay suggests OOB lookup triggered - {description}",
+                {"elapsed_seconds": elapsed, "description": description},
+            )
+
+        return None
+
     async def scan_field(
         self,
         url: str,
@@ -77,44 +129,40 @@ class XXEScanner(BaseScanner):
 
         proxy = getattr(self.engine, "proxy", "") or None
         timeout = getattr(self.engine, "timeout", 15)
+        try:
+            baseline_body, _baseline_status, _baseline_elapsed = await self._post_xml(
+                url, _BASELINE_XML
+            )
+        except Exception as exc:
+            if self.monitor:
+                await self.monitor.emit_status(
+                    f"[warn] xxe: baseline request failed on {url} ({field_name}): {exc}"
+                )
+            return []
 
         for payload, description in _XXE_PAYLOADS:
             if self.monitor:
                 await self.monitor.emit_payload_test(url, field_name, payload, self.CHECK_TYPE)
             try:
-                kwargs: dict = {
-                    "content": payload,
-                    "headers": {"Content-Type": "application/xml"},
-                    "timeout": timeout,
-                    "follow_redirects": True,
-                    "verify": False,
-                }
-                if proxy:
-                    kwargs["proxy"] = proxy
-
-                async with httpx.AsyncClient(**kwargs) as client:
-                    r = await client.post(url, **{k: v for k, v in kwargs.items()
-                                                  if k not in ("proxy",)})
-                body = r.text
+                body, status_code, elapsed = await self._post_xml(url, payload)
 
             except Exception as exc:
                 if self.monitor:
                     await self.monitor.emit_status(
                         f"[warn] xxe: request failed on {url} ({field_name}): {exc}"
-                    )
+                )
                 continue
 
-            evidence = None
-            if _PASSWD_RE.search(body):
-                evidence = f"XXE: /etc/passwd content reflected in response — {description}"
-            elif _WIN_INI_RE.search(body):
-                evidence = f"XXE: win.ini content reflected in response — {description}"
-            elif _EXPANSION_RE.search(body):
-                evidence = f"XXE: entity expansion output in response — {description}"
-            elif r.elapsed.total_seconds() > timeout * 0.8 and "oob" in description:
-                evidence = f"XXE: response delay suggests OOB DNS lookup triggered — {description}"
+            classified = self._classify(
+                baseline_body,
+                body,
+                elapsed,
+                timeout,
+                description,
+            )
 
-            if evidence:
+            if classified:
+                evidence_type, evidence, evidence_details = classified
                 finding = await self.record_finding(
                     url=url,
                     field_name=field_name,
@@ -122,9 +170,12 @@ class XXEScanner(BaseScanner):
                     evidence=evidence,
                     pair={
                         "request": {"url": url, "method": "POST", "body": payload},
-                        "response": {"status": r.status_code, "body": body[:2000]},
+                        "response": {"status": status_code, "body": body[:2000]},
                     },
                     severity="high",
+                    confidence="likely",
+                    evidence_type=evidence_type,
+                    evidence_details=evidence_details,
                 )
                 findings.append(finding)
                 break  # one confirmed finding per field is enough
@@ -133,3 +184,35 @@ class XXEScanner(BaseScanner):
 
     async def scan_page(self, url: str) -> list[Finding]:
         return []
+
+    async def verify_finding(self, finding: Finding) -> bool | None:
+        probe = next(
+            (
+                (payload, description)
+                for payload, description in _XXE_PAYLOADS
+                if payload == finding.payload
+            ),
+            None,
+        )
+        if not probe:
+            return None
+
+        payload, description = probe
+        timeout = getattr(self.engine, "timeout", 15)
+        try:
+            baseline_body, _baseline_status, _baseline_elapsed = await self._post_xml(
+                finding.url,
+                _BASELINE_XML,
+            )
+            body, _status, elapsed = await self._post_xml(finding.url, payload)
+        except Exception:
+            return None
+
+        classified = self._classify(
+            baseline_body,
+            body,
+            elapsed,
+            timeout,
+            description,
+        )
+        return bool(classified and classified[0] == finding.evidence_type)

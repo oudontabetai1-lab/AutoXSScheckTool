@@ -134,11 +134,57 @@ class SSRFScanner(BaseScanner):
                     ),
                     pair=pair,
                     severity="critical",
+                    confidence="confirmed",
+                    evidence_type="ssrf_internal_marker",
+                    evidence_details={
+                        "probe_label": label,
+                        "matched_marker": match.group(0)[:100],
+                    },
                 )
                 findings.append(finding)
                 break  # one confirmed finding per field is sufficient
 
         return findings
+
+    async def verify_finding(self, finding: Finding) -> bool | None:
+        probe = next(
+            (
+                (label, pattern)
+                for label, payload, pattern in _SSRF_PROBES
+                if payload == finding.payload
+            ),
+            None,
+        )
+        if not probe:
+            return None
+        _label, pattern = probe
+
+        from urllib.parse import parse_qs, urlparse
+
+        is_url_param = finding.field_name in parse_qs(
+            urlparse(finding.url).query, keep_blank_values=True
+        )
+        try:
+            baseline_source, _ = await self._apply_payload(
+                finding.url,
+                0,
+                finding.field_name,
+                "http://wscan-baseline-test.invalid/",
+                is_url_param,
+            )
+            probe_source, _ = await self._apply_payload(
+                finding.url,
+                0,
+                finding.field_name,
+                finding.payload,
+                is_url_param,
+            )
+        except Exception:
+            return None
+
+        if baseline_source and pattern.search(baseline_source):
+            return False
+        return bool(probe_source and pattern.search(probe_source))
 
     async def _apply_payload(
         self,

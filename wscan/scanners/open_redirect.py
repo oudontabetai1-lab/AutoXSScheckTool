@@ -9,6 +9,7 @@ Detection: after injecting an external URL, checks whether:
 """
 import asyncio
 from typing import TYPE_CHECKING
+from urllib.parse import parse_qs, urlparse
 
 from .base import BaseScanner, Finding
 
@@ -42,6 +43,15 @@ REDIRECT_PAYLOADS = [
     f"/%09/{_CANARY_HOST}",          # tab character bypass
     f"https://{_CANARY_HOST}%2F%2E", # trailing encoded chars
 ]
+
+
+def _location_header(pair: dict) -> str:
+    headers = pair.get("response", {}).get("headers", {}) or {}
+    return headers.get("location", "") or headers.get("Location", "")
+
+
+def _is_external_redirect(pair: dict, current_url: str = "") -> bool:
+    return _CANARY_HOST in (current_url or "") or _CANARY_HOST in _location_header(pair)
 
 
 class OpenRedirectScanner(BaseScanner):
@@ -104,7 +114,7 @@ class OpenRedirectScanner(BaseScanner):
                 break
 
             # Check 2: Location header in the captured HTTP response points externally
-            location = pair.get("response", {}).get("headers", {}).get("location", "")
+            location = _location_header(pair)
             if location and _CANARY_HOST in location:
                 finding = await self.record_finding(
                     url=url,
@@ -120,6 +130,23 @@ class OpenRedirectScanner(BaseScanner):
                 break
 
         return findings
+
+    async def verify_finding(self, finding: Finding) -> bool | None:
+        is_url_param = finding.field_name in parse_qs(
+            urlparse(finding.url).query, keep_blank_values=True
+        )
+        _source, pair = await self._apply_payload(
+            finding.url,
+            0,
+            finding.field_name,
+            finding.payload,
+            is_url_param,
+        )
+        try:
+            current_url = self.browser.page.url
+        except Exception:
+            current_url = ""
+        return _is_external_redirect(pair, current_url)
 
     async def _apply_payload(
         self,

@@ -4,6 +4,7 @@ Detects OS command injection vulnerabilities.
 """
 import asyncio
 from typing import TYPE_CHECKING
+from urllib.parse import parse_qs, urlparse
 
 from .base import BaseScanner, Finding
 
@@ -144,6 +145,57 @@ class OSInjectionScanner(BaseScanner):
             await asyncio.sleep(0.2 * self.sleep_factor)
 
         return findings
+
+    async def verify_finding(self, finding: Finding) -> bool | None:
+        is_url_param = finding.field_name in parse_qs(
+            urlparse(finding.url).query, keep_blank_values=True
+        )
+        baseline_source, baseline_pair = await self._apply_payload(
+            finding.url,
+            0,
+            finding.field_name,
+            "baseline_os_test",
+            is_url_param,
+        )
+        source, pair = await self._apply_payload(
+            finding.url,
+            0,
+            finding.field_name,
+            finding.payload,
+            is_url_param,
+        )
+
+        body = pair.get("response", {}).get("body", "") or source or ""
+        match = self.check_response_for_patterns(body, OS_OUTPUT_PATTERNS)
+        if match:
+            baseline_body = (
+                baseline_pair.get("response", {}).get("body", "")
+                or baseline_source
+                or ""
+            )
+            if baseline_body:
+                baseline_match = self.check_response_for_patterns(
+                    baseline_body,
+                    OS_OUTPUT_PATTERNS,
+                )
+                if baseline_match:
+                    return False
+            return True
+
+        if finding.payload in TIME_BASED_PAYLOADS:
+            _b_req = baseline_pair.get("request", {})
+            _b_resp = baseline_pair.get("response", {})
+            _b_ts_req = _b_req.get("timestamp", 0)
+            _b_ts_resp = _b_resp.get("timestamp", 0)
+            baseline_time = (
+                float(_b_ts_resp - _b_ts_req)
+                if _b_ts_req and _b_ts_resp
+                else 0.0
+            )
+            time_threshold = max(2.8, baseline_time + 2.8)
+            return self.response_time_exceeded(pair, threshold=time_threshold)
+
+        return False
 
     async def _apply_payload(
         self,

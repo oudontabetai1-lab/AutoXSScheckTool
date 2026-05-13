@@ -45,6 +45,42 @@ _SMUGGLE_ERROR_PATTERNS = [
 # is waiting for more data (indicating TE/CL discrepancy)
 _TIMEOUT_DELTA_THRESHOLD = 5.0
 
+_PROBE_DEFINITIONS = {
+    "CL.TE": {
+        "body": b"0\r\n\r\n",
+        "headers": {
+            "Content-Type": "application/x-www-form-urlencoded",
+            "Content-Length": "6",
+            "Transfer-Encoding": "chunked",
+        },
+    },
+    "TE.CL": {
+        "body": None,
+        "headers": {
+            "Content-Type": "application/x-www-form-urlencoded",
+            "Content-Length": "4",
+            "Transfer-Encoding": "chunked",
+        },
+    },
+    "TE.TE (obfuscated)": {
+        "body": b"0\r\n\r\n",
+        "headers": {
+            "Content-Type": "application/x-www-form-urlencoded",
+            "Transfer-Encoding": "chunked",
+            "Transfer-Encoding ": "xchunked",
+        },
+    },
+}
+
+
+def _probe_body(probe_name: str) -> bytes:
+    if probe_name == "TE.CL":
+        chunk = b"POST / HTTP/1.1\r\nHost: localhost\r\nContent-Length: 4\r\n\r\ntest"
+        chunk_hex = hex(len(chunk))[2:].encode()
+        return chunk_hex + b"\r\n" + chunk + b"\r\n0\r\n\r\n"
+    body = _PROBE_DEFINITIONS.get(probe_name, {}).get("body")
+    return body if isinstance(body, bytes) else b""
+
 
 class RequestSmugglingScanner(BaseScanner):
     """HTTP request smuggling detection scanner."""
@@ -91,14 +127,13 @@ class RequestSmugglingScanner(BaseScanner):
         A vulnerable backend (that reads by TE) will hang waiting for the
         0-length terminating chunk, causing a timeout differential.
         """
-        # Body: "0\r\n\r\n" = 5 bytes but CL says 6 → backend waits for 1 more byte
-        body = b"0\r\n\r\n"
-        headers = {
-            "Content-Type": "application/x-www-form-urlencoded",
-            "Content-Length": "6",       # One more than actual body
-            "Transfer-Encoding": "chunked",
-        }
-        return await self._time_probe(url, headers, body, "CL.TE")
+        probe_name = "CL.TE"
+        return await self._time_probe(
+            url,
+            dict(_PROBE_DEFINITIONS[probe_name]["headers"]),
+            _probe_body(probe_name),
+            probe_name,
+        )
 
     async def _probe_te_cl(self, url: str) -> list[Finding]:
         """
@@ -106,15 +141,13 @@ class RequestSmugglingScanner(BaseScanner):
         smaller value. A backend reading by CL will process only part of the
         chunked body, potentially treating the remainder as a new request.
         """
-        chunk = b"POST / HTTP/1.1\r\nHost: localhost\r\nContent-Length: 4\r\n\r\ntest"
-        chunk_hex = hex(len(chunk))[2:].encode()
-        body = chunk_hex + b"\r\n" + chunk + b"\r\n0\r\n\r\n"
-        headers = {
-            "Content-Type": "application/x-www-form-urlencoded",
-            "Content-Length": "4",       # Much smaller than actual body
-            "Transfer-Encoding": "chunked",
-        }
-        return await self._time_probe(url, headers, body, "TE.CL")
+        probe_name = "TE.CL"
+        return await self._time_probe(
+            url,
+            dict(_PROBE_DEFINITIONS[probe_name]["headers"]),
+            _probe_body(probe_name),
+            probe_name,
+        )
 
     async def _probe_te_te(self, url: str) -> list[Finding]:
         """
@@ -122,13 +155,82 @@ class RequestSmugglingScanner(BaseScanner):
         If one server accepts "chunked" and another accepts "xchunked",
         they will disagree on how to parse the body.
         """
-        body = b"0\r\n\r\n"
-        headers = {
-            "Content-Type": "application/x-www-form-urlencoded",
-            "Transfer-Encoding": "chunked",
-            "Transfer-Encoding ": "xchunked",   # Trailing space → obfuscation
+        probe_name = "TE.TE (obfuscated)"
+        return await self._time_probe(
+            url,
+            dict(_PROBE_DEFINITIONS[probe_name]["headers"]),
+            _probe_body(probe_name),
+            probe_name,
+        )
+
+    async def _measure_normal(self, url: str, timeout: float, proxy: str | None) -> float:
+        normal_start = time.monotonic()
+        async with httpx.AsyncClient(
+            timeout=timeout,
+            follow_redirects=False,
+            **({"proxy": proxy} if proxy else {}),
+        ) as client:
+            await client.get(url)
+        return time.monotonic() - normal_start
+
+    async def _send_probe(
+        self,
+        url: str,
+        headers: dict,
+        body: bytes,
+        timeout: float,
+        proxy: str | None,
+    ) -> tuple[float, str, int]:
+        probe_start = time.monotonic()
+        try:
+            async with httpx.AsyncClient(
+                timeout=timeout,
+                follow_redirects=False,
+                **({"proxy": proxy} if proxy else {}),
+            ) as client:
+                r_probe = await client.post(url, content=body, headers=headers)
+            return time.monotonic() - probe_start, r_probe.text, r_probe.status_code
+        except httpx.ReadTimeout:
+            return timeout, "", 0
+
+    def _classify_probe(
+        self,
+        url: str,
+        headers: dict,
+        probe_name: str,
+        normal_elapsed: float,
+        probe_elapsed: float,
+        probe_body: str,
+        probe_status: int,
+    ) -> tuple[str, str, dict, str] | None:
+        delta = probe_elapsed - normal_elapsed
+        details = {
+            "probe_name": probe_name,
+            "headers": dict(headers),
+            "normal_elapsed": round(normal_elapsed, 4),
+            "probe_elapsed": round(probe_elapsed, 4),
+            "delta": round(delta, 4),
+            "probe_status": probe_status,
         }
-        return await self._time_probe(url, headers, body, "TE.TE (obfuscated)")
+        if delta >= _TIMEOUT_DELTA_THRESHOLD or probe_status == 0:
+            evidence = (
+                f"HTTP Request Smuggling indicator ({probe_name}): "
+                f"probe response took {probe_elapsed:.1f}s vs baseline {normal_elapsed:.1f}s "
+                f"(+{delta:.1f}s). Backend may be waiting for more data, "
+                f"suggesting a CL/TE parsing disagreement."
+            )
+            return "request_smuggling_timing", "high", details, evidence
+
+        err = self.check_response_for_patterns(probe_body, _SMUGGLE_ERROR_PATTERNS)
+        if err and probe_status in (400, 501, 505):
+            details["matched_error"] = err[:100]
+            evidence = (
+                f"HTTP Request Smuggling indicator ({probe_name}): "
+                f"server returned HTTP {probe_status} with message: '{err[:100]}'. "
+                f"This may indicate a proxy/server disagreement on header parsing."
+            )
+            return "request_smuggling_parser_error", "medium", details, evidence
+        return None
 
     async def _time_probe(
         self,
@@ -142,59 +244,21 @@ class RequestSmugglingScanner(BaseScanner):
         base_timeout = min(getattr(self.engine, "timeout", 15), 10)
 
         try:
-            # First: measure normal response time as baseline
-            normal_start = time.monotonic()
-            async with httpx.AsyncClient(
-                timeout=base_timeout,
-                follow_redirects=False,
-                **({"proxy": proxy} if proxy else {}),
-            ) as client:
-                r_normal = await client.get(url)
-            normal_elapsed = time.monotonic() - normal_start
-
-            # Second: send the smuggling probe
-            probe_start = time.monotonic()
-            try:
-                async with httpx.AsyncClient(
-                    timeout=base_timeout,
-                    follow_redirects=False,
-                    **({"proxy": proxy} if proxy else {}),
-                ) as client:
-                    r_probe = await client.post(url, content=body, headers=headers)
-                probe_elapsed = time.monotonic() - probe_start
-                probe_body = r_probe.text
-                probe_status = r_probe.status_code
-            except httpx.ReadTimeout:
-                # Timeout is a strong positive signal for CL.TE
-                probe_elapsed = base_timeout
-                probe_body = ""
-                probe_status = 0
-
-            # --- Check 1: significant timeout differential ---
-            delta = probe_elapsed - normal_elapsed
-            if delta >= _TIMEOUT_DELTA_THRESHOLD or probe_status == 0:
-                pair = {
-                    "request": {"url": url, "headers": dict(headers)},
-                    "response": {"status": probe_status},
-                }
-                finding = await self.record_finding(
-                    url=url,
-                    field_name="(HTTP request headers)",
-                    payload=f"[{probe_name}] ambiguous CL+TE headers",
-                    evidence=(
-                        f"HTTP Request Smuggling indicator ({probe_name}): "
-                        f"probe response took {probe_elapsed:.1f}s vs baseline {normal_elapsed:.1f}s "
-                        f"(+{delta:.1f}s). Backend may be waiting for more data, "
-                        f"suggesting a CL/TE parsing disagreement."
-                    ),
-                    pair=pair,
-                    severity="high",
-                )
-                return [finding]
-
-            # --- Check 2: error response suggesting header conflict ---
-            err = self.check_response_for_patterns(probe_body, _SMUGGLE_ERROR_PATTERNS)
-            if err and probe_status in (400, 501, 505):
+            normal_elapsed = await self._measure_normal(url, base_timeout, proxy)
+            probe_elapsed, probe_body, probe_status = await self._send_probe(
+                url, headers, body, base_timeout, proxy
+            )
+            classified = self._classify_probe(
+                url,
+                headers,
+                probe_name,
+                normal_elapsed,
+                probe_elapsed,
+                probe_body,
+                probe_status,
+            )
+            if classified:
+                evidence_type, severity, details, evidence = classified
                 pair = {
                     "request": {"url": url, "headers": dict(headers)},
                     "response": {
@@ -205,14 +269,13 @@ class RequestSmugglingScanner(BaseScanner):
                 finding = await self.record_finding(
                     url=url,
                     field_name="(HTTP request headers)",
-                    payload=f"[{probe_name}] ambiguous CL+TE headers",
-                    evidence=(
-                        f"HTTP Request Smuggling indicator ({probe_name}): "
-                        f"server returned HTTP {probe_status} with message: '{err[:100]}'. "
-                        f"This may indicate a proxy/server disagreement on header parsing."
-                    ),
+                    payload=probe_name,
+                    evidence=evidence,
                     pair=pair,
-                    severity="medium",
+                    severity=severity,
+                    confidence="tentative",
+                    evidence_type=evidence_type,
+                    evidence_details=details,
                 )
                 return [finding]
 
@@ -220,3 +283,34 @@ class RequestSmugglingScanner(BaseScanner):
             pass
 
         return []
+
+    async def verify_finding(self, finding: Finding) -> bool | None:
+        details = getattr(finding, "evidence_details", {}) or {}
+        probe_name = details.get("probe_name") or finding.payload
+        if probe_name not in _PROBE_DEFINITIONS:
+            return None
+        proxy = getattr(self.engine, "proxy", "") or None
+        base_timeout = min(getattr(self.engine, "timeout", 15), 10)
+        headers = dict(_PROBE_DEFINITIONS[probe_name]["headers"])
+        body = _probe_body(probe_name)
+        try:
+            normal_elapsed = await self._measure_normal(finding.url, base_timeout, proxy)
+            probe_elapsed, probe_body, probe_status = await self._send_probe(
+                finding.url,
+                headers,
+                body,
+                base_timeout,
+                proxy,
+            )
+        except Exception:
+            return None
+        classified = self._classify_probe(
+            finding.url,
+            headers,
+            probe_name,
+            normal_elapsed,
+            probe_elapsed,
+            probe_body,
+            probe_status,
+        )
+        return bool(classified and classified[0] == finding.evidence_type)

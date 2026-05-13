@@ -1021,6 +1021,14 @@ body {
         <div class="cfg-section-title">除外設定</div>
         <div class="cfg-grid" style="margin-top:10px">
           <div class="cfg-field" style="grid-column:1/-1">
+            <label>検査対象URLスコープ (1行1URL、前方一致)</label>
+            <textarea id="cfgTargetUrls" rows="4" placeholder="https://app.example.com&#10;https://admin.example.com"></textarea>
+          </div>
+          <div class="cfg-field" style="grid-column:1/-1">
+            <label>アクセスのみ許可URLスコープ (攻撃しない、1行1URL)</label>
+            <textarea id="cfgAccessUrls" rows="4" placeholder="https://login.example.com&#10;https://auth.example.com"></textarea>
+          </div>
+          <div class="cfg-field" style="grid-column:1/-1">
             <label>除外フィールド名 (カンマ区切り)</label>
             <input type="text" id="cfgExcludeFields" placeholder="csrf_token, __token, _method">
           </div>
@@ -1789,6 +1797,8 @@ function submitScanConfig() {
   }
   const excludeFieldsRaw = document.getElementById('cfgExcludeFields').value.trim();
   const excludeUrlsRaw = document.getElementById('cfgExcludeUrls').value.trim();
+  const targetUrlsRaw = document.getElementById('cfgTargetUrls').value.trim();
+  const accessUrlsRaw = document.getElementById('cfgAccessUrls').value.trim();
   const config = {
     url,
     depth:       parseInt(document.getElementById('cfgDepth').value) || 2,
@@ -1834,6 +1844,8 @@ function submitScanConfig() {
     auto_register_count: parseInt(document.getElementById('cfgAutoRegisterCount').value) || 2,
     exclude_fields: excludeFieldsRaw ? excludeFieldsRaw.split(',').map(s=>s.trim()).filter(Boolean) : [],
     exclude_urls:   excludeUrlsRaw ? excludeUrlsRaw.split('\n').map(s=>s.trim()).filter(Boolean) : [],
+    target_urls:    targetUrlsRaw ? targetUrlsRaw.split('\n').map(s=>s.trim()).filter(Boolean) : [],
+    access_urls:    accessUrlsRaw ? accessUrlsRaw.split('\n').map(s=>s.trim()).filter(Boolean) : [],
     flows: collectFlows(),
   };
 
@@ -1933,6 +1945,8 @@ function saveConfigToStorage() {
       cookies: document.getElementById('cfgCookies').value,
       exclude_fields: document.getElementById('cfgExcludeFields').value,
       exclude_urls: document.getElementById('cfgExcludeUrls').value,
+      target_urls: document.getElementById('cfgTargetUrls').value,
+      access_urls: document.getElementById('cfgAccessUrls').value,
       ctf_flag_pattern: document.getElementById('cfgCtfFlagPattern').value,
       manual_crawl_file: document.getElementById('cfgManualCrawlFile').value,
       manual_crawl_output: document.getElementById('manualCrawlOutput').value,
@@ -1970,6 +1984,8 @@ function loadConfigFromStorage() {
     if (cfg.cookies) document.getElementById('cfgCookies').value = cfg.cookies;
     if (cfg.exclude_fields) document.getElementById('cfgExcludeFields').value = cfg.exclude_fields;
     if (cfg.exclude_urls) document.getElementById('cfgExcludeUrls').value = cfg.exclude_urls;
+    if (cfg.target_urls) document.getElementById('cfgTargetUrls').value = cfg.target_urls;
+    if (cfg.access_urls) document.getElementById('cfgAccessUrls').value = cfg.access_urls;
     if (cfg.ctf_flag_pattern) document.getElementById('cfgCtfFlagPattern').value = cfg.ctf_flag_pattern;
     if (cfg.manual_crawl_file) document.getElementById('cfgManualCrawlFile').value = cfg.manual_crawl_file;
     if (cfg.manual_crawl_output) document.getElementById('manualCrawlOutput').value = cfg.manual_crawl_output;
@@ -3081,6 +3097,14 @@ function applyAutoConfig(cfg) {
     const el = document.getElementById('cfgExcludeUrls');
     if (el) el.value = cfg.exclude_urls.join('\n');
   }
+  if (cfg.target_urls && Array.isArray(cfg.target_urls)) {
+    const el = document.getElementById('cfgTargetUrls');
+    if (el) el.value = cfg.target_urls.join('\n');
+  }
+  if (cfg.access_urls && Array.isArray(cfg.access_urls)) {
+    const el = document.getElementById('cfgAccessUrls');
+    if (el) el.value = cfg.access_urls.join('\n');
+  }
   // exclude_fields
   if (cfg.exclude_fields && Array.isArray(cfg.exclude_fields)) {
     const el = document.getElementById('cfgExcludeFields');
@@ -3125,6 +3149,8 @@ function submitHybridScan() {
     claude_model: (document.getElementById('cfgClaudeModel')?.value || '').trim() || 'claude-haiku-4-5-20251001',
     role_models:  collectRoleModels(),
     manual_crawl_file: (document.getElementById('cfgManualCrawlFile')?.value || '').trim(),
+    target_urls:  (document.getElementById('cfgTargetUrls')?.value || '').split('\n').map(s=>s.trim()).filter(Boolean),
+    access_urls:  (document.getElementById('cfgAccessUrls')?.value || '').split('\n').map(s=>s.trim()).filter(Boolean),
     fast_mode:    cfgToggles.fast_mode,
     max_payloads: parseInt(document.getElementById('cfgMaxPayloads')?.value) || 0,
   };

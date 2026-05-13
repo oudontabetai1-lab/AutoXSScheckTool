@@ -194,6 +194,9 @@ class ScanEngine:
         spa_crawl: bool = False,
         # ハイブリッドモード: Agent偵察で発見したURLをクロールのシードに使う
         seed_urls: Optional[list] = None,
+        # Scope: URLs that are attacked vs. URLs that may be visited only
+        target_urls: Optional[list] = None,
+        access_urls: Optional[list] = None,
         # I: 差分スキャン — 前回出力ディレクトリのパス
         previous_scan_dir: Optional[str] = None,
         # N: リクエスト間の待機秒数 (0 = 無制限)
@@ -249,6 +252,14 @@ class ScanEngine:
         self.spa_crawl = spa_crawl
         # ハイブリッドモード用シード URL (Agent偵察で発見したURL)
         self.seed_urls: list = list(seed_urls or [])
+        primary_origin = self._origin_for(self.target_url)
+        self.additional_target_urls: list[str] = self._normalize_scope_urls(list(target_urls or []))
+        self.target_urls: list[str] = self._normalize_scope_urls(
+            [primary_origin] + self.additional_target_urls
+        )
+        self.access_urls: list[str] = self._normalize_scope_urls(
+            list(access_urls or []) + ([login_url] if login_url else [])
+        )
         # I: 差分スキャン
         self.previous_scan_dir: Optional[str] = previous_scan_dir
         # K: SARIF 出力フラグ
@@ -389,6 +400,44 @@ class ScanEngine:
         # Auto-login landing page. Seeded into the normal crawl so authenticated
         # pages are not missed when the scan target itself is the login URL.
         self.auth_landing_url: str = ""
+
+    @staticmethod
+    def _origin_for(url: str) -> str:
+        parsed = urlparse(url)
+        if parsed.scheme and parsed.netloc:
+            return f"{parsed.scheme}://{parsed.netloc}"
+        return url.rstrip("/")
+
+    @classmethod
+    def _normalize_scope_urls(cls, urls: list[str]) -> list[str]:
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for raw in urls:
+            value = str(raw or "").strip().rstrip("/")
+            if not value:
+                continue
+            if value not in seen:
+                seen.add(value)
+                normalized.append(value)
+        return normalized
+
+    def _url_matches_scope(self, url: str, scopes: list[str]) -> bool:
+        candidate = url.rstrip("/")
+        parsed = urlparse(candidate)
+        for scope in scopes:
+            if scope.startswith(("http://", "https://")):
+                if candidate == scope or candidate.startswith(scope + "/"):
+                    return True
+                continue
+            if parsed.path == scope or parsed.path.startswith(scope.rstrip("/") + "/"):
+                return True
+        return False
+
+    def _is_attack_target_url(self, url: str) -> bool:
+        return self._url_matches_scope(url, self.target_urls)
+
+    def _is_access_allowed_url(self, url: str) -> bool:
+        return self._is_attack_target_url(url) or self._url_matches_scope(url, self.access_urls)
 
     def _record_scan_matrix(
         self,
@@ -556,10 +605,12 @@ class ScanEngine:
 
         finally:
             self.controller.stop()
-            await self._browser.close()
 
             # ── Phase 4.5: Verification ──────────────────────────────────
-            await self._phase_verify()
+            try:
+                await self._phase_verify()
+            finally:
+                await self._browser.close()
 
             # ── Phase 4: Report ──────────────────────────────────────────
             if self.monitor: await self.monitor.emit_phase("report")
@@ -630,14 +681,67 @@ class ScanEngine:
         return []
 
     @staticmethod
-    def _page_fingerprint(html: str) -> str:
+    def _page_fingerprint(html: str, url: str = "") -> str:
         """
         A: HTML の構造的フィンガープリント。
-        テキスト・属性値を除いたタグ列の先頭 50 個を MD5 ハッシュして返す。
+        テキスト・通常属性値を除いたタグ列に、フォームの method/action/name を加える。
+        同じレイアウトでも別 action のフォームや別 URL 入力面は検査対象として残す。
         """
         import hashlib
-        tags = re.findall(r'<\w+', html.lower())
-        return hashlib.md5(''.join(tags[:50]).encode()).hexdigest()[:12]
+        html_l = html.lower()
+        tags = re.findall(r'<\w+', html_l)
+        form_sigs: list[str] = []
+        for form_html in re.findall(r'<form\b[^>]*>.*?</form>', html_l, flags=re.S):
+            open_tag = form_html.split(">", 1)[0]
+            method = re.search(r'\bmethod=["\']?([^"\'\s>]+)', open_tag)
+            action = re.search(r'\baction=["\']?([^"\'\s>]+)', open_tag)
+            names = re.findall(r'\bname=["\']?([^"\'\s>]+)', form_html)
+            form_sigs.append(
+                "form:"
+                + (method.group(1) if method else "get")
+                + ":"
+                + (action.group(1) if action else "")
+                + ":"
+                + ",".join(sorted(names[:20]))
+            )
+        route_sig = ""
+        if url:
+            parsed = urlparse(url)
+            query_names = sorted(
+                {
+                    part.split("=", 1)[0]
+                    for part in parsed.query.split("&")
+                    if part.split("=", 1)[0]
+                }
+            )
+            if query_names:
+                route_sig = f"route:{parsed.path}?{','.join(query_names[:20])}"
+        material = "".join(tags[:50]) + "|".join(sorted(form_sigs)) + route_sig
+        return hashlib.md5(material.encode()).hexdigest()[:12]
+
+    @staticmethod
+    def _merge_url_params(current_params: list[str], queued_url: str) -> list[str]:
+        """
+        Preserve query inputs from the queued URL even if navigation redirects.
+
+        Open redirect and post-login redirect endpoints often immediately move
+        the browser away from the vulnerable URL.  Browser-side
+        window.location.search then describes the destination page, not the
+        original URL that should be attacked.
+        """
+        merged: list[str] = []
+        seen: set[str] = set()
+        parsed = urlparse(queued_url)
+        queued_params = [
+            part.split("=", 1)[0]
+            for part in parsed.query.split("&")
+            if part.split("=", 1)[0]
+        ]
+        for name in [*(current_params or []), *queued_params]:
+            if name and name not in seen:
+                seen.add(name)
+                merged.append(name)
+        return merged
 
     def _extract_sitemap_locs(self, xml_text: str) -> list[str]:
         """Extract <loc> URLs from a sitemap XML string."""
@@ -657,11 +761,22 @@ class ScanEngine:
     async def _phase_crawl(self) -> list:
         """BFS crawl — navigate every reachable page, collect forms/HTML. No payloads."""
         console.print(Rule("[bold blue] Phase 1 / 4  ·  Crawl [/bold blue]", style="blue"))
-        console.print(f"  Target: [cyan]{self.target_url}[/cyan]  depth={self.depth}\n")
+        console.print(f"  Target: [cyan]{self.target_url}[/cyan]  depth={self.depth}")
+        if len(self.target_urls) > 1 or self.access_urls:
+            console.print(
+                f"  Scope : [cyan]{len(self.target_urls)}[/cyan] attack scope(s), "
+                f"[cyan]{len(self.access_urls)}[/cyan] access-only scope(s)\n"
+            )
+        else:
+            console.print()
 
         pages: list = []
         queue: deque = deque([(self.target_url, 0, None)])  # (url, depth, parent_url)
         self.visited_urls.add(self.target_url)
+        for scope_url in self.additional_target_urls:
+            if scope_url.startswith(("http://", "https://")) and scope_url not in self.visited_urls:
+                self.visited_urls.add(scope_url)
+                queue.append((scope_url, 0, self.target_url))
         # A: DOM構造フィンガープリントで類似ページを検出
         self._seen_page_fingerprints: set[str] = set()
         _first_page = True  # CMS 検出は最初のページのみ
@@ -670,11 +785,9 @@ class ScanEngine:
         # ここを入れないとログイン後画面を巡回しないまま攻撃フェーズへ進んでしまう。
         if self.auth_landing_url:
             try:
-                base_host = urlparse(self.target_url).netloc
-                landing_host = urlparse(self.auth_landing_url).netloc
                 if (
-                    landing_host == base_host
-                    and self.auth_landing_url not in self.visited_urls
+                    self.auth_landing_url not in self.visited_urls
+                    and self._is_access_allowed_url(self.auth_landing_url)
                     and not self._is_url_excluded(self.auth_landing_url)
                 ):
                     self.visited_urls.add(self.auth_landing_url)
@@ -696,7 +809,7 @@ class ScanEngine:
                     f"{len(har_seed.cookies)} Cookie を読み込みました: {self.har_path}"
                 )
                 for _hurl in har_seed.urls:
-                    if _hurl not in self.visited_urls:
+                    if _hurl not in self.visited_urls and self._is_access_allowed_url(_hurl):
                         self.visited_urls.add(_hurl)
                         queue.append((_hurl, 0, self.target_url))
                 if har_seed.cookies:
@@ -708,13 +821,17 @@ class ScanEngine:
         if self.manual_crawl_path:
             try:
                 from wscan.manual_crawl import load_manual_crawl_seed
-                manual_seed = load_manual_crawl_seed(self.manual_crawl_path, self.target_url)
+                manual_seed = load_manual_crawl_seed(
+                    self.manual_crawl_path,
+                    self.target_url,
+                    allowed_scopes=[*self.target_urls, *self.access_urls],
+                )
                 console.print(
                     f"  [dim cyan][Manual Crawl][/dim cyan] {len(manual_seed.urls)} URL, "
                     f"{len(manual_seed.cookies)} Cookie を読み込みました: {self.manual_crawl_path}"
                 )
                 for _murl in manual_seed.urls:
-                    if _murl not in self.visited_urls:
+                    if _murl not in self.visited_urls and self._is_access_allowed_url(_murl):
                         self.visited_urls.add(_murl)
                         queue.append((_murl, 0, self.target_url))
                 if manual_seed.cookies:
@@ -730,7 +847,7 @@ class ScanEngine:
                 f"{len(sitemap_urls)} additional URL(s) discovered"
             )
             for su in sitemap_urls[:30]:  # cap at 30 seed URLs
-                if su not in self.visited_urls:
+                if su not in self.visited_urls and self._is_access_allowed_url(su):
                     self.visited_urls.add(su)
                     queue.append((su, 0, self.target_url))  # depth=0: treat as root-level
 
@@ -738,7 +855,11 @@ class ScanEngine:
         if self.seed_urls:
             added = 0
             for su in self.seed_urls:
-                if su not in self.visited_urls and not self._is_url_excluded(su):
+                if (
+                    su not in self.visited_urls
+                    and self._is_access_allowed_url(su)
+                    and not self._is_url_excluded(su)
+                ):
                     self.visited_urls.add(su)
                     queue.append((su, 0, self.target_url))
                     added += 1
@@ -754,6 +875,9 @@ class ScanEngine:
             # Skip excluded URLs (exact match or prefix match)
             if self._is_url_excluded(url):
                 console.print(f"  [dim yellow]Skip (excluded URL):[/dim yellow] {url}")
+                continue
+            if not self._is_access_allowed_url(url):
+                console.print(f"  [dim yellow]Skip (out of scope):[/dim yellow] {url}")
                 continue
 
             console.print(f"  [dim]Crawling[/dim] ({depth + 1}/{self.depth}): {url}")
@@ -799,16 +923,20 @@ class ScanEngine:
             if html:
                 if self.flag_finder:
                     self._check_page_for_flags(html, url)
-                fp = self._page_fingerprint(html)
+                fp = self._page_fingerprint(html, url)
                 if fp in self._seen_page_fingerprints:
                     console.print(f"  [dim]重複ページスキップ: {url} (同一構造を検出)[/dim]")
                     # リンクは抽出するが、スキャン対象には追加しない
                     if depth + 1 < self.depth:
                         try:
-                            links = await self.browser.collect_links(url, same_domain=True)
+                            links = await self.browser.collect_links(url, same_domain=False)
                             for link in links:
                                 clean = link.split("#")[0]
-                                if clean not in self.visited_urls and not self._is_url_excluded(clean):
+                                if (
+                                    clean not in self.visited_urls
+                                    and self._is_access_allowed_url(clean)
+                                    and not self._is_url_excluded(clean)
+                                ):
                                     self.visited_urls.add(clean)
                                     queue.append((link, depth + 1, url))
                         except Exception:
@@ -837,7 +965,7 @@ class ScanEngine:
                     pass
 
             forms = await self.browser.find_forms()
-            url_params = await self.browser.get_url_params()
+            url_params = self._merge_url_params(await self.browser.get_url_params(), url)
             screenshot_b64 = await self.browser.screenshot_b64(f"Crawl: {url}")
 
             # Record in page_graph for the transition diagram
@@ -884,8 +1012,15 @@ class ScanEngine:
                 + (f"\n    {reg_note}" if reg_note else "")
             )
 
-            pages.append(CrawledPage(url=url, html=html, forms=forms,
-                                     url_params=url_params, depth=depth))
+            is_attack_target = self._is_attack_target_url(url)
+            if is_attack_target:
+                pages.append(CrawledPage(url=url, html=html, forms=forms,
+                                         url_params=url_params, depth=depth))
+            else:
+                console.print(
+                    f"    [dim cyan]access-only scope: forms and parameters were collected "
+                    f"for navigation context but will not be attacked[/dim cyan]"
+                )
 
             # ① SPA crawl: discover dynamically-rendered routes via click interaction
             if self.spa_crawl:
@@ -895,14 +1030,18 @@ class ScanEngine:
                     )
                     for spa_link in spa_links:
                         clean_spa = spa_link.split("#")[0]
-                        if clean_spa not in self.visited_urls and not self._is_url_excluded(clean_spa):
+                        if (
+                            clean_spa not in self.visited_urls
+                            and self._is_access_allowed_url(clean_spa)
+                            and not self._is_url_excluded(clean_spa)
+                        ):
                             self.visited_urls.add(clean_spa)
                             queue.append((spa_link, depth + 1, url))
                 except Exception:
                     pass
 
             if depth + 1 < self.depth:
-                links = await self.browser.collect_links(url, same_domain=True)
+                links = await self.browser.collect_links(url, same_domain=False)
                 url_cap = max(200, self.depth * 50)
                 _cap_warned = False
                 for link in links:
@@ -916,6 +1055,7 @@ class ScanEngine:
                             _cap_warned = True
                         break
                     if (clean not in self.visited_urls
+                            and self._is_access_allowed_url(clean)
                             and not self._is_url_excluded(clean)):
                         self.visited_urls.add(clean)
                         queue.append((link, depth + 1, url))
@@ -1588,7 +1728,7 @@ class ScanEngine:
                 html = ""
 
             forms = await self._browser.find_forms()
-            url_params = await self._browser.get_url_params()
+            url_params = self._merge_url_params(await self._browser.get_url_params(), url)
             screenshot_b64 = await self._browser.screenshot_b64(
                 f"Post-Auth Crawl: {actual_url}"
             )
@@ -1690,7 +1830,10 @@ class ScanEngine:
         # ── Page-level checks (header inspection, clickjacking, session, etc.) ──
         for check_name, scanner in self.scanners.items():
             try:
-                page_findings = await scanner.scan_page(page.url)
+                if hasattr(scanner, "scan_page_context"):
+                    page_findings = await scanner.scan_page_context(page)
+                else:
+                    page_findings = await scanner.scan_page(page.url)
                 for f in (page_findings or []):
                     self._record_finding(f, source="page-level")
             except Exception as e:
@@ -2328,7 +2471,46 @@ class ScanEngine:
     # Phase 4.5: Verification — re-test each finding to catch false positives
     # =========================================================================
 
-    _VERIFIABLE_CHECKS = frozenset({"xss", "sqli", "os", "ssti", "path_traversal"})
+    _VERIFIABLE_CHECKS = frozenset({
+        "xss",
+        "sqli",
+        "os",
+        "ssti",
+        "path_traversal",
+        "open_redirect",
+        "header_injection",
+        "nosql",
+        "ssrf",
+        "deserialization",
+        "ldap",
+        "xxe",
+        "file_upload",
+        "race_condition",
+        "request_smuggling",
+        "websocket",
+        "graphql_introspection",
+        "graphql_batch",
+        "graphql_injection",
+        "graphql_sensitive",
+        "jwt_no_expiry",
+        "jwt_sensitive_data",
+        "jwt_weak_secret",
+        "jwt_alg_none",
+        "jwt_kid_injection",
+        "jwt_payload_tamper",
+        "cors",
+        "host_header",
+        "dom_xss",
+        "stored_xss",
+        "privesc_unauth",
+        "privesc_vertical",
+        "privesc_horizontal",
+        "privesc_param_idor",
+        "privesc_cross_acct",
+        "privesc_action",
+        "info_disclosure",
+        "session",
+    })
 
     async def _phase_verify(self):
         """
@@ -2383,10 +2565,18 @@ class ScanEngine:
         vulnerability is still reproducible.  Returns True if confirmed,
         True if verification could not be performed (don't penalise for nav errors).
         """
-        from urllib.parse import parse_qs, urlparse
+        from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
         import re as _re
 
-        scanner = self.scanners.get(f.check_type)
+        if f.check_type.startswith("graphql_"):
+            scanner_key = "graphql"
+        elif f.check_type.startswith("jwt_"):
+            scanner_key = "jwt"
+        elif f.check_type.startswith("privesc_"):
+            scanner_key = "privesc"
+        else:
+            scanner_key = f.check_type
+        scanner = self.scanners.get(scanner_key)
         if scanner is None:
             return True  # no scanner available → assume confirmed
 
@@ -2394,12 +2584,57 @@ class ScanEngine:
         if verifier:
             scanner_result = await verifier(f)
             if scanner_result is not None:
-                return bool(scanner_result)
+                # SSTI has an HTTP-level fallback below for URL parameters. Use
+                # it when browser-based scanner verification could not reproduce
+                # the finding, because loaded assets can make the latest browser
+                # response pair point at a script rather than the vulnerable URL.
+                if f.check_type == "ssti" and scanner_result is False:
+                    pass
+                else:
+                    return bool(scanner_result)
 
         # Determine URL-param vs form-field injection context
         is_url_param = f.field_name in parse_qs(
             urlparse(f.url).query, keep_blank_values=True
         )
+
+        if f.check_type == "ssti" and is_url_param:
+            try:
+                import httpx
+                from wscan.scanners.ssti import SSTI_PROBES
+                expected_values = [
+                    expected for probe, expected, _engine in SSTI_PROBES
+                    if probe == f.payload
+                ]
+                if expected_values:
+                    parsed = urlparse(f.url)
+                    qs = parse_qs(parsed.query, keep_blank_values=True)
+
+                    def _with_value(value: str) -> str:
+                        new_qs = dict(qs)
+                        new_qs[f.field_name] = [value]
+                        return urlunparse(parsed._replace(query=urlencode(new_qs, doseq=True)))
+
+                    headers = {"Cookie": self.cookies} if self.cookies else {}
+                    async with httpx.AsyncClient(
+                        follow_redirects=True,
+                        timeout=self.timeout,
+                        verify=False,
+                        headers=headers,
+                    ) as client:
+                        baseline_resp = await client.get(_with_value("wscan_ssti_baseline"))
+                        probe_resp = await client.get(_with_value(f.payload))
+                    baseline_text = baseline_resp.text
+                    probe_text = probe_resp.text
+                    for expected in expected_values:
+                        base_count = baseline_text.count(expected)
+                        if expected in probe_text and (
+                            base_count == 0 or probe_text.count(expected) > base_count
+                        ):
+                            return True
+                    return False
+            except Exception:
+                pass
 
         try:
             await self.browser.navigate(f.url)
@@ -2426,7 +2661,15 @@ class ScanEngine:
                 )
 
             elif f.check_type == "ssti":
-                return "49" in (source or "") or "7777777" in (source or "")
+                try:
+                    from wscan.scanners.ssti import SSTI_PROBES
+                    expected_values = [
+                        expected for probe, expected, _engine in SSTI_PROBES
+                        if probe == f.payload
+                    ] or [expected for _probe, expected, _engine in SSTI_PROBES]
+                except Exception:
+                    expected_values = ["49", "7777777", "7045744422742119121"]
+                return any(expected in (source or "") for expected in expected_values)
 
             else:
                 return True  # path_traversal etc. — difficult to re-check, assume confirmed

@@ -109,3 +109,32 @@ class SSTIScanner(BaseScanner):
                     f"[warn] ssti: _apply_payload failed on {field_name} @ {url}: {exc}"
                 )
             return "", {}
+
+    async def verify_finding(self, finding: Finding) -> bool | None:
+        """Reproduce the exact SSTI probe that created the finding."""
+        field_name = finding.field_name
+        payload = finding.payload
+        expected = next(
+            (expected for probe, expected, _engine in SSTI_PROBES if probe == payload),
+            None,
+        )
+        if not expected:
+            return None
+
+        from urllib.parse import parse_qs, urlparse
+
+        is_url_param = field_name in parse_qs(
+            urlparse(finding.url).query,
+            keep_blank_values=True,
+        )
+        baseline_source, _ = await self._apply_payload(
+            finding.url, 0, field_name, "wscan_ssti_baseline", is_url_param
+        )
+        source, _ = await self._apply_payload(
+            finding.url, 0, field_name, payload, is_url_param
+        )
+        if not source or expected not in source:
+            return False
+
+        base_count = baseline_source.count(expected) if baseline_source else 0
+        return base_count == 0 or source.count(expected) > base_count

@@ -182,6 +182,28 @@ class ActionPlanTests(unittest.TestCase):
         self.assertEqual(plan["tasks"][0]["field_name"], "password, username")
         self.assertEqual(plan["tasks"][0]["url"], "http://fixture.test/login")
 
+    def test_write_action_plan_adds_authorization_criteria_for_state_changing_actions(self):
+        finding = Finding(
+            check_type="privesc_action",
+            severity="high",
+            url="http://fixture.test/admin/users",
+            field_name="(state-changing action: POST /admin/users/role)",
+            payload="low-privilege session submitted form",
+            evidence="Low-privilege user could submit role change form",
+            confidence="confirmed",
+            verified=True,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            result = write_action_plan([finding], Path(tmp))
+            plan = json.loads(Path(result["json"]).read_text(encoding="utf-8"))
+
+        self.assertEqual(result["count"], 1)
+        self.assertIn(
+            "Authorization checks are enforced server-side",
+            " ".join(plan["tasks"][0]["acceptance_criteria"]),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -106,6 +106,25 @@ class DeserializationScanner(BaseScanner):
     CHECK_TYPE = "deserialization"
     SEVERITY = "critical"
 
+    def _probe_by_id(self, probe_id: str) -> tuple[str, str, str, str] | None:
+        for probe in _PROBES:
+            if probe[0] == probe_id:
+                return probe
+        return None
+
+    async def _apply_payload(
+        self,
+        url: str,
+        form_index: int,
+        field_name: str,
+        payload: str,
+        is_url_param: bool,
+    ) -> tuple[str, dict]:
+        if is_url_param:
+            return await self.browser.test_url_param(url, field_name, payload)
+        await self.browser.navigate(url)
+        return await self.browser.fill_and_submit_form(form_index, field_name, payload)
+
     async def scan_field(
         self,
         url: str,
@@ -127,28 +146,38 @@ class DeserializationScanner(BaseScanner):
 
         findings = []
 
+        baseline_src = ""
+        try:
+            baseline_src, _ = await self._apply_payload(
+                url,
+                form_index,
+                field_name,
+                "wscan_deser_baseline",
+                is_url_param,
+            )
+        except Exception:
+            baseline_src = ""
+
         for probe_id, description, payload, content_type in _PROBES:
             if self.monitor:
                 await self.monitor.emit_payload_test(
                     field_name, f"[{probe_id}]", "deserialization", url
                 )
             try:
-                if is_url_param:
-                    src, pair = await self.browser.test_url_param(
-                        url, field_name, payload
-                    )
-                else:
-                    await self.browser.navigate(url)
-                    src, pair = await self.browser.fill_and_submit_form(
-                        form_index, field_name, payload
-                    )
+                src, pair = await self._apply_payload(
+                    url, form_index, field_name, payload, is_url_param
+                )
 
                 err = self.check_response_for_patterns(src, _DESER_ERROR_PATTERNS)
-                if err:
+                baseline_err = self.check_response_for_patterns(
+                    baseline_src or "",
+                    _DESER_ERROR_PATTERNS,
+                )
+                if err and not baseline_err:
                     finding = await self.record_finding(
                         url=url,
                         field_name=field_name,
-                        payload=f"[{probe_id}] {payload[:60]}",
+                        payload=payload,
                         evidence=(
                             f"Insecure deserialization detected via {description}: "
                             f"error pattern '{err[:150]}' returned. "
@@ -156,6 +185,15 @@ class DeserializationScanner(BaseScanner):
                         ),
                         pair=pair,
                         severity="critical",
+                        confidence="likely",
+                        evidence_type="deserialization_error",
+                        evidence_details={
+                            "probe_id": probe_id,
+                            "description": description,
+                            "content_type": content_type,
+                            "matched_error": err[:150],
+                            "transport": "field",
+                        },
                     )
                     findings.append(finding)
                     break  # One confirmed finding per field is enough
@@ -199,10 +237,15 @@ class DeserializationScanner(BaseScanner):
                     raw_payload = payload.encode()
 
                 async with httpx.AsyncClient(**kwargs) as client:
+                    baseline = await client.post(url, content=b"wscan_deser_baseline")
                     r = await client.post(url, content=raw_payload)
 
                 err = self.check_response_for_patterns(r.text, _DESER_ERROR_PATTERNS)
-                if err:
+                baseline_err = self.check_response_for_patterns(
+                    baseline.text,
+                    _DESER_ERROR_PATTERNS,
+                )
+                if err and not baseline_err:
                     pair = {
                         "request": {"url": url, "content_type": content_type},
                         "response": {"status": r.status_code, "body": r.text[:1000]},
@@ -210,13 +253,22 @@ class DeserializationScanner(BaseScanner):
                     finding = await self.record_finding(
                         url=url,
                         field_name=field_name,
-                        payload=f"[{probe_id}] raw POST ({content_type})",
+                        payload=payload,
                         evidence=(
                             f"Insecure deserialization via raw POST: {description} "
                             f"triggered error: '{err[:150]}'"
                         ),
                         pair=pair,
                         severity="critical",
+                        confidence="likely",
+                        evidence_type="deserialization_error",
+                        evidence_details={
+                            "probe_id": probe_id,
+                            "description": description,
+                            "content_type": content_type,
+                            "matched_error": err[:150],
+                            "transport": "raw_post",
+                        },
                     )
                     findings.append(finding)
                     break
@@ -224,3 +276,85 @@ class DeserializationScanner(BaseScanner):
                 continue
 
         return findings
+
+    async def verify_finding(self, finding: Finding) -> bool | None:
+        details = getattr(finding, "evidence_details", {}) or {}
+        probe_id = details.get("probe_id")
+        probe = self._probe_by_id(probe_id) if probe_id else None
+        if not probe:
+            return None
+
+        _probe_id, _description, payload, content_type = probe
+        transport = details.get("transport", "field")
+        if transport == "raw_post":
+            return await self._verify_raw_post(finding.url, payload, content_type)
+
+        from urllib.parse import parse_qs, urlparse
+
+        is_url_param = finding.field_name in parse_qs(
+            urlparse(finding.url).query, keep_blank_values=True
+        )
+        try:
+            baseline_src, _ = await self._apply_payload(
+                finding.url,
+                0,
+                finding.field_name,
+                "wscan_deser_baseline",
+                is_url_param,
+            )
+            probe_src, _ = await self._apply_payload(
+                finding.url,
+                0,
+                finding.field_name,
+                payload,
+                is_url_param,
+            )
+        except Exception:
+            return None
+
+        baseline_err = self.check_response_for_patterns(
+            baseline_src or "",
+            _DESER_ERROR_PATTERNS,
+        )
+        probe_err = self.check_response_for_patterns(
+            probe_src or "",
+            _DESER_ERROR_PATTERNS,
+        )
+        return bool(probe_err and not baseline_err)
+
+    async def _verify_raw_post(
+        self,
+        url: str,
+        payload: str,
+        content_type: str,
+    ) -> bool | None:
+        proxy = getattr(self.engine, "proxy", "") or None
+        timeout = getattr(self.engine, "timeout", 15)
+        kwargs: dict = {
+            "timeout": timeout,
+            "follow_redirects": True,
+            "headers": {"Content-Type": content_type},
+        }
+        if proxy:
+            kwargs["proxy"] = proxy
+
+        try:
+            try:
+                raw_payload = base64.b64decode(payload)
+            except Exception:
+                raw_payload = payload.encode()
+            async with httpx.AsyncClient(**kwargs) as client:
+                baseline = await client.post(url, content=b"wscan_deser_baseline")
+                probe = await client.post(url, content=raw_payload)
+        except Exception:
+            return None
+
+        baseline_err = self.check_response_for_patterns(
+            baseline.text,
+            _DESER_ERROR_PATTERNS,
+        )
+        probe_err = self.check_response_for_patterns(
+            probe.text,
+            _DESER_ERROR_PATTERNS,
+        )
+        return bool(probe_err and not baseline_err)
