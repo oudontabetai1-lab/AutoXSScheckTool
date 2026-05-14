@@ -9,7 +9,7 @@ Detection: after injecting an external URL, checks whether:
 """
 import asyncio
 from typing import TYPE_CHECKING
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urlparse, urljoin
 
 from .base import BaseScanner, Finding
 
@@ -50,8 +50,41 @@ def _location_header(pair: dict) -> str:
     return headers.get("location", "") or headers.get("Location", "")
 
 
-def _is_external_redirect(pair: dict, current_url: str = "") -> bool:
-    return _CANARY_HOST in (current_url or "") or _CANARY_HOST in _location_header(pair)
+def _url_host(url: str) -> str:
+    """Return the lowercase host of a URL, stripped of user/port."""
+    if not url:
+        return ""
+    try:
+        netloc = urlparse(url).netloc.lower()
+    except Exception:
+        return ""
+    return netloc.split("@")[-1].split(":")[0]
+
+
+def _redirected_to_canary(current_url: str, base_url: str = "") -> bool:
+    """
+    True only when the *destination host* of ``current_url`` is the canary.
+
+    Substring matching is unsafe: a non-vulnerable app that simply echoes
+    the parameter back in its address bar (``?next=https://canary``) would
+    otherwise be flagged.  We compare the resolved netloc instead.
+    """
+    if not current_url:
+        return False
+    target = urljoin(base_url, current_url) if base_url else current_url
+    return _url_host(target) == _CANARY_HOST.lower()
+
+
+def _location_points_to_canary(pair: dict, base_url: str = "") -> bool:
+    location = _location_header(pair)
+    if not location:
+        return False
+    target = urljoin(base_url, location) if base_url else location
+    return _url_host(target) == _CANARY_HOST.lower()
+
+
+def _is_external_redirect(pair: dict, current_url: str = "", base_url: str = "") -> bool:
+    return _redirected_to_canary(current_url, base_url) or _location_points_to_canary(pair, base_url)
 
 
 class OpenRedirectScanner(BaseScanner):
@@ -99,7 +132,7 @@ class OpenRedirectScanner(BaseScanner):
                     )
                 current_url = ""
 
-            if _CANARY_HOST in current_url:
+            if _redirected_to_canary(current_url, url):
                 finding = await self.record_finding(
                     url=url,
                     field_name=field_name,
@@ -116,7 +149,7 @@ class OpenRedirectScanner(BaseScanner):
 
             # Check 2: Location header in the captured HTTP response points externally
             location = _location_header(pair)
-            if location and _CANARY_HOST in location:
+            if _location_points_to_canary(pair, url):
                 finding = await self.record_finding(
                     url=url,
                     field_name=field_name,
@@ -148,7 +181,7 @@ class OpenRedirectScanner(BaseScanner):
             current_url = self.browser.page.url
         except Exception:
             current_url = ""
-        return _is_external_redirect(pair, current_url)
+        return _is_external_redirect(pair, current_url, finding.url)
 
     async def _apply_payload(
         self,
