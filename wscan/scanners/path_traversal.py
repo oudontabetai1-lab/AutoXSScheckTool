@@ -23,7 +23,7 @@ PATH_TRAVERSAL_PATTERNS = [
     r"for 16-bit app support",  # Windows win.ini
     r"\[boot loader\]",         # Windows boot.ini
     r"WINDOWS\\system32",
-    r"<?php",                   # PHP source leak
+    r"<\?php",                  # PHP source leak (literal <?php opening tag)
     r"#!/usr/bin/perl",         # CGI source leak
     r"#!/usr/bin/python",
     r"# /etc/hosts",
