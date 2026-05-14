@@ -67,8 +67,8 @@ class PublicBrandingTests(unittest.TestCase):
             "cfgAccessUrls",
             "target_urls",
             "access_urls",
-            "検査対象URLスコープ",
-            "アクセスのみ許可URLスコープ",
+            "検査対象URL",
+            "アクセスのみ許可URL",
         )
 
         for marker in expected:
