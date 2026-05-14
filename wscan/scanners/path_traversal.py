@@ -94,6 +94,7 @@ class PathTraversalScanner(BaseScanner):
                     ),
                     pair=pair,
                     severity="high",
+                    confidence="likely",
                 )
                 findings.append(finding)
                 break

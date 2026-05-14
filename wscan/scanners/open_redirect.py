@@ -109,6 +109,7 @@ class OpenRedirectScanner(BaseScanner):
                     ),
                     pair=pair,
                     severity="medium",
+                    confidence="confirmed",
                 )
                 findings.append(finding)
                 break
@@ -125,6 +126,7 @@ class OpenRedirectScanner(BaseScanner):
                     ),
                     pair=pair,
                     severity="medium",
+                    confidence="likely",
                 )
                 findings.append(finding)
                 break

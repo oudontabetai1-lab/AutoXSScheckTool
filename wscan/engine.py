@@ -40,6 +40,9 @@ from urllib.parse import urlparse, urljoin
 # ``browser`` property reads it so that scanners transparently use the
 # worker's isolated page without any code changes.
 _CURRENT_WORKER: ContextVar = ContextVar("wscan_worker", default=None)
+# Per-task payload override: maps check_type → list[str].  Set for the duration
+# of a single scan_field call so parallel workers never clobber each other.
+_FIELD_PAYLOAD_OVERRIDES: ContextVar = ContextVar("wscan_payload_overrides", default=None)
 
 import yaml
 from rich.console import Console
@@ -2213,12 +2216,14 @@ class ScanEngine:
                 break
 
             # Merge plan payloads with defaults (LLM extras come first, defaults appended)
+            # Use a per-task ContextVar so parallel workers never contaminate each other.
             plan_payloads = field_plan.custom_payloads.get(check_name) if field_plan else None
-            _prev = self.custom_payloads.get(check_name)
+            _override_token = None
             if plan_payloads:
                 defaults = self.payload_gen.default_payloads.get(check_name, [])
                 merged = plan_payloads + [p for p in defaults if p not in plan_payloads]
-                self.custom_payloads[check_name] = merged
+                current_overrides = _FIELD_PAYLOAD_OVERRIDES.get() or {}
+                _override_token = _FIELD_PAYLOAD_OVERRIDES.set({**current_overrides, check_name: merged})
 
             try:
                 before_count = len(self.all_findings)
@@ -2251,11 +2256,8 @@ class ScanEngine:
                 )
                 console.print(f"    [yellow]Scanner error ({check_name}): {e}[/yellow]")
             finally:
-                if plan_payloads:
-                    if _prev is None:
-                        self.custom_payloads.pop(check_name, None)
-                    else:
-                        self.custom_payloads[check_name] = _prev
+                if _override_token is not None:
+                    _FIELD_PAYLOAD_OVERRIDES.reset(_override_token)
 
         # CTF: check page source after all scanners ran on this field
         if self.flag_finder:
@@ -2332,9 +2334,10 @@ class ScanEngine:
             if not adaptive_payloads:
                 continue
 
-            # Run scanner again with adaptive payloads
-            _prev = self.custom_payloads.get(check_name)
-            self.custom_payloads[check_name] = adaptive_payloads
+            # Run scanner again with adaptive payloads — isolated via ContextVar
+            current_overrides = _FIELD_PAYLOAD_OVERRIDES.get() or {}
+            _adaptive_token = _FIELD_PAYLOAD_OVERRIDES.set({**current_overrides, check_name: adaptive_payloads})
+            _critical_hit = False
 
             try:
                 findings = await scanner.scan_field(url, form_index, field, is_url_param)
@@ -2347,15 +2350,14 @@ class ScanEngine:
 
                 # Stop adaptive passes for this field if critical hit confirmed
                 if any(f is not None and f.severity == "critical" for f in (findings or [])):
-                    self.custom_payloads[check_name] = _prev if _prev is not None else self.custom_payloads.pop(check_name, None)
-                    break
+                    _critical_hit = True
             except Exception as e:
                 console.print(f"    [yellow]Adaptive scanner error ({check_name}): {e}[/yellow]")
             finally:
-                if _prev is None:
-                    self.custom_payloads.pop(check_name, None)
-                else:
-                    self.custom_payloads[check_name] = _prev
+                _FIELD_PAYLOAD_OVERRIDES.reset(_adaptive_token)
+
+            if _critical_hit:
+                break
 
             # CTF: scan page again after adaptive probe
             if self.flag_finder:
@@ -2439,11 +2441,16 @@ class ScanEngine:
         if f is None:
             return
         dedup_key = finding_dedup_key_for(f)
-        if dedup_key in self._finding_dedup:
-            return   # duplicate — skip
-        self._finding_dedup.add(dedup_key)
-        self.all_findings.append(f)
-        # L: 重大度閾値を超えた場合に Webhook 通知 (fire-and-forget)
+        if dedup_key not in self._finding_dedup:
+            # Finding bypassed scanner.record_finding (e.g. direct engine creation).
+            # Register it in the shared state now.
+            self._finding_dedup.add(dedup_key)
+            self.all_findings.append(f)
+        # Side effects must always run here.
+        # scanner.record_finding() pre-adds the dedup key and appends to all_findings
+        # so the branch above is skipped for normal scanner findings — but console
+        # output, webhook, payload learning, and flag scanning were never triggered
+        # because the old early-return prevented reaching this code.
         if self._notifier:
             asyncio.ensure_future(
                 self._notifier.notify_finding(f, self.target_url)
@@ -2453,12 +2460,10 @@ class ScanEngine:
         console.print(
             f"    [bold red][FINDING][/bold red] {label}{loc} — {f.evidence[:80]}"
         )
-        # A-3 / ⑩: record successful payload (domain-aware if learning enabled)
         if f.payload and self.enable_payload_learning:
             from urllib.parse import urlparse as _up
             _domain = _up(self.target_url).hostname or None
             self.payload_learner.record(f.check_type, f.payload, success=True, domain=_domain)
-        # Also scan the finding's evidence and response for flags
         if self.flag_finder:
             self._check_page_for_flags(f.evidence, f.url)
             body = (f.response or {}).get("body", "") or ""

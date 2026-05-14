@@ -204,11 +204,20 @@ class BaseScanner(ABC):
 
     async def get_payloads(self, field_name: str, url: str) -> list[str]:
         """Get payloads for this scanner's check type, sorted by learning data."""
+        # Check per-task ContextVar override first (set by engine for parallel isolation),
+        # fall back to the engine-level custom_payloads dict.
+        from wscan.engine import _FIELD_PAYLOAD_OVERRIDES
+        _overrides = _FIELD_PAYLOAD_OVERRIDES.get()
+        _custom = (
+            _overrides.get(self.CHECK_TYPE)
+            if _overrides
+            else self.engine.custom_payloads.get(self.CHECK_TYPE)
+        )
         payloads = await self.payload_gen.generate(
             check_type=self.CHECK_TYPE,
             field_name=field_name,
             url=url,
-            custom_payloads=self.engine.custom_payloads.get(self.CHECK_TYPE),
+            custom_payloads=_custom,
         )
         # A-3 / ⑩: re-order by historical success rate (domain-aware)
         learner = getattr(self.engine, "payload_learner", None)
@@ -294,12 +303,12 @@ class BaseScanner(ABC):
         if confidence is None and dialog_confirmed:
             confidence = "confirmed"
         elif confidence is None:
-            resp_body = pair.get("response", {}).get("body", "") or ""
-            base_body = pair.get("baseline_response", {}).get("body", "") or ""
-            if resp_body and (len(resp_body) - len(base_body)) > 100:
-                confidence = "likely"
-            else:
-                confidence = "tentative"
+            # "baseline_response" is never populated in the pair dict by any scanner,
+            # so the comparison len(resp_body) - len(base_body) was always equal to
+            # len(resp_body), making nearly every finding "likely" regardless of
+            # whether the response actually changed.  Default to "tentative" so
+            # scanners that care about confidence set it explicitly.
+            confidence = "tentative"
 
         finding = Finding(
             check_type=self.CHECK_TYPE,
