@@ -32,6 +32,8 @@ from .xxe import XXEScanner
 from .ldap_injection import LDAPScanner
 from .file_upload import FileUploadScanner
 from .race_condition import RaceConditionScanner
+from .secret_leak import SecretLeakScanner
+from .sri import SRIScanner
 from .websocket import WebSocketScanner
 
 
@@ -67,6 +69,8 @@ SCANNERS: dict[str, type] = {
     "file_upload":       FileUploadScanner,
     "race_condition":    RaceConditionScanner,
     "websocket":         WebSocketScanner,
+    "secret_leak":       SecretLeakScanner,
+    "sri":               SRIScanner,
 }
 
 
@@ -81,5 +85,5 @@ __all__ = [
     "SessionScanner", "SQLiScanner", "SSRFScanner", "SSTIScanner",
     "StoredXSSScanner", "XSSScanner",
     "XXEScanner", "LDAPScanner", "FileUploadScanner", "RaceConditionScanner",
-    "WebSocketScanner",
+    "WebSocketScanner", "SecretLeakScanner", "SRIScanner",
 ]
