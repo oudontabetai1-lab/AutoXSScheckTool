@@ -294,12 +294,12 @@ class BaseScanner(ABC):
         if confidence is None and dialog_confirmed:
             confidence = "confirmed"
         elif confidence is None:
-            resp_body = pair.get("response", {}).get("body", "") or ""
-            base_body = pair.get("baseline_response", {}).get("body", "") or ""
-            if resp_body and (len(resp_body) - len(base_body)) > 100:
-                confidence = "likely"
-            else:
-                confidence = "tentative"
+            # "baseline_response" is never populated in the pair dict by any scanner,
+            # so the comparison len(resp_body) - len(base_body) was always equal to
+            # len(resp_body), making nearly every finding "likely" regardless of
+            # whether the response actually changed.  Default to "tentative" so
+            # scanners that care about confidence set it explicitly.
+            confidence = "tentative"
 
         finding = Finding(
             check_type=self.CHECK_TYPE,

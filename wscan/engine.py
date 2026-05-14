@@ -2439,11 +2439,16 @@ class ScanEngine:
         if f is None:
             return
         dedup_key = finding_dedup_key_for(f)
-        if dedup_key in self._finding_dedup:
-            return   # duplicate — skip
-        self._finding_dedup.add(dedup_key)
-        self.all_findings.append(f)
-        # L: 重大度閾値を超えた場合に Webhook 通知 (fire-and-forget)
+        if dedup_key not in self._finding_dedup:
+            # Finding bypassed scanner.record_finding (e.g. direct engine creation).
+            # Register it in the shared state now.
+            self._finding_dedup.add(dedup_key)
+            self.all_findings.append(f)
+        # Side effects must always run here.
+        # scanner.record_finding() pre-adds the dedup key and appends to all_findings
+        # so the branch above is skipped for normal scanner findings — but console
+        # output, webhook, payload learning, and flag scanning were never triggered
+        # because the old early-return prevented reaching this code.
         if self._notifier:
             asyncio.ensure_future(
                 self._notifier.notify_finding(f, self.target_url)
@@ -2453,12 +2458,10 @@ class ScanEngine:
         console.print(
             f"    [bold red][FINDING][/bold red] {label}{loc} — {f.evidence[:80]}"
         )
-        # A-3 / ⑩: record successful payload (domain-aware if learning enabled)
         if f.payload and self.enable_payload_learning:
             from urllib.parse import urlparse as _up
             _domain = _up(self.target_url).hostname or None
             self.payload_learner.record(f.check_type, f.payload, success=True, domain=_domain)
-        # Also scan the finding's evidence and response for flags
         if self.flag_finder:
             self._check_page_for_flags(f.evidence, f.url)
             body = (f.response or {}).get("body", "") or ""

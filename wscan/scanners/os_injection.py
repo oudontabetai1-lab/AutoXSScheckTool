@@ -124,6 +124,7 @@ class OSInjectionScanner(BaseScanner):
                         ),
                         pair=pair,
                         severity="critical",
+                        confidence="likely",
                     )
                     findings.append(finding)
                     break
