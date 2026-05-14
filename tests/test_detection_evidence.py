@@ -1721,6 +1721,46 @@ class DetectionEvidenceTests(unittest.TestCase):
 
         self.run_async(run())
 
+    def test_path_traversal_php_source_leak_not_suppressed_by_php_in_baseline(self):
+        # Regression: r"<?php" (broken) matched the bare word "php" anywhere, so a
+        # baseline response like "Running PHP 8.2" would set baseline_match=True and
+        # suppress the real finding when <?php source code was leaked.
+        # The fix changes the pattern to r"<\?php" which only matches the literal tag.
+        async def run():
+            scanner = PathTraversalScanner(_DummyEngine())
+            scanner.get_payloads = AsyncMock(return_value=["../../var/www/html/config.php"])
+            scanner._apply_payload = AsyncMock(side_effect=[
+                # baseline: normal page mentioning PHP version — must NOT match <\?php
+                ("<html><body>Powered by PHP 8.2</body></html>", {}),
+                # payload: path traversal leaks PHP source starting with <?php
+                ("<?php\n$db_pass = 'secret';\n?>", {}),
+            ])
+
+            findings = await scanner.scan_field(
+                "http://fixture.test/page?file=about.txt",
+                0,
+                {"name": "file"},
+                is_url_param=True,
+            )
+
+            self.assertEqual(len(findings), 1)
+            self.assertIn("<?php", findings[0].evidence)
+
+        self.run_async(run())
+
+    def test_path_traversal_php_pattern_matches_opening_tag_not_bare_word(self):
+        import re
+        from wscan.scanners.path_traversal import PATH_TRAVERSAL_PATTERNS
+
+        php_pattern = next(p for p in PATH_TRAVERSAL_PATTERNS if "php" in p.lower())
+
+        # Must NOT match plain "PHP" (version strings, error messages, etc.)
+        self.assertIsNone(re.search(php_pattern, "Running PHP 8.2", re.IGNORECASE))
+        self.assertIsNone(re.search(php_pattern, "PHP Notice: Undefined variable", re.IGNORECASE))
+        # Must match the actual PHP source opening tag
+        self.assertIsNotNone(re.search(php_pattern, "<?php\n$x=1;", re.IGNORECASE))
+        self.assertIsNotNone(re.search(php_pattern, "<?PHP echo 'hi'; ?>", re.IGNORECASE))
+
     def test_os_verifier_replays_baseline_and_payload_body(self):
         async def run():
             scanner = OSInjectionScanner(_DummyEngine())
