@@ -161,6 +161,40 @@ def _section_url() -> str:
             _err("URL を入力してください。")
 
 
+def _section_additional_urls() -> tuple[list[str], list[str]]:
+    """追加の検査対象 URL とアクセス専用 URL を収集する。"""
+    _header("追加 URL 設定 (省略可)")
+    _print()
+    _print("  ① 追加の検査対象 URL  ─ ペイロードを挿入する URL")
+    _print("    用途例: ログイン URL が別ドメインかつ検査対象の場合")
+    _print("    スペース区切りで複数入力できます")
+    raw_target = _ask("追加の攻撃対象 URL (空白=なし)", "")
+    target_urls: list[str] = []
+    for u in raw_target.split():
+        if u.startswith(("http://", "https://")):
+            target_urls.append(u)
+        elif u:
+            _warn(f"http:// / https:// 以外のため無視: {u}")
+    if target_urls:
+        _ok(f"攻撃対象 URL: {len(target_urls)} 件 追加")
+
+    _print()
+    _print("  ② アクセス専用 URL  ─ 巡回するがペイロードは挿入しない URL")
+    _print("    用途例: Cognito 等の外部認証 IDP は巡回したいが攻撃はしたくない場合")
+    _print("    スペース区切りで複数入力できます")
+    raw_access = _ask("アクセス専用 URL (空白=なし)", "")
+    access_urls: list[str] = []
+    for u in raw_access.split():
+        if u.startswith(("http://", "https://")):
+            access_urls.append(u)
+        elif u:
+            _warn(f"http:// / https:// 以外のため無視: {u}")
+    if access_urls:
+        _ok(f"アクセス専用 URL: {len(access_urls)} 件 追加")
+
+    return target_urls, access_urls
+
+
 # ── セクション: 検査項目 ─────────────────────────────────────────
 
 def _section_checks() -> list[str]:
@@ -291,6 +325,24 @@ def _section_exclude() -> list[str]:
     _print("  例: csrf_token __token session_id")
     raw = _ask("除外パラメータ", "")
     return [e for e in raw.split() if e]
+
+
+# ── セクション: カスタムペイロード ──────────────────────────────
+
+def _section_payloads() -> str:
+    """カスタムペイロード YAML ファイルのパスを返す。空文字=デフォルト使用。"""
+    _header("カスタムペイロード (省略可)")
+    _print("  デフォルト以外のペイロードを使用する場合は YAML ファイルを指定します")
+    _print("  フォーマット: config/default_payloads.yaml を参照")
+    _print("  例: /path/to/my_payloads.yaml")
+    raw = _ask("ペイロードファイルパス (空白=デフォルト使用)", "")
+    if not raw:
+        return ""
+    if not os.path.isfile(raw):
+        _warn(f"ファイルが見つかりません: {raw}  (無視してデフォルトを使用)")
+        return ""
+    _ok(f"ペイロードファイル: {raw}")
+    return raw
 
 
 # ── セクション: 詳細設定 ────────────────────────────────────────
@@ -443,6 +495,9 @@ def _section_advanced(provider: str = "ollama") -> dict:
 def _show_summary(
     url, checks, provider, ollama_model, openai_model, gemini_model,
     depth, auth_user, auth_pass, cookie, exclude, adv,
+    target_urls: list[str] | None = None,
+    access_urls: list[str] | None = None,
+    payloads_file: str = "",
 ):
     _print()
     if _USE_RICH:
@@ -451,6 +506,10 @@ def _show_summary(
         t.add_column("value", style="white")
 
         t.add_row("対象 URL",   url)
+        if target_urls:
+            t.add_row("攻撃対象 URL",  "\n".join(target_urls))
+        if access_urls:
+            t.add_row("アクセス専用 URL", "\n".join(access_urls))
         t.add_row("検査項目",   " / ".join(c.upper() for c in checks))
 
         model_str = {
@@ -483,6 +542,8 @@ def _show_summary(
             t.add_row("Cookie", cookie[:60] + ("..." if len(cookie) > 60 else ""))
         if exclude:
             t.add_row("除外パラメータ", " ".join(exclude))
+        if payloads_file:
+            t.add_row("カスタムペイロード", payloads_file)
         if adv.get("exclude_urls_file"):
             t.add_row("除外 URL ファイル", adv["exclude_urls_file"])
         _console.print(Panel(t, title="[bold cyan]設定確認[/bold cyan]", border_style="cyan"))
@@ -492,6 +553,10 @@ def _show_summary(
         print("  設定確認")
         print("  " + "─" * 44)
         print(f"    URL      : {url}")
+        if target_urls:
+            print(f"    攻撃URL  : {' | '.join(target_urls)}")
+        if access_urls:
+            print(f"    専用URL  : {' | '.join(access_urls)}")
         print(f"    検査     : {' / '.join(c.upper() for c in checks)}")
         print(f"    LLM      : {provider}")
         print(f"    深度     : {depth}")
@@ -501,6 +566,8 @@ def _show_summary(
             print(f"    Cookie   : {cookie[:60]}")
         if exclude:
             print(f"    除外     : {' '.join(exclude)}")
+        if payloads_file:
+            print(f"    ペイロード: {payloads_file}")
         print(f"    ブラウザ : {'非表示' if adv['headless'] else '表示'}")
         print("  " + "─" * 44)
 
@@ -734,18 +801,23 @@ def main():
 
     # ── 通常スキャン (scan) ─────────────────────────────────────
     url = _section_url()
+    additional_target_urls, access_urls = _section_additional_urls()
     checks = _section_checks()
     provider, ollama_model, openai_model, gemini_model = _section_llm()
     depth = _section_depth()
     auth_user, auth_pass = _section_auth()
     cookie = _section_cookie()
     exclude = _section_exclude()
+    payloads_file = _section_payloads()
     adv = _section_advanced(provider=provider)
 
     # ── 設定確認 ────────────────────────────────────────────────
     _show_summary(
         url, checks, provider, ollama_model, openai_model, gemini_model,
         depth, auth_user, auth_pass, cookie, exclude, adv,
+        target_urls=additional_target_urls,
+        access_urls=access_urls,
+        payloads_file=payloads_file,
     )
 
     _print()
@@ -778,7 +850,8 @@ def main():
         ollama_model=ollama_model,
         openai_model=openai_model,
         gemini_model=gemini_model,
-        payloads=None,
+        claude_model=_DEFAULT_MODELS["claude"],
+        payloads=payloads_file or None,
         output=None,
         port=adv["port"],
         timeout=adv["timeout"],
@@ -791,6 +864,11 @@ def main():
         cookie=cookie,
         auth_user=auth_user,
         auth_pass=auth_pass,
+        # 複数 URL スコープ
+        target_urls=additional_target_urls,
+        access_urls=access_urls,
+        target_urls_file="",
+        access_urls_file="",
         # 追加フィールド（run_scan が getattr で参照するもの）
         login_url="",
         login_user_field="username",
