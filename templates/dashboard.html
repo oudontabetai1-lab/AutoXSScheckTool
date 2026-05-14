@@ -629,12 +629,16 @@ body {
 .cfg-field label { font-size: 0.72rem; color: var(--text-muted); font-weight: 600; text-transform: uppercase; letter-spacing: 0.03em; }
 .cfg-field input[type=text], .cfg-field input[type=number], .cfg-field input[type=password],
 .cfg-field select, .cfg-field textarea {
-  background: var(--surface2); border: 1px solid var(--border);
-  color: var(--text); border-radius: 6px; padding: 7px 10px; font-size: 0.82rem;
+  background: var(--bg); border: 1px solid var(--border);
+  color: var(--text); border-radius: 6px; padding: 8px 11px; font-size: 0.82rem;
   outline: none; width: 100%;
+  transition: border-color 0.15s, box-shadow 0.15s, background 0.15s;
 }
+.cfg-field input:hover, .cfg-field select:hover, .cfg-field textarea:hover { border-color: #475061; }
 .cfg-field input:focus, .cfg-field select:focus, .cfg-field textarea:focus {
   border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-glow);
+  background: var(--surface2);
 }
 .cfg-field textarea { resize: vertical; min-height: 60px; font-family: monospace; }
 .cfg-check-group { margin-top: 10px; }
@@ -662,17 +666,59 @@ body {
 .cfg-toggle.on::before { content: '✓ '; }
 .cfg-toggle.off { color: var(--text-muted); }
 .cfg-toggle.off::before { content: '○ '; }
-.cfg-section-title { font-size: 0.85rem; font-weight: 700; color: var(--text); margin-top: 14px; margin-bottom: 6px; }
+.cfg-section-title {
+  font-size: 0.78rem; font-weight: 700; color: var(--text);
+  text-transform: uppercase; letter-spacing: 0.06em;
+  margin-top: 16px; margin-bottom: 10px;
+  padding-left: 10px; border-left: 3px solid var(--accent);
+  line-height: 1.2;
+}
+/* Card-based section for the config overlay */
+.cfg-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 14px 16px 16px;
+  margin-top: 12px;
+  transition: border-color 0.15s;
+}
+.cfg-card:hover { border-color: #3d4754; }
+.cfg-card + .cfg-card { margin-top: 14px; }
+.cfg-card-header {
+  display: flex; align-items: center; gap: 10px;
+  margin-bottom: 4px;
+}
+.cfg-card-icon {
+  width: 30px; height: 30px;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--accent-glow); color: var(--accent);
+  border-radius: 8px; font-size: 1rem; flex-shrink: 0;
+}
+.cfg-card-title { font-size: 0.92rem; font-weight: 700; color: var(--text); }
+.cfg-card-desc {
+  font-size: 0.74rem; color: var(--text-muted);
+  margin: 2px 0 10px; line-height: 1.55;
+}
+.cfg-field-hint {
+  font-size: 0.7rem; color: var(--text-muted);
+  margin-top: 3px; line-height: 1.45;
+}
 .cfg-footer {
   background: var(--surface); border-top: 1px solid var(--border);
   padding: 12px 24px; display: flex; align-items: center; gap: 12px; flex-shrink: 0;
 }
 .cfg-start-btn {
   padding: 10px 32px; font-size: 0.95rem; font-weight: 700;
-  background: var(--accent); color: #fff; border: none; border-radius: 8px;
-  cursor: pointer; transition: opacity 0.2s;
+  background: linear-gradient(135deg, var(--accent), #5fa8ff);
+  color: #fff; border: none; border-radius: 8px;
+  cursor: pointer; transition: transform 0.15s, box-shadow 0.15s, opacity 0.15s;
+  box-shadow: 0 2px 8px rgba(56,139,253,0.35);
 }
-.cfg-start-btn:hover { opacity: 0.85; }
+.cfg-start-btn:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 14px rgba(56,139,253,0.45);
+}
+.cfg-start-btn:active { transform: translateY(0); }
 .cfg-hint { font-size: 0.75rem; color: var(--text-muted); }
 .cfg-presets {
   display:grid;
@@ -682,13 +728,19 @@ body {
 .cfg-preset {
   background:var(--surface2);
   border:1px solid var(--border);
-  border-radius:8px;
-  padding:10px 12px;
+  border-radius:10px;
+  padding:12px 14px;
   cursor:pointer;
   text-align:left;
   color:var(--text);
+  transition: transform 0.15s, border-color 0.15s, background 0.15s, box-shadow 0.15s;
 }
-.cfg-preset:hover { border-color:var(--accent); background:var(--accent-glow); }
+.cfg-preset:hover {
+  border-color:var(--accent);
+  background:var(--accent-glow);
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(0,0,0,0.25);
+}
 .cfg-preset-title { font-size:.82rem; font-weight:800; margin-bottom:4px; }
 .cfg-preset-desc { font-size:.72rem; color:var(--text-muted); line-height:1.45; }
 .cfg-profile-note {
@@ -780,7 +832,7 @@ body {
         <button class="cfg-tab" onclick="showCfgTab('auth',this)">🔐 認証・Cookie</button>
         <button class="cfg-tab" onclick="showCfgTab('llm',this)">🤖 LLM設定</button>
         <button class="cfg-tab" onclick="showCfgTab('features',this)">🧩 機能フラグ</button>
-        <button class="cfg-tab" onclick="showCfgTab('exclusions',this)">🚫 除外設定</button>
+        <button class="cfg-tab" onclick="showCfgTab('exclusions',this)">🎯 スコープ・除外</button>
         <button class="cfg-tab" onclick="showCfgTab('manualcrawl',this)">🧭 手動巡回</button>
         <button class="cfg-tab" onclick="showCfgTab('flows',this)">🔄 攻撃フロー</button>
         <button class="cfg-tab" onclick="showCfgTab('agent',this)">🧠 Agent Browser</button>
@@ -1009,34 +1061,79 @@ body {
         </div>
       </div>
 
-      <!-- Tab: Exclusions -->
+      <!-- Tab: Scope & Exclusions -->
       <div id="cfgTab-exclusions" class="cfg-panel">
-        <div class="cfg-section-title" style="margin-top:10px">カスタムペイロード</div>
-        <div class="cfg-grid" style="margin-bottom:14px">
-          <div class="cfg-field" style="grid-column:1/-1">
-            <label>カスタムペイロードファイル (YAMLパス、空=デフォルト)</label>
-            <input type="text" id="cfgPayloadsFile" placeholder="/path/to/my_payloads.yaml">
+
+        <!-- Card 1: スキャン対象スコープ -->
+        <div class="cfg-card">
+          <div class="cfg-card-header">
+            <div class="cfg-card-icon">📍</div>
+            <div>
+              <div class="cfg-card-title">スキャン対象スコープ</div>
+            </div>
+          </div>
+          <div class="cfg-card-desc">
+            検査するURLの範囲を限定します。空欄の場合は最初のターゲットURLと同じホストが対象です。
+          </div>
+          <div class="cfg-grid">
+            <div class="cfg-field" style="grid-column:1/-1">
+              <label>検査対象URL（攻撃あり）</label>
+              <textarea id="cfgTargetUrls" rows="4" placeholder="https://app.example.com&#10;https://admin.example.com"></textarea>
+              <div class="cfg-field-hint">1行1URL、前方一致。ここに記載したURL配下のみ巡回・攻撃します。</div>
+            </div>
+            <div class="cfg-field" style="grid-column:1/-1">
+              <label>アクセスのみ許可URL（攻撃なし）</label>
+              <textarea id="cfgAccessUrls" rows="3" placeholder="https://login.example.com&#10;https://auth.example.com"></textarea>
+              <div class="cfg-field-hint">ログインや外部認証など、巡回はするが攻撃ペイロードを送らないURLを指定します。</div>
+            </div>
           </div>
         </div>
-        <div class="cfg-section-title">除外設定</div>
-        <div class="cfg-grid" style="margin-top:10px">
-          <div class="cfg-field" style="grid-column:1/-1">
-            <label>検査対象URLスコープ (1行1URL、前方一致)</label>
-            <textarea id="cfgTargetUrls" rows="4" placeholder="https://app.example.com&#10;https://admin.example.com"></textarea>
+
+        <!-- Card 2: 除外項目 -->
+        <div class="cfg-card">
+          <div class="cfg-card-header">
+            <div class="cfg-card-icon">🚫</div>
+            <div>
+              <div class="cfg-card-title">除外項目</div>
+            </div>
           </div>
-          <div class="cfg-field" style="grid-column:1/-1">
-            <label>アクセスのみ許可URLスコープ (攻撃しない、1行1URL)</label>
-            <textarea id="cfgAccessUrls" rows="4" placeholder="https://login.example.com&#10;https://auth.example.com"></textarea>
+          <div class="cfg-card-desc">
+            巡回・攻撃の対象から除外するURLパスや、ペイロードを差し込まないフィールドを指定します。
           </div>
-          <div class="cfg-field" style="grid-column:1/-1">
-            <label>除外フィールド名 (カンマ区切り)</label>
-            <input type="text" id="cfgExcludeFields" placeholder="csrf_token, __token, _method">
-          </div>
-          <div class="cfg-field" style="grid-column:1/-1">
-            <label>除外URL (1行1URL、前方一致)</label>
-            <textarea id="cfgExcludeUrls" rows="5" placeholder="/logout&#10;/delete&#10;/admin/reset"></textarea>
+          <div class="cfg-grid">
+            <div class="cfg-field" style="grid-column:1/-1">
+              <label>除外URL</label>
+              <textarea id="cfgExcludeUrls" rows="4" placeholder="/logout&#10;/delete&#10;/admin/reset"></textarea>
+              <div class="cfg-field-hint">1行1URL、前方一致。ログアウト・削除など破壊的なエンドポイントを避けます。</div>
+            </div>
+            <div class="cfg-field" style="grid-column:1/-1">
+              <label>除外フィールド名</label>
+              <input type="text" id="cfgExcludeFields" placeholder="csrf_token, __token, _method">
+              <div class="cfg-field-hint">カンマ区切り。CSRFトークンなど改ざんすると遷移が壊れるフィールドを除外します。</div>
+            </div>
           </div>
         </div>
+
+        <!-- Card 3: カスタムペイロード -->
+        <div class="cfg-card">
+          <div class="cfg-card-header">
+            <div class="cfg-card-icon">📝</div>
+            <div>
+              <div class="cfg-card-title">カスタムペイロード</div>
+            </div>
+          </div>
+          <div class="cfg-card-desc">
+            既定のペイロード辞書を独自のYAMLファイルで置き換えます。空欄の場合は組み込みのペイロードを使用します。
+          </div>
+          <div class="cfg-grid">
+            <div class="cfg-field" style="grid-column:1/-1">
+              <label>カスタムペイロードファイル</label>
+              <input type="text" id="cfgPayloadsFile" placeholder="/path/to/my_payloads.yaml">
+              <div class="cfg-field-hint">YAMLパスを指定。空欄＝デフォルトのペイロード辞書を使用。</div>
+            </div>
+          </div>
+        </div>
+
       </div>
 
       <!-- Tab: Flows -->
