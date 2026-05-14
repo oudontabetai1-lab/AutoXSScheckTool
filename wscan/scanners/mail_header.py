@@ -22,13 +22,38 @@ if TYPE_CHECKING:
     from wscan.engine import ScanEngine
 
 
-# Field name substrings that suggest the value is used in a mail header
-MAIL_FIELD_HINTS = {
-    "email", "mail", "e-mail", "e_mail",
-    "to", "from", "cc", "bcc",
-    "subject", "reply_to", "replyto", "reply-to",
+# Field-name hints suggesting the value is used in a mail header.
+# Long hints are substring-matched; short tokens (to/cc/bcc/from/...) are
+# matched as whole words only -- otherwise we'd test unrelated fields
+# such as ``token``, ``totp``, ``photo``, ``account``, ``stockton``, etc.
+_MAIL_SUBSTRING_HINTS = (
+    "email", "e_mail", "mail",
+    "subject", "reply_to", "replyto",
     "sender", "recipient",
-}
+)
+_MAIL_TOKEN_HINTS = frozenset({
+    "to", "from", "cc", "bcc",
+    "mailto", "mail_to",
+    "reply", "replyto",
+})
+
+
+def _field_name_suggests_mail(field_name: str) -> bool:
+    name = (field_name or "").lower().replace("-", "_").replace(" ", "_")
+    if not name:
+        return False
+    if any(hint in name for hint in _MAIL_SUBSTRING_HINTS):
+        return True
+    # Token-style match: split on underscore and dot to handle names like
+    # ``contact.to`` or ``mail_cc1``.  Trailing digits are stripped so
+    # ``cc1`` / ``bcc_2`` still match without making ``cc`` match ``account``.
+    import re as _re
+    parts = _re.split(r"[._]", name)
+    for part in parts:
+        stripped = part.rstrip("0123456789")
+        if stripped in _MAIL_TOKEN_HINTS:
+            return True
+    return False
 
 # Injection payloads — each embeds CRLF variants to split headers
 MAIL_INJECTION_PAYLOADS = [
@@ -75,8 +100,7 @@ class MailHeaderInjectionScanner(BaseScanner):
         field_name = field.get("name", "unknown")
 
         # Only test fields whose names suggest email header usage
-        name_lower = field_name.lower().replace("-", "_").replace(" ", "_")
-        if not any(hint in name_lower for hint in MAIL_FIELD_HINTS):
+        if not _field_name_suggests_mail(field_name):
             return []
 
         findings = []

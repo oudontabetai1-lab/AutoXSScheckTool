@@ -101,19 +101,26 @@ _LOGIN_FIELD_KEYWORDS = frozenset([
 ])
 
 # Patterns in page source that suggest the login FAILED (not bypassed).
+#
+# These are used as a *negative* filter: when any pattern matches we conclude
+# auth-bypass did NOT occur.  They must therefore be tight — broad patterns
+# that match normal admin/dashboard copy (e.g. "please contact ...", "error log",
+# generic phrases like "try again") would cause real bypasses to be missed.
+#
+# All patterns are evaluated with re.IGNORECASE | re.DOTALL by
+# check_response_for_patterns(), so we keep distances between alternatives
+# explicit and short.
 LOGIN_FAILED_PATTERNS = [
-    r"invalid (user|pass|credential|login|email|account)",
-    r"(user|pass|login|credential|email|account).*(incorrect|wrong|invalid|fail|bad)",
-    r"authentication (fail|error|denied|invalid)",
-    r"login (fail|error|incorrect|denied|invalid)",
-    r"incorrect (user|pass|credential|password|login)",
-    r"wrong (user|pass|credential|password|login)",
-    r"(access|login|sign.?in) denied",
-    r"bad (user|credential|login|password)",
-    r"not (found|exist|recognized).*(user|account|email)",
-    r"(user|account|email).*(not found|does not exist|unknown)",
-    r"(please |try again|retry|re-enter)",
-    r"error.*log(in|on)",
+    r"invalid\s+(user(name)?|pass(word)?|credential|login|email|account)",
+    r"(user(name)?|pass(word)?|login|credential|email|account)\s+(is\s+)?(incorrect|wrong|invalid)",
+    r"authentication\s+(failed|error|denied|invalid)",
+    r"login\s+(failed|incorrect|denied|invalid|unsuccessful)",
+    r"incorrect\s+(user(name)?|pass(word)?|credential|login)",
+    r"wrong\s+(user(name)?|pass(word)?|credential|login)",
+    r"(access|login|sign.?in)\s+denied",
+    r"bad\s+(user(name)?|credential|login|pass(word)?)",
+    r"(user|account|email)\s+(not\s+found|does\s+not\s+exist|unknown|unrecognized)",
+    r"please\s+(re[-\s]?enter|try\s+again|check)(\s+your)?\s+(user(name)?|pass(word)?|credential|login|email)",
 ]
 
 # Path segments that indicate the browser is still on an auth/error page after submit.
