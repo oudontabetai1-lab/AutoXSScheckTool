@@ -284,9 +284,21 @@ class BaseScanner(ABC):
     ) -> Finding:
         """Create and record a finding."""
         if screenshot_b64 is None:
-            screenshot_b64 = await self.browser.screenshot_b64(
-                label=f"[FINDING] {self.CHECK_TYPE} on {field_name}"
-            )
+            # When an alert dialog fired, the browser already captured a
+            # screenshot at that exact instant -- prefer it so the evidence
+            # image actually corresponds to the payload that triggered it.
+            dlg_shot = getattr(self.browser, "dialog_screenshot_b64", "") or ""
+            if dialog_confirmed and dlg_shot:
+                screenshot_b64 = dlg_shot
+                if self.monitor:
+                    await self.monitor.emit_screenshot(
+                        dlg_shot,
+                        label=f"[FINDING] {self.CHECK_TYPE} on {field_name}",
+                    )
+            else:
+                screenshot_b64 = await self.browser.screenshot_b64(
+                    label=f"[FINDING] {self.CHECK_TYPE} on {field_name}"
+                )
         # Dedup: skip exact evidence repeats while preserving distinct signals
         # on the same input.
         dedup_key = finding_dedup_key(
