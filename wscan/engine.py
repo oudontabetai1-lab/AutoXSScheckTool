@@ -1198,17 +1198,27 @@ class ScanEngine:
         # When the web dashboard is active, send plans there and wait for
         # the operator to click "Start Attack" (edits are applied below).
         # Without a dashboard, fall back to the terminal interactive editor.
-        if self.monitor and plans:
-            console.print(
-                "\n  [bold cyan][Web Dashboard][/bold cyan] "
-                "プラン確認モーダルが開きます。ダッシュボードで確認・修正後に攻撃を開始してください。"
-            )
-            plans_data = self._serialize_plans(plans)
-            await self.monitor.emit_plan_review(plans_data)
-            edits = await self.monitor.wait_for_plan_confirm()
-            if edits:
-                self._apply_plan_edits(plans, edits)
-                console.print("  [dim]プラン編集が適用されました。[/dim]")
+        if self.monitor:
+            if plans:
+                console.print(
+                    "\n  [bold cyan][Web Dashboard][/bold cyan] "
+                    "プラン確認モーダルが開きます。ダッシュボードで確認・修正後に攻撃を開始してください。"
+                )
+                plans_data = self._serialize_plans(plans)
+                await self.monitor.emit_plan_review(plans_data)
+                edits = await self.monitor.wait_for_plan_confirm()
+                if edits:
+                    self._apply_plan_edits(plans, edits)
+                    console.print("  [dim]プラン編集が適用されました。[/dim]")
+            else:
+                # Empty plans on a dashboard run: nothing to confirm.
+                # Never block on input() — the WebUI has no way to respond.
+                await self.monitor.emit_status(
+                    "攻撃プランが生成できませんでした (入力フィールド無し)。次フェーズに進みます。"
+                )
+                console.print(
+                    "  [dim]No plans to review — continuing without confirmation.[/dim]"
+                )
         elif self.interactive_plan:
             # Terminal fallback: show interactive editor then wait for Enter
             if plans:

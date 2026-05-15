@@ -245,7 +245,7 @@ class ReportGenerator:
         ctf_flags_html = self._build_ctf_flags_html(ctf_flags)
 
         # ── Page flow diagram section ─────────────────────────────────────
-        page_flow_html = self._build_page_flow_html(page_graph)
+        page_flow_html = self._build_page_flow_html(page_graph, url_finding_counts)
 
         # ⑧ Attack chain / AI analysis section (reads ai_analysis.md if present)
         ai_analysis_html = self._build_ai_analysis_html()
@@ -844,117 +844,293 @@ document.querySelectorAll('.plan-payloads-toggle').forEach(btn => {{
         {cards_html}
     </div>"""
 
-    def _build_page_flow_html(self, page_graph: dict) -> str:
+    def _build_page_flow_html(self, page_graph: dict, url_finding_counts: dict = None) -> str:
         """
-        B: D3.js 力指向グラフによるビジュアルサイトマップ。
-        CDN が利用不可の場合はシンプルな <ul> ツリーにフォールバックする。
+        ビジュアルサイトマップ。WebUI と同じ「深さで縦カラム」レイアウトを採用し、
+        オフラインでも CDN なしで描画できる純粋な SVG として埋め込む。
 
-        page_graph: {url: {"parent": parent_url|None, "screenshot_b64": str, "depth": int}}
+        page_graph: {url: {"parent": parent_url|None, "depth": int, "forms": int, ...}}
+        url_finding_counts: {url: count}  検出ありは赤くマーキング
         """
         if not page_graph:
             return ""
 
         import json as _json
+        url_finding_counts = url_finding_counts or {}
 
-        # D3 用データ構築
+        # ノードデータ
         nodes = []
-        links = []
         url_to_idx = {}
         for i, (url, info) in enumerate(page_graph.items()):
             url_to_idx[url] = i
+            findings = int(url_finding_counts.get(url, 0))
             nodes.append({
                 "id": i,
                 "url": url,
-                "short": url[-40:] if len(url) > 40 else url,
-                "depth": info.get("depth", 0),
+                "depth": int(info.get("depth", 0) or 0),
+                "parent": info.get("parent"),
+                "forms": int(info.get("forms", 0) or 0),
+                "inputs": int(info.get("inputs", 0) or 0),
+                "params": int(info.get("params", 0) or 0),
+                "findings": findings,
+                "status": "vuln" if findings > 0 else "done",
             })
+        links = []
         for url, info in page_graph.items():
             parent = info.get("parent")
-            if parent and parent in url_to_idx:
+            if parent and parent in url_to_idx and url in url_to_idx:
                 links.append({"source": url_to_idx[parent], "target": url_to_idx[url]})
+
+        vuln_count = sum(1 for n in nodes if n["status"] == "vuln")
+        done_count = len(nodes) - vuln_count
 
         nodes_json = _json.dumps(nodes)
         links_json = _json.dumps(links)
 
-        # フォールバック: <ul> ツリー
-        fallback_items = "".join(
-            f'<li style="margin:2px 0;font-size:0.8rem;font-family:monospace">'
-            f'{"&nbsp;" * 4 * info.get("depth",0)}{"└─ " if info.get("depth",0) > 0 else ""}'
-            f'<a href="{self._escape(url)}" target="_blank">{self._escape(url)}</a></li>'
-            for url, info in page_graph.items()
-        )
+        # テキストフォールバック (ツリー)
+        def _fb_row(url, info):
+            n = url_finding_counts.get(url, 0)
+            col = "#f85149" if n > 0 else "#8b949e"
+            indent = "&nbsp;" * 3 * int(info.get("depth", 0) or 0)
+            tail = f' <span style="color:#f85149">({n} findings)</span>' if n > 0 else ""
+            return (
+                f'<li style="padding:2px 0;font-family:monospace;font-size:.78rem;color:{col}">'
+                f'{indent}↳ <a href="{self._escape(url)}" target="_blank" style="color:inherit">'
+                f'{self._escape(url)}</a>{tail}</li>'
+            )
+        fallback_items = "".join(_fb_row(u, info) for u, info in page_graph.items())
 
         return f"""
     <div class="section" id="site-map-section">
         <h2>🗺 Visual Site Map ({len(page_graph)} pages)</h2>
-        <div id="site-map-graph" style="height:450px;border:1px solid #e2e8f0;border-radius:8px;background:#1a202c;position:relative;overflow:hidden">
-            <svg id="d3-svg" width="100%" height="100%"></svg>
-            <div id="site-map-fallback" style="display:none;padding:16px;overflow-y:auto;max-height:420px">
+        <div class="sm-toolbar">
+            <span class="sm-pill">画面遷移図 <strong>{len(page_graph)}</strong></span>
+            <span class="sm-pill"><span class="sm-dot" style="background:#388bfd"></span>完了 {done_count}</span>
+            <span class="sm-pill"><span class="sm-dot" style="background:#f85149"></span>検出 {vuln_count}</span>
+            <span class="sm-pill sm-spacer"></span>
+            <button class="sm-pill sm-btn" type="button" onclick="rptSiteMapZoom(0.8)">－</button>
+            <button class="sm-pill sm-btn" type="button" onclick="rptSiteMapZoom(1.25)">＋</button>
+            <button class="sm-pill sm-btn" type="button" onclick="rptSiteMapReset()">リセット</button>
+            <button class="sm-pill sm-btn" type="button" onclick="rptSiteMapToggleList()">一覧表示</button>
+        </div>
+        <div id="rpt-sitemap-container" style="position:relative;height:520px;background:#0a0c0f;border:1px solid #21262d;border-radius:8px;overflow:hidden">
+            <svg id="rpt-sitemap-svg" style="width:100%;height:100%;display:block"></svg>
+            <div id="rpt-sitemap-tooltip"
+                 style="position:absolute;display:none;z-index:3;max-width:340px;background:rgba(13,17,23,.96);border:1px solid #30363d;color:#e6edf3;border-radius:6px;padding:6px 8px;font-size:.72rem;pointer-events:none;box-shadow:0 8px 24px rgba(0,0,0,.45)"></div>
+            <div id="rpt-sitemap-fallback"
+                 style="display:none;position:absolute;inset:8px;overflow:auto;padding:8px;background:#0d1117;border-radius:6px">
                 <ul style="list-style:none;padding:0;margin:0">{fallback_items}</ul>
             </div>
         </div>
-        <p style="font-size:0.75rem;color:#718096;margin-top:6px">
-            赤色ノード = 脆弱性が検出されたページ / 青色ノード = 正常 / ドラッグ可能
+        <p style="font-size:.75rem;color:#718096;margin-top:6px">
+            横軸 = クロール深さ / 縦並び = 同階層のページ / 色: 青=完了 オレンジ=巡回中 赤=脆弱性検出
+            · ホイールでズーム / ドラッグでパン / ノードクリックで該当ページを開く
         </p>
+        <style>
+            .sm-toolbar {{ display:flex; gap:6px; align-items:center; margin-bottom:8px; flex-wrap:wrap; }}
+            .sm-pill {{ background:rgba(13,17,23,.82); border:1px solid #30363d; color:#8b949e;
+                        border-radius:999px; padding:4px 10px; font-size:.72rem; font-weight:700; }}
+            .sm-pill .sm-dot {{ width:8px; height:8px; border-radius:50%; display:inline-block; margin-right:5px; vertical-align:middle; }}
+            .sm-spacer {{ flex:1; background:transparent; border:0; padding:0; }}
+            .sm-btn {{ cursor:pointer; }}
+            .sm-btn:hover {{ color:#e6edf3; border-color:#58a6ff; }}
+            #rpt-sitemap-svg .sm-node-g {{ cursor:pointer; }}
+            #rpt-sitemap-svg .sm-node-g:hover circle {{ stroke:#79c0ff; stroke-width:2.5; }}
+        </style>
         <script>
         (function() {{
             var nodes = {nodes_json};
             var links = {links_json};
-            var svgEl = document.getElementById('d3-svg');
-            if (!svgEl) return;
+            var svg = document.getElementById('rpt-sitemap-svg');
+            var container = document.getElementById('rpt-sitemap-container');
+            var tooltip = document.getElementById('rpt-sitemap-tooltip');
+            if (!svg || !container) return;
+            var NS = 'http://www.w3.org/2000/svg';
+            var view = {{ scale: 1, tx: 0, ty: 0 }};
 
-            function runD3() {{
-                var w = svgEl.parentElement.clientWidth || 800;
-                var h = 450;
-                var d3 = window.d3;
-                if (!d3) {{ showFallback(); return; }}
+            function color(n) {{
+                if (n.status === 'vuln') return '#f85149';
+                if (n.status === 'scanning') return '#f0883e';
+                if (n.status === 'done') return '#388bfd';
+                return '#3a3f4a';
+            }}
+
+            function shortLabel(url) {{
                 try {{
-                    var svg = d3.select('#d3-svg').attr('width', w).attr('height', h);
-                    svg.selectAll('*').remove();
-                    var g = svg.append('g');
-                    svg.call(d3.zoom().scaleExtent([0.2,4]).on('zoom', function(ev) {{
-                        g.attr('transform', ev.transform);
-                    }}));
-                    var sim = d3.forceSimulation(nodes)
-                        .force('link', d3.forceLink(links).id(function(d){{return d.id;}}).distance(100))
-                        .force('charge', d3.forceManyBody().strength(-250))
-                        .force('center', d3.forceCenter(w/2, h/2))
-                        .force('collide', d3.forceCollide(55));
-                    var link = g.append('g').selectAll('line').data(links).enter().append('line')
-                        .attr('stroke','#4a5568').attr('stroke-width',1.5).attr('marker-end','url(#arr)');
-                    svg.append('defs').append('marker').attr('id','arr').attr('viewBox','0 -4 8 8')
-                        .attr('refX',18).attr('markerWidth',6).attr('markerHeight',6).attr('orient','auto')
-                        .append('path').attr('d','M0,-4L8,0L0,4').attr('fill','#4a5568');
-                    var nodeG = g.append('g').selectAll('g').data(nodes).enter().append('g')
-                        .attr('cursor','pointer')
-                        .call(d3.drag()
-                            .on('start', function(ev,d){{if(!ev.active)sim.alphaTarget(0.3).restart();d.fx=d.x;d.fy=d.y;}})
-                            .on('drag', function(ev,d){{d.fx=ev.x;d.fy=ev.y;}})
-                            .on('end', function(ev,d){{if(!ev.active)sim.alphaTarget(0);d.fx=null;d.fy=null;}}))
-                        .on('click', function(ev,d){{window.open(d.url,'_blank');}});
-                    nodeG.append('circle').attr('r',18)
-                        .attr('fill', function(d){{return d.depth===0?'#63b3ed':'#4299e1';}})
-                        .attr('stroke','#2b6cb0').attr('stroke-width',1.5);
-                    nodeG.append('text').attr('dy','0.35em').attr('text-anchor','middle')
-                        .attr('font-size','9px').attr('fill','white')
-                        .text(function(d){{var s=d.short;return s.length>20?s.slice(-20):s;}});
-                    nodeG.append('title').text(function(d){{return d.url;}});
-                    sim.on('tick', function() {{
-                        link.attr('x1',function(d){{return d.source.x;}}).attr('y1',function(d){{return d.source.y;}})
-                            .attr('x2',function(d){{return d.target.x;}}).attr('y2',function(d){{return d.target.y;}});
-                        nodeG.attr('transform', function(d){{return 'translate('+d.x+','+d.y+')';}});
+                    var u = new URL(url);
+                    var p = u.pathname || '/';
+                    return p.length > 18 ? '…' + p.slice(-16) : p;
+                }} catch(e) {{
+                    return (url || '').slice(-16);
+                }}
+            }}
+
+            function layout() {{
+                var w = container.clientWidth || 800;
+                var h = container.clientHeight || 520;
+                var byDepth = {{}};
+                nodes.forEach(function(n) {{
+                    var d = n.depth || 0;
+                    (byDepth[d] = byDepth[d] || []).push(n);
+                }});
+                var depths = Object.keys(byDepth).map(Number).sort(function(a,b){{return a-b;}});
+                var maxDepth = Math.max.apply(null, depths.concat([1]));
+                var marginX = 60, marginY = 50;
+                depths.forEach(function(d) {{
+                    var bucket = byDepth[d].sort(function(a,b){{return a.url.localeCompare(b.url);}});
+                    var x = marginX + (w - marginX*2) * (d / maxDepth);
+                    bucket.forEach(function(n, i) {{
+                        n._x = x;
+                        n._y = marginY + (h - marginY*2) * ((i + 1) / (bucket.length + 1));
                     }});
-                }} catch(e) {{ showFallback(); }}
+                }});
+                return {{ w: w, h: h }};
             }}
-            function showFallback() {{
-                document.getElementById('d3-svg').style.display='none';
-                document.getElementById('site-map-fallback').style.display='block';
+
+            function render() {{
+                var dim = layout();
+                svg.setAttribute('viewBox', '0 0 ' + dim.w + ' ' + dim.h);
+                svg.innerHTML = '<defs><marker id="rpt-sm-arr" viewBox="0 -4 8 8" refX="23" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,-4L8,0L0,4" fill="#4a5568"/></marker></defs>';
+                var root = document.createElementNS(NS, 'g');
+                root.setAttribute('id', 'rpt-sm-root');
+                root.setAttribute('transform', 'translate(' + view.tx + ',' + view.ty + ') scale(' + view.scale + ')');
+                svg.appendChild(root);
+
+                // Links
+                var nodesById = {{}};
+                nodes.forEach(function(n) {{ nodesById[n.id] = n; }});
+                links.forEach(function(lk) {{
+                    var s = nodesById[lk.source], t = nodesById[lk.target];
+                    if (!s || !t || s._x == null || t._x == null) return;
+                    var line = document.createElementNS(NS, 'line');
+                    line.setAttribute('x1', s._x); line.setAttribute('y1', s._y);
+                    line.setAttribute('x2', t._x); line.setAttribute('y2', t._y);
+                    line.setAttribute('stroke', '#4a5568');
+                    line.setAttribute('stroke-width', '1.4');
+                    line.setAttribute('marker-end', 'url(#rpt-sm-arr)');
+                    root.appendChild(line);
+                }});
+
+                // Nodes
+                nodes.forEach(function(n) {{
+                    var g = document.createElementNS(NS, 'g');
+                    g.setAttribute('class', 'sm-node-g');
+                    g.setAttribute('transform', 'translate(' + n._x + ',' + n._y + ')');
+                    g.addEventListener('click', function(ev) {{
+                        if (ev.shiftKey) return;
+                        window.open(n.url, '_blank');
+                    }});
+                    g.addEventListener('mousemove', function(ev) {{ showTip(ev, n); }});
+                    g.addEventListener('mouseleave', hideTip);
+
+                    var c = document.createElementNS(NS, 'circle');
+                    c.setAttribute('r', '20');
+                    c.setAttribute('fill', color(n));
+                    c.setAttribute('stroke', n.depth === 0 ? '#79c0ff' : '#1f6feb');
+                    c.setAttribute('stroke-width', '1.6');
+                    g.appendChild(c);
+
+                    if (n.findings > 0) {{
+                        var b = document.createElementNS(NS, 'circle');
+                        b.setAttribute('r', '7');
+                        b.setAttribute('cx', '14'); b.setAttribute('cy', '-14');
+                        b.setAttribute('fill', '#7f1d1d');
+                        b.setAttribute('stroke', '#fca5a5');
+                        b.setAttribute('stroke-width', '1');
+                        g.appendChild(b);
+                        var bt = document.createElementNS(NS, 'text');
+                        bt.setAttribute('x', '14'); bt.setAttribute('y', '-11');
+                        bt.setAttribute('text-anchor', 'middle');
+                        bt.setAttribute('font-size', '9px');
+                        bt.setAttribute('font-weight', '700');
+                        bt.setAttribute('fill', '#fee2e2');
+                        bt.setAttribute('pointer-events', 'none');
+                        bt.textContent = n.findings > 9 ? '9+' : String(n.findings);
+                        g.appendChild(bt);
+                    }}
+
+                    var t = document.createElementNS(NS, 'text');
+                    t.setAttribute('dy', '0.35em');
+                    t.setAttribute('text-anchor', 'middle');
+                    t.setAttribute('font-size', '9px');
+                    t.setAttribute('fill', '#ffffff');
+                    t.setAttribute('pointer-events', 'none');
+                    t.textContent = shortLabel(n.url);
+                    g.appendChild(t);
+
+                    root.appendChild(g);
+                }});
             }}
-            var script = document.createElement('script');
-            script.src = 'https://d3js.org/d3.v7.min.js';
-            script.onload = function() {{ runD3(); }};
-            script.onerror = function() {{ showFallback(); }};
-            document.head.appendChild(script);
+
+            function applyTransform() {{
+                var root = document.getElementById('rpt-sm-root');
+                if (root) root.setAttribute('transform', 'translate(' + view.tx + ',' + view.ty + ') scale(' + view.scale + ')');
+            }}
+
+            function showTip(ev, n) {{
+                var rect = container.getBoundingClientRect();
+                tooltip.innerHTML =
+                    '<strong>Depth ' + n.depth + '</strong><br>' +
+                    escapeText(n.url) +
+                    '<br><span style="color:#8b949e">' + n.forms + ' forms / ' + n.inputs + ' inputs / ' + n.params + ' params</span>' +
+                    (n.findings > 0 ? '<br><span style="color:#f85149">' + n.findings + ' finding' + (n.findings>1?'s':'') + '</span>' : '');
+                tooltip.style.display = 'block';
+                var x = ev.clientX - rect.left + 12;
+                var y = ev.clientY - rect.top + 12;
+                if (x + 340 > rect.width) x = rect.width - 340;
+                tooltip.style.left = x + 'px';
+                tooltip.style.top = y + 'px';
+            }}
+            function hideTip() {{ tooltip.style.display = 'none'; }}
+            function escapeText(s) {{
+                return String(s).replace(/[&<>"']/g, function(c) {{
+                    return ({{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}})[c];
+                }});
+            }}
+
+            // Pan & zoom
+            var dragging = false, lastX = 0, lastY = 0;
+            container.addEventListener('mousedown', function(ev) {{
+                if (ev.target.closest('.sm-node-g')) return;
+                dragging = true; lastX = ev.clientX; lastY = ev.clientY;
+                container.style.cursor = 'grabbing';
+            }});
+            window.addEventListener('mousemove', function(ev) {{
+                if (!dragging) return;
+                view.tx += ev.clientX - lastX;
+                view.ty += ev.clientY - lastY;
+                lastX = ev.clientX; lastY = ev.clientY;
+                applyTransform();
+            }});
+            window.addEventListener('mouseup', function() {{ dragging = false; container.style.cursor = ''; }});
+            container.addEventListener('wheel', function(ev) {{
+                ev.preventDefault();
+                var factor = ev.deltaY < 0 ? 1.1 : 0.9;
+                var rect = container.getBoundingClientRect();
+                var cx = ev.clientX - rect.left, cy = ev.clientY - rect.top;
+                view.tx = cx - (cx - view.tx) * factor;
+                view.ty = cy - (cy - view.ty) * factor;
+                view.scale *= factor;
+                view.scale = Math.max(0.2, Math.min(4, view.scale));
+                applyTransform();
+            }}, {{ passive: false }});
+
+            window.rptSiteMapZoom = function(f) {{
+                view.scale = Math.max(0.2, Math.min(4, view.scale * f));
+                applyTransform();
+            }};
+            window.rptSiteMapReset = function() {{
+                view.scale = 1; view.tx = 0; view.ty = 0;
+                applyTransform();
+            }};
+            window.rptSiteMapToggleList = function() {{
+                var fb = document.getElementById('rpt-sitemap-fallback');
+                if (!fb) return;
+                fb.style.display = (fb.style.display === 'block') ? 'none' : 'block';
+            }};
+
+            render();
+            window.addEventListener('resize', render);
         }})();
         </script>
     </div>"""
