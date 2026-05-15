@@ -1105,7 +1105,11 @@ body {
             <div class="cfg-field" style="grid-column:1/-1">
               <label>除外URL</label>
               <textarea id="cfgExcludeUrls" rows="4" placeholder="/logout&#10;/delete&#10;/admin/reset"></textarea>
-              <div class="cfg-field-hint">1行1URL、前方一致。ログアウト・削除など破壊的なエンドポイントを避けます。</div>
+              <div class="cfg-field-hint">
+                1行1パターン。<code>https://example.com/admin</code> でフルURL前方一致、
+                <code>/logout</code> でパスのみ一致、それ以外はパスへの部分一致（大小文字無視）。
+                巡回・フォームのaction URL の両方が対象。
+              </div>
             </div>
             <div class="cfg-field" style="grid-column:1/-1">
               <label>除外フィールド名</label>

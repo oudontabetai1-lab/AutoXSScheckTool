@@ -783,7 +783,11 @@ class ScanEngine:
         queue: deque = deque([(self.target_url, 0, None)])  # (url, depth, parent_url)
         self.visited_urls.add(self.target_url)
         for scope_url in self.additional_target_urls:
-            if scope_url.startswith(("http://", "https://")) and scope_url not in self.visited_urls:
+            if (
+                scope_url.startswith(("http://", "https://"))
+                and scope_url not in self.visited_urls
+                and not self._is_url_excluded(scope_url)
+            ):
                 self.visited_urls.add(scope_url)
                 queue.append((scope_url, 0, self.target_url))
         # A: DOM構造フィンガープリントで類似ページを検出
@@ -818,7 +822,11 @@ class ScanEngine:
                     f"{len(har_seed.cookies)} Cookie を読み込みました: {self.har_path}"
                 )
                 for _hurl in har_seed.urls:
-                    if _hurl not in self.visited_urls and self._is_access_allowed_url(_hurl):
+                    if (
+                        _hurl not in self.visited_urls
+                        and self._is_access_allowed_url(_hurl)
+                        and not self._is_url_excluded(_hurl)
+                    ):
                         self.visited_urls.add(_hurl)
                         queue.append((_hurl, 0, self.target_url))
                 if har_seed.cookies:
@@ -840,7 +848,11 @@ class ScanEngine:
                     f"{len(manual_seed.cookies)} Cookie を読み込みました: {self.manual_crawl_path}"
                 )
                 for _murl in manual_seed.urls:
-                    if _murl not in self.visited_urls and self._is_access_allowed_url(_murl):
+                    if (
+                        _murl not in self.visited_urls
+                        and self._is_access_allowed_url(_murl)
+                        and not self._is_url_excluded(_murl)
+                    ):
                         self.visited_urls.add(_murl)
                         queue.append((_murl, 0, self.target_url))
                 if manual_seed.cookies:
@@ -856,7 +868,11 @@ class ScanEngine:
                 f"{len(sitemap_urls)} additional URL(s) discovered"
             )
             for su in sitemap_urls[:30]:  # cap at 30 seed URLs
-                if su not in self.visited_urls and self._is_access_allowed_url(su):
+                if (
+                    su not in self.visited_urls
+                    and self._is_access_allowed_url(su)
+                    and not self._is_url_excluded(su)
+                ):
                     self.visited_urls.add(su)
                     queue.append((su, 0, self.target_url))  # depth=0: treat as root-level
 
@@ -1678,8 +1694,13 @@ class ScanEngine:
                 u.strip() for u in (action.get("extra_urls") or [])
                 if isinstance(u, str) and u.strip().startswith(("http://", "https://"))
             ]
+            # 追加URLは除外パターンに合致するものを除いてシードに登録
+            extra_urls = [
+                u for u in extra_urls
+                if self._is_access_allowed_url(u) and not self._is_url_excluded(u)
+            ]
             for eu in extra_urls:
-                if eu not in self.visited_urls and self._is_access_allowed_url(eu):
+                if eu not in self.visited_urls:
                     self.visited_urls.add(eu)
 
             manual_file = (action.get("manual_crawl_file") or "").strip()
@@ -1774,7 +1795,7 @@ class ScanEngine:
         queue: deque = deque()
 
         for seed in {landing_url, self.target_url}:
-            if seed and seed not in auth_visited:
+            if seed and seed not in auth_visited and not self._is_url_excluded(seed):
                 auth_visited.add(seed)
                 queue.append((seed, 0, None))
 
@@ -1984,6 +2005,13 @@ class ScanEngine:
 
     async def _attack_page(self, page: CrawledPage, plan: Optional[PageAttackPlan]):
         """Run all scanners on all fields of a single page."""
+        # 除外URLが page.url の場合は丸ごとスキップ（防御的: 通常は crawl で
+        # 弾かれるが、HAR/手動巡回/シードから直接到達した場合への保険）
+        if self._is_url_excluded(page.url):
+            console.print(
+                f"  [dim yellow]Skip (excluded URL):[/dim yellow] {page.url}"
+            )
+            return
         all_forms = page.forms[:self.max_forms]
 
         # ── Registration form exclusion ───────────────────────────────
@@ -2006,6 +2034,20 @@ class ScanEngine:
                     forms.append(form)
         else:
             forms = all_forms
+
+        # ── Exclude forms whose action URL matches exclude_urls ───────
+        # action="/logout" 等の破壊系エンドポイントを攻撃しないための保険。
+        if self.exclude_urls:
+            kept = []
+            for form in forms:
+                action_url = self._form_action_url(form, page.url)
+                if self._is_url_excluded(action_url):
+                    console.print(
+                        f"  [dim yellow]Skip (excluded action):[/dim yellow] {action_url}"
+                    )
+                    continue
+                kept.append(form)
+            forms = kept
 
         # Build ordered field list
         field_queue: list = []
@@ -2470,12 +2512,58 @@ class ScanEngine:
 
     def _is_url_excluded(self, url: str) -> bool:
         """Return True if *url* matches any entry in the exclude_urls set.
-        Supports exact match or prefix match (e.g. 'http://host/admin' excludes all /admin/* URLs).
+
+        Matching rules:
+          - Full URL exact match
+          - Full URL prefix match (e.g. 'https://host/admin' excludes /admin/*)
+          - Path-only patterns starting with '/' (e.g. '/logout', '/admin/')
+            match against the URL's path on any host. Useful for excluding
+            destructive endpoints regardless of scheme/host normalisation.
+          - Patterns are matched case-insensitively for paths so that
+            '/Logout' and '/logout' are treated the same.
         """
+        if not url or not self.exclude_urls:
+            return False
+        try:
+            parsed = urlparse(url)
+        except Exception:
+            parsed = None
+        url_path = (parsed.path or "") if parsed else ""
+        url_lower = url.lower()
+        path_lower = url_path.lower()
         for pattern in self.exclude_urls:
-            if url == pattern or url.startswith(pattern):
+            if not pattern:
+                continue
+            p = pattern.strip()
+            if not p:
+                continue
+            pl = p.lower()
+            # Full-URL match (exact or prefix), case-insensitive
+            if pl.startswith(("http://", "https://")):
+                if url_lower == pl or url_lower.startswith(pl):
+                    return True
+                continue
+            # Path-only pattern: match against the URL path
+            if pl.startswith("/"):
+                if path_lower == pl or path_lower.startswith(pl):
+                    return True
+                continue
+            # Bare token: substring match on the path (defensive, lower-cased)
+            if pl in path_lower:
                 return True
         return False
+
+    def _form_action_url(self, form: dict, page_url: str) -> str:
+        """Return the resolved (absolute) action URL of a form, or page_url."""
+        action = (form.get("action") or "").strip()
+        if not action:
+            return page_url
+        if action.startswith(("http://", "https://")):
+            return action
+        try:
+            return urljoin(page_url, action)
+        except Exception:
+            return page_url
 
     def _is_registration_url(self, url: str) -> bool:
         """Return True if the URL path looks like a new-account registration page."""
