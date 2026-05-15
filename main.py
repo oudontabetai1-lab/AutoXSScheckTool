@@ -1456,7 +1456,37 @@ async def run_serve(args):
                 seed_urls=seed_urls or None,
                 manual_crawl_path=cfg.get("manual_crawl_file", "") or "",
             )
+            # アウトプットフォルダに送信された設定スナップショットを保存しておく
+            # (ブラウザの自動ダウンロードに頼らず、レポートと同じ場所に残す)
+            try:
+                import json as _json, datetime as _dt
+                snapshot_path = engine.output_dir / "scan_config.json"
+                snapshot_path.write_text(
+                    _json.dumps(
+                        {
+                            "tool": "WScan",
+                            "kind": "wscan-scan-config-snapshot",
+                            "submitted_at": _dt.datetime.now().isoformat(timespec="seconds"),
+                            "config": cfg,
+                        },
+                        ensure_ascii=False,
+                        indent=2,
+                    ),
+                    encoding="utf-8",
+                )
+            except Exception as _exc:
+                console.print(f"[yellow]設定スナップショット保存に失敗: {_exc}[/yellow]")
             await engine.run()
+            # 完了時に手動巡回JSONがあればアウトプットフォルダにコピー
+            try:
+                manual_src = cfg.get("manual_crawl_file", "") or ""
+                if manual_src:
+                    src_path = Path(manual_src)
+                    if src_path.exists() and src_path.is_file():
+                        import shutil as _shutil
+                        _shutil.copy2(src_path, engine.output_dir / src_path.name)
+            except Exception as _exc:
+                console.print(f"[yellow]手動巡回JSONのコピーに失敗: {_exc}[/yellow]")
             console.print(
                 f"\n[bold green]Scan complete![/bold green]  "
                 f"Report: [cyan]{engine.output_dir / 'report.html'}[/cyan]"
