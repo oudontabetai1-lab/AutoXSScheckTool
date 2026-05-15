@@ -228,12 +228,24 @@ class ManualCrawlSession:
 
         self._page.on("framenavigated", on_navigate)
         self._page.on("requestfinished", on_request_finished)
-        try:
-            await self._page.goto(start_url, wait_until="domcontentloaded")
-        except Exception as exc:
-            # ナビゲーション失敗は致命傷ではない (ユーザが手動で別URLに移動可)。記録だけして続行
-            self.last_error = f"goto failed: {exc}"
-        await self.snapshot("start")
+
+        # goto は待たない: ナビゲーションが終わるまでブロックすると
+        # 重いSPAや遅いサイトで API がタイムアウトしてしまうため、
+        # バックグラウンドで実行する。ユーザは既に開いているブラウザ
+        # 画面で操作できる。
+        async def _initial_goto() -> None:
+            try:
+                await self._page.goto(start_url, wait_until="commit", timeout=15_000)
+            except Exception as exc:
+                self.last_error = f"goto failed: {exc}"
+            try:
+                await self.snapshot("start")
+            except Exception:
+                pass
+
+        task = asyncio.create_task(_initial_goto())
+        self._snapshot_tasks.add(task)
+        task.add_done_callback(lambda t: self._snapshot_tasks.discard(t))
         return self.status()
 
     async def _cleanup_browser(self) -> None:
