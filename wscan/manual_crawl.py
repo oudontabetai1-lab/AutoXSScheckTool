@@ -126,7 +126,13 @@ class ManualCrawlSession:
         if not start_url.startswith(("http://", "https://")):
             raise ValueError("start_url must begin with http:// or https://")
 
-        from playwright.async_api import async_playwright
+        try:
+            from playwright.async_api import async_playwright
+        except ImportError as exc:
+            raise RuntimeError(
+                "Playwright がインストールされていません。`pip install playwright` "
+                "の後に `playwright install chromium` を実行してください。"
+            ) from exc
 
         self.start_url = start_url
         self.output_path = output_path
@@ -142,13 +148,27 @@ class ManualCrawlSession:
         self.cookies = []
         self.last_error = ""
 
-        self._pw = await async_playwright().start()
-        launch_kwargs: dict[str, Any] = {"headless": headless}
-        if proxy:
-            launch_kwargs["proxy"] = {"server": proxy}
-        self._browser = await self._pw.chromium.launch(**launch_kwargs)
-        self._context = await self._browser.new_context(ignore_https_errors=True)
-        self._page = await self._context.new_page()
+        try:
+            self._pw = await async_playwright().start()
+            launch_kwargs: dict[str, Any] = {"headless": headless}
+            if proxy:
+                launch_kwargs["proxy"] = {"server": proxy}
+            try:
+                self._browser = await self._pw.chromium.launch(**launch_kwargs)
+            except Exception as exc:
+                msg = str(exc)
+                if "Executable doesn't exist" in msg or "playwright install" in msg.lower():
+                    raise RuntimeError(
+                        "Chromium ブラウザが見つかりません。ターミナルで "
+                        "`playwright install chromium` を実行してから再度お試しください。"
+                    ) from exc
+                raise
+            self._context = await self._browser.new_context(ignore_https_errors=True)
+            self._page = await self._context.new_page()
+        except Exception:
+            await self._cleanup_browser()
+            self.running = False
+            raise
 
         token = secrets.token_hex(12)
         fill_fn = f"__wscan_manual_fill_{token}__"
@@ -208,9 +228,32 @@ class ManualCrawlSession:
 
         self._page.on("framenavigated", on_navigate)
         self._page.on("requestfinished", on_request_finished)
-        await self._page.goto(start_url, wait_until="domcontentloaded")
+        try:
+            await self._page.goto(start_url, wait_until="domcontentloaded")
+        except Exception as exc:
+            # ナビゲーション失敗は致命傷ではない (ユーザが手動で別URLに移動可)。記録だけして続行
+            self.last_error = f"goto failed: {exc}"
         await self.snapshot("start")
         return self.status()
+
+    async def _cleanup_browser(self) -> None:
+        for task in list(self._snapshot_tasks):
+            task.cancel()
+        self._snapshot_tasks.clear()
+        try:
+            if self._browser:
+                await self._browser.close()
+        except Exception:
+            pass
+        try:
+            if self._pw:
+                await self._pw.stop()
+        except Exception:
+            pass
+        self._browser = None
+        self._context = None
+        self._page = None
+        self._pw = None
 
     async def stop(self) -> dict:
         if not self.running:
@@ -221,19 +264,12 @@ class ManualCrawlSession:
         try:
             await self.snapshot("stop")
             if self._context:
-                self.cookies = await self._context.cookies()
+                try:
+                    self.cookies = await self._context.cookies()
+                except Exception:
+                    pass
         finally:
-            for task in list(self._snapshot_tasks):
-                task.cancel()
-            self._snapshot_tasks.clear()
-            if self._browser:
-                await self._browser.close()
-            if self._pw:
-                await self._pw.stop()
-            self._browser = None
-            self._context = None
-            self._page = None
-            self._pw = None
+            await self._cleanup_browser()
 
         self.save()
         return self.status()

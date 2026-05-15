@@ -1164,6 +1164,10 @@ body {
             <label>手動巡回JSON (スキャン取り込み用)</label>
             <input type="text" id="cfgManualCrawlFile" placeholder="flows/manual_crawl.json">
           </div>
+          <div class="cfg-field" style="grid-column:1/-1">
+            <label>開始URL (空欄の場合は Basic タブの Target URL を使用)</label>
+            <input type="text" id="manualCrawlStartUrl" placeholder="https://example.com/login">
+          </div>
           <div class="cfg-field">
             <label>保存先</label>
             <input type="text" id="manualCrawlOutput" value="flows/manual_crawl.json">
@@ -1875,9 +1879,10 @@ function renderManualCrawlStatus(status) {
 }
 
 async function startManualCrawl() {
-  const url = document.getElementById('cfgInputUrl').value.trim();
+  const manualUrlField = document.getElementById('manualCrawlStartUrl');
+  const url = (manualUrlField?.value?.trim()) || document.getElementById('cfgInputUrl').value.trim();
   if (!url || !url.startsWith('http')) {
-    alert('Target URL を入力してください。');
+    alert('開始URL を入力してください (Manual Crawl タブの「開始URL」または Basic タブの Target URL)。');
     return;
   }
   const outputPath = document.getElementById('manualCrawlOutput').value.trim() || 'flows/manual_crawl.json';
@@ -2018,8 +2023,8 @@ function submitScanConfig() {
   }
 
   if (state.ws && state.ws.readyState === WebSocket.OPEN) {
-    // 検査開始時に設定を自動でダウンロードしておく（後から再現できるように）
-    try { autoExportConfigSnapshot(config); } catch(e) {}
+    // 設定スナップショットはサーバ側でアウトプットフォルダに自動保存される。
+    // ブラウザへのダウンロードは「📤 設定をエクスポート」ボタン押下時のみ。
     state.ws.send(JSON.stringify({ action: 'start_scan', config }));
     document.getElementById('scanConfigOverlay').classList.remove('active');
     setStatus('スキャン開始リクエスト送信中...', 'running');
@@ -2098,14 +2103,6 @@ function exportConfigToFile() {
   const cfg = _collectFullConfigForExport();
   _downloadJson(cfg, _filenameForConfig('wscan-config'));
   addEventLog('status', '現在の設定をダウンロードしました。');
-}
-
-function autoExportConfigSnapshot(submittedConfig) {
-  // 検査開始時に呼ばれる。フォームから集めた全体設定 + 実際に送信されたペイロードを保存。
-  const snapshot = _collectFullConfigForExport();
-  snapshot._meta.kind = 'wscan-scan-config-snapshot';
-  snapshot._submitted = submittedConfig;
-  _downloadJson(snapshot, _filenameForConfig('wscan-config-snapshot'));
 }
 
 function importConfigFromFile(input) {
@@ -2780,18 +2777,11 @@ function handleEvent(event) {
     }
 
     case 'scan_complete':
-      try {
-        // 検査後に設定 + 結果サマリを自動でダウンロード
-        const finalSnap = _collectFullConfigForExport();
-        finalSnap._meta.kind = 'wscan-scan-result';
-        finalSnap._result = {
-          total_findings: data.total_findings,
-          report_path: data.report_path,
-          completed_at: new Date().toISOString(),
-        };
-        if (state.lastScanConfig) finalSnap._submitted = state.lastScanConfig;
-        _downloadJson(finalSnap, _filenameForConfig('wscan-result'));
-      } catch(e) {}
+      // 設定 + 結果サマリはサーバ側でアウトプットフォルダに自動保存される。
+      // 必要に応じて「📤 設定をエクスポート」ボタンから手動でダウンロード可能。
+      if (data.report_path) {
+        addEventLog('status', `成果物保存先: ${data.report_path.replace(/\/report\.html$/, '')}`);
+      }
       setStatus(`Scan complete — ${data.total_findings} finding(s)`, 'done');
       document.getElementById('progressBar').style.width = '100%';
       document.getElementById('statPct').textContent = '100%';
