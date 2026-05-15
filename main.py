@@ -1432,6 +1432,7 @@ async def run_serve(args):
                 low_priv_cookie_list=[],
                 use_planner=bool(cfg.get("use_planner", True)),
                 interactive_plan=bool(cfg.get("interactive_plan", False)),
+                interactive_crawl_review=bool(cfg.get("interactive_crawl_review", False)),
                 skip_registration=bool(cfg.get("skip_registration", True)),
                 open_report=bool(cfg.get("open_report", True)),
                 enable_ai_analysis=bool(cfg.get("enable_ai_analysis", True)),
