@@ -199,9 +199,35 @@ class ReportGenerator:
                 </div>
             </div>"""
 
-        urls_html = "".join(
-            f'<li class="url-item">{self._escape(u)}</li>' for u in visited_urls
-        )
+        # Map URL → finding counts so the URL list can show vuln/done status,
+        # mirroring the dashboard's URL panel.
+        url_finding_counts: dict[str, int] = {}
+        for f in findings:
+            if not f.url:
+                continue
+            url_finding_counts[f.url] = url_finding_counts.get(f.url, 0) + 1
+
+        url_status_labels = {
+            "vuln": "発見あり",
+            "done": "完了",
+        }
+        url_items_parts = []
+        for u in visited_urls:
+            n = url_finding_counts.get(u, 0)
+            status = "vuln" if n > 0 else "done"
+            label = url_status_labels[status]
+            if status == "vuln":
+                label = f"{label} ({n})"
+            url_items_parts.append(
+                f'<div class="url-item" data-status="{status}" title="{self._escape(u)}">'
+                f'<span class="url-text">{self._escape(u)}</span>'
+                f'<span class="url-badge url-badge-{status}">{label}</span>'
+                f'</div>'
+            )
+        urls_html = "".join(url_items_parts)
+        url_total = len(visited_urls)
+        url_vuln_total = sum(1 for u in visited_urls if url_finding_counts.get(u, 0) > 0)
+        url_done_total = url_total - url_vuln_total
 
         no_findings_html = ""
         if not findings:
@@ -293,9 +319,29 @@ body {{ font-family: 'Segoe UI', system-ui, -apple-system, sans-serif; backgroun
 .no-findings-icon {{ font-size: 4rem; color: #68d391; margin-bottom: 16px; }}
 .no-findings p {{ font-size: 1.1rem; margin-bottom: 8px; }}
 .no-findings .note {{ font-size: 0.85rem; color: #a0aec0; }}
-.url-list {{ list-style: none; }}
-.url-item {{ padding: 6px 12px; border-radius: 4px; font-family: monospace; font-size: 0.85rem; word-break: break-all; }}
-.url-item:nth-child(even) {{ background: #f7f8fa; }}
+/* ── Dashboard-style URL panel ── */
+.url-panel-section {{ background:#0d1117; color:#cdd9e5; border:1px solid #1e293b; }}
+.url-panel-section h2 {{ color:#e6edf3; border-bottom-color:#1e293b; }}
+.url-panel-header {{ display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap; margin-bottom:14px; }}
+.url-panel-header h2 {{ margin:0; padding:0; border-bottom:none; }}
+.url-panel-summary {{ display:flex; gap:6px; flex-wrap:wrap; }}
+.url-panel-toolbar {{ display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin-bottom:10px; }}
+.url-filter-input {{ flex:1; min-width:220px; background:#161b22; border:1px solid #30363d; color:#cdd9e5; border-radius:6px; padding:6px 10px; font-size:.8rem; }}
+.url-filter-input:focus {{ outline:none; border-color:#388bfd; }}
+.url-filter-tabs {{ display:flex; gap:4px; }}
+.url-filter-tab {{ background:#161b22; border:1px solid #30363d; color:#8b949e; border-radius:999px; padding:4px 12px; font-size:.72rem; font-weight:700; cursor:pointer; }}
+.url-filter-tab:hover {{ color:#cdd9e5; border-color:#388bfd; }}
+.url-filter-tab.active {{ background:#1f6feb22; color:#79c0ff; border-color:#388bfd; }}
+.url-list {{ list-style:none; max-height:360px; overflow-y:auto; border:1px solid #1e293b; border-radius:8px; background:#0a0c0f; padding:4px 0; }}
+.url-item {{ display:flex; align-items:center; gap:10px; padding:6px 12px; font-family:'Cascadia Code','Consolas',monospace; font-size:.8rem; border-bottom:1px solid #1e293b; }}
+.url-item:last-child {{ border-bottom:none; }}
+.url-item .url-text {{ flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:#8b949e; }}
+.url-item[data-status="vuln"] .url-text {{ color:#fca5a5; }}
+.url-badge {{ flex-shrink:0; padding:2px 9px; border-radius:999px; font-size:.68rem; font-weight:700; letter-spacing:.03em; }}
+.url-badge-done {{ background:#14532d; color:#86efac; }}
+.url-badge-vuln {{ background:#7f1d1d; color:#fca5a5; }}
+.url-list::-webkit-scrollbar {{ width:8px; }}
+.url-list::-webkit-scrollbar-thumb {{ background:#30363d; border-radius:4px; }}
 .scan-meta {{ display: flex; gap: 24px; flex-wrap: wrap; }}
 .meta-item {{ display: flex; flex-direction: column; gap: 2px; }}
 .meta-label {{ font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.08em; color: #718096; }}
@@ -529,12 +575,26 @@ body {{ font-family: 'Segoe UI', system-ui, -apple-system, sans-serif; backgroun
     <!-- Page Flow Diagram -->
     {page_flow_html}
 
-    <!-- Visited URLs -->
-    <div class="section">
-        <h2>Scanned URLs ({len(visited_urls)})</h2>
-        <ul class="url-list">
+    <!-- Visited URLs (dashboard-style URL panel) -->
+    <div class="section url-panel-section">
+        <div class="url-panel-header">
+            <h2>Scanned URLs ({url_total})</h2>
+            <div class="url-panel-summary">
+                <span class="url-badge url-badge-done">完了 {url_done_total}</span>
+                <span class="url-badge url-badge-vuln">発見あり {url_vuln_total}</span>
+            </div>
+        </div>
+        <div class="url-panel-toolbar">
+            <input type="text" id="url-filter" class="url-filter-input" placeholder="URL でフィルタ…">
+            <div class="url-filter-tabs">
+                <button class="url-filter-tab active" data-filter="all">すべて</button>
+                <button class="url-filter-tab" data-filter="vuln">発見あり</button>
+                <button class="url-filter-tab" data-filter="done">完了</button>
+            </div>
+        </div>
+        <div class="url-list" id="url-list">
             {urls_html}
-        </ul>
+        </div>
     </div>
 </div>
 
@@ -579,6 +639,32 @@ document.querySelectorAll('.plan-card-header').forEach(header => {{
         header.closest('.plan-card').classList.toggle('collapsed');
     }});
 }});
+// URL panel: filter + tab switching (dashboard-style)
+(function() {{
+    const list = document.getElementById('url-list');
+    if (!list) return;
+    const items = Array.from(list.querySelectorAll('.url-item'));
+    const input = document.getElementById('url-filter');
+    const tabs = document.querySelectorAll('.url-filter-tab');
+    let activeFilter = 'all';
+    function apply() {{
+        const q = (input && input.value || '').toLowerCase();
+        items.forEach(it => {{
+            const status = it.dataset.status || 'done';
+            const text = (it.querySelector('.url-text')?.textContent || '').toLowerCase();
+            const statusOk = activeFilter === 'all' || status === activeFilter;
+            const textOk = !q || text.includes(q);
+            it.style.display = (statusOk && textOk) ? '' : 'none';
+        }});
+    }}
+    if (input) input.addEventListener('input', apply);
+    tabs.forEach(t => t.addEventListener('click', () => {{
+        tabs.forEach(x => x.classList.remove('active'));
+        t.classList.add('active');
+        activeFilter = t.dataset.filter;
+        apply();
+    }}));
+}})();
 // Payload list expand
 document.querySelectorAll('.plan-payloads-toggle').forEach(btn => {{
     btn.addEventListener('click', (e) => {{

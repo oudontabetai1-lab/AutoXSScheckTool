@@ -169,6 +169,15 @@ class BrowserManager:
         """Capture alert dialogs (XSS indicator)."""
         self.dialog_fired = True
         self.dialog_message = dialog.message
+        # Snapshot the page *before* dismissing so the screenshot reflects the
+        # exact moment the payload triggered execution.  Playwright pauses the
+        # page while the dialog is pending, so the capture matches the payload
+        # that fired it.
+        try:
+            shot = await self.page.screenshot(full_page=False, type="jpeg", quality=80)
+            self.dialog_screenshot_b64 = base64.b64encode(shot).decode()
+        except Exception:
+            self.dialog_screenshot_b64 = ""
         try:
             await dialog.dismiss()
         except Exception:
