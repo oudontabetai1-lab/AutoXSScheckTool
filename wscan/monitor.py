@@ -40,6 +40,9 @@ class MonitorServer:
         # Scan config submitted from the dashboard (serve mode)
         self.scan_request_event: asyncio.Event = asyncio.Event()
         self.scan_request_data: dict = {}
+        # Crawl review (AeyeScan-style pause between crawl and plan)
+        self.crawl_review_event: asyncio.Event = asyncio.Event()
+        self.crawl_review_action: dict = {}
         # LLM config for auto-config HTTP endpoint (set by main.py after init)
         self.llm_cfg: dict = {}
         self.default_scan_cfg: dict = {}
@@ -297,6 +300,17 @@ class MonitorServer:
             self.scan_request_data = msg.get("config", {})
             self.scan_request_event.set()
 
+        elif action == "crawl_review":
+            # User reviewed crawl results. command: continue|recrawl|cancel
+            # Optional extra_urls (list[str]) and manual_crawl_file (str) are
+            # consumed by the engine on resume.
+            self.crawl_review_action = {
+                "command": msg.get("command", "continue"),
+                "extra_urls": msg.get("extra_urls", []) or [],
+                "manual_crawl_file": msg.get("manual_crawl_file", "") or "",
+            }
+            self.crawl_review_event.set()
+
     # ------------------------------------------------------------------
     # Broadcast helpers
     # ------------------------------------------------------------------
@@ -428,6 +442,29 @@ class MonitorServer:
         """
         self.plan_confirm_event.clear()
         await self.emit("plan_review", {"plans": plans_data})
+
+    async def emit_crawl_review(self, pages_data: list):
+        """
+        Send the list of pages discovered by the crawl phase to the dashboard
+        so the operator can confirm coverage, request a re-crawl, or merge a
+        manual-crawl JSON before the attack phase begins.
+        """
+        self.crawl_review_event.clear()
+        self.crawl_review_action = {}
+        await self.emit("crawl_review", {"pages": pages_data})
+
+    async def wait_for_crawl_review(self, timeout: float = 1800.0) -> dict:
+        """Block until the operator clicks a button in the crawl review modal."""
+        try:
+            await asyncio.wait_for(self.crawl_review_event.wait(), timeout=timeout)
+        except asyncio.TimeoutError:
+            await self.emit_status(
+                f"[warn] Crawl review timed out after {timeout:.0f}s — "
+                "continuing with current crawl results.",
+                "warning",
+            )
+            return {"command": "continue"}
+        return dict(self.crawl_review_action)
 
     async def emit_intervention_state(self, paused: bool):
         """Tell the dashboard whether the scan is paused."""

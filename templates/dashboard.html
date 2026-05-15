@@ -1050,6 +1050,7 @@ body {
           <div class="cfg-toggle on" id="tog-enable_payload_learning" onclick="toggleCfg('enable_payload_learning')">ペイロード学習</div>
           <div class="cfg-toggle on" id="tog-enable_sitemap_crawl" onclick="toggleCfg('enable_sitemap_crawl')">サイトマップ/robots.txtクロール</div>
           <div class="cfg-toggle off" id="tog-spa_crawl" onclick="toggleCfg('spa_crawl')">SPA クロール (React/Vue/Angular)</div>
+          <div class="cfg-toggle off" id="tog-interactive_crawl_review" onclick="toggleCfg('interactive_crawl_review')" title="巡回完了後に画面一覧を確認し、再巡回・手動巡回追加を選べる">🔍 巡回レビュー (検査前に画面確認)</div>
         </div>
         <div class="cfg-section-title" style="margin-top:20px">CTFモード</div>
         <div class="cfg-toggle-row">
@@ -1293,7 +1294,15 @@ body {
 
   <div class="cfg-footer">
     <button class="cfg-start-btn" onclick="submitScanConfig()">▶ スキャン開始</button>
-    <div class="cfg-hint">設定はブラウザセッション中に保持されます。CLIから起動した場合はCLIオプションが優先されます。</div>
+    <button type="button" onclick="exportConfigToFile()"
+      style="padding:8px 14px;background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:4px;cursor:pointer;font-size:0.85rem;margin-left:8px"
+      title="現在の設定をJSONファイルとしてダウンロード">📤 設定をエクスポート</button>
+    <button type="button" onclick="document.getElementById('cfgImportFile').click()"
+      style="padding:8px 14px;background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:4px;cursor:pointer;font-size:0.85rem"
+      title="エクスポートしたJSONを読み込む">📥 設定をインポート</button>
+    <input type="file" id="cfgImportFile" accept="application/json,.json" style="display:none"
+      onchange="importConfigFromFile(this)">
+    <div class="cfg-hint">設定はブラウザセッション中に保持されます。エクスポート/インポートで他環境にも引き継げます。</div>
   </div>
 </div>
 
@@ -1556,6 +1565,58 @@ body {
   </div>
 </div>
 
+<!-- Crawl Review Modal (AeyeScan-style) -->
+<div class="plan-modal-overlay" id="crawlReviewOverlay">
+  <div class="plan-modal" style="max-width:980px">
+    <div class="plan-modal-header">
+      <div>
+        <h2>🔍 巡回完了 — 検査前レビュー</h2>
+        <div class="pm-subtitle">
+          発見された画面を確認してください。不足があれば「再巡回」または「手動巡回JSONを追加」で補完できます。
+        </div>
+      </div>
+    </div>
+    <div class="plan-modal-body">
+      <div style="display:flex;gap:12px;align-items:center;margin-bottom:10px;flex-wrap:wrap">
+        <span style="font-size:1.05rem;font-weight:700;color:var(--accent)">画面数: <span id="crawlReviewCount">0</span></span>
+        <span style="font-size:.78rem;color:var(--text-muted)">フォーム/パラメータがあるページから優先的に検査されます。</span>
+        <input type="text" id="crawlReviewFilter" placeholder="URL でフィルタ..." oninput="renderCrawlReviewList()"
+          style="margin-left:auto;padding:6px 10px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:4px;min-width:240px;font-size:.82rem">
+      </div>
+      <div id="crawlReviewList" style="max-height:420px;overflow:auto;border:1px solid var(--border);border-radius:6px;background:var(--bg)"></div>
+
+      <div class="cfg-section-title" style="margin-top:18px">追加URL（任意）</div>
+      <textarea id="crawlReviewExtraUrls" rows="3" placeholder="https://example.com/admin&#10;https://example.com/api/v2/users"
+        style="width:100%;padding:8px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:4px;font-family:monospace;font-size:.82rem"></textarea>
+      <div style="font-size:.72rem;color:var(--text-muted);margin-top:4px">
+        1行1URL。「再巡回」を押すと、これらをシードに追加して再度巡回します。
+      </div>
+
+      <div class="cfg-section-title" style="margin-top:14px">手動巡回JSONの追加（任意）</div>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <input type="text" id="crawlReviewManualFile" placeholder="flows/manual_crawl.json"
+          style="flex:1;padding:7px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:4px;min-width:240px;font-size:.82rem">
+        <button onclick="openManualCrawlFromReview()" style="padding:6px 12px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:4px;cursor:pointer;font-size:.78rem">
+          手動巡回タブを開く
+        </button>
+      </div>
+      <div style="font-size:.72rem;color:var(--text-muted);margin-top:4px">
+        「手動巡回」タブで記録したJSONのパスを指定すると、そのURL・Cookieも巡回シードに加わります。
+      </div>
+    </div>
+    <div class="plan-modal-footer">
+      <span style="font-size:.74rem;color:var(--text-muted);margin-right:auto">
+        操作完了後にいずれかのボタンを押してください。
+      </span>
+      <button class="pm-btn" onclick="sendCrawlReview('cancel')"
+        style="background:var(--surface2);color:var(--text);border:1px solid var(--border)">⏹ 検査を中止</button>
+      <button class="pm-btn" onclick="sendCrawlReview('recrawl')"
+        style="background:rgba(56,139,253,0.15);color:var(--accent);border:1px solid var(--accent)">🔁 再巡回</button>
+      <button class="pm-btn confirm" onclick="sendCrawlReview('continue')">▶ この内容で検査続行</button>
+    </div>
+  </div>
+</div>
+
 <!-- Lightbox -->
 <div class="lightbox" id="lightbox" onclick="this.classList.remove('active')">
   <div class="lb-close" onclick="document.getElementById('lightbox').classList.remove('active')">✕</div>
@@ -1607,6 +1668,7 @@ const cfgToggles = {
   spa_crawl: false,
   fast_mode: false,
   auto_register: false,
+  interactive_crawl_review: false,
 };
 
 const CHECK_GROUPS = {
@@ -1930,6 +1992,7 @@ function submitScanConfig() {
     cookies:     document.getElementById('cfgCookies').value.trim(),
     low_priv_cookies: document.getElementById('cfgLowPrivCookies').value.trim(),
     interactive_plan: cfgToggles.interactive_plan,
+    interactive_crawl_review: cfgToggles.interactive_crawl_review,
     spa_crawl:    cfgToggles.spa_crawl,
     fast_mode:    cfgToggles.fast_mode,
     max_payloads: parseInt(document.getElementById('cfgMaxPayloads').value) || 0,
@@ -1951,11 +2014,171 @@ function submitScanConfig() {
   }
 
   if (state.ws && state.ws.readyState === WebSocket.OPEN) {
+    // 検査開始時に設定を自動でダウンロードしておく（後から再現できるように）
+    try { autoExportConfigSnapshot(config); } catch(e) {}
     state.ws.send(JSON.stringify({ action: 'start_scan', config }));
     document.getElementById('scanConfigOverlay').classList.remove('active');
     setStatus('スキャン開始リクエスト送信中...', 'running');
   } else {
     alert('WebSocket未接続。ページを再読み込みしてください。');
+  }
+}
+
+// ─── Config Export / Import ─────────────────────────────────────
+function _collectFullConfigForExport() {
+  const collect = id => (document.getElementById(id)?.value ?? '');
+  return {
+    _meta: {
+      tool: 'WScan',
+      kind: 'wscan-scan-config',
+      version: 1,
+      exported_at: new Date().toISOString(),
+    },
+    url: collect('cfgInputUrl').trim(),
+    depth: collect('cfgDepth'),
+    timeout: collect('cfgTimeoutInput'),
+    max_forms: collect('cfgMaxForms'),
+    concurrency: collect('cfgConcurrency'),
+    max_payloads: collect('cfgMaxPayloads'),
+    proxy: collect('cfgProxy'),
+    output_dir: collect('cfgOutputDir'),
+    payloads_file: collect('cfgPayloadsFile'),
+    toggles: {...cfgToggles},
+    checks: getSelectedChecks(),
+    llm: collect('cfgLlm'),
+    ollama_model: collect('cfgOllamaModel'),
+    openai_model: collect('cfgOpenaiModel'),
+    gemini_model: collect('cfgGeminiModel'),
+    claude_model: collect('cfgClaudeModel'),
+    role_models: collectRoleModels(),
+    auth_user: collect('cfgAuthUser'),
+    auth_pass: collect('cfgAuthPass'),
+    login_url: collect('cfgLoginUrl'),
+    login_user_field: collect('cfgLoginUserField'),
+    login_pass_field: collect('cfgLoginPassField'),
+    login_success_indicator: collect('cfgLoginSuccess'),
+    cookies: collect('cfgCookies'),
+    low_priv_cookies: collect('cfgLowPrivCookies'),
+    auto_register_count: collect('cfgAutoRegisterCount'),
+    exclude_fields: collect('cfgExcludeFields'),
+    exclude_urls: collect('cfgExcludeUrls'),
+    target_urls: collect('cfgTargetUrls'),
+    access_urls: collect('cfgAccessUrls'),
+    ctf_flag_pattern: collect('cfgCtfFlagPattern'),
+    manual_crawl_file: collect('cfgManualCrawlFile'),
+    manual_crawl_output: collect('manualCrawlOutput'),
+    flows: collectFlows(),
+    accounts: (typeof collectAccounts === 'function') ? collectAccounts() : [],
+  };
+}
+
+function _downloadJson(obj, filename) {
+  const blob = new Blob([JSON.stringify(obj, null, 2)], {type: 'application/json'});
+  const a = document.createElement('a');
+  const u = URL.createObjectURL(blob);
+  a.href = u; a.download = filename;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(u), 1500);
+}
+
+function _filenameForConfig(prefix) {
+  const ts = new Date().toISOString().replace(/[:.]/g, '-').replace('T', '_').slice(0, 19);
+  const host = (() => {
+    try { return new URL(document.getElementById('cfgInputUrl').value.trim()).hostname || 'target'; }
+    catch(e) { return 'target'; }
+  })();
+  return `${prefix}-${host}-${ts}.json`;
+}
+
+function exportConfigToFile() {
+  const cfg = _collectFullConfigForExport();
+  _downloadJson(cfg, _filenameForConfig('wscan-config'));
+  addEventLog('status', '現在の設定をダウンロードしました。');
+}
+
+function autoExportConfigSnapshot(submittedConfig) {
+  // 検査開始時に呼ばれる。フォームから集めた全体設定 + 実際に送信されたペイロードを保存。
+  const snapshot = _collectFullConfigForExport();
+  snapshot._meta.kind = 'wscan-scan-config-snapshot';
+  snapshot._submitted = submittedConfig;
+  _downloadJson(snapshot, _filenameForConfig('wscan-config-snapshot'));
+}
+
+function importConfigFromFile(input) {
+  const f = input.files && input.files[0];
+  if (!f) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    try {
+      const cfg = JSON.parse(reader.result);
+      applyImportedConfig(cfg);
+      addEventLog('status', `設定をインポートしました: ${f.name}`);
+    } catch (e) {
+      alert('JSONの読み込みに失敗しました: ' + e.message);
+    } finally {
+      input.value = '';
+    }
+  };
+  reader.readAsText(f);
+}
+
+function applyImportedConfig(cfg) {
+  if (!cfg || typeof cfg !== 'object') return;
+  const setVal = (id, v) => { const el = document.getElementById(id); if (el && v != null) el.value = v; };
+  setVal('cfgInputUrl', cfg.url);
+  setVal('cfgDepth', cfg.depth);
+  setVal('cfgTimeoutInput', cfg.timeout);
+  setVal('cfgMaxForms', cfg.max_forms);
+  setVal('cfgConcurrency', cfg.concurrency);
+  setVal('cfgMaxPayloads', cfg.max_payloads);
+  setVal('cfgProxy', cfg.proxy);
+  setVal('cfgOutputDir', cfg.output_dir);
+  setVal('cfgPayloadsFile', cfg.payloads_file);
+  setVal('cfgLlm', cfg.llm); if (cfg.llm) updateLlmModelField();
+  setVal('cfgOllamaModel', cfg.ollama_model);
+  setVal('cfgOpenaiModel', cfg.openai_model);
+  setVal('cfgGeminiModel', cfg.gemini_model);
+  setVal('cfgClaudeModel', cfg.claude_model);
+  if (cfg.role_models) restoreRoleModels(cfg.role_models);
+  setVal('cfgAuthUser', cfg.auth_user);
+  setVal('cfgAuthPass', cfg.auth_pass);
+  setVal('cfgLoginUrl', cfg.login_url);
+  setVal('cfgLoginUserField', cfg.login_user_field);
+  setVal('cfgLoginPassField', cfg.login_pass_field);
+  setVal('cfgLoginSuccess', cfg.login_success_indicator);
+  setVal('cfgCookies', cfg.cookies);
+  setVal('cfgLowPrivCookies', cfg.low_priv_cookies);
+  setVal('cfgAutoRegisterCount', cfg.auto_register_count);
+  if (Array.isArray(cfg.exclude_fields)) setVal('cfgExcludeFields', cfg.exclude_fields.join(', '));
+  else setVal('cfgExcludeFields', cfg.exclude_fields);
+  if (Array.isArray(cfg.exclude_urls)) setVal('cfgExcludeUrls', cfg.exclude_urls.join('\n'));
+  else setVal('cfgExcludeUrls', cfg.exclude_urls);
+  if (Array.isArray(cfg.target_urls)) setVal('cfgTargetUrls', cfg.target_urls.join('\n'));
+  else setVal('cfgTargetUrls', cfg.target_urls);
+  if (Array.isArray(cfg.access_urls)) setVal('cfgAccessUrls', cfg.access_urls.join('\n'));
+  else setVal('cfgAccessUrls', cfg.access_urls);
+  setVal('cfgCtfFlagPattern', cfg.ctf_flag_pattern);
+  setVal('cfgManualCrawlFile', cfg.manual_crawl_file);
+  setVal('manualCrawlOutput', cfg.manual_crawl_output);
+  if (cfg.toggles) {
+    Object.entries(cfg.toggles).forEach(([k, v]) => {
+      if (k in cfgToggles) {
+        cfgToggles[k] = !!v;
+        const el = document.getElementById('tog-' + k);
+        if (el) el.className = 'cfg-toggle ' + (v ? 'on' : 'off');
+      }
+    });
+  }
+  if (Array.isArray(cfg.checks) && cfg.checks.length) {
+    document.querySelectorAll('.cfg-check-item').forEach(el => {
+      if (cfg.checks.includes(el.dataset.check)) el.classList.add('checked');
+      else el.classList.remove('checked');
+    });
+  }
+  if (Array.isArray(cfg.flows) && cfg.flows.length) {
+    const list = document.getElementById('flowsList');
+    if (list) list.innerHTML = '';
+    restoreFlows(cfg.flows);
   }
 }
 
@@ -2553,6 +2776,18 @@ function handleEvent(event) {
     }
 
     case 'scan_complete':
+      try {
+        // 検査後に設定 + 結果サマリを自動でダウンロード
+        const finalSnap = _collectFullConfigForExport();
+        finalSnap._meta.kind = 'wscan-scan-result';
+        finalSnap._result = {
+          total_findings: data.total_findings,
+          report_path: data.report_path,
+          completed_at: new Date().toISOString(),
+        };
+        if (state.lastScanConfig) finalSnap._submitted = state.lastScanConfig;
+        _downloadJson(finalSnap, _filenameForConfig('wscan-result'));
+      } catch(e) {}
       setStatus(`Scan complete — ${data.total_findings} finding(s)`, 'done');
       document.getElementById('progressBar').style.width = '100%';
       document.getElementById('statPct').textContent = '100%';
@@ -2579,6 +2814,11 @@ function handleEvent(event) {
       state.planData = data.plans || [];
       showPlanModal(state.planData);
       addEventLog('status', `攻撃プランが ${state.planData.length} ページ分生成されました — ダッシュボードで確認してください`);
+      break;
+
+    case 'crawl_review':
+      showCrawlReviewModal(data.pages || []);
+      addEventLog('status', `巡回完了: ${(data.pages||[]).length} 画面 — レビューしてください`);
       break;
 
     case 'intervention_state':
@@ -3063,6 +3303,81 @@ function filterFindings() {
     const searchOk = !q || text.includes(q);
     card.style.display = (sevOk && searchOk) ? '' : 'none';
   });
+}
+
+// ─── Crawl Review (pre-attack page list) ────────────────────────
+let _crawlReviewPages = [];
+
+function showCrawlReviewModal(pages) {
+  _crawlReviewPages = Array.isArray(pages) ? pages.slice() : [];
+  document.getElementById('crawlReviewCount').textContent = _crawlReviewPages.length;
+  document.getElementById('crawlReviewFilter').value = '';
+  document.getElementById('crawlReviewExtraUrls').value = '';
+  const manualEl = document.getElementById('crawlReviewManualFile');
+  if (manualEl && !manualEl.value) {
+    manualEl.value = document.getElementById('cfgManualCrawlFile')?.value || '';
+  }
+  renderCrawlReviewList();
+  document.getElementById('crawlReviewOverlay').classList.add('active');
+}
+
+function renderCrawlReviewList() {
+  const filter = (document.getElementById('crawlReviewFilter').value || '').toLowerCase();
+  const list = document.getElementById('crawlReviewList');
+  if (!list) return;
+  const items = _crawlReviewPages.filter(p =>
+    !filter || (p.url || '').toLowerCase().includes(filter)
+  );
+  if (!items.length) {
+    list.innerHTML = '<div style="padding:14px;color:var(--text-muted);font-size:.85rem">該当ページがありません。</div>';
+    return;
+  }
+  list.innerHTML = items.map((p, i) => {
+    const forms = p.forms || 0;
+    const params = p.params || 0;
+    const depth = p.depth ?? '';
+    const badge = (forms || params)
+      ? `<span style="background:rgba(248,81,73,.15);color:#ff7b72;padding:1px 6px;border-radius:8px;font-size:.7rem;font-weight:700">攻撃面 ${forms}F/${params}P</span>`
+      : `<span style="background:var(--surface2);color:var(--text-muted);padding:1px 6px;border-radius:8px;font-size:.7rem">静的</span>`;
+    return `
+      <div style="display:flex;gap:10px;align-items:center;padding:6px 10px;border-bottom:1px solid var(--border);font-size:.8rem">
+        <span style="color:var(--text-muted);min-width:32px;text-align:right">${i+1}</span>
+        <span style="color:var(--text-muted);min-width:46px">d=${depth}</span>
+        ${badge}
+        <span style="flex:1;font-family:monospace;color:var(--text);word-break:break-all">${escapeHtml(p.url || '')}</span>
+      </div>`;
+  }).join('');
+}
+
+function sendCrawlReview(command) {
+  if (!state.ws || state.ws.readyState !== WebSocket.OPEN) {
+    alert('WebSocket未接続。ページを再読み込みしてください。');
+    return;
+  }
+  const extraUrls = (document.getElementById('crawlReviewExtraUrls').value || '')
+    .split('\n').map(s => s.trim()).filter(Boolean);
+  const manualFile = (document.getElementById('crawlReviewManualFile').value || '').trim();
+  state.ws.send(JSON.stringify({
+    action: 'crawl_review',
+    command,
+    extra_urls: extraUrls,
+    manual_crawl_file: manualFile,
+  }));
+  document.getElementById('crawlReviewOverlay').classList.remove('active');
+  const label = command === 'recrawl' ? '再巡回中...' :
+                command === 'cancel'  ? '検査を中止しました' :
+                '検査を続行します';
+  setStatus(label, command === 'cancel' ? '' : 'running');
+  addEventLog('status', `[Crawl Review] ${label}`);
+}
+
+function openManualCrawlFromReview() {
+  // 巡回レビュー中に手動巡回タブを開けるよう、設定オーバーレイを表示
+  document.getElementById('crawlReviewOverlay').classList.remove('active');
+  document.getElementById('scanConfigOverlay').classList.add('active');
+  const btn = document.querySelector(`.cfg-tab[onclick*="'manualcrawl'"]`);
+  showCfgTab('manualcrawl', btn);
+  addEventLog('status', '手動巡回タブを開きました。記録後、JSONパスを巡回レビューに戻して入力してください。');
 }
 
 // ─── U-3: Manual payload execution ──────────────────────────────

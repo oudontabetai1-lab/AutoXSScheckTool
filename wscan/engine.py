@@ -167,6 +167,7 @@ class ScanEngine:
         auth_pass: str = "",
         use_planner: bool = True,
         interactive_plan: bool = False,
+        interactive_crawl_review: bool = False,
         skip_registration: bool = True,
         open_report: bool = True,
         proxy: str = "",
@@ -285,6 +286,7 @@ class ScanEngine:
 
         self.use_planner = use_planner
         self.interactive_plan = interactive_plan
+        self.interactive_crawl_review = interactive_crawl_review
         self.skip_registration = skip_registration
         self.open_report = open_report
         self.proxy = proxy
@@ -551,6 +553,10 @@ class ScanEngine:
             # ── Phase 1: Crawl ───────────────────────────────────────────
             if self.monitor: await self.monitor.emit_phase("crawl")
             crawled_pages = await self._phase_crawl()
+
+            # ── Phase 1b: Crawl Review (AeyeScan-style) ──────────────────
+            if self.interactive_crawl_review and self.monitor:
+                crawled_pages = await self._phase_crawl_review(crawled_pages)
 
             # A: Auto-register accounts via registration forms (after crawl)
             if self.auto_register and self.login_url:
@@ -1635,6 +1641,80 @@ class ScanEngine:
                 f"  → Post-authentication re-crawl scheduled for after Phase 3."
             )
             # Monitor notification is done lazily at async context (see _phase_crawl_postauth)
+
+    # ── Crawl review (interactive pause between crawl and plan) ───────────
+
+    async def _phase_crawl_review(self, pages: list) -> list:
+        """
+        Pause between crawl and plan phases so the operator can review the
+        discovered pages, request a re-crawl, add manually-recorded URLs, or
+        proceed to the attack phase.  Repeats until the operator clicks
+        "continue" (or the review times out).
+        """
+        current = list(pages)
+        while True:
+            pages_data = [
+                {
+                    "url": p.url,
+                    "depth": p.depth,
+                    "forms": len(p.forms or []),
+                    "params": len(p.url_params or []),
+                }
+                for p in current
+            ]
+            console.print(
+                f"\n  [bold cyan][Crawl Review][/bold cyan] "
+                f"{len(current)} 画面を巡回しました。ダッシュボードで確認してください。"
+            )
+            await self.monitor.emit_status(
+                f"巡回完了: {len(current)} 画面。ダッシュボードで確認してください。",
+                "running",
+            )
+            await self.monitor.emit_crawl_review(pages_data)
+            action = await self.monitor.wait_for_crawl_review()
+            command = (action.get("command") or "continue").lower()
+
+            extra_urls = [
+                u.strip() for u in (action.get("extra_urls") or [])
+                if isinstance(u, str) and u.strip().startswith(("http://", "https://"))
+            ]
+            for eu in extra_urls:
+                if eu not in self.visited_urls and self._is_access_allowed_url(eu):
+                    self.visited_urls.add(eu)
+
+            manual_file = (action.get("manual_crawl_file") or "").strip()
+            if manual_file:
+                self.manual_crawl_path = manual_file
+
+            if command == "recrawl" or extra_urls or manual_file:
+                console.print(
+                    f"  [cyan][Crawl Review][/cyan] 再巡回を実行 "
+                    f"(+{len(extra_urls)} URL, manual={'on' if manual_file else 'off'})"
+                )
+                await self.monitor.emit_status("再巡回中...", "running")
+                # Seed the new crawl with the user-supplied URLs so they are
+                # actually visited even if the previous crawl already enqueued
+                # the application root.
+                prev_seed = list(self.seed_urls)
+                if extra_urls:
+                    self.seed_urls = list({*prev_seed, *extra_urls})
+                try:
+                    additional = await self._phase_crawl()
+                finally:
+                    self.seed_urls = prev_seed
+                # Merge new pages, deduplicating by URL.
+                seen = {p.url for p in current}
+                for p in additional:
+                    if p.url not in seen:
+                        current.append(p)
+                        seen.add(p.url)
+                continue
+
+            if command == "cancel":
+                console.print("  [yellow][Crawl Review][/yellow] 操作者が検査を中断しました。")
+                raise AbortScan("crawl review cancelled")
+
+            return current
 
     # ── Post-authentication re-crawl ──────────────────────────────────────
 
