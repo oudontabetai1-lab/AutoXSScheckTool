@@ -314,6 +314,7 @@ body {
 .url-badge-scanning { background:#3b1fa8; color:#c4b5fd; animation:phasePulse 1s infinite; }
 .url-badge-done     { background:#14532d; color:#86efac; }
 .url-badge-vuln     { background:#7f1d1d; color:#fca5a5; }
+.url-badge-error    { background:#5f1d1d; color:#fecaca; }
 /* Current test rows */
 .ct-row-item { display:flex; align-items:center; gap:6px; margin-bottom:3px; min-width:0; }
 .ct-meta-label { font-size:.68rem; color:var(--text-muted); text-transform:uppercase; letter-spacing:.06em; flex-shrink:0; width:42px; }
@@ -861,6 +862,14 @@ body {
           <div class="cfg-field">
             <label>ペイロード上限/フィールド (0=無制限)</label>
             <input type="number" id="cfgMaxPayloads" value="0" min="0" max="200">
+          </div>
+          <div class="cfg-field">
+            <label>リクエスト間隔 (秒)</label>
+            <input type="number" id="cfgDelay" value="0.5" min="0" max="60" step="0.1">
+          </div>
+          <div class="cfg-field">
+            <label>ページ遷移リトライ</label>
+            <input type="number" id="cfgNavigationRetries" value="2" min="0" max="10">
           </div>
           <div class="cfg-field">
             <label>ダッシュボードポート</label>
@@ -1573,7 +1582,7 @@ body {
   </div>
 </div>
 
-<!-- Crawl Review Modal (AeyeScan-style) -->
+<!-- Crawl Review Modal -->
 <div class="plan-modal-overlay" id="crawlReviewOverlay">
   <div class="plan-modal" style="max-width:980px">
     <div class="plan-modal-header">
@@ -1648,7 +1657,7 @@ const state = {
   phase: null,
   phaseStartTs: {},
   phaseTimes: {},
-  urlStatuses: {},   // { url: 'pending'|'scanning'|'done'|'vuln' }
+  urlStatuses: {},   // { url: 'pending'|'scanning'|'done'|'vuln'|'error' }
   urlOrder: [],      // discovery order
   checkCounts: {},   // { xss: 12, sqli: 8, ... }
   graphNodes: {},    // { url: {id,url,parent,depth,status,forms,inputs} }
@@ -2005,6 +2014,8 @@ function submitScanConfig() {
     spa_crawl:    cfgToggles.spa_crawl,
     fast_mode:    cfgToggles.fast_mode,
     max_payloads: parseInt(document.getElementById('cfgMaxPayloads').value) || 0,
+    request_delay: parseFloat(document.getElementById('cfgDelay').value) || 0,
+    navigation_retries: parseInt(document.getElementById('cfgNavigationRetries').value) || 0,
     output_dir:   document.getElementById('cfgOutputDir').value.trim(),
     payloads_file: document.getElementById('cfgPayloadsFile').value.trim(),
     manual_crawl_file: document.getElementById('cfgManualCrawlFile').value.trim(),
@@ -2132,6 +2143,8 @@ function applyImportedConfig(cfg) {
   setVal('cfgMaxForms', cfg.max_forms);
   setVal('cfgConcurrency', cfg.concurrency);
   setVal('cfgMaxPayloads', cfg.max_payloads);
+  setVal('cfgDelay', cfg.request_delay);
+  setVal('cfgNavigationRetries', cfg.navigation_retries);
   setVal('cfgProxy', cfg.proxy);
   setVal('cfgOutputDir', cfg.output_dir);
   setVal('cfgPayloadsFile', cfg.payloads_file);
@@ -2249,6 +2262,8 @@ function saveConfigToStorage() {
       timeout: document.getElementById('cfgTimeoutInput').value,
       max_forms: document.getElementById('cfgMaxForms').value,
       concurrency: document.getElementById('cfgConcurrency').value,
+      request_delay: document.getElementById('cfgDelay').value,
+      navigation_retries: document.getElementById('cfgNavigationRetries').value,
       proxy: document.getElementById('cfgProxy').value,
       toggles: {...cfgToggles},
       llm: document.getElementById('cfgLlm').value,
@@ -2288,6 +2303,8 @@ function loadConfigFromStorage() {
     if (cfg.timeout) document.getElementById('cfgTimeoutInput').value = cfg.timeout;
     if (cfg.max_forms) document.getElementById('cfgMaxForms').value = cfg.max_forms;
     if (cfg.concurrency) document.getElementById('cfgConcurrency').value = cfg.concurrency;
+    if (cfg.request_delay != null) document.getElementById('cfgDelay').value = cfg.request_delay;
+    if (cfg.navigation_retries != null) document.getElementById('cfgNavigationRetries').value = cfg.navigation_retries;
     if (cfg.proxy) document.getElementById('cfgProxy').value = cfg.proxy;
     if (cfg.toggles) Object.assign(cfgToggles, cfg.toggles);
     if (cfg.llm) { document.getElementById('cfgLlm').value = cfg.llm; updateLlmModelField(); }
@@ -2335,6 +2352,8 @@ async function loadDefaultConfigFromServer() {
     if (cfg.depth != null) document.getElementById('cfgDepth').value = cfg.depth;
     if (cfg.timeout != null) document.getElementById('cfgTimeoutInput').value = cfg.timeout;
     if (cfg.max_forms != null) document.getElementById('cfgMaxForms').value = cfg.max_forms;
+    if (cfg.request_delay != null) document.getElementById('cfgDelay').value = cfg.request_delay;
+    if (cfg.navigation_retries != null) document.getElementById('cfgNavigationRetries').value = cfg.navigation_retries;
     if (cfg.proxy != null) document.getElementById('cfgProxy').value = cfg.proxy;
     if (cfg.llm) { document.getElementById('cfgLlm').value = cfg.llm; updateLlmModelField(); }
     if (cfg.ollama_model) document.getElementById('cfgOllamaModel').value = cfg.ollama_model;
@@ -2748,6 +2767,20 @@ function handleEvent(event) {
       }
       break;
 
+    case 'scan_gap': {
+      const u = data.url || '';
+      if (u) {
+        if (!state.urlStatuses[u]) state.urlOrder.push(u);
+        state.urlStatuses[u] = 'error';
+        renderUrlList();
+      }
+      addEventLog(
+        'status',
+        `[未検査] ${(data.check || 'access').toUpperCase()} ${u} — ${(data.note || '').substring(0, 120)}`
+      );
+      break;
+    }
+
     case 'request':
       updateRequest(data);
       addEventLog('request', `${data.method || 'GET'} ${(data.url||'').substring(0,60)}`);
@@ -2938,7 +2971,7 @@ function renderUrlList() {
   const total = state.urlOrder.length;
   if (panel) panel.style.display = total > 0 ? 'block' : 'none';
   if (countEl) countEl.textContent = total;
-  const LABELS = { pending: '待機中', scanning: '検査中', done: '完了', vuln: '発見あり' };
+  const LABELS = { pending: '待機中', scanning: '検査中', done: '完了', vuln: '発見あり', error: '未検査' };
   el.innerHTML = state.urlOrder.map(url => {
     const st = state.urlStatuses[url] || 'pending';
     return `<div class="url-item"><span class="url-text" title="${escapeHtml(url)}">${escapeHtml(url)}</span><span class="url-badge url-badge-${st}">${LABELS[st] || st}</span></div>`;

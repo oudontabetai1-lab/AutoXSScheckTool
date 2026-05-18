@@ -434,6 +434,23 @@ class MonitorServer:
         """Emit when a URL has finished being attacked."""
         await self.emit("url_complete", {"url": url})
 
+    async def emit_scan_gap(
+        self,
+        url: str,
+        field_name: str = "(page)",
+        check: str = "access",
+        location: str = "navigation",
+        note: str = "",
+    ) -> None:
+        """Emit a target/input that could not be tested."""
+        await self.emit("scan_gap", {
+            "url": url,
+            "field_name": field_name,
+            "check": check,
+            "location": location,
+            "note": note,
+        })
+
     async def emit_plan_review(self, plans_data: list):
         """
         Send plan data to the dashboard for operator review/edit.

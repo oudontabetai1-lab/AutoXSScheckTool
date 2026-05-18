@@ -65,10 +65,16 @@ class XXEScanner(BaseScanner):
 
     async def _post_xml(self, url: str, payload: str) -> tuple[str, int, float]:
         timeout = getattr(self.engine, "timeout", 15)
+        proxy = getattr(self.engine, "proxy", "") or None
+        headers = {"Content-Type": "application/xml"}
+        auth_headers = getattr(self.engine, "auth_headers", None)
+        if callable(auth_headers):
+            headers = auth_headers(headers)
         client_kwargs: dict = {
             "timeout": timeout,
             "follow_redirects": True,
             "verify": False,
+            "headers": headers,
         }
         if proxy:
             client_kwargs["proxy"] = proxy
@@ -77,7 +83,6 @@ class XXEScanner(BaseScanner):
             r = await client.post(
                 url,
                 content=payload,
-                headers={"Content-Type": "application/xml"},
             )
         return r.text, r.status_code, r.elapsed.total_seconds()
 
@@ -127,7 +132,6 @@ class XXEScanner(BaseScanner):
         field_name = field.get("name") or field.get("id") or f"field_{form_index}"
         findings: list[Finding] = []
 
-        proxy = getattr(self.engine, "proxy", "") or None
         timeout = getattr(self.engine, "timeout", 15)
         try:
             baseline_body, _baseline_status, _baseline_elapsed = await self._post_xml(
@@ -142,7 +146,7 @@ class XXEScanner(BaseScanner):
 
         for payload, description in _XXE_PAYLOADS:
             if self.monitor:
-                await self.monitor.emit_payload_test(url, field_name, payload, self.CHECK_TYPE)
+                await self.monitor.emit_payload_test(field_name, payload, self.CHECK_TYPE, url)
             try:
                 body, status_code, elapsed = await self._post_xml(url, payload)
 
