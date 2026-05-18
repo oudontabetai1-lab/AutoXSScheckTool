@@ -6,6 +6,8 @@
 
 > 注意: WScan は脆弱性検査ツールです。自分が管理している環境、または検査許可を得た環境だけを対象にしてください。
 
+実検査前のスコープ設計、認証、負荷調整、再検査の流れは [operation_guide_ja.md](operation_guide_ja.md) を参照してください。アクセス失敗や検出漏れの切り分けは [troubleshooting_ja.md](troubleshooting_ja.md) にまとめています。
+
 ## 1. 事前準備
 
 リポジトリを取得し、Python 依存関係と Playwright ブラウザをインストールします。
