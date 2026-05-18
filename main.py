@@ -60,6 +60,8 @@ def _load_config(path: Path = _CONFIG_PATH) -> dict:
     cfg["depth"]                   = int(s.get("depth",     2))
     cfg["max_forms"]               = int(s.get("max_forms", 50))
     cfg["timeout"]                 = int(s.get("timeout",   30))
+    cfg["request_delay"]           = float(s.get("request_delay", 0.5))
+    cfg["navigation_retries"]      = int(s.get("navigation_retries", 2))
     cfg["exclude_fields"]          = list(s.get("exclude_fields", []))
     cfg["exclude_urls"]            = list(s.get("exclude_urls",   []))
     cfg["target_urls"]             = list(s.get("target_urls",    []))
@@ -103,6 +105,8 @@ def _load_config(path: Path = _CONFIG_PATH) -> dict:
     cfg["skip_registration"]       = bool(f.get("skip_registration", True))
     cfg["open_report"]             = bool(f.get("open_report",      True))
     cfg["auto_config"]             = bool(f.get("auto_config",      False))
+    cfg["spa_crawl"]               = bool(f.get("spa_crawl",        False))
+    cfg["interactive_crawl_review"] = bool(f.get("interactive_crawl_review", False))
 
     cfg["learning_file"]           = str(le.get("file", "") or "")
 
@@ -445,10 +449,17 @@ Examples:
         ),
     )
     scan.add_argument(
-        "--delay", type=float, default=0.5, metavar="SECS",
+        "--delay", type=float, default=_CFG.get("request_delay", 0.5), metavar="SECS",
         help=(
-            "リクエスト間の待機秒数 (デフォルト: 0.5)。"
+            "リクエスト間の待機秒数 (デフォルト: config scan.request_delay または 0.5)。"
             "--fast 指定時は 0 に上書きされる。本番環境への負荷軽減に活用。"
+        ),
+    )
+    scan.add_argument(
+        "--navigation-retries", type=int, default=_CFG.get("navigation_retries", 2), metavar="N",
+        help=(
+            "ページ遷移がタイムアウト/一時失敗した場合の再試行回数 "
+            "(デフォルト: config scan.navigation_retries または 2)。"
         ),
     )
     scan.add_argument(
@@ -1219,6 +1230,7 @@ async def run_scan(args):
             previous_scan_dir=getattr(args, "previous_scan", None),
             # N: リクエストレート制御
             request_delay=getattr(args, "delay", 0.5),
+            navigation_retries=getattr(args, "navigation_retries", 2),
             # K: SARIF 出力
             sarif=not getattr(args, "no_sarif", False),
             # L: Webhook/Slack 通知
@@ -1319,6 +1331,8 @@ async def run_serve(args):
         "depth": _CFG.get("depth", 2),
         "timeout": _CFG.get("timeout", 30),
         "max_forms": _CFG.get("max_forms", 50),
+        "request_delay": _CFG.get("request_delay", 0.5),
+        "navigation_retries": _CFG.get("navigation_retries", 2),
         "proxy": _CFG.get("proxy", ""),
         "llm": _CFG.get("llm_provider", "ollama"),
         "ollama_model": _CFG.get("ollama_model", "llama3"),
@@ -1347,6 +1361,8 @@ async def run_serve(args):
             "enable_waf_detection": _CFG.get("waf_detection", True),
             "enable_payload_learning": _CFG.get("payload_learning", True),
             "enable_sitemap_crawl": _CFG.get("sitemap_crawl", True),
+            "spa_crawl": _CFG.get("spa_crawl", False),
+            "interactive_crawl_review": _CFG.get("interactive_crawl_review", False),
             "ctf_mode": _CFG.get("ctf_mode", False),
         },
     }
@@ -1510,6 +1526,8 @@ async def run_serve(args):
                 spa_crawl=bool(cfg.get("spa_crawl", False)),
                 fast_mode=bool(cfg.get("fast_mode", False)),
                 max_payloads=int(cfg.get("max_payloads", 0)),
+                request_delay=float(cfg.get("request_delay", 0.5) or 0.0),
+                navigation_retries=int(cfg.get("navigation_retries", 2)),
                 accounts=cfg.get("accounts", []) or [],
                 auto_register=bool(cfg.get("auto_register", False)),
                 auto_register_count=int(cfg.get("auto_register_count", 2)),

@@ -205,6 +205,7 @@ class ScanEngine:
         previous_scan_dir: Optional[str] = None,
         # N: リクエスト間の待機秒数 (0 = 無制限)
         request_delay: float = 0.5,
+        navigation_retries: int = 2,
         # K: SARIF 出力を有効にするか
         sarif: bool = True,
         # L: Webhook/Slack 通知
@@ -238,6 +239,7 @@ class ScanEngine:
         # N: effective delay = request_delay * sleep_factor
         # fast_mode forces 0; ctf_mode halves the delay
         self._effective_delay: float = request_delay * self.sleep_factor
+        self.navigation_retries: int = max(0, int(navigation_retries))
         self.cookies = cookies
         self.cookie_list: list = list(cookie_list or [])
         # Normalise low-privilege cookies: prefer list form when both are given
@@ -507,6 +509,44 @@ class ScanEngine:
             "finding_count": finding_count,
             "note": note,
         })
+
+    def _navigation_failure_note(self) -> str:
+        """Return the most recent browser navigation failure in report-friendly form."""
+        br = self.browser
+        status = getattr(br, "last_navigation_status", None)
+        error = getattr(br, "last_navigation_error", "") or ""
+        if status is not None and error:
+            return f"Navigation failed after retries ({error}, last status HTTP {status})."
+        if status is not None:
+            return f"Navigation failed after retries (last status HTTP {status})."
+        if error:
+            return f"Navigation failed after retries ({error})."
+        return "Navigation failed after retries."
+
+    def _record_unscannable_url(self, url: str, *, field_name: str = "(page)", note: str = "") -> None:
+        """Record a URL/input that could not be tested so reports show scan gaps."""
+        note = note or self._navigation_failure_note()
+        self._record_scan_matrix(
+            url=url,
+            field_name=field_name,
+            check_name="access",
+            status="error",
+            location="navigation",
+            note=note,
+        )
+        if self.monitor:
+            try:
+                asyncio.get_running_loop().create_task(
+                    self.monitor.emit_scan_gap(
+                        url=url,
+                        field_name=field_name,
+                        check="access",
+                        location="navigation",
+                        note=note,
+                    )
+                )
+            except RuntimeError:
+                pass
 
     # =========================================================================
     # browser property — transparently returns the current worker's browser
@@ -995,9 +1035,10 @@ class ScanEngine:
             if self.monitor:
                 await self.monitor.emit_page_start(url)
 
-            success = await self.browser.navigate(url)
+            success = await self.browser.navigate(url, retries=self.navigation_retries)
             if not success:
                 console.print(f"  [yellow]  ✘ could not load[/yellow]")
+                self._record_unscannable_url(url)
                 continue
 
             # Detect session expiry: if we've been redirected to the login page,
@@ -1015,9 +1056,14 @@ class ScanEngine:
                 if ok:
                     console.print("  [green][Auth] Re-login successful — resuming crawl.[/green]")
                     # Navigate back to the intended page after re-login
-                    success = await self.browser.navigate(url)
+                    success = await self.browser.navigate(url, retries=self.navigation_retries)
                     if not success:
                         console.print(f"  [yellow]  ✘ could not re-load after login[/yellow]")
+                        self._record_unscannable_url(
+                            url,
+                            note="Navigation failed after successful re-login: "
+                            + self._navigation_failure_note(),
+                        )
                         continue
                 else:
                     console.print(
@@ -1865,7 +1911,7 @@ class ScanEngine:
 
         # Navigate to target URL with authenticated session to find the landing page
         # (e.g., target is /login but authenticated session redirects to /dashboard)
-        await self._browser.navigate(self.target_url)
+        await self._browser.navigate(self.target_url, retries=self.navigation_retries)
         landing_url = self._browser.page.url.rstrip("/")
 
         # If we landed on the login page, session may have expired — try to re-login
@@ -1907,9 +1953,10 @@ class ScanEngine:
             if self.monitor:
                 await self.monitor.emit_page_start(url)
 
-            success = await self._browser.navigate(url)
+            success = await self._browser.navigate(url, retries=self.navigation_retries)
             if not success:
                 console.print(f"  [yellow]  ✘ could not load[/yellow]")
+                self._record_unscannable_url(url)
                 continue
 
             # Check actual URL after navigation (may redirect)
@@ -2069,17 +2116,31 @@ class ScanEngine:
                         f"  [yellow][Flow] Ended on {actual_url}, "
                         f"re-navigating to {page.url}[/yellow]"
                     )
-                    if not await self.browser.navigate(page.url):
+                    if not await self.browser.navigate(page.url, retries=self.navigation_retries):
+                        self._record_unscannable_url(
+                            page.url,
+                            note="Pre-attack flow ended on a different URL and re-navigation failed: "
+                            + self._navigation_failure_note(),
+                        )
                         return
             except Exception:
-                if not await self.browser.navigate(page.url):
+                if not await self.browser.navigate(page.url, retries=self.navigation_retries):
+                    self._record_unscannable_url(
+                        page.url,
+                        note="Pre-attack flow recovery navigation failed: "
+                        + self._navigation_failure_note(),
+                    )
                     return
         else:
             # ── Re-authenticate if session expired ───────────────────────
             await self._ensure_authenticated()
             # Navigate back to page for form interaction
-            success = await self.browser.navigate(page.url)
+            success = await self.browser.navigate(page.url, retries=self.navigation_retries)
             if not success:
+                self._record_unscannable_url(
+                    page.url,
+                    note="Attack phase could not load page: " + self._navigation_failure_note(),
+                )
                 return
 
         # CTF: re-check page after navigating (dynamic content may differ from crawl)
@@ -2212,7 +2273,13 @@ class ScanEngine:
                 continue
 
             if not is_url_param:
-                await self.browser.navigate(page.url)
+                if not await self.browser.navigate(page.url, retries=self.navigation_retries):
+                    self._record_unscannable_url(
+                        page.url,
+                        field_name=field_name,
+                        note="Could not restore page after field scan: "
+                        + self._navigation_failure_note(),
+                    )
 
     # =========================================================================
     # Phase 3d: Multi-parameter simultaneous injection
@@ -2286,8 +2353,14 @@ class ScanEngine:
                     f"{', '.join(field_payloads)}[/dim magenta]"
                 )
 
-                ok = await self.browser.navigate(page.url)
+                ok = await self.browser.navigate(page.url, retries=self.navigation_retries)
                 if not ok:
+                    self._record_unscannable_url(
+                        page.url,
+                        field_name=f"multi[{','.join(field_payloads)}]",
+                        note="Multi-parameter scan could not load page: "
+                        + self._navigation_failure_note(),
+                    )
                     continue
                 self.browser.reset_dialog()
 
@@ -2906,7 +2979,7 @@ class ScanEngine:
                 pass
 
         try:
-            await self.browser.navigate(f.url)
+            await self.browser.navigate(f.url, retries=self.navigation_retries)
             self.browser.reset_dialog()
             source, pair = await scanner._apply_payload(
                 f.url, 0, f.field_name, f.payload, is_url_param
@@ -3224,7 +3297,7 @@ class ScanEngine:
                         self._record_finding(f, source=f"manual:{field_name}")
                 else:
                     # Generic: just navigate and check for payload in response
-                    await self.browser.navigate(url)
+                    await self.browser.navigate(url, retries=self.navigation_retries)
                     source, pair = await self.browser.fill_and_submit_form(0, field_name, payload)
                     if payload in (source or ""):
                         console.print(
@@ -3329,7 +3402,7 @@ class ScanEngine:
 
             # Fill and submit the registration form via Playwright
             try:
-                await self._browser.navigate(reg_url)
+                await self._browser.navigate(reg_url, retries=self.navigation_retries)
                 form_inputs = reg_form.get("inputs", [])
                 for inp in form_inputs:
                     iname = inp.get("name", "")

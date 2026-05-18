@@ -123,6 +123,10 @@ class CORSScanner(BaseScanner):
     async def _get_with_origin(self, url: str, origin: str):
         proxy = getattr(self.engine, "proxy", "") or None
         headers = self._origin_headers(origin)
+        if hasattr(self.engine, "auth_headers"):
+            base = self.engine.auth_headers()
+            base.update(headers)
+            headers = base
         kwargs: dict = {
             "headers": headers,
             "timeout": getattr(self.engine, "timeout", 15),

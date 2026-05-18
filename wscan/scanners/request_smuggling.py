@@ -165,12 +165,13 @@ class RequestSmugglingScanner(BaseScanner):
 
     async def _measure_normal(self, url: str, timeout: float, proxy: str | None) -> float:
         normal_start = time.monotonic()
+        headers = self.engine.auth_headers() if hasattr(self.engine, "auth_headers") else {}
         async with httpx.AsyncClient(
             timeout=timeout,
             follow_redirects=False,
             **({"proxy": proxy} if proxy else {}),
         ) as client:
-            await client.get(url)
+            await client.get(url, headers=headers)
         return time.monotonic() - normal_start
 
     async def _send_probe(

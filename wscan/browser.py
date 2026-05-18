@@ -134,6 +134,8 @@ class BrowserManager:
         self.dialog_screenshot_b64: str = ""  # Screenshot taken right when alert fires
         self.last_login_url: str = ""
         self.last_login_success: bool = False
+        self.last_navigation_error: str = ""
+        self.last_navigation_status: Optional[int] = None
 
     async def init(self):
         """Launch browser and create page."""
@@ -214,14 +216,44 @@ class BrowserManager:
         self.dialog_message = ""
         self.dialog_screenshot_b64 = ""
 
-    async def navigate(self, url: str, wait_until: str = "domcontentloaded") -> bool:
+    async def navigate(
+        self,
+        url: str,
+        wait_until: str = "domcontentloaded",
+        retries: int = 2,
+        retry_delay: float = 0.75,
+    ) -> bool:
         """Navigate to URL and return success."""
+        self.last_navigation_error = ""
+        self.last_navigation_status = None
+        attempts = max(1, int(retries) + 1)
         try:
             self.network.clear()
-            await self.page.goto(url, wait_until=wait_until, timeout=self.timeout)
-            return True
-        except Exception as e:
-            return False
+        except Exception:
+            pass
+        for attempt in range(attempts):
+            try:
+                response = await self.page.goto(url, wait_until=wait_until, timeout=self.timeout)
+                self.last_navigation_status = response.status if response else None
+                if (
+                    response is not None
+                    and (response.status == 429 or response.status >= 500)
+                    and attempt + 1 < attempts
+                ):
+                    self.last_navigation_error = f"HTTP {response.status}"
+                    await asyncio.sleep(retry_delay * (attempt + 1))
+                    continue
+                if response is not None and response.status >= 400:
+                    self.last_navigation_error = f"HTTP {response.status}"
+                    return False
+                self.last_navigation_error = ""
+                return True
+            except Exception as e:
+                self.last_navigation_error = f"{type(e).__name__}: {e}"
+                if attempt + 1 >= attempts:
+                    return False
+                await asyncio.sleep(retry_delay * (attempt + 1))
+        return False
 
     async def screenshot_b64(self, label: str = "") -> str:
         """Take screenshot and return as base64 string."""

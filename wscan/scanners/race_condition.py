@@ -114,6 +114,10 @@ class RaceConditionScanner(BaseScanner):
         }
         if proxy:
             client_kwargs["proxy"] = proxy
+        if hasattr(self.engine, "auth_headers"):
+            base_headers = self.engine.auth_headers()
+            base_headers.update(headers or {})
+            headers = base_headers
 
         async def _one_request(session: httpx.AsyncClient) -> httpx.Response:
             if method == "POST":
