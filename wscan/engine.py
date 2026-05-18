@@ -681,15 +681,20 @@ class ScanEngine:
 
         finally:
             self.controller.stop()
-            try:
-                await self.header_manager.stop_background_refresh()
-            except Exception:
-                pass
 
             # ── Phase 4.5: Verification ──────────────────────────────────
+            # Keep the header refresh task alive through verification: scanner
+            # verify_finding() paths still make authenticated httpx calls via
+            # auth_headers(), and stopping refresh here would freeze the token
+            # snapshot — verifiers near token expiry would 401 and mark real
+            # findings unconfirmed.
             try:
                 await self._phase_verify()
             finally:
+                try:
+                    await self.header_manager.stop_background_refresh()
+                except Exception:
+                    pass
                 await self._browser.close()
 
             # ── Phase 4: Report ──────────────────────────────────────────
