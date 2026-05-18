@@ -111,6 +111,7 @@ class BrowserManager:
         auth_pass: str = "",
         proxy: str = "",
         sleep_factor: float = 1.0,
+        extra_headers: Optional[dict] = None,
     ):
         self.headless = headless
         self.timeout = timeout * 1000  # ms
@@ -119,6 +120,10 @@ class BrowserManager:
         self.auth_pass = auth_pass
         self.proxy = proxy  # e.g. "http://127.0.0.1:8080"
         self.sleep_factor = sleep_factor
+        # Custom HTTP headers (Authorization, X-API-Key, …) applied to every
+        # request through the Playwright context. Updated live by HeaderManager
+        # when ``--header-refresh-cmd`` rotates the token.
+        self.extra_headers: dict[str, str] = dict(extra_headers or {})
         self._playwright = None
         self._browser: Optional[Browser] = None
         self._context: Optional[BrowserContext] = None
@@ -145,6 +150,13 @@ class BrowserManager:
         }
         if self.proxy:
             ctx_kwargs["proxy"] = {"server": self.proxy}
+        if self.extra_headers:
+            # Keep header names case-preserving but de-dupe case-insensitive collisions
+            # so Playwright doesn't reject duplicates.
+            seen: dict[str, str] = {}
+            for k, v in self.extra_headers.items():
+                seen[k.lower()] = v
+                ctx_kwargs.setdefault("extra_http_headers", {})[k] = str(v)
         self._context = await self._browser.new_context(**ctx_kwargs)
         self.page = await self._context.new_page()
         self.page.set_default_timeout(self.timeout)
@@ -183,6 +195,18 @@ class BrowserManager:
         except Exception:
             # The page may already have navigated or been closed by a parallel
             # worker. The dialog signal is still useful evidence.
+            pass
+
+    async def update_extra_headers(self, headers: dict) -> None:
+        """Replace the context-wide extra HTTP headers (used by the refresh task)."""
+        self.extra_headers = dict(headers or {})
+        if self._context is None:
+            return
+        try:
+            await self._context.set_extra_http_headers(self.extra_headers)
+        except Exception:
+            # Older Playwright builds or already-closed contexts — swallow so a
+            # rotating-token failure never aborts an in-progress scan.
             pass
 
     def reset_dialog(self):

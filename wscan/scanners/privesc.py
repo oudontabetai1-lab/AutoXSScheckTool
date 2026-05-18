@@ -44,6 +44,15 @@ if TYPE_CHECKING:
     from wscan.engine import ScanEngine
 
 
+def _engine_custom_headers(engine) -> dict:
+    """Return custom --header / refreshed-token headers, *without* the Cookie
+    (privesc deliberately swaps the Cookie under test)."""
+    if not hasattr(engine, "auth_headers"):
+        return {}
+    hdrs = engine.auth_headers(include_cookie=False)
+    return {k: v for k, v in hdrs.items() if k.lower() != "cookie"}
+
+
 # ---------------------------------------------------------------------------
 # Heuristics
 # ---------------------------------------------------------------------------
@@ -472,7 +481,7 @@ class PrivEscScanner(BaseScanner):
                 follow_redirects=False,
                 timeout=timeout,
                 verify=False,
-                headers={**_HEADERS, "Cookie": low_priv_cookies},
+                headers={**_HEADERS, **_engine_custom_headers(self.engine), "Cookie": low_priv_cookies},
                 **self._client_proxy_kwargs(),
             ) as client:
                 resp = await client.get(url)
@@ -961,7 +970,10 @@ class PrivEscScanner(BaseScanner):
                 follow_redirects=True,
                 timeout=timeout,
                 verify=False,
-                headers={**_HEADERS, "Cookie": cookies} if cookies else _HEADERS,
+                headers=(
+                    {**_HEADERS, **_engine_custom_headers(self.engine), "Cookie": cookies}
+                    if cookies else {**_HEADERS, **_engine_custom_headers(self.engine)}
+                ),
                 **self._client_proxy_kwargs(),
             ) as client:
                 resp = await client.get(url)
@@ -983,7 +995,10 @@ class PrivEscScanner(BaseScanner):
                 follow_redirects=False,
                 timeout=timeout,
                 verify=False,
-                headers={**_HEADERS, "Cookie": cookies} if cookies else _HEADERS,
+                headers=(
+                    {**_HEADERS, **_engine_custom_headers(self.engine), "Cookie": cookies}
+                    if cookies else {**_HEADERS, **_engine_custom_headers(self.engine)}
+                ),
                 **self._client_proxy_kwargs(),
             ) as client:
                 resp = await client.request(method, url, data=data)

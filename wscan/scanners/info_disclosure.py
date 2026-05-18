@@ -130,6 +130,8 @@ class InfoDisclosureScanner(BaseScanner):
         }
         if proxy:
             kwargs["proxy"] = proxy
+        if hasattr(self.engine, "auth_headers"):
+            kwargs["headers"] = self.engine.auth_headers()
 
         if self.monitor:
             await self.monitor.emit_status(
@@ -295,6 +297,8 @@ class InfoDisclosureScanner(BaseScanner):
         kwargs: dict = {"timeout": timeout, "follow_redirects": follow_redirects}
         if proxy:
             kwargs["proxy"] = proxy
+        if hasattr(self.engine, "auth_headers"):
+            kwargs["headers"] = self.engine.auth_headers()
         async with httpx.AsyncClient(**kwargs) as client:
             return await client.get(url)
 

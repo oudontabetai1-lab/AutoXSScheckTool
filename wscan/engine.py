@@ -214,6 +214,10 @@ class ScanEngine:
         har_path: str = "",
         # 手動巡回ファイルインポート
         manual_crawl_path: str = "",
+        # Custom HTTP headers + periodic refresh (Authorization rotation, etc.)
+        headers: Optional[dict] = None,
+        header_refresh_cmd: str = "",
+        header_refresh_interval: float = 0.0,
     ):
         self.target_url = url.rstrip("/")
         self.monitor = monitor
@@ -330,13 +334,45 @@ class ScanEngine:
 
         prompt_templates = payloads_data.get("llm_prompts", {})
 
+        # Header manager — single source of truth for custom HTTP headers
+        # (Authorization, X-API-Key, etc.). Browser context AND every httpx call
+        # site pull from here so rotating tokens take effect immediately.
+        from .header_manager import HeaderManager
+        self.header_manager = HeaderManager(
+            headers=headers or {},
+            refresh_cmd=header_refresh_cmd or "",
+            refresh_interval=float(header_refresh_interval or 0.0),
+        )
         # Components
         self._browser = BrowserManager(
             headless=headless, timeout=timeout, monitor=monitor,
             auth_user=auth_user, auth_pass=auth_pass,
             proxy=proxy,
             sleep_factor=self.sleep_factor,
+            extra_headers=self.header_manager.current(),
         )
+        # When the refresh task fetches a new token, push it into the browser
+        # context so crawled pages immediately use the rotated header.
+        async def _propagate_headers(new_headers: dict):
+            try:
+                await self._browser.update_extra_headers(new_headers)
+            except Exception:
+                pass
+            # If the refresh command emitted a fresh ``Cookie:`` header, treat it
+            # as a session refresh: update the engine cookie string AND the
+            # browser cookie jar so subsequent navigations carry it.
+            cookie_value = ""
+            for k, v in new_headers.items():
+                if k.lower() == "cookie":
+                    cookie_value = v
+                    break
+            if cookie_value and cookie_value != self.cookies:
+                self.cookies = cookie_value
+                try:
+                    await self._browser.set_cookies(cookie_value, self.target_url)
+                except Exception:
+                    pass
+        self.header_manager._on_change = _propagate_headers
         self.payload_gen = PayloadGenerator(
             provider=llm_provider,
             ollama_model=ollama_model,
@@ -366,8 +402,13 @@ class ScanEngine:
         self.exclude_fields: set = {f.lower() for f in (exclude_fields or [])}
         self.exclude_urls: set = set(exclude_urls or [])
 
-        # A-2: WAF detection
-        self.waf_detector = WAFDetector(payload_gen=self.payload_gen, proxy=proxy)
+        # A-2: WAF detection — feed custom headers through so authenticated
+        # endpoints respond honestly during the probe.
+        self.waf_detector = WAFDetector(
+            payload_gen=self.payload_gen,
+            proxy=proxy,
+            headers_provider=lambda: self.auth_headers(),
+        )
         # A-3: Payload continuous learning
         self.payload_learner = PayloadLearner(learning_file=learning_file)
 
@@ -471,6 +512,28 @@ class ScanEngine:
     # browser property — transparently returns the current worker's browser
     # =========================================================================
 
+    def auth_headers(self, extra: Optional[dict] = None, *, include_cookie: bool = True) -> dict:
+        """
+        Central source of HTTP headers for direct httpx calls.
+
+        Merges (in order, later overrides earlier):
+          * Custom headers from --header / --header-file / refresh command
+          * The current Cookie string (engine.cookies) unless ``include_cookie=False``
+            and the user hasn't already supplied a Cookie header
+          * Caller-supplied ``extra``
+        """
+        headers: dict = self.header_manager.current()
+        if include_cookie and self.cookies:
+            # Don't clobber an explicit Cookie header from --header.
+            if not any(k.lower() == "cookie" for k in headers):
+                headers["Cookie"] = self.cookies
+        if extra:
+            for k, v in extra.items():
+                if v is None:
+                    continue
+                headers[k] = v
+        return headers
+
     @property
     def browser(self):
         """
@@ -505,6 +568,10 @@ class ScanEngine:
         # U-3: Start manual payload listener if monitor active
         if self.monitor:
             asyncio.run_coroutine_threadsafe(self._manual_payload_listener(), loop)
+
+        # Periodic header refresh (rotating Bearer tokens etc.). Safe no-op if
+        # no refresh command / interval was configured.
+        self.header_manager.start_background_refresh()
 
         try:
             await self._browser.init()
@@ -614,6 +681,10 @@ class ScanEngine:
 
         finally:
             self.controller.stop()
+            try:
+                await self.header_manager.stop_background_refresh()
+            except Exception:
+                pass
 
             # ── Phase 4.5: Verification ──────────────────────────────────
             try:
@@ -646,6 +717,7 @@ class ScanEngine:
             verify=False,
             follow_redirects=True,
             proxy=self.proxy or None,
+            headers=self.auth_headers(),
         ) as client:
             # robots.txt
             try:
@@ -831,6 +903,15 @@ class ScanEngine:
                         queue.append((_hurl, 0, self.target_url))
                 if har_seed.cookies:
                     await self.browser.page.context.add_cookies(har_seed.cookies)
+                # Pick up Authorization / X-API-Key headers captured in the HAR
+                # so the scanner sends them on every subsequent request.
+                if getattr(har_seed, "headers", None):
+                    har_hdrs = {
+                        k: v for k, v in har_seed.headers.items()
+                        if k.lower() not in ("cookie", "content-length", "host")
+                    }
+                    if har_hdrs:
+                        await self.header_manager.update(har_hdrs)
             except Exception as _har_err:
                 console.print(f"  [yellow][O-HAR] HAR 読み込み失敗: {_har_err}[/yellow]")
 
@@ -2798,7 +2879,7 @@ class ScanEngine:
                         new_qs[f.field_name] = [value]
                         return urlunparse(parsed._replace(query=urlencode(new_qs, doseq=True)))
 
-                    headers = {"Cookie": self.cookies} if self.cookies else {}
+                    headers = self.auth_headers()
                     async with httpx.AsyncClient(
                         follow_redirects=True,
                         timeout=self.timeout,

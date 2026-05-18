@@ -181,11 +181,15 @@ class JWTScanner(BaseScanner):
         """
         timeout = float(getattr(self.engine, "timeout", 30))
 
-        # Build request headers (include session cookies if available)
+        # Build request headers — pull through engine.auth_headers() so custom
+        # --header values and refreshed bearer tokens are always included.
         req_headers = dict(_HEADERS)
-        cookies_str = getattr(self.engine, "cookies", "") or ""
-        if cookies_str:
-            req_headers["Cookie"] = cookies_str
+        if hasattr(self.engine, "auth_headers"):
+            req_headers.update(self.engine.auth_headers())
+        else:
+            cookies_str = getattr(self.engine, "cookies", "") or ""
+            if cookies_str:
+                req_headers["Cookie"] = cookies_str
 
         # Fetch the target page
         try:
@@ -661,9 +665,12 @@ class JWTScanner(BaseScanner):
             if not probe_token:
                 return None
             headers = dict(_HEADERS)
-            cookies_str = getattr(self.engine, "cookies", "") or ""
-            if cookies_str:
-                headers["Cookie"] = cookies_str
+            if hasattr(self.engine, "auth_headers"):
+                headers.update(self.engine.auth_headers())
+            else:
+                cookies_str = getattr(self.engine, "cookies", "") or ""
+                if cookies_str:
+                    headers["Cookie"] = cookies_str
             timeout = float(getattr(self.engine, "timeout", 30))
             return await self._probe_token(finding.url, probe_token, headers, timeout)
 

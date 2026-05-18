@@ -148,8 +148,15 @@ class HostHeaderScanner(BaseScanner):
         client_kwargs: dict = {"timeout": timeout, "follow_redirects": True}
         if proxy:
             client_kwargs["proxy"] = proxy
+        # Merge engine-level auth headers (custom --header, Cookie, refreshed
+        # bearer) underneath the probe-specific headers so the host-header
+        # tests still authenticate.
+        merged = {}
+        if hasattr(self.engine, "auth_headers"):
+            merged.update(self.engine.auth_headers())
+        merged.update(headers or {})
         async with httpx.AsyncClient(**client_kwargs) as client:
-            return await client.get(url, headers=headers)
+            return await client.get(url, headers=merged)
 
     async def verify_finding(self, finding: Finding) -> bool | None:
         if finding.evidence_type != "host_header_reflection":

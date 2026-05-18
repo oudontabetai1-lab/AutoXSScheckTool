@@ -183,6 +183,12 @@ class RequestSmugglingScanner(BaseScanner):
     ) -> tuple[float, str, int]:
         probe_start = time.monotonic()
         try:
+            # Merge engine custom headers underneath probe-specific ones so
+            # smuggling probes still authenticate against gated endpoints.
+            if hasattr(self.engine, "auth_headers"):
+                base = self.engine.auth_headers()
+                base.update(headers or {})
+                headers = base
             async with httpx.AsyncClient(
                 timeout=timeout,
                 follow_redirects=False,
