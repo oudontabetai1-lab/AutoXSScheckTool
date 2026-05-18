@@ -100,6 +100,8 @@ class FileUploadScanner(BaseScanner):
         }
         if proxy:
             client_kwargs["proxy"] = proxy
+        if hasattr(self.engine, "auth_headers"):
+            client_kwargs["headers"] = self.engine.auth_headers()
 
         request_kwargs = {
             "files": {field_name: (filename, io.BytesIO(content), "image/jpeg")},

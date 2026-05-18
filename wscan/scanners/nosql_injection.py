@@ -247,10 +247,15 @@ class NoSQLInjectionScanner(BaseScanner):
         findings = []
         proxy = getattr(self.engine, "proxy", "") or None
         timeout = getattr(self.engine, "timeout", 15)
+        hdrs: dict = {"Content-Type": "application/json"}
+        if hasattr(self.engine, "auth_headers"):
+            base = self.engine.auth_headers()
+            base.update(hdrs)
+            hdrs = base
         kwargs: dict = {
             "timeout": timeout,
             "follow_redirects": True,
-            "headers": {"Content-Type": "application/json"},
+            "headers": hdrs,
         }
         if proxy:
             kwargs["proxy"] = proxy
@@ -347,10 +352,15 @@ class NoSQLInjectionScanner(BaseScanner):
     async def _verify_json_error(self, finding: Finding) -> bool | None:
         proxy = getattr(self.engine, "proxy", "") or None
         timeout = getattr(self.engine, "timeout", 15)
+        hdrs: dict = {"Content-Type": "application/json"}
+        if hasattr(self.engine, "auth_headers"):
+            base = self.engine.auth_headers()
+            base.update(hdrs)
+            hdrs = base
         kwargs: dict = {
             "timeout": timeout,
             "follow_redirects": True,
-            "headers": {"Content-Type": "application/json"},
+            "headers": hdrs,
         }
         if proxy:
             kwargs["proxy"] = proxy

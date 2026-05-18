@@ -117,6 +117,13 @@ class CmsScanner(BaseScanner):
         client_kwargs: dict = {"timeout": 10.0, "follow_redirects": True}
         if proxy:
             client_kwargs["proxy"] = proxy
+        if hasattr(self.engine, "auth_headers"):
+            # Strip Cookie from auth_headers because we already pass it via
+            # the ``cookies`` kwarg below; httpx would otherwise duplicate it.
+            client_kwargs["headers"] = {
+                k: v for k, v in self.engine.auth_headers().items()
+                if k.lower() != "cookie"
+            }
 
         async with httpx.AsyncClient(**client_kwargs) as client:
             for path, desc, severity in paths:

@@ -221,10 +221,17 @@ class DeserializationScanner(BaseScanner):
             if content_type == "application/x-www-form-urlencoded":
                 continue  # Already covered by form submission
             try:
+                hdrs: dict = {"Content-Type": content_type}
+                if hasattr(self.engine, "auth_headers"):
+                    # Underlay engine auth headers (Cookie / custom) so requests
+                    # against authenticated endpoints don't 401.
+                    base = self.engine.auth_headers()
+                    base.update(hdrs)
+                    hdrs = base
                 kwargs: dict = {
                     "timeout": timeout,
                     "follow_redirects": True,
-                    "headers": {"Content-Type": content_type},
+                    "headers": hdrs,
                 }
                 if proxy:
                     kwargs["proxy"] = proxy
@@ -330,10 +337,15 @@ class DeserializationScanner(BaseScanner):
     ) -> bool | None:
         proxy = getattr(self.engine, "proxy", "") or None
         timeout = getattr(self.engine, "timeout", 15)
+        hdrs: dict = {"Content-Type": content_type}
+        if hasattr(self.engine, "auth_headers"):
+            base = self.engine.auth_headers()
+            base.update(hdrs)
+            hdrs = base
         kwargs: dict = {
             "timeout": timeout,
             "follow_redirects": True,
-            "headers": {"Content-Type": content_type},
+            "headers": hdrs,
         }
         if proxy:
             kwargs["proxy"] = proxy

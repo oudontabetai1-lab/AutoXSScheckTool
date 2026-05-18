@@ -298,6 +298,38 @@ Examples:
         "--low-priv-cookie-file", metavar="FILE", default="",
         help="JSON file containing low-privilege session cookies (same format as --cookie-file).",
     )
+    # Custom HTTP headers (Authorization, X-API-Key, …) — applied to BOTH the
+    # Playwright browser context and every direct httpx call site.
+    scan.add_argument(
+        "-H", "--header", metavar="HEADER", action="append", default=[],
+        help=(
+            "Custom HTTP header to send with every request, "
+            "in 'Name: Value' form. Repeat to send multiple "
+            "(e.g. -H 'Authorization: Bearer abc' -H 'X-Tenant: foo')."
+        ),
+    )
+    scan.add_argument(
+        "--header-file", metavar="FILE", default="",
+        help=(
+            "File containing custom HTTP headers. Accepts JSON object, YAML "
+            "map, or one 'Name: Value' line per row."
+        ),
+    )
+    scan.add_argument(
+        "--header-refresh-cmd", metavar="CMD", default="",
+        help=(
+            "Shell command whose stdout supplies refreshed HTTP headers "
+            "(same format as --header-file). Useful for systems whose "
+            "Authorization token must be rotated periodically."
+        ),
+    )
+    scan.add_argument(
+        "--header-refresh-interval", metavar="SECONDS", type=float, default=0.0,
+        help=(
+            "Re-run --header-refresh-cmd this often during the scan "
+            "(seconds). 0 disables periodic refresh."
+        ),
+    )
     scan.add_argument(
         "--auth-user", metavar="USER", default=_CFG.get("auth_user", ""),
         help="Username/email for login form auto-fill",
@@ -1103,6 +1135,30 @@ async def run_scan(args):
             f"privilege escalation testing[/cyan]"
         )
 
+    # Build custom HTTP header set: --header-file underneath, CLI -H values on top.
+    from wscan.header_manager import parse_header_args, load_header_file
+    _resolved_headers: dict = {}
+    _hdr_file = getattr(args, "header_file", "") or ""
+    if _hdr_file:
+        try:
+            _resolved_headers.update(load_header_file(_hdr_file))
+        except Exception as _hex:
+            console.print(f"[yellow]Warning: could not load header file: {_hex}[/yellow]")
+    _cli_headers = parse_header_args(getattr(args, "header", []) or [])
+    _resolved_headers.update(_cli_headers)
+    if _resolved_headers:
+        console.print(
+            f"Custom headers  : [cyan]{len(_resolved_headers)} header(s) "
+            f"({', '.join(_resolved_headers.keys())})[/cyan]"
+        )
+    if (getattr(args, "header_refresh_cmd", "") or "") and (
+        getattr(args, "header_refresh_interval", 0.0) or 0.0
+    ) > 0:
+        console.print(
+            f"Header refresh  : [cyan]every "
+            f"{getattr(args, 'header_refresh_interval', 0.0)}s via shell command[/cyan]"
+        )
+
     def _engine_kwargs(monitor_obj):
         return dict(
             url=args.url,
@@ -1171,6 +1227,10 @@ async def run_scan(args):
             # O: HAR インポート
             har_path=getattr(args, "har", "") or "",
             manual_crawl_path=getattr(args, "manual_crawl", "") or "",
+            # Custom headers + periodic refresh
+            headers=_resolved_headers,
+            header_refresh_cmd=getattr(args, "header_refresh_cmd", "") or "",
+            header_refresh_interval=getattr(args, "header_refresh_interval", 0.0) or 0.0,
         )
 
     if args.no_monitor:
@@ -1455,6 +1515,9 @@ async def run_serve(args):
                 auto_register_count=int(cfg.get("auto_register_count", 2)),
                 seed_urls=seed_urls or None,
                 manual_crawl_path=cfg.get("manual_crawl_file", "") or "",
+                headers=cfg.get("headers", {}) or {},
+                header_refresh_cmd=cfg.get("header_refresh_cmd", "") or "",
+                header_refresh_interval=float(cfg.get("header_refresh_interval", 0.0) or 0.0),
             )
             # アウトプットフォルダに送信された設定スナップショットを保存しておく
             # (ブラウザの自動ダウンロードに頼らず、レポートと同じ場所に残す)
