@@ -59,6 +59,7 @@ lsof -i :8765 -P -n
 | VPN 未接続 | 社内 URL に curl / ブラウザで到達できるか確認 |
 | DNS / hosts 問題 | `curl -v` や `dig` で確認 |
 | 自己署名証明書 | ブラウザで証明書エラーが出ていないか確認 |
+| クライアント証明書必須 | mTLS 証明書未指定時に 400/403/接続拒否になっていないか確認 |
 | プロキシ必須 | `--proxy` を指定 |
 | IP 制限 | 検査端末の送信元 IP を確認 |
 | WAF / Bot 対策 | 403、429、CAPTCHA、ブロックページを確認 |
@@ -79,6 +80,49 @@ python3 main.py scan https://example.com \
   --timeout 60 \
   --delay 1.0
 ```
+
+## クライアント証明書が必要なサイトに入れない
+
+### 症状
+
+- ブラウザで証明書選択や 400/403 が出る。
+- ダッシュボードからの Crawl がすぐ失敗する。
+- httpx 系のスキャナだけ失敗し、ブラウザ表示は成功する。
+
+### 対処
+
+PEM のクライアント証明書と秘密鍵がある場合:
+
+```bash
+python3 main.py scan https://secure.example.com \
+  --tls-client-cert /path/to/client.crt \
+  --tls-client-key /path/to/client.key
+```
+
+社内CA/自己署名CAも検証する場合:
+
+```bash
+python3 main.py scan https://secure.example.com \
+  --tls-client-cert /path/to/client.crt \
+  --tls-client-key /path/to/client.key \
+  --tls-ca-cert /path/to/ca.pem \
+  --tls-verify
+```
+
+PFX/PKCS#12 しかない場合:
+
+```bash
+python3 main.py scan https://secure.example.com \
+  --tls-client-pfx /path/to/client.p12 \
+  --tls-client-cert-password 'password'
+```
+
+注意点:
+
+- PEM の cert/key は Playwright と httpx の直接リクエストの両方で使用されます。
+- PFX は Playwright ブラウザアクセスで使用されます。httpx 系の直接リクエストにも同じ証明書が必要な場合は、PEM 形式も用意してください。
+- `--tls-verify` をオンにした場合、CA が信頼できないと接続に失敗します。社内CAの場合は `--tls-ca-cert` を指定してください。
+- 証明書パスは WScan を実行している端末から読める絶対パスを推奨します。
 
 ## 検査が途中で途切れる
 

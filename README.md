@@ -83,6 +83,26 @@ python3 main.py scan https://example.com --checks xss sqli csrf --depth 2
 
 高速確認では `--fast`、認証あり検査では `--cookie` / `--cookie-file` / `--login-url`、通信確認では `--proxy` を組み合わせます。
 
+クライアント証明書が必要な mTLS 環境や、社内CA/自己署名証明書を使う環境では、証明書オプションを指定します。
+
+```bash
+python3 main.py scan https://secure.example.com \
+  --tls-client-cert /path/to/client.crt \
+  --tls-client-key /path/to/client.key \
+  --tls-ca-cert /path/to/ca.pem \
+  --tls-verify
+```
+
+PFX/PKCS#12 をブラウザアクセスに使う場合:
+
+```bash
+python3 main.py scan https://secure.example.com \
+  --tls-client-pfx /path/to/client.p12 \
+  --tls-client-cert-password 'password'
+```
+
+PEM の cert/key は Playwright と httpx の両方で使われます。PFX は Playwright ブラウザ向けです。`--tls-ca-cert` と `--tls-verify` は httpx の直接リクエストでサーバ証明書を検証するために使われ、ブラウザクロールは互換性維持のため HTTPS エラーを許容します。
+
 ## IPA 準拠カバレッジ
 
 | IPA 章番号 | 脆弱性 | チェック名 | 手法 |
@@ -402,6 +422,13 @@ usage: main.py scan [オプション] URL
 
 プロキシ・通信:
   --proxy URL              HTTP プロキシ URL (例: http://127.0.0.1:8080)
+  --tls-client-cert FILE   mTLS 用 PEM クライアント証明書
+  --tls-client-key FILE    --tls-client-cert に対応する PEM 秘密鍵
+  --tls-client-pfx FILE    Playwright ブラウザアクセス用 PFX/PKCS#12 証明書
+  --tls-client-cert-password TEXT
+                           クライアント証明書キーまたは PFX のパスフレーズ
+  --tls-ca-cert FILE       サーバ証明書検証に使う CA バンドル
+  --tls-verify             サーバ証明書を検証する
   -H "Name: Value"         全リクエストに付与するカスタムヘッダ。複数指定可
   --header-file FILE       JSON / YAML / Name: Value 形式のヘッダファイル
   --har FILE               HAR から URL と Cookie を取り込む

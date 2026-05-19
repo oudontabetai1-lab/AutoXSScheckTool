@@ -113,10 +113,11 @@ class CmsScanner(BaseScanner):
                     k, v = part.split("=", 1)
                     cookies_dict[k.strip()] = v.strip()
 
-        proxy = getattr(self.engine, "proxy", "") or None
         client_kwargs: dict = {"timeout": 10.0, "follow_redirects": True}
-        if proxy:
-            client_kwargs["proxy"] = proxy
+        if hasattr(self.engine, "httpx_client_kwargs"):
+            client_kwargs = self.engine.httpx_client_kwargs(**client_kwargs)
+        elif getattr(self.engine, "proxy", ""):
+            client_kwargs["proxy"] = getattr(self.engine, "proxy", "")
         if hasattr(self.engine, "auth_headers"):
             # Strip Cookie from auth_headers because we already pass it via
             # the ``cookies`` kwarg below; httpx would otherwise duplicate it.

@@ -233,7 +233,9 @@ class DeserializationScanner(BaseScanner):
                     "follow_redirects": True,
                     "headers": hdrs,
                 }
-                if proxy:
+                if hasattr(self.engine, "httpx_client_kwargs"):
+                    kwargs = self.engine.httpx_client_kwargs(**kwargs)
+                elif proxy:
                     kwargs["proxy"] = proxy
 
                 # Convert base64-encoded binary payloads back to bytes
@@ -347,7 +349,9 @@ class DeserializationScanner(BaseScanner):
             "follow_redirects": True,
             "headers": hdrs,
         }
-        if proxy:
+        if hasattr(self.engine, "httpx_client_kwargs"):
+            kwargs = self.engine.httpx_client_kwargs(**kwargs)
+        elif proxy:
             kwargs["proxy"] = proxy
 
         try:

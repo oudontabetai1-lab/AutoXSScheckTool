@@ -53,6 +53,7 @@ from rich import box as rbox
 from .attack_planner import AttackPlanner, FieldAttackPlan, PageAttackPlan
 from .adaptive_payload import AdaptivePayloadEngine
 from .browser import BrowserManager
+from .tls_config import TLSConfig
 from .chain_scanner import ChainScanner, ChainFinding
 from .ctf_flag_finder import FlagFinder
 from .intervention import ScanController, AbortScan, SkipField, SkipPage
@@ -219,6 +220,12 @@ class ScanEngine:
         headers: Optional[dict] = None,
         header_refresh_cmd: str = "",
         header_refresh_interval: float = 0.0,
+        tls_client_cert: str = "",
+        tls_client_key: str = "",
+        tls_client_pfx: str = "",
+        tls_client_cert_password: str = "",
+        tls_ca_cert: str = "",
+        tls_verify: bool = False,
     ):
         self.target_url = url.rstrip("/")
         self.monitor = monitor
@@ -296,6 +303,17 @@ class ScanEngine:
         self.skip_registration = skip_registration
         self.open_report = open_report
         self.proxy = proxy
+        self.tls_config = TLSConfig.from_values(
+            client_cert=tls_client_cert,
+            client_key=tls_client_key,
+            client_pfx=tls_client_pfx,
+            client_cert_password=tls_client_cert_password,
+            ca_cert=tls_ca_cert,
+            verify_tls=tls_verify,
+        )
+        tls_errors = self.tls_config.validate_paths()
+        if tls_errors:
+            raise ValueError("; ".join(tls_errors))
         self.login_url = login_url
         self.login_user_field = login_user_field
         self.login_pass_field = login_pass_field
@@ -352,6 +370,8 @@ class ScanEngine:
             proxy=proxy,
             sleep_factor=self.sleep_factor,
             extra_headers=self.header_manager.current(),
+            tls_config=self.tls_config,
+            target_url=self.target_url,
         )
         # When the refresh task fetches a new token, push it into the browser
         # context so crawled pages immediately use the rotated header.
@@ -410,6 +430,7 @@ class ScanEngine:
             payload_gen=self.payload_gen,
             proxy=proxy,
             headers_provider=lambda: self.auth_headers(),
+            tls_options_provider=lambda: self.tls_config.httpx_options(),
         )
         # A-3: Payload continuous learning
         self.payload_learner = PayloadLearner(learning_file=learning_file)
@@ -448,6 +469,14 @@ class ScanEngine:
         # Auto-login landing page. Seeded into the normal crawl so authenticated
         # pages are not missed when the scan target itself is the login URL.
         self.auth_landing_url: str = ""
+
+    def httpx_client_kwargs(self, **overrides) -> dict:
+        """Return httpx kwargs with scanner-wide proxy/TLS settings applied."""
+        kwargs = self.tls_config.httpx_options()
+        if self.proxy and "proxy" not in overrides:
+            kwargs["proxy"] = self.proxy
+        kwargs.update(overrides)
+        return kwargs
 
     @staticmethod
     def _origin_for(url: str) -> str:
@@ -758,11 +787,11 @@ class ScanEngine:
         base = self.target_url.rstrip("/")
 
         async with httpx.AsyncClient(
-            timeout=10.0,
-            verify=False,
-            follow_redirects=True,
-            proxy=self.proxy or None,
-            headers=self.auth_headers(),
+            **self.httpx_client_kwargs(
+                timeout=10.0,
+                follow_redirects=True,
+                headers=self.auth_headers(),
+            )
         ) as client:
             # robots.txt
             try:
@@ -2959,10 +2988,11 @@ class ScanEngine:
 
                     headers = self.auth_headers()
                     async with httpx.AsyncClient(
-                        follow_redirects=True,
-                        timeout=self.timeout,
-                        verify=False,
-                        headers=headers,
+                        **self.httpx_client_kwargs(
+                            follow_redirects=True,
+                            timeout=self.timeout,
+                            headers=headers,
+                        )
                     ) as client:
                         baseline_resp = await client.get(_with_value("wscan_ssti_baseline"))
                         probe_resp = await client.get(_with_value(f.payload))

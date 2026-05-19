@@ -880,6 +880,26 @@ body {
             <input type="text" id="cfgProxy" placeholder="http://127.0.0.1:8080">
           </div>
           <div class="cfg-field">
+            <label>クライアント証明書 (PEM)</label>
+            <input type="text" id="cfgTlsClientCert" placeholder="/path/to/client.crt">
+          </div>
+          <div class="cfg-field">
+            <label>クライアント秘密鍵 (PEM)</label>
+            <input type="text" id="cfgTlsClientKey" placeholder="/path/to/client.key">
+          </div>
+          <div class="cfg-field">
+            <label>クライアント証明書 (PFX/PKCS#12)</label>
+            <input type="text" id="cfgTlsClientPfx" placeholder="/path/to/client.p12">
+          </div>
+          <div class="cfg-field">
+            <label>証明書パスフレーズ</label>
+            <input type="password" id="cfgTlsClientCertPassword" placeholder="必要な場合のみ">
+          </div>
+          <div class="cfg-field">
+            <label>CA証明書バンドル</label>
+            <input type="text" id="cfgTlsCaCert" placeholder="/path/to/ca.pem">
+          </div>
+          <div class="cfg-field">
             <label>出力ディレクトリ (空=自動)</label>
             <input type="text" id="cfgOutputDir" placeholder="/path/to/reports">
           </div>
@@ -891,6 +911,7 @@ body {
           <div class="cfg-toggle on" id="tog-open_report" onclick="toggleCfg('open_report')">スキャン後レポートを開く</div>
           <div class="cfg-toggle on" id="tog-use_planner" onclick="toggleCfg('use_planner')">AI攻撃プランナー</div>
           <div class="cfg-toggle off" id="tog-interactive_plan" onclick="toggleCfg('interactive_plan')">プラン手動レビュー</div>
+          <div class="cfg-toggle off" id="tog-tls_verify" onclick="toggleCfg('tls_verify')" title="CA証明書またはOS標準CAでサーバ証明書を検証">TLS証明書を検証</div>
         </div>
       </div>
 
@@ -1684,6 +1705,7 @@ const cfgToggles = {
   interactive_plan: false,
   spa_crawl: false,
   fast_mode: false,
+  tls_verify: false,
   auto_register: false,
   interactive_crawl_review: false,
 };
@@ -1983,6 +2005,12 @@ function submitScanConfig() {
     max_forms:   parseInt(document.getElementById('cfgMaxForms').value) || 50,
     concurrency: parseInt(document.getElementById('cfgConcurrency').value) || 1,
     proxy:       document.getElementById('cfgProxy').value.trim(),
+    tls_client_cert: document.getElementById('cfgTlsClientCert').value.trim(),
+    tls_client_key:  document.getElementById('cfgTlsClientKey').value.trim(),
+    tls_client_pfx:  document.getElementById('cfgTlsClientPfx').value.trim(),
+    tls_client_cert_password: document.getElementById('cfgTlsClientCertPassword').value,
+    tls_ca_cert: document.getElementById('cfgTlsCaCert').value.trim(),
+    tls_verify:  cfgToggles.tls_verify,
     headless:    cfgToggles.headless,
     skip_registration: cfgToggles.skip_registration,
     open_report: cfgToggles.open_report,
@@ -2061,6 +2089,11 @@ function _collectFullConfigForExport() {
     concurrency: collect('cfgConcurrency'),
     max_payloads: collect('cfgMaxPayloads'),
     proxy: collect('cfgProxy'),
+    tls_client_cert: collect('cfgTlsClientCert'),
+    tls_client_key: collect('cfgTlsClientKey'),
+    tls_client_pfx: collect('cfgTlsClientPfx'),
+    tls_client_cert_password: collect('cfgTlsClientCertPassword'),
+    tls_ca_cert: collect('cfgTlsCaCert'),
     output_dir: collect('cfgOutputDir'),
     payloads_file: collect('cfgPayloadsFile'),
     toggles: {...cfgToggles},
@@ -2146,6 +2179,12 @@ function applyImportedConfig(cfg) {
   setVal('cfgDelay', cfg.request_delay);
   setVal('cfgNavigationRetries', cfg.navigation_retries);
   setVal('cfgProxy', cfg.proxy);
+  setVal('cfgTlsClientCert', cfg.tls_client_cert);
+  setVal('cfgTlsClientKey', cfg.tls_client_key);
+  setVal('cfgTlsClientPfx', cfg.tls_client_pfx);
+  setVal('cfgTlsClientCertPassword', cfg.tls_client_cert_password);
+  setVal('cfgTlsCaCert', cfg.tls_ca_cert);
+  if (cfg.tls_verify != null) setCfgToggle('tls_verify', !!cfg.tls_verify);
   setVal('cfgOutputDir', cfg.output_dir);
   setVal('cfgPayloadsFile', cfg.payloads_file);
   setVal('cfgLlm', cfg.llm); if (cfg.llm) updateLlmModelField();
@@ -2265,6 +2304,11 @@ function saveConfigToStorage() {
       request_delay: document.getElementById('cfgDelay').value,
       navigation_retries: document.getElementById('cfgNavigationRetries').value,
       proxy: document.getElementById('cfgProxy').value,
+      tls_client_cert: document.getElementById('cfgTlsClientCert').value,
+      tls_client_key: document.getElementById('cfgTlsClientKey').value,
+      tls_client_pfx: document.getElementById('cfgTlsClientPfx').value,
+      tls_client_cert_password: document.getElementById('cfgTlsClientCertPassword').value,
+      tls_ca_cert: document.getElementById('cfgTlsCaCert').value,
       toggles: {...cfgToggles},
       llm: document.getElementById('cfgLlm').value,
       ollama_model: document.getElementById('cfgOllamaModel').value,
@@ -2306,6 +2350,11 @@ function loadConfigFromStorage() {
     if (cfg.request_delay != null) document.getElementById('cfgDelay').value = cfg.request_delay;
     if (cfg.navigation_retries != null) document.getElementById('cfgNavigationRetries').value = cfg.navigation_retries;
     if (cfg.proxy) document.getElementById('cfgProxy').value = cfg.proxy;
+    if (cfg.tls_client_cert) document.getElementById('cfgTlsClientCert').value = cfg.tls_client_cert;
+    if (cfg.tls_client_key) document.getElementById('cfgTlsClientKey').value = cfg.tls_client_key;
+    if (cfg.tls_client_pfx) document.getElementById('cfgTlsClientPfx').value = cfg.tls_client_pfx;
+    if (cfg.tls_client_cert_password) document.getElementById('cfgTlsClientCertPassword').value = cfg.tls_client_cert_password;
+    if (cfg.tls_ca_cert) document.getElementById('cfgTlsCaCert').value = cfg.tls_ca_cert;
     if (cfg.toggles) Object.assign(cfgToggles, cfg.toggles);
     if (cfg.llm) { document.getElementById('cfgLlm').value = cfg.llm; updateLlmModelField(); }
     if (cfg.ollama_model) document.getElementById('cfgOllamaModel').value = cfg.ollama_model;
@@ -2355,6 +2404,12 @@ async function loadDefaultConfigFromServer() {
     if (cfg.request_delay != null) document.getElementById('cfgDelay').value = cfg.request_delay;
     if (cfg.navigation_retries != null) document.getElementById('cfgNavigationRetries').value = cfg.navigation_retries;
     if (cfg.proxy != null) document.getElementById('cfgProxy').value = cfg.proxy;
+    if (cfg.tls_client_cert != null) document.getElementById('cfgTlsClientCert').value = cfg.tls_client_cert;
+    if (cfg.tls_client_key != null) document.getElementById('cfgTlsClientKey').value = cfg.tls_client_key;
+    if (cfg.tls_client_pfx != null) document.getElementById('cfgTlsClientPfx').value = cfg.tls_client_pfx;
+    if (cfg.tls_client_cert_password != null) document.getElementById('cfgTlsClientCertPassword').value = cfg.tls_client_cert_password;
+    if (cfg.tls_ca_cert != null) document.getElementById('cfgTlsCaCert').value = cfg.tls_ca_cert;
+    if (cfg.tls_verify != null) setCfgToggle('tls_verify', !!cfg.tls_verify);
     if (cfg.llm) { document.getElementById('cfgLlm').value = cfg.llm; updateLlmModelField(); }
     if (cfg.ollama_model) document.getElementById('cfgOllamaModel').value = cfg.ollama_model;
     if (cfg.openai_model) document.getElementById('cfgOpenaiModel').value = cfg.openai_model;

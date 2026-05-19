@@ -65,7 +65,6 @@ class XXEScanner(BaseScanner):
 
     async def _post_xml(self, url: str, payload: str) -> tuple[str, int, float]:
         timeout = getattr(self.engine, "timeout", 15)
-        proxy = getattr(self.engine, "proxy", "") or None
         headers = {"Content-Type": "application/xml"}
         auth_headers = getattr(self.engine, "auth_headers", None)
         if callable(auth_headers):
@@ -73,11 +72,13 @@ class XXEScanner(BaseScanner):
         client_kwargs: dict = {
             "timeout": timeout,
             "follow_redirects": True,
-            "verify": False,
             "headers": headers,
         }
-        if proxy:
-            client_kwargs["proxy"] = proxy
+        if hasattr(self.engine, "httpx_client_kwargs"):
+            client_kwargs = self.engine.httpx_client_kwargs(**client_kwargs)
+        elif getattr(self.engine, "proxy", ""):
+            client_kwargs["proxy"] = getattr(self.engine, "proxy", "")
+            client_kwargs["verify"] = False
 
         async with httpx.AsyncClient(**client_kwargs) as client:
             r = await client.post(

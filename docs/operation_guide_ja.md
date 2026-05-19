@@ -21,6 +21,7 @@ WScan は、クロール、攻撃計画、ペイロード投入、証跡保存�
 | 許可範囲 | 対象ドメイン、サブドメイン、IP、検査可能時間帯 |
 | 禁止操作 | ログアウト、削除、購入、送信、パスワード変更、外部通知など |
 | 認証方式 | Cookie、ログインフォーム、Authorization ヘッダ、SSO、MFA の有無 |
+| 証明書 | mTLS クライアント証明書、秘密鍵、PFX、社内CA/自己署名CA の有無 |
 | 環境 | 本番、ステージング、ローカル、検証用レプリカ |
 | 負荷条件 | リクエスト間隔、並列数、上限リクエスト数、WAF/IDS 通知先 |
 | 証跡要件 | HTML レポート、JSON、SARIF、再現コマンド、スクリーンショット |
@@ -162,7 +163,48 @@ python3 main.py scan https://app.example.com \
 
 プロキシを使うと、リクエスト/レスポンスの実態、リダイレクト、認証切れ、WAF ブロックを確認しやすくなります。
 
-## 7. 手動クロールと HAR
+## 7. 証明書が必要な環境
+
+mTLS が必要な検査対象では、クライアント証明書を指定します。PEM 形式の場合は証明書と秘密鍵をセットで渡します。
+
+```bash
+python3 main.py scan https://secure.example.com \
+  --tls-client-cert /path/to/client.crt \
+  --tls-client-key /path/to/client.key
+```
+
+秘密鍵にパスフレーズがある場合:
+
+```bash
+python3 main.py scan https://secure.example.com \
+  --tls-client-cert /path/to/client.crt \
+  --tls-client-key /path/to/client.key \
+  --tls-client-cert-password 'password'
+```
+
+PFX/PKCS#12 形式は、Playwright ブラウザのアクセスに使えます。
+
+```bash
+python3 main.py scan https://secure.example.com \
+  --tls-client-pfx /path/to/client.p12 \
+  --tls-client-cert-password 'password'
+```
+
+社内CAや自己署名証明書を検証したい場合は、CA バンドルと `--tls-verify` を指定します。
+
+```bash
+python3 main.py scan https://secure.example.com \
+  --tls-client-cert /path/to/client.crt \
+  --tls-client-key /path/to/client.key \
+  --tls-ca-cert /path/to/ca.pem \
+  --tls-verify
+```
+
+ダッシュボードでは、基本設定タブの証明書欄に同じパスを入力します。PFX はブラウザアクセス向け、PEM の cert/key は Playwright と httpx の直接リクエストの両方で使われます。
+
+補足: Playwright ブラウザには任意CAバンドルをコンテキスト単位で渡せないため、ブラウザクロールは従来通り HTTPS エラーを許容します。一方、httpx による直接リクエストは `--tls-ca-cert` と `--tls-verify` でサーバ証明書を検証します。
+
+## 8. 手動クロールと HAR
 
 通常のクロールだけでは到達できない画面は、手動クロールや HAR を使って補います。
 
@@ -184,7 +226,7 @@ python3 main.py scan https://app.example.com --manual-crawl manual_seed.json
 python3 main.py scan https://app.example.com --har app.har
 ```
 
-## 8. 出力物の確認順
+## 9. 出力物の確認順
 
 検査完了後、`output/<timestamp>/` に結果が保存されます。
 
@@ -202,7 +244,7 @@ python3 main.py scan https://app.example.com --har app.har
 
 運用では、まず `report.html` で全体を見て、重要 Finding は `evidence.json` と `reproduce.sh` で再現性を確認します。
 
-## 9. Finding の確認観点
+## 10. Finding の確認観点
 
 検出結果は、次の順で確認します。
 
@@ -215,7 +257,7 @@ python3 main.py scan https://app.example.com --har app.har
 
 `alert()` 発火、DB エラー、時間差、権限差分、機密情報パターンなど、証拠の種類によって確度が異なります。
 
-## 10. 再検査と差分確認
+## 11. 再検査と差分確認
 
 修正後の再検査では、前回出力ディレクトリを指定します。
 
@@ -226,11 +268,12 @@ python3 main.py scan https://app.example.com \
 
 レポート上で、新規、修正済み、継続中の Finding を確認できます。修正確認では、前回と同じ認証情報、同じスコープ、同じ主要チェックで比較することが重要です。
 
-## 11. 実検査前の最終チェックリスト
+## 12. 実検査前の最終チェックリスト
 
 - Target URL が許可範囲内である。
 - ログアウト、削除、送信、決済、パスワード変更 URL を除外した。
 - 認証 Cookie またはログイン情報が有効である。
+- mTLS や社内CAが必要な場合は、クライアント証明書、秘密鍵、CA バンドルを指定した。
 - プロキシや VPN が必要な場合は設定済みである。
 - `--delay` と `--concurrency` が対象環境の負荷条件に合っている。
 - 初回は `--fast` や小さい `--max-payloads` で接続確認した。

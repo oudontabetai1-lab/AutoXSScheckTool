@@ -372,6 +372,11 @@ class PrivEscScanner(BaseScanner):
         proxy = getattr(self.engine, "proxy", "") or None
         return {"proxy": proxy} if proxy else {}
 
+    def _client_transport_kwargs(self) -> dict:
+        if hasattr(self.engine, "httpx_client_kwargs"):
+            return self.engine.httpx_client_kwargs()
+        return {"verify": False, **self._client_proxy_kwargs()}
+
     def _form_payload(self, form: dict) -> dict:
         data: dict[str, str] = {}
         for inp in form.get("inputs", []):
@@ -413,9 +418,8 @@ class PrivEscScanner(BaseScanner):
             async with httpx.AsyncClient(
                 follow_redirects=False,
                 timeout=timeout,
-                verify=False,
                 headers=_HEADERS,
-                **self._client_proxy_kwargs(),
+                **self._client_transport_kwargs(),
             ) as client:
                 resp = await client.get(url)
                 status = resp.status_code
@@ -480,9 +484,8 @@ class PrivEscScanner(BaseScanner):
             async with httpx.AsyncClient(
                 follow_redirects=False,
                 timeout=timeout,
-                verify=False,
                 headers={**_HEADERS, **_engine_custom_headers(self.engine), "Cookie": low_priv_cookies},
-                **self._client_proxy_kwargs(),
+                **self._client_transport_kwargs(),
             ) as client:
                 resp = await client.get(url)
                 status = resp.status_code
@@ -969,12 +972,11 @@ class PrivEscScanner(BaseScanner):
             async with httpx.AsyncClient(
                 follow_redirects=True,
                 timeout=timeout,
-                verify=False,
                 headers=(
                     {**_HEADERS, **_engine_custom_headers(self.engine), "Cookie": cookies}
                     if cookies else {**_HEADERS, **_engine_custom_headers(self.engine)}
                 ),
-                **self._client_proxy_kwargs(),
+                **self._client_transport_kwargs(),
             ) as client:
                 resp = await client.get(url)
                 return resp.status_code, resp.text[:8000]
@@ -994,12 +996,11 @@ class PrivEscScanner(BaseScanner):
             async with httpx.AsyncClient(
                 follow_redirects=False,
                 timeout=timeout,
-                verify=False,
                 headers=(
                     {**_HEADERS, **_engine_custom_headers(self.engine), "Cookie": cookies}
                     if cookies else {**_HEADERS, **_engine_custom_headers(self.engine)}
                 ),
-                **self._client_proxy_kwargs(),
+                **self._client_transport_kwargs(),
             ) as client:
                 resp = await client.request(method, url, data=data)
                 return resp.status_code, resp.text[:8000]
