@@ -128,7 +128,9 @@ class InfoDisclosureScanner(BaseScanner):
             "timeout": timeout,
             "follow_redirects": False,
         }
-        if proxy:
+        if hasattr(self.engine, "httpx_client_kwargs"):
+            kwargs = self.engine.httpx_client_kwargs(**kwargs)
+        elif proxy:
             kwargs["proxy"] = proxy
         if hasattr(self.engine, "auth_headers"):
             kwargs["headers"] = self.engine.auth_headers()
@@ -295,7 +297,9 @@ class InfoDisclosureScanner(BaseScanner):
         proxy = getattr(self.engine, "proxy", "") or None
         timeout = getattr(self.engine, "timeout", 15)
         kwargs: dict = {"timeout": timeout, "follow_redirects": follow_redirects}
-        if proxy:
+        if hasattr(self.engine, "httpx_client_kwargs"):
+            kwargs = self.engine.httpx_client_kwargs(**kwargs)
+        elif proxy:
             kwargs["proxy"] = proxy
         if hasattr(self.engine, "auth_headers"):
             kwargs["headers"] = self.engine.auth_headers()

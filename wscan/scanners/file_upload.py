@@ -91,15 +91,16 @@ class FileUploadScanner(BaseScanner):
         filename: str,
         content: bytes,
     ) -> tuple[str, int, dict]:
-        proxy = getattr(self.engine, "proxy", "") or None
         timeout = getattr(self.engine, "timeout", 15)
         client_kwargs: dict = {
             "timeout": timeout,
             "follow_redirects": True,
-            "verify": False,
         }
-        if proxy:
-            client_kwargs["proxy"] = proxy
+        if hasattr(self.engine, "httpx_client_kwargs"):
+            client_kwargs = self.engine.httpx_client_kwargs(**client_kwargs)
+        elif getattr(self.engine, "proxy", ""):
+            client_kwargs["proxy"] = getattr(self.engine, "proxy", "")
+            client_kwargs["verify"] = False
         if hasattr(self.engine, "auth_headers"):
             client_kwargs["headers"] = self.engine.auth_headers()
 

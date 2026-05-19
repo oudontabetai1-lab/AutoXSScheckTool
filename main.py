@@ -70,6 +70,12 @@ def _load_config(path: Path = _CONFIG_PATH) -> dict:
 
     cfg["headless"]                = bool(b.get("headless", False))
     cfg["proxy"]                   = str(b.get("proxy", "") or "")
+    cfg["tls_client_cert"]         = str(b.get("tls_client_cert", "") or "")
+    cfg["tls_client_key"]          = str(b.get("tls_client_key", "") or "")
+    cfg["tls_client_pfx"]          = str(b.get("tls_client_pfx", "") or "")
+    cfg["tls_client_cert_password"] = str(b.get("tls_client_cert_password", "") or "")
+    cfg["tls_ca_cert"]             = str(b.get("tls_ca_cert", "") or "")
+    cfg["tls_verify"]              = bool(b.get("tls_verify", False))
 
     cfg["llm_provider"]            = str(l.get("provider",     "ollama"))
     cfg["ollama_model"]            = str(l.get("ollama_model", "llama3"))
@@ -373,6 +379,18 @@ Examples:
             "(e.g. http://127.0.0.1:8080 for Burp Suite / mitmproxy)."
         ),
     )
+    scan.add_argument("--tls-client-cert", metavar="FILE", default=_CFG.get("tls_client_cert", ""),
+                      help="PEM client certificate for mutual TLS targets.")
+    scan.add_argument("--tls-client-key", metavar="FILE", default=_CFG.get("tls_client_key", ""),
+                      help="PEM private key for --tls-client-cert.")
+    scan.add_argument("--tls-client-pfx", metavar="FILE", default=_CFG.get("tls_client_pfx", ""),
+                      help="PKCS#12/PFX client certificate for Playwright browser access.")
+    scan.add_argument("--tls-client-cert-password", metavar="TEXT", default=_CFG.get("tls_client_cert_password", ""),
+                      help="Passphrase for the client certificate key or PFX file.")
+    scan.add_argument("--tls-ca-cert", metavar="FILE", default=_CFG.get("tls_ca_cert", ""),
+                      help="CA bundle used to verify the target certificate for httpx requests.")
+    scan.add_argument("--tls-verify", action="store_true", default=_CFG.get("tls_verify", False),
+                      help="Verify target TLS certificates. By default WScan keeps browser compatibility by ignoring HTTPS errors.")
     # Auth-1: Login automation
     scan.add_argument(
         "--login-url", metavar="URL", default=_CFG.get("login_url", ""),
@@ -1243,6 +1261,12 @@ async def run_scan(args):
             headers=_resolved_headers,
             header_refresh_cmd=getattr(args, "header_refresh_cmd", "") or "",
             header_refresh_interval=getattr(args, "header_refresh_interval", 0.0) or 0.0,
+            tls_client_cert=getattr(args, "tls_client_cert", "") or "",
+            tls_client_key=getattr(args, "tls_client_key", "") or "",
+            tls_client_pfx=getattr(args, "tls_client_pfx", "") or "",
+            tls_client_cert_password=getattr(args, "tls_client_cert_password", "") or "",
+            tls_ca_cert=getattr(args, "tls_ca_cert", "") or "",
+            tls_verify=getattr(args, "tls_verify", False),
         )
 
     if args.no_monitor:
@@ -1334,6 +1358,12 @@ async def run_serve(args):
         "request_delay": _CFG.get("request_delay", 0.5),
         "navigation_retries": _CFG.get("navigation_retries", 2),
         "proxy": _CFG.get("proxy", ""),
+        "tls_client_cert": _CFG.get("tls_client_cert", ""),
+        "tls_client_key": _CFG.get("tls_client_key", ""),
+        "tls_client_pfx": _CFG.get("tls_client_pfx", ""),
+        "tls_client_cert_password": _CFG.get("tls_client_cert_password", ""),
+        "tls_ca_cert": _CFG.get("tls_ca_cert", ""),
+        "tls_verify": _CFG.get("tls_verify", False),
         "llm": _CFG.get("llm_provider", "ollama"),
         "ollama_model": _CFG.get("ollama_model", "llama3"),
         "openai_model": _CFG.get("openai_model", "gpt-4o-mini"),
@@ -1364,6 +1394,7 @@ async def run_serve(args):
             "spa_crawl": _CFG.get("spa_crawl", False),
             "interactive_crawl_review": _CFG.get("interactive_crawl_review", False),
             "ctf_mode": _CFG.get("ctf_mode", False),
+            "tls_verify": _CFG.get("tls_verify", False),
         },
     }
     # /api/auto-config エンドポイント用に LLM 設定をキャッシュ
@@ -1496,6 +1527,12 @@ async def run_serve(args):
                 auth_pass=cfg.get("auth_pass", "") or "",
                 cookies=cfg.get("cookies", "") or "",
                 proxy=cfg.get("proxy", "") or "",
+                tls_client_cert=cfg.get("tls_client_cert", "") or "",
+                tls_client_key=cfg.get("tls_client_key", "") or "",
+                tls_client_pfx=cfg.get("tls_client_pfx", "") or "",
+                tls_client_cert_password=cfg.get("tls_client_cert_password", "") or "",
+                tls_ca_cert=cfg.get("tls_ca_cert", "") or "",
+                tls_verify=bool(cfg.get("tls_verify", False)),
                 login_url=cfg.get("login_url", "") or "",
                 login_user_field=cfg.get("login_user_field", "username") or "username",
                 login_pass_field=cfg.get("login_pass_field", "password") or "password",

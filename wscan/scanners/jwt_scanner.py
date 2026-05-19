@@ -165,6 +165,11 @@ class JWTScanner(BaseScanner):
         proxy = getattr(self.engine, "proxy", "") or None
         return {"proxy": proxy} if proxy else {}
 
+    def _client_transport_kwargs(self) -> dict:
+        if hasattr(self.engine, "httpx_client_kwargs"):
+            return self.engine.httpx_client_kwargs()
+        return {"verify": False, **self._client_proxy_kwargs()}
+
     async def scan_field(
         self,
         url: str,
@@ -196,9 +201,8 @@ class JWTScanner(BaseScanner):
             async with httpx.AsyncClient(
                 follow_redirects=True,
                 timeout=timeout,
-                verify=False,
                 headers=req_headers,
-                **self._client_proxy_kwargs(),
+                **self._client_transport_kwargs(),
             ) as client:
                 resp = await client.get(url)
         except Exception:
@@ -626,9 +630,8 @@ class JWTScanner(BaseScanner):
                 async with httpx.AsyncClient(
                     follow_redirects=False,
                     timeout=timeout,
-                    verify=False,
                     headers=headers,
-                    **self._client_proxy_kwargs(),
+                    **self._client_transport_kwargs(),
                 ) as client:
                     resp = await client.get(url)
                     if 200 <= resp.status_code < 300:

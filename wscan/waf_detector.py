@@ -85,12 +85,13 @@ _DETECTION_TTL = 300  # seconds — re-probe if stale
 class WAFDetector:
     """Detects WAF presence and suggests bypass strategies."""
 
-    def __init__(self, payload_gen=None, proxy: str = "", headers_provider=None):
+    def __init__(self, payload_gen=None, proxy: str = "", headers_provider=None, tls_options_provider=None):
         self.payload_gen = payload_gen
         self.proxy = proxy or ""
         # Callable returning a dict of HTTP headers (pulls fresh values each call
         # so a rotated bearer token is used on every probe).
         self.headers_provider = headers_provider
+        self.tls_options_provider = tls_options_provider
         self._detected: Optional[str] = None
         self._checked_at: float = 0.0  # epoch seconds of last probe
 
@@ -111,12 +112,15 @@ class WAFDetector:
                     extra_headers = self.headers_provider() or {}
                 except Exception:
                     extra_headers = {}
+            tls_kwargs = self.tls_options_provider() if self.tls_options_provider else {"verify": False}
             async with httpx.AsyncClient(
-                timeout=timeout,
-                verify=False,
-                follow_redirects=True,
-                proxy=self.proxy or None,
-                headers=extra_headers,
+                **{
+                    **tls_kwargs,
+                    "timeout": timeout,
+                    "follow_redirects": True,
+                    "proxy": self.proxy or None,
+                    "headers": extra_headers,
+                }
             ) as client:
                 # First: normal request (collect always-present WAF headers)
                 resp = await client.get(url)

@@ -11,6 +11,7 @@ from typing import Optional, Callable, Any
 from urllib.parse import urljoin, urlparse
 
 from playwright.async_api import async_playwright, Browser, BrowserContext, Page, Request, Response
+from .tls_config import TLSConfig
 
 
 class NetworkCapture:
@@ -112,6 +113,8 @@ class BrowserManager:
         proxy: str = "",
         sleep_factor: float = 1.0,
         extra_headers: Optional[dict] = None,
+        tls_config: Optional[TLSConfig] = None,
+        target_url: str = "",
     ):
         self.headless = headless
         self.timeout = timeout * 1000  # ms
@@ -120,6 +123,8 @@ class BrowserManager:
         self.auth_pass = auth_pass
         self.proxy = proxy  # e.g. "http://127.0.0.1:8080"
         self.sleep_factor = sleep_factor
+        self.tls_config = tls_config or TLSConfig()
+        self.target_url = target_url
         # Custom HTTP headers (Authorization, X-API-Key, …) applied to every
         # request through the Playwright context. Updated live by HeaderManager
         # when ``--header-refresh-cmd`` rotates the token.
@@ -147,9 +152,9 @@ class BrowserManager:
         self._browser = await self._playwright.chromium.launch(**launch_kwargs)
         ctx_kwargs: dict = {
             "viewport": {"width": 1280, "height": 800},
-            "ignore_https_errors": True,
             "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
         }
+        ctx_kwargs.update(self.tls_config.playwright_context_options(self.target_url))
         if self.proxy:
             ctx_kwargs["proxy"] = {"server": self.proxy}
         if self.extra_headers:

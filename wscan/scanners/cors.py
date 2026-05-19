@@ -132,7 +132,9 @@ class CORSScanner(BaseScanner):
             "timeout": getattr(self.engine, "timeout", 15),
             "follow_redirects": True,
         }
-        if proxy:
+        if hasattr(self.engine, "httpx_client_kwargs"):
+            kwargs = self.engine.httpx_client_kwargs(**kwargs)
+        elif proxy:
             kwargs["proxy"] = proxy
 
         async with httpx.AsyncClient(**kwargs) as client:

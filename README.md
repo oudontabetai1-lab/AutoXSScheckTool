@@ -2,7 +2,106 @@
 
 WScan は、IPA「**安全なウェブサイトの作り方**」の全脆弱性カテゴリに準拠した、Playwright ブラウザ自動化 × LLM 動的ペイロード生成による Web 脆弱性スキャナーです。
 
+通常利用では、まずダッシュボードを起動し、ブラウザ上で検査対象 URL、認証情報、検査範囲、チェック種別を確認してからスキャンを開始する方法を推奨します。
+
+```bash
+python3 main.py serve --port 8765
+```
+
+ブラウザで `http://localhost:8765` を開き、Target URL を入力して `Scan Start` を押します。
+
+![WScan dashboard setup](docs/images/dashboard-configured.png)
+
+検査が進むと、ダッシュボード上でクロール、攻撃計画、攻撃実行、レポート生成の進捗と Findings を確認できます。
+
+![WScan dashboard findings](docs/images/dashboard-results.png)
+
+詳しい画面操作は [docs/dashboard_usage_ja.md](docs/dashboard_usage_ja.md) を参照してください。
+
 ---
+
+## ドキュメント
+
+| ドキュメント | 内容 |
+| --- | --- |
+| [docs/dashboard_usage_ja.md](docs/dashboard_usage_ja.md) | ダッシュボードを先に起動し、画面から検査を開始する手順。疑似検査のスクリーンショット付き |
+| [docs/operation_guide_ja.md](docs/operation_guide_ja.md) | 実検査前の準備、認証、スコープ設計、検査強度、出力物、再検査の運用ガイド |
+| [docs/troubleshooting_ja.md](docs/troubleshooting_ja.md) | アクセスできない、検査が途切れる、検出できない、UIに反映されない場合の切り分け |
+| [docs/advanced_features.md](docs/advanced_features.md) | 高度診断支援機能の詳細 |
+
+初めて使う場合は、この README の「クイックスタート」から始め、実際の操作は `dashboard_usage_ja.md`、現場投入前の確認は `operation_guide_ja.md`、問題発生時は `troubleshooting_ja.md` の順に確認してください。
+
+---
+
+## クイックスタート
+
+### 1. インストール
+
+```bash
+git clone https://github.com/oudontabetai1-lab/AutoXSScheckTool.git
+cd AutoXSScheckTool
+
+pip install -r requirements.txt
+playwright install chromium
+```
+
+**動作要件**: Python 3.11+、Playwright、FastAPI、Uvicorn、httpx、Rich、PyYAML、anthropic (Claude 使用時)
+
+### 2. ダッシュボード起動
+
+```bash
+python3 main.py serve --port 8765
+```
+
+起動後、ブラウザで次を開きます。
+
+```text
+http://localhost:8765
+```
+
+ポートが競合する場合は、`--port 8766` のように別ポートを指定します。
+
+### 3. 画面から検査開始
+
+1. `Target URL` に検査対象を入力する。
+2. 目的に合うスキャンプロファイルを選ぶ。
+3. 必要に応じて認証情報、Cookie、除外 URL、プロキシを設定する。
+4. `Scan Start` を押す。
+5. 攻撃プラン確認画面で対象フィールドとチェック種別を確認する。
+6. `攻撃開始` を押す。
+7. Findings、Event Log、Request / Response、`output/<timestamp>/report.html` を確認する。
+
+疑似脆弱アプリでの実行例は [docs/dashboard_usage_ja.md](docs/dashboard_usage_ja.md) に画像付きでまとめています。
+
+### 4. CLI で直接実行したい場合
+
+ダッシュボードを経由せずに CLI から直接スキャンすることもできます。
+
+```bash
+python3 main.py scan https://example.com --checks xss sqli csrf --depth 2
+```
+
+高速確認では `--fast`、認証あり検査では `--cookie` / `--cookie-file` / `--login-url`、通信確認では `--proxy` を組み合わせます。
+
+クライアント証明書が必要な mTLS 環境や、社内CA/自己署名証明書を使う環境では、証明書オプションを指定します。
+
+```bash
+python3 main.py scan https://secure.example.com \
+  --tls-client-cert /path/to/client.crt \
+  --tls-client-key /path/to/client.key \
+  --tls-ca-cert /path/to/ca.pem \
+  --tls-verify
+```
+
+PFX/PKCS#12 をブラウザアクセスに使う場合:
+
+```bash
+python3 main.py scan https://secure.example.com \
+  --tls-client-pfx /path/to/client.p12 \
+  --tls-client-cert-password 'password'
+```
+
+PEM の cert/key は Playwright と httpx の両方で使われます。PFX は Playwright ブラウザ向けです。`--tls-ca-cert` と `--tls-verify` は httpx の直接リクエストでサーバ証明書を検証するために使われ、ブラウザクロールは互換性維持のため HTTPS エラーを許容します。
 
 ## IPA 準拠カバレッジ
 
@@ -95,19 +194,30 @@ WScan は、IPA「**安全なウェブサイトの作り方**」の全脆弱性�
 
 ## インストール
 
-```bash
-git clone https://github.com/yourname/AutoXSScheckTool.git
-cd AutoXSScheckTool
+基本手順は「クイックスタート」と同じです。
 
+```bash
+git clone https://github.com/oudontabetai1-lab/AutoXSScheckTool.git
+cd AutoXSScheckTool
 pip install -r requirements.txt
 playwright install chromium
 ```
 
-**動作要件**: Python 3.11+、Playwright、FastAPI、Uvicorn、httpx、Rich、PyYAML、anthropic (Claude 使用時)
+LLM を使う場合は、利用するプロバイダーに応じて API キーやローカルモデルを準備します。LLM を使わずに固定ペイロード中心で確認する場合は、`--llm none` またはダッシュボードの LLM 設定で無効化して実行できます。
 
 ---
 
 ## 使い方
+
+### 推奨: ダッシュボードから開始
+
+```bash
+python3 main.py serve --port 8765
+```
+
+`http://localhost:8765` を開き、画面から Target URL、プロファイル、認証、スコープ、チェック種別を設定します。操作手順は [docs/dashboard_usage_ja.md](docs/dashboard_usage_ja.md) を参照してください。
+
+ダッシュボード起点の運用では、検査前に対象範囲を確認し、攻撃プラン確認画面で実行内容を見てから攻撃フェーズに進めるため、実検査での誤爆や過剰なリクエストを抑えやすくなります。
 
 ### トリアージモード（ペイロード送信なし・高速リスク評価）
 
@@ -260,7 +370,8 @@ usage: main.py scan [オプション] URL
                                    clickjacking open_redirect ssti privesc
                                    cors info_disclosure host_header security_headers
                                    file_upload nosql deserialization request_smuggling
-                                   graphql jwt
+                                   ssrf graphql jwt cms xxe ldap race_condition
+                                   websocket secret_leak sri
   --depth N                クロール深度 (デフォルト: 2)
   --headless               ブラウザをヘッドレスモードで起動
   --no-monitor             リアルタイム監視ダッシュボードを無効化
@@ -311,6 +422,23 @@ usage: main.py scan [オプション] URL
 
 プロキシ・通信:
   --proxy URL              HTTP プロキシ URL (例: http://127.0.0.1:8080)
+  --tls-client-cert FILE   mTLS 用 PEM クライアント証明書
+  --tls-client-key FILE    --tls-client-cert に対応する PEM 秘密鍵
+  --tls-client-pfx FILE    Playwright ブラウザアクセス用 PFX/PKCS#12 証明書
+  --tls-client-cert-password TEXT
+                           クライアント証明書キーまたは PFX のパスフレーズ
+  --tls-ca-cert FILE       サーバ証明書検証に使う CA バンドル
+  --tls-verify             サーバ証明書を検証する
+  -H "Name: Value"         全リクエストに付与するカスタムヘッダ。複数指定可
+  --header-file FILE       JSON / YAML / Name: Value 形式のヘッダファイル
+  --har FILE               HAR から URL と Cookie を取り込む
+  --manual-crawl FILE      手動巡回 JSON から URL と Cookie を取り込む
+  --previous-scan DIR      前回 evidence.json と比較して新規/修正/継続 Finding を表示
+  --concurrency N          攻撃フェーズの並列ブラウザワーカー数
+  --fast                   高速スキャンモード
+  --max-payloads N         フィールド・チェックタイプごとのペイロード上限
+  --delay SECS             リクエスト間隔
+  --navigation-retries N   ページ遷移失敗時の再試行回数
 
 学習データ:
   --learning-file FILE     ペイロード学習データ JSON ファイル
@@ -362,7 +490,15 @@ accounts:
 output/
 └── 20240101_120000/
     ├── report.html             # 自己完結型 HTML レポート（ブラウザで開く）
+    ├── report_executive.html   # 経営・管理層向けサマリーレポート
+    ├── report_developer.html   # 開発者向け修正観点レポート
+    ├── report.sarif            # SARIF 2.1.0 レポート
     ├── evidence.json           # 全検出結果 JSON
+    ├── reproduction.json       # 再現に必要なリクエスト/条件
+    ├── reproduce.sh            # 再現用シェルスクリプト
+    ├── scan_config.json        # 実行時設定のスナップショット
+    ├── remediation_plan.md     # 修正方針・対応タスク
+    ├── remediation_tasks.json  # 機械処理しやすい修正タスク
     ├── ai_analysis.md          # AI 攻撃チェーン分析・総合レポート（Markdown）
     ├── ai_finding_fixes.json   # Finding 別 AI 修正提案（ビジネス影響・修正コード・CWE 参照）
     └── screenshots/            # スキャン中スクリーンショット
@@ -370,6 +506,8 @@ output/
 config/
 └── payload_learning.json    # ペイロード学習データ（グローバル + ドメイン別、累積）
 ```
+
+出力物の読み方、Evidence の確認順、再検査時の比較方法は [docs/operation_guide_ja.md](docs/operation_guide_ja.md) を参照してください。
 
 ### 深刻度と CVSS スコアの目安
 
