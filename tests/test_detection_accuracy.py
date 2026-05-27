@@ -7,6 +7,7 @@ the FP / FN we want to guard against.
 import re
 import unittest
 
+from wscan.scanners.xss import XSSScanner
 from wscan.scanners.mail_header import _field_name_suggests_mail
 from wscan.scanners.open_redirect import (
     _CANARY_HOST,
@@ -131,6 +132,60 @@ class SqliLoginFailedPatternTests(unittest.TestCase):
         ]:
             with self.subTest(msg=msg):
                 self.assertFalse(self._matches(msg), msg)
+
+
+class XSSReflectionEscapingTests(unittest.TestCase):
+    """Bare XSS markers (``alert(`` / ``onload=`` / ``onerror=``) carry no
+    HTML-structural character, so they survive ``html.escape()`` verbatim.
+
+    A correctly-escaped page that echoes user input must NOT be reported: the
+    angle brackets / quotes the payload relied on were neutralised, so the
+    marker is inert text. Failing to account for this produced false positives
+    on every escaped reflection (search, greeting, profile name, …).
+    """
+
+    def setUp(self):
+        self.scanner = object.__new__(XSSScanner)
+
+    def test_escaped_script_payload_in_text_is_not_flagged(self):
+        payload = "<script>alert(1)</script>"
+        baseline = "<html><body><p>Hello, guest! Welcome back.</p></body></html>"
+        # Server HTML-escaped the payload: '<' and '>' became entities, but the
+        # literal substring 'alert(' survives.
+        escaped = "<html><body><p>Hello, &lt;script&gt;alert(1)&lt;/script&gt;! Welcome back.</p></body></html>"
+
+        self.assertEqual(self.scanner._analyze_reflection(escaped, payload, baseline), {})
+
+    def test_escaped_event_handler_payload_in_attribute_is_not_flagged(self):
+        payload = '" onmouseover=alert(1)'
+        baseline = '<html><body><input name="q" value=""></body></html>'
+        # The breaking quote was encoded to &quot; — 'onmouseover=' survives but
+        # cannot escape the attribute, so it is not exploitable.
+        escaped = '<html><body><input name="q" value="&quot; onmouseover=alert(1)"></body></html>'
+
+        self.assertEqual(self.scanner._analyze_reflection(escaped, payload, baseline), {})
+
+    def test_raw_unescaped_payload_is_still_flagged(self):
+        payload = "<svg onload=alert(1)>"
+        baseline = "<html><body><p>Search</p></body></html>"
+        # Reflected verbatim — a real reflected XSS that must NOT be suppressed.
+        raw = "<html><body><p>Search result: <svg onload=alert(1)></p></body></html>"
+
+        reflection = self.scanner._analyze_reflection(raw, payload, baseline)
+
+        self.assertTrue(reflection)
+        self.assertTrue(reflection.get("raw_payload_present"))
+
+    def test_marker_surviving_with_real_breakout_is_flagged(self):
+        # Payload partially mutated so the verbatim string is absent, but the
+        # raw '<' it introduced survives — a genuine breakout that must fire.
+        payload = "<img src=x onerror=alert(1)>"
+        baseline = "<html><body><p>Comments</p></body></html>"
+        mutated = "<html><body><p>Comment: <img src=x onerror=alert(1) data-z></p></body></html>"
+
+        reflection = self.scanner._analyze_reflection(mutated, payload, baseline)
+
+        self.assertTrue(reflection)
 
 
 if __name__ == "__main__":
