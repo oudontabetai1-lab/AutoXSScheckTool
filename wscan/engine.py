@@ -30,7 +30,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass, field as dc_field
 from pathlib import Path
 from typing import Optional
-from urllib.parse import urlparse, urljoin
+from urllib.parse import urlparse, urljoin, parse_qs
 
 # ---------------------------------------------------------------------------
 # Per-worker browser context variable
@@ -529,10 +529,21 @@ class ScanEngine:
             return False
         current = urlparse(url.rstrip("/").lower())
         target = urlparse(self.login_url.rstrip("/").lower())
-        # Match on host + path (ignoring query/fragment so /login?next=… still
-        # matches). The host MUST match: a different origin that happens to share
-        # the /login path (e.g. an external IdP) is not our target login page.
-        return (current.netloc, current.path) == (target.netloc, target.path)
+        # The host AND path must match: a different origin that merely shares the
+        # /login path (e.g. an external IdP) is not our target login page.
+        if (current.netloc, current.path) != (target.netloc, target.path):
+            return False
+        # When the login route is encoded in the query string
+        # (e.g. /index.php?route=account/login), that query is significant — a
+        # protected page like /index.php?route=checkout shares the path but is
+        # NOT the login page, so require the configured query params to match.
+        # When the login URL has no query, ignore the candidate's query so
+        # redirect params such as ?next=… still match.
+        if not target.query:
+            return True
+        target_params = parse_qs(target.query)
+        current_params = parse_qs(current.query)
+        return all(current_params.get(k) == v for k, v in target_params.items())
 
     def _record_scan_matrix(
         self,
