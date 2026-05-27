@@ -680,6 +680,10 @@ class ScanEngine:
 
             # Auth-1: Auto-login if login URL provided
             if self.login_url and self._browser.auth_user and self._browser.auth_pass:
+                # Inspect the login form FIRST, while still logged out. Apps that
+                # redirect authenticated users away from /login would otherwise
+                # hide the form, leaving this attack surface untested.
+                await self._scan_login_form_preauth()
                 console.print(
                     f"  [cyan][Auth] Auto-login:[/cyan] {self.login_url}"
                 )
@@ -2162,6 +2166,73 @@ class ScanEngine:
                 console.print("  [yellow][Auth] Re-login may have failed — continuing.[/yellow]")
             return success
         return True
+
+    async def _scan_login_form_preauth(self) -> None:
+        """Capture and attack the login form while still unauthenticated.
+
+        Runs BEFORE auto-login. Apps that redirect authenticated users away from
+        the login page would otherwise hide the form entirely, so the login form
+        (reflected XSS in the username/error message, SQLi auth bypass, etc.)
+        must be observed and tested in a logged-out context. Marks the login URL
+        as visited so the authenticated crawl does not re-record post-login
+        content under it.
+        """
+        if not (self.login_url and self._is_attack_target_url(self.login_url)):
+            return
+        login_seed = self.login_url.rstrip("/")
+        if self._is_url_excluded(login_seed):
+            return
+
+        console.print(
+            Rule(
+                "[bold magenta] Pre-Auth · Login Form Inspection [/bold magenta]",
+                style="magenta",
+            )
+        )
+        console.print(
+            f"  [dim]未認証コンテキストでログインフォームを検査:[/dim] {login_seed}"
+        )
+
+        if not await self._browser.navigate(login_seed, retries=self.navigation_retries):
+            console.print("  [yellow]  ✘ ログインページを読み込めませんでした[/yellow]")
+            self._record_unscannable_url(
+                login_seed,
+                note="Pre-auth login page load failed: "
+                + self._navigation_failure_note(),
+            )
+            return
+
+        try:
+            html = await self._browser.page.content()
+        except Exception:
+            html = ""
+        forms = await self._browser.find_forms()
+        url_params = self._merge_url_params(
+            await self._browser.get_url_params(), login_seed
+        )
+
+        if not forms and not url_params:
+            console.print(
+                "  [dim]ログインページに入力フォームが見つかりませんでした。[/dim]"
+            )
+            return
+
+        console.print(
+            f"  [cyan]{len(forms)}[/cyan] form(s) · "
+            f"[cyan]{len(url_params)}[/cyan] URL param(s) を検出"
+        )
+        page = CrawledPage(
+            url=login_seed, html=html, forms=forms, url_params=url_params, depth=0
+        )
+        self.page_graph.setdefault(
+            login_seed, {"parent": None, "screenshot_b64": "", "depth": 0}
+        )
+
+        await self._attack_one_page(page, {})
+
+        # Prevent the authenticated crawl/attack from re-visiting the login page
+        # (which, on redirect-on-auth apps, would only capture post-login content).
+        self.visited_urls.add(login_seed)
 
     async def _attack_one_page(self, page: CrawledPage, plans: dict):
         """
