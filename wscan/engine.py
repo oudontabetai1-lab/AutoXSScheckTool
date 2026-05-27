@@ -804,9 +804,12 @@ class ScanEngine:
             await self._phase_report_async()
 
             if self.monitor:
+                self.monitor.api_findings = [f.to_dict() for f in self.all_findings]
+                self.monitor.api_scan_status = "done"
                 await self.monitor.emit("scan_complete", {
                     "total_findings": len(self.all_findings),
                     "report_path": str(self.output_dir / "report.html"),
+                    "findings": self.monitor.api_findings,
                 })
 
     # =========================================================================
@@ -895,6 +898,7 @@ class ScanEngine:
         route_sig = ""
         if url:
             parsed = urlparse(url)
+            route_sig = f"route:{parsed.path or '/'}"
             query_names = sorted(
                 {
                     part.split("=", 1)[0]
@@ -903,7 +907,7 @@ class ScanEngine:
                 }
             )
             if query_names:
-                route_sig = f"route:{parsed.path}?{','.join(query_names[:20])}"
+                route_sig += f"?{','.join(query_names[:20])}"
         material = "".join(tags[:50]) + "|".join(sorted(form_sigs)) + route_sig
         return hashlib.md5(material.encode()).hexdigest()[:12]
 
@@ -3018,6 +3022,7 @@ class ScanEngine:
         "privesc_action",
         "info_disclosure",
         "session",
+        "security_headers",
     })
 
     async def _phase_verify(self):

@@ -1,6 +1,8 @@
 import unittest
 from unittest.mock import AsyncMock, patch
 
+import httpx
+
 from wscan.browser import NetworkCapture
 from wscan.ctf_flag_finder import FlagFinder
 from wscan.engine import ScanEngine
@@ -1558,6 +1560,14 @@ class DetectionEvidenceTests(unittest.TestCase):
             ScanEngine._page_fingerprint(html, "http://fixture.test/ctf/bundle-hidden?token=from-bundle"),
         )
 
+    def test_page_fingerprint_preserves_distinct_paths_for_page_level_checks(self):
+        html = "<html><body><h1>Same Layout</h1><p>static copy</p></body></html>"
+
+        self.assertNotEqual(
+            ScanEngine._page_fingerprint(html, "http://fixture.test/safe"),
+            ScanEngine._page_fingerprint(html, "http://fixture.test/short-hsts"),
+        )
+
     def test_merge_url_params_preserves_redirect_source_query_inputs(self):
         params = ScanEngine._merge_url_params([], "http://fixture.test/go?next=/catalog")
 
@@ -1601,6 +1611,26 @@ class DetectionEvidenceTests(unittest.TestCase):
         import asyncio
         asyncio.run(run())
 
+    def test_current_page_pair_does_not_fall_back_to_unrelated_latest_response(self):
+        scanner = _DummyScanner(_DummyEngine())
+
+        class Network:
+            def latest_for_url(self, url, *, match_query=True):
+                return None
+
+            def latest(self):
+                return {
+                    "request": {"url": "http://fixture.test/short-hsts"},
+                    "response": {
+                        "url": "http://fixture.test/short-hsts",
+                        "headers": {"strict-transport-security": "max-age=60"},
+                    },
+                }
+
+        scanner.browser = type("Browser", (), {"network": Network()})()
+
+        self.assertEqual(scanner.current_page_pair("http://fixture.test/"), {})
+
     def test_header_injection_verifier_replays_payload_and_checks_header(self):
         async def run():
             scanner = HeaderInjectionScanner(_DummyEngine())
@@ -1629,6 +1659,116 @@ class DetectionEvidenceTests(unittest.TestCase):
             )
 
         self.run_async(run())
+
+    def test_security_headers_scan_records_structured_missing_header_evidence(self):
+        async def run():
+            scanner = SecurityHeadersScanner(_DummyEngine())
+            scanner.current_page_pair = lambda url: {
+                "request": {"url": url},
+                "response": {
+                    "status": 200,
+                    "headers": {"server": "fixture"},
+                    "body": "<html>ok</html>",
+                },
+            }
+
+            findings = await scanner.scan_page("http://fixture.test/")
+            hsts = next(
+                f for f in findings
+                if f.field_name == "(Header: strict-transport-security)"
+            )
+
+            self.assertEqual(hsts.evidence_type, "security_header_missing")
+            self.assertEqual(
+                hsts.evidence_details["header"],
+                "strict-transport-security",
+            )
+            self.assertIn("Confirm response header", hsts.reproduction_steps[1])
+
+        self.run_async(run())
+
+    def test_security_headers_verifier_confirms_missing_header(self):
+        async def run():
+            scanner = SecurityHeadersScanner(_DummyEngine())
+            scanner._get = AsyncMock(
+                return_value=httpx.Response(
+                    200,
+                    headers={"content-security-policy": "default-src 'self'"},
+                )
+            )
+            finding = Finding(
+                check_type="security_headers",
+                severity="medium",
+                url="http://fixture.test/",
+                field_name="(Header: strict-transport-security)",
+                payload="(no payload)",
+                evidence="HSTS missing",
+                evidence_type="security_header_missing",
+                evidence_details={"header": "strict-transport-security"},
+            )
+
+            result = await scanner.verify_finding(finding)
+
+            self.assertTrue(result)
+
+        self.run_async(run())
+
+    def test_security_headers_verifier_rejects_present_header(self):
+        async def run():
+            scanner = SecurityHeadersScanner(_DummyEngine())
+            scanner._get = AsyncMock(
+                return_value=httpx.Response(
+                    200,
+                    headers={"strict-transport-security": "max-age=31536000"},
+                )
+            )
+            finding = Finding(
+                check_type="security_headers",
+                severity="medium",
+                url="http://fixture.test/",
+                field_name="(Header: strict-transport-security)",
+                payload="(no payload)",
+                evidence="HSTS missing",
+                evidence_type="security_header_missing",
+                evidence_details={"header": "strict-transport-security"},
+            )
+
+            result = await scanner.verify_finding(finding)
+
+            self.assertFalse(result)
+
+        self.run_async(run())
+
+    def test_security_headers_scan_uses_direct_response_headers_to_avoid_browser_header_gaps(self):
+        async def run():
+            scanner = SecurityHeadersScanner(_DummyEngine())
+            scanner.current_page_pair = lambda url: {
+                "request": {"url": "http://fixture.test/unrelated"},
+                "response": {"headers": {}},
+            }
+            scanner._get = AsyncMock(
+                return_value=httpx.Response(
+                    200,
+                    headers={
+                        "strict-transport-security": "max-age=31536000; includeSubDomains",
+                        "content-security-policy": "default-src 'self'",
+                        "x-content-type-options": "nosniff",
+                        "referrer-policy": "strict-origin-when-cross-origin",
+                        "permissions-policy": "geolocation=()",
+                        "cross-origin-opener-policy": "same-origin",
+                    },
+                    text="<html>safe</html>",
+                )
+            )
+
+            findings = await scanner.scan_page("http://fixture.test/safe")
+
+            self.assertEqual(findings, [])
+
+        self.run_async(run())
+
+    def test_security_headers_is_in_phase_45_verification_gate(self):
+        self.assertIn("security_headers", ScanEngine._VERIFIABLE_CHECKS)
 
     def test_open_redirect_verifier_replays_payload_and_checks_location(self):
         async def run():

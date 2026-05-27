@@ -2867,6 +2867,9 @@ function handleEvent(event) {
     case 'scan_complete':
       // 設定 + 結果サマリはサーバ側でアウトプットフォルダに自動保存される。
       // 必要に応じて「📤 設定をエクスポート」ボタンから手動でダウンロード可能。
+      if (Array.isArray(data.findings)) {
+        replaceFindings(data.findings);
+      }
       if (data.report_path) {
         addEventLog('status', `成果物保存先: ${data.report_path.replace(/\/report\.html$/, '')}`);
       }
@@ -3208,6 +3211,19 @@ function addFinding(data) {
   while (panel.children.length > MAX_CARDS) {
     panel.removeChild(panel.lastChild);
   }
+}
+
+function replaceFindings(findings) {
+  const panel = document.getElementById('findingsPanel');
+  panel.innerHTML = '';
+  state.findingCount = findings.length;
+  document.getElementById('statFindings').textContent = state.findingCount;
+  document.getElementById('findingCount').textContent = state.findingCount;
+  if (!findings.length) {
+    panel.innerHTML = '<div class="no-findings-msg">No vulnerabilities detected.</div>';
+    return;
+  }
+  findings.slice().reverse().forEach(addFinding);
 }
 
 function updateRequest(req) {
