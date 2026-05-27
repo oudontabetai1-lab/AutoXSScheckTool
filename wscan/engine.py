@@ -30,7 +30,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass, field as dc_field
 from pathlib import Path
 from typing import Optional
-from urllib.parse import urlparse, urljoin
+from urllib.parse import urlparse, urljoin, parse_qs
 
 # ---------------------------------------------------------------------------
 # Per-worker browser context variable
@@ -516,6 +516,35 @@ class ScanEngine:
     def _is_access_allowed_url(self, url: str) -> bool:
         return self._is_attack_target_url(url) or self._url_matches_scope(url, self.access_urls)
 
+    def _is_login_target_url(self, url: str) -> bool:
+        """Return True when *url* itself is the configured login page.
+
+        Used to distinguish a *deliberate* visit to the login page (so the login
+        form can be crawled and attacked) from an *unexpected* redirect to it
+        (genuine session expiry). Without this, ``is_on_login_page`` would treat
+        every login-page visit as expiry, re-authenticate, and navigate away —
+        leaving the login form itself never inspected.
+        """
+        if not self.login_url or not url:
+            return False
+        current = urlparse(url.rstrip("/").lower())
+        target = urlparse(self.login_url.rstrip("/").lower())
+        # The host AND path must match: a different origin that merely shares the
+        # /login path (e.g. an external IdP) is not our target login page.
+        if (current.netloc, current.path) != (target.netloc, target.path):
+            return False
+        # When the login route is encoded in the query string
+        # (e.g. /index.php?route=account/login), that query is significant — a
+        # protected page like /index.php?route=checkout shares the path but is
+        # NOT the login page, so require the configured query params to match.
+        # When the login URL has no query, ignore the candidate's query so
+        # redirect params such as ?next=… still match.
+        if not target.query:
+            return True
+        target_params = parse_qs(target.query)
+        current_params = parse_qs(current.query)
+        return all(current_params.get(k) == v for k, v in target_params.items())
+
     def _record_scan_matrix(
         self,
         url: str,
@@ -651,6 +680,10 @@ class ScanEngine:
 
             # Auth-1: Auto-login if login URL provided
             if self.login_url and self._browser.auth_user and self._browser.auth_pass:
+                # Inspect the login form FIRST, while still logged out. Apps that
+                # redirect authenticated users away from /login would otherwise
+                # hide the form, leaving this attack surface untested.
+                await self._scan_login_form_preauth()
                 console.print(
                     f"  [cyan][Auth] Auto-login:[/cyan] {self.login_url}"
                 )
@@ -958,6 +991,22 @@ class ScanEngine:
             except Exception:
                 pass
 
+        # ログインページ自体を必ずクロール対象に含める。認証後はログインへの
+        # リンクが消えるアプリが多く、シードしないとログインフォームが
+        # 攻撃対象から漏れてしまう。
+        if self.login_url and self._is_attack_target_url(self.login_url):
+            login_seed = self.login_url.rstrip("/")
+            if (
+                login_seed not in self.visited_urls
+                and not self._is_url_excluded(login_seed)
+            ):
+                self.visited_urls.add(login_seed)
+                queue.append((login_seed, 0, self.target_url))
+                console.print(
+                    f"  [dim cyan][Auth][/dim cyan] "
+                    f"ログインページをクロールキューに追加: {login_seed}"
+                )
+
         # O: HAR ファイルインポート — URL シードと Cookie を注入
         if self.har_path:
             try:
@@ -1072,7 +1121,14 @@ class ScanEngine:
 
             # Detect session expiry: if we've been redirected to the login page,
             # re-authenticate before collecting forms from this page.
-            if self.login_url and self._browser.is_on_login_page(self.login_url):
+            # Skip when we deliberately navigated to the login page itself — the
+            # login form is a valid attack surface and must be crawled/attacked
+            # rather than mistaken for an expired session.
+            if (
+                self.login_url
+                and self._browser.is_on_login_page(self.login_url)
+                and not self._is_login_target_url(url)
+            ):
                 console.print(
                     "  [yellow][Auth] Session expired during crawl — re-authenticating...[/yellow]"
                 )
@@ -1943,8 +1999,12 @@ class ScanEngine:
         await self._browser.navigate(self.target_url, retries=self.navigation_retries)
         landing_url = self._browser.page.url.rstrip("/")
 
-        # If we landed on the login page, session may have expired — try to re-login
-        if self._browser.is_on_login_page(self.login_url):
+        # If we landed on the login page, session may have expired — try to re-login.
+        # Unless the target itself is the login page (then staying on it is expected).
+        if (
+            self._browser.is_on_login_page(self.login_url)
+            and not self._is_login_target_url(self.target_url)
+        ):
             console.print("  [yellow][Post-Auth] Session appears expired — re-authenticating …[/yellow]")
             if self.login_url and self._browser.auth_user:
                 ok = await self._browser.auto_login(
@@ -1991,8 +2051,12 @@ class ScanEngine:
             # Check actual URL after navigation (may redirect)
             actual_url = self._browser.page.url.rstrip("/")
 
-            # If redirected to login, session expired mid-crawl
-            if self._browser.is_on_login_page(self.login_url):
+            # If redirected to login, session expired mid-crawl — unless this URL
+            # is the login page itself, which is a legitimate page to crawl.
+            if (
+                self._browser.is_on_login_page(self.login_url)
+                and not self._is_login_target_url(url)
+            ):
                 console.print(
                     "  [yellow][Post-Auth] Redirected to login — session expired.[/yellow]"
                 )
@@ -2069,14 +2133,20 @@ class ScanEngine:
 
     # ── Single-page attack (shared by serial and concurrent modes) ────────
 
-    async def _ensure_authenticated(self) -> bool:
+    async def _ensure_authenticated(self, intended_url: str = "") -> bool:
         """
         Detect session expiry (redirect to login page) and re-authenticate.
         Called before attacking each page.  Returns True if session is valid
         (or if no auto-login is configured).
+
+        When *intended_url* is the login page itself we are deliberately about to
+        attack the login form, so a re-login (which would navigate away) is
+        suppressed.
         """
         br = self.browser  # context-aware: returns worker in concurrent mode
         if not self.login_url and not br.auth_user:
+            return True
+        if self._is_login_target_url(intended_url):
             return True
         if br.is_on_login_page(self.login_url):
             console.print(
@@ -2096,6 +2166,73 @@ class ScanEngine:
                 console.print("  [yellow][Auth] Re-login may have failed — continuing.[/yellow]")
             return success
         return True
+
+    async def _scan_login_form_preauth(self) -> None:
+        """Capture and attack the login form while still unauthenticated.
+
+        Runs BEFORE auto-login. Apps that redirect authenticated users away from
+        the login page would otherwise hide the form entirely, so the login form
+        (reflected XSS in the username/error message, SQLi auth bypass, etc.)
+        must be observed and tested in a logged-out context. Marks the login URL
+        as visited so the authenticated crawl does not re-record post-login
+        content under it.
+        """
+        if not (self.login_url and self._is_attack_target_url(self.login_url)):
+            return
+        login_seed = self.login_url.rstrip("/")
+        if self._is_url_excluded(login_seed):
+            return
+
+        console.print(
+            Rule(
+                "[bold magenta] Pre-Auth · Login Form Inspection [/bold magenta]",
+                style="magenta",
+            )
+        )
+        console.print(
+            f"  [dim]未認証コンテキストでログインフォームを検査:[/dim] {login_seed}"
+        )
+
+        if not await self._browser.navigate(login_seed, retries=self.navigation_retries):
+            console.print("  [yellow]  ✘ ログインページを読み込めませんでした[/yellow]")
+            self._record_unscannable_url(
+                login_seed,
+                note="Pre-auth login page load failed: "
+                + self._navigation_failure_note(),
+            )
+            return
+
+        try:
+            html = await self._browser.page.content()
+        except Exception:
+            html = ""
+        forms = await self._browser.find_forms()
+        url_params = self._merge_url_params(
+            await self._browser.get_url_params(), login_seed
+        )
+
+        if not forms and not url_params:
+            console.print(
+                "  [dim]ログインページに入力フォームが見つかりませんでした。[/dim]"
+            )
+            return
+
+        console.print(
+            f"  [cyan]{len(forms)}[/cyan] form(s) · "
+            f"[cyan]{len(url_params)}[/cyan] URL param(s) を検出"
+        )
+        page = CrawledPage(
+            url=login_seed, html=html, forms=forms, url_params=url_params, depth=0
+        )
+        self.page_graph.setdefault(
+            login_seed, {"parent": None, "screenshot_b64": "", "depth": 0}
+        )
+
+        await self._attack_one_page(page, {})
+
+        # Prevent the authenticated crawl/attack from re-visiting the login page
+        # (which, on redirect-on-auth apps, would only capture post-login content).
+        self.visited_urls.add(login_seed)
 
     async def _attack_one_page(self, page: CrawledPage, plans: dict):
         """
@@ -2162,7 +2299,7 @@ class ScanEngine:
                     return
         else:
             # ── Re-authenticate if session expired ───────────────────────
-            await self._ensure_authenticated()
+            await self._ensure_authenticated(page.url)
             # Navigate back to page for form interaction
             success = await self.browser.navigate(page.url, retries=self.navigation_retries)
             if not success:
