@@ -527,12 +527,12 @@ class ScanEngine:
         """
         if not self.login_url or not url:
             return False
-        current = url.rstrip("/").lower()
-        target = self.login_url.rstrip("/").lower()
-        if current == target:
-            return True
-        target_path = urlparse(target).path
-        return bool(target_path) and urlparse(current).path == target_path
+        current = urlparse(url.rstrip("/").lower())
+        target = urlparse(self.login_url.rstrip("/").lower())
+        # Match on host + path (ignoring query/fragment so /login?next=… still
+        # matches). The host MUST match: a different origin that happens to share
+        # the /login path (e.g. an external IdP) is not our target login page.
+        return (current.netloc, current.path) == (target.netloc, target.path)
 
     def _record_scan_matrix(
         self,

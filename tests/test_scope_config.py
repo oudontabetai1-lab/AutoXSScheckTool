@@ -54,6 +54,15 @@ class ScopeConfigTests(unittest.TestCase):
         self.assertFalse(engine._is_login_target_url("http://app.test/dashboard"))
         self.assertFalse(engine._is_login_target_url(""))
 
+    def test_is_login_target_url_requires_matching_host(self):
+        # login_url points at an external IdP; the target app shares the /login
+        # path. A redirect to the app's own /login must NOT be treated as a
+        # deliberate login-page visit, otherwise re-auth would be wrongly skipped.
+        engine = self._engine(login_url="http://auth.test/login")
+
+        self.assertTrue(engine._is_login_target_url("http://auth.test/login"))
+        self.assertFalse(engine._is_login_target_url("http://app.test/login"))
+
     def test_is_login_target_url_false_without_login_url(self):
         engine = self._engine()
 
