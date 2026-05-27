@@ -38,6 +38,11 @@ XSS_MARKERS = [
     "alert(",
 ]
 
+# Attributes whose value is a URL — a javascript: payload here executes even
+# without breaking out of the quotes, so a reflection inside them stays
+# dangerous.
+_URL_ATTRS = {"href", "src", "action", "formaction", "xlink:href", "data", "poster"}
+
 
 class XSSScanner(BaseScanner):
     """XSS vulnerability scanner."""
@@ -60,11 +65,20 @@ class XSSScanner(BaseScanner):
         if self.monitor:
             await self.monitor.emit_status(f"XSS testing: {field_name} on {url}")
 
-        # Capture baseline before injecting any payload
+        # Capture baseline before injecting any payload. Reflection analysis
+        # runs on the raw HTTP response body (where the server's escaping is
+        # visible as &lt; / &quot;), not the serialised DOM — the browser
+        # re-serialises attribute values with raw < / >, which makes an escaped
+        # payload inside value="…" look like a live tag and yields false
+        # positives. The DOM (page.content()) is the fallback for DOM-only
+        # reflections that never appear in the response body.
         baseline_source = ""
         try:
             await self.browser.navigate(url)
             baseline_source = await self.browser.page.content()
+            body = self._response_body_for(url)
+            if body:
+                baseline_source = body
         except Exception as exc:
             if self.monitor:
                 await self.monitor.emit_status(
@@ -113,8 +127,9 @@ class XSSScanner(BaseScanner):
                 break  # Confirmed - no need to test more payloads
 
             # --- Check 2: Payload reflected without HTML encoding ---
-            if source:
-                reflection = self._analyze_reflection(source, payload, baseline_source)
+            reflect_source = pair.get("response", {}).get("body") or source
+            if reflect_source:
+                reflection = self._analyze_reflection(reflect_source, payload, baseline_source)
                 if reflection:
                     context = reflection.get("context", "unknown")
                     confidence = reflection.get("confidence", "tentative")
@@ -173,16 +188,16 @@ class XSSScanner(BaseScanner):
             idx = source.find(payload)
             preceding = source.lower()[max(0, idx - 300):idx]
             if not (preceding.rfind("<!--") > preceding.rfind("-->")):
-                return {
-                    "context": self._classify_reflection_context(source, idx),
-                    "match": "full_payload",
-                    "snippet": source[max(0, idx - 10):idx + len(payload) + 50],
-                    "confidence": self._confidence_for_context(
-                        self._classify_reflection_context(source, idx)
-                    ),
-                    "raw_payload_present": True,
-                    "baseline_marker_delta": None,
-                }
+                context = self._classify_reflection_context(source, idx)
+                if self._reflection_executable(source, idx, payload, payload, baseline_source, context):
+                    return {
+                        "context": context,
+                        "match": "full_payload",
+                        "snippet": source[max(0, idx - 10):idx + len(payload) + 50],
+                        "confidence": self._confidence_for_context(context),
+                        "raw_payload_present": True,
+                        "baseline_marker_delta": None,
+                    }
 
         source_lower = source.lower()
         baseline_lower = baseline_source.lower() if baseline_source else ""
@@ -215,6 +230,8 @@ class XSSScanner(BaseScanner):
                 continue
 
             context = self._classify_reflection_context(source, idx)
+            if not self._reflection_executable(source, idx, payload, marker, baseline_source, context):
+                continue
             delta = None
             if baseline_lower:
                 delta = source_lower.count(marker_lower) - baseline_lower.count(marker_lower)
@@ -228,6 +245,101 @@ class XSSScanner(BaseScanner):
             }
 
         return {}
+
+    def _reflection_executable(
+        self,
+        source: str,
+        idx: int,
+        payload: str,
+        matched: str,
+        baseline_source: str,
+        context: str,
+    ) -> bool:
+        """Decide whether a reflection at ``idx`` can actually execute.
+
+        Reflection alone is not XSS: a correctly-escaped page echoes the payload
+        but neutralises the characters that would let it break out. ``matched``
+        is the token confirmed present *raw* at ``idx`` (the whole payload, or a
+        single marker), and ``page.content()`` is the browser's serialised DOM,
+        so the trustworthy signals are:
+
+        * ``matched`` carries a raw ``<`` — a real tag/element was formed
+          (escaped output keeps ``&lt;``, and a serialised text node re-escapes
+          ``<``, so a raw ``<`` in the matched token means a live tag);
+        * the reflection sits in an inherently executable position — a
+          ``<script>`` body, an unquoted ``on*`` handler, or a URL attribute;
+        * inside a quoted attribute value, only an ``on*`` handler / URL
+          attribute, or the value's delimiting quote actually being broken.
+
+        Bare markers (``alert(``, ``onload=`` …) and quote / backtick characters
+        survive ``html.escape`` and even reappear raw inside serialised attribute
+        values, so they are treated as data unless one of the signals above
+        holds. This is what suppresses ``value="&quot; onmouseover=alert(1)"``
+        and ``Hello, &lt;script&gt;alert(1)`` false positives while still
+        catching genuinely unescaped reflections.
+        """
+        if context == "html_comment":
+            return False
+
+        raw_tag = "<" in matched  # matched is confirmed present raw at idx
+
+        owner, delim = self._owning_quoted_attr(source, idx)
+        if owner is not None:
+            # idx sits inside a quoted attribute value: the token is data unless
+            # the owning attribute itself runs script, the payload broke the
+            # delimiting quote, or a real tag was formed. This stops the
+            # classifier from mistaking ``value="… onmouseover=alert(1)"`` text
+            # for a live event handler.
+            if owner.startswith("on") or owner in _URL_ATTRS:
+                return True
+            if raw_tag:
+                return True
+            base_l = baseline_source.lower() if baseline_source else ""
+            return bool(
+                delim
+                and delim in payload
+                and base_l
+                and source.count(delim) > baseline_source.count(delim)
+            )
+
+        # Not inside a quoted value: trust the positional classification — an
+        # unquoted on*-handler, a <script> body, or a javascript: URL attribute
+        # are executable regardless of structural characters.
+        if context in ("script", "event_handler_attribute", "url_attribute"):
+            return True
+        # html_text / bare unquoted attribute: needs a real tag-opening bracket.
+        return raw_tag
+
+    @staticmethod
+    def _owning_quoted_attr(source: str, idx: int) -> tuple:
+        """Resolve the quoted attribute value (if any) that contains ``idx``.
+
+        Returns ``(attribute_name, delimiter_quote)`` when ``idx`` is inside an
+        open, quoted attribute value, else ``(None, "")``. The attribute name is
+        lower-cased; it is ``""`` when a delimiter is open but no name precedes
+        it. Only raw quote characters are tracked, so an escaped ``&quot;`` does
+        not look like a delimiter — which is exactly what distinguishes inert
+        escaped output from a genuine attribute breakout.
+        """
+        lt = source.rfind("<", 0, idx)
+        gt = source.rfind(">", 0, idx)
+        if lt == -1 or (gt != -1 and gt > lt):
+            return (None, "")  # not inside a tag
+        seg = source[lt:idx]
+        quote = None
+        open_pos = -1
+        for j, c in enumerate(seg):
+            if quote:
+                if c == quote:
+                    quote = None
+            elif c in ('"', "'"):
+                quote = c
+                open_pos = j
+        if quote is None:
+            return (None, "")
+        head = seg[:open_pos]
+        m = re.search(r'([A-Za-z_:][-A-Za-z0-9_:.]*)\s*=\s*$', head)
+        return (m.group(1).lower() if m else "", quote)
 
     def _classify_reflection_context(self, source: str, idx: int) -> str:
         before = source[max(0, idx - 500):idx].lower()
@@ -258,6 +370,22 @@ class XSSScanner(BaseScanner):
             return "tentative"
         return "tentative"
 
+    def _response_body_for(self, url: str) -> str:
+        """Raw HTTP response body captured for ``url`` (empty when unavailable).
+
+        Reflection analysis prefers this over the serialised DOM because the
+        server's escaping (``&lt;`` / ``&quot;``) is visible here, whereas the
+        browser re-emits attribute values with raw ``<`` / ``>``.
+        """
+        net = getattr(self.browser, "network", None)
+        if not net:
+            return ""
+        try:
+            pair = net.latest_for_url(url) or net.latest() or {}
+        except Exception:
+            return ""
+        return pair.get("response", {}).get("body") or ""
+
     async def verify_finding(self, finding: Finding) -> bool | None:
         from urllib.parse import parse_qs, urlparse
         is_url_param = finding.field_name in parse_qs(
@@ -268,10 +396,13 @@ class XSSScanner(BaseScanner):
             self.browser.reset_dialog()
             await self.browser.navigate(finding.url)
             baseline_source = await self.browser.page.content()
+            body = self._response_body_for(finding.url)
+            if body:
+                baseline_source = body
         except Exception:
             baseline_source = ""
         self.browser.reset_dialog()
-        source, _ = await self._apply_payload(
+        source, pair = await self._apply_payload(
             finding.url,
             0,
             finding.field_name,
@@ -283,7 +414,8 @@ class XSSScanner(BaseScanner):
             return True
         if getattr(finding, "evidence_type", "") == "xss_dialog":
             return False
-        return bool(source and self._analyze_reflection(source, finding.payload, baseline_source))
+        reflect_source = pair.get("response", {}).get("body") or source
+        return bool(reflect_source and self._analyze_reflection(reflect_source, finding.payload, baseline_source))
 
     async def _apply_payload(
         self,
