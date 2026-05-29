@@ -4,24 +4,49 @@ FastAPI + WebSocket server for real-time scan monitoring dashboard.
 """
 import asyncio
 import collections
+import hashlib
 import json
+import secrets
 import time
 from pathlib import Path
 from typing import Set, Any, Optional
 
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
+from fastapi.responses import (
+    HTMLResponse,
+    JSONResponse,
+    FileResponse,
+    RedirectResponse,
+)
 from fastapi.staticfiles import StaticFiles
 
 
 TEMPLATES_DIR = Path(__file__).parent.parent / "templates"
 
+# Name of the session cookie set after a successful token login.
+SESSION_COOKIE = "wscan_session"
+# Paths that never require authentication (health checks, the login page itself).
+_PUBLIC_PATHS = {"/health", "/login", "/favicon.ico"}
+
+
+def _session_value(token: str) -> str:
+    """Derive an opaque cookie value from the shared token.
+
+    The raw token is never stored in the browser cookie; instead we store a
+    SHA-256 digest so a leaked cookie cannot be replayed against the Bearer
+    API and the token itself is not exposed in client storage.
+    """
+    return hashlib.sha256(("wscan:" + token).encode("utf-8")).hexdigest()
+
 
 class MonitorServer:
     """Real-time monitoring server for scan progress."""
 
-    def __init__(self, port: int = 8765):
+    def __init__(self, port: int = 8765, auth_token: str = ""):
         self.port = port
+        # Shared access token. Empty string => authentication disabled.
+        self.auth_token: str = (auth_token or "").strip()
+        self._session_value: str = _session_value(self.auth_token) if self.auth_token else ""
         self.clients: Set[WebSocket] = set()
         self._queue: asyncio.Queue = asyncio.Queue()
         self.app = self._create_app()
@@ -40,6 +65,9 @@ class MonitorServer:
         # Scan config submitted from the dashboard (serve mode)
         self.scan_request_event: asyncio.Event = asyncio.Event()
         self.scan_request_data: dict = {}
+        # True while a scan is actually executing in persistent serve mode.
+        # Used to reject (rather than silently drop) concurrent scan requests.
+        self.scan_in_progress: bool = False
         # Crawl review (AeyeScan-style pause between crawl and plan)
         self.crawl_review_event: asyncio.Event = asyncio.Event()
         self.crawl_review_action: dict = {}
@@ -53,8 +81,95 @@ class MonitorServer:
         self.api_report_path: Optional[str] = None
         self.manual_crawl_session = None
 
+    # ------------------------------------------------------------------
+    # Authentication helpers
+    # ------------------------------------------------------------------
+
+    def _token_ok(self, token: Optional[str]) -> bool:
+        """Constant-time comparison of a presented raw token."""
+        if not self.auth_token:
+            return True
+        if not token:
+            return False
+        return secrets.compare_digest(token, self.auth_token)
+
+    def _request_authorized(self, request: Request) -> bool:
+        """True if the HTTP request carries valid credentials."""
+        if not self.auth_token:
+            return True
+        # 1. Session cookie set by the login page.
+        cookie = request.cookies.get(SESSION_COOKIE)
+        if cookie and secrets.compare_digest(cookie, self._session_value):
+            return True
+        # 2. Authorization: Bearer <token>  (API / CI clients).
+        auth = request.headers.get("authorization", "")
+        if auth.lower().startswith("bearer "):
+            if self._token_ok(auth[7:].strip()):
+                return True
+        # 3. X-Auth-Token header (convenience for scripts).
+        if self._token_ok(request.headers.get("x-auth-token")):
+            return True
+        return False
+
+    def _ws_authorized(self, ws: WebSocket) -> bool:
+        """True if a WebSocket upgrade request is authenticated."""
+        if not self.auth_token:
+            return True
+        cookie = ws.cookies.get(SESSION_COOKIE)
+        if cookie and secrets.compare_digest(cookie, self._session_value):
+            return True
+        # Non-browser clients may pass ?token=... on the WS URL.
+        token = ws.query_params.get("token")
+        return self._token_ok(token)
+
     def _create_app(self) -> FastAPI:
         app = FastAPI(title="WScan Monitor", docs_url=None, redoc_url=None)
+
+        @app.middleware("http")
+        async def _auth_middleware(request: Request, call_next):
+            if not self.auth_token:
+                return await call_next(request)
+            path = request.url.path
+            if path in _PUBLIC_PATHS or self._request_authorized(request):
+                return await call_next(request)
+            # Browsers asking for HTML get redirected to the login page;
+            # API/XHR callers get a clean 401 so they can react.
+            accept = request.headers.get("accept", "")
+            wants_html = "text/html" in accept and not path.startswith("/api/")
+            if wants_html:
+                return RedirectResponse(url="/login", status_code=303)
+            return JSONResponse(
+                {"error": "認証が必要です。Authorization: Bearer <token> ヘッダーを付与してください。"},
+                status_code=401,
+            )
+
+        @app.get("/login", response_class=HTMLResponse)
+        async def login_page(request: Request):
+            if not self.auth_token or self._request_authorized(request):
+                return RedirectResponse(url="/", status_code=303)
+            return HTMLResponse(self._login_html())
+
+        @app.post("/login")
+        async def login_submit(request: Request):
+            form = await request.form()
+            token = (form.get("token") or "").strip()
+            if self._token_ok(token):
+                resp = RedirectResponse(url="/", status_code=303)
+                resp.set_cookie(
+                    SESSION_COOKIE,
+                    self._session_value,
+                    httponly=True,
+                    samesite="lax",
+                    max_age=60 * 60 * 12,  # 12 hours
+                )
+                return resp
+            return HTMLResponse(self._login_html(error=True), status_code=401)
+
+        @app.get("/logout")
+        async def logout():
+            resp = RedirectResponse(url="/login", status_code=303)
+            resp.delete_cookie(SESSION_COOKIE)
+            return resp
 
         @app.get("/", response_class=HTMLResponse)
         async def dashboard():
@@ -65,6 +180,9 @@ class MonitorServer:
 
         @app.websocket("/ws")
         async def websocket_endpoint(ws: WebSocket):
+            if not self._ws_authorized(ws):
+                await ws.close(code=4401)  # 4401: custom "unauthorized"
+                return
             await ws.accept()
             self.clients.add(ws)
             # Send event history to newly connected client
@@ -87,6 +205,11 @@ class MonitorServer:
         @app.get("/health")
         async def health():
             return {"status": "ok", "clients": len(self.clients)}
+
+        @app.get("/api/auth-status")
+        async def api_auth_status():
+            """Lets the dashboard know whether the logout control applies."""
+            return {"auth_enabled": bool(self.auth_token)}
 
         @app.get("/api/config/defaults")
         async def api_config_defaults():
@@ -156,11 +279,24 @@ class MonitorServer:
             if not config.get("url"):
                 return JSONResponse({"error": "url is required"}, status_code=400)
 
+            # Reject instead of silently dropping a scan submitted while another
+            # one is already running in persistent serve mode.
+            if self.scan_in_progress or self.scan_request_event.is_set():
+                return JSONResponse(
+                    {
+                        "error": "スキャンが既に実行中です。完了後に再試行してください。",
+                        "status": self.api_scan_status,
+                        "scan_id": self.api_scan_id,
+                    },
+                    status_code=409,
+                )
+
             self.scan_request_data = config
             self.scan_request_event.set()
             self.api_scan_id = str(int(time.time()))
             self.api_scan_status = "scanning"
             self.api_findings = []
+            self.api_report_path = None
             return JSONResponse({
                 "status": "accepted",
                 "scan_id": self.api_scan_id,
@@ -268,6 +404,72 @@ class MonitorServer:
         return app
 
     # ------------------------------------------------------------------
+    # Login page
+    # ------------------------------------------------------------------
+
+    def _login_html(self, error: bool = False) -> str:
+        """Render the standalone token-login page."""
+        err_block = (
+            '<p class="err">トークンが正しくありません。もう一度入力してください。</p>'
+            if error else ""
+        )
+        return f"""<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WScan — ログイン</title>
+<style>
+  :root {{ color-scheme: dark; }}
+  * {{ box-sizing: border-box; }}
+  body {{
+    margin: 0; min-height: 100vh; display: flex; align-items: center;
+    justify-content: center; font-family: "Segoe UI", "Hiragino Sans", system-ui, sans-serif;
+    background: radial-gradient(circle at 30% 20%, #1b2a4a 0%, #0b1220 60%, #070b14 100%);
+    color: #e6edf6;
+  }}
+  .card {{
+    width: min(380px, 92vw); padding: 36px 32px; border-radius: 16px;
+    background: rgba(20, 30, 50, 0.85); border: 1px solid rgba(120, 160, 220, 0.25);
+    box-shadow: 0 24px 60px rgba(0, 0, 0, 0.45); backdrop-filter: blur(6px);
+  }}
+  .brand {{ display: flex; align-items: center; gap: 10px; margin-bottom: 6px; }}
+  .brand .dot {{ width: 12px; height: 12px; border-radius: 50%;
+    background: #4fd1c5; box-shadow: 0 0 12px #4fd1c5; }}
+  h1 {{ font-size: 1.4rem; margin: 0; letter-spacing: 0.5px; }}
+  p.sub {{ margin: 4px 0 24px; color: #93a4bd; font-size: 0.86rem; }}
+  label {{ display: block; font-size: 0.8rem; color: #b9c6da; margin-bottom: 8px; }}
+  input[type=password] {{
+    width: 100%; padding: 12px 14px; border-radius: 10px; font-size: 1rem;
+    border: 1px solid rgba(120, 160, 220, 0.3); background: #0d1626; color: #e6edf6;
+    outline: none; transition: border-color 0.15s, box-shadow 0.15s;
+  }}
+  input[type=password]:focus {{ border-color: #4fd1c5; box-shadow: 0 0 0 3px rgba(79, 209, 197, 0.2); }}
+  button {{
+    margin-top: 20px; width: 100%; padding: 12px; border: 0; border-radius: 10px;
+    font-size: 1rem; font-weight: 600; cursor: pointer; color: #052018;
+    background: linear-gradient(135deg, #4fd1c5, #3aa6e0);
+  }}
+  button:hover {{ filter: brightness(1.08); }}
+  .err {{ color: #ff9b9b; font-size: 0.84rem; margin: 14px 0 0; }}
+  .foot {{ margin-top: 22px; font-size: 0.72rem; color: #6f7f97; text-align: center; }}
+</style>
+</head>
+<body>
+  <form class="card" method="post" action="/login">
+    <div class="brand"><span class="dot"></span><h1>WScan</h1></div>
+    <p class="sub">Web Security Scanner — イントラネット版</p>
+    <label for="token">アクセストークン</label>
+    <input id="token" name="token" type="password" autofocus autocomplete="current-password"
+           placeholder="共有トークンを入力">
+    {err_block}
+    <button type="submit">ログイン</button>
+    <div class="foot">権限のある担当者のみ利用してください。</div>
+  </form>
+</body>
+</html>"""
+
+    # ------------------------------------------------------------------
     # Client message handler (called from WebSocket coroutine)
     # ------------------------------------------------------------------
 
@@ -296,7 +498,20 @@ class MonitorServer:
             self.manual_payload_queue.put_nowait(msg)
 
         elif action == "start_scan":
-            # Serve mode: dashboard submits full scan config
+            # Serve mode: dashboard submits full scan config. Ignore the request
+            # if a scan is already running so it is not silently dropped when the
+            # persistent loop next clears the event.
+            if self.scan_in_progress or self.scan_request_event.is_set():
+                # Notify the client without disturbing the in-progress scan's status.
+                try:
+                    asyncio.get_running_loop().create_task(
+                        self.emit("scan_rejected", {
+                            "message": "スキャンが既に実行中です。完了後に再試行してください。",
+                        })
+                    )
+                except RuntimeError:
+                    pass
+                return
             self.scan_request_data = msg.get("config", {})
             self.api_scan_id = str(int(time.time()))
             self.api_scan_status = "scanning"

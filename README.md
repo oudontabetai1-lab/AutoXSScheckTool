@@ -25,6 +25,7 @@ python3 main.py serve --port 8765
 | ドキュメント | 内容 |
 | --- | --- |
 | [docs/dashboard_usage_ja.md](docs/dashboard_usage_ja.md) | ダッシュボードを先に起動し、画面から検査を開始する手順。疑似検査のスクリーンショット付き |
+| [docs/server_deployment_ja.md](docs/server_deployment_ja.md) | サーバー常駐・イントラネット公開（トークン認証 / Docker / リバースプロキシ）の手順 |
 | [docs/operation_guide_ja.md](docs/operation_guide_ja.md) | 実検査前の準備、認証、スコープ設計、検査強度、出力物、再検査の運用ガイド |
 | [docs/troubleshooting_ja.md](docs/troubleshooting_ja.md) | アクセスできない、検査が途切れる、検出できない、UIに反映されない場合の切り分け |
 | [docs/advanced_features.md](docs/advanced_features.md) | 高度診断支援機能の詳細 |
@@ -60,6 +61,27 @@ http://localhost:8765
 ```
 
 ポートが競合する場合は、`--port 8766` のように別ポートを指定します。
+
+#### サーバーに常駐させてイントラネットから使う場合
+
+`serve` は常駐型のため、1 度起動すれば何度でもスキャンできます。社内ネットワークに
+公開する場合は **アクセストークンを必ず設定**してください（未設定だと到達できる全員が
+スキャナーを操作できます）。
+
+```bash
+export WSCAN_AUTH_TOKEN="$(openssl rand -hex 16)"   # トークンを生成・共有
+python3 main.py serve --host 0.0.0.0 --port 8765 --no-open-browser
+```
+
+社内端末から `http://<サーバーのLAN IP>:8765` を開き、トークンでログインします。
+Docker での配布やリバースプロキシ(HTTPS)構成は
+[docs/server_deployment_ja.md](docs/server_deployment_ja.md) を参照してください。
+
+```bash
+# Docker でまとめて起動
+export WSCAN_AUTH_TOKEN="$(openssl rand -hex 16)"
+docker compose up -d --build
+```
 
 ### 3. 画面から検査開始
 

@@ -12,6 +12,7 @@ Usage:
 import asyncio
 import argparse
 import json
+import os
 import sys
 import webbrowser
 from pathlib import Path
@@ -91,6 +92,8 @@ def _load_config(path: Path = _CONFIG_PATH) -> dict:
 
     cfg["monitor_enabled"]         = bool(m.get("enabled", True))
     cfg["port"]                    = int(m.get("port", 8765))
+    cfg["host"]                    = str(m.get("host", "0.0.0.0"))
+    cfg["auth_token"]              = str(m.get("auth_token", ""))
 
     cfg["use_planner"]             = bool(pl.get("enabled",     True))
     cfg["interactive_plan"]        = bool(pl.get("interactive", False))
@@ -710,6 +713,27 @@ Examples:
     serve.add_argument(
         "--port", type=int, default=_CFG.get("port", 8765),
         help=f"Dashboard port (default: {_CFG.get('port', 8765)})",
+    )
+    serve.add_argument(
+        "--host", default=os.environ.get("WSCAN_HOST", _CFG.get("host", "0.0.0.0")),
+        metavar="ADDR",
+        help="Interface to bind (default: 0.0.0.0 — reachable from the intranet). "
+             "Use 127.0.0.1 to restrict to localhost.",
+    )
+    serve.add_argument(
+        "--auth-token", default=os.environ.get("WSCAN_AUTH_TOKEN", _CFG.get("auth_token", "")),
+        metavar="TOKEN",
+        help="Shared access token. When set, the web UI requires login and the "
+             "API requires an 'Authorization: Bearer <token>' header. "
+             "Can also be supplied via the WSCAN_AUTH_TOKEN environment variable.",
+    )
+    serve.add_argument(
+        "--open-browser", dest="open_browser", action="store_true", default=None,
+        help="Open a browser on the host after start (default: only when bound to localhost).",
+    )
+    serve.add_argument(
+        "--no-open-browser", dest="open_browser", action="store_false",
+        help="Never open a browser on the host (recommended for headless servers).",
     )
 
     # A-4: Natural language setup subcommand
@@ -1341,15 +1365,48 @@ async def run_serve(args):
 
     console = Console()
     port = args.port
+    host = getattr(args, "host", "0.0.0.0") or "0.0.0.0"
+    auth_token = (getattr(args, "auth_token", "") or "").strip()
 
+    # Decide whether to pop a browser on the host. Default: only when bound to
+    # loopback (a local developer). On a real server (0.0.0.0 / a LAN IP) we
+    # stay headless unless --open-browser was passed explicitly.
+    is_loopback = host in ("127.0.0.1", "localhost", "::1")
+    if getattr(args, "open_browser", None) is None:
+        open_browser = is_loopback
+    else:
+        open_browser = bool(args.open_browser)
+
+    # Best-effort LAN address hint so the operator knows the intranet URL.
+    lan_hint = ""
+    if not is_loopback:
+        try:
+            import socket
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(("8.8.8.8", 80))
+            lan_ip = s.getsockname()[0]
+            s.close()
+            lan_hint = f"\n  Intranet : [underline]http://{lan_ip}:{port}[/underline]"
+        except Exception:
+            lan_hint = ""
+
+    auth_line = (
+        "  Auth     : [green]token required[/green] (login page enabled)"
+        if auth_token else
+        "  Auth     : [yellow]DISABLED[/yellow] — anyone on the network can use this scanner!"
+    )
     console.print(Panel.fit(
-        f"[bold cyan]WScan — Dashboard Mode[/bold cyan]\n"
-        f"  Opening [underline]http://localhost:{port}[/underline]\n"
-        "  Configure and start your scan from the browser.",
+        f"[bold cyan]WScan — Server Mode[/bold cyan]\n"
+        f"  Bind     : [underline]http://{host}:{port}[/underline]"
+        f"{lan_hint}\n"
+        f"  Local    : [underline]http://localhost:{port}[/underline]\n"
+        f"{auth_line}\n"
+        "  The dashboard stays up — run as many scans as you like.\n"
+        "  Press Ctrl+C to stop.",
         border_style="cyan",
     ))
 
-    monitor = MonitorServer(port=port)
+    monitor = MonitorServer(port=port, auth_token=auth_token)
     monitor.default_scan_cfg = {
         "checks": _CFG.get("checks", ["sqli", "xss", "os"]),
         "depth": _CFG.get("depth", 2),
@@ -1408,22 +1465,21 @@ async def run_serve(args):
         "claude_model": _CFG.get("claude_model", _llm_section.get("claude_model", "claude-haiku-4-5-20251001")),
         "role_models":  _CFG.get("role_models", _llm_section.get("models", {}) or {}),
     }
-    config = uvicorn.Config(app=monitor.app, host="0.0.0.0", port=port, log_level="error")
+    config = uvicorn.Config(app=monitor.app, host=host, port=port, log_level="error")
     server = uvicorn.Server(config)
 
-    async def serve_task():
-        await asyncio.sleep(1.2)
-        webbrowser.open(f"http://localhost:{port}")
-        # Tell dashboard to show the config form
-        await monitor.emit_awaiting_config()
-        # Wait for the user to submit config from the GUI
-        await monitor.scan_request_event.wait()
-        cfg = monitor.scan_request_data
+    async def run_one_scan(cfg):
+        """Run a single scan for one submitted config and return when done.
 
+        Unlike the legacy one-shot flow, this never shuts the server down —
+        the dashboard stays up so the operator can launch the next scan.
+        """
         url = cfg.get("url", "").strip()
         if not url:
-            console.print("[red]No target URL provided — aborting.[/red]")
-            server.should_exit = True
+            console.print("[red]No target URL provided — ignoring request.[/red]")
+            await monitor.emit_status(
+                "ターゲットURLが空のため、リクエストを無視しました。", "error"
+            )
             return
 
         checks = cfg.get("checks", ["sqli", "xss", "os"]) or ["sqli", "xss", "os"]
@@ -1461,15 +1517,12 @@ async def run_serve(args):
                     port=port,
                 )
                 await agent_engine.run()
-                console.print("[dim]Dashboard still running — press Ctrl+C to stop.[/dim]")
-                await asyncio.sleep(3600)
+                console.print("[dim]Agent scan finished — dashboard ready for the next scan.[/dim]")
             except asyncio.CancelledError:
-                pass
+                raise
             except Exception as exc:
                 console.print(f"\n[red]Agent Error: {exc}[/red]")
-                raise
-            finally:
-                server.should_exit = True
+                await monitor.emit_status(f"Agent エラー: {exc}", "error")
             return
 
         # ── Hybrid Mode: Agent偵察 (Phase 1) → 通常スキャン (Phase 2) ────
@@ -1609,17 +1662,74 @@ async def run_serve(args):
                 f"\n[bold green]Scan complete![/bold green]  "
                 f"Report: [cyan]{engine.output_dir / 'report.html'}[/cyan]"
             )
-            console.print("[dim]Dashboard still running — press Ctrl+C to stop.[/dim]")
-            await asyncio.sleep(3600)
+            console.print("[dim]Dashboard ready for the next scan.[/dim]")
         except asyncio.CancelledError:
-            pass
+            raise
         except Exception as exc:
             console.print(f"\n[red]Error: {exc}[/red]")
-            raise
-        finally:
-            server.should_exit = True
+            await monitor.emit_status(f"スキャン中にエラーが発生しました: {exc}", "error")
+        return
 
-    await asyncio.gather(server.serve(), serve_task())
+    async def serve_task():
+        # Open a browser on the host only when explicitly requested or when the
+        # server is bound to localhost (i.e. a developer running it locally).
+        await asyncio.sleep(1.2)
+        if open_browser:
+            try:
+                webbrowser.open(f"http://localhost:{port}")
+            except Exception:
+                pass
+
+        # Persistent loop: accept and run one scan at a time, indefinitely.
+        while not server.should_exit:
+            # While idle, KEEP the previous scan's results/status/report so
+            # CI/API clients can still poll /api/v1/scan/results and fetch the
+            # report after completion. The per-scan reset happens only when a new
+            # scan is accepted (the request handlers set status=scanning and clear
+            # findings), not the moment the previous result was published.
+            monitor.scan_in_progress = False
+            monitor.scan_request_event.clear()
+            # Tell the dashboard it is ready for a new scan config.
+            await monitor.emit_awaiting_config()
+            # Wait until a config is submitted from the GUI / API / WebSocket,
+            # but wake periodically so a shutdown (Ctrl+C) is honoured even when
+            # the loop is otherwise idle and blocked on the event.
+            while not server.should_exit and not monitor.scan_request_event.is_set():
+                try:
+                    await asyncio.wait_for(monitor.scan_request_event.wait(), timeout=0.5)
+                except asyncio.TimeoutError:
+                    pass
+            if server.should_exit:
+                break
+            # Claim the busy slot synchronously (no await in between) so concurrent
+            # requests are rejected rather than silently dropped on the next reset.
+            monitor.scan_in_progress = True
+            # New scan accepted: clear the previous run's event log so this scan
+            # starts from a clean slate in the dashboard.
+            monitor.event_history.clear()
+            cfg = monitor.scan_request_data or {}
+            try:
+                await run_one_scan(cfg)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                console.print(f"\n[red]Unexpected error: {exc}[/red]")
+            finally:
+                monitor.scan_in_progress = False
+
+    # Run the server and the scan loop side by side. When the server shuts down
+    # (Ctrl+C / SIGTERM), cancel the idle scan loop so the process exits promptly
+    # instead of hanging on a pending scan-request wait.
+    server_coro = asyncio.ensure_future(server.serve())
+    worker_coro = asyncio.ensure_future(serve_task())
+    try:
+        await server_coro
+    finally:
+        worker_coro.cancel()
+        try:
+            await worker_coro
+        except asyncio.CancelledError:
+            pass
 
 
 async def run_triage(args):
