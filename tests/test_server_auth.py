@@ -126,6 +126,31 @@ class ConcurrentScanRejectionTests(unittest.TestCase):
         )
         self.assertFalse(self.srv.scan_request_event.is_set())
 
+    def test_completed_scan_state_is_queryable_while_idle(self):
+        # Simulate a finished scan that published its results.
+        self.srv.api_scan_id = "123"
+        self.srv.api_scan_status = "done"
+        self.srv.api_findings = [{"severity": "high"}, {"severity": "critical"}]
+        self.srv.api_report_path = "/tmp/report.html"
+        # The completed results must remain queryable after completion.
+        results = self.client.get("/api/v1/scan/results").json()
+        self.assertEqual(results["status"], "done")
+        self.assertEqual(results["findings_count"], 2)
+        self.assertEqual(results["critical_count"], 1)
+        status = self.client.get("/api/v1/scan/status").json()
+        self.assertEqual(status["status"], "done")
+
+    def test_accepting_new_scan_resets_previous_state(self):
+        self.srv.api_scan_status = "done"
+        self.srv.api_findings = [{"severity": "high"}]
+        self.srv.api_report_path = "/tmp/old.html"
+        r = self.client.post("/api/v1/scan", json={"url": "https://example.com"})
+        self.assertEqual(r.status_code, 200)
+        # A freshly accepted scan starts from a clean slate.
+        self.assertEqual(self.srv.api_scan_status, "scanning")
+        self.assertEqual(self.srv.api_findings, [])
+        self.assertIsNone(self.srv.api_report_path)
+
 
 class AuthDisabledTests(unittest.TestCase):
     def setUp(self):

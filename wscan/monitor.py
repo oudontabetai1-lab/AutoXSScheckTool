@@ -296,6 +296,7 @@ class MonitorServer:
             self.api_scan_id = str(int(time.time()))
             self.api_scan_status = "scanning"
             self.api_findings = []
+            self.api_report_path = None
             return JSONResponse({
                 "status": "accepted",
                 "scan_id": self.api_scan_id,

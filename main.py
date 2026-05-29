@@ -1682,13 +1682,13 @@ async def run_serve(args):
 
         # Persistent loop: accept and run one scan at a time, indefinitely.
         while not server.should_exit:
-            # Reset per-scan state so reconnecting clients see a clean slate.
+            # While idle, KEEP the previous scan's results/status/report so
+            # CI/API clients can still poll /api/v1/scan/results and fetch the
+            # report after completion. The per-scan reset happens only when a new
+            # scan is accepted (the request handlers set status=scanning and clear
+            # findings), not the moment the previous result was published.
             monitor.scan_in_progress = False
             monitor.scan_request_event.clear()
-            monitor.event_history.clear()
-            monitor.api_findings = []
-            monitor.api_report_path = None
-            monitor.api_scan_status = "idle"
             # Tell the dashboard it is ready for a new scan config.
             await monitor.emit_awaiting_config()
             # Wait until a config is submitted from the GUI / API / WebSocket,
@@ -1704,6 +1704,9 @@ async def run_serve(args):
             # Claim the busy slot synchronously (no await in between) so concurrent
             # requests are rejected rather than silently dropped on the next reset.
             monitor.scan_in_progress = True
+            # New scan accepted: clear the previous run's event log so this scan
+            # starts from a clean slate in the dashboard.
+            monitor.event_history.clear()
             cfg = monitor.scan_request_data or {}
             try:
                 await run_one_scan(cfg)
