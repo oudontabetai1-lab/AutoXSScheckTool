@@ -1,6 +1,7 @@
 import unittest
 from unittest.mock import AsyncMock
 
+from wscan.monitor import MonitorServer
 from wscan.scanners.ldap_injection import LDAPScanner
 from wscan.scanners.xxe import XXEScanner
 
@@ -39,6 +40,22 @@ class _Engine:
 
 
 class MonitorPayloadEventTests(unittest.IsolatedAsyncioTestCase):
+    async def test_dashboard_start_scan_resets_api_state(self):
+        monitor = MonitorServer()
+        monitor.api_findings = [{"stale": True}]
+        monitor.api_report_path = "output/old/report.html"
+
+        monitor._handle_client_message(
+            '{"action":"start_scan","config":{"url":"http://fixture.test/"}}'
+        )
+
+        self.assertEqual(monitor.scan_request_data["url"], "http://fixture.test/")
+        self.assertEqual(monitor.api_scan_status, "scanning")
+        self.assertTrue(monitor.api_scan_id)
+        self.assertEqual(monitor.api_findings, [])
+        self.assertIsNone(monitor.api_report_path)
+        self.assertTrue(monitor.scan_request_event.is_set())
+
     async def test_ldap_payload_event_uses_field_payload_check_url_order(self):
         engine = _Engine()
         scanner = LDAPScanner(engine)

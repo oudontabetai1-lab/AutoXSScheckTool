@@ -263,7 +263,7 @@ class BaseScanner(ABC):
             return {}
         latest_for_url = getattr(network, "latest_for_url", None)
         if latest_for_url:
-            return latest_for_url(url, match_query=False) or network.latest() or {}
+            return latest_for_url(url, match_query=False) or {}
         return network.latest() or {}
 
     async def record_finding(

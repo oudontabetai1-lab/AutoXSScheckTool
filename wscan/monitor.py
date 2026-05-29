@@ -298,6 +298,10 @@ class MonitorServer:
         elif action == "start_scan":
             # Serve mode: dashboard submits full scan config
             self.scan_request_data = msg.get("config", {})
+            self.api_scan_id = str(int(time.time()))
+            self.api_scan_status = "scanning"
+            self.api_findings = []
+            self.api_report_path = None
             self.scan_request_event.set()
 
         elif action == "crawl_review":

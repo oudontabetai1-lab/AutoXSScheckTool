@@ -13,7 +13,10 @@ Evaluated headers:
   - Cross-Origin-Opener-Policy (COOP)
   - Cross-Origin-Resource-Policy (CORP)
 """
+import re
 from typing import TYPE_CHECKING
+
+import httpx
 
 from .base import BaseScanner, Finding
 
@@ -90,11 +93,13 @@ class SecurityHeadersScanner(BaseScanner):
         if self.monitor:
             await self.monitor.emit_status(f"Security headers audit on {url}")
 
-        pair = self.current_page_pair(url)
+        pair = await self._response_pair(url)
         headers = {
             k.lower(): v
             for k, v in pair.get("response", {}).get("headers", {}).items()
         }
+        if not headers:
+            return []
 
         findings = []
         for header, description, severity, recommendation in _HEADER_CHECKS:
@@ -106,6 +111,17 @@ class SecurityHeadersScanner(BaseScanner):
                     evidence=f"{description}. {recommendation}",
                     pair=pair,
                     severity=severity,
+                    confidence="likely",
+                    evidence_type="security_header_missing",
+                    evidence_details={
+                        "header": header,
+                        "recommendation": recommendation,
+                    },
+                    reproduction_steps=[
+                        f"Request {url}",
+                        f"Confirm response header '{header}' is absent.",
+                        f"Apply recommended setting: {recommendation}",
+                    ],
                 )
                 findings.append(finding)
 
@@ -123,13 +139,24 @@ class SecurityHeadersScanner(BaseScanner):
                 ),
                 pair=pair,
                 severity="medium",
+                confidence="likely",
+                evidence_type="security_header_unsafe_csp",
+                evidence_details={
+                    "header": "content-security-policy",
+                    "observed_value": csp,
+                    "unsafe_directive": "unsafe-inline",
+                },
+                reproduction_steps=[
+                    f"Request {url}",
+                    "Inspect the Content-Security-Policy response header.",
+                    "Confirm it contains 'unsafe-inline'.",
+                ],
             )
             findings.append(finding)
 
         # Special check: HSTS present but max-age is too short
         hsts = headers.get("strict-transport-security", "")
         if hsts:
-            import re
             m = re.search(r"max-age\s*=\s*(\d+)", hsts, re.IGNORECASE)
             if m and int(m.group(1)) < 86400:  # Less than 1 day
                 finding = await self.record_finding(
@@ -142,7 +169,87 @@ class SecurityHeadersScanner(BaseScanner):
                     ),
                     pair=pair,
                     severity="low",
+                    confidence="likely",
+                    evidence_type="security_header_short_hsts",
+                    evidence_details={
+                        "header": "strict-transport-security",
+                        "observed_value": hsts,
+                        "max_age": int(m.group(1)),
+                        "recommended_minimum": 31536000,
+                    },
+                    reproduction_steps=[
+                        f"Request {url}",
+                        "Inspect the Strict-Transport-Security response header.",
+                        "Confirm max-age is shorter than the recommended minimum.",
+                    ],
                 )
                 findings.append(finding)
 
         return findings
+
+    async def verify_finding(self, finding: Finding) -> bool | None:
+        """Re-fetch the page and confirm the same header weakness still exists."""
+        evidence_type = getattr(finding, "evidence_type", "") or ""
+        details = getattr(finding, "evidence_details", {}) or {}
+
+        if evidence_type not in {
+            "security_header_missing",
+            "security_header_unsafe_csp",
+            "security_header_short_hsts",
+        }:
+            return None
+
+        try:
+            response = await self._get(finding.url)
+        except Exception:
+            return None
+
+        headers = {k.lower(): v for k, v in response.headers.items()}
+
+        if evidence_type == "security_header_missing":
+            header = (details.get("header") or "").lower()
+            if not header:
+                return None
+            return header not in headers
+
+        if evidence_type == "security_header_unsafe_csp":
+            csp = headers.get("content-security-policy", "")
+            return "unsafe-inline" in csp.lower()
+
+        if evidence_type == "security_header_short_hsts":
+            hsts = headers.get("strict-transport-security", "")
+            match = re.search(r"max-age\s*=\s*(\d+)", hsts, re.IGNORECASE)
+            if not match:
+                return False
+            minimum = int(details.get("recommended_minimum") or 31536000)
+            return int(match.group(1)) < minimum
+
+        return None
+
+    async def _get(self, url: str):
+        proxy = getattr(self.engine, "proxy", "") or None
+        timeout = getattr(self.engine, "timeout", 15)
+        kwargs: dict = {"timeout": timeout, "follow_redirects": True}
+        if hasattr(self.engine, "httpx_client_kwargs"):
+            kwargs = self.engine.httpx_client_kwargs(**kwargs)
+        elif proxy:
+            kwargs["proxy"] = proxy
+        if hasattr(self.engine, "auth_headers"):
+            kwargs["headers"] = self.engine.auth_headers()
+        async with httpx.AsyncClient(**kwargs) as client:
+            return await client.get(url)
+
+    async def _response_pair(self, url: str) -> dict:
+        try:
+            response = await self._get(url)
+            return {
+                "request": {"url": url, "method": "GET"},
+                "response": {
+                    "url": str(response.url),
+                    "status": response.status_code,
+                    "headers": dict(response.headers),
+                    "body": response.text[:50000],
+                },
+            }
+        except Exception:
+            return self.current_page_pair(url)
