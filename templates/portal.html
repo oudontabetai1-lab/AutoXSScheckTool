@@ -252,11 +252,18 @@ async function loadScans() {
       <td><div class="row-actions">
         ${report}
         <a class="btn sm" href="/api/v1/scans/${encodeURIComponent(s.id)}/download">⬇ zip${size}</a>
-        <button class="btn sm danger" onclick="deleteScan('${esc(s.id)}')" ${s.status==='scanning'?'disabled style=opacity:.4':''}>🗑</button>
+        <button class="btn sm danger" data-action="delete" data-id="${esc(s.id)}" ${s.status==='scanning'?'disabled style=opacity:.4':''}>🗑</button>
       </div></td>
     </tr>`;
   }).join('');
 }
+
+// Event delegation: never interpolate scan ids into inline JS (the id can come
+// from an operator-supplied output_dir). Read the raw value from the dataset.
+$('scanRows').addEventListener('click', (e) => {
+  const btn = e.target.closest('[data-action="delete"]');
+  if (btn && !btn.disabled) deleteScan(btn.dataset.id);
+});
 
 async function deleteScan(id) {
   if (!confirm(`スキャン ${id} の成果物を削除しますか？この操作は取り消せません。`)) return;

@@ -130,6 +130,20 @@ class PortalEndpointTests(PortalTestBase):
         self.assertEqual(r.status_code, 200)
         self.assertEqual(self.srv.command_queue.get_nowait(), "abort")
 
+    def test_unusual_scan_id_is_listed_and_deletable(self):
+        # A scan dir name with a quote (possible from a custom output_dir) must
+        # round-trip safely; the portal JS uses data attributes, never inline JS.
+        weird = "scan_'oops"
+        self._make_scan(weird, findings=[{"severity": "low"}])
+        ids = [s["id"] for s in self.client.get("/api/v1/scans").json()["scans"]]
+        self.assertIn(weird, ids)
+        self.assertEqual(
+            self.client.delete(
+                "/api/v1/scans/" + __import__("urllib.parse", fromlist=["quote"]).quote(weird, safe="")
+            ).status_code,
+            200,
+        )
+
 
 class PortalAuthTests(PortalTestBase):
     def auth_token(self):
