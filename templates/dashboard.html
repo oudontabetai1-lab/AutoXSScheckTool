@@ -1382,6 +1382,11 @@ body {
     </div>
   </div>
   <div class="ws-badge" id="wsBadge">WS: ―</div>
+  <a href="/logout" id="logoutLink" title="ログアウト" style="
+    display:none; margin-left:8px; padding:4px 10px; border-radius:6px;
+    font-size:0.72rem; text-decoration:none; color:var(--text-muted);
+    border:1px solid var(--border); background:var(--surface2);
+  ">⎋ ログアウト</a>
 </div>
 
 <!-- ─── Intervention Toolbar ───────────────────────────────── -->
@@ -2621,8 +2626,19 @@ function _flushMsgQueue() {
   }
 }
 
+// Show the logout control only when the server has a token configured.
+fetch('/api/auth-status').then(r => r.ok ? r.json() : null).then(d => {
+  if (d && d.auth_enabled) {
+    const el = document.getElementById('logoutLink');
+    if (el) el.style.display = 'inline-block';
+  }
+}).catch(() => {});
+
 function connect() {
-  const ws = new WebSocket(`ws://${location.host}/ws`);
+  // Use wss:// automatically when the dashboard is served over HTTPS
+  // (e.g. behind a TLS-terminating reverse proxy on the intranet).
+  const wsProto = location.protocol === 'https:' ? 'wss' : 'ws';
+  const ws = new WebSocket(`${wsProto}://${location.host}/ws`);
   state.ws = ws;
 
   ws.onopen = () => {

@@ -1,0 +1,36 @@
+# WScan — intranet dashboard server
+#
+# Usage:
+#   1. Set a token:   export WSCAN_AUTH_TOKEN="$(openssl rand -hex 16)"
+#   2. Start:         docker compose up -d --build
+#   3. Open:          http://<server-lan-ip>:8765  (log in with the token)
+#
+# Reports persist under ./output on the host. Drop a customized
+# config/wscan.yaml in place before building to change scan defaults.
+services:
+  wscan:
+    build: .
+    image: wscan:latest
+    container_name: wscan
+    restart: unless-stopped
+    # Bind to the host's LAN interface so other machines on the intranet can
+    # reach it. Change "8765:8765" to "127.0.0.1:8765:8765" to keep it local.
+    ports:
+      - "8765:8765"
+    environment:
+      # REQUIRED for a networked deployment: anyone who can reach the port can
+      # otherwise drive the scanner. Generate with `openssl rand -hex 16`.
+      WSCAN_AUTH_TOKEN: "${WSCAN_AUTH_TOKEN:-}"
+      WSCAN_HOST: "0.0.0.0"
+      WSCAN_PORT: "8765"
+      # Optional LLM provider API keys (leave unset to run without an LLM).
+      ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"
+      OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
+      GEMINI_API_KEY: "${GEMINI_API_KEY:-}"
+    volumes:
+      # Persist generated reports/evidence on the host.
+      - ./output:/app/output
+      # Optional: override scan defaults without rebuilding the image.
+      - ./config:/app/config:ro
+    # Chromium needs a larger /dev/shm than Docker's 64MB default.
+    shm_size: "1gb"
