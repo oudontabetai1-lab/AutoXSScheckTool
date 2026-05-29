@@ -1683,6 +1683,7 @@ async def run_serve(args):
         # Persistent loop: accept and run one scan at a time, indefinitely.
         while not server.should_exit:
             # Reset per-scan state so reconnecting clients see a clean slate.
+            monitor.scan_in_progress = False
             monitor.scan_request_event.clear()
             monitor.event_history.clear()
             monitor.api_findings = []
@@ -1690,8 +1691,19 @@ async def run_serve(args):
             monitor.api_scan_status = "idle"
             # Tell the dashboard it is ready for a new scan config.
             await monitor.emit_awaiting_config()
-            # Wait until a config is submitted from the GUI / API / WebSocket.
-            await monitor.scan_request_event.wait()
+            # Wait until a config is submitted from the GUI / API / WebSocket,
+            # but wake periodically so a shutdown (Ctrl+C) is honoured even when
+            # the loop is otherwise idle and blocked on the event.
+            while not server.should_exit and not monitor.scan_request_event.is_set():
+                try:
+                    await asyncio.wait_for(monitor.scan_request_event.wait(), timeout=0.5)
+                except asyncio.TimeoutError:
+                    pass
+            if server.should_exit:
+                break
+            # Claim the busy slot synchronously (no await in between) so concurrent
+            # requests are rejected rather than silently dropped on the next reset.
+            monitor.scan_in_progress = True
             cfg = monitor.scan_request_data or {}
             try:
                 await run_one_scan(cfg)
@@ -1699,8 +1711,22 @@ async def run_serve(args):
                 raise
             except Exception as exc:
                 console.print(f"\n[red]Unexpected error: {exc}[/red]")
+            finally:
+                monitor.scan_in_progress = False
 
-    await asyncio.gather(server.serve(), serve_task())
+    # Run the server and the scan loop side by side. When the server shuts down
+    # (Ctrl+C / SIGTERM), cancel the idle scan loop so the process exits promptly
+    # instead of hanging on a pending scan-request wait.
+    server_coro = asyncio.ensure_future(server.serve())
+    worker_coro = asyncio.ensure_future(serve_task())
+    try:
+        await server_coro
+    finally:
+        worker_coro.cancel()
+        try:
+            await worker_coro
+        except asyncio.CancelledError:
+            pass
 
 
 async def run_triage(args):

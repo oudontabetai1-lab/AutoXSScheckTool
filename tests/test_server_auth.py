@@ -91,6 +91,42 @@ class AuthEnabledTests(unittest.TestCase):
             ws.send_text("{}")
 
 
+class ConcurrentScanRejectionTests(unittest.TestCase):
+    """A second scan submitted while one is running must be rejected, not
+    silently dropped (regression for persistent serve mode)."""
+
+    def setUp(self):
+        self.srv = MonitorServer(port=9997, auth_token="")
+        self.client = TestClient(self.srv.app)
+
+    def test_http_scan_rejected_while_busy(self):
+        self.srv.scan_in_progress = True
+        r = self.client.post("/api/v1/scan", json={"url": "https://example.com"})
+        self.assertEqual(r.status_code, 409)
+        # The pending event must NOT be set, so the loop will not pick up a
+        # request the API just refused.
+        self.assertFalse(self.srv.scan_request_event.is_set())
+
+    def test_http_scan_rejected_when_event_already_set(self):
+        self.srv.scan_request_event.set()
+        r = self.client.post("/api/v1/scan", json={"url": "https://example.com"})
+        self.assertEqual(r.status_code, 409)
+
+    def test_http_scan_accepted_when_idle(self):
+        r = self.client.post("/api/v1/scan", json={"url": "https://example.com"})
+        self.assertEqual(r.status_code, 200)
+        self.assertTrue(self.srv.scan_request_event.is_set())
+
+    def test_ws_start_scan_ignored_while_busy(self):
+        self.srv.scan_in_progress = True
+        # Direct call to the message handler avoids needing a live event loop
+        # wired to the scan runner.
+        self.srv._handle_client_message(
+            '{"action": "start_scan", "config": {"url": "https://example.com"}}'
+        )
+        self.assertFalse(self.srv.scan_request_event.is_set())
+
+
 class AuthDisabledTests(unittest.TestCase):
     def setUp(self):
         self.srv = MonitorServer(port=9998, auth_token="")

@@ -65,6 +65,9 @@ class MonitorServer:
         # Scan config submitted from the dashboard (serve mode)
         self.scan_request_event: asyncio.Event = asyncio.Event()
         self.scan_request_data: dict = {}
+        # True while a scan is actually executing in persistent serve mode.
+        # Used to reject (rather than silently drop) concurrent scan requests.
+        self.scan_in_progress: bool = False
         # Crawl review (AeyeScan-style pause between crawl and plan)
         self.crawl_review_event: asyncio.Event = asyncio.Event()
         self.crawl_review_action: dict = {}
@@ -276,6 +279,18 @@ class MonitorServer:
             if not config.get("url"):
                 return JSONResponse({"error": "url is required"}, status_code=400)
 
+            # Reject instead of silently dropping a scan submitted while another
+            # one is already running in persistent serve mode.
+            if self.scan_in_progress or self.scan_request_event.is_set():
+                return JSONResponse(
+                    {
+                        "error": "スキャンが既に実行中です。完了後に再試行してください。",
+                        "status": self.api_scan_status,
+                        "scan_id": self.api_scan_id,
+                    },
+                    status_code=409,
+                )
+
             self.scan_request_data = config
             self.scan_request_event.set()
             self.api_scan_id = str(int(time.time()))
@@ -482,7 +497,20 @@ class MonitorServer:
             self.manual_payload_queue.put_nowait(msg)
 
         elif action == "start_scan":
-            # Serve mode: dashboard submits full scan config
+            # Serve mode: dashboard submits full scan config. Ignore the request
+            # if a scan is already running so it is not silently dropped when the
+            # persistent loop next clears the event.
+            if self.scan_in_progress or self.scan_request_event.is_set():
+                # Notify the client without disturbing the in-progress scan's status.
+                try:
+                    asyncio.get_running_loop().create_task(
+                        self.emit("scan_rejected", {
+                            "message": "スキャンが既に実行中です。完了後に再試行してください。",
+                        })
+                    )
+                except RuntimeError:
+                    pass
+                return
             self.scan_request_data = msg.get("config", {})
             self.api_scan_id = str(int(time.time()))
             self.api_scan_status = "scanning"
