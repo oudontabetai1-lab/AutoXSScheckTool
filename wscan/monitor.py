@@ -4,10 +4,14 @@ FastAPI + WebSocket server for real-time scan monitoring dashboard.
 """
 import asyncio
 import collections
+import datetime
 import hashlib
+import io
 import json
 import secrets
+import shutil
 import time
+import zipfile
 from pathlib import Path
 from typing import Set, Any, Optional
 
@@ -17,11 +21,15 @@ from fastapi.responses import (
     JSONResponse,
     FileResponse,
     RedirectResponse,
+    StreamingResponse,
 )
 from fastapi.staticfiles import StaticFiles
 
 
 TEMPLATES_DIR = Path(__file__).parent.parent / "templates"
+# Where ScanEngine writes each scan's artifacts (output/<timestamp>/...).
+# Defined here to avoid importing the heavy engine module (pulls in Playwright).
+OUTPUT_BASE = Path(__file__).parent.parent / "output"
 
 # Name of the session cookie set after a successful token login.
 SESSION_COOKIE = "wscan_session"
@@ -68,6 +76,9 @@ class MonitorServer:
         # True while a scan is actually executing in persistent serve mode.
         # Used to reject (rather than silently drop) concurrent scan requests.
         self.scan_in_progress: bool = False
+        # Output directory name (timestamp) of the scan currently running, set by
+        # the engine. Lets the portal map the live scan to its artifacts folder.
+        self.current_scan_id: str = ""
         # Crawl review (AeyeScan-style pause between crawl and plan)
         self.crawl_review_event: asyncio.Event = asyncio.Event()
         self.crawl_review_action: dict = {}
@@ -172,6 +183,15 @@ class MonitorServer:
             return resp
 
         @app.get("/", response_class=HTMLResponse)
+        async def portal():
+            # Server front door: scan history, report viewing, scan management.
+            html_path = TEMPLATES_DIR / "portal.html"
+            if html_path.exists():
+                return html_path.read_text(encoding="utf-8")
+            # Fall back to the live monitor if the portal template is missing.
+            return RedirectResponse(url="/monitor", status_code=307)
+
+        @app.get("/monitor", response_class=HTMLResponse)
         async def dashboard():
             html_path = TEMPLATES_DIR / "dashboard.html"
             if html_path.exists():
@@ -401,7 +421,158 @@ class MonitorServer:
                 return JSONResponse({"running": False})
             return JSONResponse(self.manual_crawl_session.status())
 
+        # ── Scan management portal: history, reports, downloads ───────────────
+
+        @app.post("/api/v1/scan/abort")
+        async def api_scan_abort():
+            """Request the running scan to stop (saves a partial report)."""
+            if not self.scan_in_progress:
+                return JSONResponse(
+                    {"error": "実行中のスキャンはありません。"}, status_code=409
+                )
+            self.command_queue.put_nowait("abort")
+            return JSONResponse({"status": "aborting"})
+
+        @app.get("/api/v1/scans")
+        async def api_scans():
+            """List all scans found under the output directory (history)."""
+            return JSONResponse({"scans": self._list_scans()})
+
+        @app.get("/api/v1/scans/{scan_id}/download")
+        async def api_scan_download(scan_id: str):
+            """Download a scan's whole artifact folder as a zip archive."""
+            d = self._scan_dir(scan_id)
+            if d is None or not d.is_dir():
+                return JSONResponse({"error": "not found"}, status_code=404)
+
+            def _iter_zip():
+                buf = io.BytesIO()
+                with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+                    for path in sorted(d.rglob("*")):
+                        if path.is_file():
+                            zf.write(path, arcname=path.relative_to(d.parent))
+                buf.seek(0)
+                yield from buf
+
+            return StreamingResponse(
+                _iter_zip(),
+                media_type="application/zip",
+                headers={
+                    "Content-Disposition": f'attachment; filename="wscan-{scan_id}.zip"'
+                },
+            )
+
+        @app.delete("/api/v1/scans/{scan_id}")
+        async def api_scan_delete(scan_id: str):
+            """Delete a scan's artifact folder."""
+            if self.scan_in_progress and scan_id == self.current_scan_id:
+                return JSONResponse(
+                    {"error": "実行中のスキャンは削除できません。"}, status_code=409
+                )
+            d = self._scan_dir(scan_id)
+            if d is None or not d.is_dir():
+                return JSONResponse({"error": "not found"}, status_code=404)
+            try:
+                shutil.rmtree(d)
+            except Exception as exc:
+                return JSONResponse({"error": str(exc)}, status_code=500)
+            return JSONResponse({"status": "deleted", "scan_id": scan_id})
+
+        @app.get("/reports/{scan_id}/{file_path:path}")
+        async def serve_report(scan_id: str, file_path: str = ""):
+            """Serve report.html and its sibling assets straight from a scan's
+            output folder so they can be viewed in the browser."""
+            d = self._scan_dir(scan_id)
+            if d is None or not d.is_dir():
+                return JSONResponse({"error": "not found"}, status_code=404)
+            rel = file_path or "report.html"
+            target = (d / rel).resolve()
+            # Path-traversal guard: the resolved path must stay inside the folder.
+            try:
+                target.relative_to(d.resolve())
+            except ValueError:
+                return JSONResponse({"error": "forbidden"}, status_code=403)
+            if not target.is_file():
+                return JSONResponse({"error": "not found"}, status_code=404)
+            return FileResponse(str(target))
+
         return app
+
+    # ------------------------------------------------------------------
+    # Scan artifact / history helpers
+    # ------------------------------------------------------------------
+
+    def _scan_dir(self, scan_id: str) -> Optional[Path]:
+        """Resolve a scan id to its output folder, rejecting path traversal."""
+        if not scan_id or "/" in scan_id or "\\" in scan_id or scan_id in (".", ".."):
+            return None
+        d = (OUTPUT_BASE / scan_id).resolve()
+        try:
+            d.relative_to(OUTPUT_BASE.resolve())
+        except ValueError:
+            return None
+        return d
+
+    def _list_scans(self) -> list[dict]:
+        """Index the output directory into a list of scan summaries."""
+        scans: list[dict] = []
+        if not OUTPUT_BASE.is_dir():
+            return scans
+        for d in OUTPUT_BASE.iterdir():
+            if not d.is_dir():
+                continue
+            info: dict[str, Any] = {
+                "id": d.name,
+                "target": "",
+                "started_at": "",
+                "findings_count": 0,
+                "severity": {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0},
+                "report_available": (d / "report.html").is_file(),
+                "status": "done",
+                "size_bytes": 0,
+            }
+            # Prefer evidence.json (authoritative result), fall back to config.
+            evidence = d / "evidence.json"
+            cfg = d / "scan_config.json"
+            try:
+                if evidence.is_file():
+                    data = json.loads(evidence.read_text(encoding="utf-8"))
+                    info["target"] = data.get("target", "") or ""
+                    info["started_at"] = data.get("scan_date", "") or ""
+                    findings = data.get("findings", []) or []
+                    info["findings_count"] = len(findings)
+                    for f in findings:
+                        sev = (f.get("severity") or "info").lower()
+                        if sev in info["severity"]:
+                            info["severity"][sev] += 1
+                elif cfg.is_file():
+                    data = json.loads(cfg.read_text(encoding="utf-8"))
+                    info["target"] = (data.get("config", {}) or {}).get("url", "") or ""
+                    info["started_at"] = data.get("submitted_at", "") or ""
+            except Exception:
+                pass
+            if not info["started_at"]:
+                try:
+                    info["started_at"] = datetime.datetime.fromtimestamp(
+                        d.stat().st_mtime
+                    ).isoformat(timespec="seconds")
+                except Exception:
+                    info["started_at"] = ""
+            # Running scan: no evidence yet but it is the active output folder.
+            if self.scan_in_progress and d.name == self.current_scan_id:
+                info["status"] = "scanning"
+            elif not evidence.is_file() and not info["report_available"]:
+                info["status"] = "incomplete"
+            try:
+                info["size_bytes"] = sum(
+                    p.stat().st_size for p in d.rglob("*") if p.is_file()
+                )
+            except Exception:
+                pass
+            scans.append(info)
+        # Newest first (timestamps sort lexicographically; fall back to mtime).
+        scans.sort(key=lambda s: s["id"], reverse=True)
+        return scans
 
     # ------------------------------------------------------------------
     # Login page

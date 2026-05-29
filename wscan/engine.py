@@ -340,6 +340,12 @@ class ScanEngine:
         self.output_dir = Path(output_dir) if output_dir else OUTPUT_BASE / ts
         self.output_dir.mkdir(parents=True, exist_ok=True)
         (self.output_dir / "screenshots").mkdir(exist_ok=True)
+        # Let the monitor/portal map the running scan to its artifact folder.
+        if self.monitor is not None:
+            try:
+                self.monitor.current_scan_id = self.output_dir.name
+            except Exception:
+                pass
 
         # Payloads
         default_payloads_path = CONFIG_DIR / "default_payloads.yaml"

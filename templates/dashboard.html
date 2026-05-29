@@ -1435,10 +1435,12 @@ body {
   </div>
 </div>
 <div id="postScanActions" style="display:none;align-items:center;gap:8px;padding:8px 16px;background:#111827;border-bottom:1px solid #263244">
+  <a id="openReportBtn" href="#" target="_blank" rel="noopener" style="display:none;background:var(--accent);color:#001018;border:none;border-radius:4px;padding:6px 12px;font-weight:700;cursor:pointer;text-decoration:none">📄 レポートを開く</a>
+  <a id="downloadZipBtn" href="#" style="display:none;background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:6px 12px;font-weight:700;cursor:pointer;text-decoration:none">⬇ 成果物zip</a>
   <span style="font-size:.78rem;color:var(--text-muted);font-weight:700;text-transform:uppercase">After Crawl</span>
-  <button onclick="rerunLastScan()" style="background:var(--accent);color:#001018;border:none;border-radius:4px;padding:6px 12px;font-weight:700;cursor:pointer">再巡回</button>
+  <button onclick="rerunLastScan()" style="background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:6px 12px;font-weight:700;cursor:pointer">再巡回</button>
   <button onclick="openManualCrawlAfterScan()" style="background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:6px 12px;font-weight:700;cursor:pointer">手動巡回を追加</button>
-  <span id="postScanHint" style="font-size:.76rem;color:var(--text-muted)">同じ設定で再実行、または手動巡回JSONを追加して再実行できます。</span>
+  <a href="/" style="margin-left:auto;background:transparent;color:var(--text-muted);border:1px solid var(--border);border-radius:4px;padding:6px 12px;font-weight:700;cursor:pointer;text-decoration:none">🏠 ポータルへ</a>
 </div>
 <style>
 @keyframes stripe { from{background-position:0 0} to{background-position:32px 0} }
@@ -2888,6 +2890,16 @@ function handleEvent(event) {
       }
       if (data.report_path) {
         addEventLog('status', `成果物保存先: ${data.report_path.replace(/\/report\.html$/, '')}`);
+        // Build an in-browser report link from the scan's output folder name so
+        // the report can be opened/downloaded from a remote (hosted) browser.
+        const parts = data.report_path.replace(/\\/g, '/').split('/').filter(Boolean);
+        const scanId = parts.length >= 2 ? parts[parts.length - 2] : '';
+        if (scanId) {
+          const rep = document.getElementById('openReportBtn');
+          const zip = document.getElementById('downloadZipBtn');
+          if (rep) { rep.href = `/reports/${encodeURIComponent(scanId)}/report.html`; rep.style.display = ''; }
+          if (zip) { zip.href = `/api/v1/scans/${encodeURIComponent(scanId)}/download`; zip.style.display = ''; }
+        }
       }
       setStatus(`Scan complete — ${data.total_findings} finding(s)`, 'done');
       document.getElementById('progressBar').style.width = '100%';
