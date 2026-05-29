@@ -1,0 +1,40 @@
+name: CI
+
+# Run the test suite on every push to main and on every pull request.
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest pytest-asyncio
+
+      # Fast, deterministic suite (no real browser required). This is the
+      # check that must stay green.
+      - name: Unit & integration tests
+        run: pytest -q --ignore=tests/test_end_to_end_scan.py
+
+      # Browser-driven end-to-end test. Needs a real Chromium; kept as a
+      # non-blocking step while it is being stabilised in CI.
+      - name: Install Chromium for Playwright
+        run: playwright install --with-deps chromium
+
+      - name: End-to-end (browser) test
+        continue-on-error: true
+        run: pytest -q tests/test_end_to_end_scan.py

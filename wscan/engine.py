@@ -340,6 +340,17 @@ class ScanEngine:
         self.output_dir = Path(output_dir) if output_dir else OUTPUT_BASE / ts
         self.output_dir.mkdir(parents=True, exist_ok=True)
         (self.output_dir / "screenshots").mkdir(exist_ok=True)
+        # Let the monitor/portal map the running scan to its artifact folder.
+        # Only when the output folder is under OUTPUT_BASE (the portal serves
+        # reports from there); a custom output_dir elsewhere is not listed.
+        if self.monitor is not None:
+            try:
+                self.output_dir.resolve().relative_to(OUTPUT_BASE.resolve())
+                self.monitor.current_scan_id = self.output_dir.name
+            except ValueError:
+                self.monitor.current_scan_id = ""
+            except Exception:
+                pass
 
         # Payloads
         default_payloads_path = CONFIG_DIR / "default_payloads.yaml"
@@ -806,9 +817,19 @@ class ScanEngine:
             if self.monitor:
                 self.monitor.api_findings = [f.to_dict() for f in self.all_findings]
                 self.monitor.api_scan_status = "done"
+                # Only expose a portal-servable scan id when the output folder
+                # lives under OUTPUT_BASE; the /reports endpoint resolves ids
+                # there, so a custom output_dir elsewhere would 404.
+                served_scan_id = ""
+                try:
+                    self.output_dir.resolve().relative_to(OUTPUT_BASE.resolve())
+                    served_scan_id = self.output_dir.name
+                except ValueError:
+                    served_scan_id = ""
                 await self.monitor.emit("scan_complete", {
                     "total_findings": len(self.all_findings),
                     "report_path": str(self.output_dir / "report.html"),
+                    "scan_id": served_scan_id,
                     "findings": self.monitor.api_findings,
                 })
 
