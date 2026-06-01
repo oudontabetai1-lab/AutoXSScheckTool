@@ -1124,7 +1124,14 @@ document.querySelectorAll('.plan-payloads-toggle').forEach(btn => {{
             })
         vuln_count = sum(1 for n in nodes if n["status"] == "vuln")
         done_count = len(nodes) - vuln_count
-        nodes_json = _json.dumps(nodes)
+        # Serialize for an HTML <script> context: escape characters that could break out
+        # of the script tag (e.g. attacker-controlled link text containing "</script>").
+        nodes_json = (
+            _json.dumps(nodes)
+            .replace("<", "\\u003c")
+            .replace(">", "\\u003e")
+            .replace("&", "\\u0026")
+        )
 
         # テキストフォールバック (ツリー)
         def _fb_row(url, info):

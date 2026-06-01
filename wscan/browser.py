@@ -735,6 +735,18 @@ class BrowserManager:
             if same_domain:
                 base = urlparse(base_url)
                 entries = [e for e in entries if urlparse(e["url"]).netloc == base.netloc]
+            # Preserve the full discovery surface of collect_links() (inline-script URLs,
+            # data-api/data-endpoint, loaded JS/JSON assets). Any URL without an associated
+            # DOM element is added with a null ``via`` so crawl coverage is not reduced.
+            seen = {e["url"] for e in entries}
+            try:
+                for url in await self.collect_links(base_url, same_domain=same_domain):
+                    if url not in seen:
+                        seen.add(url)
+                        entries.append({"url": url, "text": "", "selector": "",
+                                        "rect": None, "viewport": None})
+            except Exception:
+                pass
             return entries
         except Exception:
             return []
