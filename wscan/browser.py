@@ -667,6 +667,78 @@ class BrowserManager:
         except Exception:
             return []
 
+    async def collect_links_rich(self, base_url: str, same_domain: bool = True) -> list[dict]:
+        """Collect navigable links together with the element that produces them.
+
+        Returns a list of ``{url, text, selector, rect, viewport}`` entries so the
+        transition diagram can show *which* link/button leads to each page and
+        *where* on the page it sits. ``rect`` is in viewport pixels (matching the
+        viewport-only screenshot), ``viewport`` is the page viewport size.
+        """
+        try:
+            entries = await self.page.evaluate("""
+                (baseUrl) => {
+                    const parsed = new URL(baseUrl);
+                    const ignoredExt = /\\.(?:png|jpe?g|gif|svg|webp|ico|css|woff2?|ttf|map|pdf|zip)(?:[?#].*)?$/i;
+                    const out = [];
+                    const seen = new Set();
+
+                    function selectorFor(el) {
+                        if (el.id) return '#' + el.id;
+                        const tag = el.tagName.toLowerCase();
+                        const name = el.getAttribute('name');
+                        if (name) return tag + '[name="' + name + '"]';
+                        const cls = (el.className && typeof el.className === 'string')
+                            ? '.' + el.className.trim().split(/\\s+/).slice(0, 2).join('.') : '';
+                        return tag + cls;
+                    }
+
+                    function consider(el, raw) {
+                        if (!raw || typeof raw !== 'string') return;
+                        let candidate = raw.trim();
+                        if (!candidate || candidate === '#' || candidate.startsWith('javascript:')
+                            || candidate.startsWith('mailto:') || candidate.startsWith('tel:')) return;
+                        candidate = candidate.replace(/[\\s"'`<>)}\\],;]+$/g, '');
+                        let url;
+                        try {
+                            url = new URL(candidate, baseUrl);
+                        } catch (e) { return; }
+                        if (url.protocol !== 'http:' && url.protocol !== 'https:') return;
+                        if (ignoredExt.test(url.pathname)) return;
+                        const clean = url.href.split('#')[0];
+                        if (seen.has(clean)) return;   // first element wins
+                        seen.add(clean);
+                        const r = el.getBoundingClientRect();
+                        const text = (el.innerText || el.textContent || el.value
+                            || el.getAttribute('aria-label') || el.getAttribute('title') || '').trim();
+                        out.push({
+                            url: clean,
+                            text: text.slice(0, 120),
+                            selector: selectorFor(el),
+                            rect: { x: Math.round(r.left), y: Math.round(r.top),
+                                    w: Math.round(r.width), h: Math.round(r.height) },
+                            viewport: { w: window.innerWidth, h: window.innerHeight }
+                        });
+                    }
+
+                    document.querySelectorAll('a[href], area[href], form[action], iframe[src], frame[src]').forEach(el => {
+                        consider(el, el.getAttribute('href') || el.getAttribute('action') || el.getAttribute('src') || '');
+                    });
+                    document.querySelectorAll('[data-href], [data-url], [data-route], [data-path]').forEach(el => {
+                        ['data-href', 'data-url', 'data-route', 'data-path'].forEach(attr => {
+                            consider(el, el.getAttribute(attr) || '');
+                        });
+                    });
+                    return out;
+                }
+            """, base_url)
+            if same_domain:
+                base = urlparse(base_url)
+                entries = [e for e in entries if urlparse(e["url"]).netloc == base.netloc]
+            return entries
+        except Exception:
+            return []
+
     def _collect_urls_from_loaded_assets(self, base_url: str) -> list[str]:
         """Extract same-site route/API candidates from loaded JS/JSON assets."""
         discovered: list[str] = []

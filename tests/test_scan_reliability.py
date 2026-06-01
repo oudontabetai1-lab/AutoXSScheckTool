@@ -86,6 +86,15 @@ class _FakeCrawlBrowser:
     async def collect_links(self, base_url, same_domain=False):
         return ["http://fixture.test/down"]
 
+    async def collect_links_rich(self, base_url, same_domain=False):
+        return [{
+            "url": "http://fixture.test/down",
+            "text": "down",
+            "selector": "a",
+            "rect": {"x": 0, "y": 0, "w": 10, "h": 10},
+            "viewport": {"w": 1280, "h": 800},
+        }]
+
 
 class EngineScanGapTests(unittest.IsolatedAsyncioTestCase):
     def _engine(self):
