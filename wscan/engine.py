@@ -22,6 +22,7 @@ Phase 4: Report   — Save evidence JSON and generate HTML report.
 """
 import asyncio
 import datetime
+import fnmatch
 import json
 import re
 import xml.etree.ElementTree as _ET
@@ -2879,6 +2880,11 @@ class ScanEngine:
           - Path-only patterns starting with '/' (e.g. '/logout', '/admin/')
             match against the URL's path on any host. Useful for excluding
             destructive endpoints regardless of scheme/host normalisation.
+          - Wildcard patterns using '*' (full-width '＊' is also accepted),
+            e.g. '/dontScan/*' excludes the path and everything beneath it,
+            'https://host/admin/*' excludes that whole sub-tree, and
+            '*/preview' matches any path ending in '/preview'. Matching is
+            glob-style via fnmatch.
           - Patterns are matched case-insensitively for paths so that
             '/Logout' and '/logout' are treated the same.
         """
@@ -2894,12 +2900,27 @@ class ScanEngine:
         for pattern in self.exclude_urls:
             if not pattern:
                 continue
-            p = pattern.strip()
+            # Normalise the full-width asterisk that Japanese input often
+            # produces ('＊' -> '*') and lower-case for case-insensitivity.
+            p = pattern.strip().replace("＊", "*")
             if not p:
                 continue
             pl = p.lower()
+            is_full_url = pl.startswith(("http://", "https://"))
+            target = url_lower if is_full_url else path_lower
+
+            # Wildcard pattern: glob-style match.
+            if "*" in pl:
+                if fnmatch.fnmatch(target, pl):
+                    return True
+                # Treat a trailing '/*' as also matching the base path itself
+                # so that '/dontScan/*' excludes '/dontScan' (no trailing slash).
+                if pl.endswith("/*") and target == pl[:-2]:
+                    return True
+                continue
+
             # Full-URL match (exact or prefix), case-insensitive
-            if pl.startswith(("http://", "https://")):
+            if is_full_url:
                 if url_lower == pl or url_lower.startswith(pl):
                     return True
                 continue
