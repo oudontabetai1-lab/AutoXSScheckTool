@@ -3993,7 +3993,9 @@ function _smRenderShots(model) {
     defs.innerHTML = `<clipPath id="${clip}"><rect x="6" y="6" width="${CW - 12}" height="${IMGH}" rx="4"/></clipPath>`;
     g.appendChild(defs);
     if (n.shot) {
-      const img = _smEl('image', { x: 6, y: 6, width: CW - 12, height: IMGH, preserveAspectRatio: 'xMidYMin slice', 'clip-path': `url(#${clip})` });
+      // 'none' makes the image fill the box exactly, so the click-rect overlays
+      // (positioned by viewport fraction × box size) stay aligned with elements.
+      const img = _smEl('image', { x: 6, y: 6, width: CW - 12, height: IMGH, preserveAspectRatio: 'none', 'clip-path': `url(#${clip})` });
       img.setAttributeNS('http://www.w3.org/1999/xlink', 'href', 'data:image/jpeg;base64,' + n.shot);
       img.setAttribute('href', 'data:image/jpeg;base64,' + n.shot);
       g.appendChild(img);
@@ -4035,20 +4037,29 @@ function _smRenderExplorer(model) {
     const firstVuln = Object.keys(all).find(u => all[u].status === 'vuln');
     state.smSelected = firstVuln || Object.keys(all)[0] || null;
   }
-  // Left tree (collapsible, indented).
+  // Left tree (collapsible, indented). URLs go into HTML-escaped data attributes
+  // (never interpolated into a JS-string handler) and are dispatched via a single
+  // delegated listener, so attacker-controlled URLs cannot break out into code.
   const roots = Object.keys(all).filter(u => !all[u].parent || !all[all[u].parent]);
   const rowHtml = (u, ind) => {
     const n = all[u]; const kids = (children[u] || []);
     const c = _smNodeColor(n);
-    const caret = kids.length ? `<span class="sm-tcaret" onclick="event.stopPropagation();smToggle('${encodeURIComponent(u)}')">${state.smCollapsed[u] ? '▶' : '▼'}</span>` : '<span class="sm-tcaret"></span>';
+    const caret = kids.length ? `<span class="sm-tcaret" data-act="toggle" data-u="${escapeHtml(u)}">${state.smCollapsed[u] ? '▶' : '▼'}</span>` : '<span class="sm-tcaret"></span>';
     const label = _smShort(u).replace(/^…?\/?/, '') || '/';
-    let html = `<div class="sm-trow ${u === state.smSelected ? 'sel' : ''}" style="padding-left:${ind * 14 + 4}px" onclick="smSelect('${encodeURIComponent(u)}')">`
+    let html = `<div class="sm-trow ${u === state.smSelected ? 'sel' : ''}" style="padding-left:${ind * 14 + 4}px" data-act="sel" data-u="${escapeHtml(u)}">`
       + caret + `<span class="sm-dot" style="background:${c}"></span><span>${escapeHtml(label)}</span>`
       + (kids.length ? `<span class="sm-tcount">${desc[u]}</span>` : '') + `</div>`;
     if (!state.smCollapsed[u]) kids.sort((a, b) => a.localeCompare(b)).forEach(k => { html += rowHtml(k, ind + 1); });
     return html;
   };
   tree.innerHTML = roots.map(r => rowHtml(r, 0)).join('') || '<div style="color:var(--text-muted);padding:8px">巡回待ち…</div>';
+  tree.onclick = (ev) => {
+    const t = ev.target.closest('[data-act]'); if (!t) return;
+    const u = t.getAttribute('data-u'); if (u == null) return;
+    if (t.getAttribute('data-act') === 'toggle') { ev.stopPropagation(); state.smCollapsed[u] = !state.smCollapsed[u]; }
+    else { state.smSelected = u; }
+    _sitemapRerender();
+  };
   // Right detail.
   const n = all[state.smSelected];
   if (!n) { detail.innerHTML = ''; return; }
@@ -4069,8 +4080,6 @@ function _smRenderExplorer(model) {
   html += `<br><a href="${escapeHtml(n.url)}" target="_blank" style="color:var(--accent)">このページを開く ↗</a></div>`;
   detail.innerHTML = html;
 }
-function smToggle(u) { u = decodeURIComponent(u); state.smCollapsed[u] = !state.smCollapsed[u]; _sitemapRerender(); }
-function smSelect(u) { state.smSelected = decodeURIComponent(u); _sitemapRerender(); }
 
 // ── Click-location popover (compact / shots modes) ──
 function _smShowPopover(ev, n) {

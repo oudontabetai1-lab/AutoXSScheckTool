@@ -132,7 +132,8 @@ _RPT_SITEMAP_JS = r"""
       var clip = 'rptclip-' + hashId(n.url);
       var defs = mk('defs'); defs.innerHTML = '<clipPath id="' + clip + '"><rect x="6" y="6" width="' + (CW-12) + '" height="' + IMGH + '" rx="4"/></clipPath>'; g.appendChild(defs);
       if (n.shot) {
-        var img = mk('image', { x: 6, y: 6, width: CW-12, height: IMGH, preserveAspectRatio: 'xMidYMin slice', 'clip-path': 'url(#' + clip + ')' });
+        // 'none' fills the box exactly so the click-rect overlays stay aligned.
+        var img = mk('image', { x: 6, y: 6, width: CW-12, height: IMGH, preserveAspectRatio: 'none', 'clip-path': 'url(#' + clip + ')' });
         img.setAttributeNS('http://www.w3.org/1999/xlink', 'href', 'data:image/jpeg;base64,' + n.shot);
         img.setAttribute('href', 'data:image/jpeg;base64,' + n.shot);
         g.appendChild(img);
@@ -178,11 +179,13 @@ _RPT_SITEMAP_JS = r"""
       st.selected = fv || Object.keys(all)[0] || null;
     }
     var roots = Object.keys(all).filter(function(u){ return !all[u].parent || !all[all[u].parent]; });
+    // URLs go into HTML-escaped data attributes (never a JS-string handler) and are
+    // dispatched via one delegated listener, so untrusted URLs cannot inject script.
     function row(u, ind) {
       var n = all[u], kids = children[u] || [], c = color(n);
-      var caret = kids.length ? '<span class="rsm-caret" onclick="event.stopPropagation();rptSmToggle(\'' + encodeURIComponent(u) + '\')">' + (st.collapsed[u] ? '▶' : '▼') + '</span>' : '<span class="rsm-caret"></span>';
+      var caret = kids.length ? '<span class="rsm-caret" data-act="toggle" data-u="' + esc(u) + '">' + (st.collapsed[u] ? '▶' : '▼') + '</span>' : '<span class="rsm-caret"></span>';
       var label = short(u).replace(/^…?\/?/, '') || '/';
-      var html = '<div class="rsm-trow ' + (u === st.selected ? 'sel' : '') + '" style="padding-left:' + (ind*14+4) + 'px" onclick="rptSmSelect(\'' + encodeURIComponent(u) + '\')">' + caret + '<span class="sm-dot" style="width:8px;height:8px;border-radius:50%;display:inline-block;background:' + c + '"></span><span>' + esc(label) + '</span>' + (kids.length ? '<span class="rsm-cnt">' + desc[u] + '</span>' : '') + '</div>';
+      var html = '<div class="rsm-trow ' + (u === st.selected ? 'sel' : '') + '" style="padding-left:' + (ind*14+4) + 'px" data-act="sel" data-u="' + esc(u) + '">' + caret + '<span class="sm-dot" style="width:8px;height:8px;border-radius:50%;display:inline-block;background:' + c + '"></span><span>' + esc(label) + '</span>' + (kids.length ? '<span class="rsm-cnt">' + desc[u] + '</span>' : '') + '</div>';
       if (!st.collapsed[u]) kids.sort(function(a,b){return a.localeCompare(b);}).forEach(function(k){ html += row(k, ind+1); });
       return html;
     }
@@ -190,6 +193,13 @@ _RPT_SITEMAP_JS = r"""
     var n = all[st.selected];
     var detail = '<div style="flex:1;overflow:auto;background:rgba(13,17,23,.7);border:1px solid #21262d;border-radius:8px;padding:14px">' + (n ? detailHtml(n) : '') + '</div>';
     explorer.innerHTML = treeHtml + detail;
+    explorer.onclick = function(ev) {
+      var t = ev.target.closest('[data-act]'); if (!t) return;
+      var u = t.getAttribute('data-u'); if (u == null) return;
+      if (t.getAttribute('data-act') === 'toggle') { ev.stopPropagation(); st.collapsed[u] = !st.collapsed[u]; }
+      else { st.selected = u; }
+      render();
+    };
   }
 
   function render() {
@@ -237,8 +247,6 @@ _RPT_SITEMAP_JS = r"""
   window.rptSmExpand = function(open) { Object.keys(all).forEach(function(u){ st.collapsed[u] = !open; }); render(); };
   window.rptSmZoom = function(f) { st.view.scale = Math.max(0.2, Math.min(4, st.view.scale * f)); applyView(); };
   window.rptSmReset = function() { st.view = { scale: 1, tx: 0, ty: 0 }; applyView(); };
-  window.rptSmToggle = function(u) { u = decodeURIComponent(u); st.collapsed[u] = !st.collapsed[u]; render(); };
-  window.rptSmSelect = function(u) { st.selected = decodeURIComponent(u); render(); };
 
   // Pan & zoom
   var drag = false, lx = 0, ly = 0;
