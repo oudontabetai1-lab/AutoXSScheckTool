@@ -87,6 +87,29 @@ class ScopeConfigTests(unittest.TestCase):
 
         self.assertFalse(engine._is_login_target_url("http://app.test/login"))
 
+    def test_exclude_url_path_wildcard_matches_subtree(self):
+        engine = self._engine(exclude_urls=["/dontScan/*"])
+
+        self.assertTrue(engine._is_url_excluded("http://app.test/dontScan/a"))
+        self.assertTrue(engine._is_url_excluded("http://app.test/dontScan/a/b/c"))
+        # The base path itself (with or without trailing slash) is excluded too.
+        self.assertTrue(engine._is_url_excluded("http://app.test/dontScan/"))
+        self.assertTrue(engine._is_url_excluded("http://app.test/dontScan"))
+        # Unrelated paths and prefixes that merely share a stem are not excluded.
+        self.assertFalse(engine._is_url_excluded("http://app.test/other"))
+        self.assertFalse(engine._is_url_excluded("http://app.test/dontScanX"))
+
+    def test_exclude_url_full_width_asterisk(self):
+        engine = self._engine(exclude_urls=["/dontScan/＊"])
+
+        self.assertTrue(engine._is_url_excluded("http://app.test/dontScan/x"))
+
+    def test_exclude_url_full_url_wildcard(self):
+        engine = self._engine(exclude_urls=["http://app.test/admin/*"])
+
+        self.assertTrue(engine._is_url_excluded("http://app.test/admin/users"))
+        self.assertFalse(engine._is_url_excluded("http://app.test/public"))
+
 
 if __name__ == "__main__":
     unittest.main()
