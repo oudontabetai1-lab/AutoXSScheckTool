@@ -14,6 +14,261 @@ if TYPE_CHECKING:
 
 TEMPLATES_DIR = Path(__file__).parent.parent / "templates"
 
+# Plain JS for the offline report's screen-transition map (compact / shots / explorer
+# modes). Kept as a normal string (single braces) so it can sit inside an f-string
+# without brace-escaping. Reads the global `RPT_SM_NODES` injected before it.
+_RPT_SITEMAP_JS = r"""
+(function() {
+  var NS = 'http://www.w3.org/2000/svg';
+  var svg = document.getElementById('rpt-sm-svg');
+  var explorer = document.getElementById('rpt-sm-explorer');
+  var wrap = document.getElementById('rpt-sm-wrap');
+  var pop = document.getElementById('rpt-sm-pop');
+  var tip = document.getElementById('rpt-sm-tip');
+  if (!svg || !wrap) return;
+
+  var all = {}, children = {}, desc = {};
+  RPT_SM_NODES.forEach(function(n) { all[n.url] = n; });
+  Object.keys(all).forEach(function(u) {
+    var p = all[u].parent;
+    if (p && all[p]) (children[p] = children[p] || []).push(u);
+  });
+  function count(u) { if (desc[u] != null) return desc[u]; var c = 0; (children[u] || []).forEach(function(k){ c += 1 + count(k); }); desc[u] = c; return c; }
+  Object.keys(all).forEach(count);
+
+  var st = { mode: 'compact', collapsed: {}, search: '', view: { scale: 1, tx: 0, ty: 0 }, selected: null, autoCollapsed: false };
+  if (Object.keys(all).length > 12) {
+    Object.keys(all).forEach(function(u) { if ((children[u] || []).length >= 6) st.collapsed[u] = true; });
+  }
+
+  function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function(c){ return ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[c]; }); }
+  function color(n) { if (n.status === 'vuln') return '#f85149'; if (n.status === 'scanning') return '#f0883e'; if (n.status === 'done') return '#388bfd'; return '#3a3f4a'; }
+  function short(url) { try { var p = new URL(url).pathname || '/'; return p.length > 22 ? '…' + p.slice(-20) : p; } catch(e) { return (url || '').slice(-20); } }
+  function norm(via) { if (!via || !via.rect || !via.viewport || !via.viewport.w || !via.viewport.h) return null; var r = via.rect, v = via.viewport, cl = function(x){ return Math.max(0, Math.min(1, x)); }; return { x: cl(r.x/v.w), y: cl(r.y/v.h), w: cl(r.w/v.w), h: cl(r.h/v.h) }; }
+  function mk(tag, a) { var e = document.createElementNS(NS, tag); if (a) for (var k in a) e.setAttribute(k, a[k]); return e; }
+  function hashId(s) { var h = 0; for (var i = 0; i < s.length; i++) { h = (h << 5) - h + s.charCodeAt(i); h |= 0; } return Math.abs(h); }
+
+  function model() {
+    var q = (st.search || '').trim().toLowerCase();
+    var matches = function(u) { return !q || u.toLowerCase().indexOf(q) >= 0 || ((all[u].via && all[u].via.text) || '').toLowerCase().indexOf(q) >= 0; };
+    var hidden = function(u) { var p = all[u].parent; while (p && all[p]) { if (st.collapsed[p]) return true; p = all[p].parent; } return false; };
+    var ids = Object.keys(all), vis;
+    if (q) {
+      var show = {}; ids.forEach(function(u){ if (matches(u)) { show[u] = 1; var p = all[u].parent; while (p && all[p]) { show[p] = 1; p = all[p].parent; } } });
+      vis = ids.filter(function(u){ return show[u]; });
+    } else { vis = ids.filter(function(u){ return !hidden(u); }); }
+    return vis.map(function(u){ return all[u]; });
+  }
+
+  function arrowDefs() { return '<defs><marker id="rpt-arr" viewBox="0 -5 10 10" refX="9" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,-5L10,0L0,5" fill="#4a5568"/></marker></defs>'; }
+  function applyView() { var g = document.getElementById('rpt-sm-vp'); if (g) g.setAttribute('transform', 'translate(' + st.view.tx + ',' + st.view.ty + ') scale(' + st.view.scale + ')'); }
+
+  function edgeLabel(vp, txt, lx, ly) {
+    if (!txt) return;
+    var tw = Math.min(txt.length, 14) * 7 + 12;
+    vp.appendChild(mk('rect', { x: lx - tw/2, y: ly - 8, width: tw, height: 16, rx: 4, fill: '#0d1117', stroke: '#21262d' }));
+    var t = mk('text', { x: lx, y: ly + 3, 'text-anchor': 'middle', 'font-size': '10px', fill: '#c9d1d9' });
+    t.textContent = txt.length > 14 ? txt.slice(0, 13) + '…' : txt; vp.appendChild(t);
+  }
+
+  function renderCompact(vis) {
+    svg.innerHTML = arrowDefs();
+    var vp = mk('g', { id: 'rpt-sm-vp' }); svg.appendChild(vp);
+    var W = 220, RH = 60, BW = 156, BH = 38, byId = {};
+    vis.forEach(function(n){ byId[n.url] = n; });
+    var byDepth = {}; vis.forEach(function(n){ (byDepth[n.depth||0] = byDepth[n.depth||0] || []).push(n); });
+    Object.keys(byDepth).map(Number).sort(function(a,b){return a-b;}).forEach(function(d){
+      byDepth[d].sort(function(a,b){return a.url.localeCompare(b.url);}).forEach(function(n,i){ n._x = 40 + d*W; n._y = 40 + i*RH; });
+    });
+    vis.forEach(function(n){
+      var p = n.parent && byId[n.parent]; if (!p) return;
+      var x1 = p._x + BW, y1 = p._y + BH/2, x2 = n._x, y2 = n._y + BH/2, mx = (x1+x2)/2;
+      vp.appendChild(mk('path', { d: 'M'+x1+','+y1+' C'+mx+','+y1+' '+mx+','+y2+' '+x2+','+y2, fill: 'none', stroke: '#4a5568', 'stroke-width': 1.5, 'marker-end': 'url(#rpt-arr)' }));
+      vp.appendChild(mk('circle', { cx: x1, cy: y1, r: 3.2, fill: '#f85149', stroke: '#fff', 'stroke-width': 1 }));
+      edgeLabel(vp, (n.via && n.via.text) || '', mx, (y1+y2)/2);
+    });
+    vis.forEach(function(n){
+      var hasKids = (children[n.url] || []).length > 0;
+      var g = mk('g', { transform: 'translate(' + n._x + ',' + n._y + ')' }); g.style.cursor = 'pointer';
+      g.appendChild(mk('rect', { width: BW, height: BH, rx: 8, fill: '#11151b', stroke: color(n), 'stroke-width': 2 }));
+      var tx = 12;
+      if (hasKids) {
+        var car = mk('text', { x: 10, y: BH/2 + 4, 'font-size': '10px', fill: '#8b949e' });
+        car.textContent = st.collapsed[n.url] ? '▶' : '▼'; car.style.cursor = 'pointer';
+        car.addEventListener('click', function(ev){ ev.stopPropagation(); st.collapsed[n.url] = !st.collapsed[n.url]; render(); });
+        g.appendChild(car); tx = 24;
+      }
+      g.appendChild(mk('circle', { cx: tx + 4, cy: BH/2, r: 4.5, fill: color(n) }));
+      var title = mk('text', { x: tx + 14, y: BH/2 - 2, 'font-size': '10.5px', fill: '#e6edf3' }); title.textContent = short(n.url); g.appendChild(title);
+      var sub = mk('text', { x: tx + 14, y: BH/2 + 11, 'font-size': '9px', fill: '#8b949e' });
+      sub.textContent = (st.collapsed[n.url] && desc[n.url]) ? (desc[n.url] + ' ページ') : ((n.forms||0) + 'f / ' + (n.inputs||0) + 'i');
+      g.appendChild(sub);
+      g.addEventListener('click', function(ev){ showPop(ev, n); });
+      g.addEventListener('mousemove', function(ev){ showTip(ev, n); });
+      g.addEventListener('mouseleave', hideTip);
+      vp.appendChild(g);
+    });
+    applyView();
+  }
+
+  function renderShots(vis) {
+    svg.innerHTML = arrowDefs();
+    var vp = mk('g', { id: 'rpt-sm-vp' }); svg.appendChild(vp);
+    var W = 290, RH = 168, CW = 210, CH = 132, IMGH = 96, byId = {};
+    vis.forEach(function(n){ byId[n.url] = n; });
+    var byDepth = {}; vis.forEach(function(n){ (byDepth[n.depth||0] = byDepth[n.depth||0] || []).push(n); });
+    Object.keys(byDepth).map(Number).sort(function(a,b){return a-b;}).forEach(function(d){
+      byDepth[d].sort(function(a,b){return a.url.localeCompare(b.url);}).forEach(function(n,i){ n._x = 30 + d*W; n._y = 30 + i*RH; });
+    });
+    vis.forEach(function(n){
+      var p = n.parent && byId[n.parent]; if (!p) return;
+      var x1 = p._x + CW, y1 = p._y + CH/2, x2 = n._x, y2 = n._y + CH/2, mx = (x1+x2)/2;
+      vp.appendChild(mk('path', { d: 'M'+x1+','+y1+' C'+mx+','+y1+' '+mx+','+y2+' '+x2+','+y2, fill: 'none', stroke: '#4a5568', 'stroke-width': 1.5, 'marker-end': 'url(#rpt-arr)' }));
+      edgeLabel(vp, (n.via && n.via.text) || '', mx, (y1+y2)/2);
+    });
+    vis.forEach(function(n){
+      var g = mk('g', { transform: 'translate(' + n._x + ',' + n._y + ')' }); g.style.cursor = 'pointer';
+      g.appendChild(mk('rect', { width: CW, height: CH, rx: 8, fill: '#11151b', stroke: color(n), 'stroke-width': 2 }));
+      var clip = 'rptclip-' + hashId(n.url);
+      var defs = mk('defs'); defs.innerHTML = '<clipPath id="' + clip + '"><rect x="6" y="6" width="' + (CW-12) + '" height="' + IMGH + '" rx="4"/></clipPath>'; g.appendChild(defs);
+      if (n.shot) {
+        // 'none' fills the box exactly so the click-rect overlays stay aligned.
+        var img = mk('image', { x: 6, y: 6, width: CW-12, height: IMGH, preserveAspectRatio: 'none', 'clip-path': 'url(#' + clip + ')' });
+        img.setAttributeNS('http://www.w3.org/1999/xlink', 'href', 'data:image/jpeg;base64,' + n.shot);
+        img.setAttribute('href', 'data:image/jpeg;base64,' + n.shot);
+        g.appendChild(img);
+      } else {
+        g.appendChild(mk('rect', { x: 6, y: 6, width: CW-12, height: IMGH, rx: 4, fill: '#0e1420' }));
+        [22,32,42].forEach(function(yy,i){ g.appendChild(mk('rect', { x: 12, y: yy, width: (CW-24)*(i%2?0.6:0.85), height: 4, rx: 2, fill: '#2a3344' })); });
+      }
+      (children[n.url] || []).forEach(function(ku){
+        var k = byId[ku]; if (!k) return; var nr = norm(k.via); if (!nr) return;
+        g.appendChild(mk('rect', { x: 6 + (CW-12)*nr.x, y: 6 + IMGH*nr.y, width: Math.max(8, (CW-12)*nr.w), height: Math.max(7, IMGH*nr.h), rx: 3, fill: 'rgba(248,81,73,.18)', stroke: '#f85149', 'stroke-width': 1.5 }));
+      });
+      var title = mk('text', { x: 8, y: CH-11, 'font-size': '10.5px', fill: '#e6edf3' }); title.textContent = short(n.url); g.appendChild(title);
+      var sub = mk('text', { x: 8, y: CH-2, 'font-size': '9px', fill: '#8b949e' }); sub.textContent = (n.forms||0)+'f / '+(n.inputs||0)+'i / '+(n.params||0)+'p'; g.appendChild(sub);
+      g.appendChild(mk('circle', { cx: CW-12, cy: CH-9, r: 5, fill: color(n) }));
+      g.addEventListener('click', function(ev){ showPop(ev, n); });
+      g.addEventListener('mousemove', function(ev){ showTip(ev, n); });
+      g.addEventListener('mouseleave', hideTip);
+      vp.appendChild(g);
+    });
+    applyView();
+  }
+
+  function detailHtml(n) {
+    var p = n.parent && all[n.parent], nr = norm(n.via), shot = (p && p.shot) || n.shot;
+    var h = '<h4 style="margin:0 0 10px;color:#58a6ff;font-size:.86rem">' + (n.via ? ('クリック箇所： ' + esc(short(p ? p.url : '')) + ' → ' + esc(short(n.url))) : (esc(n.url) + '（起点）')) + '</h4>';
+    if (shot) {
+      h += '<div style="position:relative;border:1px solid #30363d;border-radius:8px;overflow:hidden;max-width:560px"><img style="display:block;width:100%" src="data:image/jpeg;base64,' + shot + '">';
+      if (nr && p && p.shot) h += '<div style="position:absolute;border:2px solid #f85149;border-radius:4px;box-shadow:0 0 0 3px rgba(248,81,73,.25);left:' + (nr.x*100) + '%;top:' + (nr.y*100) + '%;width:' + (nr.w*100) + '%;height:' + (nr.h*100) + '%"></div>';
+      h += '</div>';
+    }
+    h += '<div style="margin-top:12px;font-size:.78rem;color:#8b949e;line-height:1.8">';
+    if (n.via) h += '押した要素：<b style="color:#e6edf3">「' + esc(n.via.text || '(テキスト無し)') + '」</b><br>セレクタ：<code style="color:#79c0ff">' + esc(n.via.selector || '-') + '</code><br>';
+    h += 'URL：<code style="color:#79c0ff">' + esc(n.url) + '</code><br>状態：<b style="color:#e6edf3">' + n.status + '</b> ／ ' + (n.forms||0) + ' forms / ' + (n.inputs||0) + ' inputs / ' + (n.params||0) + ' params';
+    if (n.findings > 0) h += '<br><span style="color:#f85149">' + n.findings + ' finding' + (n.findings>1?'s':'') + '</span>';
+    h += '<br><a href="' + esc(n.url) + '" target="_blank" style="color:#58a6ff">このページを開く ↗</a></div>';
+    return h;
+  }
+
+  function renderExplorer() {
+    hideTip(); hidePop();
+    if (!st.selected || !all[st.selected]) {
+      var fv = Object.keys(all).filter(function(u){ return all[u].status === 'vuln'; })[0];
+      st.selected = fv || Object.keys(all)[0] || null;
+    }
+    var roots = Object.keys(all).filter(function(u){ return !all[u].parent || !all[all[u].parent]; });
+    // URLs go into HTML-escaped data attributes (never a JS-string handler) and are
+    // dispatched via one delegated listener, so untrusted URLs cannot inject script.
+    function row(u, ind) {
+      var n = all[u], kids = children[u] || [], c = color(n);
+      var caret = kids.length ? '<span class="rsm-caret" data-act="toggle" data-u="' + esc(u) + '">' + (st.collapsed[u] ? '▶' : '▼') + '</span>' : '<span class="rsm-caret"></span>';
+      var label = short(u).replace(/^…?\/?/, '') || '/';
+      var html = '<div class="rsm-trow ' + (u === st.selected ? 'sel' : '') + '" style="padding-left:' + (ind*14+4) + 'px" data-act="sel" data-u="' + esc(u) + '">' + caret + '<span class="sm-dot" style="width:8px;height:8px;border-radius:50%;display:inline-block;background:' + c + '"></span><span>' + esc(label) + '</span>' + (kids.length ? '<span class="rsm-cnt">' + desc[u] + '</span>' : '') + '</div>';
+      if (!st.collapsed[u]) kids.sort(function(a,b){return a.localeCompare(b);}).forEach(function(k){ html += row(k, ind+1); });
+      return html;
+    }
+    var treeHtml = '<div style="width:280px;flex-shrink:0;overflow:auto;background:rgba(13,17,23,.7);border:1px solid #21262d;border-radius:8px;padding:6px">' + (roots.map(function(r){ return row(r, 0); }).join('') || '') + '</div>';
+    var n = all[st.selected];
+    var detail = '<div style="flex:1;overflow:auto;background:rgba(13,17,23,.7);border:1px solid #21262d;border-radius:8px;padding:14px">' + (n ? detailHtml(n) : '') + '</div>';
+    explorer.innerHTML = treeHtml + detail;
+    explorer.onclick = function(ev) {
+      var t = ev.target.closest('[data-act]'); if (!t) return;
+      var u = t.getAttribute('data-u'); if (u == null) return;
+      if (t.getAttribute('data-act') === 'toggle') { ev.stopPropagation(); st.collapsed[u] = !st.collapsed[u]; }
+      else { st.selected = u; }
+      render();
+    };
+  }
+
+  function render() {
+    var mode = st.mode;
+    svg.style.display = (mode === 'explorer') ? 'none' : '';
+    explorer.style.display = (mode === 'explorer') ? 'flex' : 'none';
+    var vis = model();
+    if (mode === 'explorer') { renderExplorer(); return; }
+    if (mode === 'shots') renderShots(vis); else renderCompact(vis);
+  }
+
+  function showTip(ev, n) {
+    var rect = wrap.getBoundingClientRect();
+    tip.innerHTML = '<strong>Depth ' + n.depth + '</strong><br>' + esc(n.url) + '<br><span style="color:#8b949e">' + (n.forms||0) + ' forms / ' + (n.inputs||0) + ' inputs</span>' + (n.findings>0 ? '<br><span style="color:#f85149">' + n.findings + ' findings</span>' : '');
+    tip.style.display = 'block';
+    var x = ev.clientX - rect.left + 12, y = ev.clientY - rect.top + 12;
+    if (x + 340 > rect.width) x = rect.width - 340;
+    tip.style.left = x + 'px'; tip.style.top = y + 'px';
+  }
+  function hideTip() { tip.style.display = 'none'; }
+
+  function showPop(ev, n) {
+    var p = n.parent && all[n.parent], nr = norm(n.via), shot = (p && p.shot) || n.shot;
+    var h = '<h4 style="margin:0 0 6px;color:#58a6ff;font-size:.78rem">' + (n.via ? ('クリック箇所： ' + esc(short(p ? p.url : '')) + ' → ' + esc(short(n.url))) : (esc(short(n.url)) + '（起点）')) + '</h4>';
+    if (shot) {
+      h += '<div style="position:relative;border:1px solid #30363d;border-radius:8px;overflow:hidden"><img style="display:block;width:100%" src="data:image/jpeg;base64,' + shot + '">';
+      if (nr && p && p.shot) h += '<div style="position:absolute;border:2px solid #f85149;border-radius:4px;box-shadow:0 0 0 3px rgba(248,81,73,.25);left:' + (nr.x*100) + '%;top:' + (nr.y*100) + '%;width:' + (nr.w*100) + '%;height:' + (nr.h*100) + '%"></div>';
+      h += '</div>';
+    }
+    h += '<div style="margin-top:8px;font-size:.74rem;color:#8b949e;line-height:1.7">';
+    if (n.via) h += '押した要素：<b style="color:#e6edf3">「' + esc(n.via.text || '(テキスト無し)') + '」</b><br>セレクタ：<code style="color:#79c0ff">' + esc(n.via.selector || '-') + '</code><br>';
+    h += '<a href="' + esc(n.url) + '" target="_blank" style="color:#58a6ff">ページを開く ↗</a></div>';
+    pop.innerHTML = h; pop.style.display = 'block';
+    var rect = wrap.getBoundingClientRect();
+    var x = ev.clientX - rect.left + 14, y = ev.clientY - rect.top + 8;
+    if (x + 350 > rect.width) x = rect.width - 350;
+    if (y + 250 > rect.height) y = Math.max(8, rect.height - 250);
+    pop.style.left = x + 'px'; pop.style.top = y + 'px';
+  }
+  function hidePop() { pop.style.display = 'none'; }
+
+  // Global handlers (toolbar)
+  window.rptSmMode = function(m) { st.mode = m; ['compact','shots','explorer'].forEach(function(k){ var b = document.getElementById('rpt-sm-m-' + k); if (b) b.classList.toggle('active', k === m); }); hidePop(); render(); };
+  window.rptSmSearch = function(v) { st.search = v || ''; hidePop(); render(); };
+  window.rptSmExpand = function(open) { Object.keys(all).forEach(function(u){ st.collapsed[u] = !open; }); render(); };
+  window.rptSmZoom = function(f) { st.view.scale = Math.max(0.2, Math.min(4, st.view.scale * f)); applyView(); };
+  window.rptSmReset = function() { st.view = { scale: 1, tx: 0, ty: 0 }; applyView(); };
+
+  // Pan & zoom
+  var drag = false, lx = 0, ly = 0;
+  wrap.addEventListener('mousedown', function(ev) {
+    if (st.mode === 'explorer') return;
+    if (ev.target.closest('#rpt-sm-pop')) return;
+    drag = true; lx = ev.clientX; ly = ev.clientY;
+  });
+  window.addEventListener('mousemove', function(ev) { if (!drag) return; st.view.tx += ev.clientX - lx; st.view.ty += ev.clientY - ly; lx = ev.clientX; ly = ev.clientY; applyView(); });
+  window.addEventListener('mouseup', function() { drag = false; });
+  wrap.addEventListener('wheel', function(ev) {
+    if (st.mode === 'explorer') return;
+    ev.preventDefault();
+    var rect = wrap.getBoundingClientRect(), cx = ev.clientX - rect.left, cy = ev.clientY - rect.top, f = ev.deltaY < 0 ? 1.1 : 0.9;
+    st.view.tx = cx - (cx - st.view.tx) * f; st.view.ty = cy - (cy - st.view.ty) * f;
+    st.view.scale = Math.max(0.2, Math.min(4, st.view.scale * f)); applyView();
+  }, { passive: false });
+
+  render();
+})();
+"""
+
 SEVERITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
 SEVERITY_COLORS = {
     "critical": "#e53e3e",
@@ -846,10 +1101,12 @@ document.querySelectorAll('.plan-payloads-toggle').forEach(btn => {{
 
     def _build_page_flow_html(self, page_graph: dict, url_finding_counts: dict = None) -> str:
         """
-        ビジュアルサイトマップ。WebUI と同じ「深さで縦カラム」レイアウトを採用し、
-        オフラインでも CDN なしで描画できる純粋な SVG として埋め込む。
+        ビジュアルサイトマップ。3つの表示モード（コンパクト / スクショ / 一覧）を切り替えられる
+        自己完結 (CDN なし) の SVG + JS として埋め込む。各遷移には「どの要素をクリックして
+        そのページへ来たか」(via) を、ノードにはページのスクリーンショットを保持する。
 
-        page_graph: {url: {"parent": parent_url|None, "depth": int, "forms": int, ...}}
+        page_graph: {url: {"parent", "depth", "forms", "inputs", "params",
+                            "via": {text,selector,rect,viewport}, "screenshot_b64": str}}
         url_finding_counts: {url: count}  検出ありは赤くマーキング
         """
         if not page_graph:
@@ -858,34 +1115,31 @@ document.querySelectorAll('.plan-payloads-toggle').forEach(btn => {{
         import json as _json
         url_finding_counts = url_finding_counts or {}
 
-        # ノードデータ
         nodes = []
-        url_to_idx = {}
-        for i, (url, info) in enumerate(page_graph.items()):
-            url_to_idx[url] = i
+        for url, info in page_graph.items():
             findings = int(url_finding_counts.get(url, 0))
             nodes.append({
-                "id": i,
                 "url": url,
+                "parent": info.get("parent") or "",
                 "depth": int(info.get("depth", 0) or 0),
-                "parent": info.get("parent"),
                 "forms": int(info.get("forms", 0) or 0),
                 "inputs": int(info.get("inputs", 0) or 0),
                 "params": int(info.get("params", 0) or 0),
                 "findings": findings,
                 "status": "vuln" if findings > 0 else "done",
+                "via": info.get("via") or None,
+                "shot": info.get("screenshot_b64") or "",
             })
-        links = []
-        for url, info in page_graph.items():
-            parent = info.get("parent")
-            if parent and parent in url_to_idx and url in url_to_idx:
-                links.append({"source": url_to_idx[parent], "target": url_to_idx[url]})
-
         vuln_count = sum(1 for n in nodes if n["status"] == "vuln")
         done_count = len(nodes) - vuln_count
-
-        nodes_json = _json.dumps(nodes)
-        links_json = _json.dumps(links)
+        # Serialize for an HTML <script> context: escape characters that could break out
+        # of the script tag (e.g. attacker-controlled link text containing "</script>").
+        nodes_json = (
+            _json.dumps(nodes)
+            .replace("<", "\\u003c")
+            .replace(">", "\\u003e")
+            .replace("&", "\\u0026")
+        )
 
         # テキストフォールバック (ツリー)
         def _fb_row(url, info):
@@ -900,240 +1154,61 @@ document.querySelectorAll('.plan-payloads-toggle').forEach(btn => {{
             )
         fallback_items = "".join(_fb_row(u, info) for u, info in page_graph.items())
 
-        return f"""
+        header = f"""
     <div class="section" id="site-map-section">
         <h2>🗺 Visual Site Map ({len(page_graph)} pages)</h2>
         <div class="sm-toolbar">
             <span class="sm-pill">画面遷移図 <strong>{len(page_graph)}</strong></span>
+            <input id="rpt-sm-search" class="sm-search" placeholder="検索…" oninput="rptSmSearch(this.value)">
+            <span class="sm-modes">
+                <button class="sm-mode-btn active" id="rpt-sm-m-compact" type="button" onclick="rptSmMode('compact')">コンパクト</button>
+                <button class="sm-mode-btn" id="rpt-sm-m-shots" type="button" onclick="rptSmMode('shots')">スクショ</button>
+                <button class="sm-mode-btn" id="rpt-sm-m-explorer" type="button" onclick="rptSmMode('explorer')">一覧</button>
+            </span>
+            <button class="sm-pill sm-btn" type="button" onclick="rptSmExpand(true)">全展開</button>
+            <button class="sm-pill sm-btn" type="button" onclick="rptSmExpand(false)">全折りたたみ</button>
+            <button class="sm-pill sm-btn" type="button" onclick="rptSmZoom(0.8)">－</button>
+            <button class="sm-pill sm-btn" type="button" onclick="rptSmZoom(1.25)">＋</button>
+            <button class="sm-pill sm-btn" type="button" onclick="rptSmReset()">⟲</button>
+            <span class="sm-pill sm-spacer"></span>
             <span class="sm-pill"><span class="sm-dot" style="background:#388bfd"></span>完了 {done_count}</span>
             <span class="sm-pill"><span class="sm-dot" style="background:#f85149"></span>検出 {vuln_count}</span>
-            <span class="sm-pill sm-spacer"></span>
-            <button class="sm-pill sm-btn" type="button" onclick="rptSiteMapZoom(0.8)">－</button>
-            <button class="sm-pill sm-btn" type="button" onclick="rptSiteMapZoom(1.25)">＋</button>
-            <button class="sm-pill sm-btn" type="button" onclick="rptSiteMapReset()">リセット</button>
-            <button class="sm-pill sm-btn" type="button" onclick="rptSiteMapToggleList()">一覧表示</button>
         </div>
-        <div id="rpt-sitemap-container" style="position:relative;height:520px;background:#0a0c0f;border:1px solid #21262d;border-radius:8px;overflow:hidden">
-            <svg id="rpt-sitemap-svg" style="width:100%;height:100%;display:block"></svg>
-            <div id="rpt-sitemap-tooltip"
-                 style="position:absolute;display:none;z-index:3;max-width:340px;background:rgba(13,17,23,.96);border:1px solid #30363d;color:#e6edf3;border-radius:6px;padding:6px 8px;font-size:.72rem;pointer-events:none;box-shadow:0 8px 24px rgba(0,0,0,.45)"></div>
-            <div id="rpt-sitemap-fallback"
-                 style="display:none;position:absolute;inset:8px;overflow:auto;padding:8px;background:#0d1117;border-radius:6px">
+        <div id="rpt-sm-wrap" style="position:relative;height:560px;background:#0a0c0f;border:1px solid #21262d;border-radius:8px;overflow:hidden">
+            <svg id="rpt-sm-svg" style="width:100%;height:100%;display:block"></svg>
+            <div id="rpt-sm-explorer" style="position:absolute;inset:8px;display:none;gap:8px"></div>
+            <div id="rpt-sm-tip" style="position:absolute;display:none;z-index:3;max-width:340px;background:rgba(13,17,23,.96);border:1px solid #30363d;color:#e6edf3;border-radius:6px;padding:6px 8px;font-size:.72rem;pointer-events:none;box-shadow:0 8px 24px rgba(0,0,0,.45)"></div>
+            <div id="rpt-sm-pop" style="position:absolute;display:none;z-index:5;width:340px;background:rgba(13,17,23,.97);border:1px solid #58a6ff;border-radius:10px;padding:10px;font-size:.74rem;box-shadow:0 10px 30px rgba(0,0,0,.6)"></div>
+            <div id="rpt-sm-fallback" style="display:none;position:absolute;inset:8px;overflow:auto;padding:8px;background:#0d1117;border-radius:6px">
                 <ul style="list-style:none;padding:0;margin:0">{fallback_items}</ul>
             </div>
         </div>
         <p style="font-size:.75rem;color:#718096;margin-top:6px">
-            横軸 = クロール深さ / 縦並び = 同階層のページ / 色: 青=完了 オレンジ=巡回中 赤=脆弱性検出
-            · ホイールでズーム / ドラッグでパン / ノードクリックで該当ページを開く
+            コンパクト=ツリー / スクショ=画面サムネにクリック箇所を表示 / 一覧=ツリー+詳細
+            · 矢印のラベル=クリックした要素 · ホイールでズーム / ドラッグでパン
         </p>
         <style>
             .sm-toolbar {{ display:flex; gap:6px; align-items:center; margin-bottom:8px; flex-wrap:wrap; }}
             .sm-pill {{ background:rgba(13,17,23,.82); border:1px solid #30363d; color:#8b949e;
-                        border-radius:999px; padding:4px 10px; font-size:.72rem; font-weight:700; }}
+                        border-radius:999px; padding:4px 10px; font-size:.72rem; font-weight:700; white-space:nowrap; }}
             .sm-pill .sm-dot {{ width:8px; height:8px; border-radius:50%; display:inline-block; margin-right:5px; vertical-align:middle; }}
             .sm-spacer {{ flex:1; background:transparent; border:0; padding:0; }}
             .sm-btn {{ cursor:pointer; }}
             .sm-btn:hover {{ color:#e6edf3; border-color:#58a6ff; }}
-            #rpt-sitemap-svg .sm-node-g {{ cursor:pointer; }}
-            #rpt-sitemap-svg .sm-node-g:hover circle {{ stroke:#79c0ff; stroke-width:2.5; }}
+            .sm-search {{ background:#0d1117; border:1px solid #30363d; color:#e6edf3; border-radius:6px; padding:4px 9px; font-size:.72rem; width:140px; }}
+            .sm-modes {{ display:inline-flex; border:1px solid #30363d; border-radius:6px; overflow:hidden; }}
+            .sm-mode-btn {{ background:transparent; border:0; color:#8b949e; cursor:pointer; padding:4px 9px; font-size:.72rem; font-weight:700; }}
+            .sm-mode-btn.active {{ background:#1f6feb; color:#fff; }}
+            #rpt-sm-svg .sm-node-g {{ cursor:pointer; }}
+            .rsm-trow {{ display:flex; align-items:center; gap:6px; padding:4px 6px; border-radius:6px; cursor:pointer; white-space:nowrap; font-size:.76rem; color:#c9d1d9; }}
+            .rsm-trow:hover {{ background:#161b22; }}
+            .rsm-trow.sel {{ background:rgba(56,139,253,.18); outline:1px solid #58a6ff; }}
+            .rsm-caret {{ width:12px; color:#8b949e; text-align:center; flex-shrink:0; }}
+            .rsm-cnt {{ margin-left:auto; color:#8b949e; font-size:.68rem; }}
         </style>
-        <script>
-        (function() {{
-            var nodes = {nodes_json};
-            var links = {links_json};
-            var svg = document.getElementById('rpt-sitemap-svg');
-            var container = document.getElementById('rpt-sitemap-container');
-            var tooltip = document.getElementById('rpt-sitemap-tooltip');
-            if (!svg || !container) return;
-            var NS = 'http://www.w3.org/2000/svg';
-            var view = {{ scale: 1, tx: 0, ty: 0 }};
-
-            function color(n) {{
-                if (n.status === 'vuln') return '#f85149';
-                if (n.status === 'scanning') return '#f0883e';
-                if (n.status === 'done') return '#388bfd';
-                return '#3a3f4a';
-            }}
-
-            function shortLabel(url) {{
-                try {{
-                    var u = new URL(url);
-                    var p = u.pathname || '/';
-                    return p.length > 18 ? '…' + p.slice(-16) : p;
-                }} catch(e) {{
-                    return (url || '').slice(-16);
-                }}
-            }}
-
-            function layout() {{
-                var w = container.clientWidth || 800;
-                var h = container.clientHeight || 520;
-                var byDepth = {{}};
-                nodes.forEach(function(n) {{
-                    var d = n.depth || 0;
-                    (byDepth[d] = byDepth[d] || []).push(n);
-                }});
-                var depths = Object.keys(byDepth).map(Number).sort(function(a,b){{return a-b;}});
-                var maxDepth = Math.max.apply(null, depths.concat([1]));
-                var marginX = 60, marginY = 50;
-                depths.forEach(function(d) {{
-                    var bucket = byDepth[d].sort(function(a,b){{return a.url.localeCompare(b.url);}});
-                    var x = marginX + (w - marginX*2) * (d / maxDepth);
-                    bucket.forEach(function(n, i) {{
-                        n._x = x;
-                        n._y = marginY + (h - marginY*2) * ((i + 1) / (bucket.length + 1));
-                    }});
-                }});
-                return {{ w: w, h: h }};
-            }}
-
-            function render() {{
-                var dim = layout();
-                svg.setAttribute('viewBox', '0 0 ' + dim.w + ' ' + dim.h);
-                svg.innerHTML = '<defs><marker id="rpt-sm-arr" viewBox="0 -4 8 8" refX="23" markerWidth="6" markerHeight="6" orient="auto"><path d="M0,-4L8,0L0,4" fill="#4a5568"/></marker></defs>';
-                var root = document.createElementNS(NS, 'g');
-                root.setAttribute('id', 'rpt-sm-root');
-                root.setAttribute('transform', 'translate(' + view.tx + ',' + view.ty + ') scale(' + view.scale + ')');
-                svg.appendChild(root);
-
-                // Links
-                var nodesById = {{}};
-                nodes.forEach(function(n) {{ nodesById[n.id] = n; }});
-                links.forEach(function(lk) {{
-                    var s = nodesById[lk.source], t = nodesById[lk.target];
-                    if (!s || !t || s._x == null || t._x == null) return;
-                    var line = document.createElementNS(NS, 'line');
-                    line.setAttribute('x1', s._x); line.setAttribute('y1', s._y);
-                    line.setAttribute('x2', t._x); line.setAttribute('y2', t._y);
-                    line.setAttribute('stroke', '#4a5568');
-                    line.setAttribute('stroke-width', '1.4');
-                    line.setAttribute('marker-end', 'url(#rpt-sm-arr)');
-                    root.appendChild(line);
-                }});
-
-                // Nodes
-                nodes.forEach(function(n) {{
-                    var g = document.createElementNS(NS, 'g');
-                    g.setAttribute('class', 'sm-node-g');
-                    g.setAttribute('transform', 'translate(' + n._x + ',' + n._y + ')');
-                    g.addEventListener('click', function(ev) {{
-                        if (ev.shiftKey) return;
-                        window.open(n.url, '_blank');
-                    }});
-                    g.addEventListener('mousemove', function(ev) {{ showTip(ev, n); }});
-                    g.addEventListener('mouseleave', hideTip);
-
-                    var c = document.createElementNS(NS, 'circle');
-                    c.setAttribute('r', '20');
-                    c.setAttribute('fill', color(n));
-                    c.setAttribute('stroke', n.depth === 0 ? '#79c0ff' : '#1f6feb');
-                    c.setAttribute('stroke-width', '1.6');
-                    g.appendChild(c);
-
-                    if (n.findings > 0) {{
-                        var b = document.createElementNS(NS, 'circle');
-                        b.setAttribute('r', '7');
-                        b.setAttribute('cx', '14'); b.setAttribute('cy', '-14');
-                        b.setAttribute('fill', '#7f1d1d');
-                        b.setAttribute('stroke', '#fca5a5');
-                        b.setAttribute('stroke-width', '1');
-                        g.appendChild(b);
-                        var bt = document.createElementNS(NS, 'text');
-                        bt.setAttribute('x', '14'); bt.setAttribute('y', '-11');
-                        bt.setAttribute('text-anchor', 'middle');
-                        bt.setAttribute('font-size', '9px');
-                        bt.setAttribute('font-weight', '700');
-                        bt.setAttribute('fill', '#fee2e2');
-                        bt.setAttribute('pointer-events', 'none');
-                        bt.textContent = n.findings > 9 ? '9+' : String(n.findings);
-                        g.appendChild(bt);
-                    }}
-
-                    var t = document.createElementNS(NS, 'text');
-                    t.setAttribute('dy', '0.35em');
-                    t.setAttribute('text-anchor', 'middle');
-                    t.setAttribute('font-size', '9px');
-                    t.setAttribute('fill', '#ffffff');
-                    t.setAttribute('pointer-events', 'none');
-                    t.textContent = shortLabel(n.url);
-                    g.appendChild(t);
-
-                    root.appendChild(g);
-                }});
-            }}
-
-            function applyTransform() {{
-                var root = document.getElementById('rpt-sm-root');
-                if (root) root.setAttribute('transform', 'translate(' + view.tx + ',' + view.ty + ') scale(' + view.scale + ')');
-            }}
-
-            function showTip(ev, n) {{
-                var rect = container.getBoundingClientRect();
-                tooltip.innerHTML =
-                    '<strong>Depth ' + n.depth + '</strong><br>' +
-                    escapeText(n.url) +
-                    '<br><span style="color:#8b949e">' + n.forms + ' forms / ' + n.inputs + ' inputs / ' + n.params + ' params</span>' +
-                    (n.findings > 0 ? '<br><span style="color:#f85149">' + n.findings + ' finding' + (n.findings>1?'s':'') + '</span>' : '');
-                tooltip.style.display = 'block';
-                var x = ev.clientX - rect.left + 12;
-                var y = ev.clientY - rect.top + 12;
-                if (x + 340 > rect.width) x = rect.width - 340;
-                tooltip.style.left = x + 'px';
-                tooltip.style.top = y + 'px';
-            }}
-            function hideTip() {{ tooltip.style.display = 'none'; }}
-            function escapeText(s) {{
-                return String(s).replace(/[&<>"']/g, function(c) {{
-                    return ({{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}})[c];
-                }});
-            }}
-
-            // Pan & zoom
-            var dragging = false, lastX = 0, lastY = 0;
-            container.addEventListener('mousedown', function(ev) {{
-                if (ev.target.closest('.sm-node-g')) return;
-                dragging = true; lastX = ev.clientX; lastY = ev.clientY;
-                container.style.cursor = 'grabbing';
-            }});
-            window.addEventListener('mousemove', function(ev) {{
-                if (!dragging) return;
-                view.tx += ev.clientX - lastX;
-                view.ty += ev.clientY - lastY;
-                lastX = ev.clientX; lastY = ev.clientY;
-                applyTransform();
-            }});
-            window.addEventListener('mouseup', function() {{ dragging = false; container.style.cursor = ''; }});
-            container.addEventListener('wheel', function(ev) {{
-                ev.preventDefault();
-                var factor = ev.deltaY < 0 ? 1.1 : 0.9;
-                var rect = container.getBoundingClientRect();
-                var cx = ev.clientX - rect.left, cy = ev.clientY - rect.top;
-                view.tx = cx - (cx - view.tx) * factor;
-                view.ty = cy - (cy - view.ty) * factor;
-                view.scale *= factor;
-                view.scale = Math.max(0.2, Math.min(4, view.scale));
-                applyTransform();
-            }}, {{ passive: false }});
-
-            window.rptSiteMapZoom = function(f) {{
-                view.scale = Math.max(0.2, Math.min(4, view.scale * f));
-                applyTransform();
-            }};
-            window.rptSiteMapReset = function() {{
-                view.scale = 1; view.tx = 0; view.ty = 0;
-                applyTransform();
-            }};
-            window.rptSiteMapToggleList = function() {{
-                var fb = document.getElementById('rpt-sitemap-fallback');
-                if (!fb) return;
-                fb.style.display = (fb.style.display === 'block') ? 'none' : 'block';
-            }};
-
-            render();
-            window.addEventListener('resize', render);
-        }})();
-        </script>
-    </div>"""
+        <script>"""
+        data_js = f"\nvar RPT_SM_NODES = {nodes_json};\n"
+        return header + data_js + _RPT_SITEMAP_JS + "\n        </script>\n    </div>"
 
     def _format_request(self, req: dict) -> str:
         if not req:

@@ -233,17 +233,25 @@ body {
   background:#0a0c0f;
   position:relative;
   overflow:hidden;
+  display:flex;
+  flex-direction:column;
+}
+.sitemap-canvas {
+  position:relative;
+  flex:1;
+  min-height:0;
+  overflow:hidden;
 }
 .sitemap-toolbar {
-  position:absolute;
-  top:8px;
-  left:8px;
-  right:8px;
+  flex-shrink:0;
   z-index:2;
   display:flex;
   align-items:center;
-  gap:8px;
-  pointer-events:none;
+  gap:6px;
+  flex-wrap:wrap;
+  padding:6px 8px;
+  background:#0d1117;
+  border-bottom:1px solid var(--border);
 }
 .sitemap-pill {
   background:rgba(13,17,23,.82);
@@ -253,8 +261,9 @@ body {
   padding:4px 10px;
   font-size:.7rem;
   font-weight:700;
+  white-space:nowrap;
 }
-.sitemap-legend { margin-left:auto; display:flex; gap:6px; }
+.sitemap-legend { margin-left:auto; display:flex; gap:6px; flex-wrap:wrap; }
 .sm-dot { width:8px; height:8px; border-radius:50%; display:inline-block; margin-right:4px; }
 .sm-tooltip {
   position:absolute;
@@ -273,11 +282,62 @@ body {
 .sitemap-fallback {
   display:none;
   position:absolute;
-  inset:42px 10px 10px 10px;
+  inset:8px;
   overflow:auto;
   color:var(--text-muted);
   font-size:.76rem;
 }
+/* Screen-transition map: toolbar controls + view modes */
+.sm-search {
+  background:rgba(13,17,23,.92); border:1px solid var(--border); color:var(--text);
+  border-radius:6px; padding:4px 9px; font-size:.72rem; width:170px; pointer-events:auto;
+}
+.sm-search::placeholder { color:var(--text-muted); }
+.sm-modes { display:flex; gap:0; pointer-events:auto; background:rgba(13,17,23,.92);
+  border:1px solid var(--border); border-radius:6px; overflow:hidden; }
+.sm-mode-btn {
+  background:transparent; border:none; color:var(--text-muted); cursor:pointer;
+  padding:4px 9px; font-size:.72rem; font-weight:700;
+}
+.sm-mode-btn:hover { color:var(--text); }
+.sm-mode-btn.active { background:var(--accent); color:#fff; }
+.sm-mini-btn {
+  background:rgba(13,17,23,.92); border:1px solid var(--border); color:var(--text);
+  border-radius:6px; cursor:pointer; padding:4px 8px; font-size:.72rem; pointer-events:auto;
+}
+.sm-mini-btn:hover { border-color:var(--accent); color:#fff; }
+.sitemap-explorer {
+  position:absolute; inset:8px; display:none; gap:8px; z-index:1;
+}
+.sitemap-explorer.active { display:flex; }
+.sm-tree {
+  width:280px; flex-shrink:0; overflow:auto; background:rgba(13,17,23,.7);
+  border:1px solid var(--border); border-radius:8px; padding:6px;
+}
+.sm-trow { display:flex; align-items:center; gap:6px; padding:4px 6px; border-radius:6px;
+  cursor:pointer; white-space:nowrap; font-size:.76rem; }
+.sm-trow:hover { background:var(--surface2); }
+.sm-trow.sel { background:rgba(56,139,253,.18); outline:1px solid var(--accent); }
+.sm-tcaret { width:12px; color:var(--text-muted); flex-shrink:0; text-align:center; }
+.sm-tcount { margin-left:auto; color:var(--text-muted); font-size:.68rem; }
+.sm-detail { flex:1; overflow:auto; background:rgba(13,17,23,.7);
+  border:1px solid var(--border); border-radius:8px; padding:14px; }
+.sm-detail h4 { margin:0 0 10px; font-size:.86rem; color:var(--accent); }
+.sm-shot { position:relative; border:1px solid var(--border); border-radius:8px;
+  overflow:hidden; background:#0e1420; max-width:560px; }
+.sm-shot img { display:block; width:100%; }
+.sm-marker { position:absolute; border:2px solid var(--critical); border-radius:4px;
+  box-shadow:0 0 0 3px rgba(248,81,73,.25); }
+.sm-marker::after { content:"クリック"; position:absolute; top:-16px; left:0;
+  background:var(--critical); color:#fff; font-size:.6rem; padding:0 5px; border-radius:3px; white-space:nowrap; }
+.sm-meta { margin-top:12px; font-size:.78rem; color:var(--text-muted); line-height:1.8; }
+.sm-meta b { color:var(--text); } .sm-meta code { color:#79c0ff; }
+.sm-popover {
+  position:absolute; z-index:5; display:none; width:340px; background:rgba(13,17,23,.97);
+  border:1px solid var(--accent); border-radius:10px; padding:10px;
+  box-shadow:0 10px 30px rgba(0,0,0,.6); font-size:.74rem;
+}
+.sm-popover h4 { margin:0 0 6px; font-size:.78rem; color:var(--accent); }
 .check-progress-bar-wrap { display:grid; grid-template-columns:110px 1fr 42px; gap:8px; align-items:center; margin-bottom:8px; }
 .cp-label { color:var(--text); font-size:.75rem; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .cp-bar-bg { height:8px; background:var(--surface2); border:1px solid var(--border); border-radius:999px; overflow:hidden; }
@@ -1481,16 +1541,33 @@ body {
       <div class="sitemap-container" id="sitemapContainer">
         <div class="sitemap-toolbar">
           <span class="sitemap-pill">画面遷移図 <span id="sitemapNodeCount">0</span></span>
-          <span class="sitemap-pill">巡回を先に見える化</span>
+          <input id="smSearch" class="sm-search" placeholder="検索…" oninput="smOnSearch(this.value)">
+          <div class="sm-modes">
+            <button class="sm-mode-btn active" id="smMode-compact"  onclick="smSetMode('compact')">コンパクト</button>
+            <button class="sm-mode-btn"        id="smMode-shots"    onclick="smSetMode('shots')">スクショ</button>
+            <button class="sm-mode-btn"        id="smMode-explorer" onclick="smSetMode('explorer')">一覧</button>
+          </div>
+          <button class="sm-mini-btn" onclick="smExpandAll(true)"  title="全展開">⊞</button>
+          <button class="sm-mini-btn" onclick="smExpandAll(false)" title="全折りたたみ">⊟</button>
+          <button class="sm-mini-btn" onclick="smZoom(0.8)"  title="縮小">－</button>
+          <button class="sm-mini-btn" onclick="smZoom(1.25)" title="拡大">＋</button>
+          <button class="sm-mini-btn" onclick="smResetView()" title="リセット">⟲</button>
           <div class="sitemap-legend">
             <span class="sitemap-pill"><span class="sm-dot" style="background:#f0883e"></span>巡回中</span>
             <span class="sitemap-pill"><span class="sm-dot" style="background:#388bfd"></span>完了</span>
             <span class="sitemap-pill"><span class="sm-dot" style="background:#f85149"></span>検出</span>
           </div>
         </div>
-        <svg id="sitemapSvg" style="width:100%;height:100%"></svg>
-        <div class="sitemap-fallback" id="sitemapFallback"></div>
-        <div class="sm-tooltip" id="smTooltip"></div>
+        <div class="sitemap-canvas" id="sitemapCanvas">
+          <svg id="sitemapSvg" style="width:100%;height:100%"></svg>
+          <div class="sitemap-explorer" id="sitemapExplorer">
+            <div class="sm-tree" id="smTree"></div>
+            <div class="sm-detail" id="smDetail"></div>
+          </div>
+          <div class="sitemap-fallback" id="sitemapFallback"></div>
+          <div class="sm-tooltip" id="smTooltip"></div>
+          <div class="sm-popover" id="smPopover"></div>
+        </div>
       </div>
     </div>
     <div class="center-view" id="ctview-browser">
@@ -1689,11 +1766,18 @@ const state = {
   urlStatuses: {},   // { url: 'pending'|'scanning'|'done'|'vuln'|'error' }
   urlOrder: [],      // discovery order
   checkCounts: {},   // { xss: 12, sqli: 8, ... }
-  graphNodes: {},    // { url: {id,url,parent,depth,status,forms,inputs} }
+  graphNodes: {},    // { url: {id,url,parent,depth,status,forms,inputs,via,shot} }
   graphLinks: [],    // [{source,target}]
   urlFindingCounts: {},
   d3Loaded: false,
   _d3: null,
+  smMode: 'compact',          // 'compact' | 'shots' | 'explorer'
+  smCollapsed: {},            // { url: true } collapsed subtrees
+  smSearch: '',
+  smView: { scale: 1, tx: 0, ty: 0 },
+  smSelected: null,           // explorer-selected url
+  smAutoCollapsed: false,
+  _smPanWired: false,
   checkStats: {},
   lastScanConfig: null,
 };
@@ -2986,6 +3070,12 @@ function resetLiveScanState() {
   state.checkCounts = {};
   state.graphNodes = {};
   state.graphLinks = [];
+  state.smCollapsed = {};
+  state.smSearch = '';
+  state.smView = { scale: 1, tx: 0, ty: 0 };
+  state.smSelected = null;
+  state.smAutoCollapsed = false;
+  const _ss = document.getElementById('smSearch'); if (_ss) _ss.value = '';
   state.urlFindingCounts = {};
   state.checkStats = {};
   state.phaseStartTs = {};
@@ -3725,7 +3815,7 @@ function loadD3() {
 function initSiteMapD3() {
   const svgEl = document.getElementById('sitemapSvg');
   if (!svgEl) return;
-  const container = document.getElementById('sitemapContainer');
+  const container = document.getElementById('sitemapCanvas') || document.getElementById('sitemapContainer');
   const w = container.clientWidth  || 600;
   const h = container.clientHeight || 380;
   svgEl.style.display = '';
@@ -3736,89 +3826,334 @@ function initSiteMapD3() {
   _sitemapRerender();
 }
 
+const SM_NS = 'http://www.w3.org/2000/svg';
+function _smEl(tag, attrs) {
+  const e = document.createElementNS(SM_NS, tag);
+  if (attrs) for (const k in attrs) e.setAttribute(k, attrs[k]);
+  return e;
+}
+function _smShort(url) {
+  try { const p = new URL(url).pathname || '/'; return p.length > 22 ? '…' + p.slice(-20) : p; }
+  catch (e) { return (url || '').slice(-20); }
+}
+function _smNorm(via) {
+  // Normalize a click rect (viewport px) into 0..1 fractions for overlay markers.
+  if (!via || !via.rect || !via.viewport || !via.viewport.w || !via.viewport.h) return null;
+  const r = via.rect, vp = via.viewport;
+  const cl = (v) => Math.max(0, Math.min(1, v));
+  return { x: cl(r.x / vp.w), y: cl(r.y / vp.h), w: cl(r.w / vp.w), h: cl(r.h / vp.h) };
+}
+
+// Build the visible model: children map, descendant counts, search/collapse filtering.
+function _smModel() {
+  const all = state.graphNodes;
+  const ids = Object.keys(all);
+  const children = {};
+  ids.forEach(u => { const p = all[u].parent; if (p && all[p]) (children[p] = children[p] || []).push(u); });
+  const desc = {};
+  const count = (u) => {
+    if (desc[u] != null) return desc[u];
+    let c = 0; (children[u] || []).forEach(k => { c += 1 + count(k); }); desc[u] = c; return c;
+  };
+  ids.forEach(count);
+  // Auto-collapse big subtrees once, so large sites start tidy.
+  if (!state.smAutoCollapsed && ids.length > 12) {
+    ids.forEach(u => { if ((children[u] || []).length >= 6) state.smCollapsed[u] = true; });
+    state.smAutoCollapsed = true;
+  }
+  const q = (state.smSearch || '').trim().toLowerCase();
+  const matches = (u) => !q || u.toLowerCase().includes(q) ||
+    ((all[u].via && all[u].via.text) || '').toLowerCase().includes(q);
+  const hiddenByCollapse = (u) => {
+    let p = all[u].parent;
+    while (p && all[p]) { if (state.smCollapsed[p]) return true; p = all[p].parent; }
+    return false;
+  };
+  let visible;
+  if (q) {
+    const show = new Set();
+    ids.forEach(u => { if (matches(u)) { show.add(u); let p = all[u].parent; while (p && all[p]) { show.add(p); p = all[p].parent; } } });
+    visible = ids.filter(u => show.has(u));
+  } else {
+    visible = ids.filter(u => !hiddenByCollapse(u));
+  }
+  return { all, ids, children, desc, visible: visible.map(u => all[u]) };
+}
+
 function _sitemapRerender() {
   if (!state._d3) return;
-  const { svgEl, container } = state._d3;
-  const nodes = Object.values(state.graphNodes);
-  const links = state.graphLinks.slice();
-  const w = container.clientWidth || 600;
-  const h = container.clientHeight || 380;
-  svgEl.setAttribute('width', w);
-  svgEl.setAttribute('height', h);
-  svgEl.innerHTML = `
-    <defs>
-      <marker id="sm-arr" viewBox="0 -4 8 8" refX="23" markerWidth="6" markerHeight="6" orient="auto">
-        <path d="M0,-4L8,0L0,4" fill="#4a5568"></path>
-      </marker>
-    </defs>`;
-  if (!nodes.length) return;
+  const svgEl = document.getElementById('sitemapSvg');
+  const explorer = document.getElementById('sitemapExplorer');
+  const mode = state.smMode || 'compact';
+  // Toggle which surface is shown.
+  if (svgEl) svgEl.style.display = (mode === 'explorer') ? 'none' : '';
+  if (explorer) explorer.classList.toggle('active', mode === 'explorer');
+  const cnt = document.getElementById('sitemapNodeCount');
+  if (cnt) cnt.textContent = Object.keys(state.graphNodes).length;
+  const model = _smModel();
+  if (mode === 'explorer') { _smRenderExplorer(model); return; }
+  _smWirePan();
+  if (mode === 'shots') _smRenderShots(model);
+  else _smRenderCompact(model);
+}
 
-  const byDepth = new Map();
-  nodes.forEach(n => {
-    const d = Number(n.depth || 0);
-    if (!byDepth.has(d)) byDepth.set(d, []);
-    byDepth.get(d).push(n);
+function _smArrowDefs() {
+  return `<defs><marker id="sm-arr" viewBox="0 -5 10 10" refX="9" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,-5L10,0L0,5" fill="#4a5568"></path></marker></defs>`;
+}
+function _smApplyView() {
+  const vp = document.getElementById('smVp');
+  if (vp) vp.setAttribute('transform', `translate(${state.smView.tx},${state.smView.ty}) scale(${state.smView.scale})`);
+}
+
+function _smRenderCompact(model) {
+  const svgEl = document.getElementById('sitemapSvg');
+  const { all, children, desc } = model;
+  const byId = {}; model.visible.forEach(n => byId[n.url] = n);
+  svgEl.innerHTML = _smArrowDefs();
+  const vp = _smEl('g', { id: 'smVp' }); svgEl.appendChild(vp);
+  // Layout: column by depth, stacked rows.
+  const W = 220, RH = 60, BW = 156, BH = 38;
+  const byDepth = {};
+  model.visible.forEach(n => { (byDepth[n.depth || 0] = byDepth[n.depth || 0] || []).push(n); });
+  Object.keys(byDepth).map(Number).sort((a, b) => a - b).forEach(d => {
+    byDepth[d].sort((a, b) => a.url.localeCompare(b.url)).forEach((n, i) => { n.x = 40 + d * W; n.y = 40 + i * RH; });
   });
-  const depths = [...byDepth.keys()].sort((a, b) => a - b);
-  const maxDepth = Math.max(...depths, 1);
-  const marginX = 48;
-  const marginY = 64;
-  depths.forEach(depth => {
-    const bucket = byDepth.get(depth).sort((a, b) => a.url.localeCompare(b.url));
-    const x = marginX + (w - marginX * 2) * (depth / maxDepth);
-    bucket.forEach((n, i) => {
-      n.x = x;
-      n.y = marginY + (h - marginY * 2) * ((i + 1) / (bucket.length + 1));
-    });
-  });
-
-  const ns = 'http://www.w3.org/2000/svg';
-  links.forEach(link => {
-    const s = state.graphNodes[link.source] || link.source;
-    const t = state.graphNodes[link.target] || link.target;
-    if (!s || !t || s.x == null || t.x == null) return;
-    const line = document.createElementNS(ns, 'line');
-    line.setAttribute('x1', s.x);
-    line.setAttribute('y1', s.y);
-    line.setAttribute('x2', t.x);
-    line.setAttribute('y2', t.y);
-    line.setAttribute('stroke', '#4a5568');
-    line.setAttribute('stroke-width', '1.5');
-    line.setAttribute('marker-end', 'url(#sm-arr)');
-    svgEl.appendChild(line);
-  });
-
-  nodes.forEach(n => {
-    const g = document.createElementNS(ns, 'g');
-    g.setAttribute('class', 'sm-node');
-    g.setAttribute('transform', `translate(${n.x},${n.y})`);
-    g.style.cursor = 'pointer';
-    g.addEventListener('click', () => window.open(n.url, '_blank'));
-    g.addEventListener('mousemove', ev => _showSmTooltip(ev, n));
-    g.addEventListener('mouseleave', _hideSmTooltip);
-
-    const circle = document.createElementNS(ns, 'circle');
-    circle.setAttribute('r', '18');
-    circle.setAttribute('fill', _smNodeColor(n));
-    circle.setAttribute('stroke', n.depth === 0 ? '#79c0ff' : '#2b6cb0');
-    circle.setAttribute('stroke-width', '1.5');
-    g.appendChild(circle);
-
-    const text = document.createElementNS(ns, 'text');
-    text.setAttribute('dy', '0.35em');
-    text.setAttribute('text-anchor', 'middle');
-    text.setAttribute('font-size', '8px');
-    text.setAttribute('fill', 'white');
-    text.setAttribute('pointer-events', 'none');
-    try {
-      const p = new URL(n.url).pathname || '/';
-      text.textContent = p.length > 18 ? '…' + p.slice(-16) : p;
-    } catch(e) {
-      text.textContent = n.url.slice(-16);
+  // Edges with click-text labels.
+  model.visible.forEach(n => {
+    const p = n.parent && byId[n.parent]; if (!p) return;
+    const x1 = p.x + BW, y1 = p.y + BH / 2, x2 = n.x, y2 = n.y + BH / 2, mx = (x1 + x2) / 2;
+    vp.appendChild(_smEl('path', { d: `M${x1},${y1} C${mx},${y1} ${mx},${y2} ${x2},${y2}`, fill: 'none', stroke: '#4a5568', 'stroke-width': 1.5, 'marker-end': 'url(#sm-arr)' }));
+    vp.appendChild(_smEl('circle', { cx: x1, cy: y1, r: 3.2, fill: '#f85149', stroke: '#fff', 'stroke-width': 1 }));
+    const txt = (n.via && n.via.text) || '';
+    if (txt) {
+      const tw = Math.min(txt.length, 14) * 7 + 12, lx = mx, ly = (y1 + y2) / 2;
+      vp.appendChild(_smEl('rect', { x: lx - tw / 2, y: ly - 8, width: tw, height: 16, rx: 4, fill: '#0d1117', stroke: '#21262d' }));
+      const t = _smEl('text', { x: lx, y: ly + 3, 'text-anchor': 'middle', 'font-size': '10px', fill: '#c9d1d9' });
+      t.textContent = txt.length > 14 ? txt.slice(0, 13) + '…' : txt; vp.appendChild(t);
     }
-    g.appendChild(text);
-    svgEl.appendChild(g);
   });
+  // Nodes.
+  model.visible.forEach(n => {
+    const hasKids = (children[n.url] || []).length > 0;
+    const g = _smEl('g', { transform: `translate(${n.x},${n.y})` }); g.style.cursor = 'pointer';
+    g.appendChild(_smEl('rect', { width: BW, height: BH, rx: 8, fill: '#11151b', stroke: _smNodeColor(n), 'stroke-width': 2 }));
+    let tx = 12;
+    if (hasKids) {
+      const car = _smEl('text', { x: 10, y: BH / 2 + 4, 'font-size': '10px', fill: '#8b949e' });
+      car.textContent = state.smCollapsed[n.url] ? '▶' : '▼'; car.style.cursor = 'pointer';
+      car.addEventListener('click', (ev) => { ev.stopPropagation(); state.smCollapsed[n.url] = !state.smCollapsed[n.url]; _sitemapRerender(); });
+      g.appendChild(car); tx = 24;
+    }
+    g.appendChild(_smEl('circle', { cx: tx + 4, cy: BH / 2, r: 4.5, fill: _smNodeColor(n) }));
+    const title = _smEl('text', { x: tx + 14, y: BH / 2 - 2, 'font-size': '10.5px', fill: '#e6edf3' });
+    title.textContent = _smShort(n.url); g.appendChild(title);
+    const sub = _smEl('text', { x: tx + 14, y: BH / 2 + 11, 'font-size': '9px', fill: '#8b949e' });
+    sub.textContent = (state.smCollapsed[n.url] && desc[n.url]) ? `${desc[n.url]} ページ`
+      : `${n.forms || 0}f / ${n.inputs || 0}i`;
+    g.appendChild(sub);
+    g.addEventListener('click', (ev) => _smShowPopover(ev, n));
+    g.addEventListener('mousemove', (ev) => _showSmTooltip(ev, n));
+    g.addEventListener('mouseleave', _hideSmTooltip);
+    vp.appendChild(g);
+  });
+  _smApplyView();
+}
+
+function _smRenderShots(model) {
+  const svgEl = document.getElementById('sitemapSvg');
+  const { children } = model;
+  const byId = {}; model.visible.forEach(n => byId[n.url] = n);
+  svgEl.innerHTML = _smArrowDefs();
+  const vp = _smEl('g', { id: 'smVp' }); svgEl.appendChild(vp);
+  const W = 290, RH = 168, CW = 210, CH = 132, IMGH = 96;
+  const byDepth = {};
+  model.visible.forEach(n => { (byDepth[n.depth || 0] = byDepth[n.depth || 0] || []).push(n); });
+  Object.keys(byDepth).map(Number).sort((a, b) => a - b).forEach(d => {
+    byDepth[d].sort((a, b) => a.url.localeCompare(b.url)).forEach((n, i) => { n.x = 30 + d * W; n.y = 30 + i * RH; });
+  });
+  // Edges + labels.
+  model.visible.forEach(n => {
+    const p = n.parent && byId[n.parent]; if (!p) return;
+    const x1 = p.x + CW, y1 = p.y + CH / 2, x2 = n.x, y2 = n.y + CH / 2, mx = (x1 + x2) / 2;
+    vp.appendChild(_smEl('path', { d: `M${x1},${y1} C${mx},${y1} ${mx},${y2} ${x2},${y2}`, fill: 'none', stroke: '#4a5568', 'stroke-width': 1.5, 'marker-end': 'url(#sm-arr)' }));
+    const txt = (n.via && n.via.text) || '';
+    if (txt) {
+      const tw = Math.min(txt.length, 14) * 7 + 12, lx = mx, ly = (y1 + y2) / 2;
+      vp.appendChild(_smEl('rect', { x: lx - tw / 2, y: ly - 8, width: tw, height: 16, rx: 4, fill: '#0d1117', stroke: '#21262d' }));
+      const t = _smEl('text', { x: lx, y: ly + 3, 'text-anchor': 'middle', 'font-size': '10px', fill: '#c9d1d9' });
+      t.textContent = txt.length > 14 ? txt.slice(0, 13) + '…' : txt; vp.appendChild(t);
+    }
+  });
+  // Cards with screenshot + outgoing click markers.
+  model.visible.forEach(n => {
+    const g = _smEl('g', { transform: `translate(${n.x},${n.y})` }); g.style.cursor = 'pointer';
+    g.appendChild(_smEl('rect', { width: CW, height: CH, rx: 8, fill: '#11151b', stroke: _smNodeColor(n), 'stroke-width': 2 }));
+    const clip = 'smclip-' + Math.abs(_smHash(n.url));
+    const defs = _smEl('defs');
+    defs.innerHTML = `<clipPath id="${clip}"><rect x="6" y="6" width="${CW - 12}" height="${IMGH}" rx="4"/></clipPath>`;
+    g.appendChild(defs);
+    if (n.shot) {
+      // 'none' makes the image fill the box exactly, so the click-rect overlays
+      // (positioned by viewport fraction × box size) stay aligned with elements.
+      const img = _smEl('image', { x: 6, y: 6, width: CW - 12, height: IMGH, preserveAspectRatio: 'none', 'clip-path': `url(#${clip})` });
+      img.setAttributeNS('http://www.w3.org/1999/xlink', 'href', 'data:image/jpeg;base64,' + n.shot);
+      img.setAttribute('href', 'data:image/jpeg;base64,' + n.shot);
+      g.appendChild(img);
+    } else {
+      g.appendChild(_smEl('rect', { x: 6, y: 6, width: CW - 12, height: IMGH, rx: 4, fill: '#0e1420' }));
+      [22, 32, 42].forEach((yy, i) => g.appendChild(_smEl('rect', { x: 12, y: yy, width: (CW - 24) * (i % 2 ? 0.6 : 0.85), height: 4, rx: 2, fill: '#2a3344' })));
+    }
+    // Highlight where the user clicks to reach each visible child (element overlay on the thumbnail).
+    (children[n.url] || []).forEach(ku => {
+      const k = byId[ku]; if (!k) return; const nr = _smNorm(k.via); if (!nr) return;
+      g.appendChild(_smEl('rect', {
+        x: 6 + (CW - 12) * nr.x, y: 6 + IMGH * nr.y,
+        width: Math.max(8, (CW - 12) * nr.w), height: Math.max(7, IMGH * nr.h),
+        rx: 3, fill: 'rgba(248,81,73,.18)', stroke: '#f85149', 'stroke-width': 1.5
+      }));
+    });
+    const title = _smEl('text', { x: 8, y: CH - 11, 'font-size': '10.5px', fill: '#e6edf3' });
+    title.textContent = _smShort(n.url); g.appendChild(title);
+    const sub = _smEl('text', { x: 8, y: CH - 2, 'font-size': '9px', fill: '#8b949e' });
+    sub.textContent = `${n.forms || 0}f / ${n.inputs || 0}i / ${n.params || 0}p`; g.appendChild(sub);
+    g.appendChild(_smEl('circle', { cx: CW - 12, cy: CH - 9, r: 5, fill: _smNodeColor(n) }));
+    g.addEventListener('click', (ev) => _smShowPopover(ev, n));
+    g.addEventListener('mousemove', (ev) => _showSmTooltip(ev, n));
+    g.addEventListener('mouseleave', _hideSmTooltip);
+    vp.appendChild(g);
+  });
+  _smApplyView();
+}
+
+function _smHash(s) { let h = 0; for (let i = 0; i < s.length; i++) { h = (h << 5) - h + s.charCodeAt(i); h |= 0; } return h; }
+
+function _smRenderExplorer(model) {
+  _hideSmTooltip(); _smHidePopover();
+  const tree = document.getElementById('smTree');
+  const detail = document.getElementById('smDetail');
+  const { all, children, desc } = model;
+  const visibleSet = new Set(model.visible.map(n => n.url));
+  if (!state.smSelected || !all[state.smSelected]) {
+    const firstVuln = Object.keys(all).find(u => all[u].status === 'vuln');
+    state.smSelected = firstVuln || Object.keys(all)[0] || null;
+  }
+  // Left tree (collapsible, indented). URLs go into HTML-escaped data attributes
+  // (never interpolated into a JS-string handler) and are dispatched via a single
+  // delegated listener, so attacker-controlled URLs cannot break out into code.
+  const roots = Object.keys(all).filter(u => !all[u].parent || !all[all[u].parent]);
+  const rowHtml = (u, ind) => {
+    const n = all[u]; const kids = (children[u] || []);
+    const c = _smNodeColor(n);
+    const caret = kids.length ? `<span class="sm-tcaret" data-act="toggle" data-u="${escapeHtml(u)}">${state.smCollapsed[u] ? '▶' : '▼'}</span>` : '<span class="sm-tcaret"></span>';
+    const label = _smShort(u).replace(/^…?\/?/, '') || '/';
+    let html = `<div class="sm-trow ${u === state.smSelected ? 'sel' : ''}" style="padding-left:${ind * 14 + 4}px" data-act="sel" data-u="${escapeHtml(u)}">`
+      + caret + `<span class="sm-dot" style="background:${c}"></span><span>${escapeHtml(label)}</span>`
+      + (kids.length ? `<span class="sm-tcount">${desc[u]}</span>` : '') + `</div>`;
+    if (!state.smCollapsed[u]) kids.sort((a, b) => a.localeCompare(b)).forEach(k => { html += rowHtml(k, ind + 1); });
+    return html;
+  };
+  tree.innerHTML = roots.map(r => rowHtml(r, 0)).join('') || '<div style="color:var(--text-muted);padding:8px">巡回待ち…</div>';
+  tree.onclick = (ev) => {
+    const t = ev.target.closest('[data-act]'); if (!t) return;
+    const u = t.getAttribute('data-u'); if (u == null) return;
+    if (t.getAttribute('data-act') === 'toggle') { ev.stopPropagation(); state.smCollapsed[u] = !state.smCollapsed[u]; }
+    else { state.smSelected = u; }
+    _sitemapRerender();
+  };
+  // Right detail.
+  const n = all[state.smSelected];
+  if (!n) { detail.innerHTML = ''; return; }
+  const p = n.parent && all[n.parent];
+  const nr = _smNorm(n.via);
+  const shot = (p && p.shot) || n.shot;
+  const fc = state.urlFindingCounts[n.url] || 0;
+  let html = `<h4>${n.via ? 'クリック箇所： ' + escapeHtml(_smShort(p ? p.url : '')) + ' → ' + escapeHtml(_smShort(n.url)) : escapeHtml(n.url) + '（起点）'}</h4>`;
+  if (shot) {
+    html += `<div class="sm-shot"><img src="data:image/jpeg;base64,${shot}">`;
+    if (nr && p && p.shot) html += `<div class="sm-marker" style="left:${nr.x * 100}%;top:${nr.y * 100}%;width:${nr.w * 100}%;height:${nr.h * 100}%"></div>`;
+    html += `</div>`;
+  }
+  html += `<div class="sm-meta">`;
+  if (n.via) html += `押した要素：<b>「${escapeHtml(n.via.text || '(テキスト無し)')}」</b><br>セレクタ：<code>${escapeHtml(n.via.selector || '-')}</code><br>`;
+  html += `URL：<code>${escapeHtml(n.url)}</code><br>状態：<b>${n.status}</b> ／ ${n.forms || 0} forms / ${n.inputs || 0} inputs / ${n.params || 0} params`;
+  if (fc > 0) html += `<br><span style="color:var(--critical)">${fc} finding${fc > 1 ? 's' : ''}</span>`;
+  html += `<br><a href="${escapeHtml(n.url)}" target="_blank" style="color:var(--accent)">このページを開く ↗</a></div>`;
+  detail.innerHTML = html;
+}
+
+// ── Click-location popover (compact / shots modes) ──
+function _smShowPopover(ev, n) {
+  const pop = document.getElementById('smPopover');
+  if (!pop) return;
+  const p = n.parent && state.graphNodes[n.parent];
+  const nr = _smNorm(n.via);
+  const shot = (p && p.shot) || n.shot;
+  let html = `<h4>${n.via ? 'クリック箇所： ' + escapeHtml(_smShort(p ? p.url : '')) + ' → ' + escapeHtml(_smShort(n.url)) : escapeHtml(_smShort(n.url)) + '（起点）'}</h4>`;
+  if (shot) {
+    html += `<div class="sm-shot"><img src="data:image/jpeg;base64,${shot}">`;
+    if (nr && p && p.shot) html += `<div class="sm-marker" style="left:${nr.x * 100}%;top:${nr.y * 100}%;width:${nr.w * 100}%;height:${nr.h * 100}%"></div>`;
+    html += `</div>`;
+  }
+  html += `<div class="sm-meta">`;
+  if (n.via) html += `押した要素：<b>「${escapeHtml(n.via.text || '(テキスト無し)')}」</b><br>セレクタ：<code>${escapeHtml(n.via.selector || '-')}</code><br>`;
+  html += `<a href="${escapeHtml(n.url)}" target="_blank" style="color:var(--accent)">ページを開く ↗</a></div>`;
+  pop.innerHTML = html;
+  pop.style.display = 'block';
+  const rect = (document.getElementById('sitemapCanvas') || document.getElementById('sitemapContainer')).getBoundingClientRect();
+  let x = ev.clientX - rect.left + 14, y = ev.clientY - rect.top + 8;
+  if (x + 350 > rect.width) x = rect.width - 350;
+  if (y + 250 > rect.height) y = Math.max(46, rect.height - 250);
+  pop.style.left = x + 'px'; pop.style.top = y + 'px';
+}
+function _smHidePopover() { const pop = document.getElementById('smPopover'); if (pop) pop.style.display = 'none'; }
+
+// ── Toolbar handlers ──
+function smSetMode(m) {
+  state.smMode = m;
+  ['compact', 'shots', 'explorer'].forEach(k => {
+    const b = document.getElementById('smMode-' + k); if (b) b.classList.toggle('active', k === m);
+  });
+  _smHidePopover();
+  if (!state._d3) initSiteMapD3(); else _sitemapRerender();
+}
+function smOnSearch(v) { state.smSearch = v || ''; _smHidePopover(); _sitemapRerender(); }
+function smExpandAll(open) {
+  Object.keys(state.graphNodes).forEach(u => { state.smCollapsed[u] = !open; });
+  state.smAutoCollapsed = true; _sitemapRerender();
+}
+function smZoom(f) {
+  state.smView.scale = Math.max(0.2, Math.min(4, state.smView.scale * f)); _smApplyView();
+}
+function smResetView() { state.smView = { scale: 1, tx: 0, ty: 0 }; _smApplyView(); }
+function _smWirePan() {
+  if (state._smPanWired) return;
+  const container = document.getElementById('sitemapCanvas') || document.getElementById('sitemapContainer');
+  if (!container) return;
+  state._smPanWired = true;
+  let drag = false, lx = 0, ly = 0;
+  container.addEventListener('mousedown', (ev) => {
+    if (state.smMode === 'explorer') return;
+    if (ev.target.closest('.sm-popover') || ev.target.closest('.sitemap-toolbar')) return;
+    if (ev.target.closest('g[transform]') && ev.target.tagName !== 'svg') { /* allow node clicks */ }
+    drag = true; lx = ev.clientX; ly = ev.clientY;
+  });
+  window.addEventListener('mousemove', (ev) => {
+    if (!drag) return;
+    state.smView.tx += ev.clientX - lx; state.smView.ty += ev.clientY - ly;
+    lx = ev.clientX; ly = ev.clientY; _smApplyView();
+  });
+  window.addEventListener('mouseup', () => { drag = false; });
+  container.addEventListener('wheel', (ev) => {
+    if (state.smMode === 'explorer') return;
+    ev.preventDefault();
+    const rect = container.getBoundingClientRect();
+    const cx = ev.clientX - rect.left, cy = ev.clientY - rect.top;
+    const f = ev.deltaY < 0 ? 1.1 : 0.9;
+    state.smView.tx = cx - (cx - state.smView.tx) * f;
+    state.smView.ty = cy - (cy - state.smView.ty) * f;
+    state.smView.scale = Math.max(0.2, Math.min(4, state.smView.scale * f));
+    _smApplyView();
+  }, { passive: false });
 }
 
 function _smNodeColor(d) {
@@ -3839,6 +4174,8 @@ function addSiteMapNode(url, parent, depth, meta = {}) {
       inputs: meta.inputs ?? state.graphNodes[url].inputs,
       params: meta.params ?? state.graphNodes[url].params,
       status: meta.status || state.graphNodes[url].status || 'done',
+      via: meta.via || state.graphNodes[url].via || null,
+      shot: meta.screenshot_b64 || state.graphNodes[url].shot || '',
     });
     if (state._d3) _sitemapRerender();
     _updateSiteMapFallback();
@@ -3853,6 +4190,8 @@ function addSiteMapNode(url, parent, depth, meta = {}) {
     forms: meta.forms || 0,
     inputs: meta.inputs || 0,
     params: meta.params || 0,
+    via: meta.via || null,
+    shot: meta.screenshot_b64 || '',
   };
   state.graphNodes[url] = node;
 
@@ -3907,8 +4246,8 @@ function _showSmTooltip(ev, d) {
     `<br><span style="color:var(--text-muted)">${d.forms || 0} forms / ${d.inputs || 0} inputs / ${d.params || 0} params</span>` +
     (fc > 0 ? `<br><span style="color:var(--critical)">${fc} finding${fc > 1 ? 's' : ''}</span>` : '');
   tt.style.display = 'block';
-  // Tooltip position relative to container
-  const rect = document.getElementById('sitemapContainer').getBoundingClientRect();
+  // Tooltip position relative to canvas
+  const rect = (document.getElementById('sitemapCanvas') || document.getElementById('sitemapContainer')).getBoundingClientRect();
   tt.style.left = (ev.clientX - rect.left + 12) + 'px';
   tt.style.top  = (ev.clientY - rect.top  + 12) + 'px';
 }

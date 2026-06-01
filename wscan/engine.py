@@ -472,6 +472,9 @@ class ScanEngine:
         self.scan_matrix: list[dict] = []
         # page_graph: {url: {"parent": parent_url|None, "screenshot_b64": str, "depth": int}}
         self.page_graph: dict = {}
+        # transition_via: {child_url: {"text","selector","rect","viewport"}} — records
+        # which element on the parent page led to each discovered URL (for the diagram).
+        self._transition_via: dict = {}
         # Scan controller (intervention system)
         self.controller = ScanController()
         # SQLi auth-bypass signal: set by signal_auth_bypass() when a scanner detects bypass
@@ -1197,8 +1200,9 @@ class ScanEngine:
                     # リンクは抽出するが、スキャン対象には追加しない
                     if depth + 1 < self.depth:
                         try:
-                            links = await self.browser.collect_links(url, same_domain=False)
-                            for link in links:
+                            link_entries = await self.browser.collect_links_rich(url, same_domain=False)
+                            for entry in link_entries:
+                                link = entry["url"]
                                 clean = link.split("#")[0]
                                 if (
                                     clean not in self.visited_urls
@@ -1206,6 +1210,12 @@ class ScanEngine:
                                     and not self._is_url_excluded(clean)
                                 ):
                                     self.visited_urls.add(clean)
+                                    self._transition_via.setdefault(clean, {
+                                        "text": entry.get("text", ""),
+                                        "selector": entry.get("selector", ""),
+                                        "rect": entry.get("rect"),
+                                        "viewport": entry.get("viewport"),
+                                    })
                                     queue.append((link, depth + 1, url))
                         except Exception:
                             pass
@@ -1237,10 +1247,12 @@ class ScanEngine:
             screenshot_b64 = await self.browser.screenshot_b64(f"Crawl: {url}")
 
             # Record in page_graph for the transition diagram
+            via = self._transition_via.get(url.split("#")[0])
             self.page_graph[url] = {
                 "parent": parent_url,
                 "screenshot_b64": screenshot_b64,
                 "depth": depth,
+                "via": via,
             }
 
             # CTF: scan page HTML for flags even during crawl
@@ -1259,6 +1271,10 @@ class ScanEngine:
                     reg_form_count = len(forms)  # whole page will be skipped
 
             input_count = sum(len(f.get("inputs", [])) for f in forms) + len(url_params)
+            # Persist counts so the offline report's diagram can show them too.
+            self.page_graph[url].update(
+                {"forms": len(forms), "inputs": input_count, "params": len(url_params)}
+            )
             if self.monitor:
                 await self.monitor.emit_page_graph_update(
                     url=url,
@@ -1268,6 +1284,8 @@ class ScanEngine:
                     inputs=input_count,
                     params=len(url_params),
                     status="done",
+                    via=via,
+                    screenshot_b64=screenshot_b64,
                 )
             reg_note = (
                 f"  [dim yellow]({reg_form_count} registration form(s) will be skipped)[/dim yellow]"
@@ -1309,10 +1327,11 @@ class ScanEngine:
                     pass
 
             if depth + 1 < self.depth:
-                links = await self.browser.collect_links(url, same_domain=False)
+                link_entries = await self.browser.collect_links_rich(url, same_domain=False)
                 url_cap = max(200, self.depth * 50)
                 _cap_warned = False
-                for link in links:
+                for entry in link_entries:
+                    link = entry["url"]
                     clean = link.split("#")[0]
                     if len(self.visited_urls) >= url_cap:
                         if not _cap_warned:
@@ -1326,6 +1345,12 @@ class ScanEngine:
                             and self._is_access_allowed_url(clean)
                             and not self._is_url_excluded(clean)):
                         self.visited_urls.add(clean)
+                        self._transition_via.setdefault(clean, {
+                            "text": entry.get("text", ""),
+                            "selector": entry.get("selector", ""),
+                            "rect": entry.get("rect"),
+                            "viewport": entry.get("viewport"),
+                        })
                         queue.append((link, depth + 1, url))
 
         total_inputs = sum(
@@ -2101,16 +2126,22 @@ class ScanEngine:
 
             was_known = url in self.visited_urls or actual_url in self.visited_urls
 
+            via = self._transition_via.get(actual_url.split("#")[0]) or \
+                self._transition_via.get(url.split("#")[0])
             self.page_graph[actual_url] = {
                 "parent": parent_url,
                 "screenshot_b64": screenshot_b64,
                 "depth": depth,
+                "via": via,
             }
             # Mark as visited so the main scanner doesn't double-count
             self.visited_urls.add(actual_url)
 
             input_count = (
                 sum(len(f.get("inputs", [])) for f in forms) + len(url_params)
+            )
+            self.page_graph[actual_url].update(
+                {"forms": len(forms), "inputs": input_count, "params": len(url_params)}
             )
             label = "[dim](re-crawled with auth)[/dim]" if was_known else "[green][NEW][/green]"
             console.print(
@@ -2131,19 +2162,39 @@ class ScanEngine:
             if actual_url != url.rstrip("/") and actual_url not in auth_visited:
                 auth_visited.add(actual_url)
 
+            if self.monitor:
+                await self.monitor.emit_page_graph_update(
+                    url=actual_url,
+                    parent=parent_url,
+                    depth=depth,
+                    forms=len(forms),
+                    inputs=input_count,
+                    params=len(url_params),
+                    status="done",
+                    via=via,
+                    screenshot_b64=screenshot_b64,
+                )
+
             # BFS: collect links from actual page
             if depth + 1 < self.depth:
                 try:
-                    links = await self._browser.collect_links(actual_url, same_domain=True)
+                    link_entries = await self._browser.collect_links_rich(actual_url, same_domain=True)
                 except Exception:
-                    links = []
+                    link_entries = []
                 url_cap = max(200, self.depth * 50)
-                for link in links:
+                for entry in link_entries:
+                    link = entry["url"]
                     clean = link.split("#")[0].split("?")[0]
                     if len(auth_visited) >= url_cap:
                         break
                     if clean not in auth_visited and not self._is_url_excluded(clean):
                         auth_visited.add(clean)
+                        self._transition_via.setdefault(clean, {
+                            "text": entry.get("text", ""),
+                            "selector": entry.get("selector", ""),
+                            "rect": entry.get("rect"),
+                            "viewport": entry.get("viewport"),
+                        })
                         queue.append((clean, depth + 1, actual_url))
 
         total_inputs = sum(

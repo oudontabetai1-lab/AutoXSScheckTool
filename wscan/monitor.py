@@ -784,8 +784,15 @@ class MonitorServer:
         inputs: int = 0,
         params: int = 0,
         status: str = "done",
+        via: dict = None,
+        screenshot_b64: str = "",
     ):
-        """Emit a crawl graph node for the live screen-transition map."""
+        """Emit a crawl graph node for the live screen-transition map.
+
+        ``via`` describes the element on the parent page that led here
+        ({text, selector, rect, viewport}); ``screenshot_b64`` is the page
+        thumbnail. Both power the click-location / screenshot views.
+        """
         await self.emit("page_graph_update", {
             "url": url,
             "parent": parent,
@@ -794,6 +801,8 @@ class MonitorServer:
             "inputs": inputs,
             "params": params,
             "status": status,
+            "via": via,
+            "screenshot_b64": screenshot_b64,
         })
 
     async def emit_payload_test(self, field: str, payload: str, check_type: str, url: str = "") -> None:
