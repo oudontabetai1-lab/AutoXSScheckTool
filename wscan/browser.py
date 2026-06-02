@@ -60,9 +60,19 @@ class NetworkCapture:
         self.pairs.append(pair)
 
     async def enrich_response(self, response: Response):
-        """Asynchronously get response body text."""
+        """Asynchronously get response body text.
+
+        Playwright's ``response.text()`` does a strict UTF-8 decode of the raw
+        body and raises ``UnicodeDecodeError`` on non-UTF-8 / binary content,
+        which would silently drop the body. Fall back to a resilient decode of
+        the raw bytes so we still capture (and can scan) such responses.
+        """
         try:
-            body = await response.text()
+            try:
+                body = await response.text()
+            except UnicodeDecodeError:
+                from .textio import safe_decode
+                body = safe_decode(await response.body())
             for pair in reversed(self.pairs):
                 if pair["response"]["url"] == response.url:
                     pair["response"]["body"] = body[:50000]  # cap at 50KB

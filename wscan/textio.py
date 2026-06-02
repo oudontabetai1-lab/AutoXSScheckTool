@@ -50,6 +50,27 @@ def read_text_resilient(path: str | Path) -> str:
     return data.decode("utf-8", errors="replace")
 
 
+def safe_decode(data: bytes, limit: int | None = None) -> str:
+    """Decode raw response/body bytes to text, tolerating non-UTF-8 content.
+
+    Tries the same encoding ladder as :func:`read_text_resilient`.  Unlike
+    httpx's ``Response.text`` (which already replaces undecodable bytes), this
+    is for paths that decode raw ``bytes`` directly — e.g. Playwright's
+    ``response.body()`` — where a strict ``bytes.decode()`` would raise
+    ``UnicodeDecodeError`` on a malformed or binary body.
+    """
+    if not data:
+        return ""
+    if limit is not None:
+        data = data[:limit]
+    for enc in _FALLBACK_ENCODINGS:
+        try:
+            return data.decode(enc)
+        except UnicodeDecodeError:
+            continue
+    return data.decode("utf-8", errors="replace")
+
+
 def configure_console() -> None:
     """Make stdout/stderr resilient to characters the console codec can't encode.
 
