@@ -90,7 +90,8 @@ def load_header_file(path: str) -> dict[str, str]:
     p = Path(path)
     if not p.is_file():
         raise FileNotFoundError(f"Header file not found: {path}")
-    text = p.read_text(encoding="utf-8")
+    from .textio import read_text_resilient
+    text = read_text_resilient(p)
     if p.suffix.lower() in (".yaml", ".yml"):
         try:
             import yaml  # type: ignore

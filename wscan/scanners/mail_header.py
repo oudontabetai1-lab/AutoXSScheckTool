@@ -2,6 +2,17 @@
 Mail Header Injection Scanner
 Detects CRLF injection in email-related form fields (IPA: 1.8 メールヘッダ・インジェクション).
 
+⚠️ 現在このスキャナは無効化されています（wscan/scanners/__init__.py の SCANNERS
+レジストリから除外済み）。理由:
+  - ブラウザ経由フォーム送信では <input> の value sanitization により CR/LF が
+    除去され、注入そのものが成立しない（CRLF はサーバへ届かない）。
+  - 注入が成立しても、結果は外向きメールのヘッダに現れるため、HTTP レスポンス
+    しか見られない黒box スキャナからは観測できない。
+本格的な検知には OOB(out-of-band) メール受信基盤（自前の IMAP 受信箱、または
+ユニーク宛先を受け取る collaborator ドメイン）を用意し、注入した一意の Cc/Bcc
+宛にメールが届いたかをポーリングする方式が必要。その実装が入るまで本クラスは
+将来の再有効化に備えて残置している（コードは削除しない）。
+
 Detection strategy:
   1. Target only fields whose names suggest they feed into email headers
      (email, to, from, cc, bcc, subject, reply_to, …).

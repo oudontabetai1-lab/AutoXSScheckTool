@@ -47,7 +47,15 @@ SCANNERS: dict[str, type] = {
     "path_traversal":    PathTraversalScanner,
     "csrf":              CSRFScanner,
     "header_injection":  HeaderInjectionScanner,
-    "mail_header":       MailHeaderInjectionScanner,
+    # "mail_header" は意図的に無効化（レジストリから除外）。
+    # メールヘッダインジェクションの確証には注入された Cc/Bcc 宛メールを
+    # 実際に受信・観測する必要があり、ブラウザ経由の黒box スキャンでは
+    #   (1) <input> の value sanitization で CR/LF が除去され注入が成立しない
+    #   (2) 外向きメールの中身はスキャナから観測できない
+    # ため誤検知・取りこぼしが避けられない。OOB メール受信箱 (自前 IMAP /
+    # collaborator ドメイン) を整備して初めて実用的な検査が可能になる。
+    # 実装 (MailHeaderInjectionScanner) は将来の再有効化のため残置している。
+    # "mail_header":       MailHeaderInjectionScanner,
     "open_redirect":     OpenRedirectScanner,
     "clickjacking":      ClickjackingScanner,
     "session":           SessionScanner,
