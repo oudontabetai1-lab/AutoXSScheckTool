@@ -140,6 +140,33 @@ _REWRITE_HEADERS: tuple[str, ...] = ("X-Original-URL", "X-Rewrite-URL")
 # Alternative HTTP verbs to try when a GET is blocked (verb / method tampering).
 _TAMPER_METHODS: tuple[str, ...] = ("POST", "PUT", "PATCH", "OPTIONS")
 
+# Header names that carry credentials. The 401/403 *bypass* probes claim to be
+# unauthenticated, so any of these coming from --header / a refreshed token must
+# be stripped — otherwise a valid token (not the bypass) is what served the
+# resource, invalidating the finding.
+_CREDENTIAL_HEADER_NAMES = frozenset({
+    "authorization", "proxy-authorization", "cookie", "authentication",
+    "x-api-key", "x-apikey", "api-key", "apikey", "x-auth-token", "x-auth",
+    "x-access-token", "x-session-token", "x-csrf-token", "x-xsrf-token",
+    "x-amz-security-token", "bearer",
+})
+_CREDENTIAL_HEADER_SUBSTRINGS = (
+    "auth", "token", "api-key", "apikey", "session", "cookie", "credential", "secret",
+)
+
+
+def _strip_credential_headers(headers: dict) -> dict:
+    """Drop credential-bearing headers so an 'unauthenticated' probe really is."""
+    out: dict = {}
+    for key, value in (headers or {}).items():
+        kl = key.lower()
+        if kl in _CREDENTIAL_HEADER_NAMES:
+            continue
+        if any(token in kl for token in _CREDENTIAL_HEADER_SUBSTRINGS):
+            continue
+        out[key] = value
+    return out
+
 
 def _path_bypass_variants(path: str) -> list[str]:
     """Return path-normalisation tricks that frequently bypass naive ACL prefix
@@ -653,16 +680,28 @@ class PrivEscScanner(BaseScanner):
         # 3) URL-rewrite headers (request the root, point the header at the path)
         root_url = urlunparse(parsed._replace(path="/", query="", fragment=""))
         rewrite_target = path + (f"?{parsed.query}" if parsed.query else "")
+        # Control request WITHOUT the rewrite header: if the proxy ignores the
+        # header, the root just serves its public homepage. We must observe a
+        # different response with the header to claim the protected resource was
+        # actually reached — otherwise this is a false positive.
+        control_status, control_body = await self._raw_request("GET", root_url, timeout)
         for hname in _REWRITE_HEADERS:
             status, body = await self._raw_request(
                 "GET", root_url, timeout, headers={hname: rewrite_target}
             )
-            if self._bypass_succeeded(status, body):
-                return [_make(
-                    f"rewrite header {hname}", root_url, status, body,
-                    {"url": root_url, "method": "GET",
-                     "headers": {hname: rewrite_target}},
-                )]
+            if not self._bypass_succeeded(status, body):
+                continue
+            # Need a usable control to establish a difference; a failed control
+            # (network error / empty) gives no evidence, so skip conservatively.
+            if not control_body:
+                continue
+            if self._responses_equivalent(control_status, control_body, status, body):
+                continue  # header ignored — only proves '/' is public
+            return [_make(
+                f"rewrite header {hname}", root_url, status, body,
+                {"url": root_url, "method": "GET",
+                 "headers": {hname: rewrite_target}},
+            )]
 
         # 4) HTTP verb / method tampering
         for method in _TAMPER_METHODS:
@@ -1151,8 +1190,11 @@ class PrivEscScanner(BaseScanner):
         cookies: str = "",
     ) -> tuple[int, str]:
         """Issue an arbitrary-method request (no redirect following) with
-        optional extra headers. Used by the 401/403 bypass probes."""
-        hdrs = {**_HEADERS, **_engine_custom_headers(self.engine)}
+        optional extra headers. Used by the 401/403 bypass probes, which are
+        unauthenticated — so credential headers from --header / a refreshed
+        token are stripped. Explicit probe ``headers`` are applied afterwards
+        and never stripped (they carry the bypass payload itself)."""
+        hdrs = {**_HEADERS, **_strip_credential_headers(_engine_custom_headers(self.engine))}
         if headers:
             hdrs.update(headers)
         if cookies:
@@ -1168,6 +1210,18 @@ class PrivEscScanner(BaseScanner):
                 return resp.status_code, resp.text[:8000]
         except Exception:
             return 0, ""
+
+    def _responses_equivalent(
+        self, status_a: int, body_a: str, status_b: int, body_b: str
+    ) -> bool:
+        """True when two responses are effectively the same page (same status
+        and near-identical body). Used to prove a URL-rewrite header actually
+        changed what was served, rather than just returning the public root."""
+        if status_a != status_b:
+            return False
+        if _normalize_response_body(body_a) == _normalize_response_body(body_b):
+            return True
+        return _body_similarity(body_a, body_b) >= 0.98
 
     def _bypass_succeeded(self, status: int, body: str) -> bool:
         """A bypass attempt counts only if the resource was actually served:

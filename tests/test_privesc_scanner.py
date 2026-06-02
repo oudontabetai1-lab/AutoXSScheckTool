@@ -445,6 +445,69 @@ class PrivEscScannerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(findings, [])
 
+    async def test_bypass_rewrite_header_suppressed_when_control_equal(self):
+        # Proxy ignores X-Original-URL: root keeps serving its public homepage,
+        # identical to the control request -> must NOT be flagged.
+        scanner = PrivEscScanner(_DummyEngine())
+        home = "<html><body>Welcome to our public homepage. Browse products here.</body></html>"
+
+        async def fake(method, url, timeout, *, headers=None, cookies=""):
+            if headers and any(h.lower() in ("x-original-url", "x-rewrite-url") for h in headers):
+                return 200, home          # header ignored -> homepage
+            if headers:
+                return 403, ""            # spoofed-IP headers still blocked
+            if "/admin" in url.lower():
+                return 403, ""            # baseline + path variants blocked
+            return 200, home              # control request to '/'
+
+        scanner._raw_request = AsyncMock(side_effect=fake)
+
+        findings = await scanner._test_forbidden_bypass(
+            "http://fixture.test/admin", True, timeout=3,
+        )
+
+        self.assertEqual(findings, [])
+
+    async def test_bypass_rewrite_header_flagged_when_content_differs(self):
+        scanner = PrivEscScanner(_DummyEngine())
+        home = "<html><body>Welcome to our public homepage. Browse products here.</body></html>"
+        admin = "<html><body>ADMIN PANEL: user list, secret exports, billing settings</body></html>"
+
+        async def fake(method, url, timeout, *, headers=None, cookies=""):
+            if headers and any(h.lower() in ("x-original-url", "x-rewrite-url") for h in headers):
+                return 200, admin         # header honoured -> protected content
+            if headers:
+                return 403, ""
+            if "/admin" in url.lower():
+                return 403, ""
+            return 200, home              # control request to '/'
+
+        scanner._raw_request = AsyncMock(side_effect=fake)
+
+        findings = await scanner._test_forbidden_bypass(
+            "http://fixture.test/admin", True, timeout=3,
+        )
+
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0].check_type, "privesc_bypass")
+        self.assertIn("rewrite header", findings[0].field_name)
+
+    def test_strip_credential_headers_removes_auth_keeps_routing(self):
+        from wscan.scanners.privesc import _strip_credential_headers
+        stripped = _strip_credential_headers({
+            "Authorization": "Bearer xyz",
+            "X-API-Key": "secret",
+            "X-Auth-Token": "t",
+            "Cookie": "sid=1",
+            "X-App-Version": "2.0",
+            "Accept-Language": "ja",
+        })
+        self.assertNotIn("Authorization", stripped)
+        self.assertNotIn("X-API-Key", stripped)
+        self.assertNotIn("X-Auth-Token", stripped)
+        self.assertNotIn("Cookie", stripped)
+        self.assertEqual(stripped, {"X-App-Version": "2.0", "Accept-Language": "ja"})
+
     async def test_bypass_verifier_replays_request(self):
         scanner = PrivEscScanner(_DummyEngine())
         scanner._raw_request = AsyncMock(
