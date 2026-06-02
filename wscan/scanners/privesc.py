@@ -137,8 +137,12 @@ _BYPASS_HEADERS: tuple[dict, ...] = (
 # request is sent to a benign URL while the header points at the protected one.
 _REWRITE_HEADERS: tuple[str, ...] = ("X-Original-URL", "X-Rewrite-URL")
 
-# Alternative HTTP verbs to try when a GET is blocked (verb / method tampering).
-_TAMPER_METHODS: tuple[str, ...] = ("POST", "PUT", "PATCH", "OPTIONS")
+# Verbs to try when a GET is blocked (verb / method tampering).
+# OPTIONS is non-mutating and always safe to send. POST/PUT/PATCH can change
+# server state (e.g. an endpoint that acts on method alone like /admin/cache/clear),
+# so they only run when the operator explicitly opts in.
+_TAMPER_METHODS_SAFE: tuple[str, ...] = ("OPTIONS",)
+_TAMPER_METHODS_MUTATING: tuple[str, ...] = ("POST", "PUT", "PATCH")
 
 # Header names that carry credentials. The 401/403 *bypass* probes claim to be
 # unauthenticated, so any of these coming from --header / a refreshed token must
@@ -657,16 +661,30 @@ class PrivEscScanner(BaseScanner):
                 },
             )
 
+        # Catch-all control: a path that should not exist. If the server serves
+        # a generic 200 (SPA fallback / custom error page) for it, a
+        # path-variant "success" with equivalent content is not a real bypass.
+        bogus_path = (path.rstrip("/") or "") + "/wscan-nonexistent-probe-zzq"
+        bogus_status, bogus_body = await self._raw_request(
+            "GET", urlunparse(parsed._replace(path=bogus_path)), timeout
+        )
+        catchall = bool(bogus_body) and self._bypass_succeeded(bogus_status, bogus_body)
+
         # 1) Path-normalisation bypass
         for variant_path in _path_bypass_variants(path):
             candidate_url = urlunparse(parsed._replace(path=variant_path))
             status, body = await self._raw_request("GET", candidate_url, timeout)
-            if self._bypass_succeeded(status, body):
-                return [_make(
-                    f"path normalisation '{variant_path}'", candidate_url,
-                    status, body,
-                    {"url": candidate_url, "method": "GET", "headers": {}},
-                )]
+            if not self._bypass_succeeded(status, body):
+                continue
+            # The server returns a generic page for unknown paths — the variant
+            # didn't actually reach the protected resource.
+            if catchall and self._responses_equivalent(bogus_status, bogus_body, status, body):
+                continue
+            return [_make(
+                f"path normalisation '{variant_path}'", candidate_url,
+                status, body,
+                {"url": candidate_url, "method": "GET", "headers": {}},
+            )]
 
         # 2) Trusted-origin / internal-IP spoofing headers
         for hdr in _BYPASS_HEADERS:
@@ -703,8 +721,13 @@ class PrivEscScanner(BaseScanner):
                  "headers": {hname: rewrite_target}},
             )]
 
-        # 4) HTTP verb / method tampering
-        for method in _TAMPER_METHODS:
+        # 4) HTTP verb / method tampering. OPTIONS is always safe; the
+        # state-changing verbs run only when the operator opts in, since blindly
+        # POST/PUT/PATCH-ing a privileged URL could mutate server state.
+        methods = list(_TAMPER_METHODS_SAFE)
+        if getattr(self.engine, "allow_state_changing_probes", False):
+            methods += list(_TAMPER_METHODS_MUTATING)
+        for method in methods:
             status, body = await self._raw_request(method, url, timeout)
             if self._bypass_succeeded(status, body):
                 return [_make(

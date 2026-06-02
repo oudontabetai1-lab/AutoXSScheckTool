@@ -364,6 +364,16 @@ Examples:
         ),
     )
     scan.add_argument(
+        "--allow-state-changing-probes", action="store_true",
+        default=_CFG.get("allow_state_changing_probes", False),
+        help=(
+            "Permit intrusive probes that may mutate server state, e.g. privesc "
+            "verb tampering with POST/PUT/PATCH against blocked privileged URLs. "
+            "Off by default; only enable against systems you are authorised to "
+            "modify (a staging/test environment)."
+        ),
+    )
+    scan.add_argument(
         "--no-planner", action="store_true",
         default=not _CFG.get("use_planner", True),
         help="Disable the AI attack planner.",
@@ -1274,6 +1284,7 @@ async def run_scan(args):
             accounts=_accounts_list,
             auto_register=getattr(args, "auto_register", False),
             auto_register_count=getattr(args, "auto_register_count", 2),
+            allow_state_changing_probes=getattr(args, "allow_state_changing_probes", False),
             # ①: SPA crawl
             spa_crawl=getattr(args, "spa_crawl", False),
             # I: 差分スキャン

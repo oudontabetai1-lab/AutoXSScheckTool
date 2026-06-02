@@ -16,6 +16,7 @@ class _DummyEngine:
         self.monitor = None
         self.low_priv_cookies = ""
         self.account_sessions = []
+        self.allow_state_changing_probes = False
 
 
 class _DummyPage:
@@ -380,9 +381,11 @@ class PrivEscScannerTests(unittest.IsolatedAsyncioTestCase):
     async def test_bypass_flags_path_normalisation(self):
         scanner = PrivEscScanner(_DummyEngine())
         good = "<html><h1>Admin dashboard</h1><p>secret exports here</p></html>"
-        # 1st call = baseline (blocked), 2nd call = first path variant (served)
+        # call1 = baseline (blocked), call2 = catch-all control (404 -> no catch-all),
+        # call3 = first path variant (served).
         scanner._raw_request = AsyncMock(side_effect=[
             (403, ""),
+            (404, "not found"),
             (200, good),
         ])
 
@@ -393,6 +396,58 @@ class PrivEscScannerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(findings), 1)
         self.assertEqual(findings[0].check_type, "privesc_bypass")
         self.assertEqual(findings[0].response["baseline_status"], 403)
+
+    async def test_bypass_path_variant_suppressed_by_catchall(self):
+        # The server serves a generic 200 page (SPA fallback) for ANY unknown
+        # path, including the catch-all control -> path variants must not flag.
+        scanner = PrivEscScanner(_DummyEngine())
+        spa = "<html><body><div id='app'>Loading the single page app…</div></body></html>"
+
+        async def fake(method, url, timeout, *, headers=None, cookies=""):
+            # The /admin route itself is access-controlled and stays blocked
+            # regardless of spoofed headers or method.
+            if url.rstrip("/").endswith("/admin"):
+                return 403, ""
+            # Any other (unknown) path -> SPA catch-all 200 (control + variants).
+            return 200, spa
+
+        scanner._raw_request = AsyncMock(side_effect=fake)
+
+        findings = await scanner._test_forbidden_bypass(
+            "http://fixture.test/admin", True, timeout=3,
+        )
+
+        self.assertEqual(findings, [])
+
+    async def test_bypass_verb_tampering_requires_optin_for_mutating(self):
+        # Without opt-in, only OPTIONS is sent (no POST/PUT/PATCH). A server that
+        # would serve content on POST must NOT be probed with POST by default.
+        engine = _DummyEngine()
+        scanner = PrivEscScanner(engine)
+        seen_methods = []
+
+        async def fake(method, url, timeout, *, headers=None, cookies=""):
+            seen_methods.append(method)
+            return 403, ""              # everything blocked -> reach verb stage
+
+        scanner._raw_request = AsyncMock(side_effect=fake)
+
+        await scanner._test_forbidden_bypass(
+            "http://fixture.test/admin", True, timeout=3,
+        )
+
+        self.assertIn("OPTIONS", seen_methods)
+        self.assertNotIn("POST", seen_methods)
+        self.assertNotIn("PUT", seen_methods)
+        self.assertNotIn("PATCH", seen_methods)
+
+        # With opt-in, mutating verbs are allowed.
+        engine.allow_state_changing_probes = True
+        seen_methods.clear()
+        await scanner._test_forbidden_bypass(
+            "http://fixture.test/admin", True, timeout=3,
+        )
+        self.assertIn("POST", seen_methods)
 
     async def test_bypass_flags_spoofed_header(self):
         scanner = PrivEscScanner(_DummyEngine())
