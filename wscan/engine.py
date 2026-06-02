@@ -3113,6 +3113,7 @@ class ScanEngine:
         "privesc_param_idor",
         "privesc_cross_acct",
         "privesc_action",
+        "privesc_bypass",
         "info_disclosure",
         "session",
         "security_headers",

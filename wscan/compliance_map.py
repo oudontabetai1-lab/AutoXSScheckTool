@@ -138,6 +138,12 @@ COMPLIANCE_REFS: dict[str, dict[str, list[str]]] = {
         "owasp_top10": ["A01:2021 Broken Access Control"],
         "ipa":         ["IPA 2.1 認可・アクセス制御"],
     },
+    "privesc_bypass": {
+        "pci_dss":     ["PCI DSS v4.0 §7.2.1", "PCI DSS v4.0 §7.3.1"],
+        "owasp_asvs":  ["ASVS V4.1.1", "ASVS V4.1.3", "ASVS V4.3.1"],
+        "owasp_top10": ["A01:2021 Broken Access Control"],
+        "ipa":         ["IPA 2.1 認可・アクセス制御"],
+    },
     "info_disclosure": {
         "pci_dss":     ["PCI DSS v4.0 §6.2.4", "PCI DSS v4.0 §3.4.1"],
         "owasp_asvs":  ["ASVS V8.3.1", "ASVS V14.3.3"],

@@ -205,6 +205,7 @@ def _acceptance_criteria(f: Finding) -> list[str]:
         "privesc_param_idor",
         "privesc_cross_acct",
         "privesc_action",
+        "privesc_bypass",
     }:
         criteria.append("Authorization checks are enforced server-side for the affected resource.")
     return criteria

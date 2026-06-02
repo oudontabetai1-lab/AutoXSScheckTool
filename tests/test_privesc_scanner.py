@@ -373,5 +373,100 @@ class PrivEscScannerTests(unittest.IsolatedAsyncioTestCase):
         )
 
 
+    # ------------------------------------------------------------------
+    # 401/403 access-control bypass
+    # ------------------------------------------------------------------
+
+    async def test_bypass_flags_path_normalisation(self):
+        scanner = PrivEscScanner(_DummyEngine())
+        good = "<html><h1>Admin dashboard</h1><p>secret exports here</p></html>"
+        # 1st call = baseline (blocked), 2nd call = first path variant (served)
+        scanner._raw_request = AsyncMock(side_effect=[
+            (403, ""),
+            (200, good),
+        ])
+
+        findings = await scanner._test_forbidden_bypass(
+            "http://fixture.test/admin", True, timeout=3,
+        )
+
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0].check_type, "privesc_bypass")
+        self.assertEqual(findings[0].response["baseline_status"], 403)
+
+    async def test_bypass_flags_spoofed_header(self):
+        scanner = PrivEscScanner(_DummyEngine())
+        good = "<html><h1>Admin dashboard</h1><p>internal only content</p></html>"
+
+        async def fake(method, url, timeout, *, headers=None, cookies=""):
+            if not headers:
+                # baseline + every path-normalisation variant stay blocked
+                return 403, ""
+            if any(k.lower().startswith("x-") for k in headers):
+                return 200, good
+            return 403, ""
+
+        scanner._raw_request = AsyncMock(side_effect=fake)
+
+        findings = await scanner._test_forbidden_bypass(
+            "http://fixture.test/admin", True, timeout=3,
+        )
+
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0].check_type, "privesc_bypass")
+        self.assertIn("header", findings[0].field_name)
+
+    async def test_bypass_skipped_when_baseline_not_blocked(self):
+        scanner = PrivEscScanner(_DummyEngine())
+        scanner._raw_request = AsyncMock(return_value=(200, "open content here"))
+
+        findings = await scanner._test_forbidden_bypass(
+            "http://fixture.test/admin", True, timeout=3,
+        )
+
+        self.assertEqual(findings, [])
+        scanner._raw_request.assert_awaited_once()
+
+    async def test_bypass_ignores_auth_gate_on_variant(self):
+        scanner = PrivEscScanner(_DummyEngine())
+        # Baseline blocked, then every probe returns a login gate (200 but gated)
+        gate = "<html>Please log in to continue to the admin area</html>"
+
+        async def fake(method, url, timeout, *, headers=None, cookies=""):
+            if method == "GET" and url.endswith("/admin") and not headers:
+                return 403, ""
+            return 200, gate
+
+        scanner._raw_request = AsyncMock(side_effect=fake)
+
+        findings = await scanner._test_forbidden_bypass(
+            "http://fixture.test/admin", True, timeout=3,
+        )
+
+        self.assertEqual(findings, [])
+
+    async def test_bypass_verifier_replays_request(self):
+        scanner = PrivEscScanner(_DummyEngine())
+        scanner._raw_request = AsyncMock(
+            return_value=(200, "<html><h1>Admin</h1><p>secret content here</p></html>")
+        )
+        finding = Finding(
+            check_type="privesc_bypass",
+            severity="high",
+            url="http://fixture.test/admin",
+            field_name="(access-control bypass: path normalisation '/admin/.')",
+            payload="http://fixture.test/admin/.",
+            evidence="bypass via path normalisation",
+            request={"url": "http://fixture.test/admin/.", "method": "GET", "headers": {}},
+        )
+
+        result = await scanner.verify_finding(finding)
+
+        self.assertTrue(result)
+        scanner._raw_request.assert_awaited_once_with(
+            "GET", "http://fixture.test/admin/.", 30.0, headers={},
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
