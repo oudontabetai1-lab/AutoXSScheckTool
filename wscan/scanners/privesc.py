@@ -661,14 +661,13 @@ class PrivEscScanner(BaseScanner):
                 },
             )
 
-        # Catch-all control: a path that should not exist. If the server serves
-        # a generic 200 (SPA fallback / custom error page) for it, a
-        # path-variant "success" with equivalent content is not a real bypass.
-        bogus_path = (path.rstrip("/") or "") + "/wscan-nonexistent-probe-zzq"
-        bogus_status, bogus_body = await self._raw_request(
-            "GET", urlunparse(parsed._replace(path=bogus_path)), timeout
+        # Control path that is unrelated to the protected resource and should
+        # not exist. It lives OUTSIDE the protected prefix so an upstream ACL
+        # on e.g. /admin/* does not reject it before the backend's generic
+        # fallback (SPA shell / custom 200 / default vhost) can be observed.
+        nonexistent_url = urlunparse(
+            parsed._replace(path="/wscan-nonexistent-probe-zzq", query="", fragment="")
         )
-        catchall = bool(bogus_body) and self._bypass_succeeded(bogus_status, bogus_body)
 
         # 1) Path-normalisation bypass
         for variant_path in _path_bypass_variants(path):
@@ -676,9 +675,10 @@ class PrivEscScanner(BaseScanner):
             status, body = await self._raw_request("GET", candidate_url, timeout)
             if not self._bypass_succeeded(status, body):
                 continue
-            # The server returns a generic page for unknown paths — the variant
-            # didn't actually reach the protected resource.
-            if catchall and self._responses_equivalent(bogus_status, bogus_body, status, body):
+            # If a plain request to a nonexistent path returns an equivalent
+            # 2xx, the server serves a generic page for unknown paths (SPA
+            # fallback / custom error) — the variant didn't reach the resource.
+            if await self._control_is_equivalent("GET", nonexistent_url, timeout, None, status, body):
                 continue
             return [_make(
                 f"path normalisation '{variant_path}'", candidate_url,
@@ -689,11 +689,17 @@ class PrivEscScanner(BaseScanner):
         # 2) Trusted-origin / internal-IP spoofing headers
         for hdr in _BYPASS_HEADERS:
             status, body = await self._raw_request("GET", url, timeout, headers=hdr)
-            if self._bypass_succeeded(status, body):
-                return [_make(
-                    f"spoofed header {', '.join(hdr)}", url, status, body,
-                    {"url": url, "method": "GET", "headers": dict(hdr)},
-                )]
+            if not self._bypass_succeeded(status, body):
+                continue
+            # Control: same header on a nonexistent path. If it yields an
+            # equivalent 2xx, the header only routes to generic/default content
+            # (e.g. X-Forwarded-Host selecting another vhost), not the resource.
+            if await self._control_is_equivalent("GET", nonexistent_url, timeout, hdr, status, body):
+                continue
+            return [_make(
+                f"spoofed header {', '.join(hdr)}", url, status, body,
+                {"url": url, "method": "GET", "headers": dict(hdr)},
+            )]
 
         # 3) URL-rewrite headers (request the root, point the header at the path)
         root_url = urlunparse(parsed._replace(path="/", query="", fragment=""))
@@ -729,11 +735,17 @@ class PrivEscScanner(BaseScanner):
             methods += list(_TAMPER_METHODS_MUTATING)
         for method in methods:
             status, body = await self._raw_request(method, url, timeout)
-            if self._bypass_succeeded(status, body):
-                return [_make(
-                    f"{method} method tampering", url, status, body,
-                    {"url": url, "method": method, "headers": {}},
-                )]
+            if not self._bypass_succeeded(status, body):
+                continue
+            # Control: same verb on a nonexistent path. A generic CORS /
+            # framework handler (common for OPTIONS) answers 2xx for any path,
+            # so an equivalent response means no protected resource was served.
+            if await self._control_is_equivalent(method, nonexistent_url, timeout, None, status, body):
+                continue
+            return [_make(
+                f"{method} method tampering", url, status, body,
+                {"url": url, "method": method, "headers": {}},
+            )]
 
         return []
 
@@ -1245,6 +1257,31 @@ class PrivEscScanner(BaseScanner):
         if _normalize_response_body(body_a) == _normalize_response_body(body_b):
             return True
         return _body_similarity(body_a, body_b) >= 0.98
+
+    async def _control_is_equivalent(
+        self,
+        method: str,
+        control_url: str,
+        timeout: float,
+        headers: Optional[dict],
+        status: int,
+        body: str,
+    ) -> bool:
+        """Apply the SAME technique (method + headers) to a nonexistent control
+        path and report whether it produced an equivalent 'successful' response.
+
+        True ⇒ the technique merely yields generic content (catch-all page,
+        default vhost, blanket CORS/OPTIONS handler) rather than the protected
+        resource, so the candidate finding should be suppressed.
+        """
+        ctrl_status, ctrl_body = await self._raw_request(
+            method, control_url, timeout, headers=headers
+        )
+        return (
+            bool(ctrl_body)
+            and self._bypass_succeeded(ctrl_status, ctrl_body)
+            and self._responses_equivalent(ctrl_status, ctrl_body, status, body)
+        )
 
     def _bypass_succeeded(self, status: int, body: str) -> bool:
         """A bypass attempt counts only if the resource was actually served:

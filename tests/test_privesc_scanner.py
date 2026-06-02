@@ -381,12 +381,12 @@ class PrivEscScannerTests(unittest.IsolatedAsyncioTestCase):
     async def test_bypass_flags_path_normalisation(self):
         scanner = PrivEscScanner(_DummyEngine())
         good = "<html><h1>Admin dashboard</h1><p>secret exports here</p></html>"
-        # call1 = baseline (blocked), call2 = catch-all control (404 -> no catch-all),
-        # call3 = first path variant (served).
+        # call1 = baseline (blocked), call2 = first path variant (served),
+        # call3 = nonexistent-path control (404 -> not a generic catch-all).
         scanner._raw_request = AsyncMock(side_effect=[
             (403, ""),
-            (404, "not found"),
             (200, good),
+            (404, ""),
         ])
 
         findings = await scanner._test_forbidden_bypass(
@@ -410,6 +410,44 @@ class PrivEscScannerTests(unittest.IsolatedAsyncioTestCase):
                 return 403, ""
             # Any other (unknown) path -> SPA catch-all 200 (control + variants).
             return 200, spa
+
+        scanner._raw_request = AsyncMock(side_effect=fake)
+
+        findings = await scanner._test_forbidden_bypass(
+            "http://fixture.test/admin", True, timeout=3,
+        )
+
+        self.assertEqual(findings, [])
+
+    async def test_bypass_options_suppressed_by_generic_handler(self):
+        # A blanket OPTIONS handler (e.g. CORS preflight) answers 2xx for any
+        # path; that must not be reported as an access-control bypass.
+        scanner = PrivEscScanner(_DummyEngine())
+        cors = "<html><body>CORS preflight OK. Allow: GET, POST, OPTIONS. Move along now.</body></html>"
+
+        async def fake(method, url, timeout, *, headers=None, cookies=""):
+            if method == "OPTIONS":
+                return 200, cors        # generic handler for every path
+            return 403, ""              # GET (baseline + all variants) blocked
+
+        scanner._raw_request = AsyncMock(side_effect=fake)
+
+        findings = await scanner._test_forbidden_bypass(
+            "http://fixture.test/admin", True, timeout=3,
+        )
+
+        self.assertEqual(findings, [])
+
+    async def test_bypass_spoofed_header_suppressed_by_default_vhost(self):
+        # X-Forwarded-Host routes ANY path to a default marketing vhost; the
+        # protected resource was never served, so no finding should fire.
+        scanner = PrivEscScanner(_DummyEngine())
+        vhost = "<html><body>Welcome to the default marketing site — products and pricing.</body></html>"
+
+        async def fake(method, url, timeout, *, headers=None, cookies=""):
+            if headers and any(k.lower() == "x-forwarded-host" for k in headers):
+                return 200, vhost       # header re-routes every path to the vhost
+            return 403, ""
 
         scanner._raw_request = AsyncMock(side_effect=fake)
 
@@ -458,6 +496,10 @@ class PrivEscScannerTests(unittest.IsolatedAsyncioTestCase):
                 # baseline + every path-normalisation variant stay blocked
                 return 403, ""
             if any(k.lower().startswith("x-") for k in headers):
+                # A genuine bypass: the spoofed header opens the protected URL,
+                # but the same header on a nonexistent path still 404s.
+                if "nonexistent" in url:
+                    return 404, "not found"
                 return 200, good
             return 403, ""
 
