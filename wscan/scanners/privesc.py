@@ -661,13 +661,13 @@ class PrivEscScanner(BaseScanner):
                 },
             )
 
-        # Control path that is unrelated to the protected resource and should
-        # not exist. It lives OUTSIDE the protected prefix so an upstream ACL
-        # on e.g. /admin/* does not reject it before the backend's generic
-        # fallback (SPA shell / custom 200 / default vhost) can be observed.
-        nonexistent_url = urlunparse(
-            parsed._replace(path="/wscan-nonexistent-probe-zzq", query="", fragment="")
-        )
+        # Control paths that should not exist. We probe one OUTSIDE the
+        # protected prefix (so an upstream ACL on /admin/* can't reject it
+        # before the backend's generic fallback shows) and one INSIDE the same
+        # routing context (so an SPA mounted under /app/* is still detected when
+        # root-level unknown paths 404). A candidate is suppressed if either
+        # control yields an equivalent "successful" response.
+        control_urls = self._nonexistent_control_urls(parsed)
 
         # 1) Path-normalisation bypass
         for variant_path in _path_bypass_variants(path):
@@ -678,7 +678,7 @@ class PrivEscScanner(BaseScanner):
             # If a plain request to a nonexistent path returns an equivalent
             # 2xx, the server serves a generic page for unknown paths (SPA
             # fallback / custom error) — the variant didn't reach the resource.
-            if await self._control_is_equivalent("GET", nonexistent_url, timeout, None, status, body):
+            if await self._any_control_equivalent("GET", control_urls, timeout, None, status, body):
                 continue
             return [_make(
                 f"path normalisation '{variant_path}'", candidate_url,
@@ -694,7 +694,7 @@ class PrivEscScanner(BaseScanner):
             # Control: same header on a nonexistent path. If it yields an
             # equivalent 2xx, the header only routes to generic/default content
             # (e.g. X-Forwarded-Host selecting another vhost), not the resource.
-            if await self._control_is_equivalent("GET", nonexistent_url, timeout, hdr, status, body):
+            if await self._any_control_equivalent("GET", control_urls, timeout, hdr, status, body):
                 continue
             return [_make(
                 f"spoofed header {', '.join(hdr)}", url, status, body,
@@ -704,6 +704,7 @@ class PrivEscScanner(BaseScanner):
         # 3) URL-rewrite headers (request the root, point the header at the path)
         root_url = urlunparse(parsed._replace(path="/", query="", fragment=""))
         rewrite_target = path + (f"?{parsed.query}" if parsed.query else "")
+        nonexistent_target = "/wscan-nonexistent-probe-zzq"
         # Control request WITHOUT the rewrite header: if the proxy ignores the
         # header, the root just serves its public homepage. We must observe a
         # different response with the header to claim the protected resource was
@@ -721,6 +722,13 @@ class PrivEscScanner(BaseScanner):
                 continue
             if self._responses_equivalent(control_status, control_body, status, body):
                 continue  # header ignored — only proves '/' is public
+            # The proxy may honour the header but route *any* target (incl.
+            # nonexistent ones) to a generic custom page. Control with the same
+            # header pointing at a nonexistent target and suppress if equivalent.
+            if await self._control_is_equivalent(
+                "GET", root_url, timeout, {hname: nonexistent_target}, status, body
+            ):
+                continue
             return [_make(
                 f"rewrite header {hname}", root_url, status, body,
                 {"url": root_url, "method": "GET",
@@ -740,7 +748,7 @@ class PrivEscScanner(BaseScanner):
             # Control: same verb on a nonexistent path. A generic CORS /
             # framework handler (common for OPTIONS) answers 2xx for any path,
             # so an equivalent response means no protected resource was served.
-            if await self._control_is_equivalent(method, nonexistent_url, timeout, None, status, body):
+            if await self._any_control_equivalent(method, control_urls, timeout, None, status, body):
                 continue
             return [_make(
                 f"{method} method tampering", url, status, body,
@@ -1258,6 +1266,41 @@ class PrivEscScanner(BaseScanner):
             return True
         return _body_similarity(body_a, body_b) >= 0.98
 
+    def _nonexistent_control_urls(self, parsed) -> list[str]:
+        """Build nonexistent control URLs for the protected resource: one
+        outside any prefix (origin root) for the upstream-ACL case, and one in
+        the same routing context (parent dir) for the SPA-mounted-under-prefix
+        case."""
+        token = "/wscan-nonexistent-probe-zzq"
+        paths = [token]
+        parent = (parsed.path or "/").rsplit("/", 1)[0]
+        if parent and parent != "":
+            inside = f"{parent}{token}"
+            if inside not in paths:
+                paths.append(inside)
+        return [
+            urlunparse(parsed._replace(path=p, query="", fragment=""))
+            for p in paths
+        ]
+
+    async def _any_control_equivalent(
+        self,
+        method: str,
+        control_urls: list[str],
+        timeout: float,
+        headers: Optional[dict],
+        status: int,
+        body: str,
+    ) -> bool:
+        """True if the technique applied to ANY nonexistent control path yields
+        an equivalent 'successful' response (generic content, not the resource)."""
+        for control_url in control_urls:
+            if await self._control_is_equivalent(
+                method, control_url, timeout, headers, status, body
+            ):
+                return True
+        return False
+
     async def _control_is_equivalent(
         self,
         method: str,
@@ -1334,10 +1377,35 @@ class PrivEscScanner(BaseScanner):
                 k: v for k, v in (req.get("headers") or {}).items()
                 if k.lower() != "cookie"
             }
+            # 1) The canonical resource must still be blocked — otherwise it
+            # became public between phases and there is no bypass to confirm.
+            base_status, _ = await self._raw_request("GET", finding.url, timeout)
+            if base_status not in (401, 403):
+                return False
+            # 2) The candidate must still serve substantial content.
             status, body = await self._raw_request(
                 method, candidate_url, timeout, headers=headers
             )
-            return self._bypass_succeeded(status, body)
+            if not self._bypass_succeeded(status, body):
+                return False
+            # 3) Repeat the technique-specific control comparison so a generic
+            # page (catch-all / default vhost / blanket handler) isn't confirmed.
+            parsed_orig = urlparse(finding.url)
+            rewrite_hdr = next((h for h in headers if h in _REWRITE_HEADERS), None)
+            if rewrite_hdr:
+                ctrl_headers = dict(headers)
+                ctrl_headers[rewrite_hdr] = "/wscan-nonexistent-probe-zzq"
+                if await self._control_is_equivalent(
+                    method, candidate_url, timeout, ctrl_headers, status, body
+                ):
+                    return False
+            else:
+                control_urls = self._nonexistent_control_urls(parsed_orig)
+                if await self._any_control_equivalent(
+                    method, control_urls, timeout, headers or None, status, body
+                ):
+                    return False
+            return True
 
         if finding.check_type == "privesc_vertical":
             cookies = getattr(self.engine, "low_priv_cookies", "")

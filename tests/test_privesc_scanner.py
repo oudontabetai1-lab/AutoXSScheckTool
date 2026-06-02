@@ -571,9 +571,14 @@ class PrivEscScannerTests(unittest.IsolatedAsyncioTestCase):
         admin = "<html><body>ADMIN PANEL: user list, secret exports, billing settings</body></html>"
 
         async def fake(method, url, timeout, *, headers=None, cookies=""):
-            if headers and any(h.lower() in ("x-original-url", "x-rewrite-url") for h in headers):
-                return 200, admin         # header honoured -> protected content
             if headers:
+                for h, v in headers.items():
+                    if h.lower() in ("x-original-url", "x-rewrite-url"):
+                        # Honoured: the protected target serves admin content,
+                        # but a nonexistent rewrite target still 404s.
+                        if "nonexistent" in v:
+                            return 404, "not found"
+                        return 200, admin
                 return 403, ""
             if "/admin" in url.lower():
                 return 403, ""
@@ -607,9 +612,16 @@ class PrivEscScannerTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_bypass_verifier_replays_request(self):
         scanner = PrivEscScanner(_DummyEngine())
-        scanner._raw_request = AsyncMock(
-            return_value=(200, "<html><h1>Admin</h1><p>secret content here</p></html>")
-        )
+        admin = "<html><h1>Admin</h1><p>secret content here for the panel</p></html>"
+
+        async def fake(method, url, timeout, *, headers=None, cookies=""):
+            if url.rstrip("/").endswith("/admin"):
+                return 403, ""              # canonical resource still blocked
+            if "nonexistent" in url:
+                return 404, "not found"     # control paths
+            return 200, admin               # the /admin/. variant serves content
+
+        scanner._raw_request = AsyncMock(side_effect=fake)
         finding = Finding(
             check_type="privesc_bypass",
             severity="high",
@@ -623,9 +635,26 @@ class PrivEscScannerTests(unittest.IsolatedAsyncioTestCase):
         result = await scanner.verify_finding(finding)
 
         self.assertTrue(result)
-        scanner._raw_request.assert_awaited_once_with(
-            "GET", "http://fixture.test/admin/.", 30.0, headers={},
+
+    async def test_bypass_verifier_rejects_when_baseline_now_public(self):
+        # If the canonical resource is no longer blocked, there is no bypass.
+        scanner = PrivEscScanner(_DummyEngine())
+        scanner._raw_request = AsyncMock(
+            return_value=(200, "<html><h1>Admin</h1><p>now public content</p></html>")
         )
+        finding = Finding(
+            check_type="privesc_bypass",
+            severity="high",
+            url="http://fixture.test/admin",
+            field_name="(access-control bypass: path normalisation '/admin/.')",
+            payload="http://fixture.test/admin/.",
+            evidence="bypass via path normalisation",
+            request={"url": "http://fixture.test/admin/.", "method": "GET", "headers": {}},
+        )
+
+        result = await scanner.verify_finding(finding)
+
+        self.assertFalse(result)
 
 
 if __name__ == "__main__":
