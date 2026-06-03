@@ -671,6 +671,13 @@ class PrivEscScanner(BaseScanner):
         # control yields an equivalent "successful" response.
         control_urls = self._nonexistent_control_urls(parsed)
 
+        # Public-root control: some normalisation variants (e.g. '/admin/..;/')
+        # are collapsed by the server/proxy to the site root '/'. If a variant's
+        # response matches the public root, it reached '/', not the protected
+        # resource. Fetched once and reused by the path and rewrite branches.
+        root_url = urlunparse(parsed._replace(path="/", query="", fragment=""))
+        root_status, root_body = await self._raw_request("GET", root_url, timeout)
+
         # 1) Path-normalisation bypass
         for variant_path in _path_bypass_variants(path):
             candidate_url = urlunparse(parsed._replace(path=variant_path))
@@ -681,6 +688,10 @@ class PrivEscScanner(BaseScanner):
             # 2xx, the server serves a generic page for unknown paths (SPA
             # fallback / custom error) — the variant didn't reach the resource.
             if await self._any_control_equivalent("GET", control_urls, timeout, None, status, body):
+                continue
+            # If the variant collapsed to the public root, it reached '/', not
+            # the protected resource.
+            if root_body and self._responses_equivalent(root_status, root_body, status, body):
                 continue
             return [_make(
                 f"path normalisation '{variant_path}'", candidate_url,
@@ -704,14 +715,13 @@ class PrivEscScanner(BaseScanner):
             )]
 
         # 3) URL-rewrite headers (request the root, point the header at the path)
-        root_url = urlunparse(parsed._replace(path="/", query="", fragment=""))
         rewrite_target = path + (f"?{parsed.query}" if parsed.query else "")
         nonexistent_target = "/wscan-nonexistent-probe-zzq"
-        # Control request WITHOUT the rewrite header: if the proxy ignores the
+        # Reuse the public-root control fetched above: if the proxy ignores the
         # header, the root just serves its public homepage. We must observe a
         # different response with the header to claim the protected resource was
         # actually reached — otherwise this is a false positive.
-        control_status, control_body = await self._raw_request("GET", root_url, timeout)
+        control_status, control_body = root_status, root_body
         for hname in _REWRITE_HEADERS:
             status, body = await self._raw_request(
                 "GET", root_url, timeout, headers={hname: rewrite_target}
