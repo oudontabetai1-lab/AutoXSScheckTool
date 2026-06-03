@@ -196,6 +196,9 @@ class ScanEngine:
         accounts: Optional[list] = None,      # list of {"username":, "password":, "role":}
         auto_register: bool = False,          # auto-create accounts via registration forms
         auto_register_count: int = 2,         # how many accounts to auto-register
+        # Opt-in for intrusive, potentially state-changing probes (e.g. privesc
+        # verb tampering with POST/PUT/PATCH). Off by default for safety.
+        allow_state_changing_probes: bool = False,
         # ①: SPA crawl enhancement
         spa_crawl: bool = False,
         # ハイブリッドモード: Agent偵察で発見したURLをクロールのシードに使う
@@ -264,6 +267,7 @@ class ScanEngine:
         self.accounts: list = list(accounts or [])
         self.auto_register = auto_register
         self.auto_register_count = auto_register_count
+        self.allow_state_changing_probes = allow_state_changing_probes
         # account_sessions: resolved at run time — list of {"username":, "cookies":, "role":}
         self.account_sessions: list = []
         # ①: SPA crawl
@@ -3113,6 +3117,7 @@ class ScanEngine:
         "privesc_param_idor",
         "privesc_cross_acct",
         "privesc_action",
+        "privesc_bypass",
         "info_disclosure",
         "session",
         "security_headers",

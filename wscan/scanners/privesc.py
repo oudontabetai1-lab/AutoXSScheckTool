@@ -8,6 +8,8 @@ resources can be accessed:
   3. By enumerating numeric/UUID IDs in URLs (IDOR – horizontal escalation)
   4. By probing query/body parameters that carry user/object identifiers (③)
   5. With a second user-account session (cross-account IDOR / vertical test)
+  6. By bypassing a 401/403 access control with path-normalisation,
+     trusted-IP spoofing headers, URL-rewrite headers or HTTP verb tampering
 
 Check types emitted
 -------------------
@@ -16,6 +18,7 @@ Check types emitted
   privesc_horizontal  — IDOR via URL path ID manipulation
   privesc_param_idor  — IDOR via query/body parameter manipulation (NEW ③)
   privesc_cross_acct  — cross-account access confirmed with a second session (NEW A)
+  privesc_bypass      — an enforced 401/403 access control was bypassed
 
 Trigger conditions
 ------------------
@@ -110,6 +113,94 @@ _HEADERS = {
     ),
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
 }
+
+# ---------------------------------------------------------------------------
+# 401/403 access-control bypass payloads
+# ---------------------------------------------------------------------------
+
+# Headers commonly abused to spoof a trusted origin / internal IP and slip past
+# gateway- or middleware-level access control.
+_BYPASS_HEADERS: tuple[dict, ...] = (
+    {"X-Forwarded-For": "127.0.0.1"},
+    {"X-Forwarded-For": "localhost"},
+    {"X-Forwarded-Host": "127.0.0.1"},
+    {"X-Custom-IP-Authorization": "127.0.0.1"},
+    {"X-Originating-IP": "127.0.0.1"},
+    {"X-Remote-IP": "127.0.0.1"},
+    {"X-Remote-Addr": "127.0.0.1"},
+    {"X-Client-IP": "127.0.0.1"},
+    {"X-Real-IP": "127.0.0.1"},
+    {"X-Forwarded-For": "127.0.0.1", "X-Forwarded-Host": "127.0.0.1"},
+)
+
+# Headers some reverse proxies honour to *rewrite* the requested path: the
+# request is sent to a benign URL while the header points at the protected one.
+_REWRITE_HEADERS: tuple[str, ...] = ("X-Original-URL", "X-Rewrite-URL")
+
+# Verbs to try when a GET is blocked (verb / method tampering).
+# OPTIONS is deliberately NOT probed: a successful OPTIONS only returns
+# preflight/metadata and never proves that protected data or an operation
+# became accessible. POST/PUT/PATCH *can* change state or perform an action,
+# so they only run when the operator explicitly opts in.
+_TAMPER_METHODS_SAFE: tuple[str, ...] = ()
+_TAMPER_METHODS_MUTATING: tuple[str, ...] = ("POST", "PUT", "PATCH")
+
+# Header names that carry credentials. The 401/403 *bypass* probes claim to be
+# unauthenticated, so any of these coming from --header / a refreshed token must
+# be stripped — otherwise a valid token (not the bypass) is what served the
+# resource, invalidating the finding.
+_CREDENTIAL_HEADER_NAMES = frozenset({
+    "authorization", "proxy-authorization", "cookie", "authentication",
+    "x-api-key", "x-apikey", "api-key", "apikey", "x-auth-token", "x-auth",
+    "x-access-token", "x-session-token", "x-csrf-token", "x-xsrf-token",
+    "x-amz-security-token", "bearer",
+})
+_CREDENTIAL_HEADER_SUBSTRINGS = (
+    "auth", "token", "api-key", "apikey", "session", "cookie", "credential", "secret",
+)
+
+
+def _strip_credential_headers(headers: dict) -> dict:
+    """Drop credential-bearing headers so an 'unauthenticated' probe really is."""
+    out: dict = {}
+    for key, value in (headers or {}).items():
+        kl = key.lower()
+        if kl in _CREDENTIAL_HEADER_NAMES:
+            continue
+        if any(token in kl for token in _CREDENTIAL_HEADER_SUBSTRINGS):
+            continue
+        out[key] = value
+    return out
+
+
+def _path_bypass_variants(path: str) -> list[str]:
+    """Return path-normalisation tricks that frequently bypass naive ACL prefix
+    matching (e.g. a rule that only blocks the exact string '/admin')."""
+    base = (path or "/").rstrip("/")
+    if not base:
+        return []
+    segs = base.split("/")
+    last = segs[-1]
+    prefix = "/".join(segs[:-1])
+    # NOTE: do not add file-extension suffixes (e.g. ".json"/".html"). Those are
+    # plausibly distinct application routes rather than normalisation aliases of
+    # the protected path, so a 2xx there is not evidence of an ACL bypass.
+    variants = {
+        base + "/",
+        base + "//",
+        base + "/.",
+        base + "/./",
+        base + "/..;/",
+        base + ";/",
+        base + "%20",
+        base + "%09",
+        f"{prefix}//{last}",
+        f"{prefix}/./{last}",
+        f"{prefix}/{last};",
+    }
+    if last and last.lower() != last.upper():
+        variants.add(f"{prefix}/{last.upper()}")
+    return [v for v in variants if v and v != base]
 
 
 # ---------------------------------------------------------------------------
@@ -302,6 +393,12 @@ class PrivEscScanner(BaseScanner):
         if unauth_finding:
             findings.append(unauth_finding)
             await self._emit(unauth_finding)
+
+        # ── Test 1b: 401/403 access-control bypass ────────────────────
+        if is_privileged:
+            for bf in await self._test_forbidden_bypass(url, is_privileged, timeout):
+                findings.append(bf)
+                await self._emit(bf)
 
         # ── Test 2: Low-privilege vertical escalation ─────────────────
         low_priv_cookies: str = getattr(self.engine, "low_priv_cookies", "")
@@ -516,6 +613,171 @@ class PrivEscScanner(BaseScanner):
             request={"url": url, "method": "GET", "headers": {"Cookie": "<low-priv-token>"}},
             response={"status": status, "url": url},
         )
+
+    # ------------------------------------------------------------------
+    # Test 1b: 401/403 access-control bypass
+    # ------------------------------------------------------------------
+
+    async def _test_forbidden_bypass(
+        self,
+        url: str,
+        is_privileged: bool,
+        timeout: float,
+    ) -> list[Finding]:
+        """When a privileged path enforces access control (401/403 for a bare
+        request), probe common bypass techniques: path normalisation,
+        trusted-IP spoofing headers, URL-rewrite headers and verb tampering.
+        Returns at most one finding (the first confirmed bypass)."""
+        if not is_privileged:
+            return []
+
+        parsed = urlparse(url)
+        path = parsed.path or "/"
+
+        # Baseline must actually be blocked — otherwise the unauth/vertical
+        # tests already cover open access and there is nothing to "bypass".
+        base_status, _ = await self._raw_request("GET", url, timeout)
+        if base_status not in (401, 403):
+            return []
+
+        def _make(technique: str, candidate_url: str, status: int,
+                  body: str, request: dict) -> Finding:
+            return Finding(
+                check_type="privesc_bypass",
+                severity="high",
+                url=url,
+                field_name=f"(access-control bypass: {technique})",
+                payload=candidate_url,
+                evidence=(
+                    f"Access-control bypass: the canonical request to '{path}' "
+                    f"was blocked (HTTP {base_status}), but {technique} reached "
+                    f"the resource (HTTP {status}, {len(body)} bytes) without "
+                    f"valid authorization. The access control appears to be "
+                    f"enforced only on the exact/canonical request shape."
+                ),
+                request=request,
+                response={
+                    "status": status,
+                    "url": candidate_url,
+                    "baseline_status": base_status,
+                },
+            )
+
+        # Control paths that should not exist. We probe one OUTSIDE the
+        # protected prefix (so an upstream ACL on /admin/* can't reject it
+        # before the backend's generic fallback shows) and one INSIDE the same
+        # routing context (so an SPA mounted under /app/* is still detected when
+        # root-level unknown paths 404). A candidate is suppressed if either
+        # control yields an equivalent "successful" response.
+        control_urls = self._nonexistent_control_urls(parsed)
+
+        # Public-root / parent control: some normalisation variants (e.g.
+        # '/admin/..;/') are collapsed by the server/proxy to a parent landing
+        # page rather than the protected resource — the site root '/' for a
+        # top-level path, or e.g. '/app/' for a mounted '/app/admin'. We fetch
+        # the site root (index 0, reused by the rewrite branch) plus the parent
+        # directory when it differs, and suppress a variant matching either.
+        collapse_urls = self._collapse_control_urls(parsed)
+        collapse_controls: list[tuple[int, str]] = [
+            await self._raw_request("GET", c_url, timeout) for c_url in collapse_urls
+        ]
+        root_url = collapse_urls[0]
+        root_status, root_body = collapse_controls[0]
+
+        # 1) Path-normalisation bypass
+        for variant_path in _path_bypass_variants(path):
+            candidate_url = urlunparse(parsed._replace(path=variant_path))
+            status, body = await self._raw_request("GET", candidate_url, timeout)
+            if not self._bypass_succeeded(status, body):
+                continue
+            # If a plain request to a nonexistent path returns an equivalent
+            # 2xx, the server serves a generic page for unknown paths (SPA
+            # fallback / custom error) — the variant didn't reach the resource.
+            if await self._any_control_equivalent("GET", control_urls, timeout, None, status, body):
+                continue
+            # If the variant collapsed to a parent landing page (site root or the
+            # path's parent directory), it didn't reach the protected resource.
+            if any(
+                c_body and self._responses_equivalent(c_status, c_body, status, body)
+                for c_status, c_body in collapse_controls
+            ):
+                continue
+            return [_make(
+                f"path normalisation '{variant_path}'", candidate_url,
+                status, body,
+                {"url": candidate_url, "method": "GET", "headers": {}},
+            )]
+
+        # 2) Trusted-origin / internal-IP spoofing headers
+        for hdr in _BYPASS_HEADERS:
+            status, body = await self._raw_request("GET", url, timeout, headers=hdr)
+            if not self._bypass_succeeded(status, body):
+                continue
+            # Control: same header on a nonexistent path. If it yields an
+            # equivalent 2xx, the header only routes to generic/default content
+            # (e.g. X-Forwarded-Host selecting another vhost), not the resource.
+            if await self._any_control_equivalent("GET", control_urls, timeout, hdr, status, body):
+                continue
+            return [_make(
+                f"spoofed header {', '.join(hdr)}", url, status, body,
+                {"url": url, "method": "GET", "headers": dict(hdr)},
+            )]
+
+        # 3) URL-rewrite headers (request the root, point the header at the path)
+        rewrite_target = path + (f"?{parsed.query}" if parsed.query else "")
+        nonexistent_target = "/wscan-nonexistent-probe-zzq"
+        # Reuse the public-root control fetched above: if the proxy ignores the
+        # header, the root just serves its public homepage. We must observe a
+        # different response with the header to claim the protected resource was
+        # actually reached — otherwise this is a false positive.
+        control_status, control_body = root_status, root_body
+        for hname in _REWRITE_HEADERS:
+            status, body = await self._raw_request(
+                "GET", root_url, timeout, headers={hname: rewrite_target}
+            )
+            if not self._bypass_succeeded(status, body):
+                continue
+            # Need a usable control to establish a difference; a failed control
+            # (network error / empty) gives no evidence, so skip conservatively.
+            if not control_body:
+                continue
+            if self._responses_equivalent(control_status, control_body, status, body):
+                continue  # header ignored — only proves '/' is public
+            # The proxy may honour the header but route *any* target (incl.
+            # nonexistent ones) to a generic custom page. Control with the same
+            # header pointing at a nonexistent target and suppress if equivalent.
+            if await self._control_is_equivalent(
+                "GET", root_url, timeout, {hname: nonexistent_target}, status, body
+            ):
+                continue
+            return [_make(
+                f"rewrite header {hname}", root_url, status, body,
+                {"url": root_url, "method": "GET",
+                 "headers": {hname: rewrite_target}},
+            )]
+
+        # 4) HTTP verb / method tampering. Nothing runs by default (OPTIONS is
+        # not evidence of a bypass); the state-changing verbs run only when the
+        # operator opts in, since blindly POST/PUT/PATCH-ing a privileged URL
+        # could mutate server state.
+        methods = list(_TAMPER_METHODS_SAFE)
+        if getattr(self.engine, "allow_state_changing_probes", False):
+            methods += list(_TAMPER_METHODS_MUTATING)
+        for method in methods:
+            status, body = await self._raw_request(method, url, timeout)
+            if not self._bypass_succeeded(status, body):
+                continue
+            # Control: same verb on a nonexistent path. A generic CORS /
+            # framework handler (common for OPTIONS) answers 2xx for any path,
+            # so an equivalent response means no protected resource was served.
+            if await self._any_control_equivalent(method, control_urls, timeout, None, status, body):
+                continue
+            return [_make(
+                f"{method} method tampering", url, status, body,
+                {"url": url, "method": method, "headers": {}},
+            )]
+
+        return []
 
     # ------------------------------------------------------------------
     # Test 3: S-6 — Horizontal privilege escalation via path ID
@@ -983,6 +1245,134 @@ class PrivEscScanner(BaseScanner):
         except Exception:
             return 0, ""
 
+    async def _raw_request(
+        self,
+        method: str,
+        url: str,
+        timeout: float,
+        *,
+        headers: Optional[dict] = None,
+        cookies: str = "",
+    ) -> tuple[int, str]:
+        """Issue an arbitrary-method request (no redirect following) with
+        optional extra headers. Used by the 401/403 bypass probes, which are
+        unauthenticated — so credential headers from --header / a refreshed
+        token are stripped. Explicit probe ``headers`` are applied afterwards
+        and never stripped (they carry the bypass payload itself)."""
+        hdrs = {**_HEADERS, **_strip_credential_headers(_engine_custom_headers(self.engine))}
+        if headers:
+            hdrs.update(headers)
+        if cookies:
+            hdrs["Cookie"] = cookies
+        try:
+            async with httpx.AsyncClient(
+                follow_redirects=False,
+                timeout=timeout,
+                headers=hdrs,
+                **self._client_transport_kwargs(),
+            ) as client:
+                resp = await client.request(method, url)
+                return resp.status_code, resp.text[:8000]
+        except Exception:
+            return 0, ""
+
+    def _responses_equivalent(
+        self, status_a: int, body_a: str, status_b: int, body_b: str
+    ) -> bool:
+        """True when two responses are effectively the same page (same status
+        and near-identical body). Used to prove a URL-rewrite header actually
+        changed what was served, rather than just returning the public root."""
+        if status_a != status_b:
+            return False
+        if _normalize_response_body(body_a) == _normalize_response_body(body_b):
+            return True
+        return _body_similarity(body_a, body_b) >= 0.98
+
+    def _nonexistent_control_urls(self, parsed) -> list[str]:
+        """Build nonexistent control URLs for the protected resource: one
+        outside any prefix (origin root) for the upstream-ACL case, and one in
+        the same routing context (parent dir) for the SPA-mounted-under-prefix
+        case."""
+        token = "/wscan-nonexistent-probe-zzq"
+        paths = [token]
+        parent = (parsed.path or "/").rsplit("/", 1)[0]
+        if parent and parent != "":
+            inside = f"{parent}{token}"
+            if inside not in paths:
+                paths.append(inside)
+        return [
+            urlunparse(parsed._replace(path=p, query="", fragment=""))
+            for p in paths
+        ]
+
+    def _collapse_control_urls(self, parsed) -> list[str]:
+        """Parent landing pages a '..;/'-style normalisation variant may collapse
+        to: the site root '/' (index 0, reused by the rewrite branch) and the
+        protected path's immediate parent directory when it differs."""
+        urls = [urlunparse(parsed._replace(path="/", query="", fragment=""))]
+        parent_path = (parsed.path or "/").rsplit("/", 1)[0] or "/"
+        if not parent_path.endswith("/"):
+            parent_path += "/"
+        if parent_path != "/":
+            urls.append(
+                urlunparse(parsed._replace(path=parent_path, query="", fragment=""))
+            )
+        return urls
+
+    async def _any_control_equivalent(
+        self,
+        method: str,
+        control_urls: list[str],
+        timeout: float,
+        headers: Optional[dict],
+        status: int,
+        body: str,
+    ) -> bool:
+        """True if the technique applied to ANY nonexistent control path yields
+        an equivalent 'successful' response (generic content, not the resource)."""
+        for control_url in control_urls:
+            if await self._control_is_equivalent(
+                method, control_url, timeout, headers, status, body
+            ):
+                return True
+        return False
+
+    async def _control_is_equivalent(
+        self,
+        method: str,
+        control_url: str,
+        timeout: float,
+        headers: Optional[dict],
+        status: int,
+        body: str,
+    ) -> bool:
+        """Apply the SAME technique (method + headers) to a nonexistent control
+        path and report whether it produced an equivalent 'successful' response.
+
+        True ⇒ the technique merely yields generic content (catch-all page,
+        default vhost, blanket CORS/OPTIONS handler) rather than the protected
+        resource, so the candidate finding should be suppressed.
+        """
+        ctrl_status, ctrl_body = await self._raw_request(
+            method, control_url, timeout, headers=headers
+        )
+        return (
+            bool(ctrl_body)
+            and self._bypass_succeeded(ctrl_status, ctrl_body)
+            and self._responses_equivalent(ctrl_status, ctrl_body, status, body)
+        )
+
+    def _bypass_succeeded(self, status: int, body: str) -> bool:
+        """A bypass attempt counts only if the resource was actually served:
+        a 2xx with substantial content that is neither an auth gate nor a
+        not-found page."""
+        return (
+            200 <= status < 300
+            and len(body or "") >= 50
+            and not _is_auth_gate(body or "")
+            and not NON_RESOURCE_RE.search(body or "")
+        )
+
     async def _request_form(
         self,
         method: str,
@@ -1014,6 +1404,52 @@ class PrivEscScanner(BaseScanner):
             url = finding.request.get("url") or finding.url
             status, body = await self._get(url, "", timeout)
             return self._accessible_response(status, body)
+
+        if finding.check_type == "privesc_bypass":
+            req = finding.request or {}
+            candidate_url = req.get("url") or finding.url
+            method = req.get("method", "GET")
+            headers = {
+                k: v for k, v in (req.get("headers") or {}).items()
+                if k.lower() != "cookie"
+            }
+            # 1) The canonical resource must still be blocked — otherwise it
+            # became public between phases and there is no bypass to confirm.
+            base_status, _ = await self._raw_request("GET", finding.url, timeout)
+            if base_status not in (401, 403):
+                return False
+            # 2) The candidate must still serve substantial content.
+            status, body = await self._raw_request(
+                method, candidate_url, timeout, headers=headers
+            )
+            if not self._bypass_succeeded(status, body):
+                return False
+            # 3) Repeat the technique-specific control comparison so a generic
+            # page (catch-all / default vhost / blanket handler) isn't confirmed.
+            parsed_orig = urlparse(finding.url)
+            rewrite_hdr = next((h for h in headers if h in _REWRITE_HEADERS), None)
+            if rewrite_hdr:
+                ctrl_headers = dict(headers)
+                ctrl_headers[rewrite_hdr] = "/wscan-nonexistent-probe-zzq"
+                if await self._control_is_equivalent(
+                    method, candidate_url, timeout, ctrl_headers, status, body
+                ):
+                    return False
+            else:
+                control_urls = self._nonexistent_control_urls(parsed_orig)
+                if await self._any_control_equivalent(
+                    method, control_urls, timeout, headers or None, status, body
+                ):
+                    return False
+                # Path-normalisation findings (plain GET) can collapse to a
+                # parent landing page; repeat the scan-time root/parent check so
+                # a variant that only reached '/' (or '/app/') isn't confirmed.
+                if method == "GET" and not headers:
+                    for c_url in self._collapse_control_urls(parsed_orig):
+                        c_status, c_body = await self._raw_request("GET", c_url, timeout)
+                        if c_body and self._responses_equivalent(c_status, c_body, status, body):
+                            return False
+            return True
 
         if finding.check_type == "privesc_vertical":
             cookies = getattr(self.engine, "low_priv_cookies", "")

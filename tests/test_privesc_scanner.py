@@ -16,6 +16,7 @@ class _DummyEngine:
         self.monitor = None
         self.low_priv_cookies = ""
         self.account_sessions = []
+        self.allow_state_changing_probes = False
 
 
 class _DummyPage:
@@ -371,6 +372,382 @@ class PrivEscScannerTests(unittest.IsolatedAsyncioTestCase):
             "sid=low",
             30.0,
         )
+
+
+    # ------------------------------------------------------------------
+    # 401/403 access-control bypass
+    # ------------------------------------------------------------------
+
+    async def test_bypass_flags_path_normalisation(self):
+        scanner = PrivEscScanner(_DummyEngine())
+        admin = "<html><h1>Admin dashboard</h1><p>secret exports here</p></html>"
+        home = "<html><body>Public homepage — welcome, browse products.</body></html>"
+
+        async def fake(method, url, timeout, *, headers=None, cookies=""):
+            tail = url.split("fixture.test", 1)[-1]
+            if "nonexistent" in tail:
+                return 404, "not found"          # nonexistent controls
+            if tail in ("/", ""):
+                return 200, home                 # public-root control
+            if tail == "/admin":
+                return 403, ""                   # canonical resource blocked
+            return 200, admin                    # a normalisation variant serves admin
+
+        scanner._raw_request = AsyncMock(side_effect=fake)
+
+        findings = await scanner._test_forbidden_bypass(
+            "http://fixture.test/admin", True, timeout=3,
+        )
+
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0].check_type, "privesc_bypass")
+        self.assertEqual(findings[0].response["baseline_status"], 403)
+
+    async def test_bypass_path_variant_suppressed_by_public_root(self):
+        # A variant like '/admin/..;/' is collapsed by the server to the public
+        # root '/'. It only reached the homepage, not the protected resource.
+        scanner = PrivEscScanner(_DummyEngine())
+        home = "<html><body>Public homepage — welcome, browse our products here.</body></html>"
+
+        async def fake(method, url, timeout, *, headers=None, cookies=""):
+            tail = url.split("fixture.test", 1)[-1]
+            if "nonexistent" in tail:
+                return 404, "not found"          # nonexistent controls 404
+            if tail == "/admin":
+                return 403, ""                   # canonical resource blocked
+            return 200, home                     # root + every variant -> homepage
+
+        scanner._raw_request = AsyncMock(side_effect=fake)
+
+        findings = await scanner._test_forbidden_bypass(
+            "http://fixture.test/admin", True, timeout=3,
+        )
+
+        self.assertEqual(findings, [])
+
+    async def test_bypass_path_variant_suppressed_by_parent_dir_of_mounted_app(self):
+        # '/app/admin/..;/' collapses to the mounted app's landing '/app/', not
+        # the site root and not a 404 — must be suppressed via the parent control.
+        scanner = PrivEscScanner(_DummyEngine())
+        site_home = "<html><body>Marketing site root — totally different content here.</body></html>"
+        app_landing = "<html><body>The app landing page under /app, generic and public here.</body></html>"
+
+        async def fake(method, url, timeout, *, headers=None, cookies=""):
+            tail = url.split("fixture.test", 1)[-1]
+            if "nonexistent" in tail:
+                return 404, "not found"          # both nonexistent controls 404
+            if tail == "/app/admin":
+                return 403, ""                   # canonical resource blocked
+            if tail in ("/", ""):
+                return 200, site_home            # site-root control (different)
+            if tail == "/app/":
+                return 200, app_landing          # parent-dir control
+            return 200, app_landing              # variants collapse to /app/
+
+        scanner._raw_request = AsyncMock(side_effect=fake)
+
+        findings = await scanner._test_forbidden_bypass(
+            "http://fixture.test/app/admin", True, timeout=3,
+        )
+
+        self.assertEqual(findings, [])
+
+    async def test_bypass_path_variant_suppressed_by_catchall(self):
+        # The server serves a generic 200 page (SPA fallback) for ANY unknown
+        # path, including the catch-all control -> path variants must not flag.
+        scanner = PrivEscScanner(_DummyEngine())
+        spa = "<html><body><div id='app'>Loading the single page app…</div></body></html>"
+
+        async def fake(method, url, timeout, *, headers=None, cookies=""):
+            # The /admin route itself is access-controlled and stays blocked
+            # regardless of spoofed headers or method.
+            if url.rstrip("/").endswith("/admin"):
+                return 403, ""
+            # Any other (unknown) path -> SPA catch-all 200 (control + variants).
+            return 200, spa
+
+        scanner._raw_request = AsyncMock(side_effect=fake)
+
+        findings = await scanner._test_forbidden_bypass(
+            "http://fixture.test/admin", True, timeout=3,
+        )
+
+        self.assertEqual(findings, [])
+
+    async def test_bypass_does_not_probe_or_report_options(self):
+        # A successful OPTIONS response is not evidence of a bypass, so OPTIONS
+        # must neither be probed by default nor reported.
+        scanner = PrivEscScanner(_DummyEngine())
+        cors = "<html><body>CORS preflight OK. Allow: GET, POST, OPTIONS. Move along now.</body></html>"
+        seen_methods = []
+
+        async def fake(method, url, timeout, *, headers=None, cookies=""):
+            seen_methods.append(method)
+            if method == "OPTIONS":
+                return 200, cors        # generic handler for every path
+            return 403, ""              # GET (baseline + all variants) blocked
+
+        scanner._raw_request = AsyncMock(side_effect=fake)
+
+        findings = await scanner._test_forbidden_bypass(
+            "http://fixture.test/admin", True, timeout=3,
+        )
+
+        self.assertEqual(findings, [])
+        self.assertNotIn("OPTIONS", seen_methods)
+
+    async def test_bypass_spoofed_header_suppressed_by_default_vhost(self):
+        # X-Forwarded-Host routes ANY path to a default marketing vhost; the
+        # protected resource was never served, so no finding should fire.
+        scanner = PrivEscScanner(_DummyEngine())
+        vhost = "<html><body>Welcome to the default marketing site — products and pricing.</body></html>"
+
+        async def fake(method, url, timeout, *, headers=None, cookies=""):
+            if headers and any(k.lower() == "x-forwarded-host" for k in headers):
+                return 200, vhost       # header re-routes every path to the vhost
+            return 403, ""
+
+        scanner._raw_request = AsyncMock(side_effect=fake)
+
+        findings = await scanner._test_forbidden_bypass(
+            "http://fixture.test/admin", True, timeout=3,
+        )
+
+        self.assertEqual(findings, [])
+
+    async def test_bypass_verb_tampering_requires_optin_for_mutating(self):
+        # Without opt-in, only OPTIONS is sent (no POST/PUT/PATCH). A server that
+        # would serve content on POST must NOT be probed with POST by default.
+        engine = _DummyEngine()
+        scanner = PrivEscScanner(engine)
+        seen_methods = []
+
+        async def fake(method, url, timeout, *, headers=None, cookies=""):
+            seen_methods.append(method)
+            return 403, ""              # everything blocked -> reach verb stage
+
+        scanner._raw_request = AsyncMock(side_effect=fake)
+
+        await scanner._test_forbidden_bypass(
+            "http://fixture.test/admin", True, timeout=3,
+        )
+
+        # Nothing is probed by default (OPTIONS removed, mutating verbs gated).
+        self.assertNotIn("OPTIONS", seen_methods)
+        self.assertNotIn("POST", seen_methods)
+        self.assertNotIn("PUT", seen_methods)
+        self.assertNotIn("PATCH", seen_methods)
+
+        # With opt-in, mutating verbs are allowed.
+        engine.allow_state_changing_probes = True
+        seen_methods.clear()
+        await scanner._test_forbidden_bypass(
+            "http://fixture.test/admin", True, timeout=3,
+        )
+        self.assertIn("POST", seen_methods)
+
+    async def test_bypass_flags_spoofed_header(self):
+        scanner = PrivEscScanner(_DummyEngine())
+        good = "<html><h1>Admin dashboard</h1><p>internal only content</p></html>"
+
+        async def fake(method, url, timeout, *, headers=None, cookies=""):
+            if not headers:
+                # baseline + every path-normalisation variant stay blocked
+                return 403, ""
+            if any(k.lower().startswith("x-") for k in headers):
+                # A genuine bypass: the spoofed header opens the protected URL,
+                # but the same header on a nonexistent path still 404s.
+                if "nonexistent" in url:
+                    return 404, "not found"
+                return 200, good
+            return 403, ""
+
+        scanner._raw_request = AsyncMock(side_effect=fake)
+
+        findings = await scanner._test_forbidden_bypass(
+            "http://fixture.test/admin", True, timeout=3,
+        )
+
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0].check_type, "privesc_bypass")
+        self.assertIn("header", findings[0].field_name)
+
+    async def test_bypass_skipped_when_baseline_not_blocked(self):
+        scanner = PrivEscScanner(_DummyEngine())
+        scanner._raw_request = AsyncMock(return_value=(200, "open content here"))
+
+        findings = await scanner._test_forbidden_bypass(
+            "http://fixture.test/admin", True, timeout=3,
+        )
+
+        self.assertEqual(findings, [])
+        scanner._raw_request.assert_awaited_once()
+
+    async def test_bypass_ignores_auth_gate_on_variant(self):
+        scanner = PrivEscScanner(_DummyEngine())
+        # Baseline blocked, then every probe returns a login gate (200 but gated)
+        gate = "<html>Please log in to continue to the admin area</html>"
+
+        async def fake(method, url, timeout, *, headers=None, cookies=""):
+            if method == "GET" and url.endswith("/admin") and not headers:
+                return 403, ""
+            return 200, gate
+
+        scanner._raw_request = AsyncMock(side_effect=fake)
+
+        findings = await scanner._test_forbidden_bypass(
+            "http://fixture.test/admin", True, timeout=3,
+        )
+
+        self.assertEqual(findings, [])
+
+    async def test_bypass_rewrite_header_suppressed_when_control_equal(self):
+        # Proxy ignores X-Original-URL: root keeps serving its public homepage,
+        # identical to the control request -> must NOT be flagged.
+        scanner = PrivEscScanner(_DummyEngine())
+        home = "<html><body>Welcome to our public homepage. Browse products here.</body></html>"
+
+        async def fake(method, url, timeout, *, headers=None, cookies=""):
+            if headers and any(h.lower() in ("x-original-url", "x-rewrite-url") for h in headers):
+                return 200, home          # header ignored -> homepage
+            if headers:
+                return 403, ""            # spoofed-IP headers still blocked
+            if "/admin" in url.lower():
+                return 403, ""            # baseline + path variants blocked
+            return 200, home              # control request to '/'
+
+        scanner._raw_request = AsyncMock(side_effect=fake)
+
+        findings = await scanner._test_forbidden_bypass(
+            "http://fixture.test/admin", True, timeout=3,
+        )
+
+        self.assertEqual(findings, [])
+
+    async def test_bypass_rewrite_header_flagged_when_content_differs(self):
+        scanner = PrivEscScanner(_DummyEngine())
+        home = "<html><body>Welcome to our public homepage. Browse products here.</body></html>"
+        admin = "<html><body>ADMIN PANEL: user list, secret exports, billing settings</body></html>"
+
+        async def fake(method, url, timeout, *, headers=None, cookies=""):
+            if headers:
+                for h, v in headers.items():
+                    if h.lower() in ("x-original-url", "x-rewrite-url"):
+                        # Honoured: the protected target serves admin content,
+                        # but a nonexistent rewrite target still 404s.
+                        if "nonexistent" in v:
+                            return 404, "not found"
+                        return 200, admin
+                return 403, ""
+            if "/admin" in url.lower():
+                return 403, ""
+            return 200, home              # control request to '/'
+
+        scanner._raw_request = AsyncMock(side_effect=fake)
+
+        findings = await scanner._test_forbidden_bypass(
+            "http://fixture.test/admin", True, timeout=3,
+        )
+
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0].check_type, "privesc_bypass")
+        self.assertIn("rewrite header", findings[0].field_name)
+
+    def test_strip_credential_headers_removes_auth_keeps_routing(self):
+        from wscan.scanners.privesc import _strip_credential_headers
+        stripped = _strip_credential_headers({
+            "Authorization": "Bearer xyz",
+            "X-API-Key": "secret",
+            "X-Auth-Token": "t",
+            "Cookie": "sid=1",
+            "X-App-Version": "2.0",
+            "Accept-Language": "ja",
+        })
+        self.assertNotIn("Authorization", stripped)
+        self.assertNotIn("X-API-Key", stripped)
+        self.assertNotIn("X-Auth-Token", stripped)
+        self.assertNotIn("Cookie", stripped)
+        self.assertEqual(stripped, {"X-App-Version": "2.0", "Accept-Language": "ja"})
+
+    async def test_bypass_verifier_replays_request(self):
+        scanner = PrivEscScanner(_DummyEngine())
+        admin = "<html><h1>Admin</h1><p>secret content here for the panel</p></html>"
+
+        home = "<html><body>Public homepage — different content from the admin area.</body></html>"
+
+        async def fake(method, url, timeout, *, headers=None, cookies=""):
+            tail = url.split("fixture.test", 1)[-1]
+            if "nonexistent" in tail:
+                return 404, "not found"     # nonexistent controls
+            if tail in ("/", ""):
+                return 200, home            # public-root collapse control (differs)
+            if tail == "/admin":
+                return 403, ""              # canonical resource still blocked
+            return 200, admin               # the /admin/. variant serves admin content
+
+        scanner._raw_request = AsyncMock(side_effect=fake)
+        finding = Finding(
+            check_type="privesc_bypass",
+            severity="high",
+            url="http://fixture.test/admin",
+            field_name="(access-control bypass: path normalisation '/admin/.')",
+            payload="http://fixture.test/admin/.",
+            evidence="bypass via path normalisation",
+            request={"url": "http://fixture.test/admin/.", "method": "GET", "headers": {}},
+        )
+
+        result = await scanner.verify_finding(finding)
+
+        self.assertTrue(result)
+
+    async def test_bypass_verifier_rejects_variant_collapsing_to_root(self):
+        # At verify time the candidate now collapses to the public homepage —
+        # it didn't reach the protected resource, so it must not be confirmed.
+        scanner = PrivEscScanner(_DummyEngine())
+        home = "<html><body>Public homepage — generic marketing content here now.</body></html>"
+
+        async def fake(method, url, timeout, *, headers=None, cookies=""):
+            tail = url.split("fixture.test", 1)[-1]
+            if "nonexistent" in tail:
+                return 404, "not found"
+            if tail == "/admin":
+                return 403, ""              # canonical still blocked
+            return 200, home                # root control AND the variant -> homepage
+
+        scanner._raw_request = AsyncMock(side_effect=fake)
+        finding = Finding(
+            check_type="privesc_bypass",
+            severity="high",
+            url="http://fixture.test/admin",
+            field_name="(access-control bypass: path normalisation '/admin/..;/')",
+            payload="http://fixture.test/admin/..;/",
+            evidence="bypass via path normalisation",
+            request={"url": "http://fixture.test/admin/..;/", "method": "GET", "headers": {}},
+        )
+
+        result = await scanner.verify_finding(finding)
+
+        self.assertFalse(result)
+
+    async def test_bypass_verifier_rejects_when_baseline_now_public(self):
+        # If the canonical resource is no longer blocked, there is no bypass.
+        scanner = PrivEscScanner(_DummyEngine())
+        scanner._raw_request = AsyncMock(
+            return_value=(200, "<html><h1>Admin</h1><p>now public content</p></html>")
+        )
+        finding = Finding(
+            check_type="privesc_bypass",
+            severity="high",
+            url="http://fixture.test/admin",
+            field_name="(access-control bypass: path normalisation '/admin/.')",
+            payload="http://fixture.test/admin/.",
+            evidence="bypass via path normalisation",
+            request={"url": "http://fixture.test/admin/.", "method": "GET", "headers": {}},
+        )
+
+        result = await scanner.verify_finding(finding)
+
+        self.assertFalse(result)
 
 
 if __name__ == "__main__":

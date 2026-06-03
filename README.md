@@ -138,10 +138,10 @@ PEM の cert/key は Playwright と httpx の両方で使われます。PFX は 
 | 1.5 | クロスサイト・スクリプティング（格納型） | `stored_xss` | マーカー注入 → 全ページ横断検出 |
 | 1.6 | CSRF | `csrf` | POST フォームの CSRF トークン有無 |
 | 1.7 | HTTPヘッダ・インジェクション | `header_injection` | CRLF 注入 → レスポンスヘッダ確認 |
-| 1.8 | メールヘッダ・インジェクション | `mail_header` | メール関連フィールドへの CRLF 注入 |
+| 1.8 | メールヘッダ・インジェクション | `mail_header` | ⚠️ 無効化済み（確証に OOB メール受信が必要で黒box では実用的に検知できないため。実装は残置） |
 | 1.9 | クリックジャッキング | `clickjacking` | X-Frame-Options / CSP frame-ancestors 確認 |
 | 1.11 | オープンリダイレクト | `open_redirect` | リダイレクト先未検証の検出 |
-| — | アクセス制御・権限昇格 | `privesc` | 未認証アクセス・垂直/水平権限昇格 (IDOR) |
+| — | アクセス制御・権限昇格 | `privesc` | 未認証アクセス・垂直/水平権限昇格 (IDOR)・401/403 バイパス |
 | — | CORS 設定ミス | `cors` | ワイルドカード ACAO・任意 Origin 反射 |
 | — | 機密ファイル露出・情報漏洩 | `info_disclosure` | `.env`・`.git`・phpinfo 等へのアクセス確認 |
 | — | Host ヘッダインジェクション | `host_header` | パスワードリセット汚染 |
@@ -165,7 +165,7 @@ PEM の cert/key は Playwright と httpx の両方で使われます。PFX は 
 - **AI 攻撃計画（AttackPlanner）** — スキャン前にページを分析し、フィールドごとに優先チェックとターゲット特化ペイロードを計画
 - **DOM-based XSS 検出** — `innerHTML` / `document.write` / `eval` / `location.href` 等の危険シンクを Playwright でフック、クライアントサイド実行を検出
 - **格納型 XSS 検出** — ユニークマーカーを注入し、全クロールページを横断してペイロードの出現を確認
-- **アクセス制御検査** — 未認証アクセス・垂直権限昇格（低権限セッション）・水平権限昇格 (IDOR) の 3 種テスト
+- **アクセス制御検査** — 未認証アクセス・垂直権限昇格（低権限セッション）・水平権限昇格 (IDOR) に加え、**401/403 アクセス制御バイパス**（パス正規化・信頼 IP ヘッダ偽装・URL リライトヘッダ・HTTP メソッド改ざん）を検出
 - **CORS 検出** — ワイルドカード ACAO・任意 Origin 反射・クレデンシャル付き CORS を自動判定
 - **機密ファイル露出** — `.env`・`.git`・phpinfo・actuator 等 35 種以上のパスをプローブ
 - **セキュリティヘッダ監査** — HSTS・CSP・X-Content-Type-Options・Referrer-Policy・Permissions-Policy の欠如/設定ミスを検出
@@ -388,7 +388,7 @@ usage: main.py scan [オプション] URL
 主要オプション:
   --checks CHECK ...       実行するチェック (デフォルト: config/wscan.yaml)
                            選択肢: sqli xss dom_xss stored_xss os path_traversal
-                                   session csrf header_injection mail_header
+                                   session csrf header_injection
                                    clickjacking open_redirect ssti privesc
                                    cors info_disclosure host_header security_headers
                                    file_upload nosql deserialization request_smuggling
@@ -677,6 +677,12 @@ wscan/
 3. **水平権限昇格 / IDOR (High)**: URL パスの数値 ID を ±1/±5 変化させ他ユーザーのリソースが取得できるか確認
 4. **パラメータ IDOR (High)**: クエリパラメータ/POST ボディ内の `user_id`・`order_id`・`id` 等を ±1 変化、UUID 末尾変更でテスト
 5. **複数アカウント間 IDOR (High)**: アカウント A のリソース URL にアカウント B のセッションでアクセスし、コンテンツ差異を検出
+6. **状態変更操作の認可欠落 (High)**: 管理系の非 GET フォームを低権限セッションで送信し、サーバー側認可が無いか確認
+7. **401/403 アクセス制御バイパス (High)**: 保護パスが 401/403 を返す場合に、以下のバイパス手法を試行
+   - **パス正規化**: `/admin/`・`/admin/.`・`/admin//`・`/admin/..;/`・`/admin%20`・大文字化・`.json`/`.html` 付与 など
+   - **信頼 IP ヘッダ偽装**: `X-Forwarded-For: 127.0.0.1`・`X-Custom-IP-Authorization`・`X-Originating-IP`・`X-Real-IP` など
+   - **URL リライトヘッダ**: ルートへのリクエストに `X-Original-URL`/`X-Rewrite-URL` で保護パスを指定
+   - **HTTP メソッド改ざん**: GET が拒否される場合に `POST`/`PUT`/`PATCH`/`OPTIONS` で到達できるか確認
 
 ### GraphQL セキュリティ検査 (`graphql`)
 1. **イントロスペクション公開 (Medium)**: `__schema` クエリで完全なスキーマが取得できるか確認
@@ -710,7 +716,7 @@ JWT は Cookie・Authorization ヘッダ・URL パラメータ・レスポンス
 | `jwt_kid_injection` | 10.0 | Critical |
 | `nosql`, `privesc_unauth` | 9.1 | High |
 | `request_smuggling` | 8.7 | High |
-| `xss`, `dom_xss`, `privesc_vertical`, `privesc_cross_acct` | 8.1–8.8 | High |
+| `xss`, `dom_xss`, `privesc_vertical`, `privesc_cross_acct`, `privesc_action`, `privesc_bypass` | 8.1–8.8 | High |
 | `path_traversal`, `info_disclosure`, `cors` | 7.4–7.5 | High |
 | `session`, `privesc_horizontal`, `privesc_param_idor` | 6.5–7.4 | High/Medium |
 | `csrf`, `open_redirect`, `host_header` | 5.4–6.5 | Medium |

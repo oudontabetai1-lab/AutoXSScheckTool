@@ -1822,7 +1822,8 @@ const CHECK_GROUPS = {
   ],
   header: [
     {id:'header_injection',  label:'ヘッダインジェクション', def:false},
-    {id:'mail_header',       label:'メールヘッダ',           def:false},
+    // 'mail_header' は無効化済み（OOBメール受信が必要で黒boxでは検知不可、
+    // wscan/scanners/__init__.py 参照）。UIの選択肢からも除外している。
     {id:'open_redirect',     label:'オープンリダイレクト',   def:false},
     {id:'path_traversal',    label:'パストラバーサル',       def:false},
     {id:'host_header',       label:'Hostヘッダ攻撃',         def:false},

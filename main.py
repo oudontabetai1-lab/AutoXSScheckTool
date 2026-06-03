@@ -36,7 +36,8 @@ def _load_config(path: Path = _CONFIG_PATH) -> dict:
         return cfg
     try:
         import yaml
-        raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        from wscan.textio import read_text_resilient
+        raw = yaml.safe_load(read_text_resilient(path)) or {}
     except Exception as _yaml_exc:
         import sys
         print(
@@ -68,6 +69,7 @@ def _load_config(path: Path = _CONFIG_PATH) -> dict:
     cfg["target_urls"]             = list(s.get("target_urls",    []))
     cfg["access_urls"]             = list(s.get("access_urls",    []))
     cfg["manual_crawl_file"]       = str(s.get("manual_crawl_file", "") or "")
+    cfg["allow_state_changing_probes"] = bool(s.get("allow_state_changing_probes", False))
 
     cfg["headless"]                = bool(b.get("headless", False))
     cfg["proxy"]                   = str(b.get("proxy", "") or "")
@@ -157,8 +159,11 @@ Examples:
         help="Custom payloads YAML file (see config/default_payloads.yaml for format)",
     )
     _ALL_CHECKS = [
+        # NOTE: "mail_header" は無効化済み（wscan/scanners/__init__.py 参照）。
+        # 確証にOOBメール受信が必要で黒boxでは実用的に検知できないため、
+        # 既定の選択肢から除外している。
         "sqli", "xss", "dom_xss", "stored_xss", "os", "path_traversal",
-        "session", "csrf", "header_injection", "mail_header",
+        "session", "csrf", "header_injection",
         "clickjacking", "open_redirect", "ssti", "privesc",
         "cors", "info_disclosure", "host_header", "security_headers",
         "nosql", "deserialization", "request_smuggling", "ssrf",
@@ -357,6 +362,16 @@ Examples:
         help=(
             "Also test registration / sign-up forms (config default: "
             f"{'include' if not _CFG.get('skip_registration', True) else 'skip'})."
+        ),
+    )
+    scan.add_argument(
+        "--allow-state-changing-probes", action="store_true",
+        default=_CFG.get("allow_state_changing_probes", False),
+        help=(
+            "Permit intrusive probes that may mutate server state, e.g. privesc "
+            "verb tampering with POST/PUT/PATCH against blocked privileged URLs. "
+            "Off by default; only enable against systems you are authorised to "
+            "modify (a staging/test environment)."
         ),
     )
     scan.add_argument(
@@ -818,7 +833,8 @@ def _load_cookie_file(path: str, console) -> list:
     if not path:
         return []
     try:
-        raw = Path(path).read_text(encoding="utf-8").strip()
+        from wscan.textio import read_text_resilient
+        raw = read_text_resilient(path).strip()
         data = json.loads(raw)
         if isinstance(data, list):
             return data
@@ -1093,7 +1109,8 @@ async def run_scan(args):
     exclude_fields = list(args.exclude)
     if args.exclude_file:
         try:
-            lines = Path(args.exclude_file).read_text(encoding="utf-8").splitlines()
+            from wscan.textio import read_text_resilient
+            lines = read_text_resilient(args.exclude_file).splitlines()
             exclude_fields += [l.strip() for l in lines if l.strip() and not l.startswith("#")]
         except Exception as ex:
             console.print(f"[yellow]Warning: Could not read exclude file: {ex}[/yellow]")
@@ -1127,7 +1144,8 @@ async def run_scan(args):
     excl_urls_file = getattr(args, "exclude_urls_file", None)
     if excl_urls_file:
         try:
-            lines = Path(excl_urls_file).read_text(encoding="utf-8").splitlines()
+            from wscan.textio import read_text_resilient
+            lines = read_text_resilient(excl_urls_file).splitlines()
             exclude_urls = [l.strip() for l in lines if l.strip() and not l.startswith("#")]
             console.print(f"Excluded URLs   : [yellow]{len(exclude_urls)} entry/entries from {excl_urls_file}[/yellow]")
         except Exception as ex:
@@ -1137,7 +1155,8 @@ async def run_scan(args):
         if not path:
             return []
         try:
-            lines = Path(path).read_text(encoding="utf-8").splitlines()
+            from wscan.textio import read_text_resilient
+            lines = read_text_resilient(path).splitlines()
             return [l.strip() for l in lines if l.strip() and not l.lstrip().startswith("#")]
         except Exception as ex:
             console.print(f"[yellow]Warning: Could not read scope file {path}: {ex}[/yellow]")
@@ -1177,8 +1196,8 @@ async def run_scan(args):
     _accounts_file = getattr(args, "accounts_file", "") or ""
     if _accounts_file:
         try:
-            with open(_accounts_file, encoding="utf-8") as _af:
-                _af_data = _yaml.safe_load(_af) or {}
+            from wscan.textio import read_text_resilient
+            _af_data = _yaml.safe_load(read_text_resilient(_accounts_file)) or {}
             _accounts_list.extend(_af_data.get("accounts", []))
         except Exception as _ex:
             console.print(f"[yellow]Warning: Could not read accounts file: {_ex}[/yellow]")
@@ -1266,6 +1285,7 @@ async def run_scan(args):
             accounts=_accounts_list,
             auto_register=getattr(args, "auto_register", False),
             auto_register_count=getattr(args, "auto_register_count", 2),
+            allow_state_changing_probes=getattr(args, "allow_state_changing_probes", False),
             # ①: SPA crawl
             spa_crawl=getattr(args, "spa_crawl", False),
             # I: 差分スキャン
@@ -1452,6 +1472,7 @@ async def run_serve(args):
             "interactive_crawl_review": _CFG.get("interactive_crawl_review", False),
             "ctf_mode": _CFG.get("ctf_mode", False),
             "tls_verify": _CFG.get("tls_verify", False),
+            "allow_state_changing_probes": _CFG.get("allow_state_changing_probes", False),
         },
     }
     # /api/auto-config エンドポイント用に LLM 設定をキャッシュ
@@ -1621,6 +1642,12 @@ async def run_serve(args):
                 accounts=cfg.get("accounts", []) or [],
                 auto_register=bool(cfg.get("auto_register", False)),
                 auto_register_count=int(cfg.get("auto_register_count", 2)),
+                allow_state_changing_probes=bool(
+                    cfg.get(
+                        "allow_state_changing_probes",
+                        _CFG.get("allow_state_changing_probes", False),
+                    )
+                ),
                 seed_urls=seed_urls or None,
                 manual_crawl_path=cfg.get("manual_crawl_file", "") or "",
                 headers=cfg.get("headers", {}) or {},
@@ -1804,7 +1831,7 @@ async def run_setup(args):
         f"You are a web security scanner configuration assistant.\n"
         f"The user wants to scan this target: {description}\n\n"
         f"Available checks: sqli, xss, dom_xss, os, ssti, path_traversal, "
-        f"csrf, header_injection, mail_header, open_redirect, clickjacking, session, privesc, "
+        f"csrf, header_injection, open_redirect, clickjacking, session, privesc, "
         f"nosql, deserialization, ssrf, graphql, jwt, cms, xxe, ldap, file_upload, "
         f"race_condition, websocket\n\n"
         f"Based on the description, suggest the optimal scan command. "
@@ -1951,6 +1978,10 @@ async def run_manual_crawl(args):
 
 
 def main():
+    # Make stdout/stderr tolerant of non-ASCII output (streaming LLM text,
+    # payload snippets) on consoles whose native codec can't encode it.
+    from wscan.textio import configure_console
+    configure_console()
     args = parse_args()
     try:
         if args.command == "setup":
