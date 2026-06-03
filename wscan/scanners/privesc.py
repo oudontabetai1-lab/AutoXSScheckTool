@@ -672,11 +672,26 @@ class PrivEscScanner(BaseScanner):
         control_urls = self._nonexistent_control_urls(parsed)
 
         # Public-root control: some normalisation variants (e.g. '/admin/..;/')
-        # are collapsed by the server/proxy to the site root '/'. If a variant's
-        # response matches the public root, it reached '/', not the protected
-        # resource. Fetched once and reused by the path and rewrite branches.
+        # are collapsed by the server/proxy to a parent landing page rather than
+        # the protected resource. The collapse target is the path's parent
+        # directory — the site root '/' for a top-level path, or e.g. '/app/'
+        # for a mounted '/app/admin'. We fetch the site root (reused by the
+        # rewrite branch) plus the immediate parent directory when it differs,
+        # and suppress a variant whose response matches either.
         root_url = urlunparse(parsed._replace(path="/", query="", fragment=""))
         root_status, root_body = await self._raw_request("GET", root_url, timeout)
+
+        collapse_controls: list[tuple[int, str]] = [(root_status, root_body)]
+        parent_path = path.rsplit("/", 1)[0] or "/"
+        if not parent_path.endswith("/"):
+            parent_path += "/"
+        if parent_path != "/":
+            p_status, p_body = await self._raw_request(
+                "GET",
+                urlunparse(parsed._replace(path=parent_path, query="", fragment="")),
+                timeout,
+            )
+            collapse_controls.append((p_status, p_body))
 
         # 1) Path-normalisation bypass
         for variant_path in _path_bypass_variants(path):
@@ -689,9 +704,12 @@ class PrivEscScanner(BaseScanner):
             # fallback / custom error) — the variant didn't reach the resource.
             if await self._any_control_equivalent("GET", control_urls, timeout, None, status, body):
                 continue
-            # If the variant collapsed to the public root, it reached '/', not
-            # the protected resource.
-            if root_body and self._responses_equivalent(root_status, root_body, status, body):
+            # If the variant collapsed to a parent landing page (site root or the
+            # path's parent directory), it didn't reach the protected resource.
+            if any(
+                c_body and self._responses_equivalent(c_status, c_body, status, body)
+                for c_status, c_body in collapse_controls
+            ):
                 continue
             return [_make(
                 f"path normalisation '{variant_path}'", candidate_url,

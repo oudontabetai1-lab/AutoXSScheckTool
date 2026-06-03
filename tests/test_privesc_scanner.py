@@ -425,6 +425,33 @@ class PrivEscScannerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(findings, [])
 
+    async def test_bypass_path_variant_suppressed_by_parent_dir_of_mounted_app(self):
+        # '/app/admin/..;/' collapses to the mounted app's landing '/app/', not
+        # the site root and not a 404 — must be suppressed via the parent control.
+        scanner = PrivEscScanner(_DummyEngine())
+        site_home = "<html><body>Marketing site root — totally different content here.</body></html>"
+        app_landing = "<html><body>The app landing page under /app, generic and public here.</body></html>"
+
+        async def fake(method, url, timeout, *, headers=None, cookies=""):
+            tail = url.split("fixture.test", 1)[-1]
+            if "nonexistent" in tail:
+                return 404, "not found"          # both nonexistent controls 404
+            if tail == "/app/admin":
+                return 403, ""                   # canonical resource blocked
+            if tail in ("/", ""):
+                return 200, site_home            # site-root control (different)
+            if tail == "/app/":
+                return 200, app_landing          # parent-dir control
+            return 200, app_landing              # variants collapse to /app/
+
+        scanner._raw_request = AsyncMock(side_effect=fake)
+
+        findings = await scanner._test_forbidden_bypass(
+            "http://fixture.test/app/admin", True, timeout=3,
+        )
+
+        self.assertEqual(findings, [])
+
     async def test_bypass_path_variant_suppressed_by_catchall(self):
         # The server serves a generic 200 page (SPA fallback) for ANY unknown
         # path, including the catch-all control -> path variants must not flag.
