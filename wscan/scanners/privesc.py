@@ -138,10 +138,11 @@ _BYPASS_HEADERS: tuple[dict, ...] = (
 _REWRITE_HEADERS: tuple[str, ...] = ("X-Original-URL", "X-Rewrite-URL")
 
 # Verbs to try when a GET is blocked (verb / method tampering).
-# OPTIONS is non-mutating and always safe to send. POST/PUT/PATCH can change
-# server state (e.g. an endpoint that acts on method alone like /admin/cache/clear),
+# OPTIONS is deliberately NOT probed: a successful OPTIONS only returns
+# preflight/metadata and never proves that protected data or an operation
+# became accessible. POST/PUT/PATCH *can* change state or perform an action,
 # so they only run when the operator explicitly opts in.
-_TAMPER_METHODS_SAFE: tuple[str, ...] = ("OPTIONS",)
+_TAMPER_METHODS_SAFE: tuple[str, ...] = ()
 _TAMPER_METHODS_MUTATING: tuple[str, ...] = ("POST", "PUT", "PATCH")
 
 # Header names that carry credentials. The 401/403 *bypass* probes claim to be
@@ -181,6 +182,9 @@ def _path_bypass_variants(path: str) -> list[str]:
     segs = base.split("/")
     last = segs[-1]
     prefix = "/".join(segs[:-1])
+    # NOTE: do not add file-extension suffixes (e.g. ".json"/".html"). Those are
+    # plausibly distinct application routes rather than normalisation aliases of
+    # the protected path, so a 2xx there is not evidence of an ACL bypass.
     variants = {
         base + "/",
         base + "//",
@@ -190,8 +194,6 @@ def _path_bypass_variants(path: str) -> list[str]:
         base + ";/",
         base + "%20",
         base + "%09",
-        base + ".json",
-        base + ".html",
         f"{prefix}//{last}",
         f"{prefix}/./{last}",
         f"{prefix}/{last};",
@@ -735,9 +737,10 @@ class PrivEscScanner(BaseScanner):
                  "headers": {hname: rewrite_target}},
             )]
 
-        # 4) HTTP verb / method tampering. OPTIONS is always safe; the
-        # state-changing verbs run only when the operator opts in, since blindly
-        # POST/PUT/PATCH-ing a privileged URL could mutate server state.
+        # 4) HTTP verb / method tampering. Nothing runs by default (OPTIONS is
+        # not evidence of a bypass); the state-changing verbs run only when the
+        # operator opts in, since blindly POST/PUT/PATCH-ing a privileged URL
+        # could mutate server state.
         methods = list(_TAMPER_METHODS_SAFE)
         if getattr(self.engine, "allow_state_changing_probes", False):
             methods += list(_TAMPER_METHODS_MUTATING)

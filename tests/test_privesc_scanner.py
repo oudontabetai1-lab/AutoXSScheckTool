@@ -419,13 +419,15 @@ class PrivEscScannerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(findings, [])
 
-    async def test_bypass_options_suppressed_by_generic_handler(self):
-        # A blanket OPTIONS handler (e.g. CORS preflight) answers 2xx for any
-        # path; that must not be reported as an access-control bypass.
+    async def test_bypass_does_not_probe_or_report_options(self):
+        # A successful OPTIONS response is not evidence of a bypass, so OPTIONS
+        # must neither be probed by default nor reported.
         scanner = PrivEscScanner(_DummyEngine())
         cors = "<html><body>CORS preflight OK. Allow: GET, POST, OPTIONS. Move along now.</body></html>"
+        seen_methods = []
 
         async def fake(method, url, timeout, *, headers=None, cookies=""):
+            seen_methods.append(method)
             if method == "OPTIONS":
                 return 200, cors        # generic handler for every path
             return 403, ""              # GET (baseline + all variants) blocked
@@ -437,6 +439,7 @@ class PrivEscScannerTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(findings, [])
+        self.assertNotIn("OPTIONS", seen_methods)
 
     async def test_bypass_spoofed_header_suppressed_by_default_vhost(self):
         # X-Forwarded-Host routes ANY path to a default marketing vhost; the
@@ -474,7 +477,8 @@ class PrivEscScannerTests(unittest.IsolatedAsyncioTestCase):
             "http://fixture.test/admin", True, timeout=3,
         )
 
-        self.assertIn("OPTIONS", seen_methods)
+        # Nothing is probed by default (OPTIONS removed, mutating verbs gated).
+        self.assertNotIn("OPTIONS", seen_methods)
         self.assertNotIn("POST", seen_methods)
         self.assertNotIn("PUT", seen_methods)
         self.assertNotIn("PATCH", seen_methods)

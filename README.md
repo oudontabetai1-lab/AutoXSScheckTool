@@ -138,7 +138,7 @@ PEM の cert/key は Playwright と httpx の両方で使われます。PFX は 
 | 1.5 | クロスサイト・スクリプティング（格納型） | `stored_xss` | マーカー注入 → 全ページ横断検出 |
 | 1.6 | CSRF | `csrf` | POST フォームの CSRF トークン有無 |
 | 1.7 | HTTPヘッダ・インジェクション | `header_injection` | CRLF 注入 → レスポンスヘッダ確認 |
-| 1.8 | メールヘッダ・インジェクション | `mail_header` | メール関連フィールドへの CRLF 注入 |
+| 1.8 | メールヘッダ・インジェクション | `mail_header` | ⚠️ 無効化済み（確証に OOB メール受信が必要で黒box では実用的に検知できないため。実装は残置） |
 | 1.9 | クリックジャッキング | `clickjacking` | X-Frame-Options / CSP frame-ancestors 確認 |
 | 1.11 | オープンリダイレクト | `open_redirect` | リダイレクト先未検証の検出 |
 | — | アクセス制御・権限昇格 | `privesc` | 未認証アクセス・垂直/水平権限昇格 (IDOR)・401/403 バイパス |
@@ -388,7 +388,7 @@ usage: main.py scan [オプション] URL
 主要オプション:
   --checks CHECK ...       実行するチェック (デフォルト: config/wscan.yaml)
                            選択肢: sqli xss dom_xss stored_xss os path_traversal
-                                   session csrf header_injection mail_header
+                                   session csrf header_injection
                                    clickjacking open_redirect ssti privesc
                                    cors info_disclosure host_header security_headers
                                    file_upload nosql deserialization request_smuggling
