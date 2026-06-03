@@ -1472,6 +1472,7 @@ async def run_serve(args):
             "interactive_crawl_review": _CFG.get("interactive_crawl_review", False),
             "ctf_mode": _CFG.get("ctf_mode", False),
             "tls_verify": _CFG.get("tls_verify", False),
+            "allow_state_changing_probes": _CFG.get("allow_state_changing_probes", False),
         },
     }
     # /api/auto-config エンドポイント用に LLM 設定をキャッシュ
@@ -1641,7 +1642,12 @@ async def run_serve(args):
                 accounts=cfg.get("accounts", []) or [],
                 auto_register=bool(cfg.get("auto_register", False)),
                 auto_register_count=int(cfg.get("auto_register_count", 2)),
-                allow_state_changing_probes=bool(cfg.get("allow_state_changing_probes", False)),
+                allow_state_changing_probes=bool(
+                    cfg.get(
+                        "allow_state_changing_probes",
+                        _CFG.get("allow_state_changing_probes", False),
+                    )
+                ),
                 seed_urls=seed_urls or None,
                 manual_crawl_path=cfg.get("manual_crawl_file", "") or "",
                 headers=cfg.get("headers", {}) or {},
