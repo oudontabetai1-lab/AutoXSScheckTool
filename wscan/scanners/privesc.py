@@ -671,27 +671,18 @@ class PrivEscScanner(BaseScanner):
         # control yields an equivalent "successful" response.
         control_urls = self._nonexistent_control_urls(parsed)
 
-        # Public-root control: some normalisation variants (e.g. '/admin/..;/')
-        # are collapsed by the server/proxy to a parent landing page rather than
-        # the protected resource. The collapse target is the path's parent
-        # directory — the site root '/' for a top-level path, or e.g. '/app/'
-        # for a mounted '/app/admin'. We fetch the site root (reused by the
-        # rewrite branch) plus the immediate parent directory when it differs,
-        # and suppress a variant whose response matches either.
-        root_url = urlunparse(parsed._replace(path="/", query="", fragment=""))
-        root_status, root_body = await self._raw_request("GET", root_url, timeout)
-
-        collapse_controls: list[tuple[int, str]] = [(root_status, root_body)]
-        parent_path = path.rsplit("/", 1)[0] or "/"
-        if not parent_path.endswith("/"):
-            parent_path += "/"
-        if parent_path != "/":
-            p_status, p_body = await self._raw_request(
-                "GET",
-                urlunparse(parsed._replace(path=parent_path, query="", fragment="")),
-                timeout,
-            )
-            collapse_controls.append((p_status, p_body))
+        # Public-root / parent control: some normalisation variants (e.g.
+        # '/admin/..;/') are collapsed by the server/proxy to a parent landing
+        # page rather than the protected resource — the site root '/' for a
+        # top-level path, or e.g. '/app/' for a mounted '/app/admin'. We fetch
+        # the site root (index 0, reused by the rewrite branch) plus the parent
+        # directory when it differs, and suppress a variant matching either.
+        collapse_urls = self._collapse_control_urls(parsed)
+        collapse_controls: list[tuple[int, str]] = [
+            await self._raw_request("GET", c_url, timeout) for c_url in collapse_urls
+        ]
+        root_url = collapse_urls[0]
+        root_status, root_body = collapse_controls[0]
 
         # 1) Path-normalisation bypass
         for variant_path in _path_bypass_variants(path):
@@ -1314,6 +1305,20 @@ class PrivEscScanner(BaseScanner):
             for p in paths
         ]
 
+    def _collapse_control_urls(self, parsed) -> list[str]:
+        """Parent landing pages a '..;/'-style normalisation variant may collapse
+        to: the site root '/' (index 0, reused by the rewrite branch) and the
+        protected path's immediate parent directory when it differs."""
+        urls = [urlunparse(parsed._replace(path="/", query="", fragment=""))]
+        parent_path = (parsed.path or "/").rsplit("/", 1)[0] or "/"
+        if not parent_path.endswith("/"):
+            parent_path += "/"
+        if parent_path != "/":
+            urls.append(
+                urlunparse(parsed._replace(path=parent_path, query="", fragment=""))
+            )
+        return urls
+
     async def _any_control_equivalent(
         self,
         method: str,
@@ -1436,6 +1441,14 @@ class PrivEscScanner(BaseScanner):
                     method, control_urls, timeout, headers or None, status, body
                 ):
                     return False
+                # Path-normalisation findings (plain GET) can collapse to a
+                # parent landing page; repeat the scan-time root/parent check so
+                # a variant that only reached '/' (or '/app/') isn't confirmed.
+                if method == "GET" and not headers:
+                    for c_url in self._collapse_control_urls(parsed_orig):
+                        c_status, c_body = await self._raw_request("GET", c_url, timeout)
+                        if c_body and self._responses_equivalent(c_status, c_body, status, body):
+                            return False
             return True
 
         if finding.check_type == "privesc_vertical":

@@ -673,12 +673,17 @@ class PrivEscScannerTests(unittest.IsolatedAsyncioTestCase):
         scanner = PrivEscScanner(_DummyEngine())
         admin = "<html><h1>Admin</h1><p>secret content here for the panel</p></html>"
 
+        home = "<html><body>Public homepage — different content from the admin area.</body></html>"
+
         async def fake(method, url, timeout, *, headers=None, cookies=""):
-            if url.rstrip("/").endswith("/admin"):
+            tail = url.split("fixture.test", 1)[-1]
+            if "nonexistent" in tail:
+                return 404, "not found"     # nonexistent controls
+            if tail in ("/", ""):
+                return 200, home            # public-root collapse control (differs)
+            if tail == "/admin":
                 return 403, ""              # canonical resource still blocked
-            if "nonexistent" in url:
-                return 404, "not found"     # control paths
-            return 200, admin               # the /admin/. variant serves content
+            return 200, admin               # the /admin/. variant serves admin content
 
         scanner._raw_request = AsyncMock(side_effect=fake)
         finding = Finding(
@@ -694,6 +699,35 @@ class PrivEscScannerTests(unittest.IsolatedAsyncioTestCase):
         result = await scanner.verify_finding(finding)
 
         self.assertTrue(result)
+
+    async def test_bypass_verifier_rejects_variant_collapsing_to_root(self):
+        # At verify time the candidate now collapses to the public homepage —
+        # it didn't reach the protected resource, so it must not be confirmed.
+        scanner = PrivEscScanner(_DummyEngine())
+        home = "<html><body>Public homepage — generic marketing content here now.</body></html>"
+
+        async def fake(method, url, timeout, *, headers=None, cookies=""):
+            tail = url.split("fixture.test", 1)[-1]
+            if "nonexistent" in tail:
+                return 404, "not found"
+            if tail == "/admin":
+                return 403, ""              # canonical still blocked
+            return 200, home                # root control AND the variant -> homepage
+
+        scanner._raw_request = AsyncMock(side_effect=fake)
+        finding = Finding(
+            check_type="privesc_bypass",
+            severity="high",
+            url="http://fixture.test/admin",
+            field_name="(access-control bypass: path normalisation '/admin/..;/')",
+            payload="http://fixture.test/admin/..;/",
+            evidence="bypass via path normalisation",
+            request={"url": "http://fixture.test/admin/..;/", "method": "GET", "headers": {}},
+        )
+
+        result = await scanner.verify_finding(finding)
+
+        self.assertFalse(result)
 
     async def test_bypass_verifier_rejects_when_baseline_now_public(self):
         # If the canonical resource is no longer blocked, there is no bypass.
