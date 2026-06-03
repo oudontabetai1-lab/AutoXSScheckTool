@@ -69,6 +69,7 @@ def _load_config(path: Path = _CONFIG_PATH) -> dict:
     cfg["target_urls"]             = list(s.get("target_urls",    []))
     cfg["access_urls"]             = list(s.get("access_urls",    []))
     cfg["manual_crawl_file"]       = str(s.get("manual_crawl_file", "") or "")
+    cfg["allow_state_changing_probes"] = bool(s.get("allow_state_changing_probes", False))
 
     cfg["headless"]                = bool(b.get("headless", False))
     cfg["proxy"]                   = str(b.get("proxy", "") or "")
@@ -1640,6 +1641,7 @@ async def run_serve(args):
                 accounts=cfg.get("accounts", []) or [],
                 auto_register=bool(cfg.get("auto_register", False)),
                 auto_register_count=int(cfg.get("auto_register_count", 2)),
+                allow_state_changing_probes=bool(cfg.get("allow_state_changing_probes", False)),
                 seed_urls=seed_urls or None,
                 manual_crawl_path=cfg.get("manual_crawl_file", "") or "",
                 headers=cfg.get("headers", {}) or {},

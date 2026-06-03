@@ -31,6 +31,11 @@ scan:
   # 除外フィールド名 (csrf_token など)
   exclude_fields: []
 
+  # 権限昇格バイパス検査で、状態を変更し得る POST/PUT/PATCH のメソッド改ざん
+  # プローブを許可するか (既定 false)。本番環境では有効化しないこと。
+  # 変更を加えても安全な検証環境に対してのみ true にする。
+  # allow_state_changing_probes: false
+
   # 除外URLプレフィックス
   exclude_urls: []
 
