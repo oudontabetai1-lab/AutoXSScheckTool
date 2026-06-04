@@ -2869,9 +2869,12 @@ function scnRenderPalette() {
   body.innerHTML = pages.map((p, pi) => {
     const forms = (p.form_details || []);
     const formsHtml = forms.map((f, fi) => {
-      const fields = (f.fields || []).map(fld =>
+      // Field names come from the scanned (untrusted) target, so never inline
+      // them into the onclick handler — pass integer indices and look the name
+      // up from sbState. The visible text is escaped with _esc().
+      const fields = (f.fields || []).map((fld, fldi) =>
         `<span class="scn-pal-field" title="入力ステップを追加"
-           onclick="scnPalFill(${JSON.stringify(fld.name||'').replace(/"/g,'&quot;')})">⌨️ ${_esc(fld.name)}</span>`
+           onclick="scnPalFill(${pi},${fi},${fldi})">⌨️ ${_esc(fld.name)}</span>`
       ).join('');
       return `<div class="scn-pal-form">
           <div class="scn-pal-form-title">
@@ -2893,8 +2896,11 @@ function scnPalNavigate(pi) {
   const p = sbState.pages[pi]; if (!p) return;
   scnAddStep('navigate', {url: p.url || ''});
 }
-function scnPalFill(name) {
-  scnAddStep('fill', {field: name || '', value: ''});
+function scnPalFill(pi, fi, fldi) {
+  const p = sbState.pages[pi]; if (!p) return;
+  const f = (p.form_details || [])[fi]; if (!f) return;
+  const fld = (f.fields || [])[fldi]; if (!fld) return;
+  scnAddStep('fill', {field: fld.name || '', value: ''});
 }
 function scnPalAddForm(pi, fi) {
   const p = sbState.pages[pi]; if (!p) return;
