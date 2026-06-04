@@ -1950,6 +1950,8 @@ class ScanEngine:
         "continue" (or the review times out).
         """
         current = list(pages)
+        # Track scenarios already merged so re-crawl loops do not duplicate them.
+        applied_flow_sigs: set[str] = set()
         while True:
             pages_data = [
                 {
@@ -1957,6 +1959,24 @@ class ScanEngine:
                     "depth": p.depth,
                     "forms": len(p.forms or []),
                     "params": len(p.url_params or []),
+                    # Rich detail for the manual scenario builder: form actions and
+                    # their input fields so the operator can compose steps visually.
+                    "param_names": list(p.url_params or []),
+                    "form_details": [
+                        {
+                            "action": (f.get("action") or p.url),
+                            "method": (f.get("method") or "get"),
+                            "fields": [
+                                {
+                                    "name": (inp.get("name") or inp.get("id") or ""),
+                                    "type": (inp.get("type") or "text"),
+                                }
+                                for inp in (f.get("inputs") or [])
+                                if (inp.get("name") or inp.get("id"))
+                            ],
+                        }
+                        for f in (p.forms or [])
+                    ],
                 }
                 for p in current
             ]
@@ -1988,6 +2008,27 @@ class ScanEngine:
             manual_file = (action.get("manual_crawl_file") or "").strip()
             if manual_file:
                 self.manual_crawl_path = manual_file
+
+            # Manual attack scenarios composed in the dashboard builder. Merge any
+            # newly-defined scenarios into the flows executed before each attack,
+            # deduplicating so re-crawl iterations do not register them twice.
+            for raw_flow in (action.get("flows") or []):
+                try:
+                    sig = json.dumps(raw_flow, sort_keys=True, ensure_ascii=False)
+                except (TypeError, ValueError):
+                    continue
+                if sig in applied_flow_sigs:
+                    continue
+                applied_flow_sigs.add(sig)
+                try:
+                    self.flows.append(ScanFlow.from_dict(raw_flow))
+                    console.print(
+                        f"  [cyan][Crawl Review][/cyan] 手動シナリオを追加: "
+                        f"{raw_flow.get('name', 'scenario')} "
+                        f"({len(raw_flow.get('steps') or [])} ステップ)"
+                    )
+                except Exception as exc:
+                    console.print(f"  [yellow][Crawl Review] シナリオ取り込み失敗: {exc}[/yellow]")
 
             if command == "recrawl" or extra_urls or manual_file:
                 console.print(
