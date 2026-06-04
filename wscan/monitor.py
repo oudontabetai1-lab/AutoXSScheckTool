@@ -698,6 +698,8 @@ class MonitorServer:
                 "command": msg.get("command", "continue"),
                 "extra_urls": msg.get("extra_urls", []) or [],
                 "manual_crawl_file": msg.get("manual_crawl_file", "") or "",
+                # Manual attack scenarios built in the dashboard scenario editor.
+                "flows": msg.get("flows", []) or [],
             }
             self.crawl_review_event.set()
 
