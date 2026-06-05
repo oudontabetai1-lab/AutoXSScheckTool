@@ -29,6 +29,7 @@ python3 main.py serve --port 8765
 | [docs/operation_guide_ja.md](docs/operation_guide_ja.md) | 実検査前の準備、認証、スコープ設計、検査強度、出力物、再検査の運用ガイド |
 | [docs/troubleshooting_ja.md](docs/troubleshooting_ja.md) | アクセスできない、検査が途切れる、検出できない、UIに反映されない場合の切り分け |
 | [docs/advanced_features.md](docs/advanced_features.md) | 高度診断支援機能の詳細 |
+| [docs/oob_email_ja.md](docs/oob_email_ja.md) | OOB（帯域外）メール受信ボックスと MCP サーバの設定（blind XSS/SSRF・メールヘッダ注入の確証用） |
 
 初めて使う場合は、この README の「クイックスタート」から始め、実際の操作は `dashboard_usage_ja.md`、現場投入前の確認は `operation_guide_ja.md`、問題発生時は `troubleshooting_ja.md` の順に確認してください。
 

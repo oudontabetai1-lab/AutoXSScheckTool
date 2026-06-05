@@ -1,0 +1,9 @@
+# Requirements for the OOB email MCP server (wscan/oob_email_mcp.py)
+# Install in addition to requirements.txt:
+#   pip install -r requirements-mcp.txt
+#
+# Then configure the receiving mailbox via WSCAN_OOB_* environment variables
+# (see docs/oob_email_ja.md) and launch:
+#   python -m wscan.oob_email_mcp
+
+mcp>=1.0.0
