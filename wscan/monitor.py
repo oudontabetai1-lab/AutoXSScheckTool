@@ -91,6 +91,9 @@ class MonitorServer:
         self.api_findings: list[dict] = []   # emit_finding() で自動蓄積
         self.api_report_path: Optional[str] = None
         self.manual_crawl_session = None
+        # Optional RequestLogger (set by ScanEngine). Persists tested payloads
+        # to payloads.jsonl alongside the HTTP request audit log.
+        self.request_logger = None
 
     # ------------------------------------------------------------------
     # Authentication helpers
@@ -808,6 +811,8 @@ class MonitorServer:
         })
 
     async def emit_payload_test(self, field: str, payload: str, check_type: str, url: str = "") -> None:
+        if self.request_logger is not None:
+            self.request_logger.log_payload(field, payload, check_type, url)
         await self.emit("payload_test", {
             "field": field,
             "payload": payload,

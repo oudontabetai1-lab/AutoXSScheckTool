@@ -231,7 +231,13 @@ class ScanEngine:
         tls_ca_cert: str = "",
         tls_verify: bool = False,
     ):
-        self.target_url = url.rstrip("/")
+        # ユーザーが指定した URL は末尾スラッシュも含めてそのまま保持する。
+        # 以前は url.rstrip("/") で末尾の "/" を一律に除去していたが、
+        # http://example.com/app/ と /app は別リソースになりうるため、
+        # 指定どおりにリクエストする。スコープ判定側 (_normalize_scope_urls /
+        # _url_matches_scope など) は両辺を rstrip("/") して比較するので、
+        # 末尾スラッシュを保持しても突合は崩れない。
+        self.target_url = url.strip()
         self.monitor = monitor
         self.depth = depth
         self.checks = list(checks or ["sqli", "xss", "os"])
@@ -345,6 +351,12 @@ class ScanEngine:
         self.output_dir = Path(output_dir) if output_dir else OUTPUT_BASE / ts
         self.output_dir.mkdir(parents=True, exist_ok=True)
         (self.output_dir / "screenshots").mkdir(exist_ok=True)
+        # リクエスト/ペイロードの監査ログ。送信した全 HTTP リクエスト
+        # (http_requests.jsonl) と投入ペイロード (payloads.jsonl) を保存する。
+        from .request_logger import RequestLogger
+        self.request_logger = RequestLogger(self.output_dir)
+        if self.monitor is not None:
+            self.monitor.request_logger = self.request_logger
         # Let the monitor/portal map the running scan to its artifact folder.
         # Only when the output folder is under OUTPUT_BASE (the portal serves
         # reports from there); a custom output_dir elsewhere is not listed.
@@ -388,6 +400,7 @@ class ScanEngine:
             extra_headers=self.header_manager.current(),
             tls_config=self.tls_config,
             target_url=self.target_url,
+            request_logger=self.request_logger,
         )
         # When the refresh task fetches a new token, push it into the browser
         # context so crawled pages immediately use the rotated header.

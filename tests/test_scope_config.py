@@ -17,6 +17,24 @@ class ScopeConfigTests(unittest.TestCase):
             **kwargs,
         )
 
+    def test_trailing_slash_in_target_url_is_preserved(self):
+        # A user-specified trailing slash must be kept verbatim — /app/ and /app
+        # can resolve to different resources, so the scanner must request exactly
+        # what was given instead of silently stripping the slash.
+        engine = ScanEngine(
+            "http://app.test/app/",
+            checks=["xss"],
+            llm_provider="none",
+            open_report=False,
+            enable_waf_detection=False,
+            enable_ai_analysis=False,
+            enable_payload_learning=False,
+            enable_adaptive_payloads=False,
+        )
+        self.assertEqual(engine.target_url, "http://app.test/app/")
+        # Scope matching still works because comparisons normalise both sides.
+        self.assertTrue(engine._is_attack_target_url("http://app.test/app/sub"))
+
     def test_primary_origin_is_attack_scope_by_default(self):
         engine = self._engine()
 
