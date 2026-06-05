@@ -159,6 +159,50 @@ class XSSScanner(BaseScanner):
 
             await asyncio.sleep(0.2 * self.sleep_factor)
 
+        # --- Check 3: String-concatenation / quote-break equivalence probe ---
+        # When direct reflection checks find nothing, probe whether the input is
+        # embedded in a quoted HTML attribute or JS string that can be split with
+        # matching quotes (e.g. AA" "BB / 'AA'+'BB'). A collapse to the marker
+        # proves the quote breaks the surrounding context — a strong XSS signal.
+        if not findings:
+            for ctx in ("html_attr", "js_string"):
+                probe = await self.run_equivalence_probe(
+                    url, form_index, field_name, is_url_param, context=ctx
+                )
+                if not probe:
+                    continue
+                verdict, pair = probe
+                finding = await self.record_finding(
+                    url=url,
+                    field_name=field_name,
+                    payload=verdict.details.get("matched_payload", ""),
+                    evidence=(
+                        "String-concatenation/quote-break equivalence XSS: "
+                        + verdict.rationale
+                    ),
+                    pair=pair,
+                    severity="medium",
+                    confidence="likely" if verdict.confidence >= 0.85 else "tentative",
+                    evidence_type="xss_concat_equivalence",
+                    evidence_details={
+                        "matched_dialect": verdict.matched_dialect,
+                        "matched_probe": verdict.matched_probe,
+                        "probe_confidence": round(verdict.confidence, 3),
+                        **verdict.details,
+                    },
+                    reproduction_steps=[
+                        f"Open {url}",
+                        f"Submit the quote-splitting payload to '{field_name}': "
+                        f"{verdict.details.get('matched_payload', '')}",
+                        "Confirm the response collapses to the marker, proving the "
+                        "injected quote breaks the surrounding attribute/JS context.",
+                        "Escalate manually with a context-appropriate event/script payload.",
+                    ],
+                )
+                if finding:
+                    findings.append(finding)
+                break
+
         return findings
 
     def _check_reflected(self, source: str, payload: str, baseline_source: str = "") -> str:

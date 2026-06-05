@@ -250,6 +250,54 @@ class BaseScanner(ABC):
             return (resp_ts - req_ts) >= threshold
         return False
 
+    async def run_equivalence_probe(
+        self,
+        url: str,
+        form_index: int,
+        field_name: str,
+        is_url_param: bool,
+        *,
+        context: str = "sql",
+    ) -> "Optional[tuple]":
+        """文字列結合の等価性プローブを 1 フィールドに対して実行する。
+
+        ``context`` に応じたプローブ群を生成して順に投入し、応答本文から
+        ``equivalence_probe.evaluate`` で注入可否を判定する。判定が陽性なら
+        ``(ProbeVerdict, last_pair)`` を、そうでなければ ``None`` を返す。
+
+        SQLi / XSS の両スキャナから再利用する共通ロジック。投入は各スキャナの
+        ``_apply_payload`` に委譲するため、フォーム/URLパラメータ双方に対応する。
+        """
+        from wscan import equivalence_probe as eqp
+
+        builders = {
+            "sql": eqp.sql_probe_set,
+            "html_attr": eqp.html_attr_probe_set,
+            "js_string": eqp.js_string_probe_set,
+        }
+        builder = builders.get(context)
+        if builder is None:
+            return None
+
+        probe_set = builder()
+        responses: dict[str, str] = {}
+        last_pair: dict = {}
+        for probe in probe_set.probes:
+            try:
+                source, pair = await self._apply_payload(
+                    url, form_index, field_name, probe.value, is_url_param
+                )
+            except Exception:
+                continue
+            last_pair = pair or last_pair
+            body = (pair.get("response", {}) or {}).get("body") or source or ""
+            responses[probe.name] = body
+
+        verdict = eqp.evaluate(probe_set, responses)
+        if verdict.injectable:
+            return verdict, last_pair
+        return None
+
     def current_page_pair(self, url: str) -> dict:
         """
         Return the captured request/response for the page under test.
