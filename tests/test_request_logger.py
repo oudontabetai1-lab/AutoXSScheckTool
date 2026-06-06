@@ -12,6 +12,66 @@ def _read_jsonl(path: Path) -> list[dict]:
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
+class RedactionTests(unittest.TestCase):
+    def test_sensitive_headers_redacted(self):
+        with tempfile.TemporaryDirectory() as d:
+            logger = RequestLogger(d)
+            logger.log_http({
+                "request": {
+                    "url": "http://t.test/login",
+                    "method": "POST",
+                    "headers": {"Authorization": "Bearer secret", "Cookie": "sid=abc",
+                                "Accept": "*/*"},
+                    "post_data": "user=bob&password=hunter2&q=hello",
+                    "timestamp": 1.0,
+                },
+                "response": {"status": 200, "headers": {"Set-Cookie": "sid=xyz; HttpOnly"}},
+            })
+            row = _read_jsonl(logger.http_path)[0]
+            self.assertEqual(row["request_headers"]["Authorization"], "<redacted>")
+            self.assertEqual(row["request_headers"]["Cookie"], "<redacted>")
+            self.assertEqual(row["request_headers"]["Accept"], "*/*")  # non-sensitive kept
+            self.assertEqual(row["response_headers"]["Set-Cookie"], "<redacted>")
+            # password redacted, ordinary field kept
+            self.assertIn("password=<redacted>", row["post_data"])
+            self.assertIn("q=hello", row["post_data"])
+            self.assertNotIn("hunter2", row["post_data"])
+
+    def test_json_body_secret_redacted(self):
+        with tempfile.TemporaryDirectory() as d:
+            logger = RequestLogger(d)
+            logger.log_http({
+                "request": {"url": "http://t.test/", "method": "POST", "headers": {},
+                            "post_data": '{"username":"bob","access_token":"tok123"}',
+                            "timestamp": 1.0},
+                "response": {"status": 200, "headers": {}},
+            })
+            row = _read_jsonl(logger.http_path)[0]
+            self.assertNotIn("tok123", row["post_data"])
+            self.assertIn("bob", row["post_data"])
+
+    def test_url_query_secret_redacted(self):
+        with tempfile.TemporaryDirectory() as d:
+            logger = RequestLogger(d)
+            logger.log_http({
+                "request": {"url": "http://t.test/cb?code=1&token=leakme&id=5",
+                            "method": "GET", "headers": {}, "post_data": None,
+                            "timestamp": 1.0},
+                "response": {"status": 200, "headers": {}},
+            })
+            row = _read_jsonl(logger.http_path)[0]
+            self.assertNotIn("leakme", row["url"])
+            self.assertIn("id=5", row["url"])
+
+    def test_payload_url_redacted(self):
+        with tempfile.TemporaryDirectory() as d:
+            logger = RequestLogger(d)
+            logger.log_payload("q", "<script>", "xss", "http://t.test/s?session_id=abc&q=x")
+            row = _read_jsonl(logger.payload_path)[0]
+            self.assertNotIn("abc", row["url"])
+            self.assertEqual(row["payload"], "<script>")  # payload itself preserved
+
+
 class RequestLoggerTests(unittest.TestCase):
     def test_log_http_writes_request_and_payload_in_url(self):
         with tempfile.TemporaryDirectory() as d:

@@ -165,9 +165,10 @@ class FileUploadScanner(BaseScanner):
         action_url = await self._form_action_url(url, form_index)
 
         for filename, content, description in _PROBE_FILES:
+            # log_payload_test(field_name, payload, check_type, url)
             await self.log_payload_test(
-                    url, field_name, filename, self.CHECK_TYPE
-                )
+                field_name, filename, self.CHECK_TYPE, url
+            )
             try:
                 body, status_code, pair = await self._upload_file(
                     action_url, field_name, filename, content
