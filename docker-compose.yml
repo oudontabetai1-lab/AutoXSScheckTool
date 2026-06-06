@@ -23,6 +23,10 @@ services:
       WSCAN_AUTH_TOKEN: "${WSCAN_AUTH_TOKEN:-}"
       WSCAN_HOST: "0.0.0.0"
       WSCAN_PORT: "8765"
+      # Output retention (0 = unlimited). When either limit is set, old scans
+      # under ./output are pruned on startup and after each scan completes.
+      WSCAN_RETENTION_DAYS: "${WSCAN_RETENTION_DAYS:-0}"
+      WSCAN_RETENTION_MAX_SCANS: "${WSCAN_RETENTION_MAX_SCANS:-0}"
       # Optional LLM provider API keys (leave unset to run without an LLM).
       ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"
       OPENAI_API_KEY: "${OPENAI_API_KEY:-}"

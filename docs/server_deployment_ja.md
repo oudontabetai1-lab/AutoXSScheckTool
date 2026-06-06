@@ -45,7 +45,12 @@ WScan のダッシュボードをサーバー上で常時起動し、社内ネ�
 | `GET /reports/{scan_id}/report.html` | レポートをブラウザで閲覧 |
 | `GET /api/v1/scans/{scan_id}/download` | 成果物フォルダを zip でダウンロード |
 | `DELETE /api/v1/scans/{scan_id}` | スキャン成果物を削除（実行中スキャンは不可） |
+| `POST /api/v1/scans/prune` | 保持ポリシーを今すぐ適用し古いスキャンを削除（ポータルの「🧹 整理」ボタン） |
 | `POST /api/v1/scan/abort` | 実行中スキャンの停止を要求 |
+
+`GET /api/v1/scans` のレスポンスには履歴 `scans` に加え、合計使用量と保持ポリシーを示す
+`storage`（`total_bytes` / `scan_count` / `retention_days` / `retention_max_scans`）が含まれます。
+ポータル上部に使用量と保持設定が表示されます。
 
 ### 主なオプション / 環境変数
 
@@ -55,6 +60,12 @@ WScan のダッシュボードをサーバー上で常時起動し、社内ネ�
 | ポート | `--port` | （`config/wscan.yaml` の `port`） | `8765` |
 | アクセストークン | `--auth-token` | `WSCAN_AUTH_TOKEN` | （無効） |
 | ブラウザ自動起動 | `--open-browser` / `--no-open-browser` | — | localhost バインド時のみ起動 |
+| 出力の保持日数 | （`config/wscan.yaml` の `retention_days`） | `WSCAN_RETENTION_DAYS` | `0`（無制限） |
+| 出力の保持件数 | （`config/wscan.yaml` の `retention_max_scans`） | `WSCAN_RETENTION_MAX_SCANS` | `0`（無制限） |
+
+保持ポリシー（`retention_days` / `retention_max_scans`）を設定すると、serve 起動時と各スキャン完了時に
+`output/` 配下の古いスキャン成果物が自動削除されます（実行中スキャンは保護）。0 のときは無制限（既定）。
+ディスクを圧迫しがちな長期運用サーバーでの肥大化防止に有効です。
 
 トークンは推測されにくい長い文字列を使ってください。
 

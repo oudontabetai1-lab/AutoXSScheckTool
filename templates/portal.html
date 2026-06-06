@@ -139,7 +139,9 @@
     <div class="toolbar">
       <p class="section-title" style="margin:0">スキャン履歴</p>
       <span class="spacer"></span>
+      <span class="muted" id="storageInfo"></span>
       <span class="muted" id="histCount"></span>
+      <button class="btn sm" id="pruneBtn" onclick="pruneScans()" style="display:none" title="保持ポリシーを適用して古いスキャンを削除">🧹 整理</button>
       <button class="btn sm" onclick="loadScans()">↻ 更新</button>
     </div>
     <table>
@@ -218,6 +220,30 @@ async function loadStatus() {
   $('newScanBtn').style.display = running ? 'none' : '';
 }
 
+function renderStorage(s) {
+  const el = $('storageInfo');
+  if (el) {
+    const parts = [`使用量 ${fmtSize(s.total_bytes) || '0 B'}`];
+    const policy = [];
+    if (s.retention_days) policy.push(`${s.retention_days}日`);
+    if (s.retention_max_scans) policy.push(`${s.retention_max_scans}件`);
+    if (policy.length) parts.push(`保持 ${policy.join('/')}`);
+    el.textContent = parts.join(' ・ ');
+  }
+  const btn = $('pruneBtn');
+  if (btn) btn.style.display = (s.retention_days || s.retention_max_scans) ? '' : 'none';
+}
+
+async function pruneScans() {
+  if (!confirm('保持ポリシーを適用して古いスキャンを削除しますか？この操作は取り消せません。')) return;
+  try {
+    const r = await api('/api/v1/scans/prune', { method: 'POST' });
+    const d = await r.json().catch(() => ({}));
+    toast(d.pruned_count ? `${d.pruned_count} 件を削除しました` : '削除対象はありませんでした');
+    loadScans();
+  } catch (e) {}
+}
+
 async function abortScan() {
   if (!confirm('実行中のスキャンを停止しますか？\n現在までの結果で部分レポートが保存されます。')) return;
   try {
@@ -233,6 +259,7 @@ async function loadScans() {
   try { data = await (await api('/api/v1/scans')).json(); }
   catch (e) { return; }
   const scans = data.scans || [];
+  renderStorage(data.storage || {});
   $('histCount').textContent = scans.length ? `${scans.length} 件` : '';
   const tb = $('scanRows');
   if (!scans.length) {

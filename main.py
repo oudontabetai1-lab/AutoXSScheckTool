@@ -96,6 +96,9 @@ def _load_config(path: Path = _CONFIG_PATH) -> dict:
     cfg["port"]                    = int(m.get("port", 8765))
     cfg["host"]                    = str(m.get("host", "0.0.0.0"))
     cfg["auth_token"]              = str(m.get("auth_token", ""))
+    # 出力の保持ポリシー（0=無制限）。serve モードで自動削除に使う。
+    cfg["retention_days"]          = float(m.get("retention_days", 0) or 0)
+    cfg["retention_max_scans"]     = int(m.get("retention_max_scans", 0) or 0)
 
     cfg["use_planner"]             = bool(pl.get("enabled",     True))
     cfg["interactive_plan"]        = bool(pl.get("interactive", False))
@@ -1427,6 +1430,17 @@ async def run_serve(args):
     ))
 
     monitor = MonitorServer(port=port, auth_token=auth_token)
+    # 出力の保持ポリシー（env が優先、無ければ config/wscan.yaml の値）。
+    try:
+        monitor.retention_days = float(
+            os.environ.get("WSCAN_RETENTION_DAYS", _CFG.get("retention_days", 0)) or 0
+        )
+        monitor.retention_max_scans = int(
+            os.environ.get("WSCAN_RETENTION_MAX_SCANS", _CFG.get("retention_max_scans", 0)) or 0
+        )
+    except (TypeError, ValueError):
+        monitor.retention_days = 0
+        monitor.retention_max_scans = 0
     monitor.default_scan_cfg = {
         "checks": _CFG.get("checks", ["sqli", "xss", "os"]),
         "depth": _CFG.get("depth", 2),
@@ -1707,6 +1721,14 @@ async def run_serve(args):
             except Exception:
                 pass
 
+        # 起動時に保持ポリシーを一度適用（前回までの古い成果物を整理）。
+        try:
+            pruned = monitor.prune_old_scans()
+            if pruned:
+                console.print(f"[dim]保持ポリシー: 古いスキャン {len(pruned)} 件を削除しました。[/dim]")
+        except Exception:
+            pass
+
         # Persistent loop: accept and run one scan at a time, indefinitely.
         while not server.should_exit:
             # While idle, KEEP the previous scan's results/status/report so
@@ -1743,6 +1765,11 @@ async def run_serve(args):
                 console.print(f"\n[red]Unexpected error: {exc}[/red]")
             finally:
                 monitor.scan_in_progress = False
+                # スキャン完了毎に保持ポリシーを適用（実行中スキャンは保護）。
+                try:
+                    monitor.prune_old_scans()
+                except Exception:
+                    pass
 
     # Run the server and the scan loop side by side. When the server shuts down
     # (Ctrl+C / SIGTERM), cancel the idle scan loop so the process exits promptly

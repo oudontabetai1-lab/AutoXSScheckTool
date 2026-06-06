@@ -47,6 +47,58 @@ def _session_value(token: str) -> str:
     return hashlib.sha256(("wscan:" + token).encode("utf-8")).hexdigest()
 
 
+def select_scans_to_prune(
+    scans: list,
+    *,
+    max_age_days: float = 0,
+    max_scans: int = 0,
+    now_epoch: Optional[float] = None,
+    protected_ids: Optional[set] = None,
+) -> list:
+    """保持ポリシーに基づき「削除対象スキャンの id」を返す純粋関数。
+
+    - ``max_age_days > 0`` … 経過日数がこれを超えるスキャンを削除対象にする。
+    - ``max_scans   > 0`` … 新しい順に ``max_scans`` 件を残し、超過分を削除対象にする。
+    - ``protected_ids``   … 実行中スキャン等、決して削除しない id の集合。
+    値が 0/未設定のポリシーは無効（＝何も削除しない。後方互換のため既定で無効）。
+
+    ``scans`` の各要素は ``{"id", "started_at"}`` を持つ想定。スキャン id が
+    数値(エポック秒)ならそれを、そうでなければ ``started_at`` の ISO 文字列を
+    時刻として用いる。FS/HTTP に依存しないためテスト容易。
+    """
+    if now_epoch is None:
+        now_epoch = time.time()
+    protected = {str(p) for p in (protected_ids or set())}
+
+    def _epoch(s) -> Optional[float]:
+        sid = str(s.get("id", ""))
+        if sid.isdigit():
+            return float(sid)
+        ts = s.get("started_at") or ""
+        try:
+            return datetime.datetime.fromisoformat(ts).timestamp()
+        except Exception:
+            return None
+
+    ordered = sorted(scans, key=lambda s: (_epoch(s) or 0.0), reverse=True)  # newest first
+    doomed: set = set()
+
+    if max_age_days and max_age_days > 0:
+        cutoff = now_epoch - max_age_days * 86400
+        for s in ordered:
+            e = _epoch(s)
+            if e is not None and e < cutoff:
+                doomed.add(str(s.get("id", "")))
+
+    if max_scans and max_scans > 0:
+        for s in ordered[int(max_scans):]:
+            doomed.add(str(s.get("id", "")))
+
+    doomed -= protected
+    doomed.discard("")
+    return [str(s.get("id", "")) for s in ordered if str(s.get("id", "")) in doomed]
+
+
 class MonitorServer:
     """Real-time monitoring server for scan progress."""
 
@@ -91,6 +143,12 @@ class MonitorServer:
         self.api_findings: list[dict] = []   # emit_finding() で自動蓄積
         self.api_report_path: Optional[str] = None
         self.manual_crawl_session = None
+        # 出力(output/)の保持ポリシー。0 = 無制限(既定・後方互換)。
+        #   retention_days       … 経過日数を超えたスキャンを自動削除
+        #   retention_max_scans  … 直近この件数のみ残し超過分を自動削除
+        # serve 起動時とスキャン完了毎に prune_old_scans() が適用する。
+        self.retention_days: float = 0
+        self.retention_max_scans: int = 0
         # Optional RequestLogger (set by ScanEngine). Persists tested payloads
         # to payloads.jsonl alongside the HTTP request audit log.
         self.request_logger = None
@@ -439,7 +497,22 @@ class MonitorServer:
         @app.get("/api/v1/scans")
         async def api_scans():
             """List all scans found under the output directory (history)."""
-            return JSONResponse({"scans": self._list_scans()})
+            scans = self._list_scans()
+            return JSONResponse({
+                "scans": scans,
+                "storage": self.storage_summary(scans),
+            })
+
+        @app.post("/api/v1/scans/prune")
+        async def api_scans_prune():
+            """保持ポリシーを今すぐ適用して古いスキャンを削除する（手動整理）。"""
+            pruned = self.prune_old_scans()
+            return JSONResponse({
+                "status": "ok",
+                "pruned": pruned,
+                "pruned_count": len(pruned),
+                "storage": self.storage_summary(),
+            })
 
         @app.get("/api/v1/scans/{scan_id}/download")
         async def api_scan_download(scan_id: str):
@@ -576,6 +649,46 @@ class MonitorServer:
         # Newest first (timestamps sort lexicographically; fall back to mtime).
         scans.sort(key=lambda s: s["id"], reverse=True)
         return scans
+
+    def storage_summary(self, scans: Optional[list] = None) -> dict:
+        """output/ の合計サイズ・件数・保持ポリシーを返す（ポータル表示用）。"""
+        if scans is None:
+            scans = self._list_scans()
+        total = sum(int(s.get("size_bytes") or 0) for s in scans)
+        return {
+            "total_bytes": total,
+            "scan_count": len(scans),
+            "retention_days": self.retention_days,
+            "retention_max_scans": self.retention_max_scans,
+        }
+
+    def prune_old_scans(self) -> list:
+        """保持ポリシーに従い古いスキャンの成果物フォルダを削除し、削除した id を返す。
+
+        ポリシー未設定（いずれも 0）なら何もしない。実行中スキャンは保護する。
+        """
+        if not (self.retention_days or self.retention_max_scans):
+            return []
+        protected = set()
+        if self.scan_in_progress and self.current_scan_id:
+            protected.add(self.current_scan_id)
+        ids = select_scans_to_prune(
+            self._list_scans(),
+            max_age_days=self.retention_days,
+            max_scans=self.retention_max_scans,
+            protected_ids=protected,
+        )
+        pruned: list = []
+        for sid in ids:
+            d = self._scan_dir(sid)
+            if d is None or not d.is_dir():
+                continue
+            try:
+                shutil.rmtree(d)
+                pruned.append(sid)
+            except Exception:
+                pass
+        return pruned
 
     # ------------------------------------------------------------------
     # Login page
