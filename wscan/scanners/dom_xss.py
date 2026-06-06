@@ -107,6 +107,19 @@ class DOMXSSScanner(BaseScanner):
     CHECK_TYPE = "dom_xss"
     SEVERITY = "critical"
 
+    async def _ensure_hook(self) -> None:
+        """シンクフックを「現在のページに対して一度だけ」登録する。
+
+        ``page.add_init_script`` は呼ぶたびに別個のスクリプトとして蓄積され、
+        以降の全ナビゲーションで多重実行される。フィールドごとに呼ぶと
+        innerHTML 等の setter が何重にもラップされ、ログ重複・性能劣化・
+        他スキャナのページ遷移への波及を招くため、ページ単位で 1 回に抑える。
+        """
+        if getattr(self, "_hooked_page", None) is self.browser.page:
+            return
+        await self.browser.page.add_init_script(_HOOK_SCRIPT)
+        self._hooked_page = self.browser.page
+
     async def scan_field(
         self,
         url: str,
@@ -127,8 +140,8 @@ class DOMXSSScanner(BaseScanner):
         await self.log_payload_test(field_name, payload, "dom_xss", url)
 
         try:
-            # Install DOM hook before the page loads
-            await self.browser.page.add_init_script(_HOOK_SCRIPT)
+            # Install DOM hook before the page loads (once per page)
+            await self._ensure_hook()
 
             if is_url_param:
                 source, pair = await self.browser.test_url_param(url, field_name, payload)
@@ -214,7 +227,7 @@ class DOMXSSScanner(BaseScanner):
 
         try:
             self.browser.reset_dialog()
-            await self.browser.page.add_init_script(_HOOK_SCRIPT)
+            await self._ensure_hook()
             await self._apply_payload(finding.url, finding.field_name, finding.payload)
             await asyncio.sleep(0.5 * self.sleep_factor)
             log = await self.browser.page.evaluate(

@@ -1899,7 +1899,18 @@ const state = {
   _smPanWired: false,
   checkStats: {},
   lastScanConfig: null,
+  // WS 再接続時にサーバが直近イベント履歴を再送するため、同一 finding が
+  // 重複してカードに積まれるのを防ぐ。安定キー(url|field|check|payload|type)で抑止。
+  findingKeys: new Set(),
 };
+
+// finding の安定キー。再送・再接続時の重複カードを抑止するために使う。
+function findingKey(d) {
+  return [
+    d.url || '', d.field_name || '', d.check_type || '',
+    d.evidence_type || '', d.payload || '',
+  ].join('||');
+}
 
 // ─── Config form state ───────────────────────────────────────────
 const cfgToggles = {
@@ -3262,11 +3273,13 @@ function handleEvent(event) {
       addEventLog('screenshot', `Screenshot: ${data.label || 'captured'}`);
       break;
 
-    case 'finding':
+    case 'finding': {
+      // 重複(再接続時の履歴再送など)はカウンタにも反映しない。
+      const added = addFinding(data);
+      if (!added) break;
       state.findingCount++;
       document.getElementById('statFindings').textContent = state.findingCount;
       document.getElementById('findingCount').textContent = state.findingCount;
-      addFinding(data);
       addEventLog('finding', `[FINDING] ${data.check_type?.toUpperCase()} on "${data.field_name}" — ${(data.evidence||'').substring(0,60)}`);
       if (data.url) state.urlFindingCounts[data.url] = (state.urlFindingCounts[data.url] || 0) + 1;
       if (data.url) markSiteMapVuln(data.url);
@@ -3276,6 +3289,7 @@ function handleEvent(event) {
         renderUrlList();
       }
       break;
+    }
 
     case 'scan_gap': {
       const u = data.url || '';
@@ -3412,6 +3426,7 @@ function handleEvent(event) {
 function resetLiveScanState() {
   state.eventCount = 0;
   state.findingCount = 0;
+  state.findingKeys = new Set();
   state.pageCount = 0;
   state.testCount = 0;
   state.scanStartTime = null;
@@ -3604,6 +3619,11 @@ function updateScreenshot(b64, label) {
 }
 
 function addFinding(data) {
+  // 重複抑止: 再接続/履歴再送で同じ finding が二重にカード化されるのを防ぐ。
+  const key = findingKey(data);
+  if (state.findingKeys.has(key)) return false;
+  state.findingKeys.add(key);
+
   const panel = document.getElementById('findingsPanel');
   const placeholder = panel.querySelector('.no-findings-msg');
   if (placeholder) placeholder.remove();
@@ -3681,11 +3701,13 @@ function addFinding(data) {
   while (panel.children.length > MAX_CARDS) {
     panel.removeChild(panel.lastChild);
   }
+  return true;
 }
 
 function replaceFindings(findings) {
   const panel = document.getElementById('findingsPanel');
   panel.innerHTML = '';
+  state.findingKeys = new Set();  // full re-sync: rebuild dedup index from scratch
   state.findingCount = findings.length;
   document.getElementById('statFindings').textContent = state.findingCount;
   document.getElementById('findingCount').textContent = state.findingCount;
