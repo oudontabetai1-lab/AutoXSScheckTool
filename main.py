@@ -1737,7 +1737,9 @@ async def run_serve(args):
             # scan is accepted (the request handlers set status=scanning and clear
             # findings), not the moment the previous result was published.
             monitor.scan_in_progress = False
-            monitor.scan_request_event.clear()
+            # NOTE: ここで event をクリアしない。直前の完了処理(await 通知送信)中に
+            # スケジューラ/API が立てた要求を取りこぼし、しかも next_run は前進済みで
+            # 1 周期スキップされるのを防ぐため、消費は「要求検出後」に行う。
             # Tell the dashboard it is ready for a new scan config.
             await monitor.emit_awaiting_config()
             # Wait until a config is submitted from the GUI / API / WebSocket,
@@ -1750,8 +1752,9 @@ async def run_serve(args):
                     pass
             if server.should_exit:
                 break
-            # Claim the busy slot synchronously (no await in between) so concurrent
-            # requests are rejected rather than silently dropped on the next reset.
+            # 要求を消費（検出直後に同期的にクリア＋busy 化。間に await を挟まないので
+            # 並行する別要求は scan_in_progress / event により確実に弾かれる）。
+            monitor.scan_request_event.clear()
             monitor.scan_in_progress = True
             # New scan accepted: clear the previous run's event log so this scan
             # starts from a clean slate in the dashboard.

@@ -143,6 +143,12 @@ class StoredXSSScanner(BaseScanner):
             in_raw = verdict["in_raw"]
             in_encoded = verdict["in_encoded"]
 
+            # 完全に HTML エスケープされ実行不能になった反射(= 生タグ無し)は、
+            # 正しい出力エンコードであって脆弱性ではない。finding にすると誤検知に
+            # なるため、実行可能な格納(生 <script> が残る)のみ報告する。
+            if not in_raw:
+                continue
+
             # Stored XSS only if the marker appears on a page OTHER than where it was injected
             if url == meta["url"]:
                 continue

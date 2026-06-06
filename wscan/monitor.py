@@ -8,6 +8,7 @@ import datetime
 import hashlib
 import io
 import json
+import os
 import secrets
 import shutil
 import time
@@ -876,13 +877,32 @@ class MonitorServer:
         try:
             return json.loads(p.read_text(encoding="utf-8")) or {}
         except Exception:
+            # 破損していたら握り潰さず .corrupt へ退避してログする（次回は空で再生成）。
+            try:
+                backup = p.with_suffix(".json.corrupt")
+                p.replace(backup)
+                print(f"[wscan] 設定ファイルが壊れていたため {backup.name} へ退避しました。")
+            except Exception:
+                pass
             return {}
 
     def _save_settings(self, data: dict) -> None:
+        """設定を atomic に書き出す（一時ファイル→fsync→os.replace）。
+
+        直書きだと書き込み途中のクラッシュでファイルが壊れ、通知設定や
+        スケジュールが丸ごと失われる。同一ディレクトリの一時ファイルへ書いて
+        fsync 後に置換することで、常に「旧 or 新」のどちらか完全な状態を保つ。
+        書き込みは serve の単一イベントループ内で同期実行されるため逐次化される。
+        """
         OUTPUT_BASE.mkdir(parents=True, exist_ok=True)
-        self._settings_path().write_text(
-            json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
+        target = self._settings_path()
+        tmp = target.with_suffix(".json.tmp")
+        payload = json.dumps(data, ensure_ascii=False, indent=2)
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(payload)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, target)
 
     def _notify_settings(self) -> dict:
         n = (self._load_settings().get("notifications") or {})
