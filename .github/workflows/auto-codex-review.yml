@@ -1,0 +1,39 @@
+# Automatically ask Codex to (re)review the pull request.
+#
+# Codex already reviews on its own when a PR is opened as non-draft or when a
+# draft is marked ready. The gaps it does NOT cover are:
+#   - draft PRs (never auto-reviewed)
+#   - re-review after each new push (synchronize)
+# This workflow fills exactly those gaps by posting an "@codex review" comment,
+# so every push gets a fresh review without duplicating Codex's built-in triggers.
+
+name: Auto Codex Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  pull-requests: write
+
+jobs:
+  request-codex-review:
+    runs-on: ubuntu-latest
+    # - synchronize: every push (the main value — Codex won't re-review on its own)
+    # - reopened:    re-trigger a review
+    # - opened:      only when the PR is a draft (non-draft opens auto-review already)
+    if: >-
+      github.event.action == 'synchronize' ||
+      github.event.action == 'reopened' ||
+      (github.event.action == 'opened' && github.event.pull_request.draft == true)
+    steps:
+      - name: Comment "@codex review"
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.pull_request.number,
+              body: '@codex review',
+            });
