@@ -292,6 +292,70 @@ class MonitorServer:
         async def health():
             return {"status": "ok", "clients": len(self.clients)}
 
+        @app.get("/api/v1/settings")
+        async def api_get_settings():
+            """通知設定を返す（Webhook URL はマスクして返す）。"""
+            n = self._notify_settings()
+            return JSONResponse({
+                "notifications": {
+                    "enabled": n["enabled"],
+                    "min_severity": n["min_severity"],
+                    "notify_complete": n["notify_complete"],
+                    "webhook_set": bool(n["webhook_url"]),
+                    "webhook_hint": self._mask_secret(n["webhook_url"]),
+                }
+            })
+
+        @app.post("/api/v1/settings")
+        async def api_set_settings(request: Request):
+            """通知設定を更新する。webhook_url 未指定なら既存値を保持。"""
+            try:
+                body = await request.json()
+            except Exception:
+                return JSONResponse({"error": "Invalid JSON"}, status_code=400)
+            n = body.get("notifications") or {}
+            cur = self._notify_settings()
+            new_url = n.get("webhook_url", None)
+            if new_url is None:
+                new_url = cur["webhook_url"]  # 未指定 → 既存維持
+            new_url = str(new_url).strip()
+            min_sev = str(n.get("min_severity", cur["min_severity"]) or "high")
+            if min_sev not in ("critical", "high", "medium", "low"):
+                min_sev = "high"
+            settings = self._load_settings()
+            settings["notifications"] = {
+                "webhook_url": new_url,
+                "min_severity": min_sev,
+                "notify_complete": bool(n.get("notify_complete", cur["notify_complete"])),
+                "enabled": bool(n.get("enabled", cur["enabled"])),
+            }
+            try:
+                self._save_settings(settings)
+            except Exception as exc:
+                return JSONResponse({"error": f"保存に失敗しました: {exc}"}, status_code=500)
+            return JSONResponse({"status": "ok"})
+
+        @app.post("/api/v1/settings/test")
+        async def api_test_notification():
+            """現在の通知設定でテスト通知を送信する。"""
+            cfg = self._notify_settings()
+            if not cfg["webhook_url"]:
+                return JSONResponse({"error": "Webhook URL が未設定です。"}, status_code=400)
+            try:
+                from wscan.notification import NotificationManager
+                mgr = NotificationManager(
+                    webhook_url=cfg["webhook_url"],
+                    min_severity=cfg["min_severity"],
+                    notify_complete=True,
+                )
+                await mgr.notify_scan_complete(
+                    {"total": 0, "critical": 0, "high": 0, "medium": 0, "low": 0},
+                    target_url="(WScan テスト通知)",
+                )
+                return JSONResponse({"status": "sent"})
+            except Exception as exc:
+                return JSONResponse({"error": str(exc)}, status_code=500)
+
         @app.get("/api/auth-status")
         async def api_auth_status():
             """Lets the dashboard know whether the logout control applies."""
@@ -738,6 +802,72 @@ class MonitorServer:
             except Exception:
                 pass
         return pruned
+
+    # ------------------------------------------------------------------
+    # Server settings (notifications) — persisted as a FILE under output/ so it
+    # survives restarts (output is the mounted volume) and is never listed as a
+    # scan (._list_scans only iterates directories).
+    # ------------------------------------------------------------------
+
+    def _settings_path(self) -> Path:
+        return OUTPUT_BASE / "wscan_settings.json"
+
+    def _load_settings(self) -> dict:
+        p = self._settings_path()
+        if not p.is_file():
+            return {}
+        try:
+            return json.loads(p.read_text(encoding="utf-8")) or {}
+        except Exception:
+            return {}
+
+    def _save_settings(self, data: dict) -> None:
+        OUTPUT_BASE.mkdir(parents=True, exist_ok=True)
+        self._settings_path().write_text(
+            json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+
+    def _notify_settings(self) -> dict:
+        n = (self._load_settings().get("notifications") or {})
+        return {
+            "webhook_url": str(n.get("webhook_url", "") or ""),
+            "min_severity": str(n.get("min_severity", "high") or "high"),
+            "notify_complete": bool(n.get("notify_complete", True)),
+            "enabled": bool(n.get("enabled", True)),
+        }
+
+    @staticmethod
+    def _mask_secret(s: str) -> str:
+        s = s or ""
+        if len(s) <= 8:
+            return "••••" if s else ""
+        return s[:8] + "…" + s[-4:]
+
+    async def send_scan_complete_notification(self) -> None:
+        """ポータルで設定された Webhook へスキャン完了通知を送る（serve モード）。"""
+        cfg = self._notify_settings()
+        if not (cfg["enabled"] and cfg["webhook_url"]):
+            return
+        try:
+            from wscan.notification import NotificationManager
+            mgr = NotificationManager(
+                webhook_url=cfg["webhook_url"],
+                min_severity=cfg["min_severity"],
+                notify_complete=cfg["notify_complete"],
+            )
+            sev = {"critical": 0, "high": 0, "medium": 0, "low": 0}
+            for f in self.api_findings:
+                s = (f.get("severity") or "").lower()
+                if s in sev:
+                    sev[s] += 1
+            summary = {"total": len(self.api_findings), **sev}
+            await mgr.notify_scan_complete(
+                summary,
+                target_url=self.api_target,
+                report_path=self.api_report_path or "",
+            )
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------
     # Login page

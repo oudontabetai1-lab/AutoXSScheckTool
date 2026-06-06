@@ -1765,6 +1765,11 @@ async def run_serve(args):
                 console.print(f"\n[red]Unexpected error: {exc}[/red]")
             finally:
                 monitor.scan_in_progress = False
+                # スキャン完了通知（ポータルで設定された Webhook へ）。
+                try:
+                    await monitor.send_scan_complete_notification()
+                except Exception:
+                    pass
                 # スキャン完了毎に保持ポリシーを適用（実行中スキャンは保護）。
                 try:
                     monitor.prune_old_scans()

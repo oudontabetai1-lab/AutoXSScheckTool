@@ -115,6 +115,7 @@
     <span>Server Portal</span>
   </div>
   <div class="spacer"></div>
+  <button class="btn" onclick="openSettings()">⚙ 通知設定</button>
   <a class="btn" href="/monitor">🖥 ライブモニター</a>
   <a class="btn ghost" href="/logout" id="logoutLink" style="display:none">⎋ ログアウト</a>
 </header>
@@ -191,7 +192,46 @@
   </div>
 </div>
 
-<div class="toast" id="toast"></div>
+<!-- Settings modal (notifications) -->
+<div id="settingsOverlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:60;align-items:flex-start;justify-content:center;padding:8vh 16px;overflow:auto">
+  <div style="background:var(--surface);border:1px solid var(--border);border-radius:14px;width:min(560px,96vw);box-shadow:0 24px 60px rgba(0,0,0,.5)">
+    <div style="display:flex;align-items:center;gap:10px;padding:16px 20px;border-bottom:1px solid var(--border)">
+      <strong style="font-size:1rem">⚙ 通知設定（Slack / Webhook）</strong>
+      <span class="spacer" style="flex:1"></span>
+      <button class="btn sm" onclick="closeSettings()">✕</button>
+    </div>
+    <div style="padding:18px 20px;display:flex;flex-direction:column;gap:14px">
+      <label style="display:flex;flex-direction:column;gap:6px;font-size:.85rem">
+        Webhook URL <span class="muted" id="setWebhookHint"></span>
+        <input type="text" id="setWebhook" placeholder="https://hooks.slack.com/services/…"
+          style="background:var(--bg);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:9px 12px;font-size:.9rem">
+      </label>
+      <label style="display:flex;align-items:center;gap:8px;font-size:.85rem">
+        <input type="checkbox" id="setEnabled"> 通知を有効にする
+      </label>
+      <label style="display:flex;align-items:center;gap:8px;font-size:.85rem">
+        <input type="checkbox" id="setComplete"> スキャン完了時にサマリーを送信
+      </label>
+      <label style="display:flex;flex-direction:column;gap:6px;font-size:.85rem">
+        最小重大度（finding 通知の閾値）
+        <select id="setMinSev" style="background:var(--bg);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:8px 10px;font-size:.9rem">
+          <option value="critical">critical</option>
+          <option value="high">high</option>
+          <option value="medium">medium</option>
+          <option value="low">low</option>
+        </select>
+      </label>
+      <div style="display:flex;gap:10px;margin-top:6px">
+        <button class="btn primary" onclick="saveSettings()">保存</button>
+        <button class="btn" onclick="testNotification()">テスト送信</button>
+        <span class="spacer" style="flex:1"></span>
+      </div>
+      <p class="muted" style="font-size:.76rem">完了通知は serve モードで各スキャン終了時に送信されます。Webメンバーで共有のため、URL はサーバーの output/wscan_settings.json に保存されます。</p>
+    </div>
+  </div>
+</div>
+
+<!-- Diff modal -->
 
 <script>
 const $ = (id) => document.getElementById(id);
@@ -461,6 +501,65 @@ async function deleteScan(id) {
     const r = await api('/api/v1/scans/' + encodeURIComponent(id), { method: 'DELETE' });
     if (r.ok) { toast('削除しました'); loadScans(); }
     else { const e = await r.json().catch(()=>({})); toast(e.error || '削除できませんでした'); }
+  } catch (e) {}
+}
+
+// ── Notification settings ─────────────────────────────────────────────
+async function openSettings() {
+  $('settingsOverlay').style.display = 'flex';
+  try {
+    const d = (await (await api('/api/v1/settings')).json()).notifications || {};
+    $('setWebhook').value = '';
+    $('setWebhook').placeholder = d.webhook_set
+      ? `設定済み（変更時のみ入力）` : 'https://hooks.slack.com/services/…';
+    $('setWebhookHint').textContent = d.webhook_set ? `現在: ${d.webhook_hint || ''}` : '未設定';
+    $('setEnabled').checked = !!d.enabled;
+    $('setComplete').checked = !!d.notify_complete;
+    $('setMinSev').value = d.min_severity || 'high';
+  } catch (e) {}
+}
+function closeSettings() { $('settingsOverlay').style.display = 'none'; }
+
+async function saveSettings() {
+  const body = { notifications: {
+    enabled: $('setEnabled').checked,
+    notify_complete: $('setComplete').checked,
+    min_severity: $('setMinSev').value,
+  }};
+  const url = $('setWebhook').value.trim();
+  if (url) body.notifications.webhook_url = url;  // 空なら既存維持
+  try {
+    const r = await api('/api/v1/settings', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (r.ok) { toast('通知設定を保存しました'); closeSettings(); }
+    else { const e = await r.json().catch(()=>({})); toast(e.error || '保存できませんでした'); }
+  } catch (e) {}
+}
+
+async function testNotification() {
+  // 未保存の URL も即テストできるよう、先に保存してから送る。
+  await saveSettingsSilent();
+  try {
+    const r = await api('/api/v1/settings/test', { method: 'POST' });
+    const d = await r.json().catch(()=>({}));
+    toast(r.ok ? 'テスト通知を送信しました' : (d.error || 'テスト送信に失敗しました'));
+  } catch (e) { toast('テスト送信に失敗しました'); }
+}
+async function saveSettingsSilent() {
+  const body = { notifications: {
+    enabled: $('setEnabled').checked,
+    notify_complete: $('setComplete').checked,
+    min_severity: $('setMinSev').value,
+  }};
+  const url = $('setWebhook').value.trim();
+  if (url) body.notifications.webhook_url = url;
+  try {
+    await api('/api/v1/settings', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
   } catch (e) {}
 }
 
