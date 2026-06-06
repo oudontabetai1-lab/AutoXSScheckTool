@@ -142,6 +142,11 @@ class MonitorServer:
         self.api_scan_status: str = "idle"   # idle / scanning / done / error
         self.api_findings: list[dict] = []   # emit_finding() で自動蓄積
         self.api_report_path: Optional[str] = None
+        # 進捗のスナップショット（ポータルが /api/v1/scan/status でモニターを
+        # 開かずに確認できるようにする）。emit_phase/emit_progress が更新。
+        self.api_target: str = ""
+        self.api_phase: str = ""             # crawl / plan / attack / report
+        self.api_progress: dict = {"current": 0, "total": 0, "percent": 0}
         self.manual_crawl_session = None
         # 出力(output/)の保持ポリシー。0 = 無制限(既定・後方互換)。
         #   retention_days       … 経過日数を超えたスキャンを自動削除
@@ -378,6 +383,9 @@ class MonitorServer:
             self.api_scan_status = "scanning"
             self.api_findings = []
             self.api_report_path = None
+            self.api_target = config.get("url", "") or ""
+            self.api_phase = ""
+            self.api_progress = {"current": 0, "total": 0, "percent": 0}
             return JSONResponse({
                 "status": "accepted",
                 "scan_id": self.api_scan_id,
@@ -386,11 +394,14 @@ class MonitorServer:
 
         @app.get("/api/v1/scan/status")
         async def api_scan_status():
-            """スキャンステータスを返す。"""
+            """スキャンステータスを返す（進捗・フェーズ・対象を含む）。"""
             return JSONResponse({
                 "status": self.api_scan_status,
                 "scan_id": self.api_scan_id,
                 "findings_count": len(self.api_findings),
+                "target": self.api_target,
+                "phase": self.api_phase,
+                "progress": self.api_progress,
             })
 
         @app.get("/api/v1/scan/findings")
@@ -538,6 +549,42 @@ class MonitorServer:
                 },
             )
 
+        @app.get("/api/v1/scans/{scan_id}/diff")
+        async def api_scan_diff(scan_id: str):
+            """同一対象の「前回スキャン」との差分（新規/修正済み/継続）を返す。"""
+            d = self._scan_dir(scan_id)
+            if d is None or not d.is_dir():
+                return JSONResponse({"error": "not found"}, status_code=404)
+            from wscan.diff_scan import load_previous, diff as _diff
+
+            scans = self._list_scans()
+            cur = next((s for s in scans if s["id"] == scan_id), None)
+            target = (cur or {}).get("target", "")
+            # 同一対象で、この scan より前(=id が小さい)・evidence ありの最新を探す。
+            prev = None
+            for s in sorted(scans, key=lambda x: x["id"], reverse=True):
+                if s["id"] >= scan_id or not s.get("json_available"):
+                    continue
+                if target and s.get("target") != target:
+                    continue
+                prev = s
+                break
+            if prev is None:
+                return JSONResponse(
+                    {"error": "比較対象（同一対象の前回スキャン）が見つかりません。", "target": target},
+                    status_code=404,
+                )
+            new = load_previous(str(d))
+            prev_dir = self._scan_dir(prev["id"])
+            old = load_previous(str(prev_dir)) if prev_dir else []
+            result = _diff(old, new)
+            return JSONResponse({
+                "scan_id": scan_id,
+                "previous_id": prev["id"],
+                "target": target,
+                **result.to_dict(),
+            })
+
         @app.delete("/api/v1/scans/{scan_id}")
         async def api_scan_delete(scan_id: str):
             """Delete a scan's artifact folder."""
@@ -604,6 +651,8 @@ class MonitorServer:
                 "findings_count": 0,
                 "severity": {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0},
                 "report_available": (d / "report.html").is_file(),
+                "sarif_available": (d / "report.sarif").is_file(),
+                "json_available": (d / "evidence.json").is_file(),
                 "status": "done",
                 "size_bytes": 0,
             }
@@ -873,6 +922,7 @@ class MonitorServer:
         fast_mode: bool = False,
     ):
         """Send scan configuration to the dashboard so it can render dynamic badges."""
+        self.api_target = url or self.api_target
         await self.emit("scan_config", {
             "url": url,
             "checks": checks,
@@ -935,15 +985,16 @@ class MonitorServer:
         })
 
     async def emit_progress(self, current: int, total: int, message: str = ""):
-        await self.emit("progress", {
+        self.api_progress = {
             "current": current,
             "total": total,
             "percent": int(current / total * 100) if total > 0 else 0,
-            "message": message,
-        })
+        }
+        await self.emit("progress", {**self.api_progress, "message": message})
 
     async def emit_phase(self, phase: str) -> None:
         """Emit current scan phase: 'crawl' | 'plan' | 'attack' | 'report'"""
+        self.api_phase = phase
         await self.emit("phase", {"phase": phase})
 
     async def emit_url_start(self, url: str, total_urls: int = 0) -> None:

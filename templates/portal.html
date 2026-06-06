@@ -132,12 +132,24 @@
         <button class="btn danger" id="abortBtn" style="display:none" onclick="abortScan()">⏹ 停止</button>
       </div>
     </div>
+    <div id="nowProgress" style="display:none;margin-top:14px">
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:6px">
+        <span id="nowPhase" class="st scanning" style="text-transform:uppercase">—</span>
+        <span class="now-meta" id="nowTarget" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1"></span>
+        <span class="now-meta" id="nowPct" style="font-weight:700;color:var(--accent)">—%</span>
+      </div>
+      <div style="height:6px;background:var(--surface2);border:1px solid var(--border);border-radius:999px;overflow:hidden">
+        <div id="nowBar" style="height:100%;width:0%;background:linear-gradient(90deg,var(--accent),var(--accent2));transition:width .4s ease"></div>
+      </div>
+    </div>
   </div>
 
   <!-- History -->
   <div class="card">
     <div class="toolbar">
       <p class="section-title" style="margin:0">スキャン履歴</p>
+      <input type="search" id="histSearch" placeholder="対象/IDで絞り込み…" oninput="renderScans()"
+        style="background:var(--bg);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:6px 10px;font-size:0.82rem;width:220px">
       <span class="spacer"></span>
       <span class="muted" id="storageInfo"></span>
       <span class="muted" id="histCount"></span>
@@ -147,15 +159,37 @@
     <table>
       <thead>
         <tr>
-          <th>日時</th><th>対象</th><th>検出</th><th>状態</th><th style="text-align:right">操作</th>
+          <th class="sortable" data-sort="started_at" onclick="setSort('started_at')" style="cursor:pointer">日時 <span class="sort-ind"></span></th>
+          <th class="sortable" data-sort="target" onclick="setSort('target')" style="cursor:pointer">対象 <span class="sort-ind"></span></th>
+          <th class="sortable" data-sort="findings_count" onclick="setSort('findings_count')" style="cursor:pointer">検出 <span class="sort-ind"></span></th>
+          <th class="sortable" data-sort="status" onclick="setSort('status')" style="cursor:pointer">状態 <span class="sort-ind"></span></th>
+          <th style="text-align:right">操作</th>
         </tr>
       </thead>
       <tbody id="scanRows">
         <tr><td colspan="5" class="empty">読み込み中…</td></tr>
       </tbody>
     </table>
+    <div class="toolbar" id="pager" style="display:none;margin-top:12px">
+      <span class="spacer"></span>
+      <button class="btn sm" id="pagePrev" onclick="changePage(-1)">← 前</button>
+      <span class="muted" id="pageInfo"></span>
+      <button class="btn sm" id="pageNext" onclick="changePage(1)">次 →</button>
+    </div>
   </div>
 </main>
+
+<!-- Diff modal -->
+<div id="diffOverlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:60;align-items:flex-start;justify-content:center;padding:6vh 16px;overflow:auto">
+  <div style="background:var(--surface);border:1px solid var(--border);border-radius:14px;width:min(820px,96vw);box-shadow:0 24px 60px rgba(0,0,0,.5)">
+    <div style="display:flex;align-items:center;gap:10px;padding:16px 20px;border-bottom:1px solid var(--border)">
+      <strong style="font-size:1rem">前回スキャンとの差分</strong>
+      <span class="spacer" style="flex:1"></span>
+      <button class="btn sm" onclick="closeDiff()">✕ 閉じる</button>
+    </div>
+    <div id="diffBody" style="padding:18px 20px"></div>
+  </div>
+</div>
 
 <div class="toast" id="toast"></div>
 
@@ -218,6 +252,21 @@ async function loadStatus() {
   $('abortBtn').style.display = running ? '' : 'none';
   $('openMonitorBtn').style.display = running ? '' : 'none';
   $('newScanBtn').style.display = running ? 'none' : '';
+
+  // 進捗バー（モニターを開かずにフェーズ/進捗%/対象を確認できる）
+  const prog = $('nowProgress');
+  if (running) {
+    prog.style.display = '';
+    const p = s.progress || {};
+    const pct = p.percent ?? 0;
+    $('nowPhase').textContent = (s.phase || 'スキャン中').toUpperCase();
+    $('nowTarget').textContent = s.target || '';
+    $('nowTarget').title = s.target || '';
+    $('nowPct').textContent = pct + '%';
+    $('nowBar').style.width = pct + '%';
+  } else {
+    prog.style.display = 'none';
+  }
 }
 
 function renderStorage(s) {
@@ -253,23 +302,88 @@ async function abortScan() {
   loadStatus();
 }
 
-// ── History ───────────────────────────────────────────────────────────
+// ── History (search / sort / pagination) ─────────────────────────────
+let allScans = [];
+const PAGE_SIZE = 20;
+const histState = { sort: 'started_at', dir: 'desc', page: 0, query: '' };
+
 async function loadScans() {
   let data;
   try { data = await (await api('/api/v1/scans')).json(); }
   catch (e) { return; }
-  const scans = data.scans || [];
+  allScans = data.scans || [];
   renderStorage(data.storage || {});
-  $('histCount').textContent = scans.length ? `${scans.length} 件` : '';
+  renderScans();
+}
+
+function setSort(key) {
+  if (histState.sort === key) {
+    histState.dir = histState.dir === 'asc' ? 'desc' : 'asc';
+  } else {
+    histState.sort = key;
+    histState.dir = (key === 'target' || key === 'status') ? 'asc' : 'desc';
+  }
+  histState.page = 0;
+  renderScans();
+}
+
+function changePage(delta) {
+  histState.page += delta;
+  renderScans();
+}
+
+function renderScans() {
+  histState.query = ($('histSearch') && $('histSearch').value || '').trim().toLowerCase();
+  // filter
+  let rows = allScans.filter(s => {
+    if (!histState.query) return true;
+    return (`${s.target || ''} ${s.id || ''}`).toLowerCase().includes(histState.query);
+  });
+  // sort
+  const key = histState.sort, dir = histState.dir === 'asc' ? 1 : -1;
+  rows.sort((a, b) => {
+    let av = a[key], bv = b[key];
+    if (key === 'findings_count') { av = av || 0; bv = bv || 0; return (av - bv) * dir; }
+    av = String(av == null ? '' : av).toLowerCase();
+    bv = String(bv == null ? '' : bv).toLowerCase();
+    return av < bv ? -dir : av > bv ? dir : 0;
+  });
+
+  $('histCount').textContent = rows.length
+    ? `${rows.length} 件${histState.query ? ` / 全${allScans.length}` : ''}`
+    : '';
+
+  // sort indicators
+  document.querySelectorAll('th.sortable').forEach(th => {
+    const ind = th.querySelector('.sort-ind');
+    if (ind) ind.textContent = (th.dataset.sort === key) ? (dir === 1 ? '▲' : '▼') : '';
+  });
+
   const tb = $('scanRows');
-  if (!scans.length) {
-    tb.innerHTML = '<tr><td colspan="5" class="empty">スキャン履歴はまだありません。「新規スキャン」から開始できます。</td></tr>';
+  if (!rows.length) {
+    tb.innerHTML = `<tr><td colspan="5" class="empty">${
+      allScans.length ? '一致するスキャンがありません。' :
+      'スキャン履歴はまだありません。「新規スキャン」から開始できます。'}</td></tr>`;
+    $('pager').style.display = 'none';
     return;
   }
-  tb.innerHTML = scans.map(s => {
+
+  // pagination
+  const pageCount = Math.ceil(rows.length / PAGE_SIZE);
+  if (histState.page >= pageCount) histState.page = pageCount - 1;
+  if (histState.page < 0) histState.page = 0;
+  const start = histState.page * PAGE_SIZE;
+  const pageRows = rows.slice(start, start + PAGE_SIZE);
+
+  tb.innerHTML = pageRows.map(s => {
     const report = s.report_available
       ? `<a class="btn sm" href="/reports/${encodeURIComponent(s.id)}/report.html" target="_blank" rel="noopener">📄 レポート</a>`
       : `<span class="btn sm ghost" style="opacity:.4;cursor:default">レポートなし</span>`;
+    const sarif = s.sarif_available
+      ? `<a class="btn sm" href="/reports/${encodeURIComponent(s.id)}/report.sarif" download="wscan-${esc(s.id)}.sarif" title="SARIF (CI連携用)">SARIF</a>` : '';
+    const jsonl = s.json_available
+      ? `<a class="btn sm" href="/reports/${encodeURIComponent(s.id)}/evidence.json" download="wscan-${esc(s.id)}.json" title="検出結果JSON">JSON</a>` : '';
+    const diff = `<button class="btn sm" data-action="diff" data-id="${esc(s.id)}" title="同一対象の前回スキャンと比較">⟂ 差分</button>`;
     const size = s.size_bytes ? ` <span class="muted">${fmtSize(s.size_bytes)}</span>` : '';
     return `<tr>
       <td>${fmtDate(s.started_at)}<br><span class="muted">${esc(s.id)}</span></td>
@@ -277,20 +391,69 @@ async function loadScans() {
       <td>${sevBadges(s.severity || {}, s.findings_count)}</td>
       <td><span class="st ${esc(s.status)}">${esc(s.status)}</span></td>
       <td><div class="row-actions">
-        ${report}
+        ${report}${sarif}${jsonl}${diff}
         <a class="btn sm" href="/api/v1/scans/${encodeURIComponent(s.id)}/download">⬇ zip${size}</a>
         <button class="btn sm danger" data-action="delete" data-id="${esc(s.id)}" ${s.status==='scanning'?'disabled style=opacity:.4':''}>🗑</button>
       </div></td>
     </tr>`;
   }).join('');
+
+  // pager
+  if (pageCount > 1) {
+    $('pager').style.display = 'flex';
+    $('pageInfo').textContent = `${histState.page + 1} / ${pageCount}`;
+    $('pagePrev').disabled = histState.page === 0;
+    $('pageNext').disabled = histState.page >= pageCount - 1;
+  } else {
+    $('pager').style.display = 'none';
+  }
 }
 
 // Event delegation: never interpolate scan ids into inline JS (the id can come
 // from an operator-supplied output_dir). Read the raw value from the dataset.
 $('scanRows').addEventListener('click', (e) => {
-  const btn = e.target.closest('[data-action="delete"]');
-  if (btn && !btn.disabled) deleteScan(btn.dataset.id);
+  const del = e.target.closest('[data-action="delete"]');
+  if (del && !del.disabled) { deleteScan(del.dataset.id); return; }
+  const dif = e.target.closest('[data-action="diff"]');
+  if (dif) showDiff(dif.dataset.id);
 });
+
+// ── Diff vs previous scan ─────────────────────────────────────────────
+function closeDiff() { $('diffOverlay').style.display = 'none'; }
+
+function diffList(title, items, cls) {
+  if (!items.length) return '';
+  const rows = items.slice(0, 100).map(f =>
+    `<li><span class="st ${cls}" style="margin-right:6px">${esc(f.check_type || '')}</span>` +
+    `<span class="muted">${esc(f.field_name || '')}</span> ` +
+    `<code style="color:var(--accent2)">${esc(f.url || '')}</code></li>`).join('');
+  return `<div style="margin-top:14px"><strong>${title}（${items.length}）</strong>` +
+    `<ul style="margin:8px 0 0;padding-left:18px;line-height:1.7;font-size:.84rem">${rows}</ul></div>`;
+}
+
+async function showDiff(id) {
+  const body = $('diffBody');
+  body.innerHTML = '<p class="muted">計算中…</p>';
+  $('diffOverlay').style.display = 'flex';
+  let d;
+  try {
+    const r = await api('/api/v1/scans/' + encodeURIComponent(id) + '/diff');
+    d = await r.json();
+    if (!r.ok) { body.innerHTML = `<p class="muted">${esc(d.error || '差分を計算できませんでした。')}</p>`; return; }
+  } catch (e) { body.innerHTML = '<p class="muted">差分を計算できませんでした。</p>'; return; }
+  const sm = d.summary || {};
+  body.innerHTML =
+    `<p class="muted">対象 <code style="color:var(--accent2)">${esc(d.target || '—')}</code><br>` +
+    `今回 <b>${esc(d.scan_id)}</b> ⟂ 前回 <b>${esc(d.previous_id)}</b></p>` +
+    `<div class="now-row" style="margin-top:10px">` +
+    `<span class="status-pill"><span class="b critical">新規 ${sm.new_count ?? 0}</span></span>` +
+    `<span class="status-pill"><span class="b low">修正済み ${sm.fixed_count ?? 0}</span></span>` +
+    `<span class="status-pill"><span class="b zero">継続 ${sm.persistent_count ?? 0}</span></span>` +
+    `</div>` +
+    diffList('🆕 新規（今回出現）', d.new || [], 'scanning') +
+    diffList('✅ 修正済み（前回のみ）', d.fixed || [], 'done') +
+    diffList('➖ 継続', d.persistent || [], 'incomplete');
+}
 
 async function deleteScan(id) {
   if (!confirm(`スキャン ${id} の成果物を削除しますか？この操作は取り消せません。`)) return;
