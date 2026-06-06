@@ -66,9 +66,11 @@ class SqlProbeSetTests(unittest.TestCase):
         self.assertFalse(verdict.injectable)
         self.assertIn("N/A", verdict.rationale)
 
-    def test_confidence_lowered_when_broken_also_collapses(self):
-        # If even the broken (mismatched-quote) variant collapses to the marker,
-        # the result is ambiguous → lower confidence.
+    def test_rejected_when_broken_also_collapses(self):
+        # If even the broken (mismatched-quote) control collapses to the marker,
+        # the endpoint is normalizing input (stripping punctuation/whitespace)
+        # rather than interpreting the quote as syntax → reject to avoid a
+        # false positive on sanitizing search/filter fields.
         responses = {
             "baseline": "AABB",
             "adjacent": "AABB",
@@ -78,8 +80,9 @@ class SqlProbeSetTests(unittest.TestCase):
             "broken": "AABB",
         }
         verdict = eqp.evaluate(self.ps, responses)
-        self.assertTrue(verdict.injectable)
-        self.assertLess(verdict.confidence, 0.85)
+        self.assertFalse(verdict.injectable)
+        self.assertEqual(verdict.confidence, 0.0)
+        self.assertTrue(verdict.details.get("broken_collapsed"))
 
 
 class ContextProbeSetTests(unittest.TestCase):

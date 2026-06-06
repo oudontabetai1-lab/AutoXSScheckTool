@@ -173,7 +173,12 @@ def evaluate(probe_set: ProbeSet, responses: dict[str, str]) -> ProbeVerdict:
             rationale="no concatenation-equivalence collapse observed",
         )
 
-    # 3. 破壊系が「きれいな連結」を返していないことを確認して確度を補正。
+    # 3. 破壊系（クォート不整合）も「きれいな連結」を返した場合、それは
+    #    クォートが構文解釈されたのではなく、入力側で記号/空白を除去する
+    #    正規化（サニタイズ系の検索/フィルタ等）が起きている可能性が高い。
+    #    この場合は等価変形の collapse も正規化の副作用とみなし、誤検知を
+    #    避けるため injectable=False とする（対照テストとしての破壊系が
+    #    陽性なら判定を棄却）。
     broken_collapsed = False
     for b in probe_set.by_role("broken"):
         body = responses.get(b.name, "")
@@ -181,19 +186,35 @@ def evaluate(probe_set: ProbeSet, responses: dict[str, str]) -> ProbeVerdict:
             broken_collapsed = True
             break
 
-    confidence = 0.7 if broken_collapsed else 0.9
+    if broken_collapsed:
+        return ProbeVerdict(
+            injectable=False,
+            confidence=0.0,
+            matched_dialect="",
+            matched_probe="",
+            rationale=(
+                "broken-quote control also collapsed to marker — likely input "
+                "normalization (punctuation/whitespace stripping) rather than "
+                "quote being interpreted as syntax; rejecting to avoid false positive"
+            ),
+            details={
+                "marker": marker,
+                "context": probe_set.context,
+                "equivalent_hits": [p.name for p in hits],
+                "broken_collapsed": True,
+            },
+        )
+
     chosen = hits[0]
     return ProbeVerdict(
         injectable=True,
-        confidence=confidence,
+        confidence=0.9,
         matched_dialect=chosen.dialect,
         matched_probe=chosen.name,
         rationale=(
             f"string-concatenation equivalence collapsed to marker via "
-            f"'{chosen.name}' ({chosen.dialect}); "
-            + ("broken variant also collapsed (lower confidence)"
-               if broken_collapsed else
-               "broken variant did not collapse (higher confidence)")
+            f"'{chosen.name}' ({chosen.dialect}); broken-quote control did not "
+            f"collapse, indicating the quote was interpreted as syntax"
         ),
         details={
             "matched_payload": chosen.value,

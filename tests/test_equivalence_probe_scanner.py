@@ -30,7 +30,9 @@ class _AnsiInjectableScanner(BaseScanner):
             body = "result: " + payload.replace("' '", "")  # adjacent literals merge
         else:
             body = "result: " + payload                     # reflected verbatim
-        return body, {"response": {"body": body}}
+        # Record the payload on the request so tests can confirm the returned
+        # pair belongs to the probe that actually triggered the verdict.
+        return body, {"request": {"post_data": payload}, "response": {"body": body}}
 
 
 class _SafeScanner(_AnsiInjectableScanner):
@@ -52,6 +54,12 @@ class EquivalenceProbeScannerTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(verdict.injectable)
         self.assertEqual(verdict.matched_dialect, "ansi")
         self.assertTrue(pair)
+        # The returned pair must belong to the probe that triggered the verdict
+        # (the matched payload), not whichever probe ran last.
+        self.assertEqual(
+            pair.get("request", {}).get("post_data"),
+            verdict.details.get("matched_payload"),
+        )
 
     async def test_safe_backend_is_not_flagged(self):
         scanner = _SafeScanner(_make_engine())

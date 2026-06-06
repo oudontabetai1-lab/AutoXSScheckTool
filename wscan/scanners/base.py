@@ -281,7 +281,7 @@ class BaseScanner(ABC):
 
         probe_set = builder()
         responses: dict[str, str] = {}
-        last_pair: dict = {}
+        pairs: dict[str, dict] = {}
         for probe in probe_set.probes:
             try:
                 source, pair = await self._apply_payload(
@@ -289,13 +289,17 @@ class BaseScanner(ABC):
                 )
             except Exception:
                 continue
-            last_pair = pair or last_pair
+            pairs[probe.name] = pair or {}
             body = (pair.get("response", {}) or {}).get("body") or source or ""
             responses[probe.name] = body
 
         verdict = eqp.evaluate(probe_set, responses)
         if verdict.injectable:
-            return verdict, last_pair
+            # Attach the request/response pair of the probe that actually
+            # triggered the verdict, not whichever probe happened to run last
+            # (otherwise the recorded evidence points at a different payload).
+            matched_pair = pairs.get(verdict.matched_probe, {})
+            return verdict, matched_pair
         return None
 
     def current_page_pair(self, url: str) -> dict:
