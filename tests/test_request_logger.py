@@ -74,15 +74,49 @@ class RequestLoggerTests(unittest.TestCase):
             self.assertFalse(logger.payload_path.exists())
 
 
-class MonitorPayloadLoggingTests(unittest.IsolatedAsyncioTestCase):
-    async def test_emit_payload_test_persists_to_logger(self):
+class ScannerPayloadLoggingTests(unittest.IsolatedAsyncioTestCase):
+    def _scanner(self, engine):
+        from wscan.scanners.base import BaseScanner
+
+        class _S(BaseScanner):
+            CHECK_TYPE = "xss"
+
+            async def scan_field(self, *a, **k):  # pragma: no cover - stub
+                return []
+
+        return _S(engine)
+
+    async def test_log_payload_test_persists_without_monitor(self):
+        # --no-monitor / batch mode: monitor is None but payloads must still
+        # be written via engine.request_logger.
+        import types
         with tempfile.TemporaryDirectory() as d:
-            monitor = MonitorServer()
-            monitor.request_logger = RequestLogger(d)
-            await monitor.emit_payload_test("user", "<img>", "xss", "http://t.test/")
-            rows = _read_jsonl(monitor.request_logger.payload_path)
+            engine = types.SimpleNamespace(
+                browser=object(), monitor=None, payload_gen=object(),
+                request_logger=RequestLogger(d),
+            )
+            scanner = self._scanner(engine)
+            await scanner.log_payload_test("user", "<img>", "xss", "http://t.test/")
+            rows = _read_jsonl(engine.request_logger.payload_path)
             self.assertEqual(rows[0]["field"], "user")
             self.assertEqual(rows[0]["payload"], "<img>")
+
+    async def test_log_payload_test_emits_to_monitor_without_duplicate_file_write(self):
+        import types
+        with tempfile.TemporaryDirectory() as d:
+            monitor = MonitorServer()
+            logger = RequestLogger(d)
+            monitor.request_logger = logger
+            engine = types.SimpleNamespace(
+                browser=object(), monitor=monitor, payload_gen=object(),
+                request_logger=logger,
+            )
+            scanner = self._scanner(engine)
+            await scanner.log_payload_test("user", "<img>", "xss", "http://t.test/")
+            rows = _read_jsonl(logger.payload_path)
+            # Exactly one entry — emit_payload_test no longer writes to the file,
+            # so going through the monitor must not double-log.
+            self.assertEqual(len(rows), 1)
 
 
 if __name__ == "__main__":

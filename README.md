@@ -525,7 +525,7 @@ output/
     ├── ai_analysis.md          # AI 攻撃チェーン分析・総合レポート（Markdown）
     ├── ai_finding_fixes.json   # Finding 別 AI 修正提案（ビジネス影響・修正コード・CWE 参照）
     ├── http_requests.jsonl     # 送信した全 HTTP リクエスト/レスポンスの監査ログ（1行1JSON）
-    ├── payloads.jsonl          # 投入したペイロードのログ（ダッシュボード有効時。1行1JSON）
+    ├── payloads.jsonl          # 投入したペイロードのログ（--no-monitor/バッチでも常時。1行1JSON）
     └── screenshots/            # スキャン中スクリーンショット
 
 config/

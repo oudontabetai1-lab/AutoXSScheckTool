@@ -117,8 +117,7 @@ class LDAPScanner(BaseScanner):
             return []
 
         for payload in _LDAP_PAYLOADS:
-            if self.monitor:
-                await self.monitor.emit_payload_test(field_name, payload, self.CHECK_TYPE, url)
+            await self.log_payload_test(field_name, payload, self.CHECK_TYPE, url)
             try:
                 html, pair = await self._apply_payload(
                     url, form_index, field_name, payload, is_url_param

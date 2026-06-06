@@ -159,8 +159,7 @@ class NoSQLInjectionScanner(BaseScanner):
 
         # ── Parameter pollution payloads ──────────────────────────────
         for payload in _PARAM_PAYLOADS:
-            if self.monitor:
-                await self.monitor.emit_payload_test(field_name, payload, "nosql", url)
+            await self.log_payload_test(field_name, payload, "nosql", url)
             try:
                 if is_url_param:
                     # Inject as array: field[$ne]=value

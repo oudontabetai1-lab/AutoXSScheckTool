@@ -203,6 +203,24 @@ class BaseScanner(ABC):
         """Scaling factor for sleep durations (0.5 in CTF mode, 1.0 otherwise)."""
         return getattr(self.engine, "sleep_factor", 1.0)
 
+    async def log_payload_test(
+        self, field_name: str, payload: str, check_type: str, url: str = ""
+    ) -> None:
+        """Record a tested payload to the audit log and (if present) the dashboard.
+
+        Monitor-independent: writes to ``engine.request_logger`` so
+        ``payloads.jsonl`` is produced even in ``--no-monitor`` / batch runs
+        (where ``monitor`` is ``None``), then emits the live dashboard event
+        only when a monitor is attached. The file write happens here — not in
+        ``MonitorServer.emit_payload_test`` — so it is never skipped just
+        because the dashboard is absent, and not duplicated when present.
+        """
+        logger = getattr(self.engine, "request_logger", None)
+        if logger is not None:
+            logger.log_payload(field_name, payload, check_type, url)
+        if self.monitor:
+            await self.monitor.emit_payload_test(field_name, payload, check_type, url)
+
     async def get_payloads(self, field_name: str, url: str) -> list[str]:
         """Get payloads for this scanner's check type, sorted by learning data."""
         # Check per-task ContextVar override first (set by engine for parallel isolation),
@@ -283,6 +301,11 @@ class BaseScanner(ABC):
         responses: dict[str, str] = {}
         pairs: dict[str, dict] = {}
         for probe in probe_set.probes:
+            # Log probe payloads to the audit trail just like the normal scanner
+            # loops, so payloads.jsonl can reproduce a verdict's matched payload.
+            await self.log_payload_test(
+                field_name, probe.value, f"{self.CHECK_TYPE}_equiv", url
+            )
             try:
                 source, pair = await self._apply_payload(
                     url, form_index, field_name, probe.value, is_url_param

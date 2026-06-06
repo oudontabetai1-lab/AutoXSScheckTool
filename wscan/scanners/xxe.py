@@ -146,8 +146,7 @@ class XXEScanner(BaseScanner):
             return []
 
         for payload, description in _XXE_PAYLOADS:
-            if self.monitor:
-                await self.monitor.emit_payload_test(field_name, payload, self.CHECK_TYPE, url)
+            await self.log_payload_test(field_name, payload, self.CHECK_TYPE, url)
             try:
                 body, status_code, elapsed = await self._post_xml(url, payload)
 

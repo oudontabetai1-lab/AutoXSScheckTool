@@ -811,8 +811,9 @@ class MonitorServer:
         })
 
     async def emit_payload_test(self, field: str, payload: str, check_type: str, url: str = "") -> None:
-        if self.request_logger is not None:
-            self.request_logger.log_payload(field, payload, check_type, url)
+        # NOTE: payload file-logging lives in BaseScanner.log_payload_test (so it
+        # works without a monitor and is not duplicated here). This only pushes
+        # the live dashboard event.
         await self.emit("payload_test", {
             "field": field,
             "payload": payload,

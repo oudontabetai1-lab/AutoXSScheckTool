@@ -122,8 +122,7 @@ class MailHeaderInjectionScanner(BaseScanner):
             )
 
         for payload in MAIL_INJECTION_PAYLOADS:
-            if self.monitor:
-                await self.monitor.emit_payload_test(field_name, payload, "mail_header", url)
+            await self.log_payload_test(field_name, payload, "mail_header", url)
 
             source, pair = await self._apply_payload(
                 url, form_index, field_name, payload, is_url_param

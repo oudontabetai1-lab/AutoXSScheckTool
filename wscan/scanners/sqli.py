@@ -234,8 +234,7 @@ class SQLiScanner(BaseScanner):
         time_threshold = max(2.5, baseline_time + 2.5)
 
         for payload in payloads:
-            if self.monitor:
-                await self.monitor.emit_payload_test(field_name, payload, "sqli", url)
+            await self.log_payload_test(field_name, payload, "sqli", url)
 
             # Apply payload
             source, pair = await self._apply_payload(
