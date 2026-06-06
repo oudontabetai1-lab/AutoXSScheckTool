@@ -99,6 +99,23 @@ def select_scans_to_prune(
     return [str(s.get("id", "")) for s in ordered if str(s.get("id", "")) in doomed]
 
 
+def due_schedule_ids(schedules: list, now_epoch: Optional[float] = None) -> list:
+    """実行すべき（有効かつ next_run <= 現在）スケジュール id を返す純粋関数。"""
+    if now_epoch is None:
+        now_epoch = time.time()
+    out = []
+    for s in schedules or []:
+        if not s.get("enabled", True):
+            continue
+        try:
+            nxt = float(s.get("next_run", 0) or 0)
+        except (TypeError, ValueError):
+            nxt = 0
+        if nxt <= now_epoch:
+            out.append(str(s.get("id", "")))
+    return [i for i in out if i]
+
+
 class MonitorServer:
     """Real-time monitoring server for scan progress."""
 
@@ -355,6 +372,46 @@ class MonitorServer:
                 return JSONResponse({"status": "sent"})
             except Exception as exc:
                 return JSONResponse({"error": str(exc)}, status_code=500)
+
+        @app.get("/api/v1/schedules")
+        async def api_get_schedules():
+            """登録済みの定期スキャンを一覧で返す。"""
+            return JSONResponse({"schedules": self.list_schedules()})
+
+        @app.post("/api/v1/schedules")
+        async def api_add_schedule(request: Request):
+            """定期スキャンを登録する。Body: {url, checks?, depth?, interval_hours}"""
+            try:
+                body = await request.json()
+            except Exception:
+                return JSONResponse({"error": "Invalid JSON"}, status_code=400)
+            url = (body.get("url") or "").strip()
+            if not url:
+                return JSONResponse({"error": "url is required"}, status_code=400)
+            try:
+                interval = float(body.get("interval_hours", 24) or 24)
+            except (TypeError, ValueError):
+                interval = 24
+            if interval <= 0:
+                return JSONResponse({"error": "interval_hours must be > 0"}, status_code=400)
+            checks = body.get("checks") or []
+            if isinstance(checks, str):
+                checks = [c.strip() for c in checks.replace(",", " ").split() if c.strip()]
+            sched = self.add_schedule(url, checks, int(body.get("depth", 2) or 2), interval)
+            return JSONResponse({"status": "ok", "schedule": sched})
+
+        @app.post("/api/v1/schedules/{sched_id}/toggle")
+        async def api_toggle_schedule(sched_id: str):
+            s = self.toggle_schedule(sched_id)
+            if s is None:
+                return JSONResponse({"error": "not found"}, status_code=404)
+            return JSONResponse({"status": "ok", "schedule": s})
+
+        @app.delete("/api/v1/schedules/{sched_id}")
+        async def api_delete_schedule(sched_id: str):
+            if not self.delete_schedule(sched_id):
+                return JSONResponse({"error": "not found"}, status_code=404)
+            return JSONResponse({"status": "deleted", "id": sched_id})
 
         @app.get("/api/auth-status")
         async def api_auth_status():
@@ -868,6 +925,105 @@ class MonitorServer:
             )
         except Exception:
             pass
+
+    # ------------------------------------------------------------------
+    # Scheduled (recurring) scans
+    # ------------------------------------------------------------------
+
+    def request_scan(self, config: dict) -> bool:
+        """スキャンを serve ループへ投入する。実行中/投入済みなら False。
+
+        ダッシュボード/API の開始処理と同じ状態セットを行うため、スケジューラ
+        からも一貫した形でスキャンを起動できる。
+        """
+        if self.scan_in_progress or self.scan_request_event.is_set():
+            return False
+        self.scan_request_data = dict(config or {})
+        self.api_scan_id = str(int(time.time()))
+        self.api_scan_status = "scanning"
+        self.api_findings = []
+        self.api_report_path = None
+        self.api_target = (config or {}).get("url", "") or ""
+        self.api_phase = ""
+        self.api_progress = {"current": 0, "total": 0, "percent": 0}
+        self.scan_request_event.set()
+        return True
+
+    def list_schedules(self) -> list:
+        return list(self._load_settings().get("schedules") or [])
+
+    def _write_schedules(self, schedules: list) -> None:
+        settings = self._load_settings()
+        settings["schedules"] = schedules
+        self._save_settings(settings)
+
+    def add_schedule(self, url: str, checks: list, depth: int, interval_hours: float) -> dict:
+        now = time.time()
+        sched = {
+            "id": str(int(now * 1000)),  # ミリ秒で一意化
+            "url": url,
+            "checks": checks or [],
+            "depth": int(depth or 2),
+            "interval_hours": float(interval_hours or 24),
+            "enabled": True,
+            "created_at": now,
+            "last_run": 0,
+            "next_run": now,  # 次のスケジューラ tick で実行
+        }
+        schedules = self.list_schedules()
+        schedules.append(sched)
+        self._write_schedules(schedules)
+        return sched
+
+    def delete_schedule(self, sched_id: str) -> bool:
+        schedules = self.list_schedules()
+        kept = [s for s in schedules if str(s.get("id")) != str(sched_id)]
+        if len(kept) == len(schedules):
+            return False
+        self._write_schedules(kept)
+        return True
+
+    def toggle_schedule(self, sched_id: str) -> Optional[dict]:
+        schedules = self.list_schedules()
+        found = None
+        for s in schedules:
+            if str(s.get("id")) == str(sched_id):
+                s["enabled"] = not s.get("enabled", True)
+                found = s
+                break
+        if found is None:
+            return None
+        self._write_schedules(schedules)
+        return found
+
+    def trigger_due_schedules(self) -> Optional[str]:
+        """期限到来のスケジュールが1件あればスキャンを起動し、その id を返す。
+
+        serve は同時1スキャンのため、起動するのは1件のみ（残りは次 tick）。
+        起動できなければ（実行中/期限未到来）None。
+        """
+        if self.scan_in_progress or self.scan_request_event.is_set():
+            return None
+        schedules = self.list_schedules()
+        now = time.time()
+        due = due_schedule_ids(schedules, now)
+        if not due:
+            return None
+        target_id = due[0]
+        for s in schedules:
+            if str(s.get("id")) == target_id:
+                cfg = {
+                    "url": s.get("url", ""),
+                    "checks": s.get("checks") or [],
+                    "depth": int(s.get("depth", 2)),
+                }
+                if not self.request_scan(cfg):
+                    return None
+                s["last_run"] = now
+                s["next_run"] = now + float(s.get("interval_hours", 24) or 24) * 3600
+                self._write_schedules(schedules)
+                return target_id
+        return None
 
     # ------------------------------------------------------------------
     # Login page

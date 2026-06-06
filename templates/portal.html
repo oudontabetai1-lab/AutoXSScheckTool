@@ -178,6 +178,33 @@
       <button class="btn sm" id="pageNext" onclick="changePage(1)">次 →</button>
     </div>
   </div>
+
+  <!-- Scheduled scans -->
+  <div class="card">
+    <div class="toolbar">
+      <p class="section-title" style="margin:0">定期スキャン</p>
+      <span class="spacer"></span>
+      <button class="btn sm" onclick="loadSchedules()">↻ 更新</button>
+    </div>
+    <div class="now-row" style="gap:8px;flex-wrap:wrap;margin-bottom:14px">
+      <input id="schUrl" type="text" placeholder="https://example.com"
+        style="flex:1;min-width:200px;background:var(--bg);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:8px 11px;font-size:.86rem">
+      <input id="schChecks" type="text" placeholder="検査(空=既定) 例: xss sqli os" title="検査項目（スペース区切り、空で既定）"
+        style="width:210px;background:var(--bg);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:8px 11px;font-size:.86rem">
+      <input id="schDepth" type="number" min="1" max="10" value="2" title="クロール深度"
+        style="width:70px;background:var(--bg);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:8px 10px;font-size:.86rem">
+      <input id="schInterval" type="number" min="0.1" step="0.5" value="24" title="実行間隔（時間）"
+        style="width:96px;background:var(--bg);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:8px 10px;font-size:.86rem">
+      <button class="btn primary" onclick="addSchedule()">＋ 追加</button>
+    </div>
+    <table>
+      <thead>
+        <tr><th>対象</th><th>検査</th><th>間隔</th><th>次回</th><th>状態</th><th style="text-align:right">操作</th></tr>
+      </thead>
+      <tbody id="schRows"><tr><td colspan="6" class="empty">登録された定期スキャンはありません。</td></tr></tbody>
+    </table>
+    <p class="muted" style="font-size:.76rem;margin-top:10px">定期スキャンは serve モードで、他のスキャンが実行中でないときに自動起動されます（同時実行は1件）。</p>
+  </div>
 </main>
 
 <!-- Diff modal -->
@@ -563,14 +590,78 @@ async function saveSettingsSilent() {
   } catch (e) {}
 }
 
+// ── Scheduled scans ───────────────────────────────────────────────────
+async function loadSchedules() {
+  let data;
+  try { data = await (await api('/api/v1/schedules')).json(); }
+  catch (e) { return; }
+  const rows = data.schedules || [];
+  const tb = $('schRows');
+  if (!rows.length) {
+    tb.innerHTML = '<tr><td colspan="6" class="empty">登録された定期スキャンはありません。</td></tr>';
+    return;
+  }
+  tb.innerHTML = rows.map(s => {
+    const checks = (s.checks && s.checks.length) ? esc(s.checks.join(' ')) : '<span class="muted">既定</span>';
+    const next = s.enabled ? fmtDate(new Date((s.next_run || 0) * 1000).toISOString()) : '—';
+    const stCls = s.enabled ? 'scanning' : 'incomplete';
+    const stTxt = s.enabled ? '有効' : '停止中';
+    return `<tr>
+      <td class="target" title="${esc(s.url)}">${esc(s.url)}</td>
+      <td>${checks}</td>
+      <td>${esc(s.interval_hours)}h</td>
+      <td>${next}</td>
+      <td><span class="st ${stCls}">${stTxt}</span></td>
+      <td><div class="row-actions">
+        <button class="btn sm" data-sch-toggle="${esc(s.id)}">${s.enabled ? '⏸ 停止' : '▶ 再開'}</button>
+        <button class="btn sm danger" data-sch-del="${esc(s.id)}">🗑</button>
+      </div></td>
+    </tr>`;
+  }).join('');
+}
+
+async function addSchedule() {
+  const url = $('schUrl').value.trim();
+  if (!url) { toast('URL を入力してください'); return; }
+  const checks = $('schChecks').value.trim();
+  const body = {
+    url,
+    depth: parseInt($('schDepth').value, 10) || 2,
+    interval_hours: parseFloat($('schInterval').value) || 24,
+  };
+  if (checks) body.checks = checks;
+  try {
+    const r = await api('/api/v1/schedules', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (r.ok) { toast('定期スキャンを登録しました'); $('schUrl').value = ''; loadSchedules(); }
+    else { const e = await r.json().catch(()=>({})); toast(e.error || '登録できませんでした'); }
+  } catch (e) {}
+}
+
+$('schRows').addEventListener('click', async (e) => {
+  const tg = e.target.closest('[data-sch-toggle]');
+  if (tg) {
+    try { await api('/api/v1/schedules/' + encodeURIComponent(tg.dataset.schToggle) + '/toggle', { method: 'POST' }); loadSchedules(); } catch (e) {}
+    return;
+  }
+  const dl = e.target.closest('[data-sch-del]');
+  if (dl) {
+    if (!confirm('この定期スキャンを削除しますか？')) return;
+    try { await api('/api/v1/schedules/' + encodeURIComponent(dl.dataset.schDel), { method: 'DELETE' }); loadSchedules(); } catch (e) {}
+  }
+});
+
 // ── Auth-aware logout link + polling ──────────────────────────────────
 fetch('/api/auth-status').then(r => r.ok ? r.json() : null).then(d => {
   if (d && d.auth_enabled) $('logoutLink').style.display = '';
 }).catch(() => {});
 
-loadStatus(); loadScans();
+loadStatus(); loadScans(); loadSchedules();
 setInterval(loadStatus, 2500);
 setInterval(loadScans, 6000);
+setInterval(loadSchedules, 15000);
 </script>
 </body>
 </html>

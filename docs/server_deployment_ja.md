@@ -45,8 +45,11 @@ WScan のダッシュボードをサーバー上で常時起動し、社内ネ�
 | `GET /reports/{scan_id}/report.html` | レポートをブラウザで閲覧 |
 | `GET /api/v1/scans/{scan_id}/download` | 成果物フォルダを zip でダウンロード |
 | `DELETE /api/v1/scans/{scan_id}` | スキャン成果物を削除（実行中スキャンは不可） |
+| `GET /api/v1/scans/{scan_id}/diff` | 同一対象の前回スキャンとの差分（新規/修正済み/継続） |
 | `POST /api/v1/scans/prune` | 保持ポリシーを今すぐ適用し古いスキャンを削除（ポータルの「🧹 整理」ボタン） |
 | `POST /api/v1/scan/abort` | 実行中スキャンの停止を要求 |
+| `GET/POST /api/v1/settings` | 通知(Slack/Webhook)設定の取得・更新（`POST /api/v1/settings/test` でテスト送信） |
+| `GET/POST /api/v1/schedules` | 定期スキャンの一覧・登録（`{id}/toggle` で有効切替、`DELETE` で削除） |
 
 `GET /api/v1/scans` のレスポンスには履歴 `scans` に加え、合計使用量と保持ポリシーを示す
 `storage`（`total_bytes` / `scan_count` / `retention_days` / `retention_max_scans`）が含まれます。

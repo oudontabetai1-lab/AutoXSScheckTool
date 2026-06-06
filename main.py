@@ -1776,19 +1776,38 @@ async def run_serve(args):
                 except Exception:
                     pass
 
+    async def scheduler_task():
+        # 定期スキャンの期限を監視し、アイドル時に1件ずつ起動する。
+        await asyncio.sleep(3.0)
+        while not server.should_exit:
+            try:
+                sid = monitor.trigger_due_schedules()
+                if sid:
+                    console.print(f"[dim]スケジュール {sid}: 定期スキャンを起動しました。[/dim]")
+            except Exception:
+                pass
+            # 30 秒ごとにチェック（shutdown を取りこぼさないよう小刻みに待つ）。
+            for _ in range(30):
+                if server.should_exit:
+                    break
+                await asyncio.sleep(1.0)
+
     # Run the server and the scan loop side by side. When the server shuts down
     # (Ctrl+C / SIGTERM), cancel the idle scan loop so the process exits promptly
     # instead of hanging on a pending scan-request wait.
     server_coro = asyncio.ensure_future(server.serve())
     worker_coro = asyncio.ensure_future(serve_task())
+    scheduler_coro = asyncio.ensure_future(scheduler_task())
     try:
         await server_coro
     finally:
         worker_coro.cancel()
-        try:
-            await worker_coro
-        except asyncio.CancelledError:
-            pass
+        scheduler_coro.cancel()
+        for _c in (worker_coro, scheduler_coro):
+            try:
+                await _c
+            except asyncio.CancelledError:
+                pass
 
 
 async def run_triage(args):
