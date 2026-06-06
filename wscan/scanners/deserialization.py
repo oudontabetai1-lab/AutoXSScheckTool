@@ -159,8 +159,7 @@ class DeserializationScanner(BaseScanner):
             baseline_src = ""
 
         for probe_id, description, payload, content_type in _PROBES:
-            if self.monitor:
-                await self.monitor.emit_payload_test(
+            await self.log_payload_test(
                     field_name, f"[{probe_id}]", "deserialization", url
                 )
             try:

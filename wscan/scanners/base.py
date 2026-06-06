@@ -203,6 +203,24 @@ class BaseScanner(ABC):
         """Scaling factor for sleep durations (0.5 in CTF mode, 1.0 otherwise)."""
         return getattr(self.engine, "sleep_factor", 1.0)
 
+    async def log_payload_test(
+        self, field_name: str, payload: str, check_type: str, url: str = ""
+    ) -> None:
+        """Record a tested payload to the audit log and (if present) the dashboard.
+
+        Monitor-independent: writes to ``engine.request_logger`` so
+        ``payloads.jsonl`` is produced even in ``--no-monitor`` / batch runs
+        (where ``monitor`` is ``None``), then emits the live dashboard event
+        only when a monitor is attached. The file write happens here — not in
+        ``MonitorServer.emit_payload_test`` — so it is never skipped just
+        because the dashboard is absent, and not duplicated when present.
+        """
+        logger = getattr(self.engine, "request_logger", None)
+        if logger is not None:
+            logger.log_payload(field_name, payload, check_type, url)
+        if self.monitor:
+            await self.monitor.emit_payload_test(field_name, payload, check_type, url)
+
     async def get_payloads(self, field_name: str, url: str) -> list[str]:
         """Get payloads for this scanner's check type, sorted by learning data."""
         # Check per-task ContextVar override first (set by engine for parallel isolation),
@@ -249,6 +267,63 @@ class BaseScanner(ABC):
         if req_ts and resp_ts:
             return (resp_ts - req_ts) >= threshold
         return False
+
+    async def run_equivalence_probe(
+        self,
+        url: str,
+        form_index: int,
+        field_name: str,
+        is_url_param: bool,
+        *,
+        context: str = "sql",
+    ) -> "Optional[tuple]":
+        """文字列結合の等価性プローブを 1 フィールドに対して実行する。
+
+        ``context`` に応じたプローブ群を生成して順に投入し、応答本文から
+        ``equivalence_probe.evaluate`` で注入可否を判定する。判定が陽性なら
+        ``(ProbeVerdict, last_pair)`` を、そうでなければ ``None`` を返す。
+
+        SQLi / XSS の両スキャナから再利用する共通ロジック。投入は各スキャナの
+        ``_apply_payload`` に委譲するため、フォーム/URLパラメータ双方に対応する。
+        """
+        from wscan import equivalence_probe as eqp
+
+        builders = {
+            "sql": eqp.sql_probe_set,
+            "html_attr": eqp.html_attr_probe_set,
+            "js_string": eqp.js_string_probe_set,
+        }
+        builder = builders.get(context)
+        if builder is None:
+            return None
+
+        probe_set = builder()
+        responses: dict[str, str] = {}
+        pairs: dict[str, dict] = {}
+        for probe in probe_set.probes:
+            # Log probe payloads to the audit trail just like the normal scanner
+            # loops, so payloads.jsonl can reproduce a verdict's matched payload.
+            await self.log_payload_test(
+                field_name, probe.value, f"{self.CHECK_TYPE}_equiv", url
+            )
+            try:
+                source, pair = await self._apply_payload(
+                    url, form_index, field_name, probe.value, is_url_param
+                )
+            except Exception:
+                continue
+            pairs[probe.name] = pair or {}
+            body = (pair.get("response", {}) or {}).get("body") or source or ""
+            responses[probe.name] = body
+
+        verdict = eqp.evaluate(probe_set, responses)
+        if verdict.injectable:
+            # Attach the request/response pair of the probe that actually
+            # triggered the verdict, not whichever probe happened to run last
+            # (otherwise the recorded evidence points at a different payload).
+            matched_pair = pairs.get(verdict.matched_probe, {})
+            return verdict, matched_pair
+        return None
 
     def current_page_pair(self, url: str) -> dict:
         """

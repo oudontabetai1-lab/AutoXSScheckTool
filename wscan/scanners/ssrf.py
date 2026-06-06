@@ -107,8 +107,7 @@ class SSRFScanner(BaseScanner):
         )
 
         for label, payload, pattern in _SSRF_PROBES:
-            if self.monitor:
-                await self.monitor.emit_payload_test(field_name, payload, "ssrf", url)
+            await self.log_payload_test(field_name, payload, "ssrf", url)
 
             source, pair = await self._apply_payload(
                 url, form_index, field_name, payload, is_url_param

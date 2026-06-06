@@ -17,11 +17,15 @@ from .tls_config import TLSConfig
 class NetworkCapture:
     """Captures HTTP request/response pairs."""
 
-    def __init__(self):
+    def __init__(self, logger=None):
         self.pairs: list[dict] = []
         # Use (url, id(request_object)) as key to avoid collisions when the same URL
         # is requested multiple times concurrently (race condition fix).
         self._pending: dict[tuple, dict] = {}
+        # Optional RequestLogger: persists every request/response pair to a
+        # JSONL audit log. clear() wipes the in-memory list per page, so the
+        # log is the only place a complete request history survives.
+        self.logger = logger
 
     def on_request(self, request: Request):
         key = (request.url, id(request))
@@ -58,6 +62,8 @@ class NetworkCapture:
             },
         }
         self.pairs.append(pair)
+        if self.logger is not None:
+            self.logger.log_http(pair)
 
     async def enrich_response(self, response: Response):
         """Asynchronously get response body text.
@@ -125,6 +131,7 @@ class BrowserManager:
         extra_headers: Optional[dict] = None,
         tls_config: Optional[TLSConfig] = None,
         target_url: str = "",
+        request_logger=None,
     ):
         self.headless = headless
         self.timeout = timeout * 1000  # ms
@@ -143,7 +150,8 @@ class BrowserManager:
         self._browser: Optional[Browser] = None
         self._context: Optional[BrowserContext] = None
         self.page: Optional[Page] = None
-        self.network = NetworkCapture()
+        self.request_logger = request_logger
+        self.network = NetworkCapture(logger=request_logger)
         self.dialog_fired: bool = False
         self.dialog_message: str = ""
         self.dialog_screenshot_b64: str = ""  # Screenshot taken right when alert fires
@@ -1285,7 +1293,9 @@ class WorkerBrowser(BrowserManager):
 
         # Worker-private state
         self.page = page
-        self.network = NetworkCapture()
+        # Inherit the audit logger so concurrent workers also persist traffic.
+        self.request_logger = getattr(real_browser, "request_logger", None)
+        self.network = NetworkCapture(logger=self.request_logger)
         self.dialog_fired: bool = False
         self.dialog_message: str = ""
         self.dialog_screenshot_b64: str = ""

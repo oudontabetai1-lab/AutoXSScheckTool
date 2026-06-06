@@ -66,8 +66,7 @@ class HeaderInjectionScanner(BaseScanner):
             )
 
         for payload in CRLF_PAYLOADS:
-            if self.monitor:
-                await self.monitor.emit_payload_test(field_name, payload, "header_injection", url)
+            await self.log_payload_test(field_name, payload, "header_injection", url)
 
             source, pair = await self._apply_payload(
                 url, form_index, field_name, payload, is_url_param

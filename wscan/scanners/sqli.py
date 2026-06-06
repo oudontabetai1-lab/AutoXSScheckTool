@@ -234,8 +234,7 @@ class SQLiScanner(BaseScanner):
         time_threshold = max(2.5, baseline_time + 2.5)
 
         for payload in payloads:
-            if self.monitor:
-                await self.monitor.emit_payload_test(field_name, payload, "sqli", url)
+            await self.log_payload_test(field_name, payload, "sqli", url)
 
             # Apply payload
             source, pair = await self._apply_payload(
@@ -397,6 +396,46 @@ class SQLiScanner(BaseScanner):
             # Small delay to avoid overwhelming the server
             await asyncio.sleep(0.2 * self.sleep_factor)
 
+        # --- Check 5: String-concatenation equivalence probe ---
+        # When the error/boolean/time checks find nothing, fall back to the
+        # filter- and error-independent concatenation-equivalence probe
+        # (e.g. AA' 'BB collapsing to AABB), which confirms the quote was
+        # interpreted as SQL syntax rather than reflected as data.
+        if not findings:
+            probe = await self.run_equivalence_probe(
+                url, form_index, field_name, is_url_param, context="sql"
+            )
+            if probe:
+                verdict, pair = probe
+                finding = await self.record_finding(
+                    url=url,
+                    field_name=field_name,
+                    payload=verdict.details.get("matched_payload", ""),
+                    evidence=(
+                        "String-concatenation equivalence SQLi: "
+                        + verdict.rationale
+                    ),
+                    pair=pair,
+                    severity="high",
+                    confidence="likely" if verdict.confidence >= 0.85 else "tentative",
+                    evidence_type="sqli_concat_equivalence",
+                    evidence_details={
+                        "matched_dialect": verdict.matched_dialect,
+                        "matched_probe": verdict.matched_probe,
+                        "probe_confidence": round(verdict.confidence, 3),
+                        **verdict.details,
+                    },
+                    reproduction_steps=[
+                        f"Open {url}",
+                        f"Submit the concatenation payload to '{field_name}': "
+                        f"{verdict.details.get('matched_payload', '')}",
+                        "Confirm the response contains the concatenated marker, "
+                        "proving the injected quote was interpreted as SQL syntax.",
+                    ],
+                )
+                if finding:
+                    findings.append(finding)
+
         return findings
 
     def _normalise_body(self, body: str) -> str:
@@ -479,6 +518,12 @@ class SQLiScanner(BaseScanner):
                 and self._body_similarity(true_src, baseline_source) >= 0.85
                 and self._body_similarity(false_src, baseline_source) <= 0.80
             )
+        if etype == "sqli_concat_equivalence":
+            # Re-run the concatenation-equivalence probe; injectable again ⇒ verified.
+            result = await self.run_equivalence_probe(
+                finding.url, 0, finding.field_name, is_url_param, context="sql"
+            )
+            return result is not None
         return None
 
     async def _verify_auth_bypass_fresh_context(self, finding: Finding) -> bool | None:

@@ -91,6 +91,9 @@ class MonitorServer:
         self.api_findings: list[dict] = []   # emit_finding() で自動蓄積
         self.api_report_path: Optional[str] = None
         self.manual_crawl_session = None
+        # Optional RequestLogger (set by ScanEngine). Persists tested payloads
+        # to payloads.jsonl alongside the HTTP request audit log.
+        self.request_logger = None
 
     # ------------------------------------------------------------------
     # Authentication helpers
@@ -808,6 +811,9 @@ class MonitorServer:
         })
 
     async def emit_payload_test(self, field: str, payload: str, check_type: str, url: str = "") -> None:
+        # NOTE: payload file-logging lives in BaseScanner.log_payload_test (so it
+        # works without a monitor and is not duplicated here). This only pushes
+        # the live dashboard event.
         await self.emit("payload_test", {
             "field": field,
             "payload": payload,
