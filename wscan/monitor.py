@@ -104,7 +104,9 @@ def select_scans_to_prune(
 
 def _host_of(url: str) -> str:
     try:
-        return (urlparse(url).hostname or "").lower()
+        # DNS 末尾ドット（"example.com."）は "example.com" と同一ホストなので
+        # 正規化しておく。これを残すと deny/allow 照合を末尾ドットで回避できる。
+        return (urlparse(url).hostname or "").lower().rstrip(".")
     except Exception:
         return ""
 
@@ -121,10 +123,10 @@ def target_in_scope(url: str, allowed: list, denied: list) -> bool:
     if not host:
         return False
     for d in (denied or []):
-        d = (d or "").lower().lstrip(".")
+        d = (d or "").lower().strip().strip(".")
         if d and (host == d or host.endswith("." + d)):
             return False
-    allow = [(a or "").lower().lstrip(".") for a in (allowed or []) if (a or "").strip()]
+    allow = [(a or "").lower().strip().strip(".") for a in (allowed or []) if (a or "").strip()]
     if allow:
         return any(host == a or host.endswith("." + a) for a in allow)
     return True
@@ -318,11 +320,28 @@ class MonitorServer:
                 urls += [str(u).strip() for u in v if str(u).strip()]
         if config.get("login_url"):
             urls.append(config["login_url"])
+        # 攻撃フロー/シナリオの navigate 先もブラウザが実際に開くため検査対象。
+        # in-scope の url を指定しつつ、フローで範囲外へ navigate する回避を防ぐ。
+        urls += self._flow_nav_urls(config.get("flows"))
         for u in urls:
             err = self._scope_error(u)
             if err:
                 return err
         return None
+
+    @staticmethod
+    def _flow_nav_urls(flows) -> list:
+        """フロー定義から navigate 系ステップの URL を抽出する。"""
+        out: list = []
+        for flow in (flows or []):
+            if not isinstance(flow, dict):
+                continue
+            for step in (flow.get("steps") or []):
+                if not isinstance(step, dict):
+                    continue
+                if step.get("action") in ("navigate", "goto") and step.get("url"):
+                    out.append(str(step["url"]))
+        return out
 
     # ── Scan watchdog (hang protection) ───────────────────────────────
     def mark_scan_started(self) -> None:
@@ -434,7 +453,8 @@ class MonitorServer:
                 while True:
                     try:
                         raw = await asyncio.wait_for(ws.receive_text(), timeout=30)
-                        self._handle_client_message(raw)
+                        ws_ip = (ws.client.host if ws.client else "") or "ws"
+                        self._handle_client_message(raw, ws_ip)
                     except asyncio.TimeoutError:
                         # Send ping to keep alive
                         await ws.send_text(json.dumps({"type": "ping"}))
@@ -1350,7 +1370,7 @@ class MonitorServer:
     # Client message handler (called from WebSocket coroutine)
     # ------------------------------------------------------------------
 
-    def _handle_client_message(self, raw: str) -> None:
+    def _handle_client_message(self, raw: str, client_ip: str = "ws") -> None:
         """Parse and dispatch a JSON message sent from the browser."""
         try:
             msg = json.loads(raw)
@@ -1408,18 +1428,29 @@ class MonitorServer:
             self.api_target = cfg.get("url", "") or ""
             self.api_phase = ""
             self.api_progress = {"current": 0, "total": 0, "percent": 0}
+            self._audit("scan_start", client_ip, cfg.get("url", ""))
             self.scan_request_event.set()
 
         elif action == "crawl_review":
             # User reviewed crawl results. command: continue|recrawl|cancel
             # Optional extra_urls (list[str]) and manual_crawl_file (str) are
             # consumed by the engine on resume.
+            extra_urls = msg.get("extra_urls", []) or []
+            flows = msg.get("flows", []) or []
+            # レビュー時に追加される URL / フローもスコープ検査し、範囲外は除外する
+            # （スキャン本体と同じ allow/deny を後段の navigate にも効かせる）。
+            if self.allowed_target_hosts or self.denied_target_hosts:
+                extra_urls = [u for u in extra_urls if not self._scope_error(str(u))]
+                flows = [
+                    f for f in flows
+                    if all(not self._scope_error(u) for u in self._flow_nav_urls([f]))
+                ]
             self.crawl_review_action = {
                 "command": msg.get("command", "continue"),
-                "extra_urls": msg.get("extra_urls", []) or [],
+                "extra_urls": extra_urls,
                 "manual_crawl_file": msg.get("manual_crawl_file", "") or "",
                 # Manual attack scenarios built in the dashboard scenario editor.
-                "flows": msg.get("flows", []) or [],
+                "flows": flows,
             }
             self.crawl_review_event.set()
 

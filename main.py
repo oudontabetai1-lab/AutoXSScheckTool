@@ -1828,6 +1828,15 @@ async def run_serve(args):
                             f"\n[red]watchdog: スキャンが上限＋猶予({hard_timeout:.0f}秒)を"
                             f"超えたため強制終了しました。[/red]"
                         )
+                        # status を error にし、ポータル/CI が「終わらないスキャン」を
+                        # ポーリングし続けないよう可視化する。
+                        monitor.api_scan_status = "error"
+                        try:
+                            await monitor.emit_status(
+                                "スキャンが上限時間を超えたため強制終了しました。", "error"
+                            )
+                        except Exception:
+                            pass
                 else:
                     await run_one_scan(cfg)
             except asyncio.CancelledError:

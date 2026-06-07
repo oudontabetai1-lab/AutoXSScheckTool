@@ -76,6 +76,48 @@ class ServerGuardEndpointTests(unittest.TestCase):
         self.assertIsNotNone(srv._config_scope_error({"url": "http://example.com", "login_url": "http://evil.com/login"}))
         self.assertIsNone(srv._config_scope_error({"url": "http://example.com", "target_urls": ["http://a.example.com"]}))
 
+    def test_trailing_dot_does_not_bypass_deny(self):
+        # Codex指摘(P2): "example.com." は example.com と同一ホスト → deny を回避させない。
+        self.assertFalse(target_in_scope("http://example.com.", [], ["example.com"]))
+        self.assertTrue(target_in_scope("http://example.com.", ["example.com"], []))
+
+    def test_flow_navigate_urls_are_scoped(self):
+        # Codex指摘(P1): フローの navigate 先もスコープ検査する。
+        srv = MonitorServer(port=0, auth_token="")
+        srv.allowed_target_hosts = ["example.com"]
+        bad = {"url": "http://example.com",
+               "flows": [{"name": "f", "steps": [{"action": "navigate", "url": "http://evil.com"}]}]}
+        good = {"url": "http://example.com",
+                "flows": [{"name": "f", "steps": [{"action": "navigate", "url": "http://a.example.com"}]}]}
+        self.assertIsNotNone(srv._config_scope_error(bad))
+        self.assertIsNone(srv._config_scope_error(good))
+
+    def test_websocket_scan_start_is_audited(self):
+        # Codex指摘(P2): WS 経由の開始も監査ログに残す。
+        import json
+        srv = MonitorServer(port=0, auth_token="")
+        srv._handle_client_message(
+            json.dumps({"action": "start_scan", "config": {"url": "http://t"}}), "9.9.9.9")
+        aud = srv.read_audit()
+        self.assertTrue(any(a["action"] == "scan_start" and a["ip"] == "9.9.9.9" for a in aud))
+
+    def test_crawl_review_filters_out_of_scope(self):
+        # Codex指摘(P1の補足): レビュー時追加の extra_urls / flows もスコープ外を除外。
+        import json
+        srv = MonitorServer(port=0, auth_token="")
+        srv.allowed_target_hosts = ["example.com"]
+        srv._handle_client_message(json.dumps({
+            "action": "crawl_review", "command": "continue",
+            "extra_urls": ["http://evil.com", "http://x.example.com"],
+            "flows": [
+                {"name": "bad", "steps": [{"action": "navigate", "url": "http://evil.com"}]},
+                {"name": "ok", "steps": [{"action": "navigate", "url": "http://example.com/p"}]},
+            ],
+        }), "1.1.1.1")
+        cra = srv.crawl_review_action
+        self.assertEqual(cra["extra_urls"], ["http://x.example.com"])
+        self.assertEqual([f["name"] for f in cra["flows"]], ["ok"])
+
     def test_manual_crawl_enforces_scope(self):
         srv = MonitorServer(port=0, auth_token="")
         srv.allowed_target_hosts = ["example.com"]
