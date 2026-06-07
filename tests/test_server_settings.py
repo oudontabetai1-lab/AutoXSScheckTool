@@ -59,6 +59,18 @@ class ServerSettingsTests(unittest.TestCase):
         self.srv._save_settings({"notifications": {"webhook_url": "u"}})
         self.assertEqual(self.client.get("/api/v1/scans").json()["scans"], [])
 
+    def test_management_actions_are_audited(self):
+        self.client.post("/api/v1/scan", json={"url": "http://t"})
+        self.client.post("/api/v1/schedules", json={"url": "http://s", "interval_hours": 2})
+        self.client.post("/api/v1/settings", json={"notifications": {"enabled": True}})
+        actions = [a["action"] for a in self.client.get("/api/v1/audit").json()["audit"]]
+        self.assertIn("scan_start", actions)
+        self.assertIn("schedule_add", actions)
+        self.assertIn("settings_update", actions)
+        # 監査ログファイルもスキャン履歴には現れない
+        ids = [s["id"] for s in self.client.get("/api/v1/scans").json()["scans"]]
+        self.assertNotIn("management_audit.jsonl", ids)
+
 
 if __name__ == "__main__":
     unittest.main()

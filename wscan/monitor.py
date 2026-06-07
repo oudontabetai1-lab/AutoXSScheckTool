@@ -447,6 +447,8 @@ class MonitorServer:
                 self._save_settings(settings)
             except Exception as exc:
                 return JSONResponse({"error": f"保存に失敗しました: {exc}"}, status_code=500)
+            self._audit("settings_update", self._client_ip(request),
+                        f"webhook_set={bool(new_url)} enabled={settings['notifications']['enabled']}")
             return JSONResponse({"status": "ok"})
 
         @app.post("/api/v1/settings/test")
@@ -495,20 +497,29 @@ class MonitorServer:
             if isinstance(checks, str):
                 checks = [c.strip() for c in checks.replace(",", " ").split() if c.strip()]
             sched = self.add_schedule(url, checks, int(body.get("depth", 2) or 2), interval)
+            self._audit("schedule_add", self._client_ip(request), f"{url} ({interval}h)")
             return JSONResponse({"status": "ok", "schedule": sched})
 
         @app.post("/api/v1/schedules/{sched_id}/toggle")
-        async def api_toggle_schedule(sched_id: str):
+        async def api_toggle_schedule(sched_id: str, request: Request):
             s = self.toggle_schedule(sched_id)
             if s is None:
                 return JSONResponse({"error": "not found"}, status_code=404)
+            self._audit("schedule_toggle", self._client_ip(request),
+                        f"{s.get('url','')} enabled={s.get('enabled')}")
             return JSONResponse({"status": "ok", "schedule": s})
 
         @app.delete("/api/v1/schedules/{sched_id}")
-        async def api_delete_schedule(sched_id: str):
+        async def api_delete_schedule(sched_id: str, request: Request):
             if not self.delete_schedule(sched_id):
                 return JSONResponse({"error": "not found"}, status_code=404)
+            self._audit("schedule_delete", self._client_ip(request), sched_id)
             return JSONResponse({"status": "deleted", "id": sched_id})
+
+        @app.get("/api/v1/audit")
+        async def api_get_audit():
+            """管理操作の監査ログ（末尾200件、新しい順）を返す。"""
+            return JSONResponse({"audit": self.read_audit(200)})
 
         @app.get("/api/auth-status")
         async def api_auth_status():
@@ -608,6 +619,7 @@ class MonitorServer:
             self.api_target = config.get("url", "") or ""
             self.api_phase = ""
             self.api_progress = {"current": 0, "total": 0, "percent": 0}
+            self._audit("scan_start", self._client_ip(request), config.get("url", ""))
             return JSONResponse({
                 "status": "accepted",
                 "scan_id": self.api_scan_id,
@@ -718,13 +730,14 @@ class MonitorServer:
         # ── Scan management portal: history, reports, downloads ───────────────
 
         @app.post("/api/v1/scan/abort")
-        async def api_scan_abort():
+        async def api_scan_abort(request: Request):
             """Request the running scan to stop (saves a partial report)."""
             if not self.scan_in_progress:
                 return JSONResponse(
                     {"error": "実行中のスキャンはありません。"}, status_code=409
                 )
             self.command_queue.put_nowait("abort")
+            self._audit("scan_abort", self._client_ip(request), self.current_scan_id)
             return JSONResponse({"status": "aborting"})
 
         @app.get("/api/v1/scans")
@@ -737,9 +750,10 @@ class MonitorServer:
             })
 
         @app.post("/api/v1/scans/prune")
-        async def api_scans_prune():
+        async def api_scans_prune(request: Request):
             """保持ポリシーを今すぐ適用して古いスキャンを削除する（手動整理）。"""
             pruned = self.prune_old_scans()
+            self._audit("scans_prune", self._client_ip(request), f"{len(pruned)} 件")
             return JSONResponse({
                 "status": "ok",
                 "pruned": pruned,
@@ -823,7 +837,7 @@ class MonitorServer:
             })
 
         @app.delete("/api/v1/scans/{scan_id}")
-        async def api_scan_delete(scan_id: str):
+        async def api_scan_delete(scan_id: str, request: Request):
             """Delete a scan's artifact folder."""
             if self.scan_in_progress and scan_id == self.current_scan_id:
                 return JSONResponse(
@@ -836,6 +850,7 @@ class MonitorServer:
                 shutil.rmtree(d)
             except Exception as exc:
                 return JSONResponse({"error": str(exc)}, status_code=500)
+            self._audit("scan_delete", self._client_ip(request), scan_id)
             return JSONResponse({"status": "deleted", "scan_id": scan_id})
 
         @app.get("/reports/{scan_id}/{file_path:path}")
@@ -984,6 +999,50 @@ class MonitorServer:
 
     def _settings_path(self) -> Path:
         return OUTPUT_BASE / "wscan_settings.json"
+
+    # ------------------------------------------------------------------
+    # Management audit log (who did what, from where) — JSONL file under
+    # output/. 共有サーバーで start/abort/delete/設定変更 等の操作を追跡する。
+    # ------------------------------------------------------------------
+
+    def _audit_path(self) -> Path:
+        return OUTPUT_BASE / "management_audit.jsonl"
+
+    def _audit(self, action: str, ip: str = "", detail: str = "") -> None:
+        """管理操作を 1 行 JSONL で追記する（失敗しても本処理は止めない）。"""
+        try:
+            OUTPUT_BASE.mkdir(parents=True, exist_ok=True)
+            entry = {
+                "ts": datetime.datetime.now().isoformat(timespec="seconds"),
+                "ip": ip or "",
+                "action": action,
+                "detail": str(detail)[:300],
+            }
+            with open(self._audit_path(), "a", encoding="utf-8") as f:
+                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        except Exception:
+            pass
+
+    def read_audit(self, limit: int = 200) -> list:
+        """監査ログの末尾 limit 件を新しい順で返す。"""
+        p = self._audit_path()
+        if not p.is_file():
+            return []
+        try:
+            lines = p.read_text(encoding="utf-8").splitlines()
+        except Exception:
+            return []
+        out = []
+        for ln in lines[-limit:]:
+            ln = ln.strip()
+            if not ln:
+                continue
+            try:
+                out.append(json.loads(ln))
+            except Exception:
+                continue
+        out.reverse()
+        return out
 
     def _load_settings(self) -> dict:
         p = self._settings_path()

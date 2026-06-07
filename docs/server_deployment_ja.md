@@ -50,6 +50,7 @@ WScan のダッシュボードをサーバー上で常時起動し、社内ネ�
 | `POST /api/v1/scan/abort` | 実行中スキャンの停止を要求 |
 | `GET/POST /api/v1/settings` | 通知(Slack/Webhook)設定の取得・更新（`POST /api/v1/settings/test` でテスト送信） |
 | `GET/POST /api/v1/schedules` | 定期スキャンの一覧・登録（`{id}/toggle` で有効切替、`DELETE` で削除） |
+| `GET /api/v1/audit` | 管理操作（開始/中断/削除/整理/設定/スケジュール変更）の監査ログ |
 
 `GET /api/v1/scans` のレスポンスには履歴 `scans` に加え、合計使用量と保持ポリシーを示す
 `storage`（`total_bytes` / `scan_count` / `retention_days` / `retention_max_scans`）が含まれます。

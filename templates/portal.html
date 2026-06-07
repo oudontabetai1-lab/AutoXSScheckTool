@@ -115,6 +115,7 @@
     <span>Server Portal</span>
   </div>
   <div class="spacer"></div>
+  <button class="btn" onclick="openAudit()">📋 監査ログ</button>
   <button class="btn" onclick="openSettings()">⚙ 通知設定</button>
   <a class="btn" href="/monitor">🖥 ライブモニター</a>
   <a class="btn ghost" href="/logout" id="logoutLink" style="display:none">⎋ ログアウト</a>
@@ -216,6 +217,19 @@
       <button class="btn sm" onclick="closeDiff()">✕ 閉じる</button>
     </div>
     <div id="diffBody" style="padding:18px 20px"></div>
+  </div>
+</div>
+
+<!-- Audit log modal -->
+<div id="auditOverlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:60;align-items:flex-start;justify-content:center;padding:6vh 16px;overflow:auto">
+  <div style="background:var(--surface);border:1px solid var(--border);border-radius:14px;width:min(760px,96vw);box-shadow:0 24px 60px rgba(0,0,0,.5)">
+    <div style="display:flex;align-items:center;gap:10px;padding:16px 20px;border-bottom:1px solid var(--border)">
+      <strong style="font-size:1rem">📋 管理操作の監査ログ</strong>
+      <span class="spacer" style="flex:1"></span>
+      <button class="btn sm" onclick="loadAudit()">↻ 更新</button>
+      <button class="btn sm" onclick="closeAudit()">✕</button>
+    </div>
+    <div id="auditBody" style="padding:14px 20px;max-height:60vh;overflow:auto"></div>
   </div>
 </div>
 
@@ -529,6 +543,24 @@ async function deleteScan(id) {
     if (r.ok) { toast('削除しました'); loadScans(); }
     else { const e = await r.json().catch(()=>({})); toast(e.error || '削除できませんでした'); }
   } catch (e) {}
+}
+
+// ── Audit log ─────────────────────────────────────────────────────────
+function closeAudit() { $('auditOverlay').style.display = 'none'; }
+async function openAudit() { $('auditOverlay').style.display = 'flex'; loadAudit(); }
+async function loadAudit() {
+  const body = $('auditBody');
+  body.innerHTML = '<p class="muted">読み込み中…</p>';
+  let rows;
+  try { rows = (await (await api('/api/v1/audit')).json()).audit || []; }
+  catch (e) { body.innerHTML = '<p class="muted">取得できませんでした。</p>'; return; }
+  if (!rows.length) { body.innerHTML = '<p class="muted">記録された管理操作はありません。</p>'; return; }
+  body.innerHTML =
+    '<table><thead><tr><th>日時</th><th>操作</th><th>送信元</th><th>詳細</th></tr></thead><tbody>' +
+    rows.map(r =>
+      `<tr><td>${fmtDate(r.ts)}</td><td><span class="st incomplete">${esc(r.action)}</span></td>` +
+      `<td class="muted">${esc(r.ip || '')}</td><td class="target" title="${esc(r.detail||'')}">${esc(r.detail || '')}</td></tr>`
+    ).join('') + '</tbody></table>';
 }
 
 // ── Notification settings ─────────────────────────────────────────────
