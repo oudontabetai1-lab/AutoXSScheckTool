@@ -11,6 +11,11 @@ import httpx
 import yaml
 
 
+# 取り込み対象は「スキャナが get_payloads() 経由で default/community を実際に投入する」
+# check_type だけに限定する。ssti/ldap/nosql/xxe/dom_xss のスキャナは固定プローブ
+# （＋文脈適応の evolution wave）のみを使い community を消費しないため、取り込むと
+# 「ファイルにあるのにスキャンで使われない」誤解を生む。これらは context_mutator の
+# 固定セットでカバーする。
 SOURCES: dict[str, list[str]] = {
     "xss": [
         "https://raw.githubusercontent.com/swisskyrepo/PayloadsAllTheThings/master/XSS%20Injection/Intruders/XSS_Polyglots.txt",
@@ -27,23 +32,9 @@ SOURCES: dict[str, list[str]] = {
         "https://raw.githubusercontent.com/swisskyrepo/PayloadsAllTheThings/master/Command%20Injection/Intruder/command_exec.txt",
         "https://raw.githubusercontent.com/swisskyrepo/PayloadsAllTheThings/master/Command%20Injection/Intruder/command-execution-unix.txt",
     ],
-    "ssti": [
-        "https://raw.githubusercontent.com/danielmiessler/SecLists/master/Fuzzing/template-engines-expression.txt",
-        "https://raw.githubusercontent.com/danielmiessler/SecLists/master/Fuzzing/template-engines-special-vars.txt",
-    ],
-    "ldap": [
-        "https://raw.githubusercontent.com/swisskyrepo/PayloadsAllTheThings/master/LDAP%20Injection/Intruder/LDAP_FUZZ.txt",
-    ],
-    "nosql": [
-        "https://raw.githubusercontent.com/swisskyrepo/PayloadsAllTheThings/master/NoSQL%20Injection/Intruder/NoSQL.txt",
-        "https://raw.githubusercontent.com/swisskyrepo/PayloadsAllTheThings/master/NoSQL%20Injection/Intruder/MongoDB.txt",
-    ],
     "path_traversal": [
         "https://raw.githubusercontent.com/swisskyrepo/PayloadsAllTheThings/master/Directory%20Traversal/Intruder/directory_traversal.txt",
         "https://raw.githubusercontent.com/swisskyrepo/PayloadsAllTheThings/master/Directory%20Traversal/Intruder/deep_traversal.txt",
-    ],
-    "xxe": [
-        "https://raw.githubusercontent.com/danielmiessler/SecLists/master/Fuzzing/XML-FUZZ.txt",
     ],
 }
 
@@ -87,6 +78,7 @@ _EXFILTRATION_RE_LIST = [
         r"/dev/tcp/",  # bash reverse shell / 外部送出
         r"\bbash\s+-i\b",  # 対話的 reverse shell
         r"createElement\(['\"]script['\"]\)[^\n]{0,60}\.src",  # 外部 script を動的読込する XSS ビーコン
+        r"\bsrc\s*=\s*[\"']?(?:https?:)?//",  # 外部リソース読込（<script src=//host> 等。反射で第三者JSを実行）
     )
 ]
 

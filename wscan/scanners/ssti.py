@@ -85,6 +85,9 @@ class SSTIScanner(BaseScanner):
                 ),
                 pair=pair,
                 severity="critical",
+                # 進化wave など SSTI_PROBES 外の payload でも verify が再現確認できる
+                # よう、期待出力を finding に持たせる。
+                evidence_details={"expected": expected, "engine": engine_name},
             )
             findings.append(finding)
             return True
@@ -130,10 +133,13 @@ class SSTIScanner(BaseScanner):
         """Reproduce the exact SSTI probe that created the finding."""
         field_name = finding.field_name
         payload = finding.payload
-        expected = next(
-            (expected for probe, expected, _engine in SSTI_PROBES if probe == payload),
-            None,
-        )
+        # 検知時に保存した期待出力を優先（進化wave 等 SSTI_PROBES 外の payload に対応）。
+        expected = (getattr(finding, "evidence_details", None) or {}).get("expected")
+        if not expected:
+            expected = next(
+                (exp for probe, exp, _engine in SSTI_PROBES if probe == payload),
+                None,
+            )
         if not expected:
             return None
 
