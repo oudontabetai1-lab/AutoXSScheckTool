@@ -260,8 +260,8 @@ class ScanEngine:
         enable_ai_analysis: bool = True,
         enable_waf_detection: bool = True,
         enable_payload_learning: bool = True,
-        enable_community_payloads: bool = True,
-        enable_payload_evolution: bool = True,
+        enable_community_payloads: Optional[bool] = None,
+        enable_payload_evolution: Optional[bool] = None,
         enable_adaptive_payloads: bool = True,
         enable_sitemap_crawl: bool = True,
         enable_llm_web_browsing: bool = False,
@@ -413,8 +413,17 @@ class ScanEngine:
         self.enable_ai_analysis = enable_ai_analysis
         self.enable_waf_detection = enable_waf_detection
         self.enable_payload_learning = enable_payload_learning
+        # 明示指定(True/False)を最優先し、None のときだけ config を既定として読む
+        # （CLI/API の明示値が config:false で握り潰されないようにする）。
         self.enable_payload_evolution = (
-            enable_payload_evolution and _payload_evolution_enabled_by_config()
+            _payload_evolution_enabled_by_config()
+            if enable_payload_evolution is None
+            else enable_payload_evolution
+        )
+        self.enable_community_payloads = (
+            _community_payloads_enabled_by_config()
+            if enable_community_payloads is None
+            else enable_community_payloads
         )
         self.enable_adaptive_payloads = enable_adaptive_payloads
         self.enable_sitemap_crawl = enable_sitemap_crawl
@@ -456,11 +465,7 @@ class ScanEngine:
         default_payloads_path = CONFIG_DIR / "default_payloads.yaml"
         payloads_data = self._load_yaml(payloads_file or str(default_payloads_path))
         using_default_payloads = not payloads_file or payloads_file == str(default_payloads_path)
-        if (
-            using_default_payloads
-            and enable_community_payloads
-            and _community_payloads_enabled_by_config()
-        ):
+        if using_default_payloads and self.enable_community_payloads:
             community_payloads_path = CONFIG_DIR / "community_payloads.yaml"
             if community_payloads_path.exists():
                 community_payloads = self._load_yaml(str(community_payloads_path))

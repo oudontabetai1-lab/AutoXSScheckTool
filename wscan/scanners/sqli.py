@@ -58,6 +58,19 @@ TIME_BASED_PAYLOADS = [
     "1) AND SLEEP(3)--",
 ]
 
+# 時間ベース blind SQLi の遅延ディレクティブ。進化wave や community 由来の
+# 任意のクォート方言（`' OR SLEEP(3)-- -` 等）でも時間判定を走らせるため、
+# 固定リストに加えてディレクティブの有無でも判定する。
+_TIME_BASED_SQL_RE = re.compile(
+    r"\b(?:SLEEP|PG_SLEEP|BENCHMARK|DBMS_PIPE\.RECEIVE_MESSAGE)\s*\(|\bWAITFOR\s+DELAY\b",
+    re.IGNORECASE,
+)
+
+
+def _is_time_based_sql(payload: str) -> bool:
+    """ペイロードに時間遅延ディレクティブが含まれるか（純粋関数）。"""
+    return bool(payload and _TIME_BASED_SQL_RE.search(payload))
+
 # Boolean-based pairs: (true_payload, false_payload)
 # A significant response difference between true/false conditions indicates boolean-based SQLi.
 BOOLEAN_PAIRS = [
@@ -328,7 +341,9 @@ class SQLiScanner(BaseScanner):
                     return True
 
             # --- Check 3: Time-based blind SQLi ---
-            if payload in TIME_BASED_PAYLOADS:
+            # 固定リストに加え、SLEEP/WAITFOR 等のディレクティブを含む任意の
+            # ペイロード（進化wave・community 由来の方言）でも遅延判定を行う。
+            if payload in TIME_BASED_PAYLOADS or _is_time_based_sql(payload):
                 if self.response_time_exceeded(pair, threshold=time_threshold):
                     finding = await self.record_finding(
                         url=url,

