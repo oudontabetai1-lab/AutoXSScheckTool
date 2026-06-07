@@ -104,6 +104,8 @@ def _load_config(path: Path = _CONFIG_PATH) -> dict:
     cfg["denied_target_hosts"]     = list(m.get("denied_target_hosts", []) or [])
     # スキャンのウォッチドッグ（分。0=無効）。ハングしたスキャンを自動中断。
     cfg["scan_timeout_minutes"]    = float(m.get("scan_timeout_minutes", 0) or 0)
+    # 信頼できるリバースプロキシ配下で X-Forwarded-For を実クライアントIPとして使う。
+    cfg["trust_proxy"]             = bool(m.get("trust_proxy", False))
 
     cfg["use_planner"]             = bool(pl.get("enabled",     True))
     cfg["interactive_plan"]        = bool(pl.get("interactive", False))
@@ -1483,6 +1485,11 @@ async def run_serve(args):
         ) * 60
     except (TypeError, ValueError):
         monitor.scan_max_seconds = 0
+    _tp = os.environ.get("WSCAN_TRUST_PROXY", "")
+    monitor.trust_proxy = (
+        _tp.strip().lower() in ("1", "true", "yes", "on") if _tp.strip()
+        else bool(_CFG.get("trust_proxy", False))
+    )
     if monitor.allowed_target_hosts:
         console.print(f"[dim]対象スコープ(許可): {', '.join(monitor.allowed_target_hosts)}[/dim]")
     if monitor.denied_target_hosts:
@@ -1809,7 +1816,20 @@ async def run_serve(args):
             monitor.event_history.clear()
             cfg = monitor.scan_request_data or {}
             try:
-                await run_one_scan(cfg)
+                if monitor.scan_max_seconds:
+                    # watchdog はまず graceful な abort を要求する(scheduler_task)。
+                    # それでも戻らないハングに備え、上限＋猶予(60s)で強制 cancel し、
+                    # 「次のスキャンへ進む」を必ず保証する。
+                    hard_timeout = monitor.scan_max_seconds + 60
+                    try:
+                        await asyncio.wait_for(run_one_scan(cfg), timeout=hard_timeout)
+                    except asyncio.TimeoutError:
+                        console.print(
+                            f"\n[red]watchdog: スキャンが上限＋猶予({hard_timeout:.0f}秒)を"
+                            f"超えたため強制終了しました。[/red]"
+                        )
+                else:
+                    await run_one_scan(cfg)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:

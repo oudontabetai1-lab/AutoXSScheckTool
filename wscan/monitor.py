@@ -207,6 +207,11 @@ class MonitorServer:
         self.denied_target_hosts: list = []
         # ログイン失敗のレート制限（IP単位の総当たり対策）。
         self._login_fail: dict = {}
+        # リバースプロキシ配下で実クライアントIPを X-Forwarded-For から取るか。
+        # 既定 False（XFF は偽装可能なため、信頼できるプロキシ配下のときだけ有効化）。
+        self.trust_proxy: bool = False
+        # 監査ログ書き込み失敗を一度だけ警告するためのフラグ。
+        self._audit_warned: bool = False
         # スキャンのウォッチドッグ（ハング対策。0=無効）。
         self.scan_max_seconds: float = 0
         self._scan_started_at: float = 0.0
@@ -260,8 +265,17 @@ class MonitorServer:
     _LOGIN_MAX_FAILS = 5      # この回数失敗すると
     _LOGIN_WINDOW = 300       # この秒数だけロックアウト
 
-    @staticmethod
-    def _client_ip(request: Request) -> str:
+    def _client_ip(self, request: Request) -> str:
+        # 信頼できるプロキシ配下では X-Forwarded-For の先頭(=実クライアント)を使う。
+        # これによりプロキシ配下で全利用者が同一IP扱いになりロックアウトが
+        # 巻き添えになる問題を避ける。trust_proxy=False のときは偽装防止のため
+        # ソケットの接続元IPのみを用いる。
+        if self.trust_proxy:
+            xff = request.headers.get("x-forwarded-for", "")
+            if xff:
+                first = xff.split(",")[0].strip()
+                if first:
+                    return first
         return (request.client.host if request.client else "") or "unknown"
 
     def _login_locked(self, ip: str) -> bool:
@@ -282,6 +296,33 @@ class MonitorServer:
         if target_in_scope(url, self.allowed_target_hosts, self.denied_target_hosts):
             return None
         return f"対象ホストがスキャン許可スコープ外です: {_host_of(url) or url}"
+
+    def _config_scope_error(self, config: dict) -> Optional[str]:
+        """スキャン設定に含まれる全ての対象URLをスコープ検査する。
+
+        url だけでなく target_urls / access_urls / login_url も対象。これらは
+        エンジンが実際にアクセス/攻撃するため、in-scope の url を指定しつつ
+        ここに範囲外ホストを混ぜる回避を防ぐ。
+        """
+        if not (self.allowed_target_hosts or self.denied_target_hosts):
+            return None
+        config = config or {}
+        urls: list = []
+        if config.get("url"):
+            urls.append(config["url"])
+        for key in ("target_urls", "access_urls"):
+            v = config.get(key)
+            if isinstance(v, str):
+                urls += [u.strip() for u in v.replace(",", "\n").splitlines() if u.strip()]
+            elif isinstance(v, (list, tuple)):
+                urls += [str(u).strip() for u in v if str(u).strip()]
+        if config.get("login_url"):
+            urls.append(config["login_url"])
+        for u in urls:
+            err = self._scope_error(u)
+            if err:
+                return err
+        return None
 
     # ── Scan watchdog (hang protection) ───────────────────────────────
     def mark_scan_started(self) -> None:
@@ -594,7 +635,7 @@ class MonitorServer:
             if not config.get("url"):
                 return JSONResponse({"error": "url is required"}, status_code=400)
 
-            scope_err = self._scope_error(config.get("url", ""))
+            scope_err = self._config_scope_error(config)
             if scope_err:
                 return JSONResponse({"error": scope_err}, status_code=403)
 
@@ -686,6 +727,9 @@ class MonitorServer:
             url = (body.get("url") or "").strip()
             if not url:
                 return JSONResponse({"error": "url is required"}, status_code=400)
+            scope_err = self._scope_error(url)
+            if scope_err:
+                return JSONResponse({"error": scope_err}, status_code=403)
             output_path = (body.get("output_path") or "flows/manual_crawl.json").strip()
             headless = bool(body.get("headless", False))
             proxy = (body.get("proxy") or "").strip()
@@ -1020,8 +1064,11 @@ class MonitorServer:
             }
             with open(self._audit_path(), "a", encoding="utf-8") as f:
                 f.write(json.dumps(entry, ensure_ascii=False) + "\n")
-        except Exception:
-            pass
+        except Exception as exc:
+            # 監査はセキュリティ機能なので失敗を黙殺しない（最初の失敗を一度警告）。
+            if not self._audit_warned:
+                self._audit_warned = True
+                print(f"[wscan] 監査ログの書き込みに失敗しています: {exc}")
 
     def read_audit(self, limit: int = 200) -> list:
         """監査ログの末尾 limit 件を新しい順で返す。"""
@@ -1213,7 +1260,7 @@ class MonitorServer:
                 }
                 # スコープ外になった対象は起動せず、次回まで送る（無限ループ防止に
                 # next_run は前進させる）。
-                if self._scope_error(cfg["url"]):
+                if self._config_scope_error(cfg):
                     s["last_run"] = now
                     s["next_run"] = now + float(s.get("interval_hours", 24) or 24) * 3600
                     self._write_schedules(schedules)
@@ -1342,11 +1389,25 @@ class MonitorServer:
                 except RuntimeError:
                     pass
                 return
-            self.scan_request_data = msg.get("config", {})
+            cfg = msg.get("config", {}) or {}
+            # HTTP API と同様に対象スコープを検査（WS 経由でのスコープ回避を防ぐ）。
+            scope_err = self._config_scope_error(cfg)
+            if scope_err:
+                try:
+                    asyncio.get_running_loop().create_task(
+                        self.emit("scan_rejected", {"message": scope_err})
+                    )
+                except RuntimeError:
+                    pass
+                return
+            self.scan_request_data = cfg
             self.api_scan_id = str(int(time.time()))
             self.api_scan_status = "scanning"
             self.api_findings = []
             self.api_report_path = None
+            self.api_target = cfg.get("url", "") or ""
+            self.api_phase = ""
+            self.api_progress = {"current": 0, "total": 0, "percent": 0}
             self.scan_request_event.set()
 
         elif action == "crawl_review":

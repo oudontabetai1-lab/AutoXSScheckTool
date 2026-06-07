@@ -58,6 +58,43 @@ class ServerGuardEndpointTests(unittest.TestCase):
         self.assertFalse(srv.scan_request_event.is_set())
         self.assertGreater(srv.list_schedules()[0]["next_run"], 0)
 
+    def test_websocket_start_scan_enforces_scope(self):
+        # Codex指摘(High): WS 経由の start_scan もスコープ検査を通すこと。
+        import json
+        srv = MonitorServer(port=0, auth_token="")
+        srv.allowed_target_hosts = ["example.com"]
+        srv._handle_client_message(json.dumps({"action": "start_scan", "config": {"url": "http://evil.com"}}))
+        self.assertFalse(srv.scan_request_event.is_set())
+        srv._handle_client_message(json.dumps({"action": "start_scan", "config": {"url": "http://example.com"}}))
+        self.assertTrue(srv.scan_request_event.is_set())
+
+    def test_scope_covers_all_target_urls(self):
+        # Codex指摘(High): url だけでなく target_urls / login_url 等も検査。
+        srv = MonitorServer(port=0, auth_token="")
+        srv.allowed_target_hosts = ["example.com"]
+        self.assertIsNotNone(srv._config_scope_error({"url": "http://example.com", "target_urls": "http://evil.com"}))
+        self.assertIsNotNone(srv._config_scope_error({"url": "http://example.com", "login_url": "http://evil.com/login"}))
+        self.assertIsNone(srv._config_scope_error({"url": "http://example.com", "target_urls": ["http://a.example.com"]}))
+
+    def test_manual_crawl_enforces_scope(self):
+        srv = MonitorServer(port=0, auth_token="")
+        srv.allowed_target_hosts = ["example.com"]
+        c = TestClient(srv.app)
+        self.assertEqual(c.post("/api/v1/manual-crawl/start", json={"url": "http://evil.com"}).status_code, 403)
+
+    def test_trust_proxy_uses_forwarded_for(self):
+        srv = MonitorServer(port=0, auth_token="")
+
+        class _Req:
+            def __init__(self, xff, host):
+                self.headers = {"x-forwarded-for": xff} if xff else {}
+                self.client = type("C", (), {"host": host})()
+
+        srv.trust_proxy = False
+        self.assertEqual(srv._client_ip(_Req("1.2.3.4", "10.0.0.1")), "10.0.0.1")
+        srv.trust_proxy = True
+        self.assertEqual(srv._client_ip(_Req("1.2.3.4, 10.0.0.1", "10.0.0.1")), "1.2.3.4")
+
     def test_login_lockout_after_repeated_failures(self):
         srv = MonitorServer(port=0, auth_token="secret")
         c = TestClient(srv.app)
