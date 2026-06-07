@@ -16,14 +16,14 @@ def test_parse_payload_lines_filters_noise_and_preserves_payloads():
             "\x01\x02",
             "${IFS}cat${IFS}/etc/passwd",
             "A" * 2001,
-            "DROP TABLE users",
+            "' OR '1'='1",
         ]
     )
 
     assert parse_payload_lines(text) == [
         "<script>alert(1)</script>",
         "${IFS}cat${IFS}/etc/passwd",
-        "DROP TABLE users",
+        "' OR '1'='1",
     ]
     assert parse_payload_lines("short\n" + ("A" * 11), max_len=10) == ["short"]
 
@@ -37,13 +37,17 @@ def test_parse_payload_lines_destructive_denylist_default_and_opt_in():
             "shutdown now",
             "reboot",
             "DROP DATABASE prod",
+            "'; DROP TABLE users--",          # 破壊的DDL
+            "TRUNCATE TABLE logs",
+            "DELETE FROM users",
+            "net user hacker P@ssw0rd /add",  # Windows アカウント作成
             "format c:",
             "cat payload > /dev/sda",
-            "1; DROP TABLE users--",
+            "1' OR '1'='1",                   # 非破壊 → 既定で保持
         ]
     )
 
-    assert parse_payload_lines(text) == ["1; DROP TABLE users--"]
+    assert parse_payload_lines(text) == ["1' OR '1'='1"]
     assert parse_payload_lines(text, allow_destructive=True) == [
         "rm -rf /",
         "mkfs.ext4 /dev/sda1",
@@ -51,9 +55,13 @@ def test_parse_payload_lines_destructive_denylist_default_and_opt_in():
         "shutdown now",
         "reboot",
         "DROP DATABASE prod",
+        "'; DROP TABLE users--",
+        "TRUNCATE TABLE logs",
+        "DELETE FROM users",
+        "net user hacker P@ssw0rd /add",
         "format c:",
         "cat payload > /dev/sda",
-        "1; DROP TABLE users--",
+        "1' OR '1'='1",
     ]
 
 

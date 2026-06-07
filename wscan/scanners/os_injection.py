@@ -49,6 +49,17 @@ TIME_BASED_PAYLOADS = [
     "& ping -n 3 127.0.0.1",
 ]
 
+# community/任意方言の遅延プローブ（`|| sleep 10`、`& ping -n 5 127.0.0.1` 等）でも
+# 時間ベース判定を走らせるため、固定リストに加えてディレクティブ有無でも判定する。
+_TIME_BASED_OS_RE = re.compile(
+    r"\bsleep\s+\d|\bping\s+-[cn]\s*\d|\btimeout\s+/?t?\s*\d", re.IGNORECASE
+)
+
+
+def _is_time_based_os(payload: str) -> bool:
+    """ペイロードに時間遅延ディレクティブ（sleep/ping/timeout）が含まれるか（純粋関数）。"""
+    return bool(payload and _TIME_BASED_OS_RE.search(payload))
+
 
 def _echo_marker_executed(source: str, marker: str) -> bool:
     """``echo {marker}`` がシェル実行された（=単なる反射ではない）かを判定する純粋関数。
@@ -166,7 +177,9 @@ class OSInjectionScanner(BaseScanner):
                     return True
 
             # --- Check 2: Time-based blind injection ---
-            if payload in TIME_BASED_PAYLOADS:
+            # 固定リストに加え、sleep/ping/timeout を含む任意のペイロード
+            # （community・進化wave 由来）でも遅延判定を行う。
+            if payload in TIME_BASED_PAYLOADS or _is_time_based_os(payload):
                 if self.response_time_exceeded(pair, threshold=time_threshold):
                     finding = await self.record_finding(
                         url=url,
@@ -247,7 +260,7 @@ class OSInjectionScanner(BaseScanner):
             ):
                 return True
 
-        if finding.payload in TIME_BASED_PAYLOADS:
+        if finding.payload in TIME_BASED_PAYLOADS or _is_time_based_os(finding.payload):
             _b_req = baseline_pair.get("request", {})
             _b_resp = baseline_pair.get("response", {})
             _b_ts_req = _b_req.get("timestamp", 0)

@@ -49,9 +49,19 @@ _DESTRUCTIVE_RE_LIST = [
         r":\s*\(\)\s*\{",
         r"\bshutdown\b",
         r"\breboot\b",
-        r"\bdrop\s+database\b",
         r"format\s+c:",
         r">\s*/dev/sda\b",
+        # ── 破壊的 DDL/DML（検出には不要。スキーマ/データを壊す） ──
+        r"\bdrop\s+(?:database|schema|table|view|index|function|procedure|trigger|user)\b",
+        r"\btruncate\s+table\b",
+        r"\bdelete\s+from\b",
+        r"\balter\s+table\b[^\n]*\bdrop\b",
+        # ── Windows のシステム改変（アカウント作成・FW無効化・RDP有効化） ──
+        r"\bnet\s+user\b[^\n]*\/add",
+        r"\bnet\s+localgroup\b[^\n]*\/add",
+        r"\bnetsh\b[^\n]*\bfirewall\b",
+        r"fDenyTSConnections",
+        r"\bwmic\b[^\n]*\buseraccount\b[^\n]*\bcreate\b",
     )
 ]
 

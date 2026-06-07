@@ -5,7 +5,7 @@
 """
 import unittest
 
-from wscan.scanners.os_injection import _echo_marker_executed
+from wscan.scanners.os_injection import _echo_marker_executed, _is_time_based_os
 
 
 class EchoMarkerExecutedTests(unittest.TestCase):
@@ -46,6 +46,22 @@ class EchoMarkerExecutedTests(unittest.TestCase):
         self.assertFalse(_echo_marker_executed("", self.MARKER))
         self.assertFalse(_echo_marker_executed("no marker here", self.MARKER))
         self.assertFalse(_echo_marker_executed("wscanEVO42", ""))
+
+
+class IsTimeBasedOsTests(unittest.TestCase):
+    def test_detects_delay_directives(self):
+        for p in (
+            "|| sleep 10",
+            "; sleep 3",
+            "& ping -n 5 127.0.0.1",
+            "| ping -c 3 127.0.0.1",
+            "& timeout /t 5",
+        ):
+            self.assertTrue(_is_time_based_os(p), f"missed delay payload: {p!r}")
+
+    def test_ignores_non_delay(self):
+        for p in ("; id", "| cat /etc/passwd", "", "echo hello"):
+            self.assertFalse(_is_time_based_os(p), f"false delay: {p!r}")
 
 
 if __name__ == "__main__":

