@@ -141,6 +141,13 @@ monitor:
   retention_days: 0
   retention_max_scans: 0
 
+  # スキャン対象スコープ（serve モードの誤爆・悪用防止）。空=無制限（既定）。
+  # allowed を指定すると、そのホスト(サブドメイン含む)のみスキャン可能。
+  # denied は常に拒否（allowed より優先）。ホスト名で指定（例: example.com）。
+  # 環境変数 WSCAN_ALLOWED_HOSTS / WSCAN_DENIED_HOSTS（空白/カンマ区切り）が優先。
+  allowed_target_hosts: []
+  denied_target_hosts: []
+
 # ──────────────────────────────────────────────────────────
 # 攻撃プランナー
 # ──────────────────────────────────────────────────────────

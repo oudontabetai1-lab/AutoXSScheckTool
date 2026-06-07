@@ -15,6 +15,7 @@ import time
 import zipfile
 from pathlib import Path
 from typing import Set, Any, Optional
+from urllib.parse import urlparse
 
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import (
@@ -100,6 +101,34 @@ def select_scans_to_prune(
     return [str(s.get("id", "")) for s in ordered if str(s.get("id", "")) in doomed]
 
 
+def _host_of(url: str) -> str:
+    try:
+        return (urlparse(url).hostname or "").lower()
+    except Exception:
+        return ""
+
+
+def target_in_scope(url: str, allowed: list, denied: list) -> bool:
+    """対象URLのホストがスキャン許可スコープ内かを判定する純粋関数。
+
+    - denied に一致（完全一致 or サブドメイン）すれば常に拒否。
+    - allowed が非空なら、そのいずれかに一致するホストのみ許可。
+    - allowed が空なら（denied 以外は）許可。
+    共有サーバーで範囲外/内部資産への誤爆・悪用を防ぐためのガード。
+    """
+    host = _host_of(url)
+    if not host:
+        return False
+    for d in (denied or []):
+        d = (d or "").lower().lstrip(".")
+        if d and (host == d or host.endswith("." + d)):
+            return False
+    allow = [(a or "").lower().lstrip(".") for a in (allowed or []) if (a or "").strip()]
+    if allow:
+        return any(host == a or host.endswith("." + a) for a in allow)
+    return True
+
+
 def due_schedule_ids(schedules: list, now_epoch: Optional[float] = None) -> list:
     """実行すべき（有効かつ next_run <= 現在）スケジュール id を返す純粋関数。"""
     if now_epoch is None:
@@ -172,6 +201,11 @@ class MonitorServer:
         # serve 起動時とスキャン完了毎に prune_old_scans() が適用する。
         self.retention_days: float = 0
         self.retention_max_scans: int = 0
+        # スキャン対象スコープ（共有サーバーでの誤爆・悪用防止）。0件なら無制限。
+        self.allowed_target_hosts: list = []
+        self.denied_target_hosts: list = []
+        # ログイン失敗のレート制限（IP単位の総当たり対策）。
+        self._login_fail: dict = {}
         # Optional RequestLogger (set by ScanEngine). Persists tested payloads
         # to payloads.jsonl alongside the HTTP request audit log.
         self.request_logger = None
@@ -217,6 +251,33 @@ class MonitorServer:
         token = ws.query_params.get("token")
         return self._token_ok(token)
 
+    # ── Login brute-force throttling ──────────────────────────────────
+    _LOGIN_MAX_FAILS = 5      # この回数失敗すると
+    _LOGIN_WINDOW = 300       # この秒数だけロックアウト
+
+    @staticmethod
+    def _client_ip(request: Request) -> str:
+        return (request.client.host if request.client else "") or "unknown"
+
+    def _login_locked(self, ip: str) -> bool:
+        now = time.time()
+        fails = [t for t in self._login_fail.get(ip, []) if now - t < self._LOGIN_WINDOW]
+        self._login_fail[ip] = fails
+        return len(fails) >= self._LOGIN_MAX_FAILS
+
+    def _record_login_fail(self, ip: str) -> None:
+        self._login_fail.setdefault(ip, []).append(time.time())
+
+    def _clear_login_fail(self, ip: str) -> None:
+        self._login_fail.pop(ip, None)
+
+    # ── Target scope (allow/deny) ─────────────────────────────────────
+    def _scope_error(self, url: str) -> Optional[str]:
+        """対象URLが許可スコープ外なら理由文字列、許可内なら None。"""
+        if target_in_scope(url, self.allowed_target_hosts, self.denied_target_hosts):
+            return None
+        return f"対象ホストがスキャン許可スコープ外です: {_host_of(url) or url}"
+
     def _create_app(self) -> FastAPI:
         app = FastAPI(title="WScan Monitor", docs_url=None, redoc_url=None)
 
@@ -246,9 +307,13 @@ class MonitorServer:
 
         @app.post("/login")
         async def login_submit(request: Request):
+            ip = self._client_ip(request)
+            if self._login_locked(ip):
+                return HTMLResponse(self._login_html(locked=True), status_code=429)
             form = await request.form()
             token = (form.get("token") or "").strip()
             if self._token_ok(token):
+                self._clear_login_fail(ip)
                 resp = RedirectResponse(url="/", status_code=303)
                 resp.set_cookie(
                     SESSION_COOKIE,
@@ -258,6 +323,7 @@ class MonitorServer:
                     max_age=60 * 60 * 12,  # 12 hours
                 )
                 return resp
+            self._record_login_fail(ip)
             return HTMLResponse(self._login_html(error=True), status_code=401)
 
         @app.get("/logout")
@@ -486,6 +552,10 @@ class MonitorServer:
             config = body.get("config", body)
             if not config.get("url"):
                 return JSONResponse({"error": "url is required"}, status_code=400)
+
+            scope_err = self._scope_error(config.get("url", ""))
+            if scope_err:
+                return JSONResponse({"error": scope_err}, status_code=403)
 
             # Reject instead of silently dropping a scan submitted while another
             # one is already running in persistent serve mode.
@@ -1037,6 +1107,13 @@ class MonitorServer:
                     "checks": s.get("checks") or [],
                     "depth": int(s.get("depth", 2)),
                 }
+                # スコープ外になった対象は起動せず、次回まで送る（無限ループ防止に
+                # next_run は前進させる）。
+                if self._scope_error(cfg["url"]):
+                    s["last_run"] = now
+                    s["next_run"] = now + float(s.get("interval_hours", 24) or 24) * 3600
+                    self._write_schedules(schedules)
+                    return None
                 if not self.request_scan(cfg):
                     return None
                 s["last_run"] = now
@@ -1049,12 +1126,19 @@ class MonitorServer:
     # Login page
     # ------------------------------------------------------------------
 
-    def _login_html(self, error: bool = False) -> str:
+    def _login_html(self, error: bool = False, locked: bool = False) -> str:
         """Render the standalone token-login page."""
-        err_block = (
-            '<p class="err">トークンが正しくありません。もう一度入力してください。</p>'
-            if error else ""
-        )
+        if locked:
+            err_block = (
+                '<p class="err">試行回数が多すぎます。しばらく待ってから'
+                'もう一度お試しください。</p>'
+            )
+        elif error:
+            err_block = (
+                '<p class="err">トークンが正しくありません。もう一度入力してください。</p>'
+            )
+        else:
+            err_block = ""
         return f"""<!DOCTYPE html>
 <html lang="ja">
 <head>

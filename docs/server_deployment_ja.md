@@ -65,6 +65,16 @@ WScan のダッシュボードをサーバー上で常時起動し、社内ネ�
 | ブラウザ自動起動 | `--open-browser` / `--no-open-browser` | — | localhost バインド時のみ起動 |
 | 出力の保持日数 | （`config/wscan.yaml` の `retention_days`） | `WSCAN_RETENTION_DAYS` | `0`（無制限） |
 | 出力の保持件数 | （`config/wscan.yaml` の `retention_max_scans`） | `WSCAN_RETENTION_MAX_SCANS` | `0`（無制限） |
+| 無認証で外部公開を許可 | `--insecure` | — | 無効（非ループバック＋無トークンは起動拒否） |
+| 対象スコープ(許可) | （`config/wscan.yaml` の `allowed_target_hosts`） | `WSCAN_ALLOWED_HOSTS` | 空（無制限） |
+| 対象スコープ(拒否) | （`config/wscan.yaml` の `denied_target_hosts`） | `WSCAN_DENIED_HOSTS` | 空 |
+
+> セキュリティ: 非ループバック（例 `0.0.0.0`）へトークン無しで起動しようとすると、
+> 無認証公開を避けるため**既定で起動を拒否**します（`--auth-token` を設定するか、
+> `--host 127.0.0.1`、どうしても無認証公開する場合のみ `--insecure`）。
+> ログインは IP 単位で連続失敗が続くと一時的にロックアウトします（総当たり対策）。
+> `allowed_target_hosts` を設定すると、そのホスト（サブドメイン含む）以外への
+> スキャンを拒否し、範囲外/内部資産への誤爆・悪用を防げます。
 
 保持ポリシー（`retention_days` / `retention_max_scans`）を設定すると、serve 起動時と各スキャン完了時に
 `output/` 配下の古いスキャン成果物が自動削除されます（実行中スキャンは保護）。0 のときは無制限（既定）。

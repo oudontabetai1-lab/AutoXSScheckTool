@@ -99,6 +99,9 @@ def _load_config(path: Path = _CONFIG_PATH) -> dict:
     # 出力の保持ポリシー（0=無制限）。serve モードで自動削除に使う。
     cfg["retention_days"]          = float(m.get("retention_days", 0) or 0)
     cfg["retention_max_scans"]     = int(m.get("retention_max_scans", 0) or 0)
+    # スキャン対象スコープ（serve モードの誤爆・悪用防止。空=無制限）。
+    cfg["allowed_target_hosts"]    = list(m.get("allowed_target_hosts", []) or [])
+    cfg["denied_target_hosts"]     = list(m.get("denied_target_hosts", []) or [])
 
     cfg["use_planner"]             = bool(pl.get("enabled",     True))
     cfg["interactive_plan"]        = bool(pl.get("interactive", False))
@@ -744,6 +747,12 @@ Examples:
         help="Shared access token. When set, the web UI requires login and the "
              "API requires an 'Authorization: Bearer <token>' header. "
              "Can also be supplied via the WSCAN_AUTH_TOKEN environment variable.",
+    )
+    serve.add_argument(
+        "--insecure", dest="insecure", action="store_true", default=False,
+        help="Allow binding to a non-loopback address WITHOUT an auth token. "
+             "By default this is refused so the scanner control panel is never "
+             "exposed unauthenticated on the network.",
     )
     serve.add_argument(
         "--open-browser", dest="open_browser", action="store_true", default=None,
@@ -1395,6 +1404,23 @@ async def run_serve(args):
     # loopback (a local developer). On a real server (0.0.0.0 / a LAN IP) we
     # stay headless unless --open-browser was passed explicitly.
     is_loopback = host in ("127.0.0.1", "localhost", "::1")
+
+    # 安全策: 非ループバックに無認証で公開しようとした場合は既定で拒否する。
+    # スキャナの操作盤(任意URLを攻撃可能)が無認証でネットワークに晒されるのを防ぐ。
+    # 明示的に許容したい場合のみ --insecure を付ける。
+    if not is_loopback and not auth_token and not getattr(args, "insecure", False):
+        console.print(Panel.fit(
+            "[bold red]起動を中止しました — 無認証で外部公開しようとしています[/bold red]\n"
+            f"  Bind: [underline]{host}:{port}[/underline]（非ループバック）\n"
+            "  この状態ではネットワーク上の誰でもスキャナを操作できてしまいます。\n\n"
+            "  対処のいずれか:\n"
+            "   • トークンを設定: [cyan]--auth-token <TOKEN>[/cyan] または環境変数 WSCAN_AUTH_TOKEN\n"
+            "   • ローカル限定にする: [cyan]--host 127.0.0.1[/cyan]\n"
+            "   • どうしても無認証公開する: [cyan]--insecure[/cyan]（非推奨）",
+            border_style="red",
+        ))
+        return
+
     if getattr(args, "open_browser", None) is None:
         open_browser = is_loopback
     else:
@@ -1441,6 +1467,19 @@ async def run_serve(args):
     except (TypeError, ValueError):
         monitor.retention_days = 0
         monitor.retention_max_scans = 0
+
+    def _split_hosts(env_name: str, cfg_key: str) -> list:
+        raw = os.environ.get(env_name, "")
+        if raw.strip():
+            return [h.strip() for h in raw.replace(",", " ").split() if h.strip()]
+        return list(_CFG.get(cfg_key, []) or [])
+    monitor.allowed_target_hosts = _split_hosts("WSCAN_ALLOWED_HOSTS", "allowed_target_hosts")
+    monitor.denied_target_hosts = _split_hosts("WSCAN_DENIED_HOSTS", "denied_target_hosts")
+    if monitor.allowed_target_hosts:
+        console.print(f"[dim]対象スコープ(許可): {', '.join(monitor.allowed_target_hosts)}[/dim]")
+    if monitor.denied_target_hosts:
+        console.print(f"[dim]対象スコープ(拒否): {', '.join(monitor.denied_target_hosts)}[/dim]")
+
     monitor.default_scan_cfg = {
         "checks": _CFG.get("checks", ["sqli", "xss", "os"]),
         "depth": _CFG.get("depth", 2),
