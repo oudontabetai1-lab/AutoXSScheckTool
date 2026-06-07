@@ -68,6 +68,7 @@ WScan のダッシュボードをサーバー上で常時起動し、社内ネ�
 | 無認証で外部公開を許可 | `--insecure` | — | 無効（非ループバック＋無トークンは起動拒否） |
 | 対象スコープ(許可) | （`config/wscan.yaml` の `allowed_target_hosts`） | `WSCAN_ALLOWED_HOSTS` | 空（無制限） |
 | 対象スコープ(拒否) | （`config/wscan.yaml` の `denied_target_hosts`） | `WSCAN_DENIED_HOSTS` | 空 |
+| スキャンの上限時間(分) | （`config/wscan.yaml` の `scan_timeout_minutes`） | `WSCAN_SCAN_TIMEOUT_MIN` | `0`（無効） |
 
 > セキュリティ: 非ループバック（例 `0.0.0.0`）へトークン無しで起動しようとすると、
 > 無認証公開を避けるため**既定で起動を拒否**します（`--auth-token` を設定するか、

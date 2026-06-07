@@ -102,6 +102,8 @@ def _load_config(path: Path = _CONFIG_PATH) -> dict:
     # スキャン対象スコープ（serve モードの誤爆・悪用防止。空=無制限）。
     cfg["allowed_target_hosts"]    = list(m.get("allowed_target_hosts", []) or [])
     cfg["denied_target_hosts"]     = list(m.get("denied_target_hosts", []) or [])
+    # スキャンのウォッチドッグ（分。0=無効）。ハングしたスキャンを自動中断。
+    cfg["scan_timeout_minutes"]    = float(m.get("scan_timeout_minutes", 0) or 0)
 
     cfg["use_planner"]             = bool(pl.get("enabled",     True))
     cfg["interactive_plan"]        = bool(pl.get("interactive", False))
@@ -1475,6 +1477,12 @@ async def run_serve(args):
         return list(_CFG.get(cfg_key, []) or [])
     monitor.allowed_target_hosts = _split_hosts("WSCAN_ALLOWED_HOSTS", "allowed_target_hosts")
     monitor.denied_target_hosts = _split_hosts("WSCAN_DENIED_HOSTS", "denied_target_hosts")
+    try:
+        monitor.scan_max_seconds = float(
+            os.environ.get("WSCAN_SCAN_TIMEOUT_MIN", _CFG.get("scan_timeout_minutes", 0)) or 0
+        ) * 60
+    except (TypeError, ValueError):
+        monitor.scan_max_seconds = 0
     if monitor.allowed_target_hosts:
         console.print(f"[dim]対象スコープ(許可): {', '.join(monitor.allowed_target_hosts)}[/dim]")
     if monitor.denied_target_hosts:
@@ -1795,6 +1803,7 @@ async def run_serve(args):
             # 並行する別要求は scan_in_progress / event により確実に弾かれる）。
             monitor.scan_request_event.clear()
             monitor.scan_in_progress = True
+            monitor.mark_scan_started()  # watchdog 計測開始
             # New scan accepted: clear the previous run's event log so this scan
             # starts from a clean slate in the dashboard.
             monitor.event_history.clear()
@@ -1823,13 +1832,19 @@ async def run_serve(args):
         await asyncio.sleep(3.0)
         while not server.should_exit:
             try:
+                # ハングしたスキャンの自動停止（watchdog）。
+                if monitor.watchdog_check():
+                    console.print(
+                        f"[yellow]watchdog: スキャンが上限時間({monitor.scan_max_seconds:.0f}秒)を"
+                        f"超えたため中断を要求しました。[/yellow]"
+                    )
                 sid = monitor.trigger_due_schedules()
                 if sid:
                     console.print(f"[dim]スケジュール {sid}: 定期スキャンを起動しました。[/dim]")
             except Exception:
                 pass
-            # 30 秒ごとにチェック（shutdown を取りこぼさないよう小刻みに待つ）。
-            for _ in range(30):
+            # 10 秒ごとにチェック（watchdog の粒度。shutdown も小刻みに確認）。
+            for _ in range(10):
                 if server.should_exit:
                     break
                 await asyncio.sleep(1.0)

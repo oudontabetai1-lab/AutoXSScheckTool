@@ -6,11 +6,11 @@ import asyncio
 import collections
 import datetime
 import hashlib
-import io
 import json
 import os
 import secrets
 import shutil
+import tempfile
 import time
 import zipfile
 from pathlib import Path
@@ -26,6 +26,7 @@ from fastapi.responses import (
     StreamingResponse,
 )
 from fastapi.staticfiles import StaticFiles
+from starlette.background import BackgroundTask
 
 
 TEMPLATES_DIR = Path(__file__).parent.parent / "templates"
@@ -206,6 +207,10 @@ class MonitorServer:
         self.denied_target_hosts: list = []
         # ログイン失敗のレート制限（IP単位の総当たり対策）。
         self._login_fail: dict = {}
+        # スキャンのウォッチドッグ（ハング対策。0=無効）。
+        self.scan_max_seconds: float = 0
+        self._scan_started_at: float = 0.0
+        self._watchdog_fired: bool = False
         # Optional RequestLogger (set by ScanEngine). Persists tested payloads
         # to payloads.jsonl alongside the HTTP request audit log.
         self.request_logger = None
@@ -277,6 +282,31 @@ class MonitorServer:
         if target_in_scope(url, self.allowed_target_hosts, self.denied_target_hosts):
             return None
         return f"対象ホストがスキャン許可スコープ外です: {_host_of(url) or url}"
+
+    # ── Scan watchdog (hang protection) ───────────────────────────────
+    def mark_scan_started(self) -> None:
+        """スキャン開始時刻を記録し watchdog をリセットする。"""
+        self._scan_started_at = time.time()
+        self._watchdog_fired = False
+
+    def watchdog_check(self) -> bool:
+        """実行中スキャンが上限時間を超えていたら一度だけ abort を要求する。
+
+        ブラウザのハング等で完了しないスキャンを自動停止し、serve を次の
+        スキャンへ進ませる。``scan_max_seconds`` が 0 のときは無効。
+        """
+        if not (self.scan_max_seconds and self.scan_in_progress and self._scan_started_at):
+            return False
+        if self._watchdog_fired:
+            return False
+        if time.time() - self._scan_started_at > self.scan_max_seconds:
+            self._watchdog_fired = True
+            try:
+                self.command_queue.put_nowait("abort")
+            except Exception:
+                pass
+            return True
+        return False
 
     def _create_app(self) -> FastAPI:
         app = FastAPI(title="WScan Monitor", docs_url=None, redoc_url=None)
@@ -719,26 +749,41 @@ class MonitorServer:
 
         @app.get("/api/v1/scans/{scan_id}/download")
         async def api_scan_download(scan_id: str):
-            """Download a scan's whole artifact folder as a zip archive."""
+            """Download a scan's whole artifact folder as a zip archive.
+
+            アーカイブはメモリ上ではなく一時ファイルに構築してからストリーミングし、
+            送信後に削除する。スクリーンショット多数の大規模スキャンでも RAM を
+            圧迫しない。zip 構築はスレッドへ逃がしてイベントループを塞がない。
+            """
             d = self._scan_dir(scan_id)
             if d is None or not d.is_dir():
                 return JSONResponse({"error": "not found"}, status_code=404)
 
-            def _iter_zip():
-                buf = io.BytesIO()
-                with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            def _build_zip() -> str:
+                fd, tmp_path = tempfile.mkstemp(prefix=f"wscan-{scan_id}-", suffix=".zip")
+                os.close(fd)
+                with zipfile.ZipFile(tmp_path, "w", zipfile.ZIP_DEFLATED) as zf:
                     for path in sorted(d.rglob("*")):
                         if path.is_file():
                             zf.write(path, arcname=path.relative_to(d.parent))
-                buf.seek(0)
-                yield from buf
+                return tmp_path
 
-            return StreamingResponse(
-                _iter_zip(),
+            try:
+                tmp_path = await asyncio.to_thread(_build_zip)
+            except Exception as exc:
+                return JSONResponse({"error": f"zip 生成に失敗しました: {exc}"}, status_code=500)
+
+            def _cleanup() -> None:
+                try:
+                    os.unlink(tmp_path)
+                except Exception:
+                    pass
+
+            return FileResponse(
+                tmp_path,
                 media_type="application/zip",
-                headers={
-                    "Content-Disposition": f'attachment; filename="wscan-{scan_id}.zip"'
-                },
+                filename=f"wscan-{scan_id}.zip",
+                background=BackgroundTask(_cleanup),
             )
 
         @app.get("/api/v1/scans/{scan_id}/diff")
