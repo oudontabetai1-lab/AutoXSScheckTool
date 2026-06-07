@@ -232,6 +232,21 @@ class OSInjectionScanner(BaseScanner):
                     return False
             return True
 
+        # 進化wave の echo マーカー型 finding は検知と同じ判定で再現確認する
+        # （OS_OUTPUT_PATTERNS には該当しないため、ここを欠くと verify で未確証になる）。
+        marker_match = re.search(r"\bwscanEVO\d+\b", finding.payload or "")
+        if marker_match:
+            marker = marker_match.group(0)
+            baseline_body = (
+                baseline_pair.get("response", {}).get("body", "")
+                or baseline_source
+                or ""
+            )
+            if _echo_marker_executed(body, marker) and not _echo_marker_executed(
+                baseline_body, marker
+            ):
+                return True
+
         if finding.payload in TIME_BASED_PAYLOADS:
             _b_req = baseline_pair.get("request", {})
             _b_resp = baseline_pair.get("response", {})

