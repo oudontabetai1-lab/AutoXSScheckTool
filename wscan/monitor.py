@@ -6,14 +6,16 @@ import asyncio
 import collections
 import datetime
 import hashlib
-import io
 import json
+import os
 import secrets
 import shutil
+import tempfile
 import time
 import zipfile
 from pathlib import Path
 from typing import Set, Any, Optional
+from urllib.parse import urlparse
 
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import (
@@ -24,6 +26,7 @@ from fastapi.responses import (
     StreamingResponse,
 )
 from fastapi.staticfiles import StaticFiles
+from starlette.background import BackgroundTask
 
 
 TEMPLATES_DIR = Path(__file__).parent.parent / "templates"
@@ -45,6 +48,105 @@ def _session_value(token: str) -> str:
     API and the token itself is not exposed in client storage.
     """
     return hashlib.sha256(("wscan:" + token).encode("utf-8")).hexdigest()
+
+
+def select_scans_to_prune(
+    scans: list,
+    *,
+    max_age_days: float = 0,
+    max_scans: int = 0,
+    now_epoch: Optional[float] = None,
+    protected_ids: Optional[set] = None,
+) -> list:
+    """保持ポリシーに基づき「削除対象スキャンの id」を返す純粋関数。
+
+    - ``max_age_days > 0`` … 経過日数がこれを超えるスキャンを削除対象にする。
+    - ``max_scans   > 0`` … 新しい順に ``max_scans`` 件を残し、超過分を削除対象にする。
+    - ``protected_ids``   … 実行中スキャン等、決して削除しない id の集合。
+    値が 0/未設定のポリシーは無効（＝何も削除しない。後方互換のため既定で無効）。
+
+    ``scans`` の各要素は ``{"id", "started_at"}`` を持つ想定。スキャン id が
+    数値(エポック秒)ならそれを、そうでなければ ``started_at`` の ISO 文字列を
+    時刻として用いる。FS/HTTP に依存しないためテスト容易。
+    """
+    if now_epoch is None:
+        now_epoch = time.time()
+    protected = {str(p) for p in (protected_ids or set())}
+
+    def _epoch(s) -> Optional[float]:
+        sid = str(s.get("id", ""))
+        if sid.isdigit():
+            return float(sid)
+        ts = s.get("started_at") or ""
+        try:
+            return datetime.datetime.fromisoformat(ts).timestamp()
+        except Exception:
+            return None
+
+    ordered = sorted(scans, key=lambda s: (_epoch(s) or 0.0), reverse=True)  # newest first
+    doomed: set = set()
+
+    if max_age_days and max_age_days > 0:
+        cutoff = now_epoch - max_age_days * 86400
+        for s in ordered:
+            e = _epoch(s)
+            if e is not None and e < cutoff:
+                doomed.add(str(s.get("id", "")))
+
+    if max_scans and max_scans > 0:
+        for s in ordered[int(max_scans):]:
+            doomed.add(str(s.get("id", "")))
+
+    doomed -= protected
+    doomed.discard("")
+    return [str(s.get("id", "")) for s in ordered if str(s.get("id", "")) in doomed]
+
+
+def _host_of(url: str) -> str:
+    try:
+        # DNS 末尾ドット（"example.com."）は "example.com" と同一ホストなので
+        # 正規化しておく。これを残すと deny/allow 照合を末尾ドットで回避できる。
+        return (urlparse(url).hostname or "").lower().rstrip(".")
+    except Exception:
+        return ""
+
+
+def target_in_scope(url: str, allowed: list, denied: list) -> bool:
+    """対象URLのホストがスキャン許可スコープ内かを判定する純粋関数。
+
+    - denied に一致（完全一致 or サブドメイン）すれば常に拒否。
+    - allowed が非空なら、そのいずれかに一致するホストのみ許可。
+    - allowed が空なら（denied 以外は）許可。
+    共有サーバーで範囲外/内部資産への誤爆・悪用を防ぐためのガード。
+    """
+    host = _host_of(url)
+    if not host:
+        return False
+    for d in (denied or []):
+        d = (d or "").lower().strip().strip(".")
+        if d and (host == d or host.endswith("." + d)):
+            return False
+    allow = [(a or "").lower().strip().strip(".") for a in (allowed or []) if (a or "").strip()]
+    if allow:
+        return any(host == a or host.endswith("." + a) for a in allow)
+    return True
+
+
+def due_schedule_ids(schedules: list, now_epoch: Optional[float] = None) -> list:
+    """実行すべき（有効かつ next_run <= 現在）スケジュール id を返す純粋関数。"""
+    if now_epoch is None:
+        now_epoch = time.time()
+    out = []
+    for s in schedules or []:
+        if not s.get("enabled", True):
+            continue
+        try:
+            nxt = float(s.get("next_run", 0) or 0)
+        except (TypeError, ValueError):
+            nxt = 0
+        if nxt <= now_epoch:
+            out.append(str(s.get("id", "")))
+    return [i for i in out if i]
 
 
 class MonitorServer:
@@ -90,7 +192,32 @@ class MonitorServer:
         self.api_scan_status: str = "idle"   # idle / scanning / done / error
         self.api_findings: list[dict] = []   # emit_finding() で自動蓄積
         self.api_report_path: Optional[str] = None
+        # 進捗のスナップショット（ポータルが /api/v1/scan/status でモニターを
+        # 開かずに確認できるようにする）。emit_phase/emit_progress が更新。
+        self.api_target: str = ""
+        self.api_phase: str = ""             # crawl / plan / attack / report
+        self.api_progress: dict = {"current": 0, "total": 0, "percent": 0}
         self.manual_crawl_session = None
+        # 出力(output/)の保持ポリシー。0 = 無制限(既定・後方互換)。
+        #   retention_days       … 経過日数を超えたスキャンを自動削除
+        #   retention_max_scans  … 直近この件数のみ残し超過分を自動削除
+        # serve 起動時とスキャン完了毎に prune_old_scans() が適用する。
+        self.retention_days: float = 0
+        self.retention_max_scans: int = 0
+        # スキャン対象スコープ（共有サーバーでの誤爆・悪用防止）。0件なら無制限。
+        self.allowed_target_hosts: list = []
+        self.denied_target_hosts: list = []
+        # ログイン失敗のレート制限（IP単位の総当たり対策）。
+        self._login_fail: dict = {}
+        # リバースプロキシ配下で実クライアントIPを X-Forwarded-For から取るか。
+        # 既定 False（XFF は偽装可能なため、信頼できるプロキシ配下のときだけ有効化）。
+        self.trust_proxy: bool = False
+        # 監査ログ書き込み失敗を一度だけ警告するためのフラグ。
+        self._audit_warned: bool = False
+        # スキャンのウォッチドッグ（ハング対策。0=無効）。
+        self.scan_max_seconds: float = 0
+        self._scan_started_at: float = 0.0
+        self._watchdog_fired: bool = False
         # Optional RequestLogger (set by ScanEngine). Persists tested payloads
         # to payloads.jsonl alongside the HTTP request audit log.
         self.request_logger = None
@@ -136,6 +263,111 @@ class MonitorServer:
         token = ws.query_params.get("token")
         return self._token_ok(token)
 
+    # ── Login brute-force throttling ──────────────────────────────────
+    _LOGIN_MAX_FAILS = 5      # この回数失敗すると
+    _LOGIN_WINDOW = 300       # この秒数だけロックアウト
+
+    def _client_ip(self, request: Request) -> str:
+        # 信頼できるプロキシ配下では X-Forwarded-For の先頭(=実クライアント)を使う。
+        # これによりプロキシ配下で全利用者が同一IP扱いになりロックアウトが
+        # 巻き添えになる問題を避ける。trust_proxy=False のときは偽装防止のため
+        # ソケットの接続元IPのみを用いる。
+        if self.trust_proxy:
+            xff = request.headers.get("x-forwarded-for", "")
+            if xff:
+                first = xff.split(",")[0].strip()
+                if first:
+                    return first
+        return (request.client.host if request.client else "") or "unknown"
+
+    def _login_locked(self, ip: str) -> bool:
+        now = time.time()
+        fails = [t for t in self._login_fail.get(ip, []) if now - t < self._LOGIN_WINDOW]
+        self._login_fail[ip] = fails
+        return len(fails) >= self._LOGIN_MAX_FAILS
+
+    def _record_login_fail(self, ip: str) -> None:
+        self._login_fail.setdefault(ip, []).append(time.time())
+
+    def _clear_login_fail(self, ip: str) -> None:
+        self._login_fail.pop(ip, None)
+
+    # ── Target scope (allow/deny) ─────────────────────────────────────
+    def _scope_error(self, url: str) -> Optional[str]:
+        """対象URLが許可スコープ外なら理由文字列、許可内なら None。"""
+        if target_in_scope(url, self.allowed_target_hosts, self.denied_target_hosts):
+            return None
+        return f"対象ホストがスキャン許可スコープ外です: {_host_of(url) or url}"
+
+    def _config_scope_error(self, config: dict) -> Optional[str]:
+        """スキャン設定に含まれる全ての対象URLをスコープ検査する。
+
+        url だけでなく target_urls / access_urls / login_url も対象。これらは
+        エンジンが実際にアクセス/攻撃するため、in-scope の url を指定しつつ
+        ここに範囲外ホストを混ぜる回避を防ぐ。
+        """
+        if not (self.allowed_target_hosts or self.denied_target_hosts):
+            return None
+        config = config or {}
+        urls: list = []
+        if config.get("url"):
+            urls.append(config["url"])
+        for key in ("target_urls", "access_urls"):
+            v = config.get(key)
+            if isinstance(v, str):
+                urls += [u.strip() for u in v.replace(",", "\n").splitlines() if u.strip()]
+            elif isinstance(v, (list, tuple)):
+                urls += [str(u).strip() for u in v if str(u).strip()]
+        if config.get("login_url"):
+            urls.append(config["login_url"])
+        # 攻撃フロー/シナリオの navigate 先もブラウザが実際に開くため検査対象。
+        # in-scope の url を指定しつつ、フローで範囲外へ navigate する回避を防ぐ。
+        urls += self._flow_nav_urls(config.get("flows"))
+        for u in urls:
+            err = self._scope_error(u)
+            if err:
+                return err
+        return None
+
+    @staticmethod
+    def _flow_nav_urls(flows) -> list:
+        """フロー定義から navigate 系ステップの URL を抽出する。"""
+        out: list = []
+        for flow in (flows or []):
+            if not isinstance(flow, dict):
+                continue
+            for step in (flow.get("steps") or []):
+                if not isinstance(step, dict):
+                    continue
+                if step.get("action") in ("navigate", "goto") and step.get("url"):
+                    out.append(str(step["url"]))
+        return out
+
+    # ── Scan watchdog (hang protection) ───────────────────────────────
+    def mark_scan_started(self) -> None:
+        """スキャン開始時刻を記録し watchdog をリセットする。"""
+        self._scan_started_at = time.time()
+        self._watchdog_fired = False
+
+    def watchdog_check(self) -> bool:
+        """実行中スキャンが上限時間を超えていたら一度だけ abort を要求する。
+
+        ブラウザのハング等で完了しないスキャンを自動停止し、serve を次の
+        スキャンへ進ませる。``scan_max_seconds`` が 0 のときは無効。
+        """
+        if not (self.scan_max_seconds and self.scan_in_progress and self._scan_started_at):
+            return False
+        if self._watchdog_fired:
+            return False
+        if time.time() - self._scan_started_at > self.scan_max_seconds:
+            self._watchdog_fired = True
+            try:
+                self.command_queue.put_nowait("abort")
+            except Exception:
+                pass
+            return True
+        return False
+
     def _create_app(self) -> FastAPI:
         app = FastAPI(title="WScan Monitor", docs_url=None, redoc_url=None)
 
@@ -165,9 +397,13 @@ class MonitorServer:
 
         @app.post("/login")
         async def login_submit(request: Request):
+            ip = self._client_ip(request)
+            if self._login_locked(ip):
+                return HTMLResponse(self._login_html(locked=True), status_code=429)
             form = await request.form()
             token = (form.get("token") or "").strip()
             if self._token_ok(token):
+                self._clear_login_fail(ip)
                 resp = RedirectResponse(url="/", status_code=303)
                 resp.set_cookie(
                     SESSION_COOKIE,
@@ -177,6 +413,7 @@ class MonitorServer:
                     max_age=60 * 60 * 12,  # 12 hours
                 )
                 return resp
+            self._record_login_fail(ip)
             return HTMLResponse(self._login_html(error=True), status_code=401)
 
         @app.get("/logout")
@@ -216,7 +453,8 @@ class MonitorServer:
                 while True:
                     try:
                         raw = await asyncio.wait_for(ws.receive_text(), timeout=30)
-                        self._handle_client_message(raw)
+                        ws_ip = (ws.client.host if ws.client else "") or "ws"
+                        self._handle_client_message(raw, ws_ip)
                     except asyncio.TimeoutError:
                         # Send ping to keep alive
                         await ws.send_text(json.dumps({"type": "ping"}))
@@ -228,6 +466,121 @@ class MonitorServer:
         @app.get("/health")
         async def health():
             return {"status": "ok", "clients": len(self.clients)}
+
+        @app.get("/api/v1/settings")
+        async def api_get_settings():
+            """通知設定を返す（Webhook URL はマスクして返す）。"""
+            n = self._notify_settings()
+            return JSONResponse({
+                "notifications": {
+                    "enabled": n["enabled"],
+                    "min_severity": n["min_severity"],
+                    "notify_complete": n["notify_complete"],
+                    "webhook_set": bool(n["webhook_url"]),
+                    "webhook_hint": self._mask_secret(n["webhook_url"]),
+                }
+            })
+
+        @app.post("/api/v1/settings")
+        async def api_set_settings(request: Request):
+            """通知設定を更新する。webhook_url 未指定なら既存値を保持。"""
+            try:
+                body = await request.json()
+            except Exception:
+                return JSONResponse({"error": "Invalid JSON"}, status_code=400)
+            n = body.get("notifications") or {}
+            cur = self._notify_settings()
+            new_url = n.get("webhook_url", None)
+            if new_url is None:
+                new_url = cur["webhook_url"]  # 未指定 → 既存維持
+            new_url = str(new_url).strip()
+            min_sev = str(n.get("min_severity", cur["min_severity"]) or "high")
+            if min_sev not in ("critical", "high", "medium", "low"):
+                min_sev = "high"
+            settings = self._load_settings()
+            settings["notifications"] = {
+                "webhook_url": new_url,
+                "min_severity": min_sev,
+                "notify_complete": bool(n.get("notify_complete", cur["notify_complete"])),
+                "enabled": bool(n.get("enabled", cur["enabled"])),
+            }
+            try:
+                self._save_settings(settings)
+            except Exception as exc:
+                return JSONResponse({"error": f"保存に失敗しました: {exc}"}, status_code=500)
+            self._audit("settings_update", self._client_ip(request),
+                        f"webhook_set={bool(new_url)} enabled={settings['notifications']['enabled']}")
+            return JSONResponse({"status": "ok"})
+
+        @app.post("/api/v1/settings/test")
+        async def api_test_notification():
+            """現在の通知設定でテスト通知を送信する。"""
+            cfg = self._notify_settings()
+            if not cfg["webhook_url"]:
+                return JSONResponse({"error": "Webhook URL が未設定です。"}, status_code=400)
+            try:
+                from wscan.notification import NotificationManager
+                mgr = NotificationManager(
+                    webhook_url=cfg["webhook_url"],
+                    min_severity=cfg["min_severity"],
+                    notify_complete=True,
+                )
+                await mgr.notify_scan_complete(
+                    {"total": 0, "critical": 0, "high": 0, "medium": 0, "low": 0},
+                    target_url="(WScan テスト通知)",
+                )
+                return JSONResponse({"status": "sent"})
+            except Exception as exc:
+                return JSONResponse({"error": str(exc)}, status_code=500)
+
+        @app.get("/api/v1/schedules")
+        async def api_get_schedules():
+            """登録済みの定期スキャンを一覧で返す。"""
+            return JSONResponse({"schedules": self.list_schedules()})
+
+        @app.post("/api/v1/schedules")
+        async def api_add_schedule(request: Request):
+            """定期スキャンを登録する。Body: {url, checks?, depth?, interval_hours}"""
+            try:
+                body = await request.json()
+            except Exception:
+                return JSONResponse({"error": "Invalid JSON"}, status_code=400)
+            url = (body.get("url") or "").strip()
+            if not url:
+                return JSONResponse({"error": "url is required"}, status_code=400)
+            try:
+                interval = float(body.get("interval_hours", 24) or 24)
+            except (TypeError, ValueError):
+                interval = 24
+            if interval <= 0:
+                return JSONResponse({"error": "interval_hours must be > 0"}, status_code=400)
+            checks = body.get("checks") or []
+            if isinstance(checks, str):
+                checks = [c.strip() for c in checks.replace(",", " ").split() if c.strip()]
+            sched = self.add_schedule(url, checks, int(body.get("depth", 2) or 2), interval)
+            self._audit("schedule_add", self._client_ip(request), f"{url} ({interval}h)")
+            return JSONResponse({"status": "ok", "schedule": sched})
+
+        @app.post("/api/v1/schedules/{sched_id}/toggle")
+        async def api_toggle_schedule(sched_id: str, request: Request):
+            s = self.toggle_schedule(sched_id)
+            if s is None:
+                return JSONResponse({"error": "not found"}, status_code=404)
+            self._audit("schedule_toggle", self._client_ip(request),
+                        f"{s.get('url','')} enabled={s.get('enabled')}")
+            return JSONResponse({"status": "ok", "schedule": s})
+
+        @app.delete("/api/v1/schedules/{sched_id}")
+        async def api_delete_schedule(sched_id: str, request: Request):
+            if not self.delete_schedule(sched_id):
+                return JSONResponse({"error": "not found"}, status_code=404)
+            self._audit("schedule_delete", self._client_ip(request), sched_id)
+            return JSONResponse({"status": "deleted", "id": sched_id})
+
+        @app.get("/api/v1/audit")
+        async def api_get_audit():
+            """管理操作の監査ログ（末尾200件、新しい順）を返す。"""
+            return JSONResponse({"audit": self.read_audit(200)})
 
         @app.get("/api/auth-status")
         async def api_auth_status():
@@ -302,6 +655,10 @@ class MonitorServer:
             if not config.get("url"):
                 return JSONResponse({"error": "url is required"}, status_code=400)
 
+            scope_err = self._config_scope_error(config)
+            if scope_err:
+                return JSONResponse({"error": scope_err}, status_code=403)
+
             # Reject instead of silently dropping a scan submitted while another
             # one is already running in persistent serve mode.
             if self.scan_in_progress or self.scan_request_event.is_set():
@@ -320,6 +677,10 @@ class MonitorServer:
             self.api_scan_status = "scanning"
             self.api_findings = []
             self.api_report_path = None
+            self.api_target = config.get("url", "") or ""
+            self.api_phase = ""
+            self.api_progress = {"current": 0, "total": 0, "percent": 0}
+            self._audit("scan_start", self._client_ip(request), config.get("url", ""))
             return JSONResponse({
                 "status": "accepted",
                 "scan_id": self.api_scan_id,
@@ -328,11 +689,14 @@ class MonitorServer:
 
         @app.get("/api/v1/scan/status")
         async def api_scan_status():
-            """スキャンステータスを返す。"""
+            """スキャンステータスを返す（進捗・フェーズ・対象を含む）。"""
             return JSONResponse({
                 "status": self.api_scan_status,
                 "scan_id": self.api_scan_id,
                 "findings_count": len(self.api_findings),
+                "target": self.api_target,
+                "phase": self.api_phase,
+                "progress": self.api_progress,
             })
 
         @app.get("/api/v1/scan/findings")
@@ -383,6 +747,9 @@ class MonitorServer:
             url = (body.get("url") or "").strip()
             if not url:
                 return JSONResponse({"error": "url is required"}, status_code=400)
+            scope_err = self._scope_error(url)
+            if scope_err:
+                return JSONResponse({"error": scope_err}, status_code=403)
             output_path = (body.get("output_path") or "flows/manual_crawl.json").strip()
             headless = bool(body.get("headless", False))
             proxy = (body.get("proxy") or "").strip()
@@ -427,46 +794,114 @@ class MonitorServer:
         # ── Scan management portal: history, reports, downloads ───────────────
 
         @app.post("/api/v1/scan/abort")
-        async def api_scan_abort():
+        async def api_scan_abort(request: Request):
             """Request the running scan to stop (saves a partial report)."""
             if not self.scan_in_progress:
                 return JSONResponse(
                     {"error": "実行中のスキャンはありません。"}, status_code=409
                 )
             self.command_queue.put_nowait("abort")
+            self._audit("scan_abort", self._client_ip(request), self.current_scan_id)
             return JSONResponse({"status": "aborting"})
 
         @app.get("/api/v1/scans")
         async def api_scans():
             """List all scans found under the output directory (history)."""
-            return JSONResponse({"scans": self._list_scans()})
+            scans = self._list_scans()
+            return JSONResponse({
+                "scans": scans,
+                "storage": self.storage_summary(scans),
+            })
+
+        @app.post("/api/v1/scans/prune")
+        async def api_scans_prune(request: Request):
+            """保持ポリシーを今すぐ適用して古いスキャンを削除する（手動整理）。"""
+            pruned = self.prune_old_scans()
+            self._audit("scans_prune", self._client_ip(request), f"{len(pruned)} 件")
+            return JSONResponse({
+                "status": "ok",
+                "pruned": pruned,
+                "pruned_count": len(pruned),
+                "storage": self.storage_summary(),
+            })
 
         @app.get("/api/v1/scans/{scan_id}/download")
         async def api_scan_download(scan_id: str):
-            """Download a scan's whole artifact folder as a zip archive."""
+            """Download a scan's whole artifact folder as a zip archive.
+
+            アーカイブはメモリ上ではなく一時ファイルに構築してからストリーミングし、
+            送信後に削除する。スクリーンショット多数の大規模スキャンでも RAM を
+            圧迫しない。zip 構築はスレッドへ逃がしてイベントループを塞がない。
+            """
             d = self._scan_dir(scan_id)
             if d is None or not d.is_dir():
                 return JSONResponse({"error": "not found"}, status_code=404)
 
-            def _iter_zip():
-                buf = io.BytesIO()
-                with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            def _build_zip() -> str:
+                fd, tmp_path = tempfile.mkstemp(prefix=f"wscan-{scan_id}-", suffix=".zip")
+                os.close(fd)
+                with zipfile.ZipFile(tmp_path, "w", zipfile.ZIP_DEFLATED) as zf:
                     for path in sorted(d.rglob("*")):
                         if path.is_file():
                             zf.write(path, arcname=path.relative_to(d.parent))
-                buf.seek(0)
-                yield from buf
+                return tmp_path
 
-            return StreamingResponse(
-                _iter_zip(),
+            try:
+                tmp_path = await asyncio.to_thread(_build_zip)
+            except Exception as exc:
+                return JSONResponse({"error": f"zip 生成に失敗しました: {exc}"}, status_code=500)
+
+            def _cleanup() -> None:
+                try:
+                    os.unlink(tmp_path)
+                except Exception:
+                    pass
+
+            return FileResponse(
+                tmp_path,
                 media_type="application/zip",
-                headers={
-                    "Content-Disposition": f'attachment; filename="wscan-{scan_id}.zip"'
-                },
+                filename=f"wscan-{scan_id}.zip",
+                background=BackgroundTask(_cleanup),
             )
 
+        @app.get("/api/v1/scans/{scan_id}/diff")
+        async def api_scan_diff(scan_id: str):
+            """同一対象の「前回スキャン」との差分（新規/修正済み/継続）を返す。"""
+            d = self._scan_dir(scan_id)
+            if d is None or not d.is_dir():
+                return JSONResponse({"error": "not found"}, status_code=404)
+            from wscan.diff_scan import load_previous, diff as _diff
+
+            scans = self._list_scans()
+            cur = next((s for s in scans if s["id"] == scan_id), None)
+            target = (cur or {}).get("target", "")
+            # 同一対象で、この scan より前(=id が小さい)・evidence ありの最新を探す。
+            prev = None
+            for s in sorted(scans, key=lambda x: x["id"], reverse=True):
+                if s["id"] >= scan_id or not s.get("json_available"):
+                    continue
+                if target and s.get("target") != target:
+                    continue
+                prev = s
+                break
+            if prev is None:
+                return JSONResponse(
+                    {"error": "比較対象（同一対象の前回スキャン）が見つかりません。", "target": target},
+                    status_code=404,
+                )
+            new = load_previous(str(d))
+            prev_dir = self._scan_dir(prev["id"])
+            old = load_previous(str(prev_dir)) if prev_dir else []
+            result = _diff(old, new)
+            return JSONResponse({
+                "scan_id": scan_id,
+                "previous_id": prev["id"],
+                "target": target,
+                **result.to_dict(),
+            })
+
         @app.delete("/api/v1/scans/{scan_id}")
-        async def api_scan_delete(scan_id: str):
+        async def api_scan_delete(scan_id: str, request: Request):
             """Delete a scan's artifact folder."""
             if self.scan_in_progress and scan_id == self.current_scan_id:
                 return JSONResponse(
@@ -479,6 +914,7 @@ class MonitorServer:
                 shutil.rmtree(d)
             except Exception as exc:
                 return JSONResponse({"error": str(exc)}, status_code=500)
+            self._audit("scan_delete", self._client_ip(request), scan_id)
             return JSONResponse({"status": "deleted", "scan_id": scan_id})
 
         @app.get("/reports/{scan_id}/{file_path:path}")
@@ -531,6 +967,8 @@ class MonitorServer:
                 "findings_count": 0,
                 "severity": {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0},
                 "report_available": (d / "report.html").is_file(),
+                "sarif_available": (d / "report.sarif").is_file(),
+                "json_available": (d / "evidence.json").is_file(),
                 "status": "done",
                 "size_bytes": 0,
             }
@@ -577,16 +1015,301 @@ class MonitorServer:
         scans.sort(key=lambda s: s["id"], reverse=True)
         return scans
 
+    def storage_summary(self, scans: Optional[list] = None) -> dict:
+        """output/ の合計サイズ・件数・保持ポリシーを返す（ポータル表示用）。"""
+        if scans is None:
+            scans = self._list_scans()
+        total = sum(int(s.get("size_bytes") or 0) for s in scans)
+        return {
+            "total_bytes": total,
+            "scan_count": len(scans),
+            "retention_days": self.retention_days,
+            "retention_max_scans": self.retention_max_scans,
+        }
+
+    def prune_old_scans(self) -> list:
+        """保持ポリシーに従い古いスキャンの成果物フォルダを削除し、削除した id を返す。
+
+        ポリシー未設定（いずれも 0）なら何もしない。実行中スキャンは保護する。
+        """
+        if not (self.retention_days or self.retention_max_scans):
+            return []
+        protected = set()
+        if self.scan_in_progress and self.current_scan_id:
+            protected.add(self.current_scan_id)
+        ids = select_scans_to_prune(
+            self._list_scans(),
+            max_age_days=self.retention_days,
+            max_scans=self.retention_max_scans,
+            protected_ids=protected,
+        )
+        pruned: list = []
+        for sid in ids:
+            d = self._scan_dir(sid)
+            if d is None or not d.is_dir():
+                continue
+            try:
+                shutil.rmtree(d)
+                pruned.append(sid)
+            except Exception:
+                pass
+        return pruned
+
+    # ------------------------------------------------------------------
+    # Server settings (notifications) — persisted as a FILE under output/ so it
+    # survives restarts (output is the mounted volume) and is never listed as a
+    # scan (._list_scans only iterates directories).
+    # ------------------------------------------------------------------
+
+    def _settings_path(self) -> Path:
+        return OUTPUT_BASE / "wscan_settings.json"
+
+    # ------------------------------------------------------------------
+    # Management audit log (who did what, from where) — JSONL file under
+    # output/. 共有サーバーで start/abort/delete/設定変更 等の操作を追跡する。
+    # ------------------------------------------------------------------
+
+    def _audit_path(self) -> Path:
+        return OUTPUT_BASE / "management_audit.jsonl"
+
+    def _audit(self, action: str, ip: str = "", detail: str = "") -> None:
+        """管理操作を 1 行 JSONL で追記する（失敗しても本処理は止めない）。"""
+        try:
+            OUTPUT_BASE.mkdir(parents=True, exist_ok=True)
+            entry = {
+                "ts": datetime.datetime.now().isoformat(timespec="seconds"),
+                "ip": ip or "",
+                "action": action,
+                "detail": str(detail)[:300],
+            }
+            with open(self._audit_path(), "a", encoding="utf-8") as f:
+                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        except Exception as exc:
+            # 監査はセキュリティ機能なので失敗を黙殺しない（最初の失敗を一度警告）。
+            if not self._audit_warned:
+                self._audit_warned = True
+                print(f"[wscan] 監査ログの書き込みに失敗しています: {exc}")
+
+    def read_audit(self, limit: int = 200) -> list:
+        """監査ログの末尾 limit 件を新しい順で返す。"""
+        p = self._audit_path()
+        if not p.is_file():
+            return []
+        try:
+            lines = p.read_text(encoding="utf-8").splitlines()
+        except Exception:
+            return []
+        out = []
+        for ln in lines[-limit:]:
+            ln = ln.strip()
+            if not ln:
+                continue
+            try:
+                out.append(json.loads(ln))
+            except Exception:
+                continue
+        out.reverse()
+        return out
+
+    def _load_settings(self) -> dict:
+        p = self._settings_path()
+        if not p.is_file():
+            return {}
+        try:
+            return json.loads(p.read_text(encoding="utf-8")) or {}
+        except Exception:
+            # 破損していたら握り潰さず .corrupt へ退避してログする（次回は空で再生成）。
+            try:
+                backup = p.with_suffix(".json.corrupt")
+                p.replace(backup)
+                print(f"[wscan] 設定ファイルが壊れていたため {backup.name} へ退避しました。")
+            except Exception:
+                pass
+            return {}
+
+    def _save_settings(self, data: dict) -> None:
+        """設定を atomic に書き出す（一時ファイル→fsync→os.replace）。
+
+        直書きだと書き込み途中のクラッシュでファイルが壊れ、通知設定や
+        スケジュールが丸ごと失われる。同一ディレクトリの一時ファイルへ書いて
+        fsync 後に置換することで、常に「旧 or 新」のどちらか完全な状態を保つ。
+        書き込みは serve の単一イベントループ内で同期実行されるため逐次化される。
+        """
+        OUTPUT_BASE.mkdir(parents=True, exist_ok=True)
+        target = self._settings_path()
+        tmp = target.with_suffix(".json.tmp")
+        payload = json.dumps(data, ensure_ascii=False, indent=2)
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(payload)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, target)
+
+    def _notify_settings(self) -> dict:
+        n = (self._load_settings().get("notifications") or {})
+        return {
+            "webhook_url": str(n.get("webhook_url", "") or ""),
+            "min_severity": str(n.get("min_severity", "high") or "high"),
+            "notify_complete": bool(n.get("notify_complete", True)),
+            "enabled": bool(n.get("enabled", True)),
+        }
+
+    @staticmethod
+    def _mask_secret(s: str) -> str:
+        s = s or ""
+        if len(s) <= 8:
+            return "••••" if s else ""
+        return s[:8] + "…" + s[-4:]
+
+    async def send_scan_complete_notification(self) -> None:
+        """ポータルで設定された Webhook へスキャン完了通知を送る（serve モード）。"""
+        cfg = self._notify_settings()
+        if not (cfg["enabled"] and cfg["webhook_url"]):
+            return
+        try:
+            from wscan.notification import NotificationManager
+            mgr = NotificationManager(
+                webhook_url=cfg["webhook_url"],
+                min_severity=cfg["min_severity"],
+                notify_complete=cfg["notify_complete"],
+            )
+            sev = {"critical": 0, "high": 0, "medium": 0, "low": 0}
+            for f in self.api_findings:
+                s = (f.get("severity") or "").lower()
+                if s in sev:
+                    sev[s] += 1
+            summary = {"total": len(self.api_findings), **sev}
+            await mgr.notify_scan_complete(
+                summary,
+                target_url=self.api_target,
+                report_path=self.api_report_path or "",
+            )
+        except Exception:
+            pass
+
+    # ------------------------------------------------------------------
+    # Scheduled (recurring) scans
+    # ------------------------------------------------------------------
+
+    def request_scan(self, config: dict) -> bool:
+        """スキャンを serve ループへ投入する。実行中/投入済みなら False。
+
+        ダッシュボード/API の開始処理と同じ状態セットを行うため、スケジューラ
+        からも一貫した形でスキャンを起動できる。
+        """
+        if self.scan_in_progress or self.scan_request_event.is_set():
+            return False
+        self.scan_request_data = dict(config or {})
+        self.api_scan_id = str(int(time.time()))
+        self.api_scan_status = "scanning"
+        self.api_findings = []
+        self.api_report_path = None
+        self.api_target = (config or {}).get("url", "") or ""
+        self.api_phase = ""
+        self.api_progress = {"current": 0, "total": 0, "percent": 0}
+        self.scan_request_event.set()
+        return True
+
+    def list_schedules(self) -> list:
+        return list(self._load_settings().get("schedules") or [])
+
+    def _write_schedules(self, schedules: list) -> None:
+        settings = self._load_settings()
+        settings["schedules"] = schedules
+        self._save_settings(settings)
+
+    def add_schedule(self, url: str, checks: list, depth: int, interval_hours: float) -> dict:
+        now = time.time()
+        sched = {
+            "id": str(int(now * 1000)),  # ミリ秒で一意化
+            "url": url,
+            "checks": checks or [],
+            "depth": int(depth or 2),
+            "interval_hours": float(interval_hours or 24),
+            "enabled": True,
+            "created_at": now,
+            "last_run": 0,
+            "next_run": now,  # 次のスケジューラ tick で実行
+        }
+        schedules = self.list_schedules()
+        schedules.append(sched)
+        self._write_schedules(schedules)
+        return sched
+
+    def delete_schedule(self, sched_id: str) -> bool:
+        schedules = self.list_schedules()
+        kept = [s for s in schedules if str(s.get("id")) != str(sched_id)]
+        if len(kept) == len(schedules):
+            return False
+        self._write_schedules(kept)
+        return True
+
+    def toggle_schedule(self, sched_id: str) -> Optional[dict]:
+        schedules = self.list_schedules()
+        found = None
+        for s in schedules:
+            if str(s.get("id")) == str(sched_id):
+                s["enabled"] = not s.get("enabled", True)
+                found = s
+                break
+        if found is None:
+            return None
+        self._write_schedules(schedules)
+        return found
+
+    def trigger_due_schedules(self) -> Optional[str]:
+        """期限到来のスケジュールが1件あればスキャンを起動し、その id を返す。
+
+        serve は同時1スキャンのため、起動するのは1件のみ（残りは次 tick）。
+        起動できなければ（実行中/期限未到来）None。
+        """
+        if self.scan_in_progress or self.scan_request_event.is_set():
+            return None
+        schedules = self.list_schedules()
+        now = time.time()
+        due = due_schedule_ids(schedules, now)
+        if not due:
+            return None
+        target_id = due[0]
+        for s in schedules:
+            if str(s.get("id")) == target_id:
+                cfg = {
+                    "url": s.get("url", ""),
+                    "checks": s.get("checks") or [],
+                    "depth": int(s.get("depth", 2)),
+                }
+                # スコープ外になった対象は起動せず、次回まで送る（無限ループ防止に
+                # next_run は前進させる）。
+                if self._config_scope_error(cfg):
+                    s["last_run"] = now
+                    s["next_run"] = now + float(s.get("interval_hours", 24) or 24) * 3600
+                    self._write_schedules(schedules)
+                    return None
+                if not self.request_scan(cfg):
+                    return None
+                s["last_run"] = now
+                s["next_run"] = now + float(s.get("interval_hours", 24) or 24) * 3600
+                self._write_schedules(schedules)
+                return target_id
+        return None
+
     # ------------------------------------------------------------------
     # Login page
     # ------------------------------------------------------------------
 
-    def _login_html(self, error: bool = False) -> str:
+    def _login_html(self, error: bool = False, locked: bool = False) -> str:
         """Render the standalone token-login page."""
-        err_block = (
-            '<p class="err">トークンが正しくありません。もう一度入力してください。</p>'
-            if error else ""
-        )
+        if locked:
+            err_block = (
+                '<p class="err">試行回数が多すぎます。しばらく待ってから'
+                'もう一度お試しください。</p>'
+            )
+        elif error:
+            err_block = (
+                '<p class="err">トークンが正しくありません。もう一度入力してください。</p>'
+            )
+        else:
+            err_block = ""
         return f"""<!DOCTYPE html>
 <html lang="ja">
 <head>
@@ -647,7 +1370,7 @@ class MonitorServer:
     # Client message handler (called from WebSocket coroutine)
     # ------------------------------------------------------------------
 
-    def _handle_client_message(self, raw: str) -> None:
+    def _handle_client_message(self, raw: str, client_ip: str = "ws") -> None:
         """Parse and dispatch a JSON message sent from the browser."""
         try:
             msg = json.loads(raw)
@@ -686,23 +1409,48 @@ class MonitorServer:
                 except RuntimeError:
                     pass
                 return
-            self.scan_request_data = msg.get("config", {})
+            cfg = msg.get("config", {}) or {}
+            # HTTP API と同様に対象スコープを検査（WS 経由でのスコープ回避を防ぐ）。
+            scope_err = self._config_scope_error(cfg)
+            if scope_err:
+                try:
+                    asyncio.get_running_loop().create_task(
+                        self.emit("scan_rejected", {"message": scope_err})
+                    )
+                except RuntimeError:
+                    pass
+                return
+            self.scan_request_data = cfg
             self.api_scan_id = str(int(time.time()))
             self.api_scan_status = "scanning"
             self.api_findings = []
             self.api_report_path = None
+            self.api_target = cfg.get("url", "") or ""
+            self.api_phase = ""
+            self.api_progress = {"current": 0, "total": 0, "percent": 0}
+            self._audit("scan_start", client_ip, cfg.get("url", ""))
             self.scan_request_event.set()
 
         elif action == "crawl_review":
             # User reviewed crawl results. command: continue|recrawl|cancel
             # Optional extra_urls (list[str]) and manual_crawl_file (str) are
             # consumed by the engine on resume.
+            extra_urls = msg.get("extra_urls", []) or []
+            flows = msg.get("flows", []) or []
+            # レビュー時に追加される URL / フローもスコープ検査し、範囲外は除外する
+            # （スキャン本体と同じ allow/deny を後段の navigate にも効かせる）。
+            if self.allowed_target_hosts or self.denied_target_hosts:
+                extra_urls = [u for u in extra_urls if not self._scope_error(str(u))]
+                flows = [
+                    f for f in flows
+                    if all(not self._scope_error(u) for u in self._flow_nav_urls([f]))
+                ]
             self.crawl_review_action = {
                 "command": msg.get("command", "continue"),
-                "extra_urls": msg.get("extra_urls", []) or [],
+                "extra_urls": extra_urls,
                 "manual_crawl_file": msg.get("manual_crawl_file", "") or "",
                 # Manual attack scenarios built in the dashboard scenario editor.
-                "flows": msg.get("flows", []) or [],
+                "flows": flows,
             }
             self.crawl_review_event.set()
 
@@ -760,6 +1508,7 @@ class MonitorServer:
         fast_mode: bool = False,
     ):
         """Send scan configuration to the dashboard so it can render dynamic badges."""
+        self.api_target = url or self.api_target
         await self.emit("scan_config", {
             "url": url,
             "checks": checks,
@@ -822,15 +1571,16 @@ class MonitorServer:
         })
 
     async def emit_progress(self, current: int, total: int, message: str = ""):
-        await self.emit("progress", {
+        self.api_progress = {
             "current": current,
             "total": total,
             "percent": int(current / total * 100) if total > 0 else 0,
-            "message": message,
-        })
+        }
+        await self.emit("progress", {**self.api_progress, "message": message})
 
     async def emit_phase(self, phase: str) -> None:
         """Emit current scan phase: 'crawl' | 'plan' | 'attack' | 'report'"""
+        self.api_phase = phase
         await self.emit("phase", {"phase": phase})
 
     async def emit_url_start(self, url: str, total_urls: int = 0) -> None:

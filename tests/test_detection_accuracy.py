@@ -188,5 +188,40 @@ class XSSReflectionEscapingTests(unittest.TestCase):
         self.assertTrue(reflection)
 
 
+class StoredXSSMarkerClassificationTests(unittest.TestCase):
+    """Stored-XSS の実行可能/無害化の判定。マーカーは英数字のみのため、
+    旧実装は ``html.escape(marker) == marker`` で in_raw == in_encoded となり、
+    エンコード(無害)格納まで常に critical/executable と誤分類していた。"""
+
+    def setUp(self):
+        from wscan.scanners.stored_xss import classify_stored_marker
+        self.classify = classify_stored_marker
+        self.marker = "wsxss1a2b3c4d"
+        self.payload = f'<script id="{self.marker}">/*{self.marker}*/</script>'
+
+    def test_raw_script_tag_is_executable(self):
+        # サーバが生のまま反映 → DOM 直列化で <script id="..."> が残る = 実行可能。
+        src = f'<html><body><script id="{self.marker}">/*{self.marker}*/</script></body></html>'
+        v = self.classify(self.marker, self.payload, src)
+        self.assertTrue(v["found"])
+        self.assertTrue(v["in_raw"])
+        self.assertTrue(v["executable"])
+
+    def test_html_encoded_storage_is_not_executable(self):
+        # サーバがHTMLエンコードしてテキスト化 → マーカーは在るが生タグは無い = 無害。
+        import html as _html
+        src = f"<html><body><p>{_html.escape(self.payload)}</p></body></html>"
+        v = self.classify(self.marker, self.payload, src)
+        self.assertTrue(v["found"])
+        self.assertFalse(v["in_raw"])
+        self.assertTrue(v["in_encoded"])
+        self.assertFalse(v["executable"])  # ← 旧実装はここが True だった
+
+    def test_marker_absent(self):
+        v = self.classify(self.marker, self.payload, "<html>nothing here</html>")
+        self.assertFalse(v["found"])
+        self.assertFalse(v["executable"])
+
+
 if __name__ == "__main__":
     unittest.main()

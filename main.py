@@ -96,6 +96,16 @@ def _load_config(path: Path = _CONFIG_PATH) -> dict:
     cfg["port"]                    = int(m.get("port", 8765))
     cfg["host"]                    = str(m.get("host", "0.0.0.0"))
     cfg["auth_token"]              = str(m.get("auth_token", ""))
+    # 出力の保持ポリシー（0=無制限）。serve モードで自動削除に使う。
+    cfg["retention_days"]          = float(m.get("retention_days", 0) or 0)
+    cfg["retention_max_scans"]     = int(m.get("retention_max_scans", 0) or 0)
+    # スキャン対象スコープ（serve モードの誤爆・悪用防止。空=無制限）。
+    cfg["allowed_target_hosts"]    = list(m.get("allowed_target_hosts", []) or [])
+    cfg["denied_target_hosts"]     = list(m.get("denied_target_hosts", []) or [])
+    # スキャンのウォッチドッグ（分。0=無効）。ハングしたスキャンを自動中断。
+    cfg["scan_timeout_minutes"]    = float(m.get("scan_timeout_minutes", 0) or 0)
+    # 信頼できるリバースプロキシ配下で X-Forwarded-For を実クライアントIPとして使う。
+    cfg["trust_proxy"]             = bool(m.get("trust_proxy", False))
 
     cfg["use_planner"]             = bool(pl.get("enabled",     True))
     cfg["interactive_plan"]        = bool(pl.get("interactive", False))
@@ -741,6 +751,12 @@ Examples:
         help="Shared access token. When set, the web UI requires login and the "
              "API requires an 'Authorization: Bearer <token>' header. "
              "Can also be supplied via the WSCAN_AUTH_TOKEN environment variable.",
+    )
+    serve.add_argument(
+        "--insecure", dest="insecure", action="store_true", default=False,
+        help="Allow binding to a non-loopback address WITHOUT an auth token. "
+             "By default this is refused so the scanner control panel is never "
+             "exposed unauthenticated on the network.",
     )
     serve.add_argument(
         "--open-browser", dest="open_browser", action="store_true", default=None,
@@ -1392,6 +1408,23 @@ async def run_serve(args):
     # loopback (a local developer). On a real server (0.0.0.0 / a LAN IP) we
     # stay headless unless --open-browser was passed explicitly.
     is_loopback = host in ("127.0.0.1", "localhost", "::1")
+
+    # 安全策: 非ループバックに無認証で公開しようとした場合は既定で拒否する。
+    # スキャナの操作盤(任意URLを攻撃可能)が無認証でネットワークに晒されるのを防ぐ。
+    # 明示的に許容したい場合のみ --insecure を付ける。
+    if not is_loopback and not auth_token and not getattr(args, "insecure", False):
+        console.print(Panel.fit(
+            "[bold red]起動を中止しました — 無認証で外部公開しようとしています[/bold red]\n"
+            f"  Bind: [underline]{host}:{port}[/underline]（非ループバック）\n"
+            "  この状態ではネットワーク上の誰でもスキャナを操作できてしまいます。\n\n"
+            "  対処のいずれか:\n"
+            "   • トークンを設定: [cyan]--auth-token <TOKEN>[/cyan] または環境変数 WSCAN_AUTH_TOKEN\n"
+            "   • ローカル限定にする: [cyan]--host 127.0.0.1[/cyan]\n"
+            "   • どうしても無認証公開する: [cyan]--insecure[/cyan]（非推奨）",
+            border_style="red",
+        ))
+        return
+
     if getattr(args, "open_browser", None) is None:
         open_browser = is_loopback
     else:
@@ -1427,6 +1460,41 @@ async def run_serve(args):
     ))
 
     monitor = MonitorServer(port=port, auth_token=auth_token)
+    # 出力の保持ポリシー（env が優先、無ければ config/wscan.yaml の値）。
+    try:
+        monitor.retention_days = float(
+            os.environ.get("WSCAN_RETENTION_DAYS", _CFG.get("retention_days", 0)) or 0
+        )
+        monitor.retention_max_scans = int(
+            os.environ.get("WSCAN_RETENTION_MAX_SCANS", _CFG.get("retention_max_scans", 0)) or 0
+        )
+    except (TypeError, ValueError):
+        monitor.retention_days = 0
+        monitor.retention_max_scans = 0
+
+    def _split_hosts(env_name: str, cfg_key: str) -> list:
+        raw = os.environ.get(env_name, "")
+        if raw.strip():
+            return [h.strip() for h in raw.replace(",", " ").split() if h.strip()]
+        return list(_CFG.get(cfg_key, []) or [])
+    monitor.allowed_target_hosts = _split_hosts("WSCAN_ALLOWED_HOSTS", "allowed_target_hosts")
+    monitor.denied_target_hosts = _split_hosts("WSCAN_DENIED_HOSTS", "denied_target_hosts")
+    try:
+        monitor.scan_max_seconds = float(
+            os.environ.get("WSCAN_SCAN_TIMEOUT_MIN", _CFG.get("scan_timeout_minutes", 0)) or 0
+        ) * 60
+    except (TypeError, ValueError):
+        monitor.scan_max_seconds = 0
+    _tp = os.environ.get("WSCAN_TRUST_PROXY", "")
+    monitor.trust_proxy = (
+        _tp.strip().lower() in ("1", "true", "yes", "on") if _tp.strip()
+        else bool(_CFG.get("trust_proxy", False))
+    )
+    if monitor.allowed_target_hosts:
+        console.print(f"[dim]対象スコープ(許可): {', '.join(monitor.allowed_target_hosts)}[/dim]")
+    if monitor.denied_target_hosts:
+        console.print(f"[dim]対象スコープ(拒否): {', '.join(monitor.denied_target_hosts)}[/dim]")
+
     monitor.default_scan_cfg = {
         "checks": _CFG.get("checks", ["sqli", "xss", "os"]),
         "depth": _CFG.get("depth", 2),
@@ -1707,6 +1775,14 @@ async def run_serve(args):
             except Exception:
                 pass
 
+        # 起動時に保持ポリシーを一度適用（前回までの古い成果物を整理）。
+        try:
+            pruned = monitor.prune_old_scans()
+            if pruned:
+                console.print(f"[dim]保持ポリシー: 古いスキャン {len(pruned)} 件を削除しました。[/dim]")
+        except Exception:
+            pass
+
         # Persistent loop: accept and run one scan at a time, indefinitely.
         while not server.should_exit:
             # While idle, KEEP the previous scan's results/status/report so
@@ -1715,7 +1791,9 @@ async def run_serve(args):
             # scan is accepted (the request handlers set status=scanning and clear
             # findings), not the moment the previous result was published.
             monitor.scan_in_progress = False
-            monitor.scan_request_event.clear()
+            # NOTE: ここで event をクリアしない。直前の完了処理(await 通知送信)中に
+            # スケジューラ/API が立てた要求を取りこぼし、しかも next_run は前進済みで
+            # 1 周期スキップされるのを防ぐため、消費は「要求検出後」に行う。
             # Tell the dashboard it is ready for a new scan config.
             await monitor.emit_awaiting_config()
             # Wait until a config is submitted from the GUI / API / WebSocket,
@@ -1728,35 +1806,94 @@ async def run_serve(args):
                     pass
             if server.should_exit:
                 break
-            # Claim the busy slot synchronously (no await in between) so concurrent
-            # requests are rejected rather than silently dropped on the next reset.
+            # 要求を消費（検出直後に同期的にクリア＋busy 化。間に await を挟まないので
+            # 並行する別要求は scan_in_progress / event により確実に弾かれる）。
+            monitor.scan_request_event.clear()
             monitor.scan_in_progress = True
+            monitor.mark_scan_started()  # watchdog 計測開始
             # New scan accepted: clear the previous run's event log so this scan
             # starts from a clean slate in the dashboard.
             monitor.event_history.clear()
             cfg = monitor.scan_request_data or {}
             try:
-                await run_one_scan(cfg)
+                if monitor.scan_max_seconds:
+                    # watchdog はまず graceful な abort を要求する(scheduler_task)。
+                    # それでも戻らないハングに備え、上限＋猶予(60s)で強制 cancel し、
+                    # 「次のスキャンへ進む」を必ず保証する。
+                    hard_timeout = monitor.scan_max_seconds + 60
+                    try:
+                        await asyncio.wait_for(run_one_scan(cfg), timeout=hard_timeout)
+                    except asyncio.TimeoutError:
+                        console.print(
+                            f"\n[red]watchdog: スキャンが上限＋猶予({hard_timeout:.0f}秒)を"
+                            f"超えたため強制終了しました。[/red]"
+                        )
+                        # status を error にし、ポータル/CI が「終わらないスキャン」を
+                        # ポーリングし続けないよう可視化する。
+                        monitor.api_scan_status = "error"
+                        try:
+                            await monitor.emit_status(
+                                "スキャンが上限時間を超えたため強制終了しました。", "error"
+                            )
+                        except Exception:
+                            pass
+                else:
+                    await run_one_scan(cfg)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
                 console.print(f"\n[red]Unexpected error: {exc}[/red]")
             finally:
                 monitor.scan_in_progress = False
+                # スキャン完了通知（ポータルで設定された Webhook へ）。
+                try:
+                    await monitor.send_scan_complete_notification()
+                except Exception:
+                    pass
+                # スキャン完了毎に保持ポリシーを適用（実行中スキャンは保護）。
+                try:
+                    monitor.prune_old_scans()
+                except Exception:
+                    pass
+
+    async def scheduler_task():
+        # 定期スキャンの期限を監視し、アイドル時に1件ずつ起動する。
+        await asyncio.sleep(3.0)
+        while not server.should_exit:
+            try:
+                # ハングしたスキャンの自動停止（watchdog）。
+                if monitor.watchdog_check():
+                    console.print(
+                        f"[yellow]watchdog: スキャンが上限時間({monitor.scan_max_seconds:.0f}秒)を"
+                        f"超えたため中断を要求しました。[/yellow]"
+                    )
+                sid = monitor.trigger_due_schedules()
+                if sid:
+                    console.print(f"[dim]スケジュール {sid}: 定期スキャンを起動しました。[/dim]")
+            except Exception:
+                pass
+            # 10 秒ごとにチェック（watchdog の粒度。shutdown も小刻みに確認）。
+            for _ in range(10):
+                if server.should_exit:
+                    break
+                await asyncio.sleep(1.0)
 
     # Run the server and the scan loop side by side. When the server shuts down
     # (Ctrl+C / SIGTERM), cancel the idle scan loop so the process exits promptly
     # instead of hanging on a pending scan-request wait.
     server_coro = asyncio.ensure_future(server.serve())
     worker_coro = asyncio.ensure_future(serve_task())
+    scheduler_coro = asyncio.ensure_future(scheduler_task())
     try:
         await server_coro
     finally:
         worker_coro.cancel()
-        try:
-            await worker_coro
-        except asyncio.CancelledError:
-            pass
+        scheduler_coro.cancel()
+        for _c in (worker_coro, scheduler_coro):
+            try:
+                await _c
+            except asyncio.CancelledError:
+                pass
 
 
 async def run_triage(args):

@@ -214,6 +214,7 @@ class SQLiScanner(BaseScanner):
             url, form_index, field_name, is_url_param
         )
         baseline_len = len(baseline_source)
+        baseline_lower = (baseline_source or "").lower()
 
         # Second baseline to measure natural response length variance
         # (dynamic content like ads/timestamps can shift length by hundreds of bytes)
@@ -242,7 +243,12 @@ class SQLiScanner(BaseScanner):
             )
 
             # --- Check 1: Error-based SQLi ---
+            # baseline に既に同じエラー文字列が出ているなら、それはページ本来の
+            # 文言（"database error" 等の通常コピー）であって注入結果ではない。
+            # ペイロード投入で「新たに」現れたエラーだけを陽性とする（誤検知抑制）。
             match = self.check_response_for_patterns(source, SQL_ERROR_PATTERNS)
+            if match and match.lower() in baseline_lower:
+                match = None
             if match:
                 finding = await self.record_finding(
                     url=url,
@@ -490,7 +496,21 @@ class SQLiScanner(BaseScanner):
             return bool(self.check_response_for_patterns(body, SQL_ERROR_PATTERNS))
         if etype == "sqli_time":
             threshold = float(finding.evidence_details.get("threshold_seconds", 2.5))
-            return self.response_time_exceeded(pair, threshold=threshold)
+            sleep_elapsed = self.response_elapsed(pair)
+            if sleep_elapsed is None:
+                return self.response_time_exceeded(pair, threshold=threshold)
+            if sleep_elapsed < threshold:
+                return False
+            # no-sleep の対照リクエストを計測し、SLEEP 応答が対照より十分に遅い
+            # ことを要求する。恒常的に遅いだけのエンドポイント（対照との差が小さい）を
+            # time-based 陽性と誤判定しないため（注入 SLEEP は約3秒なので 2 秒の差を要求）。
+            _, control_pair = await self._apply_payload(
+                finding.url, 0, finding.field_name, "1", is_url_param
+            )
+            control_elapsed = self.response_elapsed(control_pair)
+            if control_elapsed is not None and (sleep_elapsed - control_elapsed) < 2.0:
+                return False
+            return True
         if etype == "sqli_auth_bypass":
             fresh_result = await self._verify_auth_bypass_fresh_context(finding)
             if fresh_result is not None:

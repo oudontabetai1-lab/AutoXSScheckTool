@@ -115,6 +115,8 @@
     <span>Server Portal</span>
   </div>
   <div class="spacer"></div>
+  <button class="btn" onclick="openAudit()">📋 監査ログ</button>
+  <button class="btn" onclick="openSettings()">⚙ 通知設定</button>
   <a class="btn" href="/monitor">🖥 ライブモニター</a>
   <a class="btn ghost" href="/logout" id="logoutLink" style="display:none">⎋ ログアウト</a>
 </header>
@@ -132,28 +134,143 @@
         <button class="btn danger" id="abortBtn" style="display:none" onclick="abortScan()">⏹ 停止</button>
       </div>
     </div>
+    <div id="nowProgress" style="display:none;margin-top:14px">
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:6px">
+        <span id="nowPhase" class="st scanning" style="text-transform:uppercase">—</span>
+        <span class="now-meta" id="nowTarget" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1"></span>
+        <span class="now-meta" id="nowPct" style="font-weight:700;color:var(--accent)">—%</span>
+      </div>
+      <div style="height:6px;background:var(--surface2);border:1px solid var(--border);border-radius:999px;overflow:hidden">
+        <div id="nowBar" style="height:100%;width:0%;background:linear-gradient(90deg,var(--accent),var(--accent2));transition:width .4s ease"></div>
+      </div>
+    </div>
   </div>
 
   <!-- History -->
   <div class="card">
     <div class="toolbar">
       <p class="section-title" style="margin:0">スキャン履歴</p>
+      <input type="search" id="histSearch" placeholder="対象/IDで絞り込み…" oninput="renderScans()"
+        style="background:var(--bg);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:6px 10px;font-size:0.82rem;width:220px">
       <span class="spacer"></span>
+      <span class="muted" id="storageInfo"></span>
       <span class="muted" id="histCount"></span>
+      <button class="btn sm" id="pruneBtn" onclick="pruneScans()" style="display:none" title="保持ポリシーを適用して古いスキャンを削除">🧹 整理</button>
       <button class="btn sm" onclick="loadScans()">↻ 更新</button>
     </div>
     <table>
       <thead>
         <tr>
-          <th>日時</th><th>対象</th><th>検出</th><th>状態</th><th style="text-align:right">操作</th>
+          <th class="sortable" data-sort="started_at" onclick="setSort('started_at')" style="cursor:pointer">日時 <span class="sort-ind"></span></th>
+          <th class="sortable" data-sort="target" onclick="setSort('target')" style="cursor:pointer">対象 <span class="sort-ind"></span></th>
+          <th class="sortable" data-sort="findings_count" onclick="setSort('findings_count')" style="cursor:pointer">検出 <span class="sort-ind"></span></th>
+          <th class="sortable" data-sort="status" onclick="setSort('status')" style="cursor:pointer">状態 <span class="sort-ind"></span></th>
+          <th style="text-align:right">操作</th>
         </tr>
       </thead>
       <tbody id="scanRows">
         <tr><td colspan="5" class="empty">読み込み中…</td></tr>
       </tbody>
     </table>
+    <div class="toolbar" id="pager" style="display:none;margin-top:12px">
+      <span class="spacer"></span>
+      <button class="btn sm" id="pagePrev" onclick="changePage(-1)">← 前</button>
+      <span class="muted" id="pageInfo"></span>
+      <button class="btn sm" id="pageNext" onclick="changePage(1)">次 →</button>
+    </div>
+  </div>
+
+  <!-- Scheduled scans -->
+  <div class="card">
+    <div class="toolbar">
+      <p class="section-title" style="margin:0">定期スキャン</p>
+      <span class="spacer"></span>
+      <button class="btn sm" onclick="loadSchedules()">↻ 更新</button>
+    </div>
+    <div class="now-row" style="gap:8px;flex-wrap:wrap;margin-bottom:14px">
+      <input id="schUrl" type="text" placeholder="https://example.com"
+        style="flex:1;min-width:200px;background:var(--bg);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:8px 11px;font-size:.86rem">
+      <input id="schChecks" type="text" placeholder="検査(空=既定) 例: xss sqli os" title="検査項目（スペース区切り、空で既定）"
+        style="width:210px;background:var(--bg);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:8px 11px;font-size:.86rem">
+      <input id="schDepth" type="number" min="1" max="10" value="2" title="クロール深度"
+        style="width:70px;background:var(--bg);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:8px 10px;font-size:.86rem">
+      <input id="schInterval" type="number" min="0.1" step="0.5" value="24" title="実行間隔（時間）"
+        style="width:96px;background:var(--bg);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:8px 10px;font-size:.86rem">
+      <button class="btn primary" onclick="addSchedule()">＋ 追加</button>
+    </div>
+    <table>
+      <thead>
+        <tr><th>対象</th><th>検査</th><th>間隔</th><th>次回</th><th>状態</th><th style="text-align:right">操作</th></tr>
+      </thead>
+      <tbody id="schRows"><tr><td colspan="6" class="empty">登録された定期スキャンはありません。</td></tr></tbody>
+    </table>
+    <p class="muted" style="font-size:.76rem;margin-top:10px">定期スキャンは serve モードで、他のスキャンが実行中でないときに自動起動されます（同時実行は1件）。</p>
   </div>
 </main>
+
+<!-- Diff modal -->
+<div id="diffOverlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:60;align-items:flex-start;justify-content:center;padding:6vh 16px;overflow:auto">
+  <div style="background:var(--surface);border:1px solid var(--border);border-radius:14px;width:min(820px,96vw);box-shadow:0 24px 60px rgba(0,0,0,.5)">
+    <div style="display:flex;align-items:center;gap:10px;padding:16px 20px;border-bottom:1px solid var(--border)">
+      <strong style="font-size:1rem">前回スキャンとの差分</strong>
+      <span class="spacer" style="flex:1"></span>
+      <button class="btn sm" onclick="closeDiff()">✕ 閉じる</button>
+    </div>
+    <div id="diffBody" style="padding:18px 20px"></div>
+  </div>
+</div>
+
+<!-- Audit log modal -->
+<div id="auditOverlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:60;align-items:flex-start;justify-content:center;padding:6vh 16px;overflow:auto">
+  <div style="background:var(--surface);border:1px solid var(--border);border-radius:14px;width:min(760px,96vw);box-shadow:0 24px 60px rgba(0,0,0,.5)">
+    <div style="display:flex;align-items:center;gap:10px;padding:16px 20px;border-bottom:1px solid var(--border)">
+      <strong style="font-size:1rem">📋 管理操作の監査ログ</strong>
+      <span class="spacer" style="flex:1"></span>
+      <button class="btn sm" onclick="loadAudit()">↻ 更新</button>
+      <button class="btn sm" onclick="closeAudit()">✕</button>
+    </div>
+    <div id="auditBody" style="padding:14px 20px;max-height:60vh;overflow:auto"></div>
+  </div>
+</div>
+
+<!-- Settings modal (notifications) -->
+<div id="settingsOverlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:60;align-items:flex-start;justify-content:center;padding:8vh 16px;overflow:auto">
+  <div style="background:var(--surface);border:1px solid var(--border);border-radius:14px;width:min(560px,96vw);box-shadow:0 24px 60px rgba(0,0,0,.5)">
+    <div style="display:flex;align-items:center;gap:10px;padding:16px 20px;border-bottom:1px solid var(--border)">
+      <strong style="font-size:1rem">⚙ 通知設定（Slack / Webhook）</strong>
+      <span class="spacer" style="flex:1"></span>
+      <button class="btn sm" onclick="closeSettings()">✕</button>
+    </div>
+    <div style="padding:18px 20px;display:flex;flex-direction:column;gap:14px">
+      <label style="display:flex;flex-direction:column;gap:6px;font-size:.85rem">
+        Webhook URL <span class="muted" id="setWebhookHint"></span>
+        <input type="text" id="setWebhook" placeholder="https://hooks.slack.com/services/…"
+          style="background:var(--bg);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:9px 12px;font-size:.9rem">
+      </label>
+      <label style="display:flex;align-items:center;gap:8px;font-size:.85rem">
+        <input type="checkbox" id="setEnabled"> 通知を有効にする
+      </label>
+      <label style="display:flex;align-items:center;gap:8px;font-size:.85rem">
+        <input type="checkbox" id="setComplete"> スキャン完了時にサマリーを送信
+      </label>
+      <label style="display:flex;flex-direction:column;gap:6px;font-size:.85rem">
+        最小重大度（finding 通知の閾値）
+        <select id="setMinSev" style="background:var(--bg);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:8px 10px;font-size:.9rem">
+          <option value="critical">critical</option>
+          <option value="high">high</option>
+          <option value="medium">medium</option>
+          <option value="low">low</option>
+        </select>
+      </label>
+      <div style="display:flex;gap:10px;margin-top:6px">
+        <button class="btn primary" onclick="saveSettings()">保存</button>
+        <button class="btn" onclick="testNotification()">テスト送信</button>
+        <span class="spacer" style="flex:1"></span>
+      </div>
+      <p class="muted" style="font-size:.76rem">完了通知は serve モードで各スキャン終了時に送信されます。Webメンバーで共有のため、URL はサーバーの output/wscan_settings.json に保存されます。</p>
+    </div>
+  </div>
+</div>
 
 <div class="toast" id="toast"></div>
 
@@ -216,6 +333,45 @@ async function loadStatus() {
   $('abortBtn').style.display = running ? '' : 'none';
   $('openMonitorBtn').style.display = running ? '' : 'none';
   $('newScanBtn').style.display = running ? 'none' : '';
+
+  // 進捗バー（モニターを開かずにフェーズ/進捗%/対象を確認できる）
+  const prog = $('nowProgress');
+  if (running) {
+    prog.style.display = '';
+    const p = s.progress || {};
+    const pct = p.percent ?? 0;
+    $('nowPhase').textContent = (s.phase || 'スキャン中').toUpperCase();
+    $('nowTarget').textContent = s.target || '';
+    $('nowTarget').title = s.target || '';
+    $('nowPct').textContent = pct + '%';
+    $('nowBar').style.width = pct + '%';
+  } else {
+    prog.style.display = 'none';
+  }
+}
+
+function renderStorage(s) {
+  const el = $('storageInfo');
+  if (el) {
+    const parts = [`使用量 ${fmtSize(s.total_bytes) || '0 B'}`];
+    const policy = [];
+    if (s.retention_days) policy.push(`${s.retention_days}日`);
+    if (s.retention_max_scans) policy.push(`${s.retention_max_scans}件`);
+    if (policy.length) parts.push(`保持 ${policy.join('/')}`);
+    el.textContent = parts.join(' ・ ');
+  }
+  const btn = $('pruneBtn');
+  if (btn) btn.style.display = (s.retention_days || s.retention_max_scans) ? '' : 'none';
+}
+
+async function pruneScans() {
+  if (!confirm('保持ポリシーを適用して古いスキャンを削除しますか？この操作は取り消せません。')) return;
+  try {
+    const r = await api('/api/v1/scans/prune', { method: 'POST' });
+    const d = await r.json().catch(() => ({}));
+    toast(d.pruned_count ? `${d.pruned_count} 件を削除しました` : '削除対象はありませんでした');
+    loadScans();
+  } catch (e) {}
 }
 
 async function abortScan() {
@@ -227,22 +383,88 @@ async function abortScan() {
   loadStatus();
 }
 
-// ── History ───────────────────────────────────────────────────────────
+// ── History (search / sort / pagination) ─────────────────────────────
+let allScans = [];
+const PAGE_SIZE = 20;
+const histState = { sort: 'started_at', dir: 'desc', page: 0, query: '' };
+
 async function loadScans() {
   let data;
   try { data = await (await api('/api/v1/scans')).json(); }
   catch (e) { return; }
-  const scans = data.scans || [];
-  $('histCount').textContent = scans.length ? `${scans.length} 件` : '';
+  allScans = data.scans || [];
+  renderStorage(data.storage || {});
+  renderScans();
+}
+
+function setSort(key) {
+  if (histState.sort === key) {
+    histState.dir = histState.dir === 'asc' ? 'desc' : 'asc';
+  } else {
+    histState.sort = key;
+    histState.dir = (key === 'target' || key === 'status') ? 'asc' : 'desc';
+  }
+  histState.page = 0;
+  renderScans();
+}
+
+function changePage(delta) {
+  histState.page += delta;
+  renderScans();
+}
+
+function renderScans() {
+  histState.query = ($('histSearch') && $('histSearch').value || '').trim().toLowerCase();
+  // filter
+  let rows = allScans.filter(s => {
+    if (!histState.query) return true;
+    return (`${s.target || ''} ${s.id || ''}`).toLowerCase().includes(histState.query);
+  });
+  // sort
+  const key = histState.sort, dir = histState.dir === 'asc' ? 1 : -1;
+  rows.sort((a, b) => {
+    let av = a[key], bv = b[key];
+    if (key === 'findings_count') { av = av || 0; bv = bv || 0; return (av - bv) * dir; }
+    av = String(av == null ? '' : av).toLowerCase();
+    bv = String(bv == null ? '' : bv).toLowerCase();
+    return av < bv ? -dir : av > bv ? dir : 0;
+  });
+
+  $('histCount').textContent = rows.length
+    ? `${rows.length} 件${histState.query ? ` / 全${allScans.length}` : ''}`
+    : '';
+
+  // sort indicators
+  document.querySelectorAll('th.sortable').forEach(th => {
+    const ind = th.querySelector('.sort-ind');
+    if (ind) ind.textContent = (th.dataset.sort === key) ? (dir === 1 ? '▲' : '▼') : '';
+  });
+
   const tb = $('scanRows');
-  if (!scans.length) {
-    tb.innerHTML = '<tr><td colspan="5" class="empty">スキャン履歴はまだありません。「新規スキャン」から開始できます。</td></tr>';
+  if (!rows.length) {
+    tb.innerHTML = `<tr><td colspan="5" class="empty">${
+      allScans.length ? '一致するスキャンがありません。' :
+      'スキャン履歴はまだありません。「新規スキャン」から開始できます。'}</td></tr>`;
+    $('pager').style.display = 'none';
     return;
   }
-  tb.innerHTML = scans.map(s => {
+
+  // pagination
+  const pageCount = Math.ceil(rows.length / PAGE_SIZE);
+  if (histState.page >= pageCount) histState.page = pageCount - 1;
+  if (histState.page < 0) histState.page = 0;
+  const start = histState.page * PAGE_SIZE;
+  const pageRows = rows.slice(start, start + PAGE_SIZE);
+
+  tb.innerHTML = pageRows.map(s => {
     const report = s.report_available
       ? `<a class="btn sm" href="/reports/${encodeURIComponent(s.id)}/report.html" target="_blank" rel="noopener">📄 レポート</a>`
       : `<span class="btn sm ghost" style="opacity:.4;cursor:default">レポートなし</span>`;
+    const sarif = s.sarif_available
+      ? `<a class="btn sm" href="/reports/${encodeURIComponent(s.id)}/report.sarif" download="wscan-${esc(s.id)}.sarif" title="SARIF (CI連携用)">SARIF</a>` : '';
+    const jsonl = s.json_available
+      ? `<a class="btn sm" href="/reports/${encodeURIComponent(s.id)}/evidence.json" download="wscan-${esc(s.id)}.json" title="検出結果JSON">JSON</a>` : '';
+    const diff = `<button class="btn sm" data-action="diff" data-id="${esc(s.id)}" title="同一対象の前回スキャンと比較">⟂ 差分</button>`;
     const size = s.size_bytes ? ` <span class="muted">${fmtSize(s.size_bytes)}</span>` : '';
     return `<tr>
       <td>${fmtDate(s.started_at)}<br><span class="muted">${esc(s.id)}</span></td>
@@ -250,20 +472,69 @@ async function loadScans() {
       <td>${sevBadges(s.severity || {}, s.findings_count)}</td>
       <td><span class="st ${esc(s.status)}">${esc(s.status)}</span></td>
       <td><div class="row-actions">
-        ${report}
+        ${report}${sarif}${jsonl}${diff}
         <a class="btn sm" href="/api/v1/scans/${encodeURIComponent(s.id)}/download">⬇ zip${size}</a>
         <button class="btn sm danger" data-action="delete" data-id="${esc(s.id)}" ${s.status==='scanning'?'disabled style=opacity:.4':''}>🗑</button>
       </div></td>
     </tr>`;
   }).join('');
+
+  // pager
+  if (pageCount > 1) {
+    $('pager').style.display = 'flex';
+    $('pageInfo').textContent = `${histState.page + 1} / ${pageCount}`;
+    $('pagePrev').disabled = histState.page === 0;
+    $('pageNext').disabled = histState.page >= pageCount - 1;
+  } else {
+    $('pager').style.display = 'none';
+  }
 }
 
 // Event delegation: never interpolate scan ids into inline JS (the id can come
 // from an operator-supplied output_dir). Read the raw value from the dataset.
 $('scanRows').addEventListener('click', (e) => {
-  const btn = e.target.closest('[data-action="delete"]');
-  if (btn && !btn.disabled) deleteScan(btn.dataset.id);
+  const del = e.target.closest('[data-action="delete"]');
+  if (del && !del.disabled) { deleteScan(del.dataset.id); return; }
+  const dif = e.target.closest('[data-action="diff"]');
+  if (dif) showDiff(dif.dataset.id);
 });
+
+// ── Diff vs previous scan ─────────────────────────────────────────────
+function closeDiff() { $('diffOverlay').style.display = 'none'; }
+
+function diffList(title, items, cls) {
+  if (!items.length) return '';
+  const rows = items.slice(0, 100).map(f =>
+    `<li><span class="st ${cls}" style="margin-right:6px">${esc(f.check_type || '')}</span>` +
+    `<span class="muted">${esc(f.field_name || '')}</span> ` +
+    `<code style="color:var(--accent2)">${esc(f.url || '')}</code></li>`).join('');
+  return `<div style="margin-top:14px"><strong>${title}（${items.length}）</strong>` +
+    `<ul style="margin:8px 0 0;padding-left:18px;line-height:1.7;font-size:.84rem">${rows}</ul></div>`;
+}
+
+async function showDiff(id) {
+  const body = $('diffBody');
+  body.innerHTML = '<p class="muted">計算中…</p>';
+  $('diffOverlay').style.display = 'flex';
+  let d;
+  try {
+    const r = await api('/api/v1/scans/' + encodeURIComponent(id) + '/diff');
+    d = await r.json();
+    if (!r.ok) { body.innerHTML = `<p class="muted">${esc(d.error || '差分を計算できませんでした。')}</p>`; return; }
+  } catch (e) { body.innerHTML = '<p class="muted">差分を計算できませんでした。</p>'; return; }
+  const sm = d.summary || {};
+  body.innerHTML =
+    `<p class="muted">対象 <code style="color:var(--accent2)">${esc(d.target || '—')}</code><br>` +
+    `今回 <b>${esc(d.scan_id)}</b> ⟂ 前回 <b>${esc(d.previous_id)}</b></p>` +
+    `<div class="now-row" style="margin-top:10px">` +
+    `<span class="status-pill"><span class="b critical">新規 ${sm.new_count ?? 0}</span></span>` +
+    `<span class="status-pill"><span class="b low">修正済み ${sm.fixed_count ?? 0}</span></span>` +
+    `<span class="status-pill"><span class="b zero">継続 ${sm.persistent_count ?? 0}</span></span>` +
+    `</div>` +
+    diffList('🆕 新規（今回出現）', d.new || [], 'scanning') +
+    diffList('✅ 修正済み（前回のみ）', d.fixed || [], 'done') +
+    diffList('➖ 継続', d.persistent || [], 'incomplete');
+}
 
 async function deleteScan(id) {
   if (!confirm(`スキャン ${id} の成果物を削除しますか？この操作は取り消せません。`)) return;
@@ -274,14 +545,155 @@ async function deleteScan(id) {
   } catch (e) {}
 }
 
+// ── Audit log ─────────────────────────────────────────────────────────
+function closeAudit() { $('auditOverlay').style.display = 'none'; }
+async function openAudit() { $('auditOverlay').style.display = 'flex'; loadAudit(); }
+async function loadAudit() {
+  const body = $('auditBody');
+  body.innerHTML = '<p class="muted">読み込み中…</p>';
+  let rows;
+  try { rows = (await (await api('/api/v1/audit')).json()).audit || []; }
+  catch (e) { body.innerHTML = '<p class="muted">取得できませんでした。</p>'; return; }
+  if (!rows.length) { body.innerHTML = '<p class="muted">記録された管理操作はありません。</p>'; return; }
+  body.innerHTML =
+    '<table><thead><tr><th>日時</th><th>操作</th><th>送信元</th><th>詳細</th></tr></thead><tbody>' +
+    rows.map(r =>
+      `<tr><td>${fmtDate(r.ts)}</td><td><span class="st incomplete">${esc(r.action)}</span></td>` +
+      `<td class="muted">${esc(r.ip || '')}</td><td class="target" title="${esc(r.detail||'')}">${esc(r.detail || '')}</td></tr>`
+    ).join('') + '</tbody></table>';
+}
+
+// ── Notification settings ─────────────────────────────────────────────
+async function openSettings() {
+  $('settingsOverlay').style.display = 'flex';
+  try {
+    const d = (await (await api('/api/v1/settings')).json()).notifications || {};
+    $('setWebhook').value = '';
+    $('setWebhook').placeholder = d.webhook_set
+      ? `設定済み（変更時のみ入力）` : 'https://hooks.slack.com/services/…';
+    $('setWebhookHint').textContent = d.webhook_set ? `現在: ${d.webhook_hint || ''}` : '未設定';
+    $('setEnabled').checked = !!d.enabled;
+    $('setComplete').checked = !!d.notify_complete;
+    $('setMinSev').value = d.min_severity || 'high';
+  } catch (e) {}
+}
+function closeSettings() { $('settingsOverlay').style.display = 'none'; }
+
+async function saveSettings() {
+  const body = { notifications: {
+    enabled: $('setEnabled').checked,
+    notify_complete: $('setComplete').checked,
+    min_severity: $('setMinSev').value,
+  }};
+  const url = $('setWebhook').value.trim();
+  if (url) body.notifications.webhook_url = url;  // 空なら既存維持
+  try {
+    const r = await api('/api/v1/settings', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (r.ok) { toast('通知設定を保存しました'); closeSettings(); }
+    else { const e = await r.json().catch(()=>({})); toast(e.error || '保存できませんでした'); }
+  } catch (e) {}
+}
+
+async function testNotification() {
+  // 未保存の URL も即テストできるよう、先に保存してから送る。
+  await saveSettingsSilent();
+  try {
+    const r = await api('/api/v1/settings/test', { method: 'POST' });
+    const d = await r.json().catch(()=>({}));
+    toast(r.ok ? 'テスト通知を送信しました' : (d.error || 'テスト送信に失敗しました'));
+  } catch (e) { toast('テスト送信に失敗しました'); }
+}
+async function saveSettingsSilent() {
+  const body = { notifications: {
+    enabled: $('setEnabled').checked,
+    notify_complete: $('setComplete').checked,
+    min_severity: $('setMinSev').value,
+  }};
+  const url = $('setWebhook').value.trim();
+  if (url) body.notifications.webhook_url = url;
+  try {
+    await api('/api/v1/settings', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+  } catch (e) {}
+}
+
+// ── Scheduled scans ───────────────────────────────────────────────────
+async function loadSchedules() {
+  let data;
+  try { data = await (await api('/api/v1/schedules')).json(); }
+  catch (e) { return; }
+  const rows = data.schedules || [];
+  const tb = $('schRows');
+  if (!rows.length) {
+    tb.innerHTML = '<tr><td colspan="6" class="empty">登録された定期スキャンはありません。</td></tr>';
+    return;
+  }
+  tb.innerHTML = rows.map(s => {
+    const checks = (s.checks && s.checks.length) ? esc(s.checks.join(' ')) : '<span class="muted">既定</span>';
+    const next = s.enabled ? fmtDate(new Date((s.next_run || 0) * 1000).toISOString()) : '—';
+    const stCls = s.enabled ? 'scanning' : 'incomplete';
+    const stTxt = s.enabled ? '有効' : '停止中';
+    return `<tr>
+      <td class="target" title="${esc(s.url)}">${esc(s.url)}</td>
+      <td>${checks}</td>
+      <td>${esc(s.interval_hours)}h</td>
+      <td>${next}</td>
+      <td><span class="st ${stCls}">${stTxt}</span></td>
+      <td><div class="row-actions">
+        <button class="btn sm" data-sch-toggle="${esc(s.id)}">${s.enabled ? '⏸ 停止' : '▶ 再開'}</button>
+        <button class="btn sm danger" data-sch-del="${esc(s.id)}">🗑</button>
+      </div></td>
+    </tr>`;
+  }).join('');
+}
+
+async function addSchedule() {
+  const url = $('schUrl').value.trim();
+  if (!url) { toast('URL を入力してください'); return; }
+  const checks = $('schChecks').value.trim();
+  const body = {
+    url,
+    depth: parseInt($('schDepth').value, 10) || 2,
+    interval_hours: parseFloat($('schInterval').value) || 24,
+  };
+  if (checks) body.checks = checks;
+  try {
+    const r = await api('/api/v1/schedules', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (r.ok) { toast('定期スキャンを登録しました'); $('schUrl').value = ''; loadSchedules(); }
+    else { const e = await r.json().catch(()=>({})); toast(e.error || '登録できませんでした'); }
+  } catch (e) {}
+}
+
+$('schRows').addEventListener('click', async (e) => {
+  const tg = e.target.closest('[data-sch-toggle]');
+  if (tg) {
+    try { await api('/api/v1/schedules/' + encodeURIComponent(tg.dataset.schToggle) + '/toggle', { method: 'POST' }); loadSchedules(); } catch (e) {}
+    return;
+  }
+  const dl = e.target.closest('[data-sch-del]');
+  if (dl) {
+    if (!confirm('この定期スキャンを削除しますか？')) return;
+    try { await api('/api/v1/schedules/' + encodeURIComponent(dl.dataset.schDel), { method: 'DELETE' }); loadSchedules(); } catch (e) {}
+  }
+});
+
 // ── Auth-aware logout link + polling ──────────────────────────────────
 fetch('/api/auth-status').then(r => r.ok ? r.json() : null).then(d => {
   if (d && d.auth_enabled) $('logoutLink').style.display = '';
 }).catch(() => {});
 
-loadStatus(); loadScans();
+loadStatus(); loadScans(); loadSchedules();
 setInterval(loadStatus, 2500);
 setInterval(loadScans, 6000);
+setInterval(loadSchedules, 15000);
 </script>
 </body>
 </html>

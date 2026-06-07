@@ -25,6 +25,35 @@ if TYPE_CHECKING:
 _PROBE_PREFIX = "wsxss"
 
 
+def classify_stored_marker(marker: str, payload: str, source: str) -> dict:
+    """格納マーカーが応答内でどう現れているかを純粋に分類する。
+
+    マーカーは英数字のみ（``_html.escape(marker) == marker``）なので、
+    「マーカー文字列が出現したか」だけでは実行可能性を判定できない。注入した
+    タグ構造（``<script id="marker"``）が **生のまま** 出現しているかどうかで、
+    実行可能な格納型XSSか、エンコードされ無害化された格納かを区別する。
+
+    返り値: ``{"found", "in_raw", "in_encoded", "executable"}``。
+    HTTP/ブラウザに依存しない判定ロジック（テスト容易性のため分離）。
+    """
+    if not marker or marker not in source:
+        return {"found": False, "in_raw": False, "in_encoded": False, "executable": False}
+
+    # 注入したタグの「生」表現。ブラウザの DOM 直列化は属性をダブルクォートへ
+    # 正規化するため、実行された <script> はこの形で再出現する。
+    raw_tag = f'<script id="{marker}"'
+    encoded_tag = _html.escape(raw_tag)
+    in_raw = raw_tag in source
+    in_encoded = encoded_tag in source
+    return {
+        "found": True,
+        "in_raw": in_raw,
+        # 生タグが無ければ（マーカーは在るが）エンコード/テキスト化された無害な格納。
+        "in_encoded": in_encoded or not in_raw,
+        "executable": in_raw,
+    }
+
+
 class StoredXSSScanner(BaseScanner):
     """Stored / second-order XSS scanner."""
 
@@ -108,11 +137,16 @@ class StoredXSSScanner(BaseScanner):
 
         findings = []
         for marker, meta in list(self._injected.items()):
-            marker_encoded = _html.escape(marker)
-            in_raw = marker in source
-            in_encoded = marker_encoded in source
+            verdict = classify_stored_marker(marker, meta["payload"], source)
+            if not verdict["found"]:
+                continue
+            in_raw = verdict["in_raw"]
+            in_encoded = verdict["in_encoded"]
 
-            if not in_raw and not in_encoded:
+            # 完全に HTML エスケープされ実行不能になった反射(= 生タグ無し)は、
+            # 正しい出力エンコードであって脆弱性ではない。finding にすると誤検知に
+            # なるため、実行可能な格納(生 <script> が残る)のみ報告する。
+            if not in_raw:
                 continue
 
             # Stored XSS only if the marker appears on a page OTHER than where it was injected

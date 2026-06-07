@@ -260,13 +260,18 @@ class BaseScanner(ABC):
 
     def response_time_exceeded(self, pair: dict, threshold: float = 3.0) -> bool:
         """Check if response time suggests a time-based injection."""
-        req = pair.get("request", {})
-        resp = pair.get("response", {})
+        elapsed = self.response_elapsed(pair)
+        return elapsed is not None and elapsed >= threshold
+
+    def response_elapsed(self, pair: dict) -> Optional[float]:
+        """応答の所要時間(秒)を返す。計測できなければ None。"""
+        req = pair.get("request", {}) or {}
+        resp = pair.get("response", {}) or {}
         req_ts = req.get("timestamp", 0)
         resp_ts = resp.get("timestamp", 0)
         if req_ts and resp_ts:
-            return (resp_ts - req_ts) >= threshold
-        return False
+            return resp_ts - req_ts
+        return None
 
     async def run_equivalence_probe(
         self,
