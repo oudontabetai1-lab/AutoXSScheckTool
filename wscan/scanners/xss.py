@@ -85,8 +85,8 @@ class XSSScanner(BaseScanner):
                     f"[warn] xss: baseline fetch failed on {url}: {exc}"
                 )
 
-        for payload in payloads:
-            await self.log_payload_test(field_name, payload, "xss", url)
+        async def _test_payload(payload: str, check_label: str = "xss") -> bool:
+            await self.log_payload_test(field_name, payload, check_label, url)
 
             # Reset dialog detector
             self.browser.reset_dialog()
@@ -123,7 +123,7 @@ class XSSScanner(BaseScanner):
                 )
                 findings.append(finding)
                 self.browser.reset_dialog()
-                break  # Confirmed - no need to test more payloads
+                return True
 
             # --- Check 2: Payload reflected without HTML encoding ---
             reflect_source = pair.get("response", {}).get("body") or source
@@ -154,11 +154,25 @@ class XSSScanner(BaseScanner):
                         ],
                     )
                     findings.append(finding)
-                    break
+                    return True
 
             await asyncio.sleep(0.2 * self.sleep_factor)
+            return False
 
-        # --- Check 3: String-concatenation / quote-break equivalence probe ---
+        for payload in payloads:
+            if await _test_payload(payload):
+                break  # Found vulnerability, move to next field
+
+        # --- Check 3: deterministic context-aware evolution wave ---
+        if not findings:
+            extra_payloads = await self.evolved_payloads(
+                url, form_index, field_name, is_url_param
+            )
+            for payload in extra_payloads:
+                if await _test_payload(payload, "xss_evolved"):
+                    break
+
+        # --- Check 4: String-concatenation / quote-break equivalence probe ---
         # When direct reflection checks find nothing, probe whether the input is
         # embedded in a quoted HTML attribute or JS string that can be split with
         # matching quotes (e.g. AA" "BB / 'AA'+'BB'). A collapse to the marker

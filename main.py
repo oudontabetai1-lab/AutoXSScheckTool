@@ -111,6 +111,7 @@ def _load_config(path: Path = _CONFIG_PATH) -> dict:
     cfg["ai_analysis"]             = bool(f.get("ai_analysis",      True))
     cfg["waf_detection"]           = bool(f.get("waf_detection",    True))
     cfg["payload_learning"]        = bool(f.get("payload_learning", True))
+    cfg["community_payloads"]      = bool(f.get("community_payloads", True))
     cfg["sitemap_crawl"]           = bool(f.get("sitemap_crawl",    True))
     cfg["cvss_scores"]             = bool(f.get("cvss_scores",      True))
     cfg["skip_registration"]       = bool(f.get("skip_registration", True))
@@ -453,6 +454,12 @@ Examples:
         help="Disable payload continuous learning (don't load/save success rates).",
     )
     scan.add_argument(
+        "--community-payloads",
+        action=argparse.BooleanOptionalAction,
+        default=_CFG.get("community_payloads", True),
+        help="Enable generated community payloads from config/community_payloads.yaml.",
+    )
+    scan.add_argument(
         "--no-adaptive-payloads", action="store_true",
         default=False,
         help="Disable the second-pass LLM adaptive payload refinement per field.",
@@ -580,6 +587,37 @@ Examples:
             "Interviews you about the target and auto-generates optimal settings. "
             "Use --no-auto-config to disable."
         ),
+    )
+
+    # ── import-payloads サブコマンド ───────────────────────────────
+    import_payloads = sub.add_parser(
+        "import-payloads",
+        help="Fetch public payload lists and write config/community_payloads.yaml",
+    )
+    import_payloads.add_argument(
+        "--output",
+        default="config/community_payloads.yaml",
+        metavar="FILE",
+        help="Output YAML path (default: config/community_payloads.yaml).",
+    )
+    import_payloads.add_argument(
+        "--allow-destructive",
+        action="store_true",
+        default=False,
+        help="Keep destructive payload patterns that are filtered by default.",
+    )
+    import_payloads.add_argument(
+        "--per-type-cap",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Maximum payload count per check_type.",
+    )
+    import_payloads.add_argument(
+        "--check",
+        default="",
+        metavar="xss,sqli",
+        help="Comma-separated check_type list to import.",
     )
 
     # ── agent subcommand ───────────────────────────────────────────
@@ -1274,6 +1312,7 @@ async def run_scan(args):
             enable_ai_analysis=not getattr(args, "no_ai_analysis", False),
             enable_waf_detection=not getattr(args, "no_waf_detection", False),
             enable_payload_learning=not getattr(args, "no_payload_learning", False),
+            enable_community_payloads=getattr(args, "community_payloads", True),
             enable_adaptive_payloads=not getattr(args, "no_adaptive_payloads", False),
             enable_sitemap_crawl=not getattr(args, "no_sitemap_crawl", False),
             enable_llm_web_browsing=getattr(args, "llm_web_browsing", False),
@@ -1467,6 +1506,7 @@ async def run_serve(args):
             "enable_ai_analysis": _CFG.get("ai_analysis", True),
             "enable_waf_detection": _CFG.get("waf_detection", True),
             "enable_payload_learning": _CFG.get("payload_learning", True),
+            "enable_community_payloads": _CFG.get("community_payloads", True),
             "enable_sitemap_crawl": _CFG.get("sitemap_crawl", True),
             "spa_crawl": _CFG.get("spa_crawl", False),
             "interactive_crawl_review": _CFG.get("interactive_crawl_review", False),
@@ -1625,6 +1665,7 @@ async def run_serve(args):
                 enable_ai_analysis=bool(cfg.get("enable_ai_analysis", True)),
                 enable_waf_detection=bool(cfg.get("enable_waf_detection", True)),
                 enable_payload_learning=bool(cfg.get("enable_payload_learning", True)),
+                enable_community_payloads=bool(cfg.get("enable_community_payloads", True)),
                 enable_sitemap_crawl=bool(cfg.get("enable_sitemap_crawl", True)),
                 enable_llm_web_browsing=bool(cfg.get("enable_llm_web_browsing", False)),
                 ctf_mode=bool(cfg.get("ctf_mode", False)),
@@ -1977,6 +2018,43 @@ async def run_manual_crawl(args):
         console.print(f"[red]手動巡回中にエラーが発生しました: {exc}[/red]")
 
 
+def run_import_payloads(args):
+    """公開ペイロード集を取得して community_payloads.yaml を生成する。"""
+    from rich.console import Console
+    from wscan.payload_importer import SOURCES, build_corpus, write_yaml
+
+    console = Console()
+    sources = SOURCES
+    checks_arg = (getattr(args, "check", "") or "").strip()
+    if checks_arg:
+        requested = [c.strip() for c in checks_arg.split(",") if c.strip()]
+        unknown = [c for c in requested if c not in SOURCES]
+        if unknown:
+            console.print(
+                "[red]Unknown check_type:[/red] "
+                + ", ".join(unknown)
+                + f"\n[dim]Available: {', '.join(SOURCES)}[/dim]"
+            )
+            raise SystemExit(2)
+        sources = {check_type: SOURCES[check_type] for check_type in requested}
+
+    per_type_cap = getattr(args, "per_type_cap", None)
+    if per_type_cap is not None and per_type_cap <= 0:
+        console.print("[red]--per-type-cap must be a positive integer.[/red]")
+        raise SystemExit(2)
+
+    corpus = build_corpus(
+        sources,
+        allow_destructive=bool(getattr(args, "allow_destructive", False)),
+        per_type_cap=per_type_cap,
+    )
+    write_yaml(args.output, corpus, sources=sources)
+
+    console.print(f"[bold green]Community payloads written:[/bold green] {args.output}")
+    for check_type, payloads in corpus.items():
+        console.print(f"  {check_type}: [cyan]{len(payloads)}[/cyan]")
+
+
 def main():
     # Make stdout/stderr tolerant of non-ASCII output (streaming LLM text,
     # payload snippets) on consoles whose native codec can't encode it.
@@ -1998,6 +2076,8 @@ def main():
             asyncio.run(run_record(args))
         elif args.command == "batch":
             asyncio.run(run_batch(args))
+        elif args.command == "import-payloads":
+            run_import_payloads(args)
         else:
             asyncio.run(run_scan(args))
     except KeyboardInterrupt:

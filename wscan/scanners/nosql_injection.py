@@ -157,9 +157,8 @@ class NoSQLInjectionScanner(BaseScanner):
         except Exception:
             baseline_src2 = ""
 
-        # ── Parameter pollution payloads ──────────────────────────────
-        for payload in _PARAM_PAYLOADS:
-            await self.log_payload_test(field_name, payload, "nosql", url)
+        async def _test_param_payload(payload: str, check_label: str = "nosql") -> bool:
+            await self.log_payload_test(field_name, payload, check_label, url)
             try:
                 if is_url_param:
                     # Inject as array: field[$ne]=value
@@ -191,7 +190,7 @@ class NoSQLInjectionScanner(BaseScanner):
                         evidence_details={"matched_error": err[:150]},
                     )
                     findings.append(finding)
-                    break
+                    return True
 
                 # Boolean-based: significant response length difference.
                 # Threshold scales with baseline and natural baseline variance.
@@ -220,15 +219,29 @@ class NoSQLInjectionScanner(BaseScanner):
                         },
                     )
                     findings.append(finding)
-                    break
+                    return True
 
             except Exception as exc:
                 if self.monitor:
                     await self.monitor.emit_status(
                         f"[warn] nosql: probe failed on {field_name} @ {url}: {exc}"
                     )
-                continue
+                return False
             await asyncio.sleep(0.2 * self.sleep_factor)
+            return False
+
+        # ── Parameter pollution payloads ──────────────────────────────
+        for payload in _PARAM_PAYLOADS:
+            if await _test_param_payload(payload):
+                break
+
+        if not findings:
+            extra_payloads = await self.evolved_payloads(
+                url, form_index, field_name, is_url_param
+            )
+            for payload in extra_payloads:
+                if await _test_param_payload(payload, "nosql_evolved"):
+                    break
 
         # ── JSON body injection (for JSON-accepting endpoints) ─────────
         if not findings:

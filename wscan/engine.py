@@ -96,6 +96,55 @@ CONFIG_DIR = Path(__file__).parent.parent / "config"
 OUTPUT_BASE = Path(__file__).parent.parent / "output"
 
 
+def merge_community_payloads(default_payloads: dict, community_payloads: dict) -> dict:
+    """既定ペイロードを優先し、未収録の community ペイロードだけ後ろに足す。"""
+    merged: dict = {
+        key: list(value) if isinstance(value, list) else value
+        for key, value in (default_payloads or {}).items()
+    }
+    for check_type, payloads in (community_payloads or {}).items():
+        if not isinstance(payloads, list):
+            continue
+        community_items = [p for p in payloads if isinstance(p, str)]
+        if not community_items:
+            continue
+        if check_type in merged and not isinstance(merged.get(check_type), list):
+            continue
+        if check_type not in merged:
+            merged[check_type] = []
+        seen = set(merged[check_type])
+        for payload in community_items:
+            if payload in seen:
+                continue
+            seen.add(payload)
+            merged[check_type].append(payload)
+    return merged
+
+
+def _community_payloads_enabled_by_config(path: Path | None = None) -> bool:
+    """config/wscan.yaml の features.community_payloads を読む。"""
+    config_path = path or (CONFIG_DIR / "wscan.yaml")
+    try:
+        with open(config_path, encoding="utf-8") as f:
+            raw = yaml.safe_load(f) or {}
+        features = raw.get("features", {}) or {}
+        return bool(features.get("community_payloads", True))
+    except Exception:
+        return True
+
+
+def _payload_evolution_enabled_by_config(path: Path | None = None) -> bool:
+    """config/wscan.yaml の features.payload_evolution を読む。"""
+    config_path = path or (CONFIG_DIR / "wscan.yaml")
+    try:
+        with open(config_path, encoding="utf-8") as f:
+            raw = yaml.safe_load(f) or {}
+        features = raw.get("features", {}) or {}
+        return bool(features.get("payload_evolution", True))
+    except Exception:
+        return True
+
+
 # ---------------------------------------------------------------------------
 # Registration page / form detection
 # ---------------------------------------------------------------------------
@@ -182,6 +231,8 @@ class ScanEngine:
         enable_ai_analysis: bool = True,
         enable_waf_detection: bool = True,
         enable_payload_learning: bool = True,
+        enable_community_payloads: bool = True,
+        enable_payload_evolution: bool = True,
         enable_adaptive_payloads: bool = True,
         enable_sitemap_crawl: bool = True,
         enable_llm_web_browsing: bool = False,
@@ -333,6 +384,9 @@ class ScanEngine:
         self.enable_ai_analysis = enable_ai_analysis
         self.enable_waf_detection = enable_waf_detection
         self.enable_payload_learning = enable_payload_learning
+        self.enable_payload_evolution = (
+            enable_payload_evolution and _payload_evolution_enabled_by_config()
+        )
         self.enable_adaptive_payloads = enable_adaptive_payloads
         self.enable_sitemap_crawl = enable_sitemap_crawl
         self.enable_llm_web_browsing = enable_llm_web_browsing
@@ -372,6 +426,16 @@ class ScanEngine:
         # Payloads
         default_payloads_path = CONFIG_DIR / "default_payloads.yaml"
         payloads_data = self._load_yaml(payloads_file or str(default_payloads_path))
+        using_default_payloads = not payloads_file or payloads_file == str(default_payloads_path)
+        if (
+            using_default_payloads
+            and enable_community_payloads
+            and _community_payloads_enabled_by_config()
+        ):
+            community_payloads_path = CONFIG_DIR / "community_payloads.yaml"
+            if community_payloads_path.exists():
+                community_payloads = self._load_yaml(str(community_payloads_path))
+                payloads_data = merge_community_payloads(payloads_data, community_payloads)
         self.default_payloads = payloads_data
         self.custom_payloads: dict = {}
         if payloads_file and payloads_file != str(default_payloads_path):

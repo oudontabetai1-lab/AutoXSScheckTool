@@ -76,6 +76,43 @@ class SSRFScanner(BaseScanner):
     CHECK_TYPE = "ssrf"
     SEVERITY = "critical"
 
+    @staticmethod
+    def _strip_payload_echo(source: str, payload: str) -> str:
+        """ペイロード(プローブURL)の反射分を応答から取り除く。
+
+        プローブURL自体に検出マーカー語が含まれる場合（例: GCP の
+        ``…/computeMetadata/…`` や Azure の ``…/metadata/instance``）、入力を
+        そのまま画面に反射するだけの無害なページ（検索結果・プロフィール等）でも
+        パターンに一致してしまい誤検知になる。SSRF の確証は「取得された内部
+        コンテンツ」がマーカーを含むことなので、反射されたペイロードを除去した
+        うえで判定する。生・URLエンコード両方の表記を除去する。
+        """
+        from urllib.parse import quote
+
+        variants = {
+            payload,
+            quote(payload, safe=""),
+            quote(payload, safe="/:"),
+            quote(payload, safe=":/?#[]@!$&'()*+,;="),
+        }
+        cleaned = source
+        for variant in variants:
+            if variant:
+                cleaned = cleaned.replace(variant, " ")
+        return cleaned
+
+    def _confirmed_match(self, source: str, payload: str, pattern):
+        """反射分を除いてもパターンが残る場合のみ確証マッチを返す。"""
+        if not source:
+            return None
+        match = pattern.search(source)
+        if not match:
+            return None
+        # マーカーが反射されたペイロードに由来するだけなら確証しない
+        if not pattern.search(self._strip_payload_echo(source, payload)):
+            return None
+        return match
+
     def _is_ssrf_param(self, field_name: str) -> bool:
         """Return True if the field name suggests a server-side URL/path input."""
         name = field_name.lower().replace("-", "_").replace(" ", "_")
@@ -121,7 +158,8 @@ class SSRFScanner(BaseScanner):
             if baseline_source and pattern.search(baseline_source):
                 continue
 
-            match = pattern.search(source)
+            # 反射されたプローブURLに由来するだけのマッチは確証しない
+            match = self._confirmed_match(source, payload, pattern)
             if match:
                 finding = await self.record_finding(
                     url=url,
@@ -183,7 +221,7 @@ class SSRFScanner(BaseScanner):
 
         if baseline_source and pattern.search(baseline_source):
             return False
-        return bool(probe_source and pattern.search(probe_source))
+        return self._confirmed_match(probe_source, finding.payload, pattern) is not None
 
     async def _apply_payload(
         self,

@@ -3,6 +3,7 @@ OS Command Injection Scanner
 Detects OS command injection vulnerabilities.
 """
 import asyncio
+import re
 from typing import TYPE_CHECKING
 from urllib.parse import parse_qs, urlparse
 
@@ -49,6 +50,30 @@ TIME_BASED_PAYLOADS = [
 ]
 
 
+def _echo_marker_executed(source: str, marker: str) -> bool:
+    """``echo {marker}`` がシェル実行された（=単なる反射ではない）かを判定する純粋関数。
+
+    反射ページでは応答に ``echo`` とともに marker が現れる（生でも HTML エスケープ
+    後でも ``echo wscanEVO…`` の並びが残る）。一方コマンドが実行された場合は
+    ``echo`` が消費され marker 単体が出力される。よって「marker の直前の小窓に
+    ``echo`` が無い出現が1つでもあれば実行」とみなす。これにより入力を反射する
+    だけの無害なエンドポイントでの誤検知を防ぐ。
+    """
+    if not source or not marker:
+        return False
+    low = source.lower()
+    needle = marker.lower()
+    start = 0
+    while True:
+        idx = low.find(needle, start)
+        if idx == -1:
+            return False
+        window = low[max(0, idx - 24):idx]
+        if "echo" not in window:
+            return True
+        start = idx + len(needle)
+
+
 class OSInjectionScanner(BaseScanner):
     """OS Command Injection vulnerability scanner."""
 
@@ -88,8 +113,8 @@ class OSInjectionScanner(BaseScanner):
         # Threshold = baseline + 2.8 s (injected sleep) with 0.5 s margin
         time_threshold = max(2.8, baseline_time + 2.8)
 
-        for payload in payloads:
-            await self.log_payload_test(field_name, payload, "os", url)
+        async def _test_payload(payload: str, check_label: str = "os") -> bool:
+            await self.log_payload_test(field_name, payload, check_label, url)
 
             # Apply payload
             source, pair = await self._apply_payload(
@@ -98,6 +123,18 @@ class OSInjectionScanner(BaseScanner):
 
             # --- Check 1: Command output in response (not pre-existing in baseline) ---
             match = self.check_response_for_patterns(source, OS_OUTPUT_PATTERNS)
+            # 進化wave の echo マーカーは「シェル実行された出力」のときだけ採用する。
+            # 入力を反射するだけのページでは marker が応答に現れるが、それは
+            # `echo {marker}` の反射であって実行ではない（誤検知）。
+            marker_match = re.search(r"\bwscanEVO\d+\b", payload)
+            marker = marker_match.group(0) if marker_match else ""
+            if (
+                not match
+                and check_label.endswith("_evolved")
+                and marker
+                and _echo_marker_executed(source or "", marker)
+            ):
+                match = marker
             if match:
                 # If baseline request failed (empty body), we can't reliably say
                 # whether the pattern was pre-existing. Skip the baseline check
@@ -126,7 +163,7 @@ class OSInjectionScanner(BaseScanner):
                         confidence="likely",
                     )
                     findings.append(finding)
-                    break
+                    return True
 
             # --- Check 2: Time-based blind injection ---
             if payload in TIME_BASED_PAYLOADS:
@@ -140,9 +177,22 @@ class OSInjectionScanner(BaseScanner):
                         severity="high",
                     )
                     findings.append(finding)
-                    break
+                    return True
 
             await asyncio.sleep(0.2 * self.sleep_factor)
+            return False
+
+        for payload in payloads:
+            if await _test_payload(payload):
+                break
+
+        if not findings:
+            extra_payloads = await self.evolved_payloads(
+                url, form_index, field_name, is_url_param
+            )
+            for payload in extra_payloads:
+                if await _test_payload(payload, "os_evolved"):
+                    break
 
         return findings
 

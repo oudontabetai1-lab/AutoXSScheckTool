@@ -48,7 +48,9 @@ python main.py scan http://127.0.0.1:8000 --checks xss sqli --no-monitor --llm n
 | `browser.py` | Playwright 操作。`NetworkCapture` が全 HTTP を捕捉（`request_logger` へ送る） |
 | `monitor.py` | FastAPI+WebSocket ダッシュボード（`MonitorServer`）。**`None` でも動く**（`--no-monitor`/バッチ） |
 | `attack_planner.py` / `action_plan.py` | 攻撃計画とデータ構造 |
-| `adaptive_payload.py` / `payload_gen.py` / `payload_encoder.py` / `payload_learning.py` | バイパス生成・ペイロード生成/符号化/成功率学習 |
+| `adaptive_payload.py` / `payload_gen.py` / `payload_encoder.py` / `payload_learning.py` | バイパス生成(LLM)・ペイロード生成/符号化/成功率学習 |
+| `context_mutator.py` | **LLM不要**の決定論的な文脈適応ミューテーション（反射文脈判定＋breakout合成、純粋関数） |
+| `payload_importer.py` | 公開ペイロード集(PaTT/SecLists)の取込ツール（`import-payloads` サブコマンドの実体） |
 | `equivalence_probe.py` | 文字列結合の等価性プローブ（SQLi/XSS 共通の純粋判定ロジック） |
 | `waf_detector.py` / `triage.py` | WAF 判定 / ペイロード未投入の高速分析 |
 | `agent_engine.py` / `llm_agent_browser.py` / `llm_web_tools.py` | Agent モード（LLM がブラウザ自律操作） |
@@ -74,6 +76,27 @@ python main.py scan http://127.0.0.1:8000 --checks xss sqli --no-monitor --llm n
 3. 必要なら `base.py` の `_CVSS_TABLE` に CVSS を追加。
 4. `tests/` にテストを追加（検出ロジックは純粋関数に切り出してブラウザ非依存でテスト）。
 
+### テスト用フィクスチャ（`tests/fixtures/`）
+脆弱/安全なターゲットアプリ（FastAPI）。スキャナの検出力(false negative)と
+非検出(false positive)を同時に守る。新検査を足したら対応フィクスチャに**脆弱
+エンドポイント＋安全ツインを1対で**追加し、正解データを更新すること。
+
+| フィクスチャ | 形態 | 主眼 |
+|---|---|---|
+| `vuln_app.py` | 最小の脆弱アプリ | スモーク/基本回帰 |
+| `large_vuln_app.py` | 多検査の平置きラボ＋CTFフラグ | 多数の crawl ターゲットと幅広い検査種 |
+| `realistic_site.py` | 現実的ECサイト | 反射/格納XSS・SQLi・SSTI・traversal・open_redirect・header_injection |
+| `realistic_api.py` | SaaS管理コンソール/REST API | ヘッダ系（security_headers/clickjacking/cors/session/csrf/info_disclosure/secret_leak/jwt） |
+| `realistic_intranet.py` | 社内ツールポータル | 注入系（os/ssrf/nosql/dom_xss） |
+| `header_matrix_app.py` | ヘッダ網羅マトリクス | セキュリティヘッダの組合せ |
+
+- **正解データ規約**: `realistic_*` は `EXPECTED_FINDINGS`（検出必須）と
+  `SAFE_ENDPOINTS`（検出禁止＝誤検知ガード）を dict 形式で公開する。
+- **1エンドポイント1シグナル**: 他検査のシグナルは `html.escape` 等で潰し、正解を曖昧にしない。
+- **2層のテスト**: `tests/test_realistic_*_fixture.py` が httpx でフィクスチャ挙動を高速検証。
+  `tests/test_end_to_end_scan*.py` が実エンジン（crawl→plan→attack→verify）で検出を検証
+  （`WSCAN_E2E=1` の opt-in、Chromium 必須）。
+
 ## 触るときの不変条件・落とし穴
 
 - **ターゲット URL は `url.strip()` で保持**（末尾 `/` を勝手に除去しない）。スコープ照合は
@@ -90,9 +113,24 @@ python main.py scan http://127.0.0.1:8000 --checks xss sqli --no-monitor --llm n
 
 - `config/wscan.yaml` … 既定設定と機能フラグ（`ai_analysis` / `waf_detection` /
   `payload_learning` / 適応ペイロード / `sitemap_crawl` / `spa_crawl` 等）。`checks` 既定は `["sqli","xss","os"]`。
-- `config/default_payloads.yaml` … `--llm none` 時のフォールバックペイロード。
+- `config/default_payloads.yaml` … 手キュレーションのフォールバックペイロード。
+- `config/community_payloads.yaml` … `python main.py import-payloads` が公開集(PaTT/SecLists)から
+  生成。**スキャン実行時はネット非依存**（生成済みYAMLを読むだけ）。エンジンは既定を前置・
+  community未収録分のみ後置でマージ（`features.community_payloads`）。出典/取得日時/ライセンスを冒頭に記録。
 - LLM プロバイダ: `ollama|claude|openai|gemini|none`。APIキー env: `ANTHROPIC_API_KEY` /
   `OPENAI_API_KEY` / `GEMINI_API_KEY`。役割別モデル上書き（planner/payload/adaptive/triage/report）あり。
+
+### ペイロード強化パイプライン（検知精度）
+注入系スキャナの投入は次の多層構成。誤検知ゼロを最優先（各層とも既存の検知判定を共有し、判定ロジックは変えない）。
+1. **既定 + community**（`default_payloads.yaml` + `community_payloads.yaml`）を `payload_learning` が成功率で並べ替え。
+2. **文脈適応 evolution wave**（`context_mutator.py`、`features.payload_evolution`）… 標準掃射で未検出のとき、
+   marker probe で反射文脈と生存文字を観測し、文脈に合う breakout を**LLM無し**で合成して追加投入。
+   `BaseScanner.evolved_payloads()` 経由で全注入系（xss/dom_xss/sqli/ssti/os/nosql/ldap/path_traversal）に配線。
+   加算的・フラグ＋例外保護で、無効/失敗時は従来挙動。
+3. **適応(LLM)**（`adaptive_payload.py`）… `--llm none` 以外で creative bypass を生成（2の上位互換的補完）。
+- 注意: 反射ページでの誤検知に注意（例: OSの echo マーカー検知は `_echo_marker_executed` で
+  「反射 vs 実行」を区別。SSRF は反射プローブURLを除去してから判定）。新しい evolution 系を足すときは
+  必ず安全ツイン付きフィクスチャ＋E2E で false positive を確認すること。
 
 ## 開発上の約束
 

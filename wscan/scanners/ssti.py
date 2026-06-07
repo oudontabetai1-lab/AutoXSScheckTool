@@ -51,8 +51,13 @@ class SSTIScanner(BaseScanner):
             url, form_index, field_name, "wscan_ssti_baseline", is_url_param
         )
 
-        for payload, expected, engine_name in SSTI_PROBES:
-            await self.log_payload_test(field_name, payload, "ssti", url)
+        async def _test_payload(
+            payload: str,
+            expected: str,
+            engine_name: str,
+            check_label: str = "ssti",
+        ) -> bool:
+            await self.log_payload_test(field_name, payload, check_label, url)
 
             source, pair = await self._apply_payload(
                 url, form_index, field_name, payload, is_url_param
@@ -61,14 +66,14 @@ class SSTIScanner(BaseScanner):
             await asyncio.sleep(0.2 * self.sleep_factor)
 
             if not source or expected not in source:
-                continue
+                return False
 
             # Reduce false positives: only skip if baseline already contained the
             # expected value at least as many times. When baseline has 0 occurrences,
             # any appearance after injection is evidence of SSTI.
             base_count = baseline_source.count(expected) if baseline_source else 0
             if base_count > 0 and source.count(expected) <= base_count:
-                continue
+                return False
 
             finding = await self.record_finding(
                 url=url,
@@ -82,7 +87,19 @@ class SSTIScanner(BaseScanner):
                 severity="critical",
             )
             findings.append(finding)
-            break  # Confirmed - no need to test more probes
+            return True
+
+        for payload, expected, engine_name in SSTI_PROBES:
+            if await _test_payload(payload, expected, engine_name):
+                break  # Confirmed - no need to test more probes
+
+        if not findings:
+            extra_payloads = await self.evolved_payloads(
+                url, form_index, field_name, is_url_param
+            )
+            for payload in extra_payloads:
+                if await _test_payload(payload, "49", "evolved", "ssti_evolved"):
+                    break
 
         return findings
 
