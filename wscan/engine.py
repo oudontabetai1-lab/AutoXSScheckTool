@@ -96,8 +96,35 @@ CONFIG_DIR = Path(__file__).parent.parent / "config"
 OUTPUT_BASE = Path(__file__).parent.parent / "output"
 
 
+def _interleave_payloads(
+    primary: list, secondary: list, *, primary_run: int = 2
+) -> list:
+    """primary を primary_run 個ごとに secondary を1個挟んで連結する。
+
+    curated(既定) を優先しつつ community を分散配置することで、下流の件数 cap
+    （`payload_gen` の no-LLM 経路は `max_total` で先頭のみ展開）を越えても
+    community ペイロードが必ず代表される。各列内の相対順序は保つ。
+    """
+    out: list = []
+    i = j = 0
+    while i < len(primary) or j < len(secondary):
+        for _ in range(primary_run):
+            if i < len(primary):
+                out.append(primary[i])
+                i += 1
+        if j < len(secondary):
+            out.append(secondary[j])
+            j += 1
+    return out
+
+
 def merge_community_payloads(default_payloads: dict, community_payloads: dict) -> dict:
-    """既定ペイロードを優先し、未収録の community ペイロードだけ後ろに足す。"""
+    """既定(curated)を優先しつつ、未収録の community を 2:1 でインターリーブする。
+
+    単純な末尾追記だと、curated だけで `payload_gen` の no-LLM 件数 cap を
+    使い切る check_type（xss/sqli/os 等）で community が一切使われない。
+    インターリーブにより cap 内にも community を行き渡らせる。
+    """
     merged: dict = {
         key: list(value) if isinstance(value, list) else value
         for key, value in (default_payloads or {}).items()
@@ -110,14 +137,16 @@ def merge_community_payloads(default_payloads: dict, community_payloads: dict) -
             continue
         if check_type in merged and not isinstance(merged.get(check_type), list):
             continue
-        if check_type not in merged:
-            merged[check_type] = []
-        seen = set(merged[check_type])
+        curated = merged.get(check_type, [])
+        seen = set(curated)
+        new_items = []
+        new_seen = set()
         for payload in community_items:
-            if payload in seen:
+            if payload in seen or payload in new_seen:
                 continue
-            seen.add(payload)
-            merged[check_type].append(payload)
+            new_seen.add(payload)
+            new_items.append(payload)
+        merged[check_type] = _interleave_payloads(curated, new_items, primary_run=2)
     return merged
 
 

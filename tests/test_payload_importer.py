@@ -120,3 +120,22 @@ def test_merge_community_payloads_can_be_enabled_or_skipped_by_caller():
         "os": ["id"],
     }
     assert curated["xss"] == ["curated", "shared"]
+
+
+def test_merge_interleaves_so_community_survives_generator_cap():
+    # curated だけで no-LLM の件数 cap(40) を使い切る規模でも、community が
+    # cap 内（先頭40件）に現れること（Codex P2 指摘の回帰）。
+    curated = {"sqli": [f"curated{i}" for i in range(60)]}
+    community = {"sqli": [f"community{i}" for i in range(60)]}
+
+    merged = merge_community_payloads(curated, community)["sqli"]
+
+    first40 = merged[:40]
+    assert any(p.startswith("community") for p in first40), (
+        "community payloads never reach the no-LLM generator cap"
+    )
+    # curated 優先(2:1)は保たれている
+    assert merged[0] == "curated0" and merged[1] == "curated1"
+    assert merged[2] == "community0"
+    # 重複なし・全件保持
+    assert len(merged) == len(set(merged)) == 120
