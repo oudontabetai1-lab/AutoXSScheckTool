@@ -96,6 +96,84 @@ CONFIG_DIR = Path(__file__).parent.parent / "config"
 OUTPUT_BASE = Path(__file__).parent.parent / "output"
 
 
+def _interleave_payloads(
+    primary: list, secondary: list, *, primary_run: int = 2
+) -> list:
+    """primary を primary_run 個ごとに secondary を1個挟んで連結する。
+
+    curated(既定) を優先しつつ community を分散配置することで、下流の件数 cap
+    （`payload_gen` の no-LLM 経路は `max_total` で先頭のみ展開）を越えても
+    community ペイロードが必ず代表される。各列内の相対順序は保つ。
+    """
+    out: list = []
+    i = j = 0
+    while i < len(primary) or j < len(secondary):
+        for _ in range(primary_run):
+            if i < len(primary):
+                out.append(primary[i])
+                i += 1
+        if j < len(secondary):
+            out.append(secondary[j])
+            j += 1
+    return out
+
+
+def merge_community_payloads(default_payloads: dict, community_payloads: dict) -> dict:
+    """既定(curated)を優先しつつ、未収録の community を 2:1 でインターリーブする。
+
+    単純な末尾追記だと、curated だけで `payload_gen` の no-LLM 件数 cap を
+    使い切る check_type（xss/sqli/os 等）で community が一切使われない。
+    インターリーブにより cap 内にも community を行き渡らせる。
+    """
+    merged: dict = {
+        key: list(value) if isinstance(value, list) else value
+        for key, value in (default_payloads or {}).items()
+    }
+    for check_type, payloads in (community_payloads or {}).items():
+        if not isinstance(payloads, list):
+            continue
+        community_items = [p for p in payloads if isinstance(p, str)]
+        if not community_items:
+            continue
+        if check_type in merged and not isinstance(merged.get(check_type), list):
+            continue
+        curated = merged.get(check_type, [])
+        seen = set(curated)
+        new_items = []
+        new_seen = set()
+        for payload in community_items:
+            if payload in seen or payload in new_seen:
+                continue
+            new_seen.add(payload)
+            new_items.append(payload)
+        merged[check_type] = _interleave_payloads(curated, new_items, primary_run=2)
+    return merged
+
+
+def _community_payloads_enabled_by_config(path: Path | None = None) -> bool:
+    """config/wscan.yaml の features.community_payloads を読む。"""
+    config_path = path or (CONFIG_DIR / "wscan.yaml")
+    try:
+        with open(config_path, encoding="utf-8") as f:
+            raw = yaml.safe_load(f) or {}
+        features = raw.get("features", {}) or {}
+        return bool(features.get("community_payloads", True))
+    except Exception:
+        return True
+
+
+def _payload_evolution_enabled_by_config(path: Path | None = None) -> bool:
+    """config/wscan.yaml の features.payload_evolution を読む。"""
+    config_path = path or (CONFIG_DIR / "wscan.yaml")
+    try:
+        with open(config_path, encoding="utf-8") as f:
+            raw = yaml.safe_load(f) or {}
+        features = raw.get("features", {}) or {}
+        return bool(features.get("payload_evolution", True))
+    except Exception:
+        return True
+
+
 # ---------------------------------------------------------------------------
 # Registration page / form detection
 # ---------------------------------------------------------------------------
@@ -182,6 +260,8 @@ class ScanEngine:
         enable_ai_analysis: bool = True,
         enable_waf_detection: bool = True,
         enable_payload_learning: bool = True,
+        enable_community_payloads: Optional[bool] = None,
+        enable_payload_evolution: Optional[bool] = None,
         enable_adaptive_payloads: bool = True,
         enable_sitemap_crawl: bool = True,
         enable_llm_web_browsing: bool = False,
@@ -333,6 +413,18 @@ class ScanEngine:
         self.enable_ai_analysis = enable_ai_analysis
         self.enable_waf_detection = enable_waf_detection
         self.enable_payload_learning = enable_payload_learning
+        # 明示指定(True/False)を最優先し、None のときだけ config を既定として読む
+        # （CLI/API の明示値が config:false で握り潰されないようにする）。
+        self.enable_payload_evolution = (
+            _payload_evolution_enabled_by_config()
+            if enable_payload_evolution is None
+            else enable_payload_evolution
+        )
+        self.enable_community_payloads = (
+            _community_payloads_enabled_by_config()
+            if enable_community_payloads is None
+            else enable_community_payloads
+        )
         self.enable_adaptive_payloads = enable_adaptive_payloads
         self.enable_sitemap_crawl = enable_sitemap_crawl
         self.enable_llm_web_browsing = enable_llm_web_browsing
@@ -372,6 +464,12 @@ class ScanEngine:
         # Payloads
         default_payloads_path = CONFIG_DIR / "default_payloads.yaml"
         payloads_data = self._load_yaml(payloads_file or str(default_payloads_path))
+        using_default_payloads = not payloads_file or payloads_file == str(default_payloads_path)
+        if using_default_payloads and self.enable_community_payloads:
+            community_payloads_path = CONFIG_DIR / "community_payloads.yaml"
+            if community_payloads_path.exists():
+                community_payloads = self._load_yaml(str(community_payloads_path))
+                payloads_data = merge_community_payloads(payloads_data, community_payloads)
         self.default_payloads = payloads_data
         self.custom_payloads: dict = {}
         if payloads_file and payloads_file != str(default_payloads_path):

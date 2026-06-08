@@ -208,6 +208,12 @@ features:
   # A-3: ペイロード継続学習 (成功ペイロードを優先)
   payload_learning: true
 
+  # Feature B: LLM無しの文脈適応ペイロード変異
+  payload_evolution: true
+
+  # 公開ペイロード集から生成済みの config/community_payloads.yaml を既定ペイロードに追加
+  community_payloads: true
+
   # C-3: sitemap.xml / robots.txt からURLを追加取得
   sitemap_crawl: true
 

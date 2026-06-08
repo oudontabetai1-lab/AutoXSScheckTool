@@ -225,6 +225,64 @@ class DOMXSSScanner(BaseScanner):
             )
             findings.append(finding)
 
+        if not findings:
+            extra_payloads = await self.evolved_payloads(
+                url, form_index, field_name, is_url_param
+            )
+            for raw_payload in extra_payloads:
+                payload = marker + raw_payload
+                await self.log_payload_test(field_name, payload, "dom_xss_evolved", url)
+                try:
+                    self.browser.reset_dialog()
+                    await self.browser.page.add_init_script(_HOOK_SCRIPT)
+                    if is_url_param:
+                        source, pair = await self.browser.test_url_param(
+                            url, field_name, payload
+                        )
+                    else:
+                        await self.browser.navigate(url)
+                        source, pair = await self.browser.fill_and_submit_form(
+                            form_index, field_name, payload
+                        )
+                    await asyncio.sleep(2.0 * self.sleep_factor)
+                    log = await self.browser.page.evaluate(
+                        "() => window.__wscan_domxss_log || []"
+                    )
+                except Exception:
+                    continue
+
+                for entry in log or []:
+                    sink = entry.get("sink", "unknown")
+                    data = entry.get("data", "")
+                    if marker in data:
+                        finding = await self.record_finding(
+                            url=url,
+                            field_name=field_name,
+                            payload=payload,
+                            evidence=(
+                                f"DOM-based XSS: payload marker reached sink '{sink}'. "
+                                f"Data excerpt: {data[:120]}"
+                            ),
+                            pair=pair,
+                            severity="critical",
+                            confidence="confirmed",
+                            evidence_type="dom_xss_sink",
+                            evidence_details={
+                                "sink": sink,
+                                "marker": marker,
+                                "data_excerpt": data[:200],
+                            },
+                            reproduction_steps=[
+                                f"Open {url}",
+                                f"Inject the payload into field '{field_name}'.",
+                                f"Observe that the marker reaches DOM sink '{sink}'.",
+                            ],
+                        )
+                        findings.append(finding)
+                        break
+                if findings:
+                    break
+
         return findings
 
     async def verify_finding(self, finding: Finding) -> bool | None:

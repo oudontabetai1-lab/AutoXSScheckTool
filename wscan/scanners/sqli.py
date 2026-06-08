@@ -58,6 +58,19 @@ TIME_BASED_PAYLOADS = [
     "1) AND SLEEP(3)--",
 ]
 
+# 時間ベース blind SQLi の遅延ディレクティブ。進化wave や community 由来の
+# 任意のクォート方言（`' OR SLEEP(3)-- -` 等）でも時間判定を走らせるため、
+# 固定リストに加えてディレクティブの有無でも判定する。
+_TIME_BASED_SQL_RE = re.compile(
+    r"\b(?:SLEEP|PG_SLEEP|BENCHMARK|DBMS_PIPE\.RECEIVE_MESSAGE)\s*\(|\bWAITFOR\s+DELAY\b",
+    re.IGNORECASE,
+)
+
+
+def _is_time_based_sql(payload: str) -> bool:
+    """ペイロードに時間遅延ディレクティブが含まれるか（純粋関数）。"""
+    return bool(payload and _TIME_BASED_SQL_RE.search(payload))
+
 # Boolean-based pairs: (true_payload, false_payload)
 # A significant response difference between true/false conditions indicates boolean-based SQLi.
 BOOLEAN_PAIRS = [
@@ -234,8 +247,8 @@ class SQLiScanner(BaseScanner):
         # Threshold = baseline + 2.5 s (the injected sleep) with 0.5 s margin
         time_threshold = max(2.5, baseline_time + 2.5)
 
-        for payload in payloads:
-            await self.log_payload_test(field_name, payload, "sqli", url)
+        async def _test_payload(payload: str, check_label: str = "sqli") -> bool:
+            await self.log_payload_test(field_name, payload, check_label, url)
 
             # Apply payload
             source, pair = await self._apply_payload(
@@ -271,7 +284,7 @@ class SQLiScanner(BaseScanner):
                     ],
                 )
                 findings.append(finding)
-                break  # Found vulnerability, move to next field
+                return True
 
             # --- Check 2: Boolean-based blind SQLi ---
             # Compare true vs false condition: if one matches the baseline and the other
@@ -331,12 +344,12 @@ class SQLiScanner(BaseScanner):
                         ],
                     )
                     findings.append(finding)
-                    break
-            if findings:
-                break
+                    return True
 
             # --- Check 3: Time-based blind SQLi ---
-            if payload in TIME_BASED_PAYLOADS:
+            # 固定リストに加え、SLEEP/WAITFOR 等のディレクティブを含む任意の
+            # ペイロード（進化wave・community 由来の方言）でも遅延判定を行う。
+            if payload in TIME_BASED_PAYLOADS or _is_time_based_sql(payload):
                 if self.response_time_exceeded(pair, threshold=time_threshold):
                     finding = await self.record_finding(
                         url=url,
@@ -359,7 +372,7 @@ class SQLiScanner(BaseScanner):
                         ],
                     )
                     findings.append(finding)
-                    break
+                    return True
 
             # --- Check 4: Authentication bypass via SQLi ---
             # Only applicable when the field looks like a username/password input
@@ -397,10 +410,23 @@ class SQLiScanner(BaseScanner):
                     # Notify the engine so it can re-crawl the authenticated surface
                     if hasattr(self.engine, "signal_auth_bypass"):
                         self.engine.signal_auth_bypass(url, payload, post_url)
-                    break
+                    return True
 
             # Small delay to avoid overwhelming the server
             await asyncio.sleep(0.2 * self.sleep_factor)
+            return False
+
+        for payload in payloads:
+            if await _test_payload(payload):
+                break  # Found vulnerability, move to next field
+
+        if not findings:
+            extra_payloads = await self.evolved_payloads(
+                url, form_index, field_name, is_url_param
+            )
+            for payload in extra_payloads:
+                if await _test_payload(payload, "sqli_evolved"):
+                    break
 
         # --- Check 5: String-concatenation equivalence probe ---
         # When the error/boolean/time checks find nothing, fall back to the

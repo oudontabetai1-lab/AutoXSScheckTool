@@ -330,6 +330,83 @@ class BaseScanner(ABC):
             return verdict, matched_pair
         return None
 
+    async def _evolution_probe(
+        self,
+        url: str,
+        form_index: int,
+        field_name: str,
+        is_url_param: bool,
+    ) -> tuple[str, set[str], dict]:
+        """文脈適応 payload 用の特殊文字生存 probe を投入する。
+
+        個別 scanner の検知判定は呼ばず、marker 付き文字列の反射状態だけを
+        観測する。失敗時は呼び出し側が従来挙動へ戻れるよう空値を返す。
+        """
+        try:
+            from wscan import context_mutator
+
+            marker = context_mutator.make_marker()
+            probe = context_mutator.make_char_probe(marker)
+            await self.log_payload_test(
+                field_name,
+                probe,
+                f"{self.CHECK_TYPE}_evolution_probe",
+                url,
+            )
+            if is_url_param:
+                source, pair = await self.browser.test_url_param(url, field_name, probe)
+            else:
+                await self.browser.navigate(url)
+                source, pair = await self.browser.fill_and_submit_form(
+                    form_index,
+                    field_name,
+                    probe,
+                )
+            response_source = (pair.get("response", {}) or {}).get("body") or source or ""
+            surviving = context_mutator.surviving_chars(response_source, marker)
+            context = context_mutator.detect_context(response_source, marker)
+            context["marker"] = marker
+            return response_source, surviving, context
+        except Exception:
+            return "", set(), {}
+
+    async def evolved_payloads(
+        self,
+        url: str,
+        form_index: int,
+        field_name: str,
+        is_url_param: bool,
+    ) -> list[str]:
+        """追加 wave 用の決定論的 payload 候補を返す。
+
+        ``enable_payload_evolution`` が無効、または probe/mutation が失敗した
+        場合は空 list を返し、既存の検知ループを壊さない。
+        """
+        if not getattr(self.engine, "enable_payload_evolution", True):
+            return []
+        try:
+            from wscan import context_mutator
+
+            _source, surviving, context = await self._evolution_probe(
+                url,
+                form_index,
+                field_name,
+                is_url_param,
+            )
+            marker = context.get("marker") or context_mutator.make_marker()
+            payloads = context_mutator.mutate(
+                self.CHECK_TYPE,
+                context=context,
+                surviving=surviving,
+                marker=marker,
+            )
+            cap = getattr(self.engine, "max_payloads", 0)
+            if cap and cap > 0:
+                payloads = payloads[:cap]
+            return payloads
+        except Exception:
+            return []
+
     def current_page_pair(self, url: str) -> dict:
         """
         Return the captured request/response for the page under test.

@@ -409,6 +409,32 @@ class DetectionEvidenceTests(unittest.TestCase):
 
         self.run_async(run())
 
+    def test_ssrf_verifier_rejects_reflected_probe_url(self):
+        # プローブURL自体に含まれるマーカー語（GCP の computeMetadata 等）を
+        # そのまま反射するだけの無害なページを SSRF と確証しないこと。
+        async def run():
+            scanner = SSRFScanner(_DummyEngine())
+            gcp = "http://metadata.google.internal/computeMetadata/v1/"
+            scanner._apply_payload = AsyncMock(side_effect=[
+                ("You searched for: http://wscan-baseline-test.invalid/", {}),
+                (f"<p>You searched for: {gcp}</p>", {}),  # ペイロードの純粋反射
+            ])
+            finding = Finding(
+                check_type="ssrf",
+                severity="critical",
+                url="http://fixture.test/search?q=x",
+                field_name="q",
+                payload=gcp,
+                evidence="SSRF marker",
+                evidence_type="ssrf_internal_marker",
+            )
+
+            result = await scanner.verify_finding(finding)
+
+            self.assertFalse(result)
+
+        self.run_async(run())
+
     def test_deserialization_verifier_rejects_preexisting_error(self):
         async def run():
             scanner = DeserializationScanner(_DummyEngine())

@@ -116,8 +116,8 @@ class LDAPScanner(BaseScanner):
                 )
             return []
 
-        for payload in _LDAP_PAYLOADS:
-            await self.log_payload_test(field_name, payload, self.CHECK_TYPE, url)
+        async def _test_payload(payload: str, check_label: str = self.CHECK_TYPE) -> bool:
+            await self.log_payload_test(field_name, payload, check_label, url)
             try:
                 html, pair = await self._apply_payload(
                     url, form_index, field_name, payload, is_url_param
@@ -127,7 +127,7 @@ class LDAPScanner(BaseScanner):
                     await self.monitor.emit_status(
                         f"[warn] ldap: request failed on {url} ({field_name}): {exc}"
                 )
-                continue
+                return False
 
             classified = self._classify(baseline_html, html, payload)
             if classified:
@@ -145,7 +145,20 @@ class LDAPScanner(BaseScanner):
                     evidence_details=evidence_details,
                 )
                 findings.append(finding)
+                return True
+            return False
+
+        for payload in _LDAP_PAYLOADS:
+            if await _test_payload(payload):
                 break  # one confirmed finding per field
+
+        if not findings:
+            extra_payloads = await self.evolved_payloads(
+                url, form_index, field_name, is_url_param
+            )
+            for payload in extra_payloads:
+                if await _test_payload(payload, "ldap_evolved"):
+                    break
 
         return findings
 
