@@ -152,6 +152,11 @@ def due_schedule_ids(schedules: list, now_epoch: Optional[float] = None) -> list
 class MonitorServer:
     """Real-time monitoring server for scan progress."""
 
+    # 履歴の素朴な再生からは除外する一過性モーダルイベント。これらは
+    # 「今まさに操作待ちかどうか」が本質で、解決後に再生すると亡霊モーダルになる。
+    # 未解決の1件だけ pending_interactive 経由で別途送る。
+    _REPLAY_SUPPRESS_TYPES = frozenset({"crawl_review", "plan_review", "awaiting_config"})
+
     def __init__(self, port: int = 8765, auth_token: str = ""):
         self.port = port
         # Shared access token. Empty string => authentication disabled.
@@ -162,6 +167,13 @@ class MonitorServer:
         self.app = self._create_app()
         self._started = False
         self.event_history: collections.deque = collections.deque(maxlen=1000)
+        # 「操作待ち」の一過性モーダルイベント（crawl_review / plan_review /
+        # awaiting_config）は解決済みでも event_history に残る。これをそのまま
+        # 再接続/リロード時に再生すると、解決済みのレビュー画面や次スキャン準備中の
+        # 旧レビューが亡霊のように再表示される。そこで「現在まだ未解決の1件」だけを
+        # ここで保持し、再生時は履歴から一過性モーダルを除外して本フィールドを末尾に
+        # 1件だけ送る。None なら未解決のモーダルは無い。
+        self.pending_interactive: Optional[dict] = None
 
         # ── Intervention / plan-confirm channels ──────────────────────
         # Commands arriving from the web UI (pause / resume / skip_field / skip_page / abort)
@@ -445,10 +457,16 @@ class MonitorServer:
                 return
             await ws.accept()
             self.clients.add(ws)
-            # Send event history to newly connected client
+            # Send event history to newly connected client.
+            # 一過性モーダル(crawl_review/plan_review/awaiting_config)は素朴に
+            # 再生せず除外し、未解決の1件だけを末尾に送る（亡霊モーダル防止）。
             try:
                 for event in list(self.event_history)[-200:]:
+                    if event.get("type") in self._REPLAY_SUPPRESS_TYPES:
+                        continue
                     await ws.send_text(json.dumps(event))
+                if self.pending_interactive is not None:
+                    await ws.send_text(json.dumps(self.pending_interactive))
                 # Keep connection alive and process incoming messages
                 while True:
                     try:
@@ -1388,6 +1406,8 @@ class MonitorServer:
         elif action == "plan_confirm":
             # e.g. {"action": "plan_confirm", "edits": { url: {field: {risk, checks}} }}
             self.confirmed_plan_edits = msg.get("edits", {})
+            # 解決済み＝再接続時にプランモーダルを再表示しない。
+            self._clear_pending_interactive("plan_review")
             self.plan_confirm_event.set()
 
         elif action == "manual_payload":
@@ -1452,7 +1472,29 @@ class MonitorServer:
                 # Manual attack scenarios built in the dashboard scenario editor.
                 "flows": flows,
             }
+            # 解決済み＝再接続時に巡回レビューを再表示しない。
+            self._clear_pending_interactive("crawl_review")
             self.crawl_review_event.set()
+
+    # ------------------------------------------------------------------
+    # Pending interactive (operator-awaited modal) state
+    # ------------------------------------------------------------------
+
+    def _mark_pending_interactive(self, event_type: str, data: Any = None) -> None:
+        """未解決の一過性モーダルを1件だけ記録（再接続時にこれだけ再送する）。"""
+        self.pending_interactive = {
+            "type": event_type,
+            "timestamp": time.time(),
+            "data": data or {},
+        }
+
+    def _clear_pending_interactive(self, *types: str) -> None:
+        """未解決モーダルを解消。types 指定時はその型に一致する場合のみ消す。"""
+        if self.pending_interactive is None:
+            return
+        if types and self.pending_interactive.get("type") not in types:
+            return
+        self.pending_interactive = None
 
     # ------------------------------------------------------------------
     # Broadcast helpers
@@ -1460,6 +1502,10 @@ class MonitorServer:
 
     async def emit(self, event_type: str, data: Any = None):
         """Send an event to all connected monitoring clients."""
+        # スキャンが完了したら未解決のレビュー待ちは無効化する。
+        # （非serve単発や異常終了で pending が残ったまま再接続→亡霊表示を防ぐ）
+        if event_type == "scan_complete":
+            self._clear_pending_interactive()
         event = {
             "type": event_type,
             "timestamp": time.time(),
@@ -1520,6 +1566,9 @@ class MonitorServer:
 
     async def emit_awaiting_config(self):
         """Tell the dashboard to show the scan configuration form (serve mode)."""
+        # アイドル状態＝設定フォーム待ち。これを未解決モーダルとして記録し、
+        # 再接続時に（過去スキャンの crawl_review ではなく）設定フォームを出す。
+        self._mark_pending_interactive("awaiting_config", {})
         await self.emit("awaiting_config", {})
 
     async def emit_scan_started(self, config: dict):
@@ -1615,6 +1664,7 @@ class MonitorServer:
         to click 'Start Attack'.
         """
         self.plan_confirm_event.clear()
+        self._mark_pending_interactive("plan_review", {"plans": plans_data})
         await self.emit("plan_review", {"plans": plans_data})
 
     async def emit_crawl_review(self, pages_data: list):
@@ -1625,6 +1675,7 @@ class MonitorServer:
         """
         self.crawl_review_event.clear()
         self.crawl_review_action = {}
+        self._mark_pending_interactive("crawl_review", {"pages": pages_data})
         await self.emit("crawl_review", {"pages": pages_data})
 
     async def wait_for_crawl_review(self, timeout: float = 1800.0) -> dict:

@@ -1853,8 +1853,11 @@ async def run_serve(args):
             monitor.scan_in_progress = True
             monitor.mark_scan_started()  # watchdog 計測開始
             # New scan accepted: clear the previous run's event log so this scan
-            # starts from a clean slate in the dashboard.
+            # starts from a clean slate in the dashboard. Also drop any pending
+            # interactive modal (e.g. the idle awaiting_config) so a client that
+            # reconnects mid-scan is not shown a stale config form / old review.
             monitor.event_history.clear()
+            monitor.pending_interactive = None
             cfg = monitor.scan_request_data or {}
             try:
                 if monitor.scan_max_seconds:

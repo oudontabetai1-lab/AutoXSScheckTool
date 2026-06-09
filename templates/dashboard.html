@@ -3344,6 +3344,9 @@ function handleEvent(event) {
     }
 
     case 'scan_complete':
+      // スキャンが終わった以上、巡回/プランのレビュー待ちモーダルは無効。
+      // 解決済みのまま残っている場合に備えて明示的に閉じる。
+      closeInteractiveModals();
       // 設定 + 結果サマリはサーバ側でアウトプットフォルダに自動保存される。
       // 必要に応じて「📤 設定をエクスポート」ボタンから手動でダウンロード可能。
       if (Array.isArray(data.findings)) {
@@ -3413,7 +3416,9 @@ function handleEvent(event) {
       break;
 
     case 'awaiting_config':
-      // Serve mode: show the scan config form
+      // Serve mode: show the scan config form. アイドル復帰なので、前スキャンの
+      // レビュー待ちモーダルが残っていれば閉じる（亡霊モーダル防止）。
+      closeInteractiveModals();
       document.getElementById('scanConfigOverlay').classList.add('active');
       setStatus('設定フォームに入力してスキャンを開始してください', '');
       break;
@@ -3421,6 +3426,8 @@ function handleEvent(event) {
     case 'scan_started':
       // Hide config overlay once scan begins
       document.getElementById('scanConfigOverlay').classList.remove('active');
+      // 新スキャン開始時は前スキャンのレビュー待ちモーダルを破棄。
+      closeInteractiveModals();
       state.lastScanConfig = JSON.parse(JSON.stringify(data || {}));
       showPostScanActions(false);
       resetLiveScanState();
@@ -3907,6 +3914,15 @@ function filterFindings() {
 
 // ─── Crawl Review (pre-attack page list) ────────────────────────
 let _crawlReviewPages = [];
+
+// 操作待ちモーダル（巡回レビュー / プランレビュー）を強制的に閉じる。
+// スキャン完了・アイドル復帰時に呼び、解決済みなのに残る亡霊モーダルを防ぐ。
+function closeInteractiveModals() {
+  ['crawlReviewOverlay', 'planModalOverlay'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.classList.remove('active');
+  });
+}
 
 function showCrawlReviewModal(pages) {
   _crawlReviewPages = Array.isArray(pages) ? pages.slice() : [];
