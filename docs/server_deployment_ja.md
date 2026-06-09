@@ -66,15 +66,18 @@ WScan のダッシュボードをサーバー上で常時起動し、社内ネ�
 | ブラウザ自動起動 | `--open-browser` / `--no-open-browser` | — | localhost バインド時のみ起動 |
 | 出力の保持日数 | （`config/wscan.yaml` の `retention_days`） | `WSCAN_RETENTION_DAYS` | `0`（無制限） |
 | 出力の保持件数 | （`config/wscan.yaml` の `retention_max_scans`） | `WSCAN_RETENTION_MAX_SCANS` | `0`（無制限） |
-| 無認証で外部公開を許可 | `--insecure` | — | 無効（非ループバック＋無トークンは起動拒否） |
+| 無認証でグローバル公開を許可 | `--insecure` | — | 無効（グローバルIP＋無トークンは起動拒否） |
 | 対象スコープ(許可) | （`config/wscan.yaml` の `allowed_target_hosts`） | `WSCAN_ALLOWED_HOSTS` | 空（無制限） |
 | 対象スコープ(拒否) | （`config/wscan.yaml` の `denied_target_hosts`） | `WSCAN_DENIED_HOSTS` | 空 |
 | スキャンの上限時間(分) | （`config/wscan.yaml` の `scan_timeout_minutes`） | `WSCAN_SCAN_TIMEOUT_MIN` | `0`（無効） |
 | プロキシ配下のIP信頼 | （`config/wscan.yaml` の `trust_proxy`） | `WSCAN_TRUST_PROXY` | `false` |
 
-> セキュリティ: 非ループバック（例 `0.0.0.0`）へトークン無しで起動しようとすると、
-> 無認証公開を避けるため**既定で起動を拒否**します（`--auth-token` を設定するか、
-> `--host 127.0.0.1`、どうしても無認証公開する場合のみ `--insecure`）。
+> セキュリティ: 社内イントラネット利用を想定し、ループバックやプライベートIP
+> （`192.168.0.0/16` `10.0.0.0/8` `172.16.0.0/12` 等。`0.0.0.0` バインドは実 LAN IP で判定）
+> へはトークン無しでも起動できます（警告のみ表示）。一方、**グローバルIP** へトークン無しで
+> 起動しようとすると、無認証公開を避けるため**既定で起動を拒否**します（`--auth-token` を
+> 設定するか、`--host 127.0.0.1`、どうしても無認証公開する場合のみ `--insecure`）。
+> イントラネットでも認証が必要な場合は `--auth-token` を設定してください。
 > ログインは IP 単位で連続失敗が続くと一時的にロックアウトします（総当たり対策）。
 > `allowed_target_hosts` を設定すると、そのホスト（サブドメイン含む）以外への
 > スキャンを拒否し、範囲外/内部資産への誤爆・悪用を防げます。

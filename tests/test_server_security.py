@@ -31,6 +31,30 @@ class TargetScopeTests(unittest.TestCase):
         self.assertFalse(target_in_scope("not a url", ["example.com"], []))
 
 
+class IntranetBindTests(unittest.TestCase):
+    """無認証起動を許可してよい bind 先（イントラネット）の判定。"""
+
+    def test_loopback_is_intranet(self):
+        from main import _bind_is_intranet
+        self.assertTrue(_bind_is_intranet("127.0.0.1"))
+        self.assertTrue(_bind_is_intranet("localhost"))
+        self.assertTrue(_bind_is_intranet("::1"))
+
+    def test_private_ranges_are_intranet(self):
+        from main import _bind_is_intranet
+        self.assertTrue(_bind_is_intranet("192.168.1.10"))
+        self.assertTrue(_bind_is_intranet("10.0.0.5"))
+        self.assertTrue(_bind_is_intranet("172.16.3.4"))
+
+    def test_public_ip_is_not_intranet(self):
+        from main import _bind_is_intranet
+        self.assertFalse(_bind_is_intranet("8.8.8.8"))
+
+    def test_unresolvable_host_is_not_intranet(self):
+        from main import _bind_is_intranet
+        self.assertFalse(_bind_is_intranet("not-an-ip"))
+
+
 class ServerGuardEndpointTests(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())

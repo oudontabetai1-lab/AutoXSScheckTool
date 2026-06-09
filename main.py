@@ -792,9 +792,10 @@ Examples:
     )
     serve.add_argument(
         "--insecure", dest="insecure", action="store_true", default=False,
-        help="Allow binding to a non-loopback address WITHOUT an auth token. "
-             "By default this is refused so the scanner control panel is never "
-             "exposed unauthenticated on the network.",
+        help="Allow binding to a PUBLIC (non-private) address WITHOUT an auth token. "
+             "Intranet binds (loopback / private IPs) are already allowed unauthenticated "
+             "for in-house use; this flag is only needed to expose the control panel "
+             "unauthenticated on a global IP (strongly discouraged).",
     )
     serve.add_argument(
         "--open-browser", dest="open_browser", action="store_true", default=None,
@@ -1427,6 +1428,38 @@ async def run_scan(args):
     )
 
 
+def _bind_is_intranet(host: str) -> bool:
+    """bind 先がイントラネット（ループバック / プライベートIP）かを判定する。
+
+    0.0.0.0 / :: は全インタフェース待受なので、実際の LAN IP を解決して判定する。
+    判定できない／グローバルIPの場合は False（＝無認証公開は要 --insecure）。
+    """
+    import ipaddress
+    import socket
+    h = (host or "").strip()
+    if h in ("127.0.0.1", "localhost", "::1"):
+        return True
+    candidates = []
+    if h in ("0.0.0.0", "::", ""):
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(("8.8.8.8", 80))
+            candidates.append(s.getsockname()[0])
+            s.close()
+        except Exception:
+            return False
+    else:
+        candidates.append(h)
+    for c in candidates:
+        try:
+            ip = ipaddress.ip_address(c)
+        except ValueError:
+            return False
+        if ip.is_private or ip.is_loopback or ip.is_link_local:
+            return True
+    return False
+
+
 async def run_serve(args):
     """
     GUI-first mode: start the dashboard server, show configuration form in
@@ -1447,22 +1480,33 @@ async def run_serve(args):
     # loopback (a local developer). On a real server (0.0.0.0 / a LAN IP) we
     # stay headless unless --open-browser was passed explicitly.
     is_loopback = host in ("127.0.0.1", "localhost", "::1")
+    is_intranet = _bind_is_intranet(host)
 
-    # 安全策: 非ループバックに無認証で公開しようとした場合は既定で拒否する。
-    # スキャナの操作盤(任意URLを攻撃可能)が無認証でネットワークに晒されるのを防ぐ。
-    # 明示的に許容したい場合のみ --insecure を付ける。
-    if not is_loopback and not auth_token and not getattr(args, "insecure", False):
+    # 安全策: 認証無しで起動してよいのはイントラネット（ループバック / プライベートIP）まで。
+    # 社内イントラネット利用を想定し、プライベート網への無認証起動は許可する（警告のみ）。
+    # グローバルIPへ無認証で晒そうとした場合のみ既定で拒否する（--insecure で明示許容）。
+    if not is_intranet and not auth_token and not getattr(args, "insecure", False):
         console.print(Panel.fit(
-            "[bold red]起動を中止しました — 無認証で外部公開しようとしています[/bold red]\n"
-            f"  Bind: [underline]{host}:{port}[/underline]（非ループバック）\n"
-            "  この状態ではネットワーク上の誰でもスキャナを操作できてしまいます。\n\n"
+            "[bold red]起動を中止しました — 無認証でグローバル公開しようとしています[/bold red]\n"
+            f"  Bind: [underline]{host}:{port}[/underline]（プライベートIPではありません）\n"
+            "  この状態ではインターネット上の誰でもスキャナを操作できてしまいます。\n\n"
             "  対処のいずれか:\n"
             "   • トークンを設定: [cyan]--auth-token <TOKEN>[/cyan] または環境変数 WSCAN_AUTH_TOKEN\n"
-            "   • ローカル限定にする: [cyan]--host 127.0.0.1[/cyan]\n"
+            "   • イントラネット限定にする: [cyan]--host 127.0.0.1[/cyan] やプライベートIPへ bind\n"
             "   • どうしても無認証公開する: [cyan]--insecure[/cyan]（非推奨）",
             border_style="red",
         ))
         return
+
+    # イントラネットへ無認証で起動するケースは警告を出す（社内利用の既定動作）。
+    if is_intranet and not is_loopback and not auth_token:
+        console.print(Panel.fit(
+            "[bold yellow]無認証でイントラネットに公開します[/bold yellow]\n"
+            f"  Bind: [underline]{host}:{port}[/underline]（プライベート網）\n"
+            "  同一ネットワークの誰でもスキャナを操作できます。社内限定での利用に留めてください。\n"
+            "  認証を有効化するには [cyan]--auth-token <TOKEN>[/cyan] / 環境変数 WSCAN_AUTH_TOKEN。",
+            border_style="yellow",
+        ))
 
     if getattr(args, "open_browser", None) is None:
         open_browser = is_loopback

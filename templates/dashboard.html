@@ -1889,6 +1889,7 @@ const state = {
   planData: null,   // pending plan received from server
   scanStartTime: null,  // Unix ms of first progress event (attack phase start)
   scanDone: false,      // true after scan_complete — stop ETA updates
+  etaSeries: null,      // 現在の進捗系列 {startMs, startCurrent, total}（フェーズ毎に取り直す）
   phase: null,
   phaseStartTs: {},
   phaseTimes: {},
@@ -3060,11 +3061,30 @@ function updateETA(current, total, evTimestampSec) {
   const nowMs = evTimestampSec * 1000;
   if (!state.scanStartTime) state.scanStartTime = nowMs;
 
+  // 全体経過（スキャン開始からの累計）は素直に表示する。
   const elapsedSec = (nowMs - state.scanStartTime) / 1000;
   document.getElementById('statElapsed').textContent = formatDuration(elapsedSec);
 
-  if (current >= 2 && total > 0 && elapsedSec > 0) {
-    const rate = current / elapsedSec;
+  // フェーズが変わると total が変わり current がリセットされる（例: 攻撃→検証）。
+  // 開始時点からの平均レートで外挿すると、フェーズ毎にペースが大きく違うため
+  // 残り時間・完了予定が非現実的に振れる。そこで「現在の進捗系列」ごとに基準を
+  // 取り直し、その系列の実測ペースだけから残りを推定する。
+  const s = state.etaSeries;
+  if (!s || s.total !== total || current < s.startCurrent) {
+    // 新しい系列の開始（最初の1点はサンプルが無いので推定しない）。
+    state.etaSeries = { startMs: nowMs, startCurrent: current, total };
+    document.getElementById('statRemain').textContent = '計測中…';
+    document.getElementById('statETA').textContent = '—';
+    return;
+  }
+
+  const seriesElapsedSec = (nowMs - s.startMs) / 1000;
+  const done = current - s.startCurrent;
+  if (current >= total) {
+    document.getElementById('statRemain').textContent = 'まもなく';
+    document.getElementById('statETA').textContent = '—';
+  } else if (done >= 1 && seriesElapsedSec > 0) {
+    const rate = done / seriesElapsedSec;          // items/sec（現フェーズの実測ペース）
     const remainSec = (total - current) / rate;
     document.getElementById('statRemain').textContent = formatDuration(remainSec);
     const etaStr = new Date(Date.now() + remainSec * 1000).toTimeString().slice(0, 5);
@@ -3448,6 +3468,7 @@ function resetLiveScanState() {
   state.testCount = 0;
   state.scanStartTime = null;
   state.scanDone = false;
+  state.etaSeries = null;
   state.phase = null;
   state.urlStatuses = {};
   state.urlOrder = [];
