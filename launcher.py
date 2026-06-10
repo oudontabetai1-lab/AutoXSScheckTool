@@ -778,8 +778,16 @@ def main():
     def _launch_serve(port: int) -> None:
         _ok(f"http://localhost:{port} でダッシュボードを起動します")
         _print()
-        serve_args = argparse.Namespace(port=port)
-        from main import run_serve
+        # host / auth_token は serve サブコマンドのパーサ既定（WSCAN_HOST /
+        # WSCAN_AUTH_TOKEN、無ければ config）と揃える。これを省くと
+        # run_serve が 0.0.0.0・トークン無しにフォールバックし、トークンを
+        # 設定済みでも未認証のダッシュボードが LAN に公開されてしまう。
+        from main import run_serve, _CFG
+        serve_args = argparse.Namespace(
+            port=port,
+            host=os.environ.get("WSCAN_HOST", _CFG.get("host", "0.0.0.0")),
+            auth_token=os.environ.get("WSCAN_AUTH_TOKEN", _CFG.get("auth_token", "")),
+        )
         try:
             asyncio.run(run_serve(serve_args))
         except KeyboardInterrupt:

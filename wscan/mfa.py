@@ -139,6 +139,18 @@ def parse_json_obj(value) -> dict:
         return {}
 
 
+def extract_subjects(text: str) -> str:
+    """メタデータ JSON から件名（subject）だけを連結して返す（純粋関数）。
+
+    一覧（``list_emails_metadata``）の本文取得前にコードを拾う際、UID や日時など
+    無関係な数値を誤って OTP と判定しないよう、抽出対象を件名に限定するために使う。
+    """
+    if not text:
+        return ""
+    subs = re.findall(r'"subject"\s*:\s*"((?:[^"\\]|\\.)*)"', text, re.IGNORECASE)
+    return "\n".join(subs)
+
+
 def extract_email_ids(text: str, limit: int = 5) -> list:
     """メール一覧（メタデータ）JSON/テキストからメール ID を抽出する（純粋関数）。
 
@@ -383,8 +395,11 @@ class MFASolver:
                     try:
                         meta = await session.call_tool(cfg.email_list_tool, dict(list_args))
                         meta_text = collect_tool_text(meta)
-                        # まず件名/メタデータからコードを試す（OTP を件名に載せる実装向け）。
-                        code = extract_otp(meta_text, cfg.code_length, cfg.code_regex)
+                        # まず件名だけからコードを試す（OTP を件名に載せる実装向け）。
+                        # メタデータ全体だと UID/日時の数値を誤検出するため subject に限定。
+                        code = extract_otp(
+                            extract_subjects(meta_text), cfg.code_length, cfg.code_regex
+                        )
                         if code:
                             return code
                         # 本文を取って抽出。

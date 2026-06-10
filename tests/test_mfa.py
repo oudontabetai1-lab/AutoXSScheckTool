@@ -271,6 +271,31 @@ def test_extract_email_ids_empty():
     assert mfa.extract_email_ids("no ids here") == []
 
 
+# ── extract_subjects ───────────────────────────────────────────────────────
+def test_extract_subjects():
+    text = '{"emails":[{"uid":100200,"subject":"Your code is 482913"}]}'
+    assert mfa.extract_subjects(text) == "Your code is 482913"
+
+
+def test_extract_subjects_multiple():
+    text = '[{"subject":"a"},{"subject":"b"}]'
+    assert mfa.extract_subjects(text) == "a\nb"
+
+
+def test_extract_subjects_empty():
+    assert mfa.extract_subjects("") == ""
+    assert mfa.extract_subjects('{"uid": 123456}') == ""
+
+
+def test_subject_first_pass_ignores_uid():
+    # 6桁の UID(100200) は OTP と誤判定せず、件名内の 482913 のみ拾う
+    meta = '{"emails":[{"email_id":100200,"subject":"Code: 482913"}]}'
+    assert mfa.extract_otp(mfa.extract_subjects(meta)) == "482913"
+    # 件名にコードが無ければ件名パスは None（→本文取得に進む想定）
+    meta2 = '{"emails":[{"email_id":100200,"subject":"New login"}]}'
+    assert mfa.extract_otp(mfa.extract_subjects(meta2)) is None
+
+
 # ── MFASolver の分岐（MCP 呼び出しはモック） ───────────────────────────────
 def test_solver_disabled_returns_none():
     import asyncio
