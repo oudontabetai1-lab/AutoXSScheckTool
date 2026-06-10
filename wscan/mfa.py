@@ -151,6 +151,74 @@ def extract_subjects(text: str) -> str:
     return "\n".join(subs)
 
 
+# メール ID として扱うキー（IMAP では uid が安定識別子）。
+_ID_KEYS = ("uid", "id", "email_id", "message_id", "sequence", "seq")
+
+
+def _coerce_id(value):
+    """ID 値を正規化（数字文字列は int、その他は str）。無効値は None。"""
+    if value is None:
+        return None
+    s = str(value).strip()
+    if not s or s.lower() in ("null", "none"):
+        return None
+    return int(s) if s.isdigit() else s
+
+
+def email_item_id(item):
+    """メール 1 件の dict から識別子を取り出す（純粋関数）。優先順位は ``_ID_KEYS``。"""
+    if not isinstance(item, dict):
+        return None
+    low = {str(k).lower(): v for k, v in item.items()}
+    for k in _ID_KEYS:
+        if k in low:
+            cid = _coerce_id(low[k])
+            if cid is not None:
+                return cid
+    return None
+
+
+def parse_email_items(text: str) -> list:
+    """メタデータ応答からメール dict のリストを取り出す（純粋関数）。
+
+    ``list_emails_metadata`` の戻り（JSON）をゆるくパースし、各メールの dict を
+    返す。list / {"emails":[...]} / 単一 dict のいずれの形でも拾う。古いメールの
+    取りこぼし防止（ID ベースの重複排除）に使う。
+    """
+    if not text:
+        return []
+    data = _loads_loose(text)
+    if isinstance(data, list):
+        return [d for d in data if isinstance(d, dict)]
+    if isinstance(data, dict):
+        for k in ("emails", "data", "items", "messages", "results"):
+            v = data.get(k)
+            if isinstance(v, list):
+                return [d for d in v if isinstance(d, dict)]
+        # 件名/ID らしきキーを持つなら単一メールとして扱う
+        low = {str(kk).lower() for kk in data}
+        if low & set(_ID_KEYS) or "subject" in low:
+            return [data]
+    return []
+
+
+def _loads_loose(text: str):
+    """テキストから JSON 配列/オブジェクトをゆるく読み出す（失敗時 None）。"""
+    try:
+        return json.loads(text)
+    except (ValueError, TypeError):
+        pass
+    for opener, closer in (("[", "]"), ("{", "}")):
+        i = text.find(opener)
+        j = text.rfind(closer)
+        if 0 <= i < j:
+            try:
+                return json.loads(text[i:j + 1])
+            except (ValueError, TypeError):
+                continue
+    return None
+
+
 def extract_email_ids(text: str, limit: int = 5) -> list:
     """メール一覧（メタデータ）JSON/テキストからメール ID を抽出する（純粋関数）。
 
@@ -371,6 +439,12 @@ class MFASolver:
         ``list_emails_metadata`` で直近メールのメタデータ（件名等）を取得し、
         件名でコードが拾えなければ ``get_emails_content`` で本文を取って抽出する。
         コードが届くまで ``email_timeout`` 秒ポーリングする。
+
+        **古いメール対策**: ポーリング開始時点で既に受信箱にあるメール ID を
+        baseline として記録し、以降は **その後に届いた新着メールのみ**を対象に
+        する。これにより前回ログインの期限切れコードを誤って投入しない。
+        構造解析に失敗するサーバでは baseline を作れないため、従来の
+        件名→本文の総当り（重複排除なし）にフォールバックする。
         """
         cfg = self.config
         from mcp import ClientSession, StdioServerParameters
@@ -388,33 +462,62 @@ class MFASolver:
             command=cfg.email_command, args=list(cfg.email_args), env=self._env()
         )
         deadline = time.monotonic() + max(0.0, cfg.email_timeout)
+
+        async def _fetch_code(session, ids):
+            """指定 ID 群の本文を取得してコードを抽出する。"""
+            if not ids:
+                return None
+            content_args = {"account_name": cfg.email_account, "email_ids": ids}
+            content_args.update(cfg.email_content_args or {})
+            body = await session.call_tool(cfg.email_content_tool, content_args)
+            return extract_otp(collect_tool_text(body), cfg.code_length, cfg.code_regex)
+
         async with stdio_client(params) as (read, write):
             async with ClientSession(read, write) as session:
                 await session.initialize()
+                baseline: Optional[set] = None  # ポーリング開始時点の既存メール ID
+                processed: set = set()           # 本文取得済みの新着 ID
                 while True:
                     try:
                         meta = await session.call_tool(cfg.email_list_tool, dict(list_args))
                         meta_text = collect_tool_text(meta)
-                        # まず件名だけからコードを試す（OTP を件名に載せる実装向け）。
-                        # メタデータ全体だと UID/日時の数値を誤検出するため subject に限定。
-                        code = extract_otp(
-                            extract_subjects(meta_text), cfg.code_length, cfg.code_regex
-                        )
-                        if code:
-                            return code
-                        # 本文を取って抽出。
-                        ids = extract_email_ids(meta_text, limit=cfg.email_page_size)
-                        if ids:
-                            content_args = {
-                                "account_name": cfg.email_account,
-                                "email_ids": ids,
+                        items = parse_email_items(meta_text)
+
+                        if items:
+                            ids_now = {
+                                i for i in (email_item_id(it) for it in items) if i is not None
                             }
-                            content_args.update(cfg.email_content_args or {})
-                            body = await session.call_tool(
-                                cfg.email_content_tool, content_args
-                            )
+                            if baseline is None:
+                                # 初回は既存メールを baseline 化（古いメールを除外）。
+                                baseline = ids_now
+                            else:
+                                new_items = [
+                                    it for it in items
+                                    if (cid := email_item_id(it)) is not None
+                                    and cid not in baseline and cid not in processed
+                                ]
+                                # まず新着メールの件名から（UID/日時の誤検出を避ける）。
+                                subj = "\n".join(
+                                    str(it.get("subject", "")) for it in new_items
+                                )
+                                code = extract_otp(subj, cfg.code_length, cfg.code_regex)
+                                if code:
+                                    return code
+                                new_ids = [email_item_id(it) for it in new_items]
+                                new_ids = [i for i in new_ids if i is not None]
+                                code = await _fetch_code(session, new_ids)
+                                if code:
+                                    return code
+                                processed.update(new_ids)
+                        else:
+                            # 構造解析できないサーバ向けフォールバック（重複排除なし）。
                             code = extract_otp(
-                                collect_tool_text(body), cfg.code_length, cfg.code_regex
+                                extract_subjects(meta_text), cfg.code_length, cfg.code_regex
+                            )
+                            if code:
+                                return code
+                            code = await _fetch_code(
+                                session, extract_email_ids(meta_text, limit=cfg.email_page_size)
                             )
                             if code:
                                 return code

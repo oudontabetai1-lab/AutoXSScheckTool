@@ -296,6 +296,57 @@ def test_subject_first_pass_ignores_uid():
     assert mfa.extract_otp(mfa.extract_subjects(meta2)) is None
 
 
+# ── parse_email_items / email_item_id（古いメール対策） ─────────────────────
+def test_parse_email_items_list():
+    text = '[{"uid": 5, "subject": "a"}, {"uid": 6, "subject": "b"}]'
+    items = mfa.parse_email_items(text)
+    assert [it["uid"] for it in items] == [5, 6]
+
+
+def test_parse_email_items_wrapped():
+    text = '{"emails": [{"id": 1}, {"id": 2}], "page": 1}'
+    items = mfa.parse_email_items(text)
+    assert len(items) == 2
+
+
+def test_parse_email_items_single_dict():
+    text = '{"uid": 9, "subject": "x"}'
+    assert mfa.parse_email_items(text) == [{"uid": 9, "subject": "x"}]
+
+
+def test_parse_email_items_embedded_json():
+    # 前後にテキストが付いていても JSON 部分を拾う
+    text = 'result: {"emails": [{"uid": 7}]} done'
+    assert mfa.parse_email_items(text) == [{"uid": 7}]
+
+
+def test_parse_email_items_garbage():
+    assert mfa.parse_email_items("not json") == []
+    assert mfa.parse_email_items("") == []
+
+
+def test_email_item_id_priority_and_coercion():
+    assert mfa.email_item_id({"uid": "1012", "id": 5}) == 1012   # uid 優先・数字は int
+    assert mfa.email_item_id({"email_id": "ABC"}) == "ABC"       # 非数字は str
+    assert mfa.email_item_id({"subject": "x"}) is None
+    assert mfa.email_item_id({"uid": None, "id": 3}) == 3        # 無効値は次キーへ
+    assert mfa.email_item_id("nope") is None
+
+
+def test_baseline_skip_logic():
+    # 古いメール(uid 100)は baseline 化され、新着(uid 101)のみ対象になることを
+    # 純粋関数レベルで確認（_solve_email の判定ロジックと同等）。
+    old = mfa.parse_email_items('[{"uid":100,"subject":"old 111111"}]')
+    baseline = {mfa.email_item_id(it) for it in old}
+    later = mfa.parse_email_items(
+        '[{"uid":101,"subject":"new 222222"},{"uid":100,"subject":"old 111111"}]'
+    )
+    new_items = [it for it in later if mfa.email_item_id(it) not in baseline]
+    assert [mfa.email_item_id(it) for it in new_items] == [101]
+    subj = "\n".join(it.get("subject", "") for it in new_items)
+    assert mfa.extract_otp(subj) == "222222"
+
+
 # ── MFASolver の分岐（MCP 呼び出しはモック） ───────────────────────────────
 def test_solver_disabled_returns_none():
     import asyncio

@@ -371,6 +371,8 @@ python main.py scan https://example.com \
 > まず件名、無ければ本文から `WSCAN_MFA_CODE_LENGTH`（既定 6 桁）または
 > `WSCAN_MFA_CODE_REGEX` に基づいてコードを抽出します。ツール名は利用する MCP
 > サーバの API に合わせて `*_LIST_TOOL` / `*_CONTENT_TOOL` で調整してください。
+> ポーリング開始時点で既に受信箱にあるメールは除外し、**その後に届いた新着メール
+> のみ**を対象にします（前回ログインの期限切れコードを誤投入しないため）。
 
 ### DOM-based XSS 検出を有効化
 
