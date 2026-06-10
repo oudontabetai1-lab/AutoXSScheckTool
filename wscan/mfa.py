@@ -65,6 +65,23 @@ def looks_like_mfa_page(html: str) -> bool:
     return any(sig in low for sig in _MFA_SIGNALS)
 
 
+def mfa_field_present(html: str, field: str) -> bool:
+    """設定された MFA コード入力欄（name/id == *field*）が HTML 内にあるか（純粋関数）。
+
+    "code" のような汎用語シグナルに乗らない素っ気ない MFA 画面でも、ユーザーが
+    明示指定した入力欄の存在を手掛かりに検出できるようにする。
+    """
+    if not html or not field:
+        return False
+    pat = rf'(?:name|id)\s*=\s*["\']?{re.escape(field)}\b'
+    return re.search(pat, html, re.IGNORECASE) is not None
+
+
+def mfa_challenge_present(html: str, field: str = "") -> bool:
+    """MFA チャレンジ画面か（強いシグナル or 設定欄の存在）を判定する（純粋関数）。"""
+    return looks_like_mfa_page(html) or mfa_field_present(html, field)
+
+
 def extract_otp(text: str, length: int = 6, regex: str = "") -> Optional[str]:
     """テキストからワンタイムコードを抽出する（純粋関数）。
 

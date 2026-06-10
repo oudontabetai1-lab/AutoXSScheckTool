@@ -54,6 +54,47 @@ def test_looks_like_mfa_page_empty():
     assert mfa.looks_like_mfa_page("") is False
 
 
+# ── mfa_field_present / mfa_challenge_present ──────────────────────────────
+def test_mfa_field_present_by_name():
+    html = '<form><input type="text" name="otp" maxlength="6"></form>'
+    assert mfa.mfa_field_present(html, "otp") is True
+
+
+def test_mfa_field_present_by_id_case_insensitive():
+    html = '<input id="Code" autocomplete="one-time-code">'
+    assert mfa.mfa_field_present(html, "code") is True
+
+
+def test_mfa_field_present_no_match():
+    html = '<input name="username"><input name="password">'
+    assert mfa.mfa_field_present(html, "otp") is False
+    assert mfa.mfa_field_present(html, "") is False
+    assert mfa.mfa_field_present("", "otp") is False
+
+
+def test_mfa_field_present_not_partial():
+    # name="otptoken" は field="otp" に誤マッチしない（\b 境界）
+    html = '<input name="otptoken">'
+    assert mfa.mfa_field_present(html, "otp") is False
+
+
+def test_mfa_challenge_present_via_generic_field():
+    # 文言は素っ気ない（"Enter code"）が、設定欄 code があれば検出する
+    html = '<h2>Enter code</h2><input name="code">'
+    assert mfa.looks_like_mfa_page(html) is False
+    assert mfa.mfa_challenge_present(html, "code") is True
+
+
+def test_mfa_challenge_present_via_signal():
+    html = "<p>verification code sent</p>"
+    assert mfa.mfa_challenge_present(html, "otp") is True
+
+
+def test_mfa_challenge_present_negative():
+    html = '<form><input name="username"><input name="password"></form>'
+    assert mfa.mfa_challenge_present(html, "otp") is False
+
+
 # ── parse_command / parse_json_obj ─────────────────────────────────────────
 def test_parse_command_shlex():
     assert mfa.parse_command("mcp-email-server@latest stdio") == [
