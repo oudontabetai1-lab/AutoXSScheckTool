@@ -355,3 +355,16 @@ def test_solver_disabled_returns_none():
     solver = mfa.MFASolver(cfg)
     assert solver.enabled is False
     assert asyncio.run(solver.solve()) is None
+
+
+def test_solver_prime_noop_for_totp():
+    import asyncio
+
+    cfg = mfa.MFAConfig.from_env(
+        env={"WSCAN_MFA_TYPE": "totp", "WSCAN_MFA_TOTP_ARGS": "/srv/i.js"}
+    )
+    solver = mfa.MFASolver(cfg)
+    assert solver._email_baseline is None
+    # TOTP では prime は何もしない（例外も出さない）。
+    asyncio.run(solver.prime())
+    assert solver._email_baseline is None

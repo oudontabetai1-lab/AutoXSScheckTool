@@ -394,6 +394,9 @@ class MFASolver:
 
     def __init__(self, config: MFAConfig):
         self.config = config
+        # メール: パスワード送信前に確保する「既存メール ID」の baseline。
+        # prime() で設定し、solve() が新着判定の基準に使う（古いコードの誤投入防止）。
+        self._email_baseline: Optional[set] = None
 
     @property
     def enabled(self) -> bool:
@@ -409,6 +412,40 @@ class MFASolver:
         merged = dict(os.environ)
         merged.update(self.config.extra_env or {})
         return merged
+
+    async def prime(self) -> None:
+        """コード送信のトリガ（パスワード送信）前に呼ぶ事前準備。
+
+        メール方式では、この時点で受信箱にある既存メール ID を baseline として
+        記録する。これにより solve() は「送信後に届いた新着メールのみ」を対象に
+        でき、前回ログインの期限切れコードを拾わない。TOTP では何もしない。
+        失敗しても無視（solve() 側が初回ポーリングで baseline を作る従来動作へ）。
+        """
+        if self.config.type != "email":
+            return
+        try:
+            ids = await self._list_email_ids()
+            if ids is not None:
+                self._email_baseline = ids
+        except Exception:
+            self._email_baseline = None
+
+    async def _list_email_ids(self) -> Optional[set]:
+        """現在の受信箱メタデータからメール ID 集合を取得する。"""
+        cfg = self.config
+        list_args = {
+            "account_name": cfg.email_account,
+            "page": 1,
+            "page_size": cfg.email_page_size,
+            "order": "desc",
+        }
+        list_args.update(cfg.email_list_args or {})
+        result = await _call_mcp_tool(
+            cfg.email_command, cfg.email_args, self._env(),
+            cfg.email_list_tool, list_args,
+        )
+        items = parse_email_items(collect_tool_text(result))
+        return {i for i in (email_item_id(it) for it in items) if i is not None}
 
     async def solve(self) -> Optional[str]:
         """MFA 種別に応じてコードを取得する。失敗時は ``None``。"""
@@ -475,7 +512,10 @@ class MFASolver:
         async with stdio_client(params) as (read, write):
             async with ClientSession(read, write) as session:
                 await session.initialize()
-                baseline: Optional[set] = None  # ポーリング開始時点の既存メール ID
+                # prime() でパスワード送信前に baseline を確保済みなら、それを使い
+                # 初回ポーリングから新着メールを検査する（送信直後に届く OTP を
+                # baseline で握り潰さないため）。未 prime 時のみ初回で baseline 化。
+                baseline: Optional[set] = self._email_baseline
                 processed: set = set()           # 本文取得済みの新着 ID
                 while True:
                     try:

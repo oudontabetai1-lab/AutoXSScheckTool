@@ -906,6 +906,16 @@ class BrowserManager:
             if not await _fill_field(pass_selector, self.auth_pass):
                 return False
 
+            # MFA（メール）の baseline をパスワード送信前に確保する。送信で OTP メールが
+            # 飛ぶため、ここで「送信前から受信箱にある古いメール」を記録しておくと、
+            # 送信後に届く新着のみを solve() で対象にできる（古いコードの誤投入防止）。
+            mfa_solver = getattr(self, "mfa_solver", None)
+            if mfa_solver is not None and mfa_solver.enabled:
+                try:
+                    await mfa_solver.prime()
+                except Exception:
+                    pass
+
             submitted = False
             try:
                 submit_btn = self.page.locator(user_selector).locator("xpath=ancestor::form").locator(
@@ -949,9 +959,10 @@ class BrowserManager:
             # 要求される場合、外部 MCP 経由でコードを取得して投入する。未設定・
             # 非該当時は何もしない（従来挙動を維持）。
             mfa_field = ""
-            if self.mfa_solver is not None and self.mfa_solver.enabled:
+            mfa_solver = getattr(self, "mfa_solver", None)
+            if mfa_solver is not None and mfa_solver.enabled:
                 from . import mfa as _mfa
-                mfa_field = self.mfa_solver.field or "otp"
+                mfa_field = mfa_solver.field or "otp"
                 mfa_status = await self._handle_mfa_challenge(success_indicator)
                 if mfa_status == "failed":
                     # MFA 画面を検出したがコード取得/投入に失敗。未認証のまま
@@ -1389,6 +1400,8 @@ class WorkerBrowser(BrowserManager):
         self.monitor = real_browser.monitor
         self.auth_user = real_browser.auth_user
         self.auth_pass = real_browser.auth_pass
+        # MFA ソルバも引き継ぐ（worker のセッション切れ再ログインでも MFA を解ける）。
+        self.mfa_solver = getattr(real_browser, "mfa_solver", None)
         self.proxy = real_browser.proxy
         self.sleep_factor = real_browser.sleep_factor
         self._playwright = real_browser._playwright
