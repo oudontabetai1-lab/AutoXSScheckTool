@@ -443,9 +443,10 @@ Examples:
     # (TOTP_SECRET_* / MCP_EMAIL_SERVER_*); see README.
     scan.add_argument(
         "--mfa-type", metavar="KIND", choices=["totp", "email"],
-        default=_CFG.get("mfa_type", ""),
+        default=(_CFG.get("mfa_type") or None),
         help="Solve login MFA via external MCP: 'totp' (mcp-totp-authenticator) "
-             "or 'email' (mcp-email-server). Configure via WSCAN_MFA_* env.",
+             "or 'email' (mcp-email-server). Configure via WSCAN_MFA_* env. "
+             "Unset → falls back to WSCAN_MFA_TYPE env.",
     )
     scan.add_argument(
         "--mfa-field", metavar="NAME", default=_CFG.get("mfa_field", ""),
@@ -1338,7 +1339,8 @@ async def run_scan(args):
             login_user_field=getattr(args, "login_user_field", "username") or "username",
             login_pass_field=getattr(args, "login_pass_field", "password") or "password",
             login_success_indicator=getattr(args, "login_success", "") or "",
-            mfa_type=getattr(args, "mfa_type", "") or "",
+            # None=未指定(env に委ねる) / ""=明示無効 / "totp"|"email"=明示有効
+            mfa_type=getattr(args, "mfa_type", None),
             mfa_field=getattr(args, "mfa_field", "") or "",
             learning_file=getattr(args, "learning_file", "") or "",
             # Feature on/off flags (from config or CLI)
@@ -1781,7 +1783,9 @@ async def run_serve(args):
                 login_user_field=cfg.get("login_user_field", "username") or "username",
                 login_pass_field=cfg.get("login_pass_field", "password") or "password",
                 login_success_indicator=cfg.get("login_success_indicator", "") or "",
-                mfa_type=cfg.get("mfa_type", "") or "",
+                # ダッシュボードは常に mfa_type を送る("" = UI で「無効」選択)。
+                # "" は env を上書きして無効化。キー欠落(None)時のみ env に委ねる。
+                mfa_type=cfg.get("mfa_type"),
                 mfa_field=cfg.get("mfa_field", "") or "",
                 payloads_file=cfg.get("payloads_file") or None,
                 learning_file=cfg.get("learning_file") or None,

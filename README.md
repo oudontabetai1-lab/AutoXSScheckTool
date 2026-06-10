@@ -337,10 +337,11 @@ python main.py scan https://example.com \
   --mfa-type totp --mfa-field otp
 
 # 例2: メール送付コード方式。受信は mcp-email-server（IMAP）に委譲。
+# 一覧(list_emails_metadata)→本文(get_emails_content)の2段で読む。account_name 必須。
 export WSCAN_MFA_EMAIL_COMMAND="uvx"
 export WSCAN_MFA_EMAIL_ARGS="mcp-email-server@latest stdio"
-export WSCAN_MFA_EMAIL_TOOL="get_emails"                 # サーバの取得ツール名
-export WSCAN_MFA_EMAIL_TOOL_ARGS='{"page_size": 5}'      # ツール引数（JSON）
+export WSCAN_MFA_EMAIL_ACCOUNT="ops"                     # mcp-email-server に登録済みの account_name
+export WSCAN_MFA_EMAIL_LIST_ARGS='{"subject": "code"}'   # 任意の絞り込み(JSON)
 export MCP_EMAIL_SERVER_EMAIL_ADDRESS="otp@example.com"  # ← email サーバが読む
 export MCP_EMAIL_SERVER_PASSWORD="app-password"
 export MCP_EMAIL_SERVER_IMAP_HOST="imap.example.com"
@@ -353,19 +354,23 @@ python main.py scan https://example.com \
 
 | 変数 | 既定 | 説明 |
 |---|---|---|
-| `WSCAN_MFA_TYPE` | `none` | `totp` / `email` / `none`（`--mfa-type` で上書き） |
+| `WSCAN_MFA_TYPE` | `none` | `totp` / `email` / `none`。UI/CLI(`--mfa-type`)で明示指定するとこの env より優先（UI の「無効」で確実に切れる） |
 | `WSCAN_MFA_FIELD` | `otp` | コード入力欄の name/id（`--mfa-field` で上書き） |
 | `WSCAN_MFA_CODE_LENGTH` | `6` | 抽出するコード桁数 |
 | `WSCAN_MFA_CODE_REGEX` | — | コード抽出の正規表現（指定時はこちらを優先） |
 | `WSCAN_MFA_TOTP_COMMAND` / `_ARGS` | `node` / — | TOTP MCP の起動コマンド・引数 |
 | `WSCAN_MFA_TOTP_TOOL` / `_LABEL` | `get_totp_code` / — | 呼ぶツール名・アカウントラベル |
 | `WSCAN_MFA_EMAIL_COMMAND` / `_ARGS` | `uvx` / `mcp-email-server@latest stdio` | メール MCP の起動 |
-| `WSCAN_MFA_EMAIL_TOOL` / `_TOOL_ARGS` | `get_emails` / `{}` | 取得ツール名・引数(JSON) |
+| `WSCAN_MFA_EMAIL_ACCOUNT` | — | mcp-email-server の `account_name`（**email 時は必須**） |
+| `WSCAN_MFA_EMAIL_LIST_TOOL` / `_CONTENT_TOOL` | `list_emails_metadata` / `get_emails_content` | 一覧・本文取得ツール名 |
+| `WSCAN_MFA_EMAIL_PAGE_SIZE` | `5` | 一覧で取得する直近メール件数 |
+| `WSCAN_MFA_EMAIL_LIST_ARGS` / `_CONTENT_ARGS` | `{}` / `{}` | 各ツールへの追加引数(JSON, 例 `{"subject":"code"}`) |
 | `WSCAN_MFA_EMAIL_TIMEOUT` / `_INTERVAL` | `60` / `5` | メール到着待ちの最大秒・ポーリング間隔 |
 
-> ツール名・引数（`*_TOOL` / `*_TOOL_ARGS`）は利用する MCP サーバの API に合わせて
-> 調整してください。取得したメール本文/件名から `WSCAN_MFA_CODE_LENGTH`（既定 6 桁）
-> または `WSCAN_MFA_CODE_REGEX` に基づいてコードを抽出します。
+> メールは「一覧（`list_emails_metadata`）→ 本文（`get_emails_content`）」の2段で読み、
+> まず件名、無ければ本文から `WSCAN_MFA_CODE_LENGTH`（既定 6 桁）または
+> `WSCAN_MFA_CODE_REGEX` に基づいてコードを抽出します。ツール名は利用する MCP
+> サーバの API に合わせて `*_LIST_TOOL` / `*_CONTENT_TOOL` で調整してください。
 
 ### DOM-based XSS 検出を有効化
 

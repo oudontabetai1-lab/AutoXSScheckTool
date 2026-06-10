@@ -187,12 +187,23 @@ def test_mfaconfig_totp_without_args_disabled():
     assert cfg.enabled is False
 
 
-def test_mfaconfig_email_defaults_enabled():
+def test_mfaconfig_email_requires_account():
+    # account_name が無いと list/get が必ず失敗するため無効扱い
     cfg = mfa.MFAConfig.from_env(env={"WSCAN_MFA_TYPE": "email"})
+    assert cfg.enabled is False
+
+
+def test_mfaconfig_email_enabled_with_account():
+    cfg = mfa.MFAConfig.from_env(
+        env={"WSCAN_MFA_TYPE": "email", "WSCAN_MFA_EMAIL_ACCOUNT": "ops"}
+    )
     assert cfg.enabled is True
     assert cfg.email_command == "uvx"
     assert cfg.email_args == ["mcp-email-server@latest", "stdio"]
-    assert cfg.email_tool == "get_emails"
+    # 実在ツール名がデフォルト（get_emails は存在しない）
+    assert cfg.email_list_tool == "list_emails_metadata"
+    assert cfg.email_content_tool == "get_emails_content"
+    assert cfg.email_account == "ops"
 
 
 def test_mfaconfig_overrides_take_precedence():
@@ -207,17 +218,57 @@ def test_mfaconfig_invalid_type_falls_back_to_none():
     assert cfg.type == "none"
 
 
-def test_mfaconfig_email_tool_args_parsed():
+def test_mfaconfig_email_tool_overrides_parsed():
     env = {
         "WSCAN_MFA_TYPE": "email",
-        "WSCAN_MFA_EMAIL_TOOL": "list_emails",
-        "WSCAN_MFA_EMAIL_TOOL_ARGS": '{"account": "ops", "page_size": 3}',
+        "WSCAN_MFA_EMAIL_ACCOUNT": "ops",
+        "WSCAN_MFA_EMAIL_LIST_TOOL": "list_emails",
+        "WSCAN_MFA_EMAIL_LIST_ARGS": '{"subject": "code"}',
+        "WSCAN_MFA_EMAIL_PAGE_SIZE": "3",
         "WSCAN_MFA_CODE_LENGTH": "8",
     }
     cfg = mfa.MFAConfig.from_env(env=env)
-    assert cfg.email_tool == "list_emails"
-    assert cfg.email_tool_args == {"account": "ops", "page_size": 3}
+    assert cfg.email_list_tool == "list_emails"
+    assert cfg.email_list_args == {"subject": "code"}
+    assert cfg.email_page_size == 3
     assert cfg.code_length == 8
+
+
+def test_mfaconfig_explicit_disable_overrides_env():
+    # UI/config で「無効」("") を選んだら env の WSCAN_MFA_TYPE を上書きして無効化
+    env = {"WSCAN_MFA_TYPE": "totp", "WSCAN_MFA_TOTP_ARGS": "/srv/i.js"}
+    cfg = mfa.MFAConfig.from_env(env=env, overrides={"type": "none"})
+    assert cfg.type == "none"
+    assert cfg.enabled is False
+
+
+def test_mfaconfig_no_override_uses_env():
+    # overrides に type が無ければ env を採用（未指定=env 委譲）
+    env = {"WSCAN_MFA_TYPE": "totp", "WSCAN_MFA_TOTP_ARGS": "/srv/i.js"}
+    cfg = mfa.MFAConfig.from_env(env=env, overrides={})
+    assert cfg.type == "totp"
+    assert cfg.enabled is True
+
+
+# ── extract_email_ids ──────────────────────────────────────────────────────
+def test_extract_email_ids_from_json():
+    text = '{"emails": [{"uid": 1012, "subject": "x"}, {"uid": 1011}]}'
+    assert mfa.extract_email_ids(text) == [1012, 1011]
+
+
+def test_extract_email_ids_string_ids_and_dedup():
+    text = '[{"id": "A1"}, {"id": "A1"}, {"email_id": "B2"}]'
+    assert mfa.extract_email_ids(text) == ["A1", "B2"]
+
+
+def test_extract_email_ids_limit():
+    text = ",".join(f'{{"uid": {i}}}' for i in range(10))
+    assert mfa.extract_email_ids(text, limit=3) == [0, 1, 2]
+
+
+def test_extract_email_ids_empty():
+    assert mfa.extract_email_ids("") == []
+    assert mfa.extract_email_ids("no ids here") == []
 
 
 # ── MFASolver の分岐（MCP 呼び出しはモック） ───────────────────────────────

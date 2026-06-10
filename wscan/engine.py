@@ -255,7 +255,7 @@ class ScanEngine:
         login_user_field: str = "username",
         login_pass_field: str = "password",
         login_success_indicator: str = "",
-        mfa_type: str = "",
+        mfa_type: Optional[str] = None,
         mfa_field: str = "",
         learning_file: Optional[str] = None,
         # Feature flags (from config/wscan.yaml via main.py)
@@ -492,12 +492,13 @@ class ScanEngine:
             refresh_interval=float(header_refresh_interval or 0.0),
         )
         # MFA（2FA）ソルバ: ログイン時のワンタイムコードを外部 MCP から取得。
-        # 設定（種別/欄）は env（WSCAN_MFA_*）が基本で、CLI 引数があれば上書き。
-        # 有効化されていなければ None（従来挙動）。
+        # 種別/欄は env（WSCAN_MFA_*）が既定。UI/CLI/config が明示的に値を渡した
+        # ときはそれを優先する。mfa_type=None は「未指定→env に委ねる」、空文字 ""
+        # は「明示的に無効」を意味し、env に WSCAN_MFA_TYPE があっても上書き無効化する。
         from .mfa import MFAConfig, MFASolver
         _mfa_overrides: dict = {}
-        if mfa_type:
-            _mfa_overrides["type"] = mfa_type
+        if mfa_type is not None:
+            _mfa_overrides["type"] = mfa_type or "none"
         if mfa_field:
             _mfa_overrides["field"] = mfa_field
         self._mfa_config = MFAConfig.from_env(overrides=_mfa_overrides)

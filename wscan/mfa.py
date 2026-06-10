@@ -139,6 +139,34 @@ def parse_json_obj(value) -> dict:
         return {}
 
 
+def extract_email_ids(text: str, limit: int = 5) -> list:
+    """メール一覧（メタデータ）JSON/テキストからメール ID を抽出する（純粋関数）。
+
+    ``list_emails_metadata`` の戻りから id/uid/email_id 等を拾い、本文取得
+    （``get_emails_content``）へ渡す。数字 ID は int、その他は文字列で返す。
+    重複は順序保持で除去し、先頭 *limit* 件まで。
+    """
+    if not text:
+        return []
+    out: list = []
+    seen: set = set()
+    pat = re.compile(
+        r'"(?:id|uid|email_id|message_id|sequence|seq)"\s*:\s*"?([^",}\s]+)"?',
+        re.IGNORECASE,
+    )
+    for raw in pat.findall(text):
+        val = raw.strip()
+        if not val or val.lower() in ("null", "none"):
+            continue
+        if val in seen:
+            continue
+        seen.add(val)
+        out.append(int(val) if val.isdigit() else val)
+        if len(out) >= limit:
+            break
+    return out
+
+
 def collect_tool_text(result) -> str:
     """MCP ``call_tool`` 結果からテキストを集約する（純粋関数）。
 
@@ -182,13 +210,19 @@ class MFAConfig:
     totp_label: str = ""
     totp_label_arg: str = "label"
 
-    # メール (mcp-email-server)
+    # メール (mcp-email-server / ai-zerolab)
+    # 受信箱はメタデータ一覧 → 本文取得の 2 段で読む（list-then-fetch）。
+    # 実在ツール: list_emails_metadata / get_emails_content（いずれも account_name 必須）。
     email_command: str = "uvx"
     email_args: list = dc_field(
         default_factory=lambda: ["mcp-email-server@latest", "stdio"]
     )
-    email_tool: str = "get_emails"
-    email_tool_args: dict = dc_field(default_factory=dict)
+    email_account: str = ""                 # account_name（mcp-email-server 側で登録済みの名前）
+    email_list_tool: str = "list_emails_metadata"
+    email_content_tool: str = "get_emails_content"
+    email_page_size: int = 5
+    email_list_args: dict = dc_field(default_factory=dict)    # subject/from_address 等の追加フィルタ
+    email_content_args: dict = dc_field(default_factory=dict)
     email_timeout: float = 60.0
     email_interval: float = 5.0
 
@@ -197,7 +231,8 @@ class MFAConfig:
         if self.type == "totp":
             return bool(self.totp_command and self.totp_args)
         if self.type == "email":
-            return bool(self.email_command and self.email_args)
+            # account_name が無いと list/get が必ず失敗するため必須扱い。
+            return bool(self.email_command and self.email_args and self.email_account)
         return False
 
     @classmethod
@@ -223,7 +258,11 @@ class MFAConfig:
             # WSCAN_MFA_FIELD -> "field" のような overrides キー名
             return key.replace("WSCAN_MFA_", "").lower()
 
-        mtype = _s("WSCAN_MFA_TYPE", "none").lower()
+        # type は overrides を最優先。明示的に "none"/"" を渡されたら env を無視して無効化。
+        if "type" in ov:
+            mtype = (str(ov.get("type") or "none")).lower()
+        else:
+            mtype = _s("WSCAN_MFA_TYPE", "none").lower()
         if mtype not in ("totp", "email", "none"):
             mtype = "none"
 
@@ -241,8 +280,14 @@ class MFAConfig:
             email_args=parse_command(
                 e.get("WSCAN_MFA_EMAIL_ARGS", "mcp-email-server@latest stdio")
             ),
-            email_tool=_s("WSCAN_MFA_EMAIL_TOOL", "get_emails") or "get_emails",
-            email_tool_args=parse_json_obj(e.get("WSCAN_MFA_EMAIL_TOOL_ARGS", "")),
+            email_account=_s("WSCAN_MFA_EMAIL_ACCOUNT", ""),
+            email_list_tool=_s("WSCAN_MFA_EMAIL_LIST_TOOL", "list_emails_metadata")
+            or "list_emails_metadata",
+            email_content_tool=_s("WSCAN_MFA_EMAIL_CONTENT_TOOL", "get_emails_content")
+            or "get_emails_content",
+            email_page_size=int(_f("WSCAN_MFA_EMAIL_PAGE_SIZE", 5)),
+            email_list_args=parse_json_obj(e.get("WSCAN_MFA_EMAIL_LIST_ARGS", "")),
+            email_content_args=parse_json_obj(e.get("WSCAN_MFA_EMAIL_CONTENT_ARGS", "")),
             email_timeout=_f("WSCAN_MFA_EMAIL_TIMEOUT", 60.0),
             email_interval=_f("WSCAN_MFA_EMAIL_INTERVAL", 5.0),
         )
@@ -308,9 +353,24 @@ class MFASolver:
         return extract_otp(text, cfg.code_length, cfg.code_regex)
 
     async def _solve_email(self) -> Optional[str]:
+        """受信箱から MFA コードを取得する（list-then-fetch）。
+
+        mcp-email-server (ai-zerolab) の実ツールに合わせ、まず
+        ``list_emails_metadata`` で直近メールのメタデータ（件名等）を取得し、
+        件名でコードが拾えなければ ``get_emails_content`` で本文を取って抽出する。
+        コードが届くまで ``email_timeout`` 秒ポーリングする。
+        """
         cfg = self.config
         from mcp import ClientSession, StdioServerParameters
         from mcp.client.stdio import stdio_client
+
+        list_args = {
+            "account_name": cfg.email_account,
+            "page": 1,
+            "page_size": cfg.email_page_size,
+            "order": "desc",
+        }
+        list_args.update(cfg.email_list_args or {})
 
         params = StdioServerParameters(
             command=cfg.email_command, args=list(cfg.email_args), env=self._env()
@@ -321,13 +381,28 @@ class MFASolver:
                 await session.initialize()
                 while True:
                     try:
-                        result = await session.call_tool(
-                            cfg.email_tool, dict(cfg.email_tool_args)
-                        )
-                        text = collect_tool_text(result)
-                        code = extract_otp(text, cfg.code_length, cfg.code_regex)
+                        meta = await session.call_tool(cfg.email_list_tool, dict(list_args))
+                        meta_text = collect_tool_text(meta)
+                        # まず件名/メタデータからコードを試す（OTP を件名に載せる実装向け）。
+                        code = extract_otp(meta_text, cfg.code_length, cfg.code_regex)
                         if code:
                             return code
+                        # 本文を取って抽出。
+                        ids = extract_email_ids(meta_text, limit=cfg.email_page_size)
+                        if ids:
+                            content_args = {
+                                "account_name": cfg.email_account,
+                                "email_ids": ids,
+                            }
+                            content_args.update(cfg.email_content_args or {})
+                            body = await session.call_tool(
+                                cfg.email_content_tool, content_args
+                            )
+                            code = extract_otp(
+                                collect_tool_text(body), cfg.code_length, cfg.code_regex
+                            )
+                            if code:
+                                return code
                     except Exception:
                         pass
                     if time.monotonic() >= deadline:
