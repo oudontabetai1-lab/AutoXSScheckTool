@@ -132,12 +132,16 @@ class BrowserManager:
         tls_config: Optional[TLSConfig] = None,
         target_url: str = "",
         request_logger=None,
+        mfa_solver=None,
     ):
         self.headless = headless
         self.timeout = timeout * 1000  # ms
         self.monitor = monitor
         self.auth_user = auth_user
         self.auth_pass = auth_pass
+        # MFA（2FA）ソルバ。設定時はログイン後のワンタイムコード入力を自動化。
+        # None なら従来どおり MFA 段は何もしない。
+        self.mfa_solver = mfa_solver
         self.proxy = proxy  # e.g. "http://127.0.0.1:8080"
         self.sleep_factor = sleep_factor
         self.tls_config = tls_config or TLSConfig()
@@ -941,6 +945,12 @@ class BrowserManager:
                     # polling loop below still evaluates the resulting body and URL.
                     pass
 
+            # MFA（2FA）チャレンジ: パスワード送信後にワンタイムコード入力が
+            # 要求される場合、外部 MCP 経由でコードを取得して投入する。未設定・
+            # 非該当時は何もしない（従来挙動を維持）。
+            if self.mfa_solver is not None and self.mfa_solver.enabled:
+                await self._handle_mfa_challenge(success_indicator)
+
             login_url_norm = login_url.rstrip("/")
             failure_markers = (
                 "invalid login",
@@ -980,6 +990,77 @@ class BrowserManager:
                 await asyncio.sleep(0.25)
             self.last_login_url = post_url
             return False
+        except Exception:
+            return False
+
+    async def _handle_mfa_challenge(self, success_indicator: str = "") -> bool:
+        """パスワード送信後に MFA コード入力画面が出たら自動で突破する。
+
+        最大 10 秒 MFA 画面の出現を待ち、出たら外部 MCP からコードを取得して
+        入力欄へ投入・送信する。例外・未出現時は静かに ``False`` を返し、
+        呼び出し側の成否判定（poll ループ）に委ねる。
+        """
+        from . import mfa as _mfa
+
+        try:
+            deadline = time.monotonic() + 10.0
+            body = ""
+            while time.monotonic() < deadline:
+                try:
+                    await self.page.wait_for_load_state("domcontentloaded", timeout=1000)
+                except Exception:
+                    pass
+                body = await self.get_page_source()
+                # 既に成功条件を満たしていれば MFA 不要。
+                if success_indicator and (
+                    success_indicator in self.page.url or success_indicator in body
+                ):
+                    return False
+                if _mfa.looks_like_mfa_page(body):
+                    break
+                await asyncio.sleep(0.3)
+            else:
+                return False  # MFA 画面は現れなかった
+
+            code = await self.mfa_solver.solve()
+            if not code:
+                return False
+
+            # コード入力欄を埋める。設定欄 → 一般的な OTP 入力欄の順に試す。
+            field = self.mfa_solver.field or "otp"
+            candidates = [
+                f'[name="{field}"],[id="{field}"]',
+                'input[autocomplete="one-time-code"]',
+                'input[name*="otp" i],input[id*="otp" i]',
+                'input[name*="code" i],input[id*="code" i]',
+                'input[name*="token" i],input[id*="token" i]',
+            ]
+            used = ""
+            for sel in candidates:
+                try:
+                    await self.page.fill(sel, code, timeout=3000)
+                    used = sel
+                    break
+                except Exception:
+                    continue
+            if not used:
+                return False
+
+            # 送信（同フォームの submit ボタン → 失敗時は Enter）。
+            try:
+                submit_btn = self.page.locator(used).locator(
+                    "xpath=ancestor::form"
+                ).locator(
+                    'button[type="submit"],input[type="submit"],[type="submit"],'
+                    'button:not([type="button"])'
+                ).first
+                await submit_btn.click(timeout=5000, no_wait_after=True)
+            except Exception:
+                try:
+                    await self.page.keyboard.press("Enter")
+                except Exception:
+                    pass
+            return True
         except Exception:
             return False
 

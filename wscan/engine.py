@@ -255,6 +255,8 @@ class ScanEngine:
         login_user_field: str = "username",
         login_pass_field: str = "password",
         login_success_indicator: str = "",
+        mfa_type: str = "",
+        mfa_field: str = "",
         learning_file: Optional[str] = None,
         # Feature flags (from config/wscan.yaml via main.py)
         enable_ai_analysis: bool = True,
@@ -489,6 +491,18 @@ class ScanEngine:
             refresh_cmd=header_refresh_cmd or "",
             refresh_interval=float(header_refresh_interval or 0.0),
         )
+        # MFA（2FA）ソルバ: ログイン時のワンタイムコードを外部 MCP から取得。
+        # 設定（種別/欄）は env（WSCAN_MFA_*）が基本で、CLI 引数があれば上書き。
+        # 有効化されていなければ None（従来挙動）。
+        from .mfa import MFAConfig, MFASolver
+        _mfa_overrides: dict = {}
+        if mfa_type:
+            _mfa_overrides["type"] = mfa_type
+        if mfa_field:
+            _mfa_overrides["field"] = mfa_field
+        self._mfa_config = MFAConfig.from_env(overrides=_mfa_overrides)
+        self._mfa_solver = MFASolver(self._mfa_config) if self._mfa_config.enabled else None
+
         # Components
         self._browser = BrowserManager(
             headless=headless, timeout=timeout, monitor=monitor,
@@ -499,6 +513,7 @@ class ScanEngine:
             tls_config=self.tls_config,
             target_url=self.target_url,
             request_logger=self.request_logger,
+            mfa_solver=self._mfa_solver,
         )
         # When the refresh task fetches a new token, push it into the browser
         # context so crawled pages immediately use the rotated header.
@@ -817,6 +832,11 @@ class ScanEngine:
                 console.print(
                     f"  [cyan][Auth] Auto-login:[/cyan] {self.login_url}"
                 )
+                if self._mfa_solver is not None:
+                    console.print(
+                        f"  [cyan][Auth] MFA enabled:[/cyan] type={self._mfa_config.type} "
+                        f"(external MCP)"
+                    )
                 success = await self._browser.auto_login(
                     self.login_url,
                     user_field=self.login_user_field,

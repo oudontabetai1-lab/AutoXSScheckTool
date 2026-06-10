@@ -116,6 +116,8 @@ def _load_config(path: Path = _CONFIG_PATH) -> dict:
     cfg["login_success_indicator"] = str(a.get("login_success_indicator", "") or "")
     cfg["auth_user"]               = str(a.get("auth_user", "") or "")
     cfg["auth_pass"]               = str(a.get("auth_pass", "") or "")
+    cfg["mfa_type"]                = str(a.get("mfa_type", "") or "")
+    cfg["mfa_field"]               = str(a.get("mfa_field", "") or "")
 
     cfg["dom_xss"]                 = bool(f.get("dom_xss",          False))
     cfg["ai_analysis"]             = bool(f.get("ai_analysis",      True))
@@ -436,6 +438,18 @@ Examples:
     scan.add_argument(
         "--login-success", metavar="TEXT", default=_CFG.get("login_success_indicator", ""),
         help="Substring expected in the post-login URL or page to confirm success.",
+    )
+    # MFA (2FA) automation via external MCP servers. Secrets live in env
+    # (TOTP_SECRET_* / MCP_EMAIL_SERVER_*); see README.
+    scan.add_argument(
+        "--mfa-type", metavar="KIND", choices=["totp", "email"],
+        default=_CFG.get("mfa_type", ""),
+        help="Solve login MFA via external MCP: 'totp' (mcp-totp-authenticator) "
+             "or 'email' (mcp-email-server). Configure via WSCAN_MFA_* env.",
+    )
+    scan.add_argument(
+        "--mfa-field", metavar="NAME", default=_CFG.get("mfa_field", ""),
+        help="One-time-code input field name/id on the login form (default: otp).",
     )
     # A-3: Payload learning
     scan.add_argument(
@@ -1324,6 +1338,8 @@ async def run_scan(args):
             login_user_field=getattr(args, "login_user_field", "username") or "username",
             login_pass_field=getattr(args, "login_pass_field", "password") or "password",
             login_success_indicator=getattr(args, "login_success", "") or "",
+            mfa_type=getattr(args, "mfa_type", "") or "",
+            mfa_field=getattr(args, "mfa_field", "") or "",
             learning_file=getattr(args, "learning_file", "") or "",
             # Feature on/off flags (from config or CLI)
             enable_ai_analysis=not getattr(args, "no_ai_analysis", False),
