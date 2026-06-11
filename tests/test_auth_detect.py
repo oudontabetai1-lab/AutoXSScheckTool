@@ -53,6 +53,31 @@ class LoginFormTests(unittest.TestCase):
     def test_dashboard_has_no_login_form(self):
         self.assertFalse(ad.has_login_form(_DASHBOARD))
 
+    def test_password_change_form_without_username_is_not_login_form(self):
+        # ログイン後のパスワード変更フォーム（form+submit+password だが
+        # ユーザ名/メール欄なし）を「ログインフォーム残存」と誤認しない。
+        pw_change = (
+            '<form method="post" action="/account/password">'
+            '<input type="password" name="current_password">'
+            '<input type="password" name="new_password">'
+            '<input type="password" name="confirm_password">'
+            '<button type="submit">Update password</button>'
+            "</form>"
+        )
+        self.assertFalse(ad.has_login_form(pw_change))
+
+    def test_email_only_login_form_is_detected(self):
+        # name が user 等でなくても type=email があればログインフォーム扱い。
+        email_form = (
+            '<form><input type="email"><input type="password">'
+            '<button type="submit">Go</button></form>'
+        )
+        self.assertTrue(ad.has_login_form(email_form))
+
+    def test_try_again_text_is_not_a_failure_marker(self):
+        # 「try again later」等の良性コピーを失敗と誤判定しない。
+        self.assertFalse(ad.has_failure_text("Something went wrong, please try again later."))
+
 
 class LoginSucceededTests(unittest.TestCase):
     def test_moved_but_still_login_form_is_failure(self):

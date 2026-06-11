@@ -116,9 +116,13 @@ class JsStaticScanner(BaseScanner):
                 continue
 
             confidence = "likely" if risk.tainted else "tentative"
+            # record_finding は (check_type,url,field_name,evidence_type) で重複排除
+            # するため、1スクリプト内に複数シンクがあると潰れる。sink/line を
+            # field_name に含め、別シンクが別 Finding として残るようにする。
+            field_id = f"{field_label} [{risk.sink} L{risk.line}]"
             finding = await self.record_finding(
                 url=page_url,
-                field_name=field_label,
+                field_name=field_id,
                 payload="(no payload — static JS audit)",
                 evidence=(
                     f"{risk.evidence} @ {field_label} line {risk.line}: "

@@ -36,7 +36,6 @@ _FAILURE_MARKERS = (
     "login unsuccessful",
     "could not log",
     "couldn't log",
-    "try again",
     "アカウントまたはパスワード",
     "パスワードが正しく",
     "ログインに失敗",
@@ -58,19 +57,16 @@ _LOGIN_PATH_HINTS = (
 _PASSWORD_INPUT_RE = re.compile(
     r"<input\b[^>]*\btype\s*=\s*['\"]?password['\"]?", re.IGNORECASE
 )
-# ユーザ名/メール欄、あるいは送信ボタン、あるいは <form> の存在。
+# ログイン特有のユーザ名/メール欄（name/id に user/email/login 等を含む）。
 _USERNAME_INPUT_RE = re.compile(
     r"<input\b[^>]*\b(?:name|id)\s*=\s*['\"]?[^'\">]*"
     r"(?:user|email|login|account|mail)[^'\">]*['\"]?",
     re.IGNORECASE,
 )
-_TEXT_INPUT_RE = re.compile(
-    r"<input\b[^>]*\btype\s*=\s*['\"]?(?:text|email)['\"]?", re.IGNORECASE
+# type=email の入力欄（名前が user 等でなくてもログイン欄とみなす）。
+_EMAIL_INPUT_RE = re.compile(
+    r"<input\b[^>]*\btype\s*=\s*['\"]?email['\"]?", re.IGNORECASE
 )
-_SUBMIT_RE = re.compile(
-    r"<(?:button|input)\b[^>]*\btype\s*=\s*['\"]?submit['\"]?", re.IGNORECASE
-)
-_FORM_RE = re.compile(r"<form\b", re.IGNORECASE)
 
 
 def _norm(url: str) -> str:
@@ -109,19 +105,18 @@ def has_failure_text(body: str) -> bool:
 def has_login_form(body: str) -> bool:
     """本文にログインフォームが残っているか。
 
-    パスワード入力欄に加え、ユーザ名/メール欄・送信ボタン・``<form>`` の
-    いずれかが共存する時に「ログインフォーム」とみなす。単独の password 入力
-    （例: ダッシュボード上のパスワード変更ウィジェット）を過剰に拾わないため。
+    パスワード入力欄に加え、**ログイン特有のユーザ名/メール欄**（name/id に
+    user・email・login 等を含む、または type=email）が共存する時にのみ
+    「ログインフォーム」とみなす。送信ボタンや ``<form>`` だけでは判定しない
+    （パスワード変更/アカウント設定など、ログイン後にパスワード欄を持つ正規
+    ページを失敗と誤判定しないため）。
     """
     if not body:
         return False
     if not _PASSWORD_INPUT_RE.search(body):
         return False
     return bool(
-        _USERNAME_INPUT_RE.search(body)
-        or _TEXT_INPUT_RE.search(body)
-        or _SUBMIT_RE.search(body)
-        or _FORM_RE.search(body)
+        _USERNAME_INPUT_RE.search(body) or _EMAIL_INPUT_RE.search(body)
     )
 
 

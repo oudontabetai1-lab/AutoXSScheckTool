@@ -94,6 +94,28 @@ class HtmlExtractionTests(unittest.TestCase):
         self.assertFalse(ja.is_javascript_response("http://x.test/a.css"))
 
 
+class ScannerDedupTests(unittest.TestCase):
+    def test_multiple_sinks_in_one_script_yield_distinct_dedup_keys(self):
+        # 1スクリプト内の複数シンクが record_finding の重複排除で潰れないこと。
+        # js_static は sink/line を field_name に含めて一意化する。
+        from wscan.scanners.base import finding_dedup_key
+
+        src = "eval(location.search);\ndocument.write(location.hash);"
+        risks = ja.analyze_js(src)
+        self.assertGreaterEqual(len(risks), 2)
+        label = "(inline script #1)"
+        keys = {
+            finding_dedup_key(
+                "js_static",
+                "http://x.test/",
+                f"{label} [{r.sink} L{r.line}]",
+                "js_dangerous_sink",
+            )
+            for r in risks
+        }
+        self.assertEqual(len(keys), len(risks))
+
+
 class LineReportingTests(unittest.TestCase):
     def test_line_numbers_reported(self):
         src = "// header\n// header2\neval(location.hash);"
