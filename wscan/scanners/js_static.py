@@ -57,8 +57,16 @@ class JsStaticScanner(BaseScanner):
         へ遷移している（``navigate()`` が network 捕捉も毎回クリアする）ため、
         現在タブの DOM を読むと別ページを解析してしまう。クロール時点で確定した
         HTML を使うことで、正しいページの inline script を確実に解析する。
+
+        外部スクリプトの本文も、クロール時点でスナップショットした
+        ``page.external_scripts``（{絶対URL: body}）を優先して使う（navigate で
+        network 捕捉が消えても外部 JS を解析できる）。
         """
-        return await self._scan(getattr(page, "url", "") or "", getattr(page, "html", "") or "")
+        return await self._scan(
+            getattr(page, "url", "") or "",
+            getattr(page, "html", "") or "",
+            getattr(page, "external_scripts", None) or {},
+        )
 
     async def scan_page(self, url: str) -> list[Finding]:
         # scan_page_context が使えない経路向けのフォールバック（現在タブの DOM）。
@@ -69,9 +77,9 @@ class JsStaticScanner(BaseScanner):
                 html = await self.browser.page.content()
             except Exception:
                 html = ""
-        return await self._scan(url, html)
+        return await self._scan(url, html, {})
 
-    async def _scan(self, url: str, html: str) -> list[Finding]:
+    async def _scan(self, url: str, html: str, external_scripts: dict) -> list[Finding]:
         if not url or url in self._checked_urls:
             return []
         self._checked_urls.add(url)
@@ -91,7 +99,7 @@ class JsStaticScanner(BaseScanner):
 
         # 2) このページが参照する外部 .js のみを解析（別ページの資源を誤って
         #    取り込まないよう、現在ページの HTML に出てくる src に限定する）。
-        #    本文は network 捕捉から引く（同一 URL=同一ファイルなので帰属は安全）。
+        #    本文はクロール時スナップショット → 無ければ現在の network 捕捉から引く。
         network = getattr(self.browser, "network", None)
         from urllib.parse import urljoin
 
@@ -99,12 +107,14 @@ class JsStaticScanner(BaseScanner):
             js_url = urljoin(url, src)
             if js_url in self._scanned_scripts:
                 continue
-            pair = (
-                network.latest_for_url(js_url, match_query=False)
-                if network and hasattr(network, "latest_for_url")
-                else None
-            )
-            body = (pair or {}).get("response", {}).get("body", "") if pair else ""
+            body = external_scripts.get(js_url, "") if external_scripts else ""
+            if not body:
+                pair = (
+                    network.latest_for_url(js_url, match_query=False)
+                    if network and hasattr(network, "latest_for_url")
+                    else None
+                )
+                body = (pair or {}).get("response", {}).get("body", "") if pair else ""
             if not body or not body.strip():
                 continue
             self._scanned_scripts.add(js_url)

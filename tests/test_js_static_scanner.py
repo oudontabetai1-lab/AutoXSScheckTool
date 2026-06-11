@@ -37,8 +37,10 @@ def _make_scanner(bodies=None):
     return JsStaticScanner(engine)
 
 
-def _page(url, html):
-    return types.SimpleNamespace(url=url, html=html)
+def _page(url, html, external_scripts=None):
+    return types.SimpleNamespace(
+        url=url, html=html, external_scripts=external_scripts or {}
+    )
 
 
 class JsStaticScannerContextTests(unittest.IsolatedAsyncioTestCase):
@@ -69,6 +71,16 @@ class JsStaticScannerContextTests(unittest.IsolatedAsyncioTestCase):
         html = f'<script src="/app.js"></script>'
         scanner = _make_scanner(bodies={js_url: "eval(location.hash);"})
         findings = await scanner.scan_page_context(_page(page_url, html))
+        self.assertTrue(any(js_url in f.field_name for f in findings))
+
+    async def test_external_script_uses_crawl_snapshot_when_network_cleared(self):
+        # navigate で network 捕捉が消えても、クロール時スナップショットで解析できる。
+        page_url = "http://t.test/e"
+        js_url = "http://t.test/lib.js"
+        html = '<script src="/lib.js"></script>'
+        scanner = _make_scanner(bodies={})  # network は空（クリア済みを模す）
+        page = _page(page_url, html, external_scripts={js_url: "eval(location.hash);"})
+        findings = await scanner.scan_page_context(page)
         self.assertTrue(any(js_url in f.field_name for f in findings))
 
     async def test_no_findings_for_clean_page(self):

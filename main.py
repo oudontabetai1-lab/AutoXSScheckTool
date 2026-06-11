@@ -490,8 +490,17 @@ Examples:
         default=_CFG.get("mfa_email_imap_password", ""),
         help="動的 IMAP: パスワード。WSCAN_MFA_EMAIL_IMAP_PASSWORD env でも可（推奨）。",
     )
+    # config の値（bool/文字列）を choices に合う "true"/"false" へ正規化して既定にする。
+    _imap_ssl_default = _CFG.get("mfa_email_imap_ssl", None)
+    if isinstance(_imap_ssl_default, bool):
+        _imap_ssl_default = "true" if _imap_ssl_default else "false"
+    elif _imap_ssl_default is not None:
+        _imap_ssl_default = str(_imap_ssl_default).strip().lower()
+        if _imap_ssl_default not in ("true", "false"):
+            _imap_ssl_default = None
     scan.add_argument(
-        "--mfa-email-imap-ssl", metavar="BOOL", choices=["true", "false"], default=None,
+        "--mfa-email-imap-ssl", metavar="BOOL", choices=["true", "false"],
+        default=_imap_ssl_default,
         help="動的 IMAP: SSL を使うか（true/false、既定 true）。",
     )
     # A-3: Payload learning

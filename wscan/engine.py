@@ -209,6 +209,11 @@ class CrawledPage:
     forms: list
     url_params: list
     depth: int
+    # クロール時点で捕捉した外部スクリプト本文 {絶対URL: body}。
+    # 攻撃フェーズでは navigate() が network 捕捉をクリアするため、ここに
+    # スナップショットしておくと js_static が別ページに遷移後でも外部 JS を
+    # 正しく解析できる。
+    external_scripts: dict = dc_field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -1460,8 +1465,11 @@ class ScanEngine:
 
             is_attack_target = self._is_attack_target_url(url)
             if is_attack_target:
-                pages.append(CrawledPage(url=url, html=html, forms=forms,
-                                         url_params=url_params, depth=depth))
+                pages.append(CrawledPage(
+                    url=url, html=html, forms=forms,
+                    url_params=url_params, depth=depth,
+                    external_scripts=self._snapshot_external_scripts(html, url),
+                ))
             else:
                 console.print(
                     f"    [dim cyan]access-only scope: forms and parameters were collected "
@@ -1911,6 +1919,34 @@ class ScanEngine:
     # Phase 3: Attack
     # =========================================================================
 
+    def _snapshot_external_scripts(self, html: str, base_url: str) -> dict:
+        """クロール時点の network 捕捉から、このページが参照する外部スクリプト
+        本文を ``{絶対URL: body}`` で抜き出す。
+
+        攻撃フェーズでは ``navigate()`` が network をクリアするため、ここで本文を
+        確保しておくと js_static が別ページ遷移後でも外部 JS を解析できる。
+        失敗・未捕捉は単に空のまま（best-effort）。
+        """
+        from urllib.parse import urljoin
+        from wscan import js_analysis
+
+        network = getattr(self.browser, "network", None)
+        if not network or not hasattr(network, "latest_for_url"):
+            return {}
+        out: dict = {}
+        for src in js_analysis.extract_external_script_srcs(html or ""):
+            abs_url = urljoin(base_url, src)
+            if abs_url in out:
+                continue
+            try:
+                pair = network.latest_for_url(abs_url, match_query=False)
+            except Exception:
+                pair = None
+            body = (pair or {}).get("response", {}).get("body", "") if pair else ""
+            if body and body.strip():
+                out[abs_url] = body
+        return out
+
     async def _phase_attack(self, pages: list, plans: dict):
         """
         Execute attacks guided by the plan.
@@ -2356,7 +2392,8 @@ class ScanEngine:
             # from what was seen pre-auth (login form vs real page content)
             new_pages.append(
                 CrawledPage(url=actual_url, html=html, forms=forms,
-                            url_params=url_params, depth=depth)
+                            url_params=url_params, depth=depth,
+                            external_scripts=self._snapshot_external_scripts(html, actual_url))
             )
 
             # If actual_url differs from queued url (redirect), also mark in auth_visited
@@ -2500,7 +2537,8 @@ class ScanEngine:
             f"[cyan]{len(url_params)}[/cyan] URL param(s) を検出"
         )
         page = CrawledPage(
-            url=login_seed, html=html, forms=forms, url_params=url_params, depth=0
+            url=login_seed, html=html, forms=forms, url_params=url_params, depth=0,
+            external_scripts=self._snapshot_external_scripts(html, login_seed),
         )
         self.page_graph.setdefault(
             login_seed, {"parent": None, "screenshot_b64": "", "depth": 0}
