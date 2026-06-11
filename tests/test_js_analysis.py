@@ -30,6 +30,20 @@ class TaintedFlowTests(unittest.TestCase):
         self.assertTrue(dw and dw[0].tainted)
         self.assertEqual(dw[0].severity, "critical")
 
+    def test_multiline_eval_argument_is_tainted(self):
+        # 引数が改行で続く eval も汚染ソースを取りこぼさない。
+        src = "eval(\n  location.search\n);"
+        ev = [r for r in ja.analyze_js(src) if r.sink == "eval"]
+        self.assertTrue(ev and ev[0].tainted)
+        self.assertEqual(ev[0].severity, "critical")
+
+    def test_multiline_innerHTML_rhs_is_tainted(self):
+        # 代入の右辺が次行にある innerHTML も汚染として扱う。
+        src = "el.innerHTML =\n  location.hash;"
+        inner = [r for r in ja.analyze_js(src) if r.sink == "innerHTML"]
+        self.assertTrue(inner and inner[0].tainted)
+        self.assertEqual(inner[0].severity, "high")
+
     def test_postMessage_event_data_is_source_only_with_handler(self):
         with_handler = (
             "window.addEventListener('message', function(e){\n"
@@ -54,6 +68,13 @@ class TimerSinkTests(unittest.TestCase):
     def test_tainted_variable_setInterval_is_detected(self):
         risks = self._timers("var x = location.hash;\nsetInterval(x, 50);")
         self.assertTrue(risks and risks[0].tainted)
+
+    def test_multiline_tainted_setTimeout_is_detected(self):
+        # 引数が改行で続く setTimeout も汚染として high で報告する。
+        risks = self._timers("setTimeout(\n  location.hash,\n  0\n);")
+        self.assertEqual(len(risks), 1)
+        self.assertTrue(risks[0].tainted)
+        self.assertEqual(risks[0].severity, "high")
 
     def test_literal_string_setTimeout_is_low_not_tainted(self):
         risks = self._timers('setTimeout("alert(1)", 100);')

@@ -189,15 +189,89 @@ def _references_var(text: str, names: set[str]) -> bool:
     return False
 
 
+# 行末/行頭がこれらのトークンなら、改行をまたいで 1 文の継続とみなす。
+# （例: 行末が ``=`` / ``(`` / ``,``、行頭が ``+`` / ``.`` / 二項演算子）
+_CONT_END_CHARS = set("=+-*/%&|^<>?:,.([{")
+_CONT_START_CHARS = set("+*/%&|^<>?:,.")
+
+
+def _prev_nonspace(source: str, idx: int) -> str:
+    """``source[:idx]`` を末尾から見た最初の非空白文字（改行も空白扱い）。"""
+    j = idx - 1
+    while j >= 0 and source[j] in " \t\r\n":
+        j -= 1
+    return source[j] if j >= 0 else ""
+
+
+def _next_nonspace(source: str, idx: int) -> str:
+    """``source[idx:]`` を先頭から見た最初の非空白文字（改行も空白扱い）。"""
+    n = len(source)
+    while idx < n and source[idx] in " \t\r\n":
+        idx += 1
+    return source[idx] if idx < n else ""
+
+
+def _is_break_newline(source: str, idx: int) -> bool:
+    """``idx`` の改行が文の区切りか（継続行でないか）を判定する。"""
+    if _prev_nonspace(source, idx) in _CONT_END_CHARS:
+        return False  # 前行が演算子・カンマ・開き括弧で終わる → 継続
+    if _next_nonspace(source, idx) in _CONT_START_CHARS:
+        return False  # 次行が二項演算子等で始まる → 継続
+    return True
+
+
 def _statement_around(source: str, pos: int) -> str:
-    """シンク位置を含む「文」を粗く切り出す（直前の ; か { か改行～次の ; ）。"""
-    start = max(
-        source.rfind(";", 0, pos),
-        source.rfind("{", 0, pos),
-        source.rfind("\n", 0, pos),
-    )
-    end_candidates = [e for e in (source.find(";", pos), source.find("\n", pos)) if e != -1]
-    end = min(end_candidates) if end_candidates else len(source)
+    """シンク位置を含む「文」を切り出す。
+
+    ``;`` / ``{`` / ``}`` か「区切りとなる改行」を境界にしつつ、括弧の釣り合いと
+    行継続（行末/行頭が演算子・カンマ・括弧）を見て複数行にまたがる引数・右辺も
+    1 文として取り込む。これにより ``setTimeout(\\n  location.hash, 0)`` や
+    ``el.innerHTML =\\n  location.hash`` のような整形済みコードでも汚染ソースを
+    取りこぼさない。
+    """
+    n = len(source)
+
+    # 終端: pos 以降を走査。括弧の内側の ; / 改行は無視し、外側でのみ区切る。
+    depth = 0
+    end = n
+    i = pos
+    while i < n:
+        ch = source[i]
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+        elif depth <= 0:
+            if ch == ";":
+                end = i
+                break
+            if ch == "\n" and _is_break_newline(source, i):
+                end = i
+                break
+        i += 1
+
+    # 開始: pos 直前を逆走査。釣り合わない開き括弧の内側ならそこを境界とする。
+    depth = 0
+    start = -1
+    i = pos - 1
+    while i >= 0:
+        ch = source[i]
+        if ch in ")]}":
+            depth += 1
+        elif ch in "([{":
+            if depth <= 0:
+                start = i
+                break
+            depth -= 1
+        elif depth <= 0:
+            if ch in ";{}":
+                start = i
+                break
+            if ch == "\n" and _is_break_newline(source, i):
+                start = i
+                break
+        i -= 1
+
     return source[start + 1 : end]
 
 
