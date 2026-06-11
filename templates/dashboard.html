@@ -2220,17 +2220,23 @@ function restoreRoleModels(models) {
   });
 }
 
-// MFA メールの動的 IMAP 設定フィールドをまとめて収集/復元するヘルパ。
+// MFA メールの動的 IMAP 設定（非機密）をまとめて収集/復元するヘルパ。
+// パスワードは含めない（保存/エクスポート対象にしないため）。スキャン投入時のみ
+// mfaImapPassword() で個別に付与する。
 function mfaImapFields() {
   const g = id => (document.getElementById(id)?.value || '').trim();
   return {
-    mfa_email_address:       g('cfgMfaEmailAddress'),
-    mfa_email_imap_host:     g('cfgMfaEmailImapHost'),
-    mfa_email_imap_port:     g('cfgMfaEmailImapPort'),
-    mfa_email_imap_user:     g('cfgMfaEmailImapUser'),
-    mfa_email_imap_password: g('cfgMfaEmailImapPassword'),
-    mfa_email_imap_ssl:      g('cfgMfaEmailImapSsl'),
+    mfa_email_address:    g('cfgMfaEmailAddress'),
+    mfa_email_imap_host:  g('cfgMfaEmailImapHost'),
+    mfa_email_imap_port:  g('cfgMfaEmailImapPort'),
+    mfa_email_imap_user:  g('cfgMfaEmailImapUser'),
+    mfa_email_imap_ssl:   g('cfgMfaEmailImapSsl'),
   };
+}
+// IMAP パスワードはスキャン投入のペイロードにのみ含める（localStorage/export に残さない）。
+function mfaImapPassword() {
+  const v = (document.getElementById('cfgMfaEmailImapPassword')?.value || '').trim();
+  return v ? { mfa_email_imap_password: v } : {};
 }
 function applyMfaImap(cfg) {
   if (!cfg) return;
@@ -2501,6 +2507,7 @@ function submitScanConfig() {
     mfa_field:   document.getElementById('cfgMfaField').value.trim(),
     mfa_email_account: document.getElementById('cfgMfaEmailAccount').value.trim(),
     ...mfaImapFields(),
+    ...mfaImapPassword(),
     cookies:     document.getElementById('cfgCookies').value.trim(),
     low_priv_cookies: document.getElementById('cfgLowPrivCookies').value.trim(),
     interactive_plan: cfgToggles.interactive_plan,
@@ -4463,6 +4470,7 @@ function submitHybridScan() {
     mfa_field:    (document.getElementById('cfgMfaField')?.value || '').trim(),
     mfa_email_account: (document.getElementById('cfgMfaEmailAccount')?.value || '').trim(),
     ...mfaImapFields(),
+    ...mfaImapPassword(),
     cookies:      (document.getElementById('cfgCookies')?.value || '').trim(),
     llm:          document.getElementById('cfgLlm')?.value || 'none',
     ollama_model: (document.getElementById('cfgOllamaModel')?.value || '').trim() || 'llama3',

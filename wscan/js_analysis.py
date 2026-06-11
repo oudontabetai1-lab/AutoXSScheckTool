@@ -67,14 +67,20 @@ _HAS_MESSAGE_HANDLER = re.compile(
 
 
 # ── 危険シンク ───────────────────────────────────────────────────────────
+# 文字列を実行し得るタイマー系シンク。リテラル文字列だけでなく、汚染された
+# 非リテラル引数（例: setTimeout(location.hash) / setInterval(userInput,...)）も
+# DOM XSS になり得るため広く一致させ、汚染判定で確度を決める（誤検知は、汚染も
+# リテラルも無い通常の関数参照 timer を解析ループ側で除外して抑える）。
+_TIMER_SINK_NAME = "setTimeout/setInterval"
+
 # 各エントリ: (名前, 正規表現, 汚染なし時 severity, 汚染あり時 severity)
 # 正規表現は「シンク呼び出し／代入の開始位置」にマッチさせる。
 _SINKS: list[tuple[str, re.Pattern, str, str]] = [
     ("eval", re.compile(r"\beval\s*\("), "medium", "critical"),
     ("Function", re.compile(r"\bnew\s+Function\s*\(|\bFunction\s*\("), "medium", "critical"),
     (
-        "setTimeout(string)",
-        re.compile(r"\bset(?:Timeout|Interval)\s*\(\s*['\"`]"),
+        _TIMER_SINK_NAME,
+        re.compile(r"\bset(?:Timeout|Interval)\s*\("),
         "low",
         "high",
     ),
@@ -222,6 +228,14 @@ def analyze_js(source: str, *, origin: str = "") -> list[JsRisk]:
             tainted = bool(src_name) or _references_var(stmt, tainted_vars)
             if tainted and not src_name:
                 src_name = "tainted variable"
+
+            # タイマー系は「文字列リテラル or 汚染」のときだけ報告する。
+            # benign な関数参照 timer（例: setTimeout(fn, 100)）は誤検知になるため除外。
+            if name == _TIMER_SINK_NAME:
+                after = source[m.end():].lstrip()
+                is_literal = after[:1] in ("'", '"', "`")
+                if not tainted and not is_literal:
+                    continue
 
             severity = sev_tainted if tainted else sev_clean
             seen.add(key)

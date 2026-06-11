@@ -389,7 +389,8 @@ python main.py scan https://example.com \
 | `WSCAN_MFA_EMAIL_TIMEOUT` / `_INTERVAL` | `60` / `5` | メール到着待ちの最大秒・ポーリング間隔 |
 | `WSCAN_MFA_EMAIL_ADDRESS` | — | **動的 IMAP**: メールアドレス（account 未指定時は account_name に流用） |
 | `WSCAN_MFA_EMAIL_IMAP_HOST` / `_PORT` | — / `993` | **動的 IMAP**: 受信ホスト・ポート（host 指定で動的設定モードが有効に） |
-| `WSCAN_MFA_EMAIL_USER` / `_PASSWORD` | — | **動的 IMAP**: ログインユーザー名（既定はアドレス）・パスワード |
+| `WSCAN_MFA_EMAIL_USER` | — | **動的 IMAP**: ログインユーザー名（既定はアドレス） |
+| `WSCAN_MFA_EMAIL_IMAP_PASSWORD` | — | **動的 IMAP**: パスワード（旧名 `WSCAN_MFA_EMAIL_PASSWORD` も可。env 推奨） |
 | `WSCAN_MFA_EMAIL_IMAP_SSL` | `true` | **動的 IMAP**: SSL を使うか |
 | `WSCAN_MFA_EMAIL_SERVER_ENV` | `{}` | **動的 IMAP**: 生の `MCP_EMAIL_SERVER_*` を JSON で直接上書き（SMTP 等の微調整用） |
 

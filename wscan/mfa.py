@@ -415,7 +415,11 @@ class MFAConfig:
             email_account=_s("WSCAN_MFA_EMAIL_ACCOUNT", ""),
             email_address=_s("WSCAN_MFA_EMAIL_ADDRESS", ""),
             email_user=_s("WSCAN_MFA_EMAIL_USER", ""),
-            email_password=_s("WSCAN_MFA_EMAIL_PASSWORD", ""),
+            # UI/CLI の override（短縮キー email_password）を最優先で拾うため、
+            # それを担う WSCAN_MFA_EMAIL_PASSWORD を先に評価し、ドキュメントの
+            # WSCAN_MFA_EMAIL_IMAP_PASSWORD env にもフォールバックする。
+            email_password=_s("WSCAN_MFA_EMAIL_PASSWORD", "")
+            or _s("WSCAN_MFA_EMAIL_IMAP_PASSWORD", ""),
             email_imap_host=_s("WSCAN_MFA_EMAIL_IMAP_HOST", ""),
             email_imap_port=_s("WSCAN_MFA_EMAIL_IMAP_PORT", ""),
             email_imap_ssl=_b("WSCAN_MFA_EMAIL_IMAP_SSL", True, "email_imap_ssl"),

@@ -188,7 +188,7 @@ Examples:
         "cors", "info_disclosure", "host_header", "security_headers",
         "nosql", "deserialization", "request_smuggling", "ssrf",
         "graphql", "jwt", "cms", "xxe", "ldap", "file_upload",
-        "race_condition", "websocket", "secret_leak", "sri",
+        "race_condition", "websocket", "secret_leak", "sri", "js_static",
     ]
     _default_checks = _CFG.get("checks", ["sqli", "xss", "os"])
     scan.add_argument(

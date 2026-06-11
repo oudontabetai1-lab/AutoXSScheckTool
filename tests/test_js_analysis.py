@@ -41,6 +41,32 @@ class TaintedFlowTests(unittest.TestCase):
         self.assertTrue(inner and inner[0].tainted)
 
 
+class TimerSinkTests(unittest.TestCase):
+    def _timers(self, src):
+        return [r for r in ja.analyze_js(src) if r.sink == "setTimeout/setInterval"]
+
+    def test_tainted_nonliteral_setTimeout_is_detected(self):
+        risks = self._timers("setTimeout(location.hash, 0);")
+        self.assertEqual(len(risks), 1)
+        self.assertTrue(risks[0].tainted)
+        self.assertEqual(risks[0].severity, "high")
+
+    def test_tainted_variable_setInterval_is_detected(self):
+        risks = self._timers("var x = location.hash;\nsetInterval(x, 50);")
+        self.assertTrue(risks and risks[0].tainted)
+
+    def test_literal_string_setTimeout_is_low_not_tainted(self):
+        risks = self._timers('setTimeout("alert(1)", 100);')
+        self.assertEqual(len(risks), 1)
+        self.assertFalse(risks[0].tainted)
+        self.assertEqual(risks[0].severity, "low")
+
+    def test_benign_function_reference_timer_is_ignored(self):
+        # 関数参照の timer は危険でないため報告しない（誤検知防止）。
+        self.assertEqual(self._timers("setTimeout(doStuff, 100);"), [])
+        self.assertEqual(self._timers("setTimeout(() => render(), 100);"), [])
+
+
 class CleanSinkTests(unittest.TestCase):
     def test_static_innerHTML_is_not_tainted(self):
         src = "el.innerHTML = '<b>hello</b>';"

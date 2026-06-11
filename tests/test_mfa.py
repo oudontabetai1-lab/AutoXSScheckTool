@@ -299,6 +299,28 @@ def test_email_server_env_override_takes_precedence():
     assert env["MCP_EMAIL_SERVER_IMAP_HOST"] == "override.example.com"
 
 
+def test_email_password_reads_imap_password_env_name():
+    # CLI ヘルプが案内する WSCAN_MFA_EMAIL_IMAP_PASSWORD を読む。
+    cfg = mfa.MFAConfig.from_env(
+        env={
+            "WSCAN_MFA_TYPE": "email",
+            "WSCAN_MFA_EMAIL_IMAP_HOST": "imap.example.com",
+            "WSCAN_MFA_EMAIL_IMAP_PASSWORD": "imap-secret",
+        },
+        overrides={"type": "email", "email_address": "a@example.com"},
+    )
+    assert cfg.email_password == "imap-secret"
+    assert mfa.build_email_server_env(cfg)["MCP_EMAIL_SERVER_PASSWORD"] == "imap-secret"
+
+
+def test_email_password_override_beats_env():
+    cfg = mfa.MFAConfig.from_env(
+        env={"WSCAN_MFA_TYPE": "email", "WSCAN_MFA_EMAIL_IMAP_PASSWORD": "env-secret"},
+        overrides={"type": "email", "email_password": "ui-secret"},
+    )
+    assert cfg.email_password == "ui-secret"
+
+
 def test_solver_env_injects_dynamic_imap_credentials():
     cfg = mfa.MFAConfig(
         type="email",
