@@ -179,6 +179,8 @@ def test_mfaconfig_totp_enabled():
     assert cfg.enabled is True
     assert cfg.totp_args == ["/srv/dist/index.js"]
     assert cfg.totp_label == "ops@example.com"
+    # gosusnkr/mcp-totp-authenticator は account_label 引数を読む（label ではない）
+    assert cfg.totp_label_arg == "account_label"
 
 
 def test_mfaconfig_totp_without_args_disabled():

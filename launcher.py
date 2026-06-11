@@ -4,7 +4,9 @@ WScan CUI Launcher
 ダブルクリック / launcher.bat から起動できます。
 
 既定では引数なし起動でダッシュボード(serve)を自動で開きます（実運用はほぼ
-ブラウザ UI のため）。ポートは環境変数 WSCAN_PORT（既定 8765）。
+ブラウザ UI のため）。bind 先は安全側の localhost(127.0.0.1)、ポートは環境変数
+WSCAN_PORT（既定 8765）。LAN へ公開するときは WSCAN_HOST を明示し、併せて
+WSCAN_AUTH_TOKEN の設定を推奨します。
 scan / agent モードを対話的に選ぶには `python launcher.py menu`（または
 環境変数 WSCAN_LAUNCHER_MENU=1）でモード選択メニューを表示します。
 """
@@ -779,16 +781,20 @@ def main():
         _ok(f"http://localhost:{port} でダッシュボードを起動します")
         _print()
         # host / auth_token は serve サブコマンドのパーサ既定（WSCAN_HOST /
-        # WSCAN_AUTH_TOKEN、無ければ config）と揃える。これを省くと
-        # run_serve が 0.0.0.0・トークン無しにフォールバックし、トークンを
-        # 設定済みでも未認証のダッシュボードが LAN に公開されてしまう。
-        from main import run_serve, _CFG
+        # auth_token は WSCAN_AUTH_TOKEN（無ければ config）と揃える。これを省くと
+        # run_serve がトークン無しにフォールバックし、設定済みでも未認証になる。
+        #
+        # bind 先はローカルツールとして安全側に倒し、既定で localhost(127.0.0.1)。
+        # ダブルクリック起動が無認証のままスキャナ制御画面を LAN へ晒さないため。
+        # LAN 公開したいときは WSCAN_HOST を明示指定する（その際は WSCAN_AUTH_TOKEN
+        # 推奨）。サーバ常駐は `python main.py serve` を使う（config の host を尊重）。
+        from main import run_serve
         serve_args = argparse.Namespace(
             port=port,
-            host=os.environ.get("WSCAN_HOST", _CFG.get("host", "0.0.0.0")),
-            auth_token=os.environ.get("WSCAN_AUTH_TOKEN", _CFG.get("auth_token", "")),
-            # ランチャーはダッシュボードを開くのが目的なので、bind 先が 0.0.0.0 でも
-            # ブラウザを必ず開く（run_serve 既定は loopback 時のみ開く）。
+            host=os.environ.get("WSCAN_HOST", "127.0.0.1"),
+            auth_token=os.environ.get("WSCAN_AUTH_TOKEN", ""),
+            # ランチャーはダッシュボードを開くのが目的なので必ずブラウザを開く
+            # （run_serve 既定は loopback bind 時のみ開く）。
             open_browser=True,
         )
         try:

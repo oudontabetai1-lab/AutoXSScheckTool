@@ -309,7 +309,7 @@ class MFAConfig:
     totp_args: list = dc_field(default_factory=list)
     totp_tool: str = "get_totp_code"
     totp_label: str = ""
-    totp_label_arg: str = "label"
+    totp_label_arg: str = "account_label"   # gosusnkr/mcp-totp-authenticator の get_totp_code
 
     # メール (mcp-email-server / ai-zerolab)
     # 受信箱はメタデータ一覧 → 本文取得の 2 段で読む（list-then-fetch）。
@@ -376,7 +376,8 @@ class MFAConfig:
             totp_args=parse_command(e.get("WSCAN_MFA_TOTP_ARGS", "")),
             totp_tool=_s("WSCAN_MFA_TOTP_TOOL", "get_totp_code") or "get_totp_code",
             totp_label=_s("WSCAN_MFA_TOTP_LABEL", ""),
-            totp_label_arg=_s("WSCAN_MFA_TOTP_LABEL_ARG", "label") or "label",
+            totp_label_arg=_s("WSCAN_MFA_TOTP_LABEL_ARG", "account_label")
+            or "account_label",
             email_command=_s("WSCAN_MFA_EMAIL_COMMAND", "uvx") or "uvx",
             email_args=parse_command(
                 e.get("WSCAN_MFA_EMAIL_ARGS", "mcp-email-server@latest stdio")
