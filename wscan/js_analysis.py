@@ -293,7 +293,9 @@ def analyze_js(source: str, *, origin: str = "") -> list[JsRisk]:
     for name, pat, sev_clean, sev_tainted in _SINKS:
         for m in pat.finditer(source):
             line = _line_of(source, m.start())
-            key = (name, line)
+            # 文字位置で重複排除する。同一行に同じシンクが複数あっても
+            # （minify/bundle された 1 行スクリプト等）別々の Finding を残す。
+            key = (name, m.start())
             if key in seen:
                 continue
 

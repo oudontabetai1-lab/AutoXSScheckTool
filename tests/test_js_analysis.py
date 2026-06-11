@@ -30,6 +30,13 @@ class TaintedFlowTests(unittest.TestCase):
         self.assertTrue(dw and dw[0].tainted)
         self.assertEqual(dw[0].severity, "critical")
 
+    def test_same_line_duplicate_sinks_are_both_reported(self):
+        # minify/bundle された 1 行に同じシンクが複数あっても両方残す。
+        src = "eval(location.hash); eval(location.search);"
+        ev = [r for r in ja.analyze_js(src) if r.sink == "eval"]
+        self.assertEqual(len(ev), 2)
+        self.assertTrue(all(r.tainted for r in ev))
+
     def test_multiline_eval_argument_is_tainted(self):
         # 引数が改行で続く eval も汚染ソースを取りこぼさない。
         src = "eval(\n  location.search\n);"
