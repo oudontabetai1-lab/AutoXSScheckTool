@@ -50,8 +50,29 @@ class JsStaticScanner(BaseScanner):
     ) -> list[Finding]:
         return []
 
+    async def scan_page_context(self, page) -> list[Finding]:
+        """クロール時に保持した ``page.html`` を解析する（推奨経路）。
+
+        マルチページ走査では、ページ単位スキャナの実行時に既にブラウザが別ページ
+        へ遷移している（``navigate()`` が network 捕捉も毎回クリアする）ため、
+        現在タブの DOM を読むと別ページを解析してしまう。クロール時点で確定した
+        HTML を使うことで、正しいページの inline script を確実に解析する。
+        """
+        return await self._scan(getattr(page, "url", "") or "", getattr(page, "html", "") or "")
+
     async def scan_page(self, url: str) -> list[Finding]:
-        if url in self._checked_urls:
+        # scan_page_context が使えない経路向けのフォールバック（現在タブの DOM）。
+        pair = self.current_page_pair(url)
+        html = (pair.get("response", {}) or {}).get("body", "") or ""
+        if not html:
+            try:
+                html = await self.browser.page.content()
+            except Exception:
+                html = ""
+        return await self._scan(url, html)
+
+    async def _scan(self, url: str, html: str) -> list[Finding]:
+        if not url or url in self._checked_urls:
             return []
         self._checked_urls.add(url)
 
@@ -61,35 +82,30 @@ class JsStaticScanner(BaseScanner):
         page_host = _host_of(url)
         findings: list[Finding] = []
 
-        # 1) ドキュメント HTML を取得（ネットワーク捕捉 → だめなら DOM から）。
-        pair = self.current_page_pair(url)
-        html = (pair.get("response", {}) or {}).get("body", "") or ""
-        if not html:
-            try:
-                html = await self.browser.page.content()
-            except Exception:
-                html = ""
-
-        # 2) インライン script を解析（first-party 扱い）。
+        # 1) インライン script を解析（first-party 扱い）。
         for idx, script in enumerate(js_analysis.extract_inline_scripts(html)):
             label = f"(inline script #{idx + 1})"
             findings += await self._record_risks(
                 url, label, script, first_party=True, source_url=url
             )
 
-        # 3) 捕捉済みの外部 .js を解析。
+        # 2) このページが参照する外部 .js のみを解析（別ページの資源を誤って
+        #    取り込まないよう、現在ページの HTML に出てくる src に限定する）。
+        #    本文は network 捕捉から引く（同一 URL=同一ファイルなので帰属は安全）。
         network = getattr(self.browser, "network", None)
-        pairs = list(getattr(network, "pairs", []) or [])
-        for p in pairs:
-            resp = p.get("response", {}) or {}
-            js_url = resp.get("url") or (p.get("request", {}) or {}).get("url") or ""
-            if not js_url or js_url in self._scanned_scripts:
+        from urllib.parse import urljoin
+
+        for src in js_analysis.extract_external_script_srcs(html):
+            js_url = urljoin(url, src)
+            if js_url in self._scanned_scripts:
                 continue
-            ctype = (resp.get("headers", {}) or {}).get("content-type", "")
-            if not js_analysis.is_javascript_response(js_url, ctype):
-                continue
-            body = resp.get("body", "") or ""
-            if not body.strip():
+            pair = (
+                network.latest_for_url(js_url, match_query=False)
+                if network and hasattr(network, "latest_for_url")
+                else None
+            )
+            body = (pair or {}).get("response", {}).get("body", "") if pair else ""
+            if not body or not body.strip():
                 continue
             self._scanned_scripts.add(js_url)
             first_party = _host_of(js_url) == page_host

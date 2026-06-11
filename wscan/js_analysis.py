@@ -270,6 +270,26 @@ _INLINE_SCRIPT_RE = re.compile(
 )
 _SRC_ATTR_RE = re.compile(r"""\bsrc\s*=\s*['"]?([^'"\s>]+)""", re.IGNORECASE)
 _TYPE_ATTR_RE = re.compile(r"""\btype\s*=\s*['"]?([^'"\s>]+)""", re.IGNORECASE)
+_SCRIPT_SRC_RE = re.compile(
+    r"<script\b[^>]*\bsrc\s*=\s*['\"]?([^'\"\s>]+)", re.IGNORECASE
+)
+
+
+def extract_external_script_srcs(html: str) -> list[str]:
+    """HTML から外部 ``<script src=...>`` の src 値を順序保持・重複除去で返す（純粋関数）。"""
+    if not html:
+        return []
+    seen: set[str] = set()
+    out: list[str] = []
+    for m in _SCRIPT_SRC_RE.finditer(html):
+        src = (m.group(1) or "").strip()
+        if not src or src.startswith(("data:", "javascript:", "about:")):
+            continue
+        if src in seen:
+            continue
+        seen.add(src)
+        out.append(src)
+    return out
 
 
 def extract_inline_scripts(html: str) -> list[str]:
