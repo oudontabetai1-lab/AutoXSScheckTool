@@ -771,6 +771,9 @@ class MonitorServer:
             output_path = (body.get("output_path") or "flows/manual_crawl.json").strip()
             headless = bool(body.get("headless", False))
             proxy = (body.get("proxy") or "").strip()
+            # stream=True … サーバ上のヘッドレス Chromium を画面配信し、
+            # ダッシュボードから座標入力で遠隔操作するモード。
+            stream = bool(body.get("stream", False))
 
             try:
                 from wscan.manual_crawl import ManualCrawlSession
@@ -785,6 +788,8 @@ class MonitorServer:
                     output_path=output_path,
                     headless=headless,
                     proxy=proxy,
+                    stream=stream,
+                    frame_callback=self._emit_manual_crawl_frame if stream else None,
                 )
                 await self.emit("manual_crawl_status", status)
                 return JSONResponse(status)
@@ -1463,6 +1468,17 @@ class MonitorServer:
             # U-3: {"action": "manual_payload", "url": ..., "field": ..., "payload": ..., "check_type": ...}
             self.manual_payload_queue.put_nowait(msg)
 
+        elif action == "manual_crawl_input":
+            # 遠隔ブラウザ操作: {"action":"manual_crawl_input","event":{type,nx,ny,...}}
+            # 入力の検証・正規化はセッション側（coerce_input_event）に委譲する。
+            session = self.manual_crawl_session
+            if session is not None and getattr(session, "streaming", False):
+                ev = msg.get("event") or {}
+                try:
+                    asyncio.get_running_loop().create_task(session.input_event(ev))
+                except RuntimeError:
+                    pass
+
         elif action == "start_scan":
             # Serve mode: dashboard submits full scan config. Ignore the request
             # if a scan is already running so it is not silently dropped when the
@@ -1568,6 +1584,26 @@ class MonitorServer:
             except Exception:
                 dead.add(client)
         self.clients -= dead
+
+    async def broadcast_ephemeral(self, event_type: str, data: Any = None):
+        """履歴に残さず接続中クライアントへ送る（高頻度・大容量イベント用）。
+
+        スクリーンキャストのフレームのように毎秒大量に流れ、再生する意味のない
+        イベントは ``event_history`` に積まない（メモリ肥大・再接続時の再生事故を防ぐ）。
+        """
+        event = {"type": event_type, "timestamp": time.time(), "data": data or {}}
+        payload = json.dumps(event)
+        dead = set()
+        for client in list(self.clients):
+            try:
+                await client.send_text(payload)
+            except Exception:
+                dead.add(client)
+        self.clients -= dead
+
+    async def _emit_manual_crawl_frame(self, frame: dict):
+        """遠隔操作セッションの画面フレームをダッシュボードへ配信する。"""
+        await self.broadcast_ephemeral("manual_crawl_frame", frame)
 
     async def emit_status(self, message: str, state: str = "running"):
         # D: CI/CD API — ステータス自動更新

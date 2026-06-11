@@ -60,7 +60,7 @@ python main.py scan http://127.0.0.1:8000 --checks xss sqli --no-monitor --llm n
 | `oob_email.py` / `oob_email_mcp.py` | OOB メール受信シンク＋自前 MCP（blind系の確証、`WSCAN_OOB_*`） |
 | `mfa.py` | MFA(2FA) ワンタイムコード取得。外部 MCP（TOTP=mcp-totp-authenticator / Email=mcp-email-server）を stdio クライアントで呼ぶ。抽出/判定は純粋関数、`WSCAN_MFA_*`。`BrowserManager.auto_login` のパスワード送信後に配線 |
 | `request_logger.py` | 全 HTTP / ペイロードの JSONL 監査ログ |
-| `diff_scan.py` / `batch_runner.py` / `flow_runner.py` / `flow_recorder.py` / `manual_crawl.py` / `har_importer.py` | 差分/バッチ/フロー再生・記録/手動巡回/HAR取込 |
+| `diff_scan.py` / `batch_runner.py` / `flow_runner.py` / `flow_recorder.py` / `manual_crawl.py` / `har_importer.py` | 差分/バッチ/フロー再生・記録/手動巡回/HAR取込。`manual_crawl.py` は (1)可視ブラウザ記録 (2)CDPスクリーンキャストによる遠隔操作（`stream=True`、`coerce_input_event`/`scale_point` は純粋関数）(3)URLリスト取込(`build_seed_payload`) を提供。遠隔操作のフレームは `MonitorServer.broadcast_ephemeral`（履歴非保存）で配信し、入力は WS `manual_crawl_input` で受ける |
 | `report.py` / `sarif.py` / `reproduction.py` / `remediation.py` / `compliance_map.py` | レポート/SARIF/再現/修正提案/CVSS・規格マッピング |
 | `auto_config.py` / `intervention.py` / `header_manager.py` / `tls_config.py` / `textio.py` / `ctf_flag_finder.py` / `cms_detect.py` | 設定ウィザード/介入制御/ヘッダ/mTLS/テキストIO/CTF/CMS |
 

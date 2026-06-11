@@ -1375,6 +1375,22 @@ https://example.com/search?q=test" style="width:100%;font-family:monospace;font-
         <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px">
           <button onclick="importManualCrawl()" style="padding:7px 14px;background:var(--accent);color:#fff;border:none;border-radius:4px;cursor:pointer;font-size:0.82rem">URLを取り込んで保存</button>
         </div>
+
+        <div class="cfg-section-title" style="margin-top:18px">遠隔ブラウザ操作（サーバ画面をダッシュボードから操作）</div>
+        <div style="font-size:0.78rem;color:var(--text-muted);margin-bottom:10px;line-height:1.6">
+          サーバ上のヘッドレスChromiumの画面をここに配信し、クリック・キー入力・スクロールで
+          遠隔操作します（追加ソフト不要）。操作で訪れたURL・フォーム・Cookieは通常の手動巡回と
+          同様に記録され、「停止して保存」でシードJSONになります。
+        </div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:8px">
+          <button onclick="startRemoteBrowser()" style="padding:7px 14px;background:var(--accent);color:#fff;border:none;border-radius:4px;cursor:pointer;font-size:0.82rem">遠隔ブラウザを起動</button>
+          <input type="text" id="remoteNavUrl" placeholder="https://example.com/page へ移動" style="flex:1;min-width:200px">
+          <button onclick="remoteNavigate()" style="padding:7px 12px;background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:4px;cursor:pointer;font-size:0.82rem">移動</button>
+        </div>
+        <div id="remoteScreenWrap" style="display:none;border:1px solid var(--border);border-radius:6px;overflow:hidden;background:#000;position:relative;max-width:1280px">
+          <img id="remoteScreen" tabindex="0" alt="remote browser" style="display:block;width:100%;height:auto;cursor:crosshair;outline:none">
+          <div id="remoteHint" style="position:absolute;left:8px;bottom:8px;background:rgba(0,0,0,0.55);color:#fff;font-size:0.7rem;padding:3px 8px;border-radius:4px;pointer-events:none">クリックで操作 / 画面をクリックしてからキー入力</div>
+        </div>
       </div>
       <!-- Tab: Agent Browser -->
       <div id="cfgTab-agent" class="cfg-panel">
@@ -2242,6 +2258,89 @@ async function importManualCrawl() {
     document.getElementById('manualCrawlStatus').value = '取り込み失敗';
     alert('URLの取り込みに失敗しました: ' + e.message);
   }
+}
+
+function _wsSend(obj) {
+  if (!state.ws || state.ws.readyState !== WebSocket.OPEN) {
+    alert('WebSocket未接続。ページを再読み込みしてください。');
+    return false;
+  }
+  state.ws.send(JSON.stringify(obj));
+  return true;
+}
+
+async function startRemoteBrowser() {
+  const manualUrlField = document.getElementById('manualCrawlStartUrl');
+  const url = (manualUrlField?.value?.trim()) || document.getElementById('cfgInputUrl').value.trim();
+  if (!url || !url.startsWith('http')) {
+    alert('開始URL を入力してください (Manual Crawl タブの「開始URL」または Basic タブの Target URL)。');
+    return;
+  }
+  const outputPath = document.getElementById('manualCrawlOutput').value.trim() || 'flows/manual_crawl.json';
+  const proxy = document.getElementById('cfgProxy').value.trim();
+  document.getElementById('manualCrawlStatus').value = '遠隔ブラウザ起動中...';
+  try {
+    const res = await fetch('/api/v1/manual-crawl/start', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({url, output_path: outputPath, proxy, stream: true}),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'remote browser start failed');
+    renderManualCrawlStatus(data);
+    document.getElementById('remoteScreenWrap').style.display = 'block';
+    bindRemoteScreen();
+    addEventLog('status', `遠隔ブラウザを起動: ${url}`);
+  } catch (e) {
+    document.getElementById('manualCrawlStatus').value = '起動失敗';
+    alert('遠隔ブラウザを起動できませんでした: ' + e.message);
+  }
+}
+
+function remoteNavigate() {
+  const url = document.getElementById('remoteNavUrl').value.trim();
+  if (!url.startsWith('http')) { alert('http(s) のURLを入力してください。'); return; }
+  _wsSend({action: 'manual_crawl_input', event: {type: 'navigate', url}});
+}
+
+let _remoteBound = false;
+function bindRemoteScreen() {
+  if (_remoteBound) return;
+  const img = document.getElementById('remoteScreen');
+  if (!img) return;
+  _remoteBound = true;
+
+  const norm = (e) => {
+    const r = img.getBoundingClientRect();
+    return {nx: (e.clientX - r.left) / r.width, ny: (e.clientY - r.top) / r.height};
+  };
+  img.addEventListener('click', (e) => {
+    e.preventDefault();
+    img.focus();
+    const p = norm(e);
+    _wsSend({action: 'manual_crawl_input', event: {type: 'click', nx: p.nx, ny: p.ny}});
+  });
+  img.addEventListener('contextmenu', (e) => {
+    e.preventDefault();
+    const p = norm(e);
+    _wsSend({action: 'manual_crawl_input', event: {type: 'click', nx: p.nx, ny: p.ny, button: 'right'}});
+  });
+  img.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    _wsSend({action: 'manual_crawl_input', event: {type: 'scroll', dy: e.deltaY}});
+  }, {passive: false});
+  const specialKeys = new Set(['Enter','Backspace','Tab','Delete','Escape',
+    'ArrowUp','ArrowDown','ArrowLeft','ArrowRight','Home','End','PageUp','PageDown']);
+  img.addEventListener('keydown', (e) => {
+    if (e.ctrlKey || e.metaKey || e.altKey) return; // ショートカットは送らない
+    if (e.key.length === 1) {
+      e.preventDefault();
+      _wsSend({action: 'manual_crawl_input', event: {type: 'text', text: e.key}});
+    } else if (specialKeys.has(e.key)) {
+      e.preventDefault();
+      _wsSend({action: 'manual_crawl_input', event: {type: 'key', key: e.key}});
+    }
+  });
 }
 
 function useManualCrawlOutput() {
@@ -3501,6 +3600,17 @@ function handleEvent(event) {
       renderManualCrawlStatus(data);
       addEventLog('status', data.running ? '手動巡回中' : '手動巡回を保存しました');
       break;
+
+    case 'manual_crawl_frame': {
+      // 遠隔ブラウザの画面フレーム（base64 JPEG）。履歴には残らない一過性イベント。
+      const img = document.getElementById('remoteScreen');
+      if (img && data && data.data) {
+        img.src = 'data:image/jpeg;base64,' + data.data;
+        const wrap = document.getElementById('remoteScreenWrap');
+        if (wrap && wrap.style.display === 'none') { wrap.style.display = 'block'; bindRemoteScreen(); }
+      }
+      break;
+    }
 
     case 'ai_analysis':
       showAiAnalysis(data.text || '');
