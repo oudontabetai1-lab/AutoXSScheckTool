@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import secrets
 import time
 from dataclasses import dataclass, field
@@ -87,6 +88,69 @@ def load_manual_crawl_seed(
         forms_by_url=data.get("forms_by_url") or {},
         steps=data.get("steps") or [],
     )
+
+
+def parse_url_list(text: str | list[str]) -> list[str]:
+    """貼り付けテキスト or リストから http(s) URL を抽出して順序保持で返す。
+
+    改行・空白・カンマ区切りのいずれにも対応。サーバ/ヘッドレス環境では
+    可視ブラウザを操作できないため、利用者が手元のブラウザで控えた URL を
+    そのまま貼り付けてシード化できるようにする。
+    """
+    if isinstance(text, str):
+        tokens = re.split(r"[\s,]+", text)
+    else:
+        tokens: list[str] = []
+        for item in text or []:
+            tokens.extend(re.split(r"[\s,]+", str(item or "")))
+    seen: set[str] = set()
+    urls: list[str] = []
+    for tok in tokens:
+        url = tok.split("#", 1)[0].strip()
+        if not url.startswith(("http://", "https://")):
+            continue
+        if url in seen:
+            continue
+        seen.add(url)
+        urls.append(url)
+    return urls
+
+
+def build_seed_payload(
+    start_url: str,
+    urls: list[str],
+    *,
+    cookies: list[dict] | None = None,
+) -> dict:
+    """手入力の URL リストから ``save()`` と同形式のシード JSON を構築する（純粋関数）。
+
+    通常スキャンの ``load_manual_crawl_seed`` がそのまま読める構造を返す。
+    可視ブラウザの記録（events/steps/forms）は持たないが、``seed_urls`` を
+    巡回起点として供給できる。
+    """
+    now = time.time()
+    normalized = _unique_urls(urls, start_url) if start_url else _unique_urls(urls)
+    return {
+        "version": 1,
+        "source": "manual_url_import",
+        "start_url": start_url,
+        "started_at": now,
+        "stopped_at": now,
+        "seed_urls": normalized,
+        "urls": list(urls),
+        "events": [{"type": "url", "source": "import", "url": u, "ts": now} for u in normalized],
+        "steps": [],
+        "forms_by_url": {},
+        "cookies": cookies or [],
+    }
+
+
+def save_seed_payload(output_path: str, payload: dict) -> Path:
+    """シード JSON をファイルへ書き出してパスを返す。"""
+    output = Path(output_path or "flows/manual_crawl.json")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    return output
 
 
 class ManualCrawlSession:

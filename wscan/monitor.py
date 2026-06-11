@@ -809,6 +809,55 @@ class MonitorServer:
                 return JSONResponse({"running": False})
             return JSONResponse(self.manual_crawl_session.status())
 
+        @app.post("/api/v1/manual-crawl/import")
+        async def api_manual_crawl_import(request: Request):
+            """手入力の URL リストを巡回シード JSON として保存する。
+
+            サーバ/ヘッドレス環境では可視ブラウザを利用者が操作できないため、
+            手元で控えた URL を貼り付けてシード化する代替経路を提供する。
+            """
+            try:
+                body = await request.json()
+            except Exception:
+                return JSONResponse({"error": "Invalid JSON"}, status_code=400)
+
+            from wscan.manual_crawl import (
+                parse_url_list,
+                build_seed_payload,
+                save_seed_payload,
+            )
+
+            start_url = (body.get("url") or body.get("start_url") or "").strip()
+            urls = parse_url_list(body.get("urls") or body.get("text") or "")
+            if not urls:
+                return JSONResponse(
+                    {"error": "http(s) で始まる URL を1件以上入力してください"},
+                    status_code=400,
+                )
+            # スコープ外 URL は弾く（start_url 指定時はそれも検査）。
+            for candidate in ([start_url] if start_url else []) + urls:
+                scope_err = self._scope_error(candidate)
+                if scope_err:
+                    return JSONResponse({"error": scope_err}, status_code=403)
+
+            output_path = (body.get("output_path") or "flows/manual_crawl.json").strip()
+            try:
+                payload = build_seed_payload(start_url or urls[0], urls)
+                saved = save_seed_payload(output_path, payload)
+            except Exception as exc:
+                return JSONResponse({"error": str(exc)}, status_code=500)
+
+            status = {
+                "running": False,
+                "imported": True,
+                "output_path": str(saved),
+                "url_count": len(payload.get("seed_urls", [])),
+                "step_count": 0,
+                "urls": payload.get("seed_urls", [])[-20:],
+            }
+            await self.emit("manual_crawl_status", status)
+            return JSONResponse(status)
+
         # ── Scan management portal: history, reports, downloads ───────────────
 
         @app.post("/api/v1/scan/abort")

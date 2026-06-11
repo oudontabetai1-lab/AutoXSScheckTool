@@ -137,6 +137,7 @@ PEM の cert/key は Playwright と httpx の両方で使われます。PFX は 
 | 1.4 | セッション管理の不備 | `session` | Cookie 属性チェック (Secure/HttpOnly/SameSite) |
 | 1.5 | クロスサイト・スクリプティング（反射型） | `xss` | ダイアログ確認・反射検出 |
 | 1.5 | クロスサイト・スクリプティング（DOM型） | `dom_xss` | Playwright DOM シンクフック |
+| 1.5 | 危険な JavaScript 静的評価（DOM型の前段階） | `js_static` | インライン/外部 JS を静的解析し source→sink フローを検出（注入なし） |
 | 1.5 | クロスサイト・スクリプティング（格納型） | `stored_xss` | マーカー注入 → 全ページ横断検出 |
 | 1.6 | CSRF | `csrf` | POST フォームの CSRF トークン有無 |
 | 1.7 | HTTPヘッダ・インジェクション | `header_injection` | CRLF 注入 → レスポンスヘッダ確認 |
@@ -166,6 +167,7 @@ PEM の cert/key は Playwright と httpx の両方で使われます。PFX は 
 
 - **AI 攻撃計画（AttackPlanner）** — スキャン前にページを分析し、フィールドごとに優先チェックとターゲット特化ペイロードを計画
 - **DOM-based XSS 検出** — `innerHTML` / `document.write` / `eval` / `location.href` 等の危険シンクを Playwright でフック、クライアントサイド実行を検出
+- **危険な JavaScript 静的評価（`js_static`）** — DOM XSS をペイロードで確証する前段階として、ページのインライン JS と読み込まれた外部 `.js` を**注入なしで静的解析**。`eval` / `Function` / `innerHTML` / `document.write` / `setTimeout(文字列)` 等の危険シンクと、`location.hash` / `document.cookie` / `postMessage` 等のユーザ制御ソースの **source→sink フロー**（簡易な変数汚染追跡つき）を洗い出す。汚染フローが辿れたものを高確度（`likely`）、単独の危険シンクを参考情報（`tentative`）として報告し、誤検知を抑制。`--checks js_static` で有効化
 - **格納型 XSS 検出** — ユニークマーカーを注入し、全クロールページを横断してペイロードの出現を確認
 - **アクセス制御検査** — 未認証アクセス・垂直権限昇格（低権限セッション）・水平権限昇格 (IDOR) に加え、**401/403 アクセス制御バイパス**（パス正規化・信頼 IP ヘッダ偽装・URL リライトヘッダ・HTTP メソッド改ざん）を検出
 - **CORS 検出** — ワイルドカード ACAO・任意 Origin 反射・クレデンシャル付き CORS を自動判定
@@ -196,7 +198,7 @@ PEM の cert/key は Playwright と httpx の両方で使われます。PFX は 
 - **SPA クロール強化** — `--spa-crawl` で React/Vue/Angular SPA の動的ルートを収集。`history.pushState` フック + クリック操作で通常クローラーが見逃すページを発見
 - **BFS クローラー** — 設定可能な深さで同一ドメインリンクを自動収集
 - **sitemap.xml / robots.txt 活用** — クロール時に自動取得して未リンクページを発見
-- **ログイン自動化** — `--login-url` でログインフォームを自動入力してセッションを取得
+- **ログイン自動化** — `--login-url` でログインフォームを自動入力してセッションを取得。成否判定は URL の変化だけに頼らず、**ログインフォームの残存・失敗メッセージ（日本語含む）・MFA 画面の残留**を併せて評価し、`/login?error=` のような「遷移はしたが失敗」を成功と誤認しないよう厳格化（任意で `--login-success` の文字列一致も併用可能）
 - **MFA(2FA) 自動化** — `--mfa-type totp|email` でワンタイムコードを外部 MCP 経由で取得・投入
 
 ### レポート・出力
@@ -209,6 +211,9 @@ PEM の cert/key は Playwright と httpx の両方で使われます。PFX は 
 - **リアルタイム監視ダッシュボード** — WebSocket 経由でペイロード・検出結果・スクリーンショットをライブ表示
 - **Finding フィルタ・検索** — 重要度・スキャナ種別・URL・フィールド名でリアルタイムフィルタリング
 - **手動ペイロード実行** — ダッシュボードから任意のフィールドにペイロードを即座に送信
+- **手動巡回（2 方式）** — 「手動巡回」タブから巡回シードを作成できる。
+  - *可視ブラウザ記録*：別 Chromium を開いて実操作し、訪問 URL・フォーム・Cookie を記録（操作端末にブラウザ画面が出せる環境向け）。
+  - *URL リスト取り込み*：**サーバ/ヘッドレスモードでは可視ブラウザを利用者が操作できない**ため、手元のブラウザで控えた URL を貼り付けるだけで同形式の巡回シード JSON を生成（改行・カンマ・空白区切り）。生成した JSON はそのままスキャンの巡回シードに使える
 
 ### CI/CD・運用
 
@@ -460,7 +465,7 @@ usage: main.py scan [オプション] URL
                                    cors info_disclosure host_header security_headers
                                    file_upload nosql deserialization request_smuggling
                                    ssrf graphql jwt cms xxe ldap race_condition
-                                   websocket secret_leak sri
+                                   websocket secret_leak sri js_static
   --depth N                クロール深度 (デフォルト: 2)
   --headless               ブラウザをヘッドレスモードで起動
   --no-monitor             リアルタイム監視ダッシュボードを無効化

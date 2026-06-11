@@ -50,6 +50,8 @@ python main.py scan http://127.0.0.1:8000 --checks xss sqli --no-monitor --llm n
 | `attack_planner.py` / `action_plan.py` | 攻撃計画とデータ構造 |
 | `adaptive_payload.py` / `payload_gen.py` / `payload_encoder.py` / `payload_learning.py` | バイパス生成(LLM)・ペイロード生成/符号化/成功率学習 |
 | `context_mutator.py` | **LLM不要**の決定論的な文脈適応ミューテーション（反射文脈判定＋breakout合成、純粋関数） |
+| `js_analysis.py` | **LLM不要**の純粋関数。JS ソースを静的解析し危険シンク×汚染ソースの source→sink を抽出（`js_static` スキャナの実体）。HTMLからのインラインscript抽出も提供 |
+| `auth_detect.py` | ログイン成否判定の純粋関数（フォーム残存/失敗文言/ログインページ離脱/MFA を統合）。`browser.auto_login` の判定を集約 |
 | `payload_importer.py` | 公開ペイロード集(PaTT/SecLists)の取込ツール（`import-payloads` サブコマンドの実体） |
 | `equivalence_probe.py` | 文字列結合の等価性プローブ（SQLi/XSS 共通の純粋判定ロジック） |
 | `waf_detector.py` / `triage.py` | WAF 判定 / ペイロード未投入の高速分析 |

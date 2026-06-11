@@ -64,6 +64,9 @@ _CVSS_TABLE: dict[str, tuple[str, float]] = {
     "file_upload":       ("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H", 10.0),
     "race_condition":    ("CVSS:3.1/AV:N/AC:H/PR:L/UI:N/S:U/C:H/I:H/A:N",  6.8),
     "websocket":         ("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:N",  9.6),
+    # 静的 JS 監査（DOM XSS 前段階）。実行確証前のため XSS よりやや低め。
+    "js_static":         ("CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:H/I:L/A:N",  8.8),
+    "js_dangerous_sink": ("CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:H/I:L/A:N",  8.8),
 }
 
 

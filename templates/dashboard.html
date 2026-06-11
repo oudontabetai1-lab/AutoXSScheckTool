@@ -1360,6 +1360,21 @@ body {
         <div id="manualCrawlUrls" style="margin-top:12px;padding:10px;background:var(--bg);border:1px solid var(--border);border-radius:6px;max-height:120px;overflow:auto;font-size:0.75rem;color:var(--text-muted)">
           記録されたURLはここに表示されます。
         </div>
+
+        <div class="cfg-section-title" style="margin-top:18px">URLリストを貼り付けて取り込み（サーバ/ヘッドレス向け）</div>
+        <div style="font-size:0.78rem;color:var(--text-muted);margin-bottom:10px;line-height:1.6">
+          サーバ（リモート/ヘッドレス）モードでは可視ブラウザを直接操作できません。
+          お手元のブラウザで巡回したURLを下に貼り付ければ、同じ巡回シードJSONとして
+          保存しスキャンに使えます（改行・カンマ・空白区切り）。
+        </div>
+        <div class="cfg-field" style="grid-column:1/-1">
+          <textarea id="manualCrawlImportUrls" rows="5" placeholder="https://example.com/account
+https://example.com/orders?id=12
+https://example.com/search?q=test" style="width:100%;font-family:monospace;font-size:0.78rem"></textarea>
+        </div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px">
+          <button onclick="importManualCrawl()" style="padding:7px 14px;background:var(--accent);color:#fff;border:none;border-radius:4px;cursor:pointer;font-size:0.82rem">URLを取り込んで保存</button>
+        </div>
       </div>
       <!-- Tab: Agent Browser -->
       <div id="cfgTab-agent" class="cfg-panel">
@@ -2199,6 +2214,33 @@ async function stopManualCrawl() {
   } catch (e) {
     document.getElementById('manualCrawlStatus').value = '停止失敗';
     alert('手動巡回を停止できませんでした: ' + e.message);
+  }
+}
+
+async function importManualCrawl() {
+  const text = (document.getElementById('manualCrawlImportUrls')?.value || '').trim();
+  if (!text) {
+    alert('取り込むURLを貼り付けてください。');
+    return;
+  }
+  const startUrl = (document.getElementById('manualCrawlStartUrl')?.value?.trim())
+    || document.getElementById('cfgInputUrl').value.trim();
+  const outputPath = document.getElementById('manualCrawlOutput').value.trim() || 'flows/manual_crawl.json';
+  document.getElementById('manualCrawlStatus').value = '取り込み中...';
+  try {
+    const res = await fetch('/api/v1/manual-crawl/import', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({url: startUrl, urls: text, output_path: outputPath}),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'manual crawl import failed');
+    renderManualCrawlStatus(data);
+    document.getElementById('manualCrawlStatus').value = `取り込み完了: ${data.url_count || 0} URL`;
+    addEventLog('status', `URLを取り込み: ${data.url_count || 0} 件 → ${data.output_path || ''}`);
+  } catch (e) {
+    document.getElementById('manualCrawlStatus').value = '取り込み失敗';
+    alert('URLの取り込みに失敗しました: ' + e.message);
   }
 }
 

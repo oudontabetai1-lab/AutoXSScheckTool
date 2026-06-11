@@ -13,6 +13,7 @@ from .graphql import GraphQLScanner
 from .header_injection import HeaderInjectionScanner
 from .host_header import HostHeaderScanner
 from .info_disclosure import InfoDisclosureScanner
+from .js_static import JsStaticScanner
 from .jwt_scanner import JWTScanner
 from .mail_header import MailHeaderInjectionScanner
 from .nosql_injection import NoSQLInjectionScanner
@@ -79,6 +80,7 @@ SCANNERS: dict[str, type] = {
     "websocket":         WebSocketScanner,
     "secret_leak":       SecretLeakScanner,
     "sri":               SRIScanner,
+    "js_static":         JsStaticScanner,
 }
 
 
@@ -93,5 +95,5 @@ __all__ = [
     "SessionScanner", "SQLiScanner", "SSRFScanner", "SSTIScanner",
     "StoredXSSScanner", "XSSScanner",
     "XXEScanner", "LDAPScanner", "FileUploadScanner", "RaceConditionScanner",
-    "WebSocketScanner", "SecretLeakScanner", "SRIScanner",
+    "WebSocketScanner", "SecretLeakScanner", "SRIScanner", "JsStaticScanner",
 ]
