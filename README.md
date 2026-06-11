@@ -338,10 +338,13 @@ python main.py scan https://example.com \
 
 # 例2: メール送付コード方式。受信は mcp-email-server（IMAP）に委譲。
 # 一覧(list_emails_metadata)→本文(get_emails_content)の2段で読む。account_name 必須。
+# 重要: WSCAN_MFA_EMAIL_ACCOUNT と mcp-email-server 側の登録名
+# (MCP_EMAIL_SERVER_ACCOUNT_NAME)は必ず一致させること。不一致だと unknown account で失敗する。
 export WSCAN_MFA_EMAIL_COMMAND="uvx"
 export WSCAN_MFA_EMAIL_ARGS="mcp-email-server@latest stdio"
-export WSCAN_MFA_EMAIL_ACCOUNT="ops"                     # mcp-email-server に登録済みの account_name
+export WSCAN_MFA_EMAIL_ACCOUNT="ops"                     # ← 下の ACCOUNT_NAME と一致させる
 export WSCAN_MFA_EMAIL_LIST_ARGS='{"subject": "code"}'   # 任意の絞り込み(JSON)
+export MCP_EMAIL_SERVER_ACCOUNT_NAME="ops"               # ← email サーバ側の account 登録名
 export MCP_EMAIL_SERVER_EMAIL_ADDRESS="otp@example.com"  # ← email サーバが読む
 export MCP_EMAIL_SERVER_PASSWORD="app-password"
 export MCP_EMAIL_SERVER_IMAP_HOST="imap.example.com"
@@ -361,7 +364,7 @@ python main.py scan https://example.com \
 | `WSCAN_MFA_TOTP_COMMAND` / `_ARGS` | `node` / — | TOTP MCP の起動コマンド・引数 |
 | `WSCAN_MFA_TOTP_TOOL` / `_LABEL` | `get_totp_code` / — | 呼ぶツール名・アカウントラベル |
 | `WSCAN_MFA_EMAIL_COMMAND` / `_ARGS` | `uvx` / `mcp-email-server@latest stdio` | メール MCP の起動 |
-| `WSCAN_MFA_EMAIL_ACCOUNT` | — | mcp-email-server の `account_name`（**email 時は必須**） |
+| `WSCAN_MFA_EMAIL_ACCOUNT` | — | mcp-email-server の `account_name`（**email 時は必須**。サーバ側の `MCP_EMAIL_SERVER_ACCOUNT_NAME` と一致させる） |
 | `WSCAN_MFA_EMAIL_LIST_TOOL` / `_CONTENT_TOOL` | `list_emails_metadata` / `get_emails_content` | 一覧・本文取得ツール名 |
 | `WSCAN_MFA_EMAIL_PAGE_SIZE` | `5` | 一覧で取得する直近メール件数 |
 | `WSCAN_MFA_EMAIL_LIST_ARGS` / `_CONTENT_ARGS` | `{}` / `{}` | 各ツールへの追加引数(JSON, 例 `{"subject":"code"}`) |
