@@ -325,6 +325,28 @@ def test_parse_email_items_garbage():
     assert mfa.parse_email_items("") == []
 
 
+# ── extract_email_texts（本文応答からの抽出は subject/body に限定） ─────────
+def test_extract_email_texts_ignores_identifiers():
+    # email_id(652130) と message_id/date は拾わず、body の 482913 のみ対象
+    body = (
+        '[{"email_id": 652130, "message_id": "<a@b>", "date": "2026-06-10", '
+        '"subject": "Security", "body": "Your code is 482913"}]'
+    )
+    texts = mfa.extract_email_texts(body)
+    assert mfa.extract_otp(texts) == "482913"
+    assert "652130" not in texts
+
+
+def test_extract_email_texts_subject_and_body():
+    body = '[{"subject": "s", "body": "b"}]'
+    assert mfa.extract_email_texts(body) == "s\nb"
+
+
+def test_extract_email_texts_no_items():
+    assert mfa.extract_email_texts("not json") == ""
+    assert mfa.extract_email_texts("") == ""
+
+
 def test_email_item_id_priority_and_coercion():
     assert mfa.email_item_id({"uid": "1012", "id": 5}) == 1012   # uid 優先・数字は int
     assert mfa.email_item_id({"email_id": "ABC"}) == "ABC"       # 非数字は str

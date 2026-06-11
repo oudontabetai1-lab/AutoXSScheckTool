@@ -202,6 +202,27 @@ def parse_email_items(text: str) -> list:
     return []
 
 
+def extract_email_texts(text: str, fields=("subject", "body")) -> str:
+    """メール応答(JSON)から指定フィールド（既定: subject/body）のみ連結する（純粋関数）。
+
+    ``get_emails_content`` の応答は ``email_id`` / ``message_id`` / ``date`` 等を含むため、
+    本文全体から OTP を拾うと識別子（6桁 UID 等）を誤検出する。抽出対象を本文系
+    フィールドに限定してそれを防ぐ。構造解析できなければ空文字を返す。
+    """
+    items = parse_email_items(text)
+    if not items:
+        return ""
+    low_fields = [f.lower() for f in fields]
+    parts: list = []
+    for it in items:
+        low = {str(k).lower(): v for k, v in it.items()}
+        for f in low_fields:
+            v = low.get(f)
+            if v:
+                parts.append(str(v))
+    return "\n".join(parts)
+
+
 def _loads_loose(text: str):
     """テキストから JSON 配列/オブジェクトをゆるく読み出す（失敗時 None）。"""
     try:
@@ -507,7 +528,17 @@ class MFASolver:
             content_args = {"account_name": cfg.email_account, "email_ids": ids}
             content_args.update(cfg.email_content_args or {})
             body = await session.call_tool(cfg.email_content_tool, content_args)
-            return extract_otp(collect_tool_text(body), cfg.code_length, cfg.code_regex)
+            raw = collect_tool_text(body)
+            # 応答は email_id/message_id/date を含むため、subject/body のみから抽出する
+            # （識別子の 6桁 UID を OTP と誤検出しないため）。
+            texts = extract_email_texts(raw)
+            code = extract_otp(texts, cfg.code_length, cfg.code_regex)
+            if code:
+                return code
+            # 構造解析できない応答のみ raw 全文へフォールバック（誤検出リスクは許容）。
+            if not texts:
+                return extract_otp(raw, cfg.code_length, cfg.code_regex)
+            return None
 
         async with stdio_client(params) as (read, write):
             async with ClientSession(read, write) as session:
