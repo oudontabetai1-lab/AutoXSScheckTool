@@ -154,6 +154,27 @@ def _load_config(path: Path = _CONFIG_PATH) -> dict:
 _CFG = _load_config()
 
 
+# 設定スナップショット等で永続化してはいけない秘匿フィールド。キー名に以下の
+# 語を含む値（パスワード/シークレット/トークン/APIキー）は伏字にする。
+_SECRET_KEY_TOKENS = ("password", "secret", "token", "api_key", "apikey")
+
+
+def _redact_secrets(cfg: dict) -> dict:
+    """秘匿値を伏字にした設定の浅いコピーを返す（ディスク保存・共有用）。
+
+    ダッシュボードは IMAP アプリパスワード等を「送信のみ・非保存」として扱うため、
+    成果物（``scan_config.json``）へ平文で書き出さない。
+    """
+    redacted: dict = {}
+    for key, value in (cfg or {}).items():
+        lname = str(key).lower()
+        if value not in ("", None) and any(tok in lname for tok in _SECRET_KEY_TOKENS):
+            redacted[key] = "***REDACTED***"
+        else:
+            redacted[key] = value
+    return redacted
+
+
 def parse_args():
     parser = argparse.ArgumentParser(
         description="WScan - Web Security Scanner",
@@ -1923,7 +1944,7 @@ async def run_serve(args):
                             "tool": "WScan",
                             "kind": "wscan-scan-config-snapshot",
                             "submitted_at": _dt.datetime.now().isoformat(timespec="seconds"),
-                            "config": cfg,
+                            "config": _redact_secrets(cfg),
                         },
                         ensure_ascii=False,
                         indent=2,
