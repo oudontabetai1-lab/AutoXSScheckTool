@@ -192,6 +192,14 @@ auth:
   # ブラウザ自動入力用パスワード (--auth-pass の代替, 平文保存注意)
   auth_pass: ""
 
+  # MFA(2FA) 自動突破: ログイン後のワンタイムコードを外部 MCP から取得して投入。
+  #   mfa_type: "totp"(mcp-totp-authenticator) / "email"(mcp-email-server) / "" 無効
+  #   mfa_field: コード入力欄の name/id (既定 otp)
+  # 秘匿情報(TOTP_SECRET_* / MCP_EMAIL_SERVER_* など)と MCP 起動設定は環境変数
+  # (WSCAN_MFA_*) で渡す。README 参照（コード/設定に埋め込まない）。
+  mfa_type: ""
+  mfa_field: ""
+
 # ──────────────────────────────────────────────────────────
 # 各機能のOn/Off
 # ──────────────────────────────────────────────────────────

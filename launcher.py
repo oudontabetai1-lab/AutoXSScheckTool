@@ -1,8 +1,14 @@
 #!/usr/bin/env python3
 """
 WScan CUI Launcher
-インタラクティブに設定を入力してスキャンを開始します。
 ダブルクリック / launcher.bat から起動できます。
+
+既定では引数なし起動でダッシュボード(serve)を自動で開きます（実運用はほぼ
+ブラウザ UI のため）。bind 先は安全側の localhost(127.0.0.1)、ポートは環境変数
+WSCAN_PORT（既定 8765）。LAN へ公開するときは WSCAN_HOST を明示し、併せて
+WSCAN_AUTH_TOKEN の設定を推奨します。
+scan / agent モードを対話的に選ぶには `python launcher.py menu`（または
+環境変数 WSCAN_LAUNCHER_MENU=1）でモード選択メニューを表示します。
 """
 import argparse
 import asyncio
@@ -762,14 +768,62 @@ def main():
         print("    WScan  -  Web Security Scanner")
         print("  " + "=" * 44)
 
-    # ── モード選択 ───────────────────────────────────────────────
+    # ── 既定: ダッシュボード(serve)を自動起動 ───────────────────────
+    # 実運用はほぼ serve（ブラウザ UI）なので、引数なし起動では即ダッシュボードを開く。
+    # scan / agent も使いたいときは `python launcher.py menu`（または
+    # 環境変数 WSCAN_LAUNCHER_MENU=1）でモード選択メニューを表示する。
+    argv = [a.lower() for a in sys.argv[1:]]
+    show_menu = ("menu" in argv) or os.environ.get(
+        "WSCAN_LAUNCHER_MENU", ""
+    ).strip().lower() in ("1", "true", "yes", "on")
+
+    def _launch_serve(port: int) -> None:
+        _ok(f"http://localhost:{port} でダッシュボードを起動します")
+        _print()
+        # host / auth_token は serve サブコマンドのパーサ既定（WSCAN_HOST /
+        # auth_token は WSCAN_AUTH_TOKEN（無ければ config）と揃える。これを省くと
+        # run_serve がトークン無しにフォールバックし、設定済みでも未認証になる。
+        #
+        # bind 先はローカルツールとして安全側に倒し、既定で localhost(127.0.0.1)。
+        # ダブルクリック起動が無認証のままスキャナ制御画面を LAN へ晒さないため。
+        # LAN 公開したいときは WSCAN_HOST を明示指定する（その際は WSCAN_AUTH_TOKEN
+        # 推奨）。サーバ常駐は `python main.py serve` を使う（config の host を尊重）。
+        from main import run_serve
+        serve_args = argparse.Namespace(
+            port=port,
+            host=os.environ.get("WSCAN_HOST", "127.0.0.1"),
+            auth_token=os.environ.get("WSCAN_AUTH_TOKEN", ""),
+            # ランチャーはダッシュボードを開くのが目的なので必ずブラウザを開く
+            # （run_serve 既定は loopback bind 時のみ開く）。
+            open_browser=True,
+        )
+        try:
+            asyncio.run(run_serve(serve_args))
+        except KeyboardInterrupt:
+            _print()
+            _print("  ダッシュボードを停止しました。")
+
+    if not show_menu:
+        # ポートは環境変数 WSCAN_PORT（既定 8765）。プロンプトせず即起動。
+        try:
+            port = int(os.environ.get("WSCAN_PORT", "8765") or "8765")
+        except ValueError:
+            port = 8765
+        _header("ダッシュボードを起動")
+        _print("    [dim]scan / agent を使うには `python launcher.py menu`[/dim]"
+               if _USE_RICH else
+               "    scan / agent を使うには `python launcher.py menu`")
+        _launch_serve(port)
+        return
+
+    # ── モード選択（menu 指定時のみ） ────────────────────────────────
     _header("起動モードを選択")
     _print("    [1] 通常スキャン        — クロール → AI プランナー → ペイロード自動攻撃")
     _print("    [2] Agent Browser スキャン — LLM がブラウザを直接操作して自律的に探索")
     _print("    [3] ダッシュボードを開く   — ブラウザ UI から設定・スキャン起動 (serve)")
     _print()
     mode_options = ["scan", "agent", "serve"]
-    mode = _choose("モード番号", mode_options, "scan")
+    mode = _choose("モード番号", mode_options, "serve")
 
     # ── serve モード ─────────────────────────────────────────────
     if mode == "serve":
@@ -779,15 +833,7 @@ def main():
             port = int(port_raw)
         except ValueError:
             port = 8765
-        _ok(f"http://localhost:{port} でダッシュボードを起動します")
-        _print()
-        serve_args = argparse.Namespace(port=port)
-        from main import run_serve
-        try:
-            asyncio.run(run_serve(serve_args))
-        except KeyboardInterrupt:
-            _print()
-            _print("  ダッシュボードを停止しました。")
+        _launch_serve(port)
         return
 
     # ── Agent Browser モード ─────────────────────────────────────

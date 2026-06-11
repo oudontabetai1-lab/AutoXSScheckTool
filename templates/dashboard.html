@@ -1100,6 +1100,25 @@ body {
             <input type="text" id="cfgLoginSuccess" placeholder="dashboard">
           </div>
         </div>
+        <div class="cfg-section-title" style="margin-top:16px">MFA (2段階認証) 自動入力</div>
+        <div style="font-size:0.78rem;color:var(--text-muted);margin-bottom:10px">
+          ログイン後のワンタイムコードを外部 MCP サーバ経由で取得・投入します。
+          シークレット等は環境変数 (TOTP_SECRET_* / MCP_EMAIL_SERVER_* / WSCAN_MFA_*) で設定。
+        </div>
+        <div class="cfg-grid">
+          <div class="cfg-field">
+            <label>MFA タイプ</label>
+            <select id="cfgMfaType">
+              <option value="">無効</option>
+              <option value="totp">TOTP (mcp-totp-authenticator)</option>
+              <option value="email">メール (mcp-email-server)</option>
+            </select>
+          </div>
+          <div class="cfg-field">
+            <label>コード入力フィールド名</label>
+            <input type="text" id="cfgMfaField" placeholder="otp">
+          </div>
+        </div>
         <div class="cfg-section-title" style="margin-top:16px">Cookie</div>
         <div class="cfg-field">
           <label>Cookie文字列 (session=xxx; token=yyy)</label>
@@ -2269,6 +2288,8 @@ function submitScanConfig() {
     login_user_field: document.getElementById('cfgLoginUserField').value.trim() || 'username',
     login_pass_field: document.getElementById('cfgLoginPassField').value.trim() || 'password',
     login_success_indicator: document.getElementById('cfgLoginSuccess').value.trim(),
+    mfa_type:    document.getElementById('cfgMfaType').value.trim(),
+    mfa_field:   document.getElementById('cfgMfaField').value.trim(),
     cookies:     document.getElementById('cfgCookies').value.trim(),
     low_priv_cookies: document.getElementById('cfgLowPrivCookies').value.trim(),
     interactive_plan: cfgToggles.interactive_plan,
@@ -2344,6 +2365,8 @@ function _collectFullConfigForExport() {
     login_user_field: collect('cfgLoginUserField'),
     login_pass_field: collect('cfgLoginPassField'),
     login_success_indicator: collect('cfgLoginSuccess'),
+    mfa_type: collect('cfgMfaType'),
+    mfa_field: collect('cfgMfaField'),
     cookies: collect('cfgCookies'),
     low_priv_cookies: collect('cfgLowPrivCookies'),
     auto_register_count: collect('cfgAutoRegisterCount'),
@@ -2433,6 +2456,8 @@ function applyImportedConfig(cfg) {
   setVal('cfgLoginUserField', cfg.login_user_field);
   setVal('cfgLoginPassField', cfg.login_pass_field);
   setVal('cfgLoginSuccess', cfg.login_success_indicator);
+  setVal('cfgMfaType', cfg.mfa_type);
+  setVal('cfgMfaField', cfg.mfa_field);
   setVal('cfgCookies', cfg.cookies);
   setVal('cfgLowPrivCookies', cfg.low_priv_cookies);
   setVal('cfgAutoRegisterCount', cfg.auto_register_count);
@@ -2557,6 +2582,8 @@ function saveConfigToStorage() {
       login_user_field: document.getElementById('cfgLoginUserField').value,
       login_pass_field: document.getElementById('cfgLoginPassField').value,
       login_success_indicator: document.getElementById('cfgLoginSuccess').value,
+      mfa_type: document.getElementById('cfgMfaType').value,
+      mfa_field: document.getElementById('cfgMfaField').value,
       cookies: document.getElementById('cfgCookies').value,
       exclude_fields: document.getElementById('cfgExcludeFields').value,
       exclude_urls: document.getElementById('cfgExcludeUrls').value,
@@ -2603,6 +2630,8 @@ function loadConfigFromStorage() {
     if (cfg.login_user_field) document.getElementById('cfgLoginUserField').value = cfg.login_user_field;
     if (cfg.login_pass_field) document.getElementById('cfgLoginPassField').value = cfg.login_pass_field;
     if (cfg.login_success_indicator) document.getElementById('cfgLoginSuccess').value = cfg.login_success_indicator;
+    if (cfg.mfa_type !== undefined) document.getElementById('cfgMfaType').value = cfg.mfa_type || '';
+    if (cfg.mfa_field) document.getElementById('cfgMfaField').value = cfg.mfa_field;
     if (cfg.cookies) document.getElementById('cfgCookies').value = cfg.cookies;
     if (cfg.exclude_fields) document.getElementById('cfgExcludeFields').value = cfg.exclude_fields;
     if (cfg.exclude_urls) document.getElementById('cfgExcludeUrls').value = cfg.exclude_urls;
@@ -2657,6 +2686,8 @@ async function loadDefaultConfigFromServer() {
     if (cfg.login_user_field) document.getElementById('cfgLoginUserField').value = cfg.login_user_field;
     if (cfg.login_pass_field) document.getElementById('cfgLoginPassField').value = cfg.login_pass_field;
     if (cfg.login_success_indicator) document.getElementById('cfgLoginSuccess').value = cfg.login_success_indicator;
+    if (cfg.mfa_type !== undefined) document.getElementById('cfgMfaType').value = cfg.mfa_type || '';
+    if (cfg.mfa_field) document.getElementById('cfgMfaField').value = cfg.mfa_field;
     if (cfg.exclude_fields) document.getElementById('cfgExcludeFields').value = cfg.exclude_fields;
     if (cfg.exclude_urls) document.getElementById('cfgExcludeUrls').value = cfg.exclude_urls;
     if (cfg.manual_crawl_file) document.getElementById('cfgManualCrawlFile').value = cfg.manual_crawl_file;
@@ -4196,6 +4227,8 @@ function submitHybridScan() {
     auth_user:    (document.getElementById('cfgAuthUser')?.value || '').trim(),
     auth_pass:    (document.getElementById('cfgAuthPass')?.value || ''),
     login_url:    (document.getElementById('cfgLoginUrl')?.value || '').trim(),
+    mfa_type:     (document.getElementById('cfgMfaType')?.value || '').trim(),
+    mfa_field:    (document.getElementById('cfgMfaField')?.value || '').trim(),
     cookies:      (document.getElementById('cfgCookies')?.value || '').trim(),
     llm:          document.getElementById('cfgLlm')?.value || 'none',
     ollama_model: (document.getElementById('cfgOllamaModel')?.value || '').trim() || 'llama3',

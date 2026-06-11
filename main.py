@@ -116,6 +116,8 @@ def _load_config(path: Path = _CONFIG_PATH) -> dict:
     cfg["login_success_indicator"] = str(a.get("login_success_indicator", "") or "")
     cfg["auth_user"]               = str(a.get("auth_user", "") or "")
     cfg["auth_pass"]               = str(a.get("auth_pass", "") or "")
+    cfg["mfa_type"]                = str(a.get("mfa_type", "") or "")
+    cfg["mfa_field"]               = str(a.get("mfa_field", "") or "")
 
     cfg["dom_xss"]                 = bool(f.get("dom_xss",          False))
     cfg["ai_analysis"]             = bool(f.get("ai_analysis",      True))
@@ -436,6 +438,19 @@ Examples:
     scan.add_argument(
         "--login-success", metavar="TEXT", default=_CFG.get("login_success_indicator", ""),
         help="Substring expected in the post-login URL or page to confirm success.",
+    )
+    # MFA (2FA) automation via external MCP servers. Secrets live in env
+    # (TOTP_SECRET_* / MCP_EMAIL_SERVER_*); see README.
+    scan.add_argument(
+        "--mfa-type", metavar="KIND", choices=["totp", "email"],
+        default=(_CFG.get("mfa_type") or None),
+        help="Solve login MFA via external MCP: 'totp' (mcp-totp-authenticator) "
+             "or 'email' (mcp-email-server). Configure via WSCAN_MFA_* env. "
+             "Unset → falls back to WSCAN_MFA_TYPE env.",
+    )
+    scan.add_argument(
+        "--mfa-field", metavar="NAME", default=_CFG.get("mfa_field", ""),
+        help="One-time-code input field name/id on the login form (default: otp).",
     )
     # A-3: Payload learning
     scan.add_argument(
@@ -1324,6 +1339,9 @@ async def run_scan(args):
             login_user_field=getattr(args, "login_user_field", "username") or "username",
             login_pass_field=getattr(args, "login_pass_field", "password") or "password",
             login_success_indicator=getattr(args, "login_success", "") or "",
+            # None=未指定(env に委ねる) / ""=明示無効 / "totp"|"email"=明示有効
+            mfa_type=getattr(args, "mfa_type", None),
+            mfa_field=getattr(args, "mfa_field", "") or "",
             learning_file=getattr(args, "learning_file", "") or "",
             # Feature on/off flags (from config or CLI)
             enable_ai_analysis=not getattr(args, "no_ai_analysis", False),
@@ -1604,6 +1622,8 @@ async def run_serve(args):
         "login_user_field": _CFG.get("login_user_field", "username"),
         "login_pass_field": _CFG.get("login_pass_field", "password"),
         "login_success_indicator": _CFG.get("login_success_indicator", ""),
+        "mfa_type": _CFG.get("mfa_type", ""),
+        "mfa_field": _CFG.get("mfa_field", ""),
         "exclude_fields": ", ".join(_CFG.get("exclude_fields", []) or []),
         "exclude_urls": "\n".join(_CFG.get("exclude_urls", []) or []),
         "target_urls": "\n".join(_CFG.get("target_urls", []) or []),
@@ -1763,6 +1783,10 @@ async def run_serve(args):
                 login_user_field=cfg.get("login_user_field", "username") or "username",
                 login_pass_field=cfg.get("login_pass_field", "password") or "password",
                 login_success_indicator=cfg.get("login_success_indicator", "") or "",
+                # ダッシュボードは常に mfa_type を送る("" = UI で「無効」選択)。
+                # "" は env を上書きして無効化。キー欠落(None)時のみ env に委ねる。
+                mfa_type=cfg.get("mfa_type"),
+                mfa_field=cfg.get("mfa_field", "") or "",
                 payloads_file=cfg.get("payloads_file") or None,
                 learning_file=cfg.get("learning_file") or None,
                 output_dir=cfg.get("output_dir") or None,

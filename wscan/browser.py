@@ -132,12 +132,16 @@ class BrowserManager:
         tls_config: Optional[TLSConfig] = None,
         target_url: str = "",
         request_logger=None,
+        mfa_solver=None,
     ):
         self.headless = headless
         self.timeout = timeout * 1000  # ms
         self.monitor = monitor
         self.auth_user = auth_user
         self.auth_pass = auth_pass
+        # MFA（2FA）ソルバ。設定時はログイン後のワンタイムコード入力を自動化。
+        # None なら従来どおり MFA 段は何もしない。
+        self.mfa_solver = mfa_solver
         self.proxy = proxy  # e.g. "http://127.0.0.1:8080"
         self.sleep_factor = sleep_factor
         self.tls_config = tls_config or TLSConfig()
@@ -902,6 +906,16 @@ class BrowserManager:
             if not await _fill_field(pass_selector, self.auth_pass):
                 return False
 
+            # MFA（メール）の baseline をパスワード送信前に確保する。送信で OTP メールが
+            # 飛ぶため、ここで「送信前から受信箱にある古いメール」を記録しておくと、
+            # 送信後に届く新着のみを solve() で対象にできる（古いコードの誤投入防止）。
+            mfa_solver = getattr(self, "mfa_solver", None)
+            if mfa_solver is not None and mfa_solver.enabled:
+                try:
+                    await mfa_solver.prime()
+                except Exception:
+                    pass
+
             submitted = False
             try:
                 submit_btn = self.page.locator(user_selector).locator("xpath=ancestor::form").locator(
@@ -941,6 +955,23 @@ class BrowserManager:
                     # polling loop below still evaluates the resulting body and URL.
                     pass
 
+            # MFA（2FA）チャレンジ: パスワード送信後にワンタイムコード入力が
+            # 要求される場合、外部 MCP 経由でコードを取得して投入する。未設定・
+            # 非該当時は何もしない（従来挙動を維持）。
+            mfa_field = ""
+            mfa_solver = getattr(self, "mfa_solver", None)
+            if mfa_solver is not None and mfa_solver.enabled:
+                from . import mfa as _mfa
+                mfa_field = mfa_solver.field or "otp"
+                mfa_status = await self._handle_mfa_challenge(success_indicator)
+                if mfa_status == "failed":
+                    # MFA 画面を検出したがコード取得/投入に失敗。未認証のまま
+                    # 「login_url から移動した」だけで成功と誤判定しないよう、
+                    # ここで失敗を確定する。
+                    self.last_login_url = self.page.url
+                    self.last_login_success = False
+                    return False
+
             login_url_norm = login_url.rstrip("/")
             failure_markers = (
                 "invalid login",
@@ -968,12 +999,15 @@ class BrowserManager:
                         return True
                 else:
                     failed = any(marker in body_lower for marker in failure_markers)
+                    # MFA 画面に留まっている間は「login_url から移動した」だけで
+                    # 成功と判定しない（/mfa への遷移を誤認しないため）。
+                    on_mfa = bool(mfa_field) and _mfa.mfa_challenge_present(post_body, mfa_field)
                     moved = post_url.rstrip("/") != login_url_norm
-                    if moved and not failed:
+                    if moved and not failed and not on_mfa:
                         self.last_login_url = post_url
                         self.last_login_success = True
                         return True
-                    if not self.is_on_login_page(login_url) and not failed:
+                    if not self.is_on_login_page(login_url) and not failed and not on_mfa:
                         self.last_login_url = post_url
                         self.last_login_success = True
                         return True
@@ -982,6 +1016,88 @@ class BrowserManager:
             return False
         except Exception:
             return False
+
+    async def _handle_mfa_challenge(self, success_indicator: str = "") -> str:
+        """パスワード送信後に MFA コード入力画面が出たら自動で突破する。
+
+        最大 10 秒 MFA 画面の出現を待ち（強いシグナル or 設定されたコード入力欄の
+        存在で検出）、出たら外部 MCP からコードを取得して入力欄へ投入・送信する。
+
+        戻り値:
+        - ``"not_present"`` … MFA 画面は現れなかった／既にログイン済み（従来挙動）。
+        - ``"solved"``      … コードを取得し入力欄へ投入・送信した。
+        - ``"failed"``      … MFA 画面は検出したが、コード取得や投入に失敗した。
+        """
+        from . import mfa as _mfa
+
+        field = self.mfa_solver.field or "otp"
+
+        # 検出フェーズ: ここでの例外は「MFA 無し」とみなし従来挙動へ委ねる。
+        try:
+            deadline = time.monotonic() + 10.0
+            detected = False
+            while time.monotonic() < deadline:
+                try:
+                    await self.page.wait_for_load_state("domcontentloaded", timeout=1000)
+                except Exception:
+                    pass
+                body = await self.get_page_source()
+                # 既に成功条件を満たしていれば MFA 不要。
+                if success_indicator and (
+                    success_indicator in self.page.url or success_indicator in body
+                ):
+                    return "not_present"
+                if _mfa.mfa_challenge_present(body, field):
+                    detected = True
+                    break
+                await asyncio.sleep(0.3)
+            if not detected:
+                return "not_present"
+        except Exception:
+            return "not_present"
+
+        # 解決フェーズ: 検出後の失敗は "failed"（未認証のまま成功扱いにしない）。
+        try:
+            code = await self.mfa_solver.solve()
+            if not code:
+                return "failed"
+
+            # コード入力欄を埋める。設定欄 → 一般的な OTP 入力欄の順に試す。
+            candidates = [
+                f'[name="{field}"],[id="{field}"]',
+                'input[autocomplete="one-time-code"]',
+                'input[name*="otp" i],input[id*="otp" i]',
+                'input[name*="code" i],input[id*="code" i]',
+                'input[name*="token" i],input[id*="token" i]',
+            ]
+            used = ""
+            for sel in candidates:
+                try:
+                    await self.page.fill(sel, code, timeout=3000)
+                    used = sel
+                    break
+                except Exception:
+                    continue
+            if not used:
+                return "failed"
+
+            # 送信（同フォームの submit ボタン → 失敗時は Enter）。
+            try:
+                submit_btn = self.page.locator(used).locator(
+                    "xpath=ancestor::form"
+                ).locator(
+                    'button[type="submit"],input[type="submit"],[type="submit"],'
+                    'button:not([type="button"])'
+                ).first
+                await submit_btn.click(timeout=5000, no_wait_after=True)
+            except Exception:
+                try:
+                    await self.page.keyboard.press("Enter")
+                except Exception:
+                    pass
+            return "solved"
+        except Exception:
+            return "failed"
 
     def is_on_login_page(self, login_url: str) -> bool:
         """
@@ -1284,6 +1400,8 @@ class WorkerBrowser(BrowserManager):
         self.monitor = real_browser.monitor
         self.auth_user = real_browser.auth_user
         self.auth_pass = real_browser.auth_pass
+        # MFA ソルバも引き継ぐ（worker のセッション切れ再ログインでも MFA を解ける）。
+        self.mfa_solver = getattr(real_browser, "mfa_solver", None)
         self.proxy = real_browser.proxy
         self.sleep_factor = real_browser.sleep_factor
         self._playwright = real_browser._playwright

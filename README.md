@@ -197,6 +197,7 @@ PEM の cert/key は Playwright と httpx の両方で使われます。PFX は 
 - **BFS クローラー** — 設定可能な深さで同一ドメインリンクを自動収集
 - **sitemap.xml / robots.txt 活用** — クロール時に自動取得して未リンクページを発見
 - **ログイン自動化** — `--login-url` でログインフォームを自動入力してセッションを取得
+- **MFA(2FA) 自動化** — `--mfa-type totp|email` でワンタイムコードを外部 MCP 経由で取得・投入
 
 ### レポート・出力
 
@@ -312,6 +313,70 @@ python main.py scan https://example.com \
   --low-priv-cookies "session=lowpriv_token"
 ```
 
+### MFA（2段階認証）付きログインの自動化
+
+ログイン後にワンタイムコードを要求される対象では、コード取得を**外部 MCP サーバ**へ
+委譲して自動入力します（パスワード送信後に MFA 画面を検出 → コード取得 → 投入・送信）。
+**自身が管理する／検査許可を得た対象**にのみ使用してください。秘匿情報（TOTP シークレット・
+メール認証情報）はコードや設定ファイルに書かず、すべて環境変数で渡します。
+
+事前に外部 MCP サーバを用意します（本リポジトリの Python 依存ではありません）。
+
+- TOTP: [mcp-totp-authenticator](https://github.com/gosusnkr/mcp-totp-authenticator)（Node）
+- メール: [mcp-email-server](https://github.com/ai-zerolab/mcp-email-server)（uvx/pip）
+
+```bash
+# 例1: 認証アプリ方式（TOTP）。シークレットは TOTP サーバ側の env で設定する。
+export WSCAN_MFA_TOTP_COMMAND="node"
+export WSCAN_MFA_TOTP_ARGS="/opt/mcp-totp-authenticator/dist/index.js"
+export WSCAN_MFA_TOTP_LABEL="ops@example.com"   # 任意（複数アカウント時）
+export TOTP_SECRET_1="JBSWY3DPEHPK3PXP"          # ← TOTP サーバが読む（base32）
+export TOTP_LABEL_1="ops@example.com"
+python main.py scan https://example.com \
+  --login-url https://example.com/login --auth-user ops --auth-pass 'p@ss' \
+  --mfa-type totp --mfa-field otp
+
+# 例2: メール送付コード方式。受信は mcp-email-server（IMAP）に委譲。
+# 一覧(list_emails_metadata)→本文(get_emails_content)の2段で読む。account_name 必須。
+# 重要: WSCAN_MFA_EMAIL_ACCOUNT と mcp-email-server 側の登録名
+# (MCP_EMAIL_SERVER_ACCOUNT_NAME)は必ず一致させること。不一致だと unknown account で失敗する。
+export WSCAN_MFA_EMAIL_COMMAND="uvx"
+export WSCAN_MFA_EMAIL_ARGS="mcp-email-server@latest stdio"
+export WSCAN_MFA_EMAIL_ACCOUNT="ops"                     # ← 下の ACCOUNT_NAME と一致させる
+export WSCAN_MFA_EMAIL_LIST_ARGS='{"subject": "code"}'   # 任意の絞り込み(JSON)
+export MCP_EMAIL_SERVER_ACCOUNT_NAME="ops"               # ← email サーバ側の account 登録名
+export MCP_EMAIL_SERVER_EMAIL_ADDRESS="otp@example.com"  # ← email サーバが読む
+export MCP_EMAIL_SERVER_PASSWORD="app-password"
+export MCP_EMAIL_SERVER_IMAP_HOST="imap.example.com"
+python main.py scan https://example.com \
+  --login-url https://example.com/login --auth-user ops --auth-pass 'p@ss' \
+  --mfa-type email
+```
+
+主な環境変数（`WSCAN_MFA_*`）:
+
+| 変数 | 既定 | 説明 |
+|---|---|---|
+| `WSCAN_MFA_TYPE` | `none` | `totp` / `email` / `none`。UI/CLI(`--mfa-type`)で明示指定するとこの env より優先（UI の「無効」で確実に切れる） |
+| `WSCAN_MFA_FIELD` | `otp` | コード入力欄の name/id（`--mfa-field` で上書き） |
+| `WSCAN_MFA_CODE_LENGTH` | `6` | 抽出するコード桁数 |
+| `WSCAN_MFA_CODE_REGEX` | — | コード抽出の正規表現（指定時はこちらを優先） |
+| `WSCAN_MFA_TOTP_COMMAND` / `_ARGS` | `node` / — | TOTP MCP の起動コマンド・引数 |
+| `WSCAN_MFA_TOTP_TOOL` / `_LABEL` | `get_totp_code` / — | 呼ぶツール名・アカウントラベル |
+| `WSCAN_MFA_EMAIL_COMMAND` / `_ARGS` | `uvx` / `mcp-email-server@latest stdio` | メール MCP の起動 |
+| `WSCAN_MFA_EMAIL_ACCOUNT` | — | mcp-email-server の `account_name`（**email 時は必須**。サーバ側の `MCP_EMAIL_SERVER_ACCOUNT_NAME` と一致させる） |
+| `WSCAN_MFA_EMAIL_LIST_TOOL` / `_CONTENT_TOOL` | `list_emails_metadata` / `get_emails_content` | 一覧・本文取得ツール名 |
+| `WSCAN_MFA_EMAIL_PAGE_SIZE` | `5` | 一覧で取得する直近メール件数 |
+| `WSCAN_MFA_EMAIL_LIST_ARGS` / `_CONTENT_ARGS` | `{}` / `{}` | 各ツールへの追加引数(JSON, 例 `{"subject":"code"}`) |
+| `WSCAN_MFA_EMAIL_TIMEOUT` / `_INTERVAL` | `60` / `5` | メール到着待ちの最大秒・ポーリング間隔 |
+
+> メールは「一覧（`list_emails_metadata`）→ 本文（`get_emails_content`）」の2段で読み、
+> まず件名、無ければ本文から `WSCAN_MFA_CODE_LENGTH`（既定 6 桁）または
+> `WSCAN_MFA_CODE_REGEX` に基づいてコードを抽出します。ツール名は利用する MCP
+> サーバの API に合わせて `*_LIST_TOOL` / `*_CONTENT_TOOL` で調整してください。
+> ポーリング開始時点で既に受信箱にあるメールは除外し、**その後に届いた新着メール
+> のみ**を対象にします（前回ログインの期限切れコードを誤投入しないため）。
+
 ### DOM-based XSS 検出を有効化
 
 ```bash
@@ -423,6 +488,8 @@ usage: main.py scan [オプション] URL
   --login-user-field NAME  ユーザー名フィールド名 (デフォルト: username)
   --login-pass-field NAME  パスワードフィールド名 (デフォルト: password)
   --login-success TEXT     ログイン成功判定のURL/ページ内文字列
+  --mfa-type KIND          MFA(2FA) 自動入力: totp / email（外部 MCP 経由）
+  --mfa-field NAME         ワンタイムコード入力欄の name/id (デフォルト: otp)
   --low-priv-cookies STR   垂直権限昇格テスト用の低権限セッション Cookie
   --low-priv-cookie-file F 低権限セッション Cookie JSON ファイル
   --include-registration   登録/サインアップフォームもテスト対象に含める

@@ -56,6 +56,7 @@ python main.py scan http://127.0.0.1:8000 --checks xss sqli --no-monitor --llm n
 | `agent_engine.py` / `llm_agent_browser.py` / `llm_web_tools.py` | Agent モード（LLM がブラウザ自律操作） |
 | `notification.py` | Slack/Webhook 送信（送信専用） |
 | `oob_email.py` / `oob_email_mcp.py` | OOB メール受信シンク＋自前 MCP（blind系の確証、`WSCAN_OOB_*`） |
+| `mfa.py` | MFA(2FA) ワンタイムコード取得。外部 MCP（TOTP=mcp-totp-authenticator / Email=mcp-email-server）を stdio クライアントで呼ぶ。抽出/判定は純粋関数、`WSCAN_MFA_*`。`BrowserManager.auto_login` のパスワード送信後に配線 |
 | `request_logger.py` | 全 HTTP / ペイロードの JSONL 監査ログ |
 | `diff_scan.py` / `batch_runner.py` / `flow_runner.py` / `flow_recorder.py` / `manual_crawl.py` / `har_importer.py` | 差分/バッチ/フロー再生・記録/手動巡回/HAR取込 |
 | `report.py` / `sarif.py` / `reproduction.py` / `remediation.py` / `compliance_map.py` | レポート/SARIF/再現/修正提案/CVSS・規格マッピング |
