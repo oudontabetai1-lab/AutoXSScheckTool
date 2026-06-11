@@ -83,6 +83,20 @@ class JsStaticScannerContextTests(unittest.IsolatedAsyncioTestCase):
         findings = await scanner.scan_page_context(page)
         self.assertTrue(any(js_url in f.field_name for f in findings))
 
+    async def test_findings_do_not_capture_live_screenshot(self):
+        # 静的JS監査はクロール時HTMLを解析するため、現在タブのライブスクショを
+        # 撮ってはいけない（無関係URLの画像添付を防ぐ）。
+        html = "<script>eval(location.hash);</script>"
+        scanner = _make_scanner()
+
+        async def _sentinel_shot(label=""):
+            return "LIVE_TAB_SHOT"  # 呼ばれたら混入する番兵
+
+        scanner.browser.screenshot_b64 = _sentinel_shot
+        findings = await scanner.scan_page_context(_page("http://t.test/f", html))
+        self.assertTrue(findings)
+        self.assertTrue(all(f.screenshot_b64 == "" for f in findings))
+
     async def test_no_findings_for_clean_page(self):
         scanner = _make_scanner()
         html = "<script>console.log('hello');</script>"

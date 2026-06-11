@@ -158,6 +158,10 @@ class JsStaticScanner(BaseScanner):
                 severity=risk.severity,
                 confidence=confidence,
                 evidence_type="js_dangerous_sink",
+                # 静的JS監査はクロール時の page.html を解析しており、ブラウザは
+                # 対象ページに居ない（別ページ/別ワーカーのタブのまま）。ライブ
+                # スクショを撮ると無関係なURLの画像が添付されるため明示的に空にする。
+                screenshot_b64="",
                 evidence_details={
                     "sink": risk.sink,
                     "source": risk.source,
