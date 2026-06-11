@@ -53,7 +53,7 @@ def _unique_urls(values: list[str], origin: str = "", allowed_scopes: list[str] 
     urls: list[str] = []
     allowed_scopes = allowed_scopes or []
     for raw in values:
-        url = str(raw or "").split("#")[0].strip()
+        url = _strip_in_page_anchor(str(raw or "").strip())
         if not url.startswith(("http://", "https://")):
             continue
         if origin and not _same_origin(url, origin) and not _matches_scope(url, allowed_scopes):

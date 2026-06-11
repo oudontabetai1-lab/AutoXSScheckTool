@@ -97,6 +97,21 @@ class JsStaticScannerContextTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(findings)
         self.assertTrue(all(f.screenshot_b64 == "" for f in findings))
 
+    async def test_same_url_rescanned_when_html_changes(self):
+        # 認証後など同一 URL で内容が変わった場合は再解析する（URL 単位の
+        # 取りこぼし回帰防止）。同一内容の再投入は省く。
+        url = "http://t.test/g"
+        scanner = _make_scanner()
+        clean = "<script>console.log('hi');</script>"
+        risky = "<script>eval(location.hash);</script>"
+
+        self.assertEqual(await scanner.scan_page_context(_page(url, clean)), [])
+        # 同一 URL でも HTML が変われば解析される。
+        findings = await scanner.scan_page_context(_page(url, risky))
+        self.assertTrue(any(f.evidence_details.get("sink") == "eval" for f in findings))
+        # 同一内容の再投入は重複排除でスキップ。
+        self.assertEqual(await scanner.scan_page_context(_page(url, risky)), [])
+
     async def test_no_findings_for_clean_page(self):
         scanner = _make_scanner()
         html = "<script>console.log('hello');</script>"

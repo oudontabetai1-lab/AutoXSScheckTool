@@ -13,6 +13,7 @@ JavaScript と読み込まれた外部 ``.js`` を静的に読み、危険な DO
 """
 from __future__ import annotations
 
+import hashlib
 from typing import TYPE_CHECKING
 from urllib.parse import urlparse
 
@@ -21,6 +22,11 @@ from wscan import js_analysis
 
 if TYPE_CHECKING:
     from wscan.engine import ScanEngine
+
+
+def _fingerprint(text: str) -> str:
+    """解析対象テキストの短い内容ハッシュ（重複排除キー用）。"""
+    return hashlib.sha1((text or "").encode("utf-8", "replace")).hexdigest()
 
 
 def _host_of(url: str) -> str:
@@ -38,8 +44,10 @@ class JsStaticScanner(BaseScanner):
 
     def __init__(self, engine: "ScanEngine"):
         super().__init__(engine)
-        self._checked_urls: set[str] = set()
-        self._scanned_scripts: set[str] = set()
+        # (url, html指紋) / (js_url, body指紋) で重複排除する。認証後に同一 URL の
+        # 内容が変わるケースを取りこぼさず、かつ同一内容の再解析は省く。
+        self._checked_pages: set[tuple[str, str]] = set()
+        self._scanned_scripts: set[tuple[str, str]] = set()
 
     async def scan_field(
         self,
@@ -80,9 +88,10 @@ class JsStaticScanner(BaseScanner):
         return await self._scan(url, html, {})
 
     async def _scan(self, url: str, html: str, external_scripts: dict) -> list[Finding]:
-        if not url or url in self._checked_urls:
+        page_key = (url, _fingerprint(html))
+        if not url or page_key in self._checked_pages:
             return []
-        self._checked_urls.add(url)
+        self._checked_pages.add(page_key)
 
         if self.monitor:
             await self.monitor.emit_status(f"JS static audit on {url}")
@@ -105,8 +114,6 @@ class JsStaticScanner(BaseScanner):
 
         for src in js_analysis.extract_external_script_srcs(html):
             js_url = urljoin(url, src)
-            if js_url in self._scanned_scripts:
-                continue
             body = external_scripts.get(js_url, "") if external_scripts else ""
             if not body:
                 pair = (
@@ -117,7 +124,12 @@ class JsStaticScanner(BaseScanner):
                 body = (pair or {}).get("response", {}).get("body", "") if pair else ""
             if not body or not body.strip():
                 continue
-            self._scanned_scripts.add(js_url)
+            # 内容指紋で重複排除（同一 lib の使い回しは省きつつ、認証後に
+            # 中身が変わった同一 URL は再解析する）。
+            script_key = (js_url, _fingerprint(body))
+            if script_key in self._scanned_scripts:
+                continue
+            self._scanned_scripts.add(script_key)
             first_party = _host_of(js_url) == page_host
             findings += await self._record_risks(
                 url, f"({js_url})", body, first_party=first_party, source_url=js_url

@@ -114,6 +114,18 @@ class ManualUrlImportTests(unittest.TestCase):
             ["http://x.test/1", "https://x.test/2"],
         )
 
+    def test_seed_payload_preserves_spa_hash_routes(self):
+        # _unique_urls による正規化でも SPA hash ルートを保持する（seed が / に
+        # 潰れて巡回対象から落ちないこと）。
+        payload = build_seed_payload(
+            "https://app.test/",
+            ["https://app.test/#/admin", "https://app.test/dash#section"],
+        )
+        self.assertEqual(
+            payload["seed_urls"],
+            ["https://app.test/#/admin", "https://app.test/dash"],
+        )
+
     def test_build_seed_payload_is_loadable_as_seed(self):
         payload = build_seed_payload(
             "http://example.test/",
