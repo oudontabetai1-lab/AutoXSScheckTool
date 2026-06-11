@@ -91,6 +91,23 @@ class ManualUrlImportTests(unittest.TestCase):
             ],
         )
 
+    def test_parse_url_list_preserves_spa_hash_routes(self):
+        # SPA の hash ルート（#/admin 等）は別ページなので保持。単純なページ内
+        # アンカー（#section）のみ除去する。
+        text = (
+            "https://app.test/#/admin\n"
+            "https://app.test/#!/users/1\n"
+            "https://app.test/page#section\n"
+        )
+        self.assertEqual(
+            parse_url_list(text),
+            [
+                "https://app.test/#/admin",
+                "https://app.test/#!/users/1",
+                "https://app.test/page",
+            ],
+        )
+
     def test_parse_url_list_accepts_list_input(self):
         self.assertEqual(
             parse_url_list(["http://x.test/1", "javascript:alert(1)", "https://x.test/2"]),

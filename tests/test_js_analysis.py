@@ -126,6 +126,14 @@ class CleanSinkTests(unittest.TestCase):
         self.assertTrue(by_line[1].tainted)
         self.assertFalse(by_line[2].tainted)
 
+    def test_clean_sink_after_block_on_one_line_is_not_tainted(self):
+        # 1 行コードで手前のブロック条件 `if (h){}` を文に取り込まず、リテラル
+        # 代入のクリーンなシンクを汚染扱いにしない（誤検知回帰防止）。
+        src = "const h=location.hash; if (h){} el.innerHTML='<b>safe</b>';"
+        inner = [r for r in ja.analyze_js(src) if r.sink == "innerHTML"]
+        self.assertEqual(len(inner), 1)
+        self.assertFalse(inner[0].tainted)
+
 
 class HtmlExtractionTests(unittest.TestCase):
     def test_extract_inline_scripts_skips_external(self):

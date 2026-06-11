@@ -90,6 +90,21 @@ def load_manual_crawl_seed(
     )
 
 
+def _strip_in_page_anchor(url: str) -> str:
+    """ページ内アンカー（``#section`` 等）のみ除去し、SPA ハッシュルートは保持する。
+
+    ``https://app/#/admin`` のような hash ルーティングや DOM XSS 対象は、``#`` 以降を
+    捨てると別ページ（``https://app/``）になってしまうため落とさない。``/`` や ``!`` を
+    含む（=ルート風の）フラグメントは保持し、単純なアンカーだけ除去する。
+    """
+    head, sep, frag = url.partition("#")
+    if not sep or not frag:
+        return head
+    if frag[:1] in ("/", "!") or "/" in frag:
+        return url
+    return head
+
+
 def parse_url_list(text: str | list[str]) -> list[str]:
     """貼り付けテキスト or リストから http(s) URL を抽出して順序保持で返す。
 
@@ -106,7 +121,7 @@ def parse_url_list(text: str | list[str]) -> list[str]:
     seen: set[str] = set()
     urls: list[str] = []
     for tok in tokens:
-        url = tok.split("#", 1)[0].strip()
+        url = _strip_in_page_anchor(tok.strip())
         if not url.startswith(("http://", "https://")):
             continue
         if url in seen:

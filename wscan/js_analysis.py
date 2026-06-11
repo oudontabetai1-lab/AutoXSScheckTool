@@ -256,7 +256,16 @@ def _statement_around(source: str, pos: int) -> str:
     i = pos - 1
     while i >= 0:
         ch = source[i]
-        if ch in ")]}":
+        if ch == "}":
+            # トップレベルの } は直前ブロックの終端＝文の境界（ASI）。
+            # `if(h){} el.innerHTML=...` のような 1 行コードで手前のブロック条件を
+            # 取り込み、クリーンなシンクを誤って汚染扱いしないようにする。
+            # 釣り合う {...} の内側（深い位置）では深さ計上で読み飛ばす。
+            if depth <= 0:
+                start = i
+                break
+            depth += 1
+        elif ch in ")]":
             depth += 1
         elif ch in "([{":
             if depth <= 0:
@@ -264,7 +273,7 @@ def _statement_around(source: str, pos: int) -> str:
                 break
             depth -= 1
         elif depth <= 0:
-            if ch in ";{}":
+            if ch == ";":
                 start = i
                 break
             if ch == "\n" and _is_break_newline(source, i):
