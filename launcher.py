@@ -787,6 +787,9 @@ def main():
             port=port,
             host=os.environ.get("WSCAN_HOST", _CFG.get("host", "0.0.0.0")),
             auth_token=os.environ.get("WSCAN_AUTH_TOKEN", _CFG.get("auth_token", "")),
+            # ランチャーはダッシュボードを開くのが目的なので、bind 先が 0.0.0.0 でも
+            # ブラウザを必ず開く（run_serve 既定は loopback 時のみ開く）。
+            open_browser=True,
         )
         try:
             asyncio.run(run_serve(serve_args))
