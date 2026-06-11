@@ -1126,6 +1126,44 @@ body {
             </div>
           </div>
         </div>
+        <details style="margin-top:10px">
+          <summary style="cursor:pointer;font-size:0.8rem;color:var(--accent)">IMAP 認証情報を直接指定（サーバ側に未登録のアドレスを動的に使う）</summary>
+          <div style="font-size:0.72rem;color:var(--text-muted);margin:8px 0;line-height:1.6">
+            受信ホストを入力すると動的設定モードになり、mcp-email-server へ認証情報を
+            注入して任意のメールアドレスを受信できます（事前登録不要）。パスワードは保存
+            されず、スキャン実行時にのみサーバへ送られます。空欄の項目は既定値/環境変数に従います。
+          </div>
+          <div class="cfg-grid">
+            <div class="cfg-field">
+              <label>メールアドレス</label>
+              <input type="text" id="cfgMfaEmailAddress" placeholder="pentest@example.com">
+            </div>
+            <div class="cfg-field">
+              <label>IMAP ホスト</label>
+              <input type="text" id="cfgMfaEmailImapHost" placeholder="imap.example.com">
+            </div>
+            <div class="cfg-field">
+              <label>IMAP ポート</label>
+              <input type="text" id="cfgMfaEmailImapPort" placeholder="993">
+            </div>
+            <div class="cfg-field">
+              <label>ログインユーザー名 (任意)</label>
+              <input type="text" id="cfgMfaEmailImapUser" placeholder="既定: メールアドレス">
+            </div>
+            <div class="cfg-field">
+              <label>パスワード</label>
+              <input type="password" id="cfgMfaEmailImapPassword" placeholder="アプリパスワード等" autocomplete="new-password">
+            </div>
+            <div class="cfg-field">
+              <label>SSL</label>
+              <select id="cfgMfaEmailImapSsl">
+                <option value="">既定 (true)</option>
+                <option value="true">true</option>
+                <option value="false">false</option>
+              </select>
+            </div>
+          </div>
+        </details>
         <div class="cfg-section-title" style="margin-top:16px">Cookie</div>
         <div class="cfg-field">
           <label>Cookie文字列 (session=xxx; token=yyy)</label>
@@ -2182,6 +2220,29 @@ function restoreRoleModels(models) {
   });
 }
 
+// MFA メールの動的 IMAP 設定フィールドをまとめて収集/復元するヘルパ。
+function mfaImapFields() {
+  const g = id => (document.getElementById(id)?.value || '').trim();
+  return {
+    mfa_email_address:       g('cfgMfaEmailAddress'),
+    mfa_email_imap_host:     g('cfgMfaEmailImapHost'),
+    mfa_email_imap_port:     g('cfgMfaEmailImapPort'),
+    mfa_email_imap_user:     g('cfgMfaEmailImapUser'),
+    mfa_email_imap_password: g('cfgMfaEmailImapPassword'),
+    mfa_email_imap_ssl:      g('cfgMfaEmailImapSsl'),
+  };
+}
+function applyMfaImap(cfg) {
+  if (!cfg) return;
+  const set = (id, v) => { const el = document.getElementById(id); if (el && v !== undefined) el.value = v || ''; };
+  set('cfgMfaEmailAddress',   cfg.mfa_email_address);
+  set('cfgMfaEmailImapHost',  cfg.mfa_email_imap_host);
+  set('cfgMfaEmailImapPort',  cfg.mfa_email_imap_port);
+  set('cfgMfaEmailImapUser',  cfg.mfa_email_imap_user);
+  set('cfgMfaEmailImapSsl',   cfg.mfa_email_imap_ssl);
+  // パスワードはサーバから返さないため復元しない。
+}
+
 function renderManualCrawlStatus(status) {
   const statusEl = document.getElementById('manualCrawlStatus');
   const urlsEl = document.getElementById('manualCrawlUrls');
@@ -2439,6 +2500,7 @@ function submitScanConfig() {
     mfa_type:    document.getElementById('cfgMfaType').value.trim(),
     mfa_field:   document.getElementById('cfgMfaField').value.trim(),
     mfa_email_account: document.getElementById('cfgMfaEmailAccount').value.trim(),
+    ...mfaImapFields(),
     cookies:     document.getElementById('cfgCookies').value.trim(),
     low_priv_cookies: document.getElementById('cfgLowPrivCookies').value.trim(),
     interactive_plan: cfgToggles.interactive_plan,
@@ -2517,6 +2579,7 @@ function _collectFullConfigForExport() {
     mfa_type: collect('cfgMfaType'),
     mfa_field: collect('cfgMfaField'),
     mfa_email_account: collect('cfgMfaEmailAccount'),
+    ...mfaImapFields(),
     cookies: collect('cfgCookies'),
     low_priv_cookies: collect('cfgLowPrivCookies'),
     auto_register_count: collect('cfgAutoRegisterCount'),
@@ -2609,6 +2672,7 @@ function applyImportedConfig(cfg) {
   setVal('cfgMfaType', cfg.mfa_type);
   setVal('cfgMfaField', cfg.mfa_field);
   setVal('cfgMfaEmailAccount', cfg.mfa_email_account);
+  applyMfaImap(cfg);
   setVal('cfgCookies', cfg.cookies);
   setVal('cfgLowPrivCookies', cfg.low_priv_cookies);
   setVal('cfgAutoRegisterCount', cfg.auto_register_count);
@@ -2736,6 +2800,7 @@ function saveConfigToStorage() {
       mfa_type: document.getElementById('cfgMfaType').value,
       mfa_field: document.getElementById('cfgMfaField').value,
       mfa_email_account: document.getElementById('cfgMfaEmailAccount').value,
+      ...mfaImapFields(),
       cookies: document.getElementById('cfgCookies').value,
       exclude_fields: document.getElementById('cfgExcludeFields').value,
       exclude_urls: document.getElementById('cfgExcludeUrls').value,
@@ -2785,6 +2850,7 @@ function loadConfigFromStorage() {
     if (cfg.mfa_type !== undefined) document.getElementById('cfgMfaType').value = cfg.mfa_type || '';
     if (cfg.mfa_field) document.getElementById('cfgMfaField').value = cfg.mfa_field;
     if (cfg.mfa_email_account !== undefined) document.getElementById('cfgMfaEmailAccount').value = cfg.mfa_email_account || '';
+    applyMfaImap(cfg);
     if (cfg.cookies) document.getElementById('cfgCookies').value = cfg.cookies;
     if (cfg.exclude_fields) document.getElementById('cfgExcludeFields').value = cfg.exclude_fields;
     if (cfg.exclude_urls) document.getElementById('cfgExcludeUrls').value = cfg.exclude_urls;
@@ -2842,6 +2908,7 @@ async function loadDefaultConfigFromServer() {
     if (cfg.mfa_type !== undefined) document.getElementById('cfgMfaType').value = cfg.mfa_type || '';
     if (cfg.mfa_field) document.getElementById('cfgMfaField').value = cfg.mfa_field;
     if (cfg.mfa_email_account !== undefined) document.getElementById('cfgMfaEmailAccount').value = cfg.mfa_email_account || '';
+    applyMfaImap(cfg);
     if (cfg.exclude_fields) document.getElementById('cfgExcludeFields').value = cfg.exclude_fields;
     if (cfg.exclude_urls) document.getElementById('cfgExcludeUrls').value = cfg.exclude_urls;
     if (cfg.manual_crawl_file) document.getElementById('cfgManualCrawlFile').value = cfg.manual_crawl_file;
@@ -4395,6 +4462,7 @@ function submitHybridScan() {
     mfa_type:     (document.getElementById('cfgMfaType')?.value || '').trim(),
     mfa_field:    (document.getElementById('cfgMfaField')?.value || '').trim(),
     mfa_email_account: (document.getElementById('cfgMfaEmailAccount')?.value || '').trim(),
+    ...mfaImapFields(),
     cookies:      (document.getElementById('cfgCookies')?.value || '').trim(),
     llm:          document.getElementById('cfgLlm')?.value || 'none',
     ollama_model: (document.getElementById('cfgOllamaModel')?.value || '').trim() || 'llama3',

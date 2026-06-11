@@ -58,7 +58,7 @@ python main.py scan http://127.0.0.1:8000 --checks xss sqli --no-monitor --llm n
 | `agent_engine.py` / `llm_agent_browser.py` / `llm_web_tools.py` | Agent モード（LLM がブラウザ自律操作） |
 | `notification.py` | Slack/Webhook 送信（送信専用） |
 | `oob_email.py` / `oob_email_mcp.py` | OOB メール受信シンク＋自前 MCP（blind系の確証、`WSCAN_OOB_*`） |
-| `mfa.py` | MFA(2FA) ワンタイムコード取得。外部 MCP（TOTP=mcp-totp-authenticator / Email=mcp-email-server）を stdio クライアントで呼ぶ。抽出/判定は純粋関数、`WSCAN_MFA_*`。`BrowserManager.auto_login` のパスワード送信後に配線 |
+| `mfa.py` | MFA(2FA) ワンタイムコード取得。外部 MCP（TOTP=mcp-totp-authenticator / Email=mcp-email-server）を stdio クライアントで呼ぶ。抽出/判定は純粋関数、`WSCAN_MFA_*`。`BrowserManager.auto_login` のパスワード送信後に配線。Email は account_name 指定（CLI/UI/config/env）に加え、**動的 IMAP 認証情報**（`build_email_server_env` が `MCP_EMAIL_SERVER_*` を生成→spawn する MCP サブプロセスへ注入）で事前登録なしの任意アドレスも受信可 |
 | `request_logger.py` | 全 HTTP / ペイロードの JSONL 監査ログ |
 | `diff_scan.py` / `batch_runner.py` / `flow_runner.py` / `flow_recorder.py` / `manual_crawl.py` / `har_importer.py` | 差分/バッチ/フロー再生・記録/手動巡回/HAR取込。`manual_crawl.py` は (1)可視ブラウザ記録 (2)CDPスクリーンキャストによる遠隔操作（`stream=True`、`coerce_input_event`/`scale_point` は純粋関数）(3)URLリスト取込(`build_seed_payload`) を提供。遠隔操作のフレームは `MonitorServer.broadcast_ephemeral`（履歴非保存）で配信し、入力は WS `manual_crawl_input` で受ける |
 | `report.py` / `sarif.py` / `reproduction.py` / `remediation.py` / `compliance_map.py` | レポート/SARIF/再現/修正提案/CVSS・規格マッピング |

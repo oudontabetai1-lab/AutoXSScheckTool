@@ -248,6 +248,69 @@ def test_mfaconfig_email_account_env_fallback_when_no_override():
     assert cfg.email_account == "legacy@corp.test"
 
 
+# ── 動的 IMAP 認証情報（build_email_server_env） ──────────────────────────────
+def test_dynamic_imap_enables_without_preregistered_account():
+    # account 未指定でも、アドレス＋IMAP ホストがあれば有効（アドレスを account に流用）。
+    cfg = mfa.MFAConfig.from_env(
+        env={"WSCAN_MFA_TYPE": "email"},
+        overrides={
+            "type": "email",
+            "email_address": "pentest@example.com",
+            "email_imap_host": "imap.example.com",
+            "email_password": "secret",
+        },
+    )
+    assert cfg.enabled is True
+    assert cfg.resolved_email_account == "pentest@example.com"
+
+
+def test_build_email_server_env_maps_exact_var_names():
+    cfg = mfa.MFAConfig(
+        type="email",
+        email_address="pentest@example.com",
+        email_imap_host="imap.example.com",
+        email_imap_port="993",
+        email_password="secret",
+        email_imap_ssl=False,
+    )
+    env = mfa.build_email_server_env(cfg)
+    assert env["MCP_EMAIL_SERVER_ACCOUNT_NAME"] == "pentest@example.com"
+    assert env["MCP_EMAIL_SERVER_EMAIL_ADDRESS"] == "pentest@example.com"
+    assert env["MCP_EMAIL_SERVER_IMAP_HOST"] == "imap.example.com"
+    assert env["MCP_EMAIL_SERVER_IMAP_PORT"] == "993"
+    assert env["MCP_EMAIL_SERVER_PASSWORD"] == "secret"
+    assert env["MCP_EMAIL_SERVER_IMAP_SSL"] == "false"
+
+
+def test_build_email_server_env_empty_without_dynamic_settings():
+    # ホストも生 env 上書きも無ければ注入しない（既存フローを変えない）。
+    cfg = mfa.MFAConfig(type="email", email_account="ops")
+    assert mfa.build_email_server_env(cfg) == {}
+
+
+def test_email_server_env_override_takes_precedence():
+    # 厳密な変数名の生 env 上書きが最優先（SMTP 等の微調整用の逃げ道）。
+    cfg = mfa.MFAConfig(
+        type="email",
+        email_imap_host="imap.example.com",
+        email_server_env={"MCP_EMAIL_SERVER_IMAP_HOST": "override.example.com"},
+    )
+    env = mfa.build_email_server_env(cfg)
+    assert env["MCP_EMAIL_SERVER_IMAP_HOST"] == "override.example.com"
+
+
+def test_solver_env_injects_dynamic_imap_credentials():
+    cfg = mfa.MFAConfig(
+        type="email",
+        email_address="pentest@example.com",
+        email_imap_host="imap.example.com",
+        email_password="secret",
+    )
+    merged = mfa.MFASolver(cfg)._env()
+    assert merged["MCP_EMAIL_SERVER_IMAP_HOST"] == "imap.example.com"
+    assert merged["MCP_EMAIL_SERVER_PASSWORD"] == "secret"
+
+
 def test_mfaconfig_email_tool_overrides_parsed():
     env = {
         "WSCAN_MFA_TYPE": "email",

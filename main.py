@@ -119,6 +119,12 @@ def _load_config(path: Path = _CONFIG_PATH) -> dict:
     cfg["mfa_type"]                = str(a.get("mfa_type", "") or "")
     cfg["mfa_field"]               = str(a.get("mfa_field", "") or "")
     cfg["mfa_email_account"]       = str(a.get("mfa_email_account", "") or "")
+    cfg["mfa_email_address"]       = str(a.get("mfa_email_address", "") or "")
+    cfg["mfa_email_imap_host"]     = str(a.get("mfa_email_imap_host", "") or "")
+    cfg["mfa_email_imap_port"]     = str(a.get("mfa_email_imap_port", "") or "")
+    cfg["mfa_email_imap_user"]     = str(a.get("mfa_email_imap_user", "") or "")
+    cfg["mfa_email_imap_password"] = str(a.get("mfa_email_imap_password", "") or "")
+    cfg["mfa_email_imap_ssl"]      = a.get("mfa_email_imap_ssl", None)
 
     cfg["dom_xss"]                 = bool(f.get("dom_xss",          False))
     cfg["ai_analysis"]             = bool(f.get("ai_analysis",      True))
@@ -458,6 +464,35 @@ Examples:
         help="MFA メール受信に使うアカウント名（mcp-email-server に登録済みの "
              "account_name。通常はメールアドレス）。空ならば WSCAN_MFA_EMAIL_ACCOUNT "
              "env を使う（既存設定をそのまま利用可能）。",
+    )
+    # 動的 IMAP 認証情報: ツールから直接渡すとサーバ側の事前登録なしで任意アドレス
+    # を受信できる（mcp-email-server サブプロセスへ MCP_EMAIL_SERVER_* を注入）。
+    # パスワードは環境変数 WSCAN_MFA_EMAIL_IMAP_PASSWORD でも渡せる（プロセス一覧
+    # への露出を避けたい場合に推奨）。
+    scan.add_argument(
+        "--mfa-email-address", metavar="EMAIL", default=_CFG.get("mfa_email_address", ""),
+        help="MFA メールのアドレス（動的 IMAP 設定。account 未指定時はこれを account_name に流用）。",
+    )
+    scan.add_argument(
+        "--mfa-email-imap-host", metavar="HOST", default=_CFG.get("mfa_email_imap_host", ""),
+        help="動的 IMAP: 受信サーバのホスト（指定すると動的設定モードになる）。",
+    )
+    scan.add_argument(
+        "--mfa-email-imap-port", metavar="PORT", default=_CFG.get("mfa_email_imap_port", ""),
+        help="動的 IMAP: ポート（既定 993）。",
+    )
+    scan.add_argument(
+        "--mfa-email-imap-user", metavar="USER", default=_CFG.get("mfa_email_imap_user", ""),
+        help="動的 IMAP: ログインユーザー名（既定はメールアドレス）。",
+    )
+    scan.add_argument(
+        "--mfa-email-imap-password", metavar="PASS",
+        default=_CFG.get("mfa_email_imap_password", ""),
+        help="動的 IMAP: パスワード。WSCAN_MFA_EMAIL_IMAP_PASSWORD env でも可（推奨）。",
+    )
+    scan.add_argument(
+        "--mfa-email-imap-ssl", metavar="BOOL", choices=["true", "false"], default=None,
+        help="動的 IMAP: SSL を使うか（true/false、既定 true）。",
     )
     # A-3: Payload learning
     scan.add_argument(
@@ -1350,6 +1385,16 @@ async def run_scan(args):
             mfa_type=getattr(args, "mfa_type", None),
             mfa_field=getattr(args, "mfa_field", "") or "",
             mfa_email_account=getattr(args, "mfa_email_account", "") or "",
+            mfa_email_imap={
+                "address": getattr(args, "mfa_email_address", "") or "",
+                "host": getattr(args, "mfa_email_imap_host", "") or "",
+                "port": getattr(args, "mfa_email_imap_port", "") or "",
+                "user": getattr(args, "mfa_email_imap_user", "") or "",
+                "password": getattr(args, "mfa_email_imap_password", "") or "",
+                "ssl": {"true": True, "false": False}.get(
+                    getattr(args, "mfa_email_imap_ssl", None)
+                ),
+            },
             learning_file=getattr(args, "learning_file", "") or "",
             # Feature on/off flags (from config or CLI)
             enable_ai_analysis=not getattr(args, "no_ai_analysis", False),
@@ -1633,6 +1678,11 @@ async def run_serve(args):
         "mfa_type": _CFG.get("mfa_type", ""),
         "mfa_field": _CFG.get("mfa_field", ""),
         "mfa_email_account": _CFG.get("mfa_email_account", ""),
+        "mfa_email_address": _CFG.get("mfa_email_address", ""),
+        "mfa_email_imap_host": _CFG.get("mfa_email_imap_host", ""),
+        "mfa_email_imap_port": _CFG.get("mfa_email_imap_port", ""),
+        "mfa_email_imap_user": _CFG.get("mfa_email_imap_user", ""),
+        "mfa_email_imap_ssl": _CFG.get("mfa_email_imap_ssl", ""),
         "exclude_fields": ", ".join(_CFG.get("exclude_fields", []) or []),
         "exclude_urls": "\n".join(_CFG.get("exclude_urls", []) or []),
         "target_urls": "\n".join(_CFG.get("target_urls", []) or []),
@@ -1797,6 +1847,18 @@ async def run_serve(args):
                 mfa_type=cfg.get("mfa_type"),
                 mfa_field=cfg.get("mfa_field", "") or "",
                 mfa_email_account=cfg.get("mfa_email_account", "") or "",
+                mfa_email_imap={
+                    "address": cfg.get("mfa_email_address", "") or "",
+                    "host": cfg.get("mfa_email_imap_host", "") or "",
+                    "port": cfg.get("mfa_email_imap_port", "") or "",
+                    "user": cfg.get("mfa_email_imap_user", "") or "",
+                    "password": cfg.get("mfa_email_imap_password", "") or "",
+                    "ssl": cfg.get("mfa_email_imap_ssl")
+                    if isinstance(cfg.get("mfa_email_imap_ssl"), bool)
+                    else {"true": True, "false": False}.get(
+                        str(cfg.get("mfa_email_imap_ssl") or "").lower()
+                    ),
+                },
                 payloads_file=cfg.get("payloads_file") or None,
                 learning_file=cfg.get("learning_file") or None,
                 output_dir=cfg.get("output_dir") or None,

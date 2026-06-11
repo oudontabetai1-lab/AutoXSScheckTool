@@ -258,6 +258,7 @@ class ScanEngine:
         mfa_type: Optional[str] = None,
         mfa_field: str = "",
         mfa_email_account: str = "",
+        mfa_email_imap: Optional[dict] = None,
         learning_file: Optional[str] = None,
         # Feature flags (from config/wscan.yaml via main.py)
         enable_ai_analysis: bool = True,
@@ -507,6 +508,23 @@ class ScanEngine:
         # （既存設定をそのまま利用可能）。
         if mfa_email_account:
             _mfa_overrides["email_account"] = mfa_email_account
+        # 動的 IMAP 認証情報（ツールから直接渡す）。host を含めると、サーバ側に
+        # 事前登録の無い任意アドレスでも mcp-email-server へ env 注入して受信する。
+        _imap = mfa_email_imap or {}
+        for _src, _dst in (
+            ("address", "email_address"),
+            ("user", "email_user"),
+            ("password", "email_password"),
+            ("host", "email_imap_host"),
+            ("port", "email_imap_port"),
+        ):
+            _v = _imap.get(_src)
+            if _v:
+                _mfa_overrides[_dst] = _v
+        if _imap.get("ssl") is not None:
+            _mfa_overrides["email_imap_ssl"] = _imap["ssl"]
+        if _imap.get("server_env"):
+            _mfa_overrides["email_server_env"] = _imap["server_env"]
         self._mfa_config = MFAConfig.from_env(overrides=_mfa_overrides)
         self._mfa_solver = MFASolver(self._mfa_config) if self._mfa_config.enabled else None
 

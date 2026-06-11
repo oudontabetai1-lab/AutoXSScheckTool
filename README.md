@@ -382,11 +382,33 @@ python main.py scan https://example.com \
 | `WSCAN_MFA_TOTP_COMMAND` / `_ARGS` | `node` / — | TOTP MCP の起動コマンド・引数 |
 | `WSCAN_MFA_TOTP_TOOL` / `_LABEL` | `get_totp_code` / — | 呼ぶツール名・アカウントラベル |
 | `WSCAN_MFA_EMAIL_COMMAND` / `_ARGS` | `uvx` / `mcp-email-server@latest stdio` | メール MCP の起動 |
-| `WSCAN_MFA_EMAIL_ACCOUNT` | — | mcp-email-server の `account_name`（**email 時は必須**。サーバ側の `MCP_EMAIL_SERVER_ACCOUNT_NAME` と一致させる） |
+| `WSCAN_MFA_EMAIL_ACCOUNT` | — | mcp-email-server の `account_name`（サーバ側登録済みの場合に使用。CLI `--mfa-email-account` / ダッシュボードで上書き可） |
 | `WSCAN_MFA_EMAIL_LIST_TOOL` / `_CONTENT_TOOL` | `list_emails_metadata` / `get_emails_content` | 一覧・本文取得ツール名 |
 | `WSCAN_MFA_EMAIL_PAGE_SIZE` | `5` | 一覧で取得する直近メール件数 |
 | `WSCAN_MFA_EMAIL_LIST_ARGS` / `_CONTENT_ARGS` | `{}` / `{}` | 各ツールへの追加引数(JSON, 例 `{"subject":"code"}`) |
 | `WSCAN_MFA_EMAIL_TIMEOUT` / `_INTERVAL` | `60` / `5` | メール到着待ちの最大秒・ポーリング間隔 |
+| `WSCAN_MFA_EMAIL_ADDRESS` | — | **動的 IMAP**: メールアドレス（account 未指定時は account_name に流用） |
+| `WSCAN_MFA_EMAIL_IMAP_HOST` / `_PORT` | — / `993` | **動的 IMAP**: 受信ホスト・ポート（host 指定で動的設定モードが有効に） |
+| `WSCAN_MFA_EMAIL_USER` / `_PASSWORD` | — | **動的 IMAP**: ログインユーザー名（既定はアドレス）・パスワード |
+| `WSCAN_MFA_EMAIL_IMAP_SSL` | `true` | **動的 IMAP**: SSL を使うか |
+| `WSCAN_MFA_EMAIL_SERVER_ENV` | `{}` | **動的 IMAP**: 生の `MCP_EMAIL_SERVER_*` を JSON で直接上書き（SMTP 等の微調整用） |
+
+#### 任意のメールアドレスを動的に使う（サーバ側に未登録でも可）
+
+`account_name` の事前登録に頼らず、**ツール側から IMAP 認証情報を直接渡して**任意の
+アドレスを受信できます。受信ホストを指定すると「動的設定モード」になり、内部で起動する
+`mcp-email-server` サブプロセスへ `MCP_EMAIL_SERVER_*` を注入します（事前の env 設定不要）。
+CLI・ダッシュボード（MFA セクションの「IMAP 認証情報を直接指定」）・`config` のいずれからでも設定できます。
+
+```bash
+# パスワードはプロセス一覧への露出を避けるため env 推奨
+export WSCAN_MFA_EMAIL_IMAP_PASSWORD="app-password"
+python main.py scan https://example.com \
+  --login-url https://example.com/login --auth-user ops --auth-pass 'p@ss' \
+  --mfa-type email \
+  --mfa-email-address "otp@example.com" \
+  --mfa-email-imap-host imap.example.com --mfa-email-imap-port 993
+```
 
 > メールは「一覧（`list_emails_metadata`）→ 本文（`get_emails_content`）」の2段で読み、
 > まず件名、無ければ本文から `WSCAN_MFA_CODE_LENGTH`（既定 6 桁）または
@@ -510,6 +532,12 @@ usage: main.py scan [オプション] URL
   --mfa-field NAME         ワンタイムコード入力欄の name/id (デフォルト: otp)
   --mfa-email-account EMAIL  MFA メール受信アカウント(=メールアドレス)。空なら
                            WSCAN_MFA_EMAIL_ACCOUNT env を使用（既存設定も利用可）
+  --mfa-email-address EMAIL  動的 IMAP: メールアドレス（account 未指定時に流用）
+  --mfa-email-imap-host HOST 動的 IMAP: 受信ホスト（指定で動的設定モード）
+  --mfa-email-imap-port PORT 動的 IMAP: ポート (既定 993)
+  --mfa-email-imap-user USER 動的 IMAP: ログインユーザー名 (既定: アドレス)
+  --mfa-email-imap-password PASS  動的 IMAP: パスワード(env 推奨)
+  --mfa-email-imap-ssl BOOL  動的 IMAP: SSL 使用 (true/false, 既定 true)
   --low-priv-cookies STR   垂直権限昇格テスト用の低権限セッション Cookie
   --low-priv-cookie-file F 低権限セッション Cookie JSON ファイル
   --include-registration   登録/サインアップフォームもテスト対象に含める
