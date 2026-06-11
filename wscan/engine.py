@@ -257,6 +257,7 @@ class ScanEngine:
         login_success_indicator: str = "",
         mfa_type: Optional[str] = None,
         mfa_field: str = "",
+        mfa_email_account: str = "",
         learning_file: Optional[str] = None,
         # Feature flags (from config/wscan.yaml via main.py)
         enable_ai_analysis: bool = True,
@@ -501,6 +502,11 @@ class ScanEngine:
             _mfa_overrides["type"] = mfa_type or "none"
         if mfa_field:
             _mfa_overrides["field"] = mfa_field
+        # MFA メールのアカウント名（通常はメールアドレス）。CLI/UI/config で
+        # 自由に指定でき、空なら WSCAN_MFA_EMAIL_ACCOUNT env にフォールバック
+        # （既存設定をそのまま利用可能）。
+        if mfa_email_account:
+            _mfa_overrides["email_account"] = mfa_email_account
         self._mfa_config = MFAConfig.from_env(overrides=_mfa_overrides)
         self._mfa_solver = MFASolver(self._mfa_config) if self._mfa_config.enabled else None
 

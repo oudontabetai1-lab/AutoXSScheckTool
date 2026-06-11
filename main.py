@@ -118,6 +118,7 @@ def _load_config(path: Path = _CONFIG_PATH) -> dict:
     cfg["auth_pass"]               = str(a.get("auth_pass", "") or "")
     cfg["mfa_type"]                = str(a.get("mfa_type", "") or "")
     cfg["mfa_field"]               = str(a.get("mfa_field", "") or "")
+    cfg["mfa_email_account"]       = str(a.get("mfa_email_account", "") or "")
 
     cfg["dom_xss"]                 = bool(f.get("dom_xss",          False))
     cfg["ai_analysis"]             = bool(f.get("ai_analysis",      True))
@@ -451,6 +452,12 @@ Examples:
     scan.add_argument(
         "--mfa-field", metavar="NAME", default=_CFG.get("mfa_field", ""),
         help="One-time-code input field name/id on the login form (default: otp).",
+    )
+    scan.add_argument(
+        "--mfa-email-account", metavar="EMAIL", default=_CFG.get("mfa_email_account", ""),
+        help="MFA メール受信に使うアカウント名（mcp-email-server に登録済みの "
+             "account_name。通常はメールアドレス）。空ならば WSCAN_MFA_EMAIL_ACCOUNT "
+             "env を使う（既存設定をそのまま利用可能）。",
     )
     # A-3: Payload learning
     scan.add_argument(
@@ -1342,6 +1349,7 @@ async def run_scan(args):
             # None=未指定(env に委ねる) / ""=明示無効 / "totp"|"email"=明示有効
             mfa_type=getattr(args, "mfa_type", None),
             mfa_field=getattr(args, "mfa_field", "") or "",
+            mfa_email_account=getattr(args, "mfa_email_account", "") or "",
             learning_file=getattr(args, "learning_file", "") or "",
             # Feature on/off flags (from config or CLI)
             enable_ai_analysis=not getattr(args, "no_ai_analysis", False),
@@ -1624,6 +1632,7 @@ async def run_serve(args):
         "login_success_indicator": _CFG.get("login_success_indicator", ""),
         "mfa_type": _CFG.get("mfa_type", ""),
         "mfa_field": _CFG.get("mfa_field", ""),
+        "mfa_email_account": _CFG.get("mfa_email_account", ""),
         "exclude_fields": ", ".join(_CFG.get("exclude_fields", []) or []),
         "exclude_urls": "\n".join(_CFG.get("exclude_urls", []) or []),
         "target_urls": "\n".join(_CFG.get("target_urls", []) or []),
@@ -1787,6 +1796,7 @@ async def run_serve(args):
                 # "" は env を上書きして無効化。キー欠落(None)時のみ env に委ねる。
                 mfa_type=cfg.get("mfa_type"),
                 mfa_field=cfg.get("mfa_field", "") or "",
+                mfa_email_account=cfg.get("mfa_email_account", "") or "",
                 payloads_file=cfg.get("payloads_file") or None,
                 learning_file=cfg.get("learning_file") or None,
                 output_dir=cfg.get("output_dir") or None,

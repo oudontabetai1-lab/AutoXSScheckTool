@@ -220,6 +220,34 @@ def test_mfaconfig_invalid_type_falls_back_to_none():
     assert cfg.type == "none"
 
 
+def test_mfaconfig_email_account_override_sets_address_freely():
+    # CLI/UI/config から渡したメールアドレス（account_name）を自由に設定できる。
+    cfg = mfa.MFAConfig.from_env(
+        env={"WSCAN_MFA_TYPE": "email"},
+        overrides={"type": "email", "email_account": "ops@example.com"},
+    )
+    assert cfg.email_account == "ops@example.com"
+    assert cfg.enabled is True
+
+
+def test_mfaconfig_email_account_override_beats_env():
+    # override（UI 入力）が env（既存設定）より優先される。
+    cfg = mfa.MFAConfig.from_env(
+        env={"WSCAN_MFA_TYPE": "email", "WSCAN_MFA_EMAIL_ACCOUNT": "legacy@corp.test"},
+        overrides={"type": "email", "email_account": "new@example.com"},
+    )
+    assert cfg.email_account == "new@example.com"
+
+
+def test_mfaconfig_email_account_env_fallback_when_no_override():
+    # override 未指定なら既存の env アドレスをそのまま使える。
+    cfg = mfa.MFAConfig.from_env(
+        env={"WSCAN_MFA_TYPE": "email", "WSCAN_MFA_EMAIL_ACCOUNT": "legacy@corp.test"},
+        overrides={"type": "email"},
+    )
+    assert cfg.email_account == "legacy@corp.test"
+
+
 def test_mfaconfig_email_tool_overrides_parsed():
     env = {
         "WSCAN_MFA_TYPE": "email",

@@ -357,7 +357,19 @@ export MCP_EMAIL_SERVER_IMAP_HOST="imap.example.com"
 python main.py scan https://example.com \
   --login-url https://example.com/login --auth-user ops --auth-pass 'p@ss' \
   --mfa-type email
+
+# 受信アカウント(=メールアドレス)はコマンドラインからも自由に指定できる。
+# 指定した値が WSCAN_MFA_EMAIL_ACCOUNT より優先される。空欄なら env を使う
+# ため、既存のメールアドレス設定もそのまま利用できる。
+python main.py scan https://example.com \
+  --login-url https://example.com/login --auth-user ops --auth-pass 'p@ss' \
+  --mfa-type email --mfa-email-account "ops@example.com"
 ```
+
+> メールアドレス（`account_name`）は **CLI `--mfa-email-account` / ダッシュボードの
+> 「MFA メールアドレス / アカウント名」欄 / `config` のいずれからでも自由に設定**できる。
+> いずれも mcp-email-server 側に登録済みの `account_name`（＝受信箱）を指す。値を空に
+> すると `WSCAN_MFA_EMAIL_ACCOUNT` env にフォールバックするため、既存設定を壊さない。
 
 主な環境変数（`WSCAN_MFA_*`）:
 
@@ -496,6 +508,8 @@ usage: main.py scan [オプション] URL
   --login-success TEXT     ログイン成功判定のURL/ページ内文字列
   --mfa-type KIND          MFA(2FA) 自動入力: totp / email（外部 MCP 経由）
   --mfa-field NAME         ワンタイムコード入力欄の name/id (デフォルト: otp)
+  --mfa-email-account EMAIL  MFA メール受信アカウント(=メールアドレス)。空なら
+                           WSCAN_MFA_EMAIL_ACCOUNT env を使用（既存設定も利用可）
   --low-priv-cookies STR   垂直権限昇格テスト用の低権限セッション Cookie
   --low-priv-cookie-file F 低権限セッション Cookie JSON ファイル
   --include-registration   登録/サインアップフォームもテスト対象に含める
