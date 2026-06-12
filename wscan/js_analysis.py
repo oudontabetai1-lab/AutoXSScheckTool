@@ -353,10 +353,12 @@ def analyze_js(source: str, *, origin: str = "") -> list[JsRisk]:
 _INLINE_SCRIPT_RE = re.compile(
     r"<script\b([^>]*)>(.*?)</script>", re.IGNORECASE | re.DOTALL
 )
-_SRC_ATTR_RE = re.compile(r"""\bsrc\s*=\s*['"]?([^'"\s>]+)""", re.IGNORECASE)
+# src 属性。data-src / ng-src 等の別属性を誤検出しないよう、src の直前が
+# 語頭文字・ハイフンでない（=タグ空白か行頭）ことを要求する。
+_SRC_ATTR_RE = re.compile(r"""(?<![-\w])src\s*=\s*['"]?([^'"\s>]+)""", re.IGNORECASE)
 _TYPE_ATTR_RE = re.compile(r"""\btype\s*=\s*['"]?([^'"\s>]+)""", re.IGNORECASE)
 _SCRIPT_SRC_RE = re.compile(
-    r"<script\b[^>]*\bsrc\s*=\s*['\"]?([^'\"\s>]+)", re.IGNORECASE
+    r"<script\b[^>]*?(?<![-\w])src\s*=\s*['\"]?([^'\"\s>]+)", re.IGNORECASE
 )
 
 

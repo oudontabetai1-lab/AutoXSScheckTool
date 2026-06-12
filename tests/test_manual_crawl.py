@@ -162,6 +162,26 @@ class ManualUrlImportTests(unittest.TestCase):
             seed = load_manual_crawl_seed(str(saved), "http://example.test/")
         self.assertEqual(seed.urls, ["http://example.test/orders?id=1"])
 
+    def test_seed_reload_keeps_cross_host_via_persisted_scopes(self):
+        # 取込時の許可スコープが seed に残り、再読込（同一オリジン正規化）でも
+        # クロスホストの許可 URL が落ちないこと（end-to-end の回帰防止）。
+        payload = build_seed_payload(
+            "https://app.example.com/",
+            ["https://app.example.com/dash", "https://auth.example.com/callback"],
+            allowed_scopes=["app.example.com", "auth.example.com"],
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "flows" / "manual.json"
+            saved = save_seed_payload(str(path), payload)
+            # engine と同様、target/access スコープのみ渡して再読込（auth は未指定）。
+            seed = load_manual_crawl_seed(
+                str(saved),
+                "https://app.example.com/",
+                allowed_scopes=["https://app.example.com/"],
+            )
+        self.assertIn("https://auth.example.com/callback", seed.urls)
+        self.assertIn("https://app.example.com/dash", seed.urls)
+
 
 class RemoteInputTests(unittest.TestCase):
     def test_click_normalized_and_button_defaulted(self):

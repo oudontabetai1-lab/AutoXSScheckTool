@@ -148,6 +148,18 @@ class HtmlExtractionTests(unittest.TestCase):
         self.assertEqual(len(scripts), 1)
         self.assertIn("innerHTML", scripts[0])
 
+    def test_data_src_is_not_treated_as_external_script(self):
+        # data-src / ng-src 等は外部 src ではない。インライン本文を解析対象にする。
+        html = '<script data-src="/x.js">eval(location.hash)</script>'
+        self.assertEqual(ja.extract_external_script_srcs(html), [])
+        inline = ja.extract_inline_scripts(html)
+        self.assertEqual(len(inline), 1)
+        self.assertIn("eval", inline[0])
+
+    def test_real_src_still_detected_as_external(self):
+        html = '<script src="/app.js"></script>'
+        self.assertEqual(ja.extract_external_script_srcs(html), ["/app.js"])
+
     def test_is_javascript_response(self):
         self.assertTrue(ja.is_javascript_response("http://x.test/a.js"))
         self.assertTrue(

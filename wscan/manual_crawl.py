@@ -91,8 +91,15 @@ def load_manual_crawl_seed(
         if isinstance(event, dict) and event.get("url"):
             raw_urls.append(event["url"])
 
+    # 取込時に許可・検証済みのスコープ（import_scopes）も合算する。これが無いと
+    # クロスホストの許可 URL（SSO/コールバック等）が再読込時の同一オリジン
+    # 正規化で落ちてしまう（build_seed_payload が書き出す）。
+    scopes = list(allowed_scopes or []) + [
+        str(s) for s in (data.get("import_scopes") or [])
+    ]
+
     return ManualCrawlSeed(
-        urls=_unique_urls(raw_urls, same_origin_as, allowed_scopes),
+        urls=_unique_urls(raw_urls, same_origin_as, scopes),
         cookies=data.get("cookies") or [],
         forms_by_url=data.get("forms_by_url") or {},
         steps=data.get("steps") or [],
@@ -169,6 +176,8 @@ def build_seed_payload(
         "stopped_at": now,
         "seed_urls": normalized,
         "urls": list(urls),
+        # 再読込時にクロスホストの許可 URL を落とさないよう、許可スコープを残す。
+        "import_scopes": [str(s) for s in (allowed_scopes or [])],
         "events": [{"type": "url", "source": "import", "url": u, "ts": now} for u in normalized],
         "steps": [],
         "forms_by_url": {},
