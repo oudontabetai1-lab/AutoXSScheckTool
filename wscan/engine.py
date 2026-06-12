@@ -1939,7 +1939,11 @@ class ScanEngine:
             if abs_url in out:
                 continue
             try:
-                pair = network.latest_for_url(abs_url, match_query=False)
+                # 完全一致（クエリ込み）を優先。キャッシュバスター付きで同一パス
+                # 別クエリ（/app.js?v=public と ?v=admin）の取り違えを防ぐ。
+                pair = network.latest_for_url(abs_url, match_query=True)
+                if not pair:
+                    pair = network.latest_for_url(abs_url, match_query=False)
             except Exception:
                 pair = None
             body = (pair or {}).get("response", {}).get("body", "") if pair else ""

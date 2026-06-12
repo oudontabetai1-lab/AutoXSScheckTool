@@ -112,6 +112,20 @@ class JsStaticScannerContextTests(unittest.IsolatedAsyncioTestCase):
         # 同一内容の再投入は重複排除でスキップ。
         self.assertEqual(await scanner.scan_page_context(_page(url, risky)), [])
 
+    async def test_external_script_resolved_with_full_query_url(self):
+        # 同一パス別クエリの cache-busted バンドルを取り違えない（クエリ込みの
+        # 完全一致を優先）。admin バンドルのリスクが public 側に紛れない。
+        page_url = "http://t.test/h"
+        admin_js = "http://t.test/app.js?v=admin"
+        html = '<script src="/app.js?v=admin"></script>'
+        scanner = _make_scanner(bodies={
+            admin_js: "eval(location.hash);",
+            "http://t.test/app.js?v=public": "console.log('clean');",
+        })
+        findings = await scanner.scan_page_context(_page(page_url, html))
+        self.assertTrue(any(admin_js in f.field_name for f in findings))
+        self.assertTrue(any(f.evidence_details.get("sink") == "eval" for f in findings))
+
     async def test_no_findings_for_clean_page(self):
         scanner = _make_scanner()
         html = "<script>console.log('hello');</script>"

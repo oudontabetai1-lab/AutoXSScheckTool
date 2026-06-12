@@ -116,11 +116,12 @@ class JsStaticScanner(BaseScanner):
             js_url = urljoin(url, src)
             body = external_scripts.get(js_url, "") if external_scripts else ""
             if not body:
-                pair = (
-                    network.latest_for_url(js_url, match_query=False)
-                    if network and hasattr(network, "latest_for_url")
-                    else None
-                )
+                # 完全一致（クエリ込み）を優先し、無ければパス一致にフォールバック。
+                # 同一パス別クエリの cache-busted バンドルの取り違えを防ぐ。
+                pair = None
+                if network and hasattr(network, "latest_for_url"):
+                    pair = network.latest_for_url(js_url, match_query=True) or \
+                        network.latest_for_url(js_url, match_query=False)
                 body = (pair or {}).get("response", {}).get("body", "") if pair else ""
             if not body or not body.strip():
                 continue
