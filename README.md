@@ -137,6 +137,7 @@ PEM の cert/key は Playwright と httpx の両方で使われます。PFX は 
 | 1.4 | セッション管理の不備 | `session` | Cookie 属性チェック (Secure/HttpOnly/SameSite) |
 | 1.5 | クロスサイト・スクリプティング（反射型） | `xss` | ダイアログ確認・反射検出 |
 | 1.5 | クロスサイト・スクリプティング（DOM型） | `dom_xss` | Playwright DOM シンクフック |
+| 1.5 | 危険な JavaScript 静的評価（DOM型の前段階） | `js_static` | インライン/外部 JS を静的解析し source→sink フローを検出（注入なし） |
 | 1.5 | クロスサイト・スクリプティング（格納型） | `stored_xss` | マーカー注入 → 全ページ横断検出 |
 | 1.6 | CSRF | `csrf` | POST フォームの CSRF トークン有無 |
 | 1.7 | HTTPヘッダ・インジェクション | `header_injection` | CRLF 注入 → レスポンスヘッダ確認 |
@@ -166,6 +167,7 @@ PEM の cert/key は Playwright と httpx の両方で使われます。PFX は 
 
 - **AI 攻撃計画（AttackPlanner）** — スキャン前にページを分析し、フィールドごとに優先チェックとターゲット特化ペイロードを計画
 - **DOM-based XSS 検出** — `innerHTML` / `document.write` / `eval` / `location.href` 等の危険シンクを Playwright でフック、クライアントサイド実行を検出
+- **危険な JavaScript 静的評価（`js_static`）** — DOM XSS をペイロードで確証する前段階として、ページのインライン JS と読み込まれた外部 `.js` を**注入なしで静的解析**。`eval` / `Function` / `innerHTML` / `document.write` / `setTimeout(文字列)` 等の危険シンクと、`location.hash` / `document.cookie` / `postMessage` 等のユーザ制御ソースの **source→sink フロー**（簡易な変数汚染追跡つき）を洗い出す。汚染フローが辿れたものを高確度（`likely`）、単独の危険シンクを参考情報（`tentative`）として報告し、誤検知を抑制。`--checks js_static` で有効化
 - **格納型 XSS 検出** — ユニークマーカーを注入し、全クロールページを横断してペイロードの出現を確認
 - **アクセス制御検査** — 未認証アクセス・垂直権限昇格（低権限セッション）・水平権限昇格 (IDOR) に加え、**401/403 アクセス制御バイパス**（パス正規化・信頼 IP ヘッダ偽装・URL リライトヘッダ・HTTP メソッド改ざん）を検出
 - **CORS 検出** — ワイルドカード ACAO・任意 Origin 反射・クレデンシャル付き CORS を自動判定
@@ -196,7 +198,7 @@ PEM の cert/key は Playwright と httpx の両方で使われます。PFX は 
 - **SPA クロール強化** — `--spa-crawl` で React/Vue/Angular SPA の動的ルートを収集。`history.pushState` フック + クリック操作で通常クローラーが見逃すページを発見
 - **BFS クローラー** — 設定可能な深さで同一ドメインリンクを自動収集
 - **sitemap.xml / robots.txt 活用** — クロール時に自動取得して未リンクページを発見
-- **ログイン自動化** — `--login-url` でログインフォームを自動入力してセッションを取得
+- **ログイン自動化** — `--login-url` でログインフォームを自動入力してセッションを取得。成否判定は URL の変化だけに頼らず、**ログインフォームの残存・失敗メッセージ（日本語含む）・MFA 画面の残留**を併せて評価し、`/login?error=` のような「遷移はしたが失敗」を成功と誤認しないよう厳格化（任意で `--login-success` の文字列一致も併用可能）
 - **MFA(2FA) 自動化** — `--mfa-type totp|email` でワンタイムコードを外部 MCP 経由で取得・投入
 
 ### レポート・出力
@@ -209,6 +211,10 @@ PEM の cert/key は Playwright と httpx の両方で使われます。PFX は 
 - **リアルタイム監視ダッシュボード** — WebSocket 経由でペイロード・検出結果・スクリーンショットをライブ表示
 - **Finding フィルタ・検索** — 重要度・スキャナ種別・URL・フィールド名でリアルタイムフィルタリング
 - **手動ペイロード実行** — ダッシュボードから任意のフィールドにペイロードを即座に送信
+- **手動巡回（3 方式）** — 「手動巡回」タブから巡回シードを作成できる。
+  - *可視ブラウザ記録*：別 Chromium を開いて実操作し、訪問 URL・フォーム・Cookie を記録（操作端末にブラウザ画面が出せる環境向け）。
+  - *遠隔ブラウザ操作*：**サーバ上のヘッドレス Chromium の画面を CDP スクリーンキャストでダッシュボードに配信**し、クリック・テキスト/キー入力・スクロール・URL 移動でブラウザを遠隔操作。追加パッケージ（VNC 等）不要で、サーバ/リモート環境でも「画面を見ながら手で巡回」できる。操作で訪れた URL・フォーム・Cookie は可視ブラウザ記録と同様にシード化される
+  - *URL リスト取り込み*：手元のブラウザで控えた URL を貼り付けるだけで同形式の巡回シード JSON を生成（改行・カンマ・空白区切り）。生成した JSON はそのままスキャンの巡回シードに使える
 
 ### CI/CD・運用
 
@@ -351,7 +357,19 @@ export MCP_EMAIL_SERVER_IMAP_HOST="imap.example.com"
 python main.py scan https://example.com \
   --login-url https://example.com/login --auth-user ops --auth-pass 'p@ss' \
   --mfa-type email
+
+# 受信アカウント(=メールアドレス)はコマンドラインからも自由に指定できる。
+# 指定した値が WSCAN_MFA_EMAIL_ACCOUNT より優先される。空欄なら env を使う
+# ため、既存のメールアドレス設定もそのまま利用できる。
+python main.py scan https://example.com \
+  --login-url https://example.com/login --auth-user ops --auth-pass 'p@ss' \
+  --mfa-type email --mfa-email-account "ops@example.com"
 ```
+
+> メールアドレス（`account_name`）は **CLI `--mfa-email-account` / ダッシュボードの
+> 「MFA メールアドレス / アカウント名」欄 / `config` のいずれからでも自由に設定**できる。
+> いずれも mcp-email-server 側に登録済みの `account_name`（＝受信箱）を指す。値を空に
+> すると `WSCAN_MFA_EMAIL_ACCOUNT` env にフォールバックするため、既存設定を壊さない。
 
 主な環境変数（`WSCAN_MFA_*`）:
 
@@ -364,11 +382,34 @@ python main.py scan https://example.com \
 | `WSCAN_MFA_TOTP_COMMAND` / `_ARGS` | `node` / — | TOTP MCP の起動コマンド・引数 |
 | `WSCAN_MFA_TOTP_TOOL` / `_LABEL` | `get_totp_code` / — | 呼ぶツール名・アカウントラベル |
 | `WSCAN_MFA_EMAIL_COMMAND` / `_ARGS` | `uvx` / `mcp-email-server@latest stdio` | メール MCP の起動 |
-| `WSCAN_MFA_EMAIL_ACCOUNT` | — | mcp-email-server の `account_name`（**email 時は必須**。サーバ側の `MCP_EMAIL_SERVER_ACCOUNT_NAME` と一致させる） |
+| `WSCAN_MFA_EMAIL_ACCOUNT` | — | mcp-email-server の `account_name`（サーバ側登録済みの場合に使用。CLI `--mfa-email-account` / ダッシュボードで上書き可） |
 | `WSCAN_MFA_EMAIL_LIST_TOOL` / `_CONTENT_TOOL` | `list_emails_metadata` / `get_emails_content` | 一覧・本文取得ツール名 |
 | `WSCAN_MFA_EMAIL_PAGE_SIZE` | `5` | 一覧で取得する直近メール件数 |
 | `WSCAN_MFA_EMAIL_LIST_ARGS` / `_CONTENT_ARGS` | `{}` / `{}` | 各ツールへの追加引数(JSON, 例 `{"subject":"code"}`) |
 | `WSCAN_MFA_EMAIL_TIMEOUT` / `_INTERVAL` | `60` / `5` | メール到着待ちの最大秒・ポーリング間隔 |
+| `WSCAN_MFA_EMAIL_ADDRESS` | — | **動的 IMAP**: メールアドレス（account 未指定時は account_name に流用） |
+| `WSCAN_MFA_EMAIL_IMAP_HOST` / `_PORT` | — / `993` | **動的 IMAP**: 受信ホスト・ポート（host 指定で動的設定モードが有効に） |
+| `WSCAN_MFA_EMAIL_USER` | — | **動的 IMAP**: ログインユーザー名（既定はアドレス） |
+| `WSCAN_MFA_EMAIL_IMAP_PASSWORD` | — | **動的 IMAP**: パスワード（旧名 `WSCAN_MFA_EMAIL_PASSWORD` も可。env 推奨） |
+| `WSCAN_MFA_EMAIL_IMAP_SSL` | `true` | **動的 IMAP**: SSL を使うか |
+| `WSCAN_MFA_EMAIL_SERVER_ENV` | `{}` | **動的 IMAP**: 生の `MCP_EMAIL_SERVER_*` を JSON で直接上書き（SMTP 等の微調整用） |
+
+#### 任意のメールアドレスを動的に使う（サーバ側に未登録でも可）
+
+`account_name` の事前登録に頼らず、**ツール側から IMAP 認証情報を直接渡して**任意の
+アドレスを受信できます。受信ホストを指定すると「動的設定モード」になり、内部で起動する
+`mcp-email-server` サブプロセスへ `MCP_EMAIL_SERVER_*` を注入します（事前の env 設定不要）。
+CLI・ダッシュボード（MFA セクションの「IMAP 認証情報を直接指定」）・`config` のいずれからでも設定できます。
+
+```bash
+# パスワードはプロセス一覧への露出を避けるため env 推奨
+export WSCAN_MFA_EMAIL_IMAP_PASSWORD="app-password"
+python main.py scan https://example.com \
+  --login-url https://example.com/login --auth-user ops --auth-pass 'p@ss' \
+  --mfa-type email \
+  --mfa-email-address "otp@example.com" \
+  --mfa-email-imap-host imap.example.com --mfa-email-imap-port 993
+```
 
 > メールは「一覧（`list_emails_metadata`）→ 本文（`get_emails_content`）」の2段で読み、
 > まず件名、無ければ本文から `WSCAN_MFA_CODE_LENGTH`（既定 6 桁）または
@@ -460,7 +501,7 @@ usage: main.py scan [オプション] URL
                                    cors info_disclosure host_header security_headers
                                    file_upload nosql deserialization request_smuggling
                                    ssrf graphql jwt cms xxe ldap race_condition
-                                   websocket secret_leak sri
+                                   websocket secret_leak sri js_static
   --depth N                クロール深度 (デフォルト: 2)
   --headless               ブラウザをヘッドレスモードで起動
   --no-monitor             リアルタイム監視ダッシュボードを無効化
@@ -490,6 +531,14 @@ usage: main.py scan [オプション] URL
   --login-success TEXT     ログイン成功判定のURL/ページ内文字列
   --mfa-type KIND          MFA(2FA) 自動入力: totp / email（外部 MCP 経由）
   --mfa-field NAME         ワンタイムコード入力欄の name/id (デフォルト: otp)
+  --mfa-email-account EMAIL  MFA メール受信アカウント(=メールアドレス)。空なら
+                           WSCAN_MFA_EMAIL_ACCOUNT env を使用（既存設定も利用可）
+  --mfa-email-address EMAIL  動的 IMAP: メールアドレス（account 未指定時に流用）
+  --mfa-email-imap-host HOST 動的 IMAP: 受信ホスト（指定で動的設定モード）
+  --mfa-email-imap-port PORT 動的 IMAP: ポート (既定 993)
+  --mfa-email-imap-user USER 動的 IMAP: ログインユーザー名 (既定: アドレス)
+  --mfa-email-imap-password PASS  動的 IMAP: パスワード(env 推奨)
+  --mfa-email-imap-ssl BOOL  動的 IMAP: SSL 使用 (true/false, 既定 true)
   --low-priv-cookies STR   垂直権限昇格テスト用の低権限セッション Cookie
   --low-priv-cookie-file F 低権限セッション Cookie JSON ファイル
   --include-registration   登録/サインアップフォームもテスト対象に含める

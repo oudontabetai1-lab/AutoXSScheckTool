@@ -21,12 +21,20 @@ class AuthCrawlSeedTests(unittest.TestCase):
         expected = (
             "expect_navigation",
             "last_login_url",
-            "success_indicator in post_url or success_indicator in post_body",
+            # 成否判定は auth_detect.login_succeeded に集約した。
+            "auth_detect",
+            "login_succeeded(",
         )
 
         for marker in expected:
             with self.subTest(marker=marker):
                 self.assertIn(marker, text)
+
+    def test_auth_detect_checks_success_indicator_against_url_and_body(self):
+        text = Path("wscan/auth_detect.py").read_text(encoding="utf-8")
+        # success_indicator は URL・本文の双方に対して照合する。
+        self.assertIn("success_indicator in (post_url", text)
+        self.assertIn("success_indicator in (body", text)
 
 
 if __name__ == "__main__":

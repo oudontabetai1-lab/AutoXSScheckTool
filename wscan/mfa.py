@@ -319,6 +319,16 @@ class MFAConfig:
         default_factory=lambda: ["mcp-email-server@latest", "stdio"]
     )
     email_account: str = ""                 # account_name（mcp-email-server 側で登録済みの名前）
+    # 動的 IMAP 設定: ここに値を入れると、spawn する mcp-email-server サブプロセスへ
+    # MCP_EMAIL_SERVER_* env として注入し、サーバ側に事前登録が無い任意のメール
+    # アドレスでも受信できる（ツールから IMAP 認証情報ごと動的に渡す）。
+    email_address: str = ""                 # MCP_EMAIL_SERVER_EMAIL_ADDRESS
+    email_user: str = ""                    # MCP_EMAIL_SERVER_USER_NAME（既定はアドレス）
+    email_password: str = ""                # MCP_EMAIL_SERVER_PASSWORD
+    email_imap_host: str = ""               # MCP_EMAIL_SERVER_IMAP_HOST
+    email_imap_port: str = ""               # MCP_EMAIL_SERVER_IMAP_PORT（既定 993）
+    email_imap_ssl: bool = True             # MCP_EMAIL_SERVER_IMAP_SSL
+    email_server_env: dict = dc_field(default_factory=dict)  # 生 env の追加上書き
     email_list_tool: str = "list_emails_metadata"
     email_content_tool: str = "get_emails_content"
     email_page_size: int = 5
@@ -328,12 +338,21 @@ class MFAConfig:
     email_interval: float = 5.0
 
     @property
+    def resolved_email_account(self) -> str:
+        """list/get ツールへ渡す account_name。未指定ならメールアドレスで代替する。
+
+        動的 IMAP 設定（``email_address`` + ``email_imap_host`` 等）だけ与えて
+        ``email_account`` を省略した場合でも、アドレスを account_name として使える。
+        """
+        return self.email_account or self.email_address
+
+    @property
     def enabled(self) -> bool:
         if self.type == "totp":
             return bool(self.totp_command and self.totp_args)
         if self.type == "email":
-            # account_name が無いと list/get が必ず失敗するため必須扱い。
-            return bool(self.email_command and self.email_args and self.email_account)
+            # account_name（またはアドレス）が無いと list/get が必ず失敗するため必須扱い。
+            return bool(self.email_command and self.email_args and self.resolved_email_account)
         return False
 
     @classmethod
@@ -359,6 +378,17 @@ class MFAConfig:
             # WSCAN_MFA_FIELD -> "field" のような overrides キー名
             return key.replace("WSCAN_MFA_", "").lower()
 
+        def _b(key: str, default: bool, ov_key: str) -> bool:
+            ov_val = ov.get(ov_key)
+            if ov_val is not None:
+                if isinstance(ov_val, bool):
+                    return ov_val
+                return str(ov_val).strip().lower() not in ("0", "false", "no", "off", "")
+            raw = e.get(key)
+            if raw is None or str(raw).strip() == "":
+                return default
+            return str(raw).strip().lower() not in ("0", "false", "no", "off")
+
         # type は overrides を最優先。明示的に "none"/"" を渡されたら env を無視して無効化。
         if "type" in ov:
             mtype = (str(ov.get("type") or "none")).lower()
@@ -383,6 +413,20 @@ class MFAConfig:
                 e.get("WSCAN_MFA_EMAIL_ARGS", "mcp-email-server@latest stdio")
             ),
             email_account=_s("WSCAN_MFA_EMAIL_ACCOUNT", ""),
+            email_address=_s("WSCAN_MFA_EMAIL_ADDRESS", ""),
+            email_user=_s("WSCAN_MFA_EMAIL_USER", ""),
+            # UI/CLI の override（短縮キー email_password）を最優先で拾うため、
+            # それを担う WSCAN_MFA_EMAIL_PASSWORD を先に評価し、ドキュメントの
+            # WSCAN_MFA_EMAIL_IMAP_PASSWORD env にもフォールバックする。
+            email_password=_s("WSCAN_MFA_EMAIL_PASSWORD", "")
+            or _s("WSCAN_MFA_EMAIL_IMAP_PASSWORD", ""),
+            email_imap_host=_s("WSCAN_MFA_EMAIL_IMAP_HOST", ""),
+            email_imap_port=_s("WSCAN_MFA_EMAIL_IMAP_PORT", ""),
+            email_imap_ssl=_b("WSCAN_MFA_EMAIL_IMAP_SSL", True, "email_imap_ssl"),
+            email_server_env={
+                **parse_json_obj(e.get("WSCAN_MFA_EMAIL_SERVER_ENV", "")),
+                **(ov.get("email_server_env") or {}),
+            },
             email_list_tool=_s("WSCAN_MFA_EMAIL_LIST_TOOL", "list_emails_metadata")
             or "list_emails_metadata",
             email_content_tool=_s("WSCAN_MFA_EMAIL_CONTENT_TOOL", "get_emails_content")
@@ -394,6 +438,41 @@ class MFAConfig:
             email_interval=_f("WSCAN_MFA_EMAIL_INTERVAL", 5.0),
         )
         return cfg
+
+
+def build_email_server_env(config: "MFAConfig") -> dict:
+    """動的 IMAP 設定を mcp-email-server 用の ``MCP_EMAIL_SERVER_*`` env へ変換する（純粋関数）。
+
+    ``email_imap_host`` か ``email_server_env`` が与えられている時のみ env を返す
+    （= ユーザが「ツールから IMAP 認証情報を動的に渡した」とき）。これにより、
+    サーバ側に事前登録が無い任意のメールアドレスでも、spawn する mcp-email-server
+    サブプロセスへ認証情報を注入して受信できる。host を与えない既存フロー
+    （サーバ側 env で account を登録済み）の挙動は変えない。
+
+    ``email_server_env`` の生の上書きが最優先（厳密な変数名で微調整できる逃げ道）。
+    """
+    dynamic = bool(config.email_imap_host or config.email_server_env)
+    if not dynamic:
+        return {}
+    env: dict = {}
+    account = config.resolved_email_account
+    if account:
+        env["MCP_EMAIL_SERVER_ACCOUNT_NAME"] = account
+    if config.email_address:
+        env["MCP_EMAIL_SERVER_EMAIL_ADDRESS"] = config.email_address
+    if config.email_user:
+        env["MCP_EMAIL_SERVER_USER_NAME"] = config.email_user
+    if config.email_password:
+        env["MCP_EMAIL_SERVER_PASSWORD"] = config.email_password
+    if config.email_imap_host:
+        env["MCP_EMAIL_SERVER_IMAP_HOST"] = config.email_imap_host
+        env["MCP_EMAIL_SERVER_IMAP_SSL"] = "true" if config.email_imap_ssl else "false"
+    if config.email_imap_port:
+        env["MCP_EMAIL_SERVER_IMAP_PORT"] = str(config.email_imap_port)
+    # 生 env の追加上書き（厳密な変数名指定や SMTP 等）。値は文字列化。
+    for k, v in (config.email_server_env or {}).items():
+        env[str(k)] = str(v)
+    return env
 
 
 # ── MCP クライアント呼び出し ───────────────────────────────────────────────
@@ -430,9 +509,11 @@ class MFASolver:
 
     def _env(self) -> dict:
         # 秘匿情報（TOTP_SECRET_* / MCP_EMAIL_SERVER_*）は親プロセスの環境を
-        # 引き継ぐ。extra_env で追加・上書きできる。
+        # 引き継ぐ。extra_env で追加・上書きでき、さらに動的 IMAP 設定があれば
+        # MCP_EMAIL_SERVER_* に変換して注入する（ツールから渡した認証情報が最優先）。
         merged = dict(os.environ)
         merged.update(self.config.extra_env or {})
+        merged.update(build_email_server_env(self.config))
         return merged
 
     async def prime(self) -> None:
@@ -456,7 +537,7 @@ class MFASolver:
         """現在の受信箱メタデータからメール ID 集合を取得する。"""
         cfg = self.config
         list_args = {
-            "account_name": cfg.email_account,
+            "account_name": cfg.resolved_email_account,
             "page": 1,
             "page_size": cfg.email_page_size,
             "order": "desc",
@@ -510,7 +591,7 @@ class MFASolver:
         from mcp.client.stdio import stdio_client
 
         list_args = {
-            "account_name": cfg.email_account,
+            "account_name": cfg.resolved_email_account,
             "page": 1,
             "page_size": cfg.email_page_size,
             "order": "desc",
@@ -526,7 +607,7 @@ class MFASolver:
             """指定 ID 群の本文を取得してコードを抽出する。"""
             if not ids:
                 return None
-            content_args = {"account_name": cfg.email_account, "email_ids": ids}
+            content_args = {"account_name": cfg.resolved_email_account, "email_ids": ids}
             content_args.update(cfg.email_content_args or {})
             body = await session.call_tool(cfg.email_content_tool, content_args)
             raw = collect_tool_text(body)

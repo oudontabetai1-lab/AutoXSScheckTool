@@ -118,6 +118,13 @@ def _load_config(path: Path = _CONFIG_PATH) -> dict:
     cfg["auth_pass"]               = str(a.get("auth_pass", "") or "")
     cfg["mfa_type"]                = str(a.get("mfa_type", "") or "")
     cfg["mfa_field"]               = str(a.get("mfa_field", "") or "")
+    cfg["mfa_email_account"]       = str(a.get("mfa_email_account", "") or "")
+    cfg["mfa_email_address"]       = str(a.get("mfa_email_address", "") or "")
+    cfg["mfa_email_imap_host"]     = str(a.get("mfa_email_imap_host", "") or "")
+    cfg["mfa_email_imap_port"]     = str(a.get("mfa_email_imap_port", "") or "")
+    cfg["mfa_email_imap_user"]     = str(a.get("mfa_email_imap_user", "") or "")
+    cfg["mfa_email_imap_password"] = str(a.get("mfa_email_imap_password", "") or "")
+    cfg["mfa_email_imap_ssl"]      = a.get("mfa_email_imap_ssl", None)
 
     cfg["dom_xss"]                 = bool(f.get("dom_xss",          False))
     cfg["ai_analysis"]             = bool(f.get("ai_analysis",      True))
@@ -145,6 +152,27 @@ def _load_config(path: Path = _CONFIG_PATH) -> dict:
 
 # Load once at import time so parse_args() can reference it
 _CFG = _load_config()
+
+
+# 設定スナップショット等で永続化してはいけない秘匿フィールド。キー名に以下の
+# 語を含む値（パスワード/シークレット/トークン/APIキー）は伏字にする。
+_SECRET_KEY_TOKENS = ("password", "secret", "token", "api_key", "apikey")
+
+
+def _redact_secrets(cfg: dict) -> dict:
+    """秘匿値を伏字にした設定の浅いコピーを返す（ディスク保存・共有用）。
+
+    ダッシュボードは IMAP アプリパスワード等を「送信のみ・非保存」として扱うため、
+    成果物（``scan_config.json``）へ平文で書き出さない。
+    """
+    redacted: dict = {}
+    for key, value in (cfg or {}).items():
+        lname = str(key).lower()
+        if value not in ("", None) and any(tok in lname for tok in _SECRET_KEY_TOKENS):
+            redacted[key] = "***REDACTED***"
+        else:
+            redacted[key] = value
+    return redacted
 
 
 def parse_args():
@@ -181,7 +209,7 @@ Examples:
         "cors", "info_disclosure", "host_header", "security_headers",
         "nosql", "deserialization", "request_smuggling", "ssrf",
         "graphql", "jwt", "cms", "xxe", "ldap", "file_upload",
-        "race_condition", "websocket", "secret_leak", "sri",
+        "race_condition", "websocket", "secret_leak", "sri", "js_static",
     ]
     _default_checks = _CFG.get("checks", ["sqli", "xss", "os"])
     scan.add_argument(
@@ -451,6 +479,50 @@ Examples:
     scan.add_argument(
         "--mfa-field", metavar="NAME", default=_CFG.get("mfa_field", ""),
         help="One-time-code input field name/id on the login form (default: otp).",
+    )
+    scan.add_argument(
+        "--mfa-email-account", metavar="EMAIL", default=_CFG.get("mfa_email_account", ""),
+        help="MFA メール受信に使うアカウント名（mcp-email-server に登録済みの "
+             "account_name。通常はメールアドレス）。空ならば WSCAN_MFA_EMAIL_ACCOUNT "
+             "env を使う（既存設定をそのまま利用可能）。",
+    )
+    # 動的 IMAP 認証情報: ツールから直接渡すとサーバ側の事前登録なしで任意アドレス
+    # を受信できる（mcp-email-server サブプロセスへ MCP_EMAIL_SERVER_* を注入）。
+    # パスワードは環境変数 WSCAN_MFA_EMAIL_IMAP_PASSWORD でも渡せる（プロセス一覧
+    # への露出を避けたい場合に推奨）。
+    scan.add_argument(
+        "--mfa-email-address", metavar="EMAIL", default=_CFG.get("mfa_email_address", ""),
+        help="MFA メールのアドレス（動的 IMAP 設定。account 未指定時はこれを account_name に流用）。",
+    )
+    scan.add_argument(
+        "--mfa-email-imap-host", metavar="HOST", default=_CFG.get("mfa_email_imap_host", ""),
+        help="動的 IMAP: 受信サーバのホスト（指定すると動的設定モードになる）。",
+    )
+    scan.add_argument(
+        "--mfa-email-imap-port", metavar="PORT", default=_CFG.get("mfa_email_imap_port", ""),
+        help="動的 IMAP: ポート（既定 993）。",
+    )
+    scan.add_argument(
+        "--mfa-email-imap-user", metavar="USER", default=_CFG.get("mfa_email_imap_user", ""),
+        help="動的 IMAP: ログインユーザー名（既定はメールアドレス）。",
+    )
+    scan.add_argument(
+        "--mfa-email-imap-password", metavar="PASS",
+        default=_CFG.get("mfa_email_imap_password", ""),
+        help="動的 IMAP: パスワード。WSCAN_MFA_EMAIL_IMAP_PASSWORD env でも可（推奨）。",
+    )
+    # config の値（bool/文字列）を choices に合う "true"/"false" へ正規化して既定にする。
+    _imap_ssl_default = _CFG.get("mfa_email_imap_ssl", None)
+    if isinstance(_imap_ssl_default, bool):
+        _imap_ssl_default = "true" if _imap_ssl_default else "false"
+    elif _imap_ssl_default is not None:
+        _imap_ssl_default = str(_imap_ssl_default).strip().lower()
+        if _imap_ssl_default not in ("true", "false"):
+            _imap_ssl_default = None
+    scan.add_argument(
+        "--mfa-email-imap-ssl", metavar="BOOL", choices=["true", "false"],
+        default=_imap_ssl_default,
+        help="動的 IMAP: SSL を使うか（true/false、既定 true）。",
     )
     # A-3: Payload learning
     scan.add_argument(
@@ -1342,6 +1414,17 @@ async def run_scan(args):
             # None=未指定(env に委ねる) / ""=明示無効 / "totp"|"email"=明示有効
             mfa_type=getattr(args, "mfa_type", None),
             mfa_field=getattr(args, "mfa_field", "") or "",
+            mfa_email_account=getattr(args, "mfa_email_account", "") or "",
+            mfa_email_imap={
+                "address": getattr(args, "mfa_email_address", "") or "",
+                "host": getattr(args, "mfa_email_imap_host", "") or "",
+                "port": getattr(args, "mfa_email_imap_port", "") or "",
+                "user": getattr(args, "mfa_email_imap_user", "") or "",
+                "password": getattr(args, "mfa_email_imap_password", "") or "",
+                "ssl": {"true": True, "false": False}.get(
+                    getattr(args, "mfa_email_imap_ssl", None)
+                ),
+            },
             learning_file=getattr(args, "learning_file", "") or "",
             # Feature on/off flags (from config or CLI)
             enable_ai_analysis=not getattr(args, "no_ai_analysis", False),
@@ -1624,6 +1707,12 @@ async def run_serve(args):
         "login_success_indicator": _CFG.get("login_success_indicator", ""),
         "mfa_type": _CFG.get("mfa_type", ""),
         "mfa_field": _CFG.get("mfa_field", ""),
+        "mfa_email_account": _CFG.get("mfa_email_account", ""),
+        "mfa_email_address": _CFG.get("mfa_email_address", ""),
+        "mfa_email_imap_host": _CFG.get("mfa_email_imap_host", ""),
+        "mfa_email_imap_port": _CFG.get("mfa_email_imap_port", ""),
+        "mfa_email_imap_user": _CFG.get("mfa_email_imap_user", ""),
+        "mfa_email_imap_ssl": _CFG.get("mfa_email_imap_ssl", ""),
         "exclude_fields": ", ".join(_CFG.get("exclude_fields", []) or []),
         "exclude_urls": "\n".join(_CFG.get("exclude_urls", []) or []),
         "target_urls": "\n".join(_CFG.get("target_urls", []) or []),
@@ -1787,6 +1876,19 @@ async def run_serve(args):
                 # "" は env を上書きして無効化。キー欠落(None)時のみ env に委ねる。
                 mfa_type=cfg.get("mfa_type"),
                 mfa_field=cfg.get("mfa_field", "") or "",
+                mfa_email_account=cfg.get("mfa_email_account", "") or "",
+                mfa_email_imap={
+                    "address": cfg.get("mfa_email_address", "") or "",
+                    "host": cfg.get("mfa_email_imap_host", "") or "",
+                    "port": cfg.get("mfa_email_imap_port", "") or "",
+                    "user": cfg.get("mfa_email_imap_user", "") or "",
+                    "password": cfg.get("mfa_email_imap_password", "") or "",
+                    "ssl": cfg.get("mfa_email_imap_ssl")
+                    if isinstance(cfg.get("mfa_email_imap_ssl"), bool)
+                    else {"true": True, "false": False}.get(
+                        str(cfg.get("mfa_email_imap_ssl") or "").lower()
+                    ),
+                },
                 payloads_file=cfg.get("payloads_file") or None,
                 learning_file=cfg.get("learning_file") or None,
                 output_dir=cfg.get("output_dir") or None,
@@ -1842,7 +1944,7 @@ async def run_serve(args):
                             "tool": "WScan",
                             "kind": "wscan-scan-config-snapshot",
                             "submitted_at": _dt.datetime.now().isoformat(timespec="seconds"),
-                            "config": cfg,
+                            "config": _redact_secrets(cfg),
                         },
                         ensure_ascii=False,
                         indent=2,

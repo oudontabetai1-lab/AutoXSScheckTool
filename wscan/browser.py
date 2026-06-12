@@ -972,15 +972,7 @@ class BrowserManager:
                     self.last_login_success = False
                     return False
 
-            login_url_norm = login_url.rstrip("/")
-            failure_markers = (
-                "invalid login",
-                "login failed",
-                "incorrect password",
-                "invalid password",
-                "invalid credentials",
-                "authentication failed",
-            )
+            from . import auth_detect as _auth
             deadline = time.monotonic() + 15.0
             post_url = self.page.url
             post_body = ""
@@ -991,26 +983,21 @@ class BrowserManager:
                     pass
                 post_url = self.page.url
                 post_body = await self.get_page_source()
-                body_lower = post_body.lower()
-                if success_indicator:
-                    if success_indicator in post_url or success_indicator in post_body:
-                        self.last_login_url = post_url
-                        self.last_login_success = True
-                        return True
-                else:
-                    failed = any(marker in body_lower for marker in failure_markers)
-                    # MFA 画面に留まっている間は「login_url から移動した」だけで
-                    # 成功と判定しない（/mfa への遷移を誤認しないため）。
-                    on_mfa = bool(mfa_field) and _mfa.mfa_challenge_present(post_body, mfa_field)
-                    moved = post_url.rstrip("/") != login_url_norm
-                    if moved and not failed and not on_mfa:
-                        self.last_login_url = post_url
-                        self.last_login_success = True
-                        return True
-                    if not self.is_on_login_page(login_url) and not failed and not on_mfa:
-                        self.last_login_url = post_url
-                        self.last_login_success = True
-                        return True
+                # MFA 画面に留まっている間は成功と判定しない（/mfa への遷移を誤認しない）。
+                on_mfa = bool(mfa_field) and _mfa.mfa_challenge_present(post_body, mfa_field)
+                # 判定は純粋関数へ集約。URL の変化だけでなく「ログインフォームが
+                # 残っていないか」「失敗文言が無いか」「ログインページから離脱したか」
+                # を併せて評価し、/login?error= のような「移動はしたが失敗」を弾く。
+                if _auth.login_succeeded(
+                    post_url=post_url,
+                    login_url=login_url,
+                    body=post_body,
+                    mfa_present=on_mfa,
+                    success_indicator=success_indicator,
+                ):
+                    self.last_login_url = post_url
+                    self.last_login_success = True
+                    return True
                 await asyncio.sleep(0.25)
             self.last_login_url = post_url
             return False

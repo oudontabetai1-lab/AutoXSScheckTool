@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import secrets
 import time
 from dataclasses import dataclass, field
@@ -35,6 +36,7 @@ def _same_origin(url: str, origin: str) -> bool:
 def _matches_scope(url: str, scopes: list[str]) -> bool:
     candidate = url.rstrip("/")
     parsed = urlparse(candidate)
+    host = (parsed.hostname or "").lower()
     for raw in scopes:
         scope = str(raw or "").strip().rstrip("/")
         if not scope:
@@ -42,8 +44,16 @@ def _matches_scope(url: str, scopes: list[str]) -> bool:
         if scope.startswith(("http://", "https://")):
             if candidate == scope or candidate.startswith(scope + "/"):
                 return True
-        elif parsed.path == scope or parsed.path.startswith(scope + "/"):
-            return True
+        elif "/" in scope:
+            # パス系スコープ（/admin 等）
+            if parsed.path == scope or parsed.path.startswith(scope + "/"):
+                return True
+        else:
+            # ホスト系スコープ（auth.example.com 等）: 完全一致 or サブドメイン。
+            # monitor の allowed_target_hosts と同じホスト許可判定を共有する。
+            low = scope.lower().strip(".")
+            if host and (host == low or host.endswith("." + low)):
+                return True
     return False
 
 
@@ -52,7 +62,7 @@ def _unique_urls(values: list[str], origin: str = "", allowed_scopes: list[str] 
     urls: list[str] = []
     allowed_scopes = allowed_scopes or []
     for raw in values:
-        url = str(raw or "").split("#")[0].strip()
+        url = _strip_in_page_anchor(str(raw or "").strip())
         if not url.startswith(("http://", "https://")):
             continue
         if origin and not _same_origin(url, origin) and not _matches_scope(url, allowed_scopes):
@@ -81,12 +91,192 @@ def load_manual_crawl_seed(
         if isinstance(event, dict) and event.get("url"):
             raw_urls.append(event["url"])
 
+    # 取込時に許可・検証済みのスコープ（import_scopes）も合算する。これが無いと
+    # クロスホストの許可 URL（SSO/コールバック等）が再読込時の同一オリジン
+    # 正規化で落ちてしまう（build_seed_payload が書き出す）。
+    scopes = list(allowed_scopes or []) + [
+        str(s) for s in (data.get("import_scopes") or [])
+    ]
+
     return ManualCrawlSeed(
-        urls=_unique_urls(raw_urls, same_origin_as, allowed_scopes),
+        urls=_unique_urls(raw_urls, same_origin_as, scopes),
         cookies=data.get("cookies") or [],
         forms_by_url=data.get("forms_by_url") or {},
         steps=data.get("steps") or [],
     )
+
+
+def _strip_in_page_anchor(url: str) -> str:
+    """ページ内アンカー（``#section`` 等）のみ除去し、SPA ハッシュルートは保持する。
+
+    ``https://app/#/admin`` のような hash ルーティングや DOM XSS 対象は、``#`` 以降を
+    捨てると別ページ（``https://app/``）になってしまうため落とさない。``/`` や ``!`` を
+    含む（=ルート風の）フラグメントは保持し、単純なアンカーだけ除去する。
+    """
+    head, sep, frag = url.partition("#")
+    if not sep or not frag:
+        return head
+    if frag[:1] in ("/", "!") or "/" in frag:
+        return url
+    return head
+
+
+def parse_url_list(text: str | list[str]) -> list[str]:
+    """貼り付けテキスト or リストから http(s) URL を抽出して順序保持で返す。
+
+    改行・空白・カンマ区切りのいずれにも対応。サーバ/ヘッドレス環境では
+    可視ブラウザを操作できないため、利用者が手元のブラウザで控えた URL を
+    そのまま貼り付けてシード化できるようにする。
+    """
+    if isinstance(text, str):
+        tokens = re.split(r"[\s,]+", text)
+    else:
+        tokens: list[str] = []
+        for item in text or []:
+            tokens.extend(re.split(r"[\s,]+", str(item or "")))
+    seen: set[str] = set()
+    urls: list[str] = []
+    for tok in tokens:
+        url = _strip_in_page_anchor(tok.strip())
+        if not url.startswith(("http://", "https://")):
+            continue
+        if url in seen:
+            continue
+        seen.add(url)
+        urls.append(url)
+    return urls
+
+
+def build_seed_payload(
+    start_url: str,
+    urls: list[str],
+    *,
+    cookies: list[dict] | None = None,
+    allowed_scopes: list[str] | None = None,
+) -> dict:
+    """手入力の URL リストから ``save()`` と同形式のシード JSON を構築する（純粋関数）。
+
+    通常スキャンの ``load_manual_crawl_seed`` がそのまま読める構造を返す。
+    可視ブラウザの記録（events/steps/forms）は持たないが、``seed_urls`` を
+    巡回起点として供給できる。
+
+    ``allowed_scopes`` を渡すと start_url と異なるオリジンでも許可スコープ内なら
+    seed に残す（複数の許可ホストにまたがる SSO/コールバック URL を落とさない）。
+    """
+    now = time.time()
+    normalized = (
+        _unique_urls(urls, start_url, allowed_scopes) if start_url
+        else _unique_urls(urls, "", allowed_scopes)
+    )
+    return {
+        "version": 1,
+        "source": "manual_url_import",
+        "start_url": start_url,
+        "started_at": now,
+        "stopped_at": now,
+        "seed_urls": normalized,
+        "urls": list(urls),
+        # 再読込時にクロスホストの許可 URL を落とさないよう、許可スコープを残す。
+        "import_scopes": [str(s) for s in (allowed_scopes or [])],
+        "events": [{"type": "url", "source": "import", "url": u, "ts": now} for u in normalized],
+        "steps": [],
+        "forms_by_url": {},
+        "cookies": cookies or [],
+    }
+
+
+def save_seed_payload(output_path: str, payload: dict) -> Path:
+    """シード JSON をファイルへ書き出してパスを返す。"""
+    output = Path(output_path or "flows/manual_crawl.json")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    return output
+
+
+# ── 遠隔操作（スクリーンキャスト）の入力正規化（純粋関数） ─────────────────
+# ダッシュボードから届く生の入力イベントを検証・正規化する。座標は表示画像に
+# 対する 0..1 の正規化値（nx, ny）で受け取り、ここでビューポート実座標へ変換
+# できる形に整える。ブラウザ→サーバ間の untrusted 入力なので種類とキーを白
+# リストで絞る。
+_ALLOWED_KEYS = frozenset(
+    {
+        "Enter",
+        "Backspace",
+        "Tab",
+        "Delete",
+        "Escape",
+        "ArrowUp",
+        "ArrowDown",
+        "ArrowLeft",
+        "ArrowRight",
+        "Home",
+        "End",
+        "PageUp",
+        "PageDown",
+    }
+)
+_ALLOWED_BUTTONS = frozenset({"left", "right", "middle"})
+
+
+def _clamp01(value) -> float:
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    if f < 0.0:
+        return 0.0
+    if f > 1.0:
+        return 1.0
+    return f
+
+
+def coerce_input_event(ev: dict) -> dict | None:
+    """遠隔操作イベントを検証して正規化する。不正なら ``None``。
+
+    返す dict は ``type`` を持ち、種類ごとに以下を含む:
+    - ``click`` / ``move`` … ``nx``,``ny``（0..1）、click は ``button``。
+    - ``scroll``            … ``dy``（ピクセル、範囲制限）。
+    - ``text``             … ``text``（長さ制限）。
+    - ``key``              … ``key``（白リスト）。
+    - ``navigate``         … ``url``（http(s) のみ）。
+    """
+    if not isinstance(ev, dict):
+        return None
+    etype = str(ev.get("type") or "").lower()
+    if etype in ("click", "move"):
+        out = {"type": etype, "nx": _clamp01(ev.get("nx")), "ny": _clamp01(ev.get("ny"))}
+        if etype == "click":
+            btn = str(ev.get("button") or "left").lower()
+            out["button"] = btn if btn in _ALLOWED_BUTTONS else "left"
+        return out
+    if etype == "scroll":
+        try:
+            dy = float(ev.get("dy") or 0.0)
+        except (TypeError, ValueError):
+            return None
+        dy = max(-2000.0, min(2000.0, dy))
+        return {"type": "scroll", "dy": dy}
+    if etype == "text":
+        text = str(ev.get("text") or "")
+        if not text:
+            return None
+        return {"type": "text", "text": text[:500]}
+    if etype == "key":
+        key = str(ev.get("key") or "")
+        if key not in _ALLOWED_KEYS:
+            return None
+        return {"type": "key", "key": key}
+    if etype == "navigate":
+        url = str(ev.get("url") or "").strip()
+        if not url.startswith(("http://", "https://")):
+            return None
+        return {"type": "navigate", "url": url}
+    return None
+
+
+def scale_point(nx: float, ny: float, width: int, height: int) -> tuple[float, float]:
+    """正規化座標（0..1）をビューポート実座標へ変換する（純粋関数）。"""
+    return (_clamp01(nx) * width, _clamp01(ny) * height)
 
 
 class ManualCrawlSession:
@@ -114,17 +304,35 @@ class ManualCrawlSession:
         self._lock = asyncio.Lock()
         self._snapshot_tasks: set[asyncio.Task] = set()
 
+        # 遠隔操作（スクリーンキャスト）用。
+        self.streaming = False
+        self.view_width = 1280
+        self.view_height = 800
+        self._cdp = None
+        self._frame_callback = None
+        self._frame_tasks: set[asyncio.Task] = set()
+
     async def start(
         self,
         start_url: str,
         output_path: str,
         headless: bool = False,
         proxy: str = "",
+        stream: bool = False,
+        frame_callback=None,
     ) -> dict:
         if self.running:
             raise RuntimeError("manual crawl session is already running")
         if not start_url.startswith(("http://", "https://")):
             raise ValueError("start_url must begin with http:// or https://")
+
+        # 遠隔操作モードでは、サーバ側のヘッドレス Chromium の画面を CDP
+        # スクリーンキャストでダッシュボードへ配信し、座標入力を返して操作する。
+        # 可視ウィンドウは不要なので headless を強制する。
+        if stream:
+            headless = True
+        self.streaming = bool(stream)
+        self._frame_callback = frame_callback if stream else None
 
         try:
             from playwright.async_api import async_playwright
@@ -163,7 +371,13 @@ class ManualCrawlSession:
                         "`playwright install chromium` を実行してから再度お試しください。"
                     ) from exc
                 raise
-            self._context = await self._browser.new_context(ignore_https_errors=True)
+            context_kwargs: dict[str, Any] = {"ignore_https_errors": True}
+            if stream:
+                context_kwargs["viewport"] = {
+                    "width": self.view_width,
+                    "height": self.view_height,
+                }
+            self._context = await self._browser.new_context(**context_kwargs)
             self._page = await self._context.new_page()
         except Exception:
             await self._cleanup_browser()
@@ -246,9 +460,117 @@ class ManualCrawlSession:
         task = asyncio.create_task(_initial_goto())
         self._snapshot_tasks.add(task)
         task.add_done_callback(lambda t: self._snapshot_tasks.discard(t))
+
+        if stream:
+            try:
+                await self._start_screencast()
+            except Exception as exc:
+                self.last_error = f"screencast failed: {exc}"
+
         return self.status()
 
+    async def _start_screencast(self) -> None:
+        """CDP スクリーンキャストを開始し、フレームを ``frame_callback`` へ流す。"""
+        self._cdp = await self._context.new_cdp_session(self._page)
+        self._cdp.on("Page.screencastFrame", self._on_screencast_frame)
+        await self._cdp.send(
+            "Page.startScreencast",
+            {
+                "format": "jpeg",
+                "quality": 55,
+                "maxWidth": self.view_width,
+                "maxHeight": self.view_height,
+                "everyNthFrame": 1,
+            },
+        )
+
+    def _on_screencast_frame(self, params: dict) -> None:
+        """CDP のフレームイベント（同期コールバック）→ 配信タスクを起こす。"""
+        try:
+            loop = asyncio.get_event_loop()
+        except RuntimeError:
+            return
+        t = loop.create_task(self._handle_frame(params))
+        self._frame_tasks.add(t)
+        t.add_done_callback(lambda x: self._frame_tasks.discard(x))
+
+    async def _handle_frame(self, params: dict) -> None:
+        # フレームを ack しないと次が届かない。ack 後にコールバックへ渡す。
+        session_id = params.get("sessionId")
+        if self._cdp is not None and session_id is not None:
+            try:
+                await self._cdp.send(
+                    "Page.screencastFrameAck", {"sessionId": session_id}
+                )
+            except Exception:
+                pass
+        cb = self._frame_callback
+        if cb is None:
+            return
+        try:
+            await cb(
+                {
+                    "data": params.get("data", ""),
+                    "width": self.view_width,
+                    "height": self.view_height,
+                }
+            )
+        except Exception:
+            pass
+
+    async def input_event(self, ev: dict) -> dict:
+        """遠隔操作イベントを実ブラウザへ適用する。
+
+        ``ev`` はダッシュボードからの生入力。``coerce_input_event`` で検証・正規化
+        してから Playwright の mouse/keyboard へ反映する。戻り値は適用結果。
+        """
+        if not self.running or not self._page or not self.streaming:
+            return {"ok": False, "error": "remote session not running"}
+        norm = coerce_input_event(ev)
+        if norm is None:
+            return {"ok": False, "error": "invalid input event"}
+        try:
+            etype = norm["type"]
+            if etype == "click":
+                x, y = scale_point(norm["nx"], norm["ny"], self.view_width, self.view_height)
+                await self._page.mouse.click(x, y, button=norm["button"])
+            elif etype == "move":
+                x, y = scale_point(norm["nx"], norm["ny"], self.view_width, self.view_height)
+                await self._page.mouse.move(x, y)
+            elif etype == "scroll":
+                await self._page.mouse.wheel(0, norm["dy"])
+            elif etype == "text":
+                await self._page.keyboard.insert_text(norm["text"])
+            elif etype == "key":
+                await self._page.keyboard.press(norm["key"])
+            elif etype == "navigate":
+                # 同一オリジン内に限定（recorder と同じスコープ）。
+                if not _same_origin(norm["url"], self.start_url):
+                    return {"ok": False, "error": "out of scope"}
+                await self._page.goto(norm["url"], wait_until="commit", timeout=15_000)
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+        return {"ok": True, "type": norm["type"]}
+
+    async def _stop_screencast(self) -> None:
+        for t in list(self._frame_tasks):
+            t.cancel()
+        self._frame_tasks.clear()
+        if self._cdp is not None:
+            try:
+                await self._cdp.send("Page.stopScreencast")
+            except Exception:
+                pass
+            try:
+                await self._cdp.detach()
+            except Exception:
+                pass
+        self._cdp = None
+        self._frame_callback = None
+
     async def _cleanup_browser(self) -> None:
+        await self._stop_screencast()
+        self.streaming = False
         for task in list(self._snapshot_tasks):
             task.cancel()
         self._snapshot_tasks.clear()
@@ -298,6 +620,9 @@ class ManualCrawlSession:
             "form_page_count": len(self.forms_by_url),
             "last_error": self.last_error,
             "urls": list(self.urls[-20:]),
+            "streaming": self.streaming,
+            "view_width": self.view_width,
+            "view_height": self.view_height,
         }
 
     def save(self) -> Path:
