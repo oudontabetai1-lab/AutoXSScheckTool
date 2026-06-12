@@ -24,6 +24,30 @@ class OnLoginPageTests(unittest.TestCase):
             ad.on_login_page("http://x.test/dashboard", "http://x.test/login")
         )
 
+    def test_cross_host_same_path_redirect_is_not_login_page(self):
+        # SSO/IdP: auth.example.com/ -> app.example.com/（同一パス別ホスト）は
+        # ログイン成功とみなす（未認証スキャンに落とさない）。
+        self.assertFalse(
+            ad.on_login_page("https://app.example.com/", "https://auth.example.com/")
+        )
+
+    def test_same_host_same_path_is_login_page(self):
+        # 同一ホストの同一パス（クエリ違い）は引き続きログインページ扱い。
+        self.assertTrue(
+            ad.on_login_page(
+                "https://auth.example.com/signin?error=1",
+                "https://auth.example.com/signin",
+            )
+        )
+
+    def test_cross_host_same_login_path_is_not_login_page(self):
+        # 別ホストの同一パス（/signin）でもログインページ扱いしない。
+        self.assertFalse(
+            ad.on_login_page(
+                "https://app.example.com/signin", "https://auth.example.com/signin"
+            )
+        )
+
     def test_heuristic_when_login_url_empty(self):
         self.assertTrue(ad.on_login_page("http://x.test/signin", ""))
         self.assertFalse(ad.on_login_page("http://x.test/home", ""))

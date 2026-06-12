@@ -82,10 +82,14 @@ def on_login_page(current_url: str, login_url: str) -> bool:
         login = _norm(login_url)
         if current == login:
             return True
-        cur_path = urlparse(current).path
-        login_path = urlparse(login).path
-        if login_path and cur_path == login_path:
-            return True
+        cur_parsed = urlparse(current)
+        login_parsed = urlparse(login)
+        # パス一致は同一ホストのときだけ適用する。SSO/IdP のログインで別ホスト
+        # の同一パスへ遷移した場合（auth.example.com/ -> app.example.com/）を
+        # 「まだログインページ」と誤判定して未認証スキャンに落とさない。
+        if cur_parsed.netloc == login_parsed.netloc and login_parsed.path:
+            if cur_parsed.path == login_parsed.path:
+                return True
         return False
     cur_path = urlparse(current).path
     for hint in _LOGIN_PATH_HINTS:
