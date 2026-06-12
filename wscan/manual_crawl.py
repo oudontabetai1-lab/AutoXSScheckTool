@@ -36,6 +36,7 @@ def _same_origin(url: str, origin: str) -> bool:
 def _matches_scope(url: str, scopes: list[str]) -> bool:
     candidate = url.rstrip("/")
     parsed = urlparse(candidate)
+    host = (parsed.hostname or "").lower()
     for raw in scopes:
         scope = str(raw or "").strip().rstrip("/")
         if not scope:
@@ -43,8 +44,16 @@ def _matches_scope(url: str, scopes: list[str]) -> bool:
         if scope.startswith(("http://", "https://")):
             if candidate == scope or candidate.startswith(scope + "/"):
                 return True
-        elif parsed.path == scope or parsed.path.startswith(scope + "/"):
-            return True
+        elif "/" in scope:
+            # パス系スコープ（/admin 等）
+            if parsed.path == scope or parsed.path.startswith(scope + "/"):
+                return True
+        else:
+            # ホスト系スコープ（auth.example.com 等）: 完全一致 or サブドメイン。
+            # monitor の allowed_target_hosts と同じホスト許可判定を共有する。
+            low = scope.lower().strip(".")
+            if host and (host == low or host.endswith("." + low)):
+                return True
     return False
 
 
@@ -136,15 +145,22 @@ def build_seed_payload(
     urls: list[str],
     *,
     cookies: list[dict] | None = None,
+    allowed_scopes: list[str] | None = None,
 ) -> dict:
     """手入力の URL リストから ``save()`` と同形式のシード JSON を構築する（純粋関数）。
 
     通常スキャンの ``load_manual_crawl_seed`` がそのまま読める構造を返す。
     可視ブラウザの記録（events/steps/forms）は持たないが、``seed_urls`` を
     巡回起点として供給できる。
+
+    ``allowed_scopes`` を渡すと start_url と異なるオリジンでも許可スコープ内なら
+    seed に残す（複数の許可ホストにまたがる SSO/コールバック URL を落とさない）。
     """
     now = time.time()
-    normalized = _unique_urls(urls, start_url) if start_url else _unique_urls(urls)
+    normalized = (
+        _unique_urls(urls, start_url, allowed_scopes) if start_url
+        else _unique_urls(urls, "", allowed_scopes)
+    )
     return {
         "version": 1,
         "source": "manual_url_import",

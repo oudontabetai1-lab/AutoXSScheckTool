@@ -846,8 +846,16 @@ class MonitorServer:
                     return JSONResponse({"error": scope_err}, status_code=403)
 
             output_path = (body.get("output_path") or "flows/manual_crawl.json").strip()
+            # 取込 URL はすべて _scope_error で検証済み。seed 正規化が start_url の
+            # 同一オリジンだけに絞って許可ホストの URL を落とさないよう、許可スコープ
+            # （未設定時は取込 URL のホスト集合）を渡す。
+            seed_scopes = self.allowed_target_hosts or list(
+                {h for h in (_host_of(u) for u in urls) if h}
+            )
             try:
-                payload = build_seed_payload(start_url or urls[0], urls)
+                payload = build_seed_payload(
+                    start_url or urls[0], urls, allowed_scopes=seed_scopes
+                )
                 saved = save_seed_payload(output_path, payload)
             except Exception as exc:
                 return JSONResponse({"error": str(exc)}, status_code=500)

@@ -143,6 +143,19 @@ class LoginSucceededTests(unittest.TestCase):
             )
         )
 
+    def test_success_indicator_with_mfa_present_is_failure(self):
+        # OTP 送信直後の MFA 画面が success 語を含んでも、未解決の MFA があれば
+        # 成功としない（コード誤りで未認証のまま進むのを防ぐ）。
+        self.assertFalse(
+            ad.login_succeeded(
+                post_url="http://x.test/app/mfa",
+                login_url="http://x.test/login",
+                body="<div>enter code</div>",
+                success_indicator="/app",
+                mfa_present=True,
+            )
+        )
+
     def test_success_indicator_with_failure_text_is_failure(self):
         self.assertFalse(
             ad.login_succeeded(

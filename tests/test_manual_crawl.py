@@ -126,6 +126,25 @@ class ManualUrlImportTests(unittest.TestCase):
             ["https://app.test/#/admin", "https://app.test/dash"],
         )
 
+    def test_seed_payload_keeps_allowed_cross_host_urls(self):
+        # 許可ホストにまたがる URL（SSO/コールバック等）は seed から落とさない。
+        payload = build_seed_payload(
+            "https://app.example.com/",
+            [
+                "https://app.example.com/dash",
+                "https://auth.example.com/callback",  # 別ホストだが許可スコープ内
+                "https://evil.example.org/x",  # スコープ外は除去
+            ],
+            allowed_scopes=["app.example.com", "auth.example.com"],
+        )
+        self.assertEqual(
+            payload["seed_urls"],
+            [
+                "https://app.example.com/dash",
+                "https://auth.example.com/callback",
+            ],
+        )
+
     def test_build_seed_payload_is_loadable_as_seed(self):
         payload = build_seed_payload(
             "http://example.test/",

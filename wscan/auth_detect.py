@@ -143,12 +143,15 @@ def login_succeeded(
       ``None`` を渡せば無視される。
     """
     failed = has_failure_text(body)
-    if success_indicator:
-        hit = success_indicator in (post_url or "") or success_indicator in (body or "")
-        return bool(hit and not failed)
-
+    # 失敗文言や未解決の MFA がある間は、success_indicator 指定でも成功としない。
+    # OTP 送信直後に MFA 画面（URL/本文に成功語を含む）へ留まったケースを成功と
+    # 誤認して未認証のままスキャンを進めるのを防ぐ。
     if failed or mfa_present:
         return False
+    if success_indicator:
+        hit = success_indicator in (post_url or "") or success_indicator in (body or "")
+        return bool(hit)
+
     if auth_cookie_present is False:
         return False
     if on_login_page(post_url, login_url):
