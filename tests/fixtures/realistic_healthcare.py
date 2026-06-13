@@ -86,7 +86,7 @@ EXPECTED_FINDINGS = [
      "note": "セッション Cookie を Secure/HttpOnly/SameSite 無しで発行"},
     {"check": "secret_leak", "path": "/static/vendor.js", "field": None, "difficulty": "medium",
      "note": "JS バンドルに高エントロピーの実在風キーを埋め込む"},
-    {"check": "jwt", "path": "/api/v1/auth/token", "field": None, "difficulty": "medium",
+    {"check": "jwt_weak_secret", "path": "/api/v1/auth/token", "field": None, "difficulty": "medium",
      "note": "HS256 JWT を弱い秘密鍵 secret で署名して本文に露出"},
     {"check": "nosql", "path": "/api/v1/auth/login", "field": "username", "difficulty": "medium",
      "note": "MongoDB 演算子オブジェクトを渡すと Mongo エラーが露出（認証回避）"},
@@ -156,7 +156,7 @@ SAFE_ENDPOINTS = [
      "note": "Secure; HttpOnly; SameSite=Lax 付きで Cookie 発行"},
     {"check": "secret_leak", "path": "/static/vendor.safe.js", "field": None,
      "note": "プレースホルダだけを含む JS バンドル"},
-    {"check": "jwt", "path": "/api/v1/auth/token-safe", "field": None,
+    {"check": "jwt_weak_secret", "path": "/api/v1/auth/token-safe", "field": None,
      "note": "十分長い秘密鍵で署名した exp 付き JWT を返す"},
     {"check": "nosql", "path": "/portal/signin", "field": "username",
      "note": "資格情報を常に文字列照合し演算子注入を受け付けない"},
@@ -431,6 +431,9 @@ SECURITY_HEADERS = {
     "Cross-Origin-Opener-Policy": "same-origin",
     "X-Frame-Options": "DENY",
 }
+# clickjacking 脆弱ページ用：frame-ancestors を持たない CSP（他ヘッダは揃えるので
+# security_headers は発火させず、framing 保護だけが欠ける = clickjacking 単独シグナル）。
+_FRAMELESS_CSP = "default-src 'self'; script-src 'self'; object-src 'none'; base-uri 'self'"
 _ALLOWLISTED_ORIGIN = "https://app.cedarvalley.test"
 _CANONICAL_HOST = "portal.cedarvalley.test"
 _CHART_SRC = "https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"
@@ -493,15 +496,24 @@ def create_app() -> FastAPI:
     app.state.announcements: list[str] = []  # 格納型 安全ツイン（エスケープ済み）
 
     # ── Home ──────────────────────────────────────────────────────────────
+    def _crawl_link(spec: dict) -> str:
+        # GET パラメータ系エンドポイントは代表的なクエリ文字列付きでリンクする。
+        # こうしないとクローラがパラメータ名を field_queue に積めず、E2E で
+        # ref/url/dest/title 等が未検査（false negative）になる（Codex 指摘 #1）。
+        field = spec.get("field")
+        if field and re.fullmatch(r"[A-Za-z_]\w*", field):
+            return f'{spec["path"]}?{field}=sample'
+        return spec["path"]
+
     @app.get("/", response_class=HTMLResponse)
     async def home():
         links = "\n".join(
-            f'<li><a href="{spec["path"]}">{spec["check"]} '
+            f'<li><a href="{_crawl_link(spec)}">{spec["check"]} '
             f'({spec.get("difficulty", "safe")})</a></li>'
             for spec in EXPECTED_FINDINGS
         )
         safe_links = "\n".join(
-            f'<li><a href="{spec["path"]}">{spec["check"]} (safe)</a></li>'
+            f'<li><a href="{_crawl_link(spec)}">{spec["check"]} (safe)</a></li>'
             for spec in SAFE_ENDPOINTS
         )
         return _layout(
@@ -615,17 +627,17 @@ def create_app() -> FastAPI:
     # ── clickjacking ──────────────────────────────────────────────────────
     @app.get("/portal/embed", response_class=HTMLResponse)
     async def portal_embed():
-        # XFO も CSP frame-ancestors も無い（埋め込み可能）。
-        return HTMLResponse("<p>埋め込み用のミニ予約ウィジェット。</p>")
+        # 他のセキュリティヘッダは揃えるが framing 保護（XFO / frame-ancestors）だけが
+        # 無い → clickjacking 単独シグナル（security_headers は発火させない）。
+        headers = {k: v for k, v in SECURITY_HEADERS.items() if k != "X-Frame-Options"}
+        headers["Content-Security-Policy"] = _FRAMELESS_CSP
+        return HTMLResponse("<p>埋め込み用のミニ予約ウィジェット。</p>", headers=headers)
 
     @app.get("/portal/embed-safe", response_class=HTMLResponse)
     async def portal_embed_safe():
+        # 全ヘッダ完備（XFO: DENY と frame-ancestors 'none' を含む）→ 両検査で安全。
         return HTMLResponse(
-            "<p>埋め込み拒否のミニ予約ウィジェット。</p>",
-            headers={
-                "X-Frame-Options": "DENY",
-                "Content-Security-Policy": "frame-ancestors 'none'",
-            },
+            "<p>埋め込み拒否のミニ予約ウィジェット。</p>", headers=dict(SECURITY_HEADERS)
         )
 
     # =====================================================================

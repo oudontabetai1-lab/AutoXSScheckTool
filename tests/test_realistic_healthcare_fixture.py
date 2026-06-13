@@ -77,7 +77,22 @@ class RealisticHealthcareFixtureTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(resp.status_code, 200)
         for spec in EXPECTED_FINDINGS + SAFE_ENDPOINTS:
             with self.subTest(path=spec["path"]):
-                self.assertIn(f'href="{spec["path"]}"', resp.text)
+                # パラメータ系はクロール用に ?field=... 付きでリンクされる。
+                self.assertTrue(
+                    f'href="{spec["path"]}"' in resp.text
+                    or f'href="{spec["path"]}?' in resp.text,
+                    f'{spec["path"]} not linked from home',
+                )
+
+    async def test_parameterized_get_endpoints_link_their_field(self):
+        # GET パラメータ系の脆弱エンドポイントは、クローラがパラメータ名を拾えるよう
+        # クエリ文字列付きでリンクされていること（E2E の false negative 回避）。
+        resp = await self.client.get("/")
+        for spec in EXPECTED_FINDINGS:
+            field = spec.get("field")
+            if field and field.replace("_", "").isalnum() and not field.startswith("form"):
+                with self.subTest(path=spec["path"], field=field):
+                    self.assertIn(f'href="{spec["path"]}?{field}=', resp.text)
 
     # ── LOW ────────────────────────────────────────────────────────────────
     async def test_low_reflected_xss(self):
@@ -122,8 +137,11 @@ class RealisticHealthcareFixtureTests(unittest.IsolatedAsyncioTestCase):
     async def test_low_clickjacking(self):
         vuln = await self.client.get("/portal/embed")
         safe = await self.client.get("/portal/embed-safe")
+        # framing 保護だけが欠ける（他ヘッダは揃え security_headers は発火させない）。
         self.assertNotIn("x-frame-options", vuln.headers)
-        self.assertNotIn("content-security-policy", vuln.headers)
+        self.assertIn("content-security-policy", vuln.headers)
+        self.assertNotIn("frame-ancestors", vuln.headers["content-security-policy"].lower())
+        self.assertIn("strict-transport-security", vuln.headers)  # 他ヘッダは完備
         self.assertEqual(safe.headers["x-frame-options"], "DENY")
         self.assertIn("frame-ancestors 'none'", safe.headers["content-security-policy"])
 
