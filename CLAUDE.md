@@ -91,10 +91,13 @@ python main.py scan http://127.0.0.1:8000 --checks xss sqli --no-monitor --llm n
 | `realistic_site.py` | 現実的ECサイト | 反射/格納XSS・SQLi・SSTI・traversal・open_redirect・header_injection |
 | `realistic_api.py` | SaaS管理コンソール/REST API | ヘッダ系（security_headers/clickjacking/cors/session/csrf/info_disclosure/secret_leak/jwt） |
 | `realistic_intranet.py` | 社内ツールポータル | 注入系（os/ssrf/nosql/dom_xss） |
+| `realistic_healthcare.py` | 患者ポータル（中〜大規模・難易度段階付き） | ldap/xxe/host_header/sri/js_static 他を横断。1ページ1脆弱性を **low→ultra** で配置（blind SQLi、二重デコード/バックスラッシュ/代替テンプレ等のバイパス系を含む） |
 | `header_matrix_app.py` | ヘッダ網羅マトリクス | セキュリティヘッダの組合せ |
 
 - **正解データ規約**: `realistic_*` は `EXPECTED_FINDINGS`（検出必須）と
   `SAFE_ENDPOINTS`（検出禁止＝誤検知ガード）を dict 形式で公開する。
+  `realistic_healthcare` は各 `EXPECTED_FINDINGS` に `difficulty`（low/medium/high/ultra）も付す。
+  **`ultra` はスキャナが検出できなくてもよい**ベンチマーク用の難問（素朴な防御をバイパスして初めて成立）。
 - **1エンドポイント1シグナル**: 他検査のシグナルは `html.escape` 等で潰し、正解を曖昧にしない。
 - **2層のテスト**: `tests/test_realistic_*_fixture.py` が httpx でフィクスチャ挙動を高速検証。
   `tests/test_end_to_end_scan*.py` が実エンジン（crawl→plan→attack→verify）で検出を検証
