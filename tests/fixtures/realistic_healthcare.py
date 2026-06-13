@@ -501,9 +501,15 @@ def create_app() -> FastAPI:
         # こうしないとクローラがパラメータ名を field_queue に積めず、E2E で
         # ref/url/dest/title 等が未検査（false negative）になる（Codex 指摘 #1）。
         field = spec.get("field")
-        if field and re.fullmatch(r"[A-Za-z_]\w*", field):
-            return f'{spec["path"]}?{field}=sample'
-        return spec["path"]
+        if not (field and re.fullmatch(r"[A-Za-z_]\w*", field)):
+            return spec["path"]
+        # open_redirect 系は無効値だと 302 で実在しない先へ飛び「could not load」と
+        # なってクローラが当該ページ（=フィールド）を破棄する。realistic_site の
+        # `?url=/products` と同様、ロード可能な同一サイト相対パスを既定にして
+        # クロール時にフィールドを確実に登録させる。
+        if spec.get("check") == "open_redirect":
+            return f'{spec["path"]}?{field}=/portal/search'
+        return f'{spec["path"]}?{field}=sample'
 
     @app.get("/", response_class=HTMLResponse)
     async def home():

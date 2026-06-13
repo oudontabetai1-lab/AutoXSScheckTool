@@ -48,6 +48,43 @@ class EchoMarkerExecutedTests(unittest.TestCase):
         self.assertFalse(_echo_marker_executed("wscanEVO42", ""))
 
 
+class StoredEndpointBaselineGuardTests(unittest.TestCase):
+    """stored/反射エンドポイントでの echo マーカー自己汚染ガードの回帰テスト。
+
+    OSScanner は evolution probe として「素の marker（echo 無し）」を投入する。
+    投稿が永続化・再描画される stored エンドポイント（例: コメント一覧）では、この
+    probe の素 marker が後続ペイロードの応答にも現れ、`_echo_marker_executed` だけ
+    では「実行」と誤判定する。scan_field は probe 後に取り直した baseline と比較し
+    （``executed and not _echo_marker_executed(baseline, marker)``）誤検知を防ぐ。
+    ここではその合成判定を純粋ロジックとして固定する。
+    """
+    MARKER = "wscanEVO253"
+
+    def _executed_with_baseline(self, source: str, baseline: str) -> bool:
+        # scan_field の echo マーカー採用条件と同じ合成判定。
+        return _echo_marker_executed(source, self.MARKER) and not _echo_marker_executed(
+            baseline, self.MARKER
+        )
+
+    def test_stored_probe_reflection_is_not_execution(self):
+        # probe の素 marker が一覧へ永続化 → payload 応答にも post-probe baseline にも
+        # 同じ素 marker が現れる → 実行ではない（誤検知しない）。
+        stored_listing = (
+            "<article>; echo wscanEVO253</article>\n"
+            "<article>wscanEVO253</article>\n"   # probe（素 marker）の反射
+        )
+        post_probe_baseline = stored_listing  # baseline も同じ素 marker を含む
+        self.assertFalse(
+            self._executed_with_baseline(stored_listing, post_probe_baseline)
+        )
+
+    def test_genuine_execution_survives_baseline_guard(self):
+        # 実行された場合のみ payload 応答に素 marker が現れ、baseline には無い。
+        baseline = "Server: 10.10.0.2\nName: intranet.local\n"
+        executed = "Server: 10.10.0.2\nName: host\nwscanEVO253\n"
+        self.assertTrue(self._executed_with_baseline(executed, baseline))
+
+
 class IsTimeBasedOsTests(unittest.TestCase):
     def test_detects_delay_directives(self):
         for p in (

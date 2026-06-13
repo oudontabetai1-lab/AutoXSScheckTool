@@ -124,7 +124,9 @@ class OSInjectionScanner(BaseScanner):
         # Threshold = baseline + 2.8 s (injected sleep) with 0.5 s margin
         time_threshold = max(2.8, baseline_time + 2.8)
 
-        async def _test_payload(payload: str, check_label: str = "os") -> bool:
+        async def _test_payload(
+            payload: str, check_label: str = "os", echo_baseline: str = ""
+        ) -> bool:
             await self.log_payload_test(field_name, payload, check_label, url)
 
             # Apply payload
@@ -144,6 +146,11 @@ class OSInjectionScanner(BaseScanner):
                 and check_label.endswith("_evolved")
                 and marker
                 and _echo_marker_executed(source or "", marker)
+                # stored/反射エンドポイントでは evolution probe の素の marker が
+                # 永続化され、後続ペイロードの応答（一覧）にそのまま現れる。probe 後に
+                # 取り直した baseline に同じ marker が echo 無しで出るなら、それは
+                # 実行ではなく反射 → 誤検知として除外する（verify_finding と同じ判定）。
+                and not _echo_marker_executed(echo_baseline or "", marker)
             ):
                 match = marker
             if match:
@@ -203,8 +210,16 @@ class OSInjectionScanner(BaseScanner):
             extra_payloads = await self.evolved_payloads(
                 url, form_index, field_name, is_url_param
             )
+            # evolved_payloads は内部で marker 付き probe を投入する。stored 系では
+            # この probe が一覧へ永続化されるため、probe 後の状態を baseline 化して
+            # echo マーカー誤検知ガード（_test_payload 内）に渡す。
+            echo_baseline = ""
+            if extra_payloads:
+                echo_baseline, _ = await self._apply_payload(
+                    url, form_index, field_name, "baseline_os_test", is_url_param
+                )
             for payload in extra_payloads:
-                if await _test_payload(payload, "os_evolved"):
+                if await _test_payload(payload, "os_evolved", echo_baseline):
                     break
 
         return findings

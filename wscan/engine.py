@@ -1408,6 +1408,30 @@ class ScanEngine:
                     pass
 
             forms = await self.browser.find_forms()
+            # 遷移後 URL がキュー URL と別パスなら（リダイレクトで別ページへ移動）、
+            # ここで収集した form は遷移先のもの。元 URL に紐付けると別ページの脆弱性を
+            # 元 URL へ誤帰属する（例: open_redirect 安全ツインで遷移先の反射 XSS が
+            # 元 URL の finding として出る）。form は遷移先 URL へ寄せ（未訪問かつ
+            # スコープ内なら巡回キューへ積み）、URL パラメータはリダイレクト系
+            # エンドポイント自体の検査用に元 URL へ残す（_merge_url_params の方針）。
+            if forms:
+                try:
+                    landed = (self.browser.page.url or "").split("#")[0]
+                except Exception:
+                    landed = ""
+                if (
+                    landed
+                    and urlparse(landed).path.rstrip("/")
+                    != urlparse(url).path.rstrip("/")
+                ):
+                    if (
+                        landed not in self.visited_urls
+                        and self._is_access_allowed_url(landed)
+                        and not self._is_url_excluded(landed)
+                    ):
+                        self.visited_urls.add(landed)
+                        queue.append((landed, depth, parent_url))
+                    forms = []
             url_params = self._merge_url_params(await self.browser.get_url_params(), url)
             screenshot_b64 = await self.browser.screenshot_b64(f"Crawl: {url}")
 
