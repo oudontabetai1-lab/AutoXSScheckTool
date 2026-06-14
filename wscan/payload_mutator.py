@@ -55,7 +55,12 @@ def _encode_dots_slashes(s: str) -> str:
 
 
 def _double_encode_dots_slashes(s: str) -> str:
-    return _encode_dots_slashes(_encode_dots_slashes(s))
+    """真の二重 percent-encode（``..`` → ``%252e%252e``）。
+
+    2 回目に再び ``_encode_dots_slashes`` を通しても対象は既に ``%2e`` 等で ``.`` ``/``
+    が残らず無変化になる。``%`` 自体を ``%25`` に再エンコードして二重化する。
+    """
+    return _encode_dots_slashes(s).replace("%", "%25")
 
 
 def _case_toggle(s: str) -> str:
@@ -78,21 +83,19 @@ def _redirect_host(payload: str) -> str:
 
 
 def mutate(payload: str, check_type: str) -> list[str]:
-    """``payload`` を ``check_type`` に応じたバイパス変種へ「変化」させる（純粋関数）。"""
+    """``payload`` を ``check_type`` に応じたバイパス変種へ「変化」させる（純粋関数）。
+
+    各 check_type で**高価値なバイパスを先頭**に、汎用エンコードは末尾に置く
+    （:func:`mutation_payloads` のラウンドロビン配分で先頭変種が確実に投入されるため）。
+    """
     if not payload:
         return []
     check = (check_type or "").lower()
-    out: list[str] = [_url_encode(payload), _double_url_encode(payload)]
+    out: list[str] = []
 
-    if check == "sqli":
-        out.append(_case_toggle(payload))
-        out.append(_insert_sql_comments(payload))
-    elif check == "os":
-        out.append(payload.replace(" ", "${IFS}"))
-        out.append("%0a" + payload.lstrip("; |&"))   # encoded newline 区切り
-    elif check == "path_traversal":
-        # ``..`` ブラックリスト + 拡張子チェックを「二重エンコード + NULL バイト + 拡張子」で
-        # 回避する（アプリが受領後にさらに decode する素朴な実装を突破）。
+    if check == "path_traversal":
+        # ``..`` ブラックリスト + 拡張子チェックを「(二重)エンコード + NULL バイト + 拡張子」で
+        # 回避する（アプリが受領後にさらに decode する素朴な実装を突破）。高価値を先頭に。
         de = _double_encode_dots_slashes(payload)
         se = _encode_dots_slashes(payload)
         for ext in _COMMON_EXTS:
@@ -105,21 +108,42 @@ def mutate(payload: str, check_type: str) -> list[str]:
         if host:
             out += [f"/\\{host}", f"\\/{host}", f"/%2f{host}",
                     f"https:/{host}", f"//{host}", f"/%09/{host}"]
+    elif check == "sqli":
+        out.append(_case_toggle(payload))
+        out.append(_insert_sql_comments(payload))
+    elif check == "os":
+        out.append(payload.replace(" ", "${IFS}"))
+        out.append("%0a" + payload.lstrip("; |&"))   # encoded newline 区切り
+
+    # 汎用エンコードバイパス（末尾）
+    out.append(_url_encode(payload))
+    out.append(_double_url_encode(payload))
 
     return _dedupe([v for v in out if v and v != payload])
 
 
 def mutation_payloads(check_type: str, seeds: list[str] | None = None) -> list[str]:
-    """mutation wave 用の候補列。高価値ベース + シード由来の変種を返す（純粋関数）。"""
+    """mutation wave 用の候補列。高価値ベース + シード由来の変種を返す（純粋関数）。
+
+    ベース（``BYPASS_SEEDS`` ＋ 呼び出し側シード）を**ラウンドロビン**で配分するため、
+    単一ベースが ``_MAX_VARIANTS`` を食い尽くして後続ベース（例: Windows の win.ini）や
+    呼び出し側シードを取りこぼすことがない。各ベースは「自身 → 変種[0] → 変種[1]…」の
+    順で寄与し、まず全ベース自身、次に各ベースの先頭変種…と配る。
+    """
     check = (check_type or "").lower()
     bases: list[str] = list(BYPASS_SEEDS.get(check, []))
     for s in (seeds or [])[:6]:
         if s and s not in bases:
             bases.append(s)
+    # 各ベースのリスト = [ベース自身, 変種0, 変種1, ...]
+    lists: list[list[str]] = [[b, *mutate(b, check)] for b in bases]
     out: list[str] = []
-    for b in bases:
-        out.append(b)                 # ベースそのもの（キャップで漏れた blind を確実に投入）
-        out.extend(mutate(b, check))
+    i = 0
+    while any(i < len(lst) for lst in lists):
+        for lst in lists:
+            if i < len(lst):
+                out.append(lst[i])
+        i += 1
     return _dedupe(out)[:_MAX_VARIANTS]
 
 

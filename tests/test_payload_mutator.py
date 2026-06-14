@@ -68,6 +68,22 @@ class MutationPayloadsTests(unittest.TestCase):
         self.assertIn("1 AND 1=1", out)                      # blind は必ず含む
         self.assertTrue(any("SLEEP" in p.upper() for p in out))
 
+    def test_later_bypass_seed_survives_cap(self):
+        # ラウンドロビン配分で 2 つ目以降の BYPASS_SEEDS（Windows win.ini）が
+        # 先頭シードの変種に食い潰されず残る。
+        out = pm.mutation_payloads("path_traversal")
+        self.assertTrue(any("win.ini" in p for p in out), f"win.ini seed dropped: {out!r}")
+
+    def test_caller_seeds_survive_cap_with_many(self):
+        seeds = ["s1", "s2", "s3", "s4", "s5", "s6"]
+        out = pm.mutation_payloads("path_traversal", seeds=seeds)
+        for s in seeds:
+            self.assertIn(s, out)  # 全シードがキャップ後も残る
+
+    def test_double_encode_dots_is_truly_double(self):
+        # `_double_encode_dots_slashes` は %2e ではなく %252e を生成する（真の二重）。
+        self.assertIn("%252e", pm._double_encode_dots_slashes("../"))
+
     def test_unknown_check_type_is_safe(self):
         self.assertEqual(pm.mutation_payloads("nonexistent"), [])
         self.assertEqual(pm.mutate("", "sqli"), [])

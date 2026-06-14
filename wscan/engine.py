@@ -1437,11 +1437,14 @@ class ScanEngine:
                     landed = (self.browser.page.url or "").split("#")[0]
                 except Exception:
                     landed = ""
-                if (
-                    landed
-                    and urlparse(landed).path.rstrip("/")
-                    != urlparse(url).path.rstrip("/")
-                ):
+                # scheme/host/path で比較する。パスだけだと、同一パスで別オリジンへ飛ぶ
+                # リダイレクト（例: 社内 /login → 外部 SSO /login）を「同一ページ」と誤認し、
+                # 外部ページの form を元 URL に残してしまう（Codex 指摘）。
+                def _origin_path(u: str) -> tuple:
+                    p = urlparse(u)
+                    return (p.scheme, p.netloc, p.path.rstrip("/"))
+
+                if landed and _origin_path(landed) != _origin_path(url):
                     if (
                         landed not in self.visited_urls
                         and self._is_access_allowed_url(landed)

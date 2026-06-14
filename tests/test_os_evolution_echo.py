@@ -5,7 +5,11 @@
 """
 import unittest
 
-from wscan.scanners.os_injection import _echo_marker_executed, _is_time_based_os
+from wscan.scanners.os_injection import (
+    _count_executed_markers,
+    _echo_marker_executed,
+    _is_time_based_os,
+)
 
 
 class EchoMarkerExecutedTests(unittest.TestCase):
@@ -61,14 +65,14 @@ class StoredEndpointBaselineGuardTests(unittest.TestCase):
     MARKER = "wscanEVO253"
 
     def _executed_with_baseline(self, source: str, baseline: str) -> bool:
-        # scan_field の echo マーカー採用条件と同じ合成判定。
-        return _echo_marker_executed(source, self.MARKER) and not _echo_marker_executed(
+        # scan_field の echo マーカー採用条件と同じ「出現数の差分」判定。
+        return _count_executed_markers(source, self.MARKER) > _count_executed_markers(
             baseline, self.MARKER
         )
 
     def test_stored_probe_reflection_is_not_execution(self):
         # probe の素 marker が一覧へ永続化 → payload 応答にも post-probe baseline にも
-        # 同じ素 marker が現れる → 実行ではない（誤検知しない）。
+        # 同じ素 marker が現れる（出現数が増えない）→ 実行ではない（誤検知しない）。
         stored_listing = (
             "<article>; echo wscanEVO253</article>\n"
             "<article>wscanEVO253</article>\n"   # probe（素 marker）の反射
@@ -83,6 +87,18 @@ class StoredEndpointBaselineGuardTests(unittest.TestCase):
         baseline = "Server: 10.10.0.2\nName: intranet.local\n"
         executed = "Server: 10.10.0.2\nName: host\nwscanEVO253\n"
         self.assertTrue(self._executed_with_baseline(executed, baseline))
+
+    def test_stored_and_truly_injectable_is_detected(self):
+        # Codex 指摘: stored で probe marker が baseline に残っていても、実際に注入可能なら
+        # 実行出力の素 marker が1つ増える。出現数の差分で「真の検出」を握り潰さない。
+        post_probe_baseline = "<article>wscanEVO253</article>\n"          # probe 反射のみ(1)
+        injectable_source = (
+            "<article>wscanEVO253</article>\n"   # probe 反射(1)
+            "command output:\nwscanEVO253\n"     # 実行出力(+1) = 計2
+        )
+        self.assertTrue(
+            self._executed_with_baseline(injectable_source, post_probe_baseline)
+        )
 
 
 class IsTimeBasedOsTests(unittest.TestCase):
