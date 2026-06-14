@@ -57,9 +57,16 @@ class MutationPayloadsTests(unittest.TestCase):
         self.assertTrue(any("etc/passwd" in unquote(unquote(p)) and ".." not in p for p in out))
 
     def test_seeds_are_merged_and_deduped(self):
-        out = pm.mutation_payloads("sqli", seeds=["1 AND 1=1", "custom_seed"])
+        # BYPASS_SEEDS を持たない check_type ではシードが基点になる（キャップに埋もれない）。
+        out = pm.mutation_payloads("ldap", seeds=["custom_seed", "custom_seed"])
         self.assertEqual(len(out), len(set(out)))           # 重複なし
         self.assertIn("custom_seed", out)                    # シードも基点に含む
+
+    def test_bypass_seeds_take_priority_over_caller_seeds(self):
+        # blind 系の取りこぼし防止のため、BYPASS_SEEDS をシードより優先して前置する。
+        out = pm.mutation_payloads("sqli", seeds=["zzz_low_priority_seed"])
+        self.assertIn("1 AND 1=1", out)                      # blind は必ず含む
+        self.assertTrue(any("SLEEP" in p.upper() for p in out))
 
     def test_unknown_check_type_is_safe(self):
         self.assertEqual(pm.mutation_payloads("nonexistent"), [])
