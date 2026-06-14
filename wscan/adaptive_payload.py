@@ -275,6 +275,41 @@ CRITICAL RULES:
 
 
 # ---------------------------------------------------------------------------
+# Seed-mutation prompt (LLM payload variation — pairs with payload_mutator)
+# ---------------------------------------------------------------------------
+
+_MUTATION_PROMPT = """\
+You are a world-class web application penetration tester specialising in WAF/filter bypass.
+
+Take each SEED payload below and produce MUTATED variants that bypass naive defenses \
+(URL/double-URL encoding, NULL-byte truncation, case toggling, comment insertion, \
+backslash/slash tricks, alternate template/operator syntax). Keep the same injection intent.
+
+Vuln type  : {check_type}
+Field name : {field_name}
+URL        : {url}
+
+TECHNIQUE CHEATSHEET — {check_type}
+{cheatsheet}
+
+SEED PAYLOADS:
+{seeds}
+
+OUTPUT FORMAT — strictly:
+<payloads>
+mutated_payload_1
+mutated_payload_2
+</payloads>
+
+CRITICAL RULES:
+• <payloads> must contain ONLY raw payloads — one per line
+• NO numbering, NO bullets, NO backticks, NO prose
+• Each line = one complete, ready-to-inject string (max 200 chars)
+• Variants must DIFFER from the seeds
+"""
+
+
+# ---------------------------------------------------------------------------
 # Observation builder
 # ---------------------------------------------------------------------------
 
@@ -471,6 +506,56 @@ class AdaptivePayloadEngine:
                 f"[green]{field_name}[/green] ({check_type})"
             )
         return payloads
+
+    # ------------------------------------------------------------------
+    # Seed mutation (LLM payload variation)
+    # ------------------------------------------------------------------
+
+    async def mutate_payload(
+        self,
+        check_type: str,
+        seeds: list[str],
+        *,
+        field_name: str = "",
+        url: str = "",
+    ) -> list[str]:
+        """シード payload 群を LLM で「変化」させたバイパス変種を返す。
+
+        :mod:`wscan.payload_mutator`（LLM 非依存）の対になる LLM 版。与えられた
+        ``seeds`` を起点に、エンコード/WAF 回避/代替構文などの変種を生成する。
+        プロバイダが ``none`` または LLM 不在のときは空 list を返す（呼び出し側は
+        従来挙動へフォールバック）。
+        """
+        if self.pg.provider == "none" or not seeds:
+            return []
+        if not await self.pg._check_llm_available():
+            return []
+
+        cheatsheet = _get_cheatsheet(check_type)
+        seed_block = "\n".join(f"  {s}" for s in seeds[:20])
+        prompt = _MUTATION_PROMPT.format(
+            check_type=check_type,
+            field_name=field_name or "(unknown)",
+            url=url or "(unknown)",
+            cheatsheet=cheatsheet,
+            seeds=seed_block,
+        )
+
+        provider = self.pg.provider
+        raw: Optional[str] = None
+        with self.pg.use_role("adaptive"):
+            if provider == "claude":
+                raw = await self._stream_claude(prompt)
+            elif provider == "openai":
+                raw = await self._stream_openai(prompt)
+            elif provider == "gemini":
+                raw = await self._call_gemini(prompt)
+            else:
+                raw = await self._stream_ollama(prompt)
+
+        if not raw:
+            return []
+        return _parse_payload_lines(raw, seeds)
 
     # ------------------------------------------------------------------
     # Streaming backends

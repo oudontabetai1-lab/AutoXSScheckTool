@@ -5,7 +5,11 @@
 """
 import unittest
 
-from wscan.scanners.os_injection import _echo_marker_executed, _is_time_based_os
+from wscan.scanners.os_injection import (
+    _count_executed_markers,
+    _echo_marker_executed,
+    _is_time_based_os,
+)
 
 
 class EchoMarkerExecutedTests(unittest.TestCase):
@@ -46,6 +50,55 @@ class EchoMarkerExecutedTests(unittest.TestCase):
         self.assertFalse(_echo_marker_executed("", self.MARKER))
         self.assertFalse(_echo_marker_executed("no marker here", self.MARKER))
         self.assertFalse(_echo_marker_executed("wscanEVO42", ""))
+
+
+class StoredEndpointBaselineGuardTests(unittest.TestCase):
+    """stored/反射エンドポイントでの echo マーカー自己汚染ガードの回帰テスト。
+
+    OSScanner は evolution probe として「素の marker（echo 無し）」を投入する。
+    投稿が永続化・再描画される stored エンドポイント（例: コメント一覧）では、この
+    probe の素 marker が後続ペイロードの応答にも現れ、`_echo_marker_executed` だけ
+    では「実行」と誤判定する。scan_field は probe 後に取り直した baseline と比較し
+    （``executed and not _echo_marker_executed(baseline, marker)``）誤検知を防ぐ。
+    ここではその合成判定を純粋ロジックとして固定する。
+    """
+    MARKER = "wscanEVO253"
+
+    def _executed_with_baseline(self, source: str, baseline: str) -> bool:
+        # scan_field の echo マーカー採用条件と同じ「出現数の差分」判定。
+        return _count_executed_markers(source, self.MARKER) > _count_executed_markers(
+            baseline, self.MARKER
+        )
+
+    def test_stored_probe_reflection_is_not_execution(self):
+        # probe の素 marker が一覧へ永続化 → payload 応答にも post-probe baseline にも
+        # 同じ素 marker が現れる（出現数が増えない）→ 実行ではない（誤検知しない）。
+        stored_listing = (
+            "<article>; echo wscanEVO253</article>\n"
+            "<article>wscanEVO253</article>\n"   # probe（素 marker）の反射
+        )
+        post_probe_baseline = stored_listing  # baseline も同じ素 marker を含む
+        self.assertFalse(
+            self._executed_with_baseline(stored_listing, post_probe_baseline)
+        )
+
+    def test_genuine_execution_survives_baseline_guard(self):
+        # 実行された場合のみ payload 応答に素 marker が現れ、baseline には無い。
+        baseline = "Server: 10.10.0.2\nName: intranet.local\n"
+        executed = "Server: 10.10.0.2\nName: host\nwscanEVO253\n"
+        self.assertTrue(self._executed_with_baseline(executed, baseline))
+
+    def test_stored_and_truly_injectable_is_detected(self):
+        # Codex 指摘: stored で probe marker が baseline に残っていても、実際に注入可能なら
+        # 実行出力の素 marker が1つ増える。出現数の差分で「真の検出」を握り潰さない。
+        post_probe_baseline = "<article>wscanEVO253</article>\n"          # probe 反射のみ(1)
+        injectable_source = (
+            "<article>wscanEVO253</article>\n"   # probe 反射(1)
+            "command output:\nwscanEVO253\n"     # 実行出力(+1) = 計2
+        )
+        self.assertTrue(
+            self._executed_with_baseline(injectable_source, post_probe_baseline)
+        )
 
 
 class IsTimeBasedOsTests(unittest.TestCase):

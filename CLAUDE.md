@@ -50,6 +50,7 @@ python main.py scan http://127.0.0.1:8000 --checks xss sqli --no-monitor --llm n
 | `attack_planner.py` / `action_plan.py` | 攻撃計画とデータ構造 |
 | `adaptive_payload.py` / `payload_gen.py` / `payload_encoder.py` / `payload_learning.py` | バイパス生成(LLM)・ペイロード生成/符号化/成功率学習 |
 | `context_mutator.py` | **LLM不要**の決定論的な文脈適応ミューテーション（反射文脈判定＋breakout合成、純粋関数） |
+| `payload_mutator.py` | **LLM不要**の決定論的ペイロード変異（シード→バイパス変種：二重エンコード/NULLバイト/バックスラッシュ/コメント挿入、純粋関数）。LLM版は `adaptive_payload.AdaptivePayloadEngine.mutate_payload` |
 | `js_analysis.py` | **LLM不要**の純粋関数。JS ソースを静的解析し危険シンク×汚染ソースの source→sink を抽出（`js_static` スキャナの実体）。HTMLからのインラインscript抽出も提供 |
 | `auth_detect.py` | ログイン成否判定の純粋関数（フォーム残存/失敗文言/ログインページ離脱/MFA を統合）。`browser.auto_login` の判定を集約 |
 | `payload_importer.py` | 公開ペイロード集(PaTT/SecLists)の取込ツール（`import-payloads` サブコマンドの実体） |
@@ -133,7 +134,15 @@ python main.py scan http://127.0.0.1:8000 --checks xss sqli --no-monitor --llm n
    marker probe で反射文脈と生存文字を観測し、文脈に合う breakout を**LLM無し**で合成して追加投入。
    `BaseScanner.evolved_payloads()` 経由で全注入系（xss/dom_xss/sqli/ssti/os/nosql/ldap/path_traversal）に配線。
    加算的・フラグ＋例外保護で、無効/失敗時は従来挙動。
-3. **適応(LLM)**（`adaptive_payload.py`）… `--llm none` 以外で creative bypass を生成（2の上位互換的補完）。
+3. **ペイロード変異 mutation wave**（`payload_mutator.py`、`features.payload_mutation`）… 2 でも未検出のとき、
+   シード payload を起点に**バイパス変種**（二重 URL エンコード/NULL バイト+拡張子/バックスラッシュ/
+   コメント挿入/大小混在）へ「変化」させて追加投入。`BaseScanner.mutated_payloads()` 経由
+   （現状 sqli/os/path_traversal に配線）。`max_payloads` のキャップ順で埋もれる blind 系
+   （boolean/time、`; sleep` 等）も `BYPASS_SEEDS` で確実に投入する。LLM 非依存（純粋関数）を常用し、
+   adaptive 有効時は LLM 版（`AdaptivePayloadEngine.mutate_payload`、シード→変種）も統合。
+   evolution と同じく加算的・フラグ＋例外保護で、無効/失敗時は従来挙動。`context_mutator`（反射文脈
+   起点の breakout 合成）とは相補的で、本層は「与えられた payload そのものの変形」を担う。
+4. **適応(LLM)**（`adaptive_payload.py`）… `--llm none` 以外で creative bypass を生成（2/3 の上位互換的補完）。
 - 注意: 反射ページでの誤検知に注意（例: OSの echo マーカー検知は `_echo_marker_executed` で
   「反射 vs 実行」を区別。SSRF は反射プローブURLを除去してから判定）。新しい evolution 系を足すときは
   必ず安全ツイン付きフィクスチャ＋E2E で false positive を確認すること。

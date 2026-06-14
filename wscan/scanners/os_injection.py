@@ -61,28 +61,32 @@ def _is_time_based_os(payload: str) -> bool:
     return bool(payload and _TIME_BASED_OS_RE.search(payload))
 
 
-def _echo_marker_executed(source: str, marker: str) -> bool:
-    """``echo {marker}`` がシェル実行された（=単なる反射ではない）かを判定する純粋関数。
+def _count_executed_markers(source: str, marker: str) -> int:
+    """``echo`` を伴わない（=実行出力とみなせる）marker 出現数を数える純粋関数。
 
-    反射ページでは応答に ``echo`` とともに marker が現れる（生でも HTML エスケープ
-    後でも ``echo wscanEVO…`` の並びが残る）。一方コマンドが実行された場合は
-    ``echo`` が消費され marker 単体が出力される。よって「marker の直前の小窓に
-    ``echo`` が無い出現が1つでもあれば実行」とみなす。これにより入力を反射する
-    だけの無害なエンドポイントでの誤検知を防ぐ。
+    反射ページでは ``echo {marker}`` の並びで現れる（生でも HTML エスケープ後でも
+    ``echo wscanEVO…``）。一方コマンドが実行された場合は ``echo`` が消費され marker
+    単体が出力される。よって「marker 直前の小窓に ``echo`` が無い出現」を実行出力として数える。
     """
     if not source or not marker:
-        return False
+        return 0
     low = source.lower()
     needle = marker.lower()
+    count = 0
     start = 0
     while True:
         idx = low.find(needle, start)
         if idx == -1:
-            return False
+            return count
         window = low[max(0, idx - 24):idx]
         if "echo" not in window:
-            return True
+            count += 1
         start = idx + len(needle)
+
+
+def _echo_marker_executed(source: str, marker: str) -> bool:
+    """``echo {marker}`` がシェル実行された（=単なる反射ではない）かを判定する純粋関数。"""
+    return _count_executed_markers(source, marker) > 0
 
 
 class OSInjectionScanner(BaseScanner):
@@ -124,7 +128,9 @@ class OSInjectionScanner(BaseScanner):
         # Threshold = baseline + 2.8 s (injected sleep) with 0.5 s margin
         time_threshold = max(2.8, baseline_time + 2.8)
 
-        async def _test_payload(payload: str, check_label: str = "os") -> bool:
+        async def _test_payload(
+            payload: str, check_label: str = "os", echo_baseline: str = ""
+        ) -> bool:
             await self.log_payload_test(field_name, payload, check_label, url)
 
             # Apply payload
@@ -143,7 +149,13 @@ class OSInjectionScanner(BaseScanner):
                 not match
                 and check_label.endswith("_evolved")
                 and marker
-                and _echo_marker_executed(source or "", marker)
+                # stored/反射エンドポイントでは evolution probe の素の marker が永続化され、
+                # 後続ペイロードの応答（一覧）にもそのまま現れる。そこで「実行出力とみなせる
+                # marker 出現数」が probe 後 baseline より**増えた**ときだけ実行と判定する。
+                # 単に baseline に marker があるだけでは握り潰さないため、stored かつ実際に
+                # 注入可能なケース（出力が baseline より1つ増える）も取りこぼさない。
+                and _count_executed_markers(source or "", marker)
+                > _count_executed_markers(echo_baseline or "", marker)
             ):
                 match = marker
             if match:
@@ -203,8 +215,23 @@ class OSInjectionScanner(BaseScanner):
             extra_payloads = await self.evolved_payloads(
                 url, form_index, field_name, is_url_param
             )
+            # evolved_payloads は内部で marker 付き probe を投入する。stored 系では
+            # この probe が一覧へ永続化されるため、probe 後の状態を baseline 化して
+            # echo マーカー誤検知ガード（_test_payload 内）に渡す。
+            echo_baseline = ""
+            if extra_payloads:
+                echo_baseline, _ = await self._apply_payload(
+                    url, form_index, field_name, "baseline_os_test", is_url_param
+                )
             for payload in extra_payloads:
-                if await _test_payload(payload, "os_evolved"):
+                if await _test_payload(payload, "os_evolved", echo_baseline):
+                    break
+
+        # --- Mutation wave: キャップで漏れた time-based(blind) 等を確実に投入 ---
+        if not findings:
+            mutated = await self.mutated_payloads(field_name, url, payloads)
+            for payload in mutated:
+                if await _test_payload(payload, "os_mutation"):
                     break
 
         return findings
@@ -255,7 +282,7 @@ class OSInjectionScanner(BaseScanner):
                 or baseline_source
                 or ""
             )
-            if _echo_marker_executed(body, marker) and not _echo_marker_executed(
+            if _count_executed_markers(body, marker) > _count_executed_markers(
                 baseline_body, marker
             ):
                 return True

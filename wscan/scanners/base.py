@@ -410,6 +410,48 @@ class BaseScanner(ABC):
         except Exception:
             return []
 
+    async def mutated_payloads(self, field_name: str, url: str, seeds: list[str]) -> list[str]:
+        """ペイロード変異（mutation）wave の候補を返す。
+
+        標準掃射・evolution で未検出のとき、シード payload を起点にバイパス変種へ
+        「変化」させた候補を投入するためのもの。LLM 非依存
+        （:mod:`wscan.payload_mutator`）を常に、LLM 版
+        （:meth:`wscan.adaptive_payload.AdaptivePayloadEngine.mutate_payload`）を
+        adaptive 有効時に併用する。フラグ無効・失敗時は空 list（従来挙動）。
+
+        max_payloads のキャップは「標準掃射」の絞り込み用なので、mutation wave には
+        そのまま適用しない（blind 系がキャップ順で漏れるのを補うのが目的のため）。
+        """
+        if not getattr(self.engine, "enable_payload_mutation", True):
+            return []
+        out: list[str] = []
+        # ① LLM 非依存の決定論的変異
+        try:
+            from wscan import payload_mutator
+            out.extend(payload_mutator.mutation_payloads(self.CHECK_TYPE, seeds))
+        except Exception:
+            out = []
+        # ② LLM 変異（プロバイダ有効時のみ・任意）
+        try:
+            if getattr(self.engine, "adaptive_enabled", False):
+                engine = getattr(self.engine, "adaptive_engine", None)
+                if engine is not None:
+                    llm_variants = await engine.mutate_payload(
+                        self.CHECK_TYPE, list(seeds or []),
+                        field_name=field_name, url=url,
+                    )
+                    out.extend(llm_variants or [])
+        except Exception:
+            pass
+        # 重複除去（順序保持）
+        seen: set[str] = set()
+        deduped: list[str] = []
+        for p in out:
+            if p and p not in seen:
+                seen.add(p)
+                deduped.append(p)
+        return deduped
+
     def current_page_pair(self, url: str) -> dict:
         """
         Return the captured request/response for the page under test.
