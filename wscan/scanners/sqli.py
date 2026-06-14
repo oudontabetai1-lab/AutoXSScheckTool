@@ -428,6 +428,13 @@ class SQLiScanner(BaseScanner):
                 if await _test_payload(payload, "sqli_evolved"):
                     break
 
+        # --- Mutation wave: bypass変種 + キャップで漏れた blind(boolean/time) を確実に投入 ---
+        if not findings:
+            mutated = await self.mutated_payloads(field_name, url, payloads)
+            for payload in mutated:
+                if await _test_payload(payload, "sqli_mutation"):
+                    break
+
         # --- Check 5: String-concatenation equivalence probe ---
         # When the error/boolean/time checks find nothing, fall back to the
         # filter- and error-independent concatenation-equivalence probe

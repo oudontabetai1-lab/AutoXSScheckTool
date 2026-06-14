@@ -50,12 +50,27 @@ def _location_header(pair: dict) -> str:
     return headers.get("location", "") or headers.get("Location", "")
 
 
-def _url_host(url: str) -> str:
-    """Return the lowercase host of a URL, stripped of user/port."""
+def _normalize_slashes(url: str) -> str:
+    """バックスラッシュを ``/`` に正規化する。
+
+    主要ブラウザは ``/\\host`` や ``\\/host`` を ``//host`` と解釈して外部遷移する。
+    urlparse は ``\\`` を path 文字として扱い netloc を取りこぼすため、解決前に揃える。
+    """
+    return (url or "").replace("\\", "/")
+
+
+def _url_host(url: str, base_url: str = "") -> str:
+    """Return the lowercase host of a URL, stripped of user/port.
+
+    バックスラッシュを ``/`` に正規化し、相対参照は ``base_url`` で解決してから
+    netloc を取り出す（``/\\evil`` 等のバイパスをブラウザ同様に検出するため）。
+    """
     if not url:
         return ""
+    norm = _normalize_slashes(url)
+    target = urljoin(base_url, norm) if base_url else norm
     try:
-        netloc = urlparse(url).netloc.lower()
+        netloc = urlparse(target).netloc.lower()
     except Exception:
         return ""
     return netloc.split("@")[-1].split(":")[0]
@@ -71,16 +86,14 @@ def _redirected_to_canary(current_url: str, base_url: str = "") -> bool:
     """
     if not current_url:
         return False
-    target = urljoin(base_url, current_url) if base_url else current_url
-    return _url_host(target) == _CANARY_HOST.lower()
+    return _url_host(current_url, base_url) == _CANARY_HOST.lower()
 
 
 def _location_points_to_canary(pair: dict, base_url: str = "") -> bool:
     location = _location_header(pair)
     if not location:
         return False
-    target = urljoin(base_url, location) if base_url else location
-    return _url_host(target) == _CANARY_HOST.lower()
+    return _url_host(location, base_url) == _CANARY_HOST.lower()
 
 
 def _is_external_redirect(pair: dict, current_url: str = "", base_url: str = "") -> bool:

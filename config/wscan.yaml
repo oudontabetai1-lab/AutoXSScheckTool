@@ -219,6 +219,11 @@ features:
   # Feature B: LLM無しの文脈適応ペイロード変異
   payload_evolution: true
 
+  # Feature B2: シード payload のバイパス変種化（mutation wave）。
+  # LLM 非依存（payload_mutator）を常用し、LLM 版（adaptive）併用時はそれも統合する。
+  # 二重エンコード/NULL バイト/バックスラッシュ等で high/ultra 級の素朴な防御を突破する。
+  payload_mutation: true
+
   # 公開ペイロード集から生成済みの config/community_payloads.yaml を既定ペイロードに追加
   community_payloads: true
 

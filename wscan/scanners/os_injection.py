@@ -222,6 +222,13 @@ class OSInjectionScanner(BaseScanner):
                 if await _test_payload(payload, "os_evolved", echo_baseline):
                     break
 
+        # --- Mutation wave: キャップで漏れた time-based(blind) 等を確実に投入 ---
+        if not findings:
+            mutated = await self.mutated_payloads(field_name, url, payloads)
+            for payload in mutated:
+                if await _test_payload(payload, "os_mutation"):
+                    break
+
         return findings
 
     async def verify_finding(self, finding: Finding) -> bool | None:

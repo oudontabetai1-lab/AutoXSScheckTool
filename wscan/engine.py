@@ -174,6 +174,18 @@ def _payload_evolution_enabled_by_config(path: Path | None = None) -> bool:
         return True
 
 
+def _payload_mutation_enabled_by_config(path: Path | None = None) -> bool:
+    """config/wscan.yaml の features.payload_mutation を読む。"""
+    config_path = path or (CONFIG_DIR / "wscan.yaml")
+    try:
+        with open(config_path, encoding="utf-8") as f:
+            raw = yaml.safe_load(f) or {}
+        features = raw.get("features", {}) or {}
+        return bool(features.get("payload_mutation", True))
+    except Exception:
+        return True
+
+
 # ---------------------------------------------------------------------------
 # Registration page / form detection
 # ---------------------------------------------------------------------------
@@ -271,6 +283,7 @@ class ScanEngine:
         enable_payload_learning: bool = True,
         enable_community_payloads: Optional[bool] = None,
         enable_payload_evolution: Optional[bool] = None,
+        enable_payload_mutation: Optional[bool] = None,
         enable_adaptive_payloads: bool = True,
         enable_sitemap_crawl: bool = True,
         enable_llm_web_browsing: bool = False,
@@ -424,6 +437,11 @@ class ScanEngine:
         self.enable_payload_learning = enable_payload_learning
         # 明示指定(True/False)を最優先し、None のときだけ config を既定として読む
         # （CLI/API の明示値が config:false で握り潰されないようにする）。
+        self.enable_payload_mutation = (
+            _payload_mutation_enabled_by_config()
+            if enable_payload_mutation is None
+            else enable_payload_mutation
+        )
         self.enable_payload_evolution = (
             _payload_evolution_enabled_by_config()
             if enable_payload_evolution is None

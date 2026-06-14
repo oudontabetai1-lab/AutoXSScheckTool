@@ -48,17 +48,23 @@ CHECKS = [
 
 # 現状エンジンが確実には取れない高難度（素朴な防御をバイパスして初めて成立）。
 # ここに挙げたものは検出されなくてもテストを失敗させない（CLAUDE.md: ultra 方針）。
+# NOTE: blind OS (/tools/nslookup) は payload mutation wave（; sleep 3 等を確実に投入）で
+#       検出可能になったためギャップから外した。残りはブラウザ駆動スキャン固有の壁:
+#       - boolean-blind は応答類似度しきい値、
+#       - ultra の 2 件は test_url_param のエンコードで NULL/バックスラッシュが
+#         エンコードされ素のままブラウザへ届かない（生バイト依存のバイパス）。
 KNOWN_DETECTION_GAPS = {
-    ("sqli", "/pharmacy/refill"),       # high: boolean-based blind
-    ("os", "/tools/nslookup"),          # high: blind（出力を返さない time-based）
-    ("path_traversal", "/vault/file"),  # ultra: 二重エンコード + NULL バイト
-    ("open_redirect", "/sso/return"),   # ultra: '/\\' のブラウザ正規化
+    ("sqli", "/pharmacy/refill"),       # high: boolean-based blind（類似度しきい値）
+    ("path_traversal", "/vault/file"),  # ultra: 二重エンコード + NULL バイト（生バイト依存）
+    ("open_redirect", "/sso/return"),   # ultra: '/\\' のブラウザ正規化（生バックスラッシュ依存）
 }
 
 # finding の field 名がスキャナ実装に依存して安定しないクラス（パス一致で判定）。
 _FIELD_LENIENT_CHECKS = {"stored_xss"}
 
-SCAN_TIMEOUT_S = 900
+# payload mutation wave（未検出フィールドでバイパス変種を追加投入）でスキャンが重くなるため
+# 既存 E2E より長めに確保する。
+SCAN_TIMEOUT_S = 1500
 
 
 def _free_port() -> int:
