@@ -188,7 +188,7 @@ PEM の cert/key は Playwright と httpx の両方で使われます。PFX は 
 ### AI / 自動化強化
 
 - **Agent モード（LLM 自律ブラウザ操作）** — `agent` サブコマンドで、LLM が実ブラウザを直接操作して脆弱性を自律的に発見・実証する（`browser-use` ベース。`pip install -r requirements-agent.txt` が必要）。フォーム探索・ログイン・複数手順の攻撃を LLM が判断しながら進め、ステップ数の上限（`--max-steps`）で制御。通常の `scan` がルールベースの掃射なのに対し、こちらは探索的・対話的な検査に向く
-- **コミュニティペイロード取り込み** — `import-payloads` サブコマンドで公開集（PaTT / SecLists）から `config/community_payloads.yaml` を生成。**スキャン実行時はネット非依存**（生成済み YAML を読むだけ）で、既定ペイロードに後置マージされる
+- **コミュニティペイロード取り込み** — `import-payloads` サブコマンドで公開集（[PayloadsAllTheThings](https://github.com/swisskyrepo/PayloadsAllTheThings)）から `config/community_payloads.yaml` を生成。**スキャン実行時はネット非依存**（生成済み YAML を読むだけ）。既定(curated)に未収録の community のみを重複排除し、`payload_gen` の件数上限内にも行き渡るよう curated:community = 2:1 でインターリーブしてマージする
 - **WAF 自動検出** — スキャン前にプローブを送り Cloudflare / AWS WAF / ModSecurity 等を判定。LLM がバイパス戦略を提案
 - **ペイロード継続学習（ドメイン別）** — 成功・失敗ペイロードをグローバル + ドメイン別に JSON 記録し、同一ターゲットへの再スキャン時にドメイン固有の成功ペイロードを 2 倍の重みで優先使用
 - **脆弱性チェーン推論** — 全 Finding を LLM に渡し、多段攻撃シナリオ（最大 3 チェーン）を推論。各チェーンにステップ・使用脆弱性・最終的なビジネス影響を含む
@@ -512,14 +512,14 @@ python main.py agent https://example.com \
 ### コミュニティペイロードの取り込み（import-payloads）
 
 ```bash
-# 公開集(PaTT/SecLists)から config/community_payloads.yaml を生成（取得時のみネット使用）
+# 公開集(PayloadsAllTheThings)から config/community_payloads.yaml を生成（取得時のみネット使用）
 python main.py import-payloads
 
 # 取り込む検査種別を限定 / 1 種別あたりの上限を指定
 python main.py import-payloads --check xss,sqli --per-type-cap 200
 ```
 
-生成後の**スキャン実行はネット非依存**で、既定ペイロードに後置マージされます。
+生成後の**スキャン実行はネット非依存**で、既定(curated)と 2:1 でインターリーブしてマージされます（未収録分のみ・重複排除）。
 
 ### サブコマンド早見表
 
@@ -665,7 +665,7 @@ features:
   payload_learning: true
   payload_evolution: true  # 文脈適応 evolution wave（LLM 不要）
   payload_mutation: true   # 変異 mutation wave（LLM 不要）
-  community_payloads: true # community_payloads.yaml を後置マージ
+  community_payloads: true # community_payloads.yaml を 2:1 インターリーブでマージ
   sitemap_crawl: true
   spa_crawl: false         # --spa-crawl のデフォルト
   auto_config: false       # --auto-config のデフォルト
