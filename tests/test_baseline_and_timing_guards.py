@@ -101,6 +101,35 @@ class BaselineUnavailableSuppressionTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(len(findings), 1)
 
+    async def test_os_reports_when_body_present_but_no_pair(self):
+        # フォーム送信で network pair が捕捉できず本文だけ得られた場合（本文あり・
+        # pair 空）は、本文を対照に既存/新規を判別できるので抑止しない。
+        engine = _DummyEngine()
+        scanner = OSInjectionScanner(engine)
+        scanner.get_payloads = AsyncMock(return_value=["; id"])
+        scanner._apply_payload = AsyncMock(side_effect=[
+            ("welcome to the host pinger", {}),  # 本文あり・pair 空（pair 未捕捉）
+            ("uid=1000(wscan) gid=1000(wscan)", {"response": {"body": "uid=1000(wscan)"}}),
+        ])
+        findings = await scanner.scan_field(
+            "http://fixture.test/ping?host=x", 0, {"name": "host"}, is_url_param=True
+        )
+        self.assertEqual(len(findings), 1)
+        self.assertFalse(getattr(engine, "wave_errors", []))  # 抑止していない
+
+    async def test_path_reports_when_body_present_but_no_pair(self):
+        engine = _DummyEngine()
+        scanner = PathTraversalScanner(engine)
+        scanner.get_payloads = AsyncMock(return_value=["../../etc/passwd"])
+        scanner._apply_payload = AsyncMock(side_effect=[
+            ("Documentation for baseline_test_value", {}),  # 本文あり・pair 空
+            ("root:x:0:0:root:/root:/bin/bash", {"response": {"body": "root:x:0:0"}}),
+        ])
+        findings = await scanner.scan_field(
+            "http://fixture.test/page?file=a", 0, {"name": "file"}, is_url_param=True
+        )
+        self.assertEqual(len(findings), 1)
+
     async def test_os_still_reports_when_baseline_available(self):
         # baseline が取れていれば従来どおり検知する（抑止の副作用で見逃さない）。
         engine = _DummyEngine()

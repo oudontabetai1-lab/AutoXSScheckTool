@@ -161,12 +161,15 @@ class OSInjectionScanner(BaseScanner):
             ):
                 match = marker
             if match:
-                # baseline *リクエスト自体が失敗*（pair が空）したときだけ「既存 vs
-                # 新規」を判別できないので finding を出さない。空ボディでも*成功*した
-                # baseline（pair に response あり）は有効な対照として扱う——空 200/204 を
-                # 返すが注入時のみ出力する API を誤って見逃さないため。黙って見逃すと
-                # 検出力低下に気づけないので scan note に記録して観測可能にする。
-                if not baseline_pair:
+                # baseline が *まったく取れなかった*（本文も pair も無い＝リクエスト
+                # 失敗）ときだけ「既存 vs 新規」を判別できないので finding を出さない。
+                # 次のいずれかが有れば有効な対照として使う:
+                #   - baseline_source（本文）… フォーム送信で network pair は捕捉でき
+                #     なくてもページ本文は得られる場合がある（pair 空・本文あり）。
+                #   - baseline_pair（成功リクエスト）… 空 200/204 でも本文比較で
+                #     「既存パターン無し」を示せる（本文空・pair あり）。
+                # 黙って見逃すと検出力低下に気づけないので scan note に記録する。
+                if not baseline_source and not baseline_pair:
                     self._record_scan_note(
                         f"baseline_unavailable:{self.CHECK_TYPE}: "
                         f"suppressed match '{match}' at {url}"

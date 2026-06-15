@@ -73,12 +73,12 @@ class PathTraversalScanner(BaseScanner):
 
             match = self.check_response_for_patterns(source, PATH_TRAVERSAL_PATTERNS)
             if match:
-                # baseline *リクエスト自体が失敗*（pair が空）したときだけ「既存 vs
-                # 新規」を判別できないので finding を出さない。空ボディでも*成功*した
-                # baseline（pair に response あり）は有効な対照として扱う——安全値で
-                # 空応答だが traversal 時のみファイル内容を返すエンドポイントを誤って
-                # 見逃さないため。黙って見逃すと気づけないので scan note に記録する。
-                if not baseline_pair:
+                # baseline が *まったく取れなかった*（本文も pair も無い＝リクエスト
+                # 失敗）ときだけ「既存 vs 新規」を判別できないので finding を出さない。
+                # 本文 or 成功 pair のどちらかが有れば対照として使う（フォーム送信で
+                # pair 未捕捉でも本文はある場合／空 200 でも本文比較できる場合を
+                # 偽陰性にしない）。黙って見逃すと気づけないので scan note に記録する。
+                if not baseline_source and not baseline_pair:
                     self._record_scan_note(
                         f"baseline_unavailable:{self.CHECK_TYPE}: "
                         f"suppressed match '{match}' at {url}"
