@@ -172,6 +172,23 @@ class BaseScanner(ABC):
         self.payload_gen = engine.payload_gen
         self.findings: list[Finding] = []
 
+    def _record_scan_note(self, note: str) -> None:
+        """検出力に関わる出来事を ``engine.wave_errors`` に記録する（観測可能化）。
+
+        monitor 非依存・テストで観測可能。記録のみで scan ループの挙動は変えない。
+        wave 失敗（evolution/mutation/probe）や baseline 取得不能による finding 抑止
+        など「黙って検出力が落ちる」事象を残し、誤検知ゼロ方針の副作用（見逃し）を
+        後から追えるようにする。
+        """
+        errors = getattr(self.engine, "wave_errors", None)
+        if errors is None:
+            errors = []
+            try:
+                self.engine.wave_errors = errors
+            except Exception:
+                return
+        errors.append(note)
+
     def _note_wave_degradation(self, wave: str, exc: Exception) -> None:
         """payload 強化 wave（evolution/mutation）の失敗を *観測可能* にする。
 
@@ -181,14 +198,7 @@ class BaseScanner(ABC):
         記録だけ残し（monitor 非依存・テストで観測可能）、従来どおり空 list へ
         フォールバックする。ループ挙動は一切変えない。
         """
-        errors = getattr(self.engine, "wave_errors", None)
-        if errors is None:
-            errors = []
-            try:
-                self.engine.wave_errors = errors
-            except Exception:
-                return
-        errors.append(f"{wave}:{self.CHECK_TYPE}: {type(exc).__name__}: {exc}")
+        self._record_scan_note(f"{wave}:{self.CHECK_TYPE}: {type(exc).__name__}: {exc}")
 
     @abstractmethod
     async def scan_field(

@@ -40,6 +40,19 @@ class OnLoginPageTests(unittest.TestCase):
             )
         )
 
+    def test_root_login_with_query_is_login_page(self):
+        # login_url がルート（空パス）でも、同一ホストの "/?error=1" に留まる失敗を
+        # ログインページと判定できる（空パスは "/" に正規化して比較）。
+        self.assertTrue(
+            ad.on_login_page("https://x.test/?error=1", "https://x.test/")
+        )
+
+    def test_root_login_cross_host_is_not_login_page(self):
+        # ルートログインでも別ホストへ遷移したら成功扱い（未認証スキャンに落とさない）。
+        self.assertFalse(
+            ad.on_login_page("https://app.x.test/", "https://auth.x.test/")
+        )
+
     def test_cross_host_same_login_path_is_not_login_page(self):
         # 別ホストの同一パス（/signin）でもログインページ扱いしない。
         self.assertFalse(

@@ -161,34 +161,30 @@ class OSInjectionScanner(BaseScanner):
             ):
                 match = marker
             if match:
-                # If baseline request failed (empty body), we can't reliably say
-                # whether the pattern was pre-existing. Skip the baseline check
-                # only when baseline was actually captured.
-                pattern_pre_existed = False
-                if baseline_source:
+                # baseline が取れていない（空ボディ）場合は「既存 vs 新規」を判別
+                # できないため、誤検知ゼロ優先で finding を出さない。黙って見逃すと
+                # 検出力低下に気づけないので scan note に記録して観測可能にする。
+                if not baseline_source:
+                    self._record_scan_note(
+                        f"baseline_unavailable:{self.CHECK_TYPE}: "
+                        f"suppressed match '{match}' at {url}"
+                    )
+                else:
                     baseline_match = self.check_response_for_patterns(
                         baseline_source, OS_OUTPUT_PATTERNS
                     )
-                    if baseline_match:
-                        pattern_pre_existed = True
-                if not pattern_pre_existed:
-                    evidence_suffix = (
-                        "" if baseline_source else " (baseline unavailable — verify manually)"
-                    )
-                    finding = await self.record_finding(
-                        url=url,
-                        field_name=field_name,
-                        payload=payload,
-                        evidence=(
-                            f"OS command output detected in response: '{match}'"
-                            f"{evidence_suffix}"
-                        ),
-                        pair=pair,
-                        severity="critical",
-                        confidence="likely",
-                    )
-                    findings.append(finding)
-                    return True
+                    if not baseline_match:
+                        finding = await self.record_finding(
+                            url=url,
+                            field_name=field_name,
+                            payload=payload,
+                            evidence=f"OS command output detected in response: '{match}'",
+                            pair=pair,
+                            severity="critical",
+                            confidence="likely",
+                        )
+                        findings.append(finding)
+                        return True
 
             # --- Check 2: Time-based blind injection ---
             # 固定リストに加え、sleep/ping/timeout を含む任意のペイロード
@@ -300,17 +296,21 @@ class OSInjectionScanner(BaseScanner):
                 return True
 
         if finding.payload in TIME_BASED_PAYLOADS or _is_time_based_os(finding.payload):
-            _b_req = baseline_pair.get("request", {})
-            _b_resp = baseline_pair.get("response", {})
-            _b_ts_req = _b_req.get("timestamp", 0)
-            _b_ts_resp = _b_resp.get("timestamp", 0)
-            baseline_time = (
-                float(_b_ts_resp - _b_ts_req)
-                if _b_ts_req and _b_ts_resp
-                else 0.0
-            )
+            # baseline_pair は no-sleep の対照リクエスト。これと payload 応答の
+            # 経過時間を比較し、(1) 閾値超え かつ (2) 対照より十分(>=2.0s)遅い
+            # ことを両方要求する。恒常的に遅いだけのエンドポイント（対照も遅い）を
+            # time-based 陽性と誤検知しないため（sqli の verify と同じ判定）。
+            sleep_elapsed = self.response_elapsed(pair)
+            control_elapsed = self.response_elapsed(baseline_pair)
+            baseline_time = control_elapsed or 0.0
             time_threshold = max(2.8, baseline_time + 2.8)
-            return self.response_time_exceeded(pair, threshold=time_threshold)
+            if sleep_elapsed is None:
+                return self.response_time_exceeded(pair, threshold=time_threshold)
+            if sleep_elapsed < time_threshold:
+                return False
+            if control_elapsed is not None and (sleep_elapsed - control_elapsed) < 2.0:
+                return False
+            return True
 
         return False
 

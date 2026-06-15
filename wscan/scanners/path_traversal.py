@@ -73,19 +73,20 @@ class PathTraversalScanner(BaseScanner):
 
             match = self.check_response_for_patterns(source, PATH_TRAVERSAL_PATTERNS)
             if match:
-                # Skip when baseline already contained the same pattern.
-                # When baseline retrieval failed (baseline_source is empty) we fall
-                # through and flag — but we note this as a lower confidence case
-                # below via evidence text.
-                if baseline_source:
-                    baseline_match = self.check_response_for_patterns(
-                        baseline_source, PATH_TRAVERSAL_PATTERNS
+                # baseline が取れていない（空ボディ）場合は「既存 vs 新規」を判別
+                # できないため、誤検知ゼロ優先で finding を出さない。黙って見逃すと
+                # 検出力低下に気づけないので scan note に記録して観測可能にする。
+                if not baseline_source:
+                    self._record_scan_note(
+                        f"baseline_unavailable:{self.CHECK_TYPE}: "
+                        f"suppressed match '{match}' at {url}"
                     )
-                    if baseline_match:
-                        return False  # Pattern pre-existed — not caused by our payload
-                evidence_suffix = (
-                    "" if baseline_source else " (baseline unavailable — verify manually)"
+                    return False
+                baseline_match = self.check_response_for_patterns(
+                    baseline_source, PATH_TRAVERSAL_PATTERNS
                 )
+                if baseline_match:
+                    return False  # Pattern pre-existed — not caused by our payload
 
                 finding = await self.record_finding(
                     url=url,
@@ -93,7 +94,6 @@ class PathTraversalScanner(BaseScanner):
                     payload=payload,
                     evidence=(
                         f"Path traversal successful — file content in response: '{match}'"
-                        f"{evidence_suffix}"
                     ),
                     pair=pair,
                     severity="high",

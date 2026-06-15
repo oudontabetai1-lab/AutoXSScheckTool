@@ -87,8 +87,14 @@ def on_login_page(current_url: str, login_url: str) -> bool:
         # パス一致は同一ホストのときだけ適用する。SSO/IdP のログインで別ホスト
         # の同一パスへ遷移した場合（auth.example.com/ -> app.example.com/）を
         # 「まだログインページ」と誤判定して未認証スキャンに落とさない。
-        if cur_parsed.netloc == login_parsed.netloc and login_parsed.path:
-            if cur_parsed.path == login_parsed.path:
+        # 空パス（ルートにログインがある構成）は "/" に正規化して比較する。
+        # これをしないと login_url="https://x/" のとき "https://x/?error=1" のような
+        # 「ルートのログインに留まったままの失敗」をログインページと判定できず、
+        # 失敗を成功と誤認しうる。
+        if cur_parsed.netloc == login_parsed.netloc:
+            login_path = login_parsed.path or "/"
+            cur_path = cur_parsed.path or "/"
+            if cur_path == login_path:
                 return True
         return False
     cur_path = urlparse(current).path
