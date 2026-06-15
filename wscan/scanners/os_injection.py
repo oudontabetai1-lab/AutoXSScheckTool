@@ -113,6 +113,8 @@ class OSInjectionScanner(BaseScanner):
             )
 
         # Baseline: capture pre-existing patterns and response time
+        # baseline もフィールドへの投入なので監査ログに残す（log_payload_test 一元化の不変条件）。
+        await self.log_payload_test(field_name, "baseline_os_test", "os_baseline", url)
         baseline_source, baseline_pair = await self._apply_payload(
             url, form_index, field_name, "baseline_os_test", is_url_param
         )
@@ -220,6 +222,9 @@ class OSInjectionScanner(BaseScanner):
             # echo マーカー誤検知ガード（_test_payload 内）に渡す。
             echo_baseline = ""
             if extra_payloads:
+                await self.log_payload_test(
+                    field_name, "baseline_os_test", "os_baseline", url
+                )
                 echo_baseline, _ = await self._apply_payload(
                     url, form_index, field_name, "baseline_os_test", is_url_param
                 )
@@ -240,12 +245,19 @@ class OSInjectionScanner(BaseScanner):
         is_url_param = finding.field_name in parse_qs(
             urlparse(finding.url).query, keep_blank_values=True
         )
+        # verify 時の再投入（baseline + payload）も監査ログに残す。
+        await self.log_payload_test(
+            finding.field_name, "baseline_os_test", "os_verify_baseline", finding.url
+        )
         baseline_source, baseline_pair = await self._apply_payload(
             finding.url,
             0,
             finding.field_name,
             "baseline_os_test",
             is_url_param,
+        )
+        await self.log_payload_test(
+            finding.field_name, finding.payload, "os_verify", finding.url
         )
         source, pair = await self._apply_payload(
             finding.url,

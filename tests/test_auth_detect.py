@@ -176,6 +176,19 @@ class LoginSucceededTests(unittest.TestCase):
             )
         )
 
+    def test_success_indicator_denied_when_auth_cookie_absent(self):
+        # success_indicator が URL に出ていても、認証 Cookie が明示的に無ければ
+        # 成功としない（docstring の契約。success_indicator 経路でも Cookie 不在を優先）。
+        self.assertFalse(
+            ad.login_succeeded(
+                post_url="http://x.test/app#/home",
+                login_url="http://x.test/login",
+                body="<div>nav</div>",
+                success_indicator="/app",
+                auth_cookie_present=False,
+            )
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

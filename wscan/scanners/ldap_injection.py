@@ -105,6 +105,8 @@ class LDAPScanner(BaseScanner):
         findings: list[Finding] = []
 
         # Obtain a baseline response first
+        # baseline もフィールド投入なので監査ログに残す（log_payload_test 一元化の不変条件）。
+        await self.log_payload_test(field_name, "normaluser", "ldap_baseline", url)
         try:
             baseline_html, _ = await self._apply_payload(
                 url, form_index, field_name, "normaluser", is_url_param
@@ -172,12 +174,19 @@ class LDAPScanner(BaseScanner):
             urlparse(finding.url).query, keep_blank_values=True
         )
         try:
+            # verify 時の再投入（baseline + payload）も監査ログに残す。
+            await self.log_payload_test(
+                finding.field_name, "normaluser", "ldap_verify_baseline", finding.url
+            )
             baseline_html, _ = await self._apply_payload(
                 finding.url,
                 0,
                 finding.field_name,
                 "normaluser",
                 is_url_param,
+            )
+            await self.log_payload_test(
+                finding.field_name, finding.payload, "ldap_verify", finding.url
             )
             probe_html, _ = await self._apply_payload(
                 finding.url,

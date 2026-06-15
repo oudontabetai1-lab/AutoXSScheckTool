@@ -172,6 +172,24 @@ class BaseScanner(ABC):
         self.payload_gen = engine.payload_gen
         self.findings: list[Finding] = []
 
+    def _note_wave_degradation(self, wave: str, exc: Exception) -> None:
+        """payload 強化 wave（evolution/mutation）の失敗を *観測可能* にする。
+
+        これらの wave は加算的・例外保護が設計上の不変条件で、失敗しても scan
+        ループを壊してはならない。だが ``except: return []`` で握りつぶすと
+        検出力の低下（blind/time 系の喪失など）に誰も気づけない。ここでエンジンに
+        記録だけ残し（monitor 非依存・テストで観測可能）、従来どおり空 list へ
+        フォールバックする。ループ挙動は一切変えない。
+        """
+        errors = getattr(self.engine, "wave_errors", None)
+        if errors is None:
+            errors = []
+            try:
+                self.engine.wave_errors = errors
+            except Exception:
+                return
+        errors.append(f"{wave}:{self.CHECK_TYPE}: {type(exc).__name__}: {exc}")
+
     @abstractmethod
     async def scan_field(
         self,
@@ -218,11 +236,14 @@ class BaseScanner(ABC):
         ``MonitorServer.emit_payload_test`` — so it is never skipped just
         because the dashboard is absent, and not duplicated when present.
         """
-        logger = getattr(self.engine, "request_logger", None)
+        # engine/monitor が未配線でも壊れないようにする（baseline/verify などの再投入で
+        # この helper を広く呼ぶため、stub 構築されたスキャナでも安全に no-op になる）。
+        logger = getattr(getattr(self, "engine", None), "request_logger", None)
         if logger is not None:
             logger.log_payload(field_name, payload, check_type, url)
-        if self.monitor:
-            await self.monitor.emit_payload_test(field_name, payload, check_type, url)
+        monitor = getattr(self, "monitor", None)
+        if monitor:
+            await monitor.emit_payload_test(field_name, payload, check_type, url)
 
     async def get_payloads(self, field_name: str, url: str) -> list[str]:
         """Get payloads for this scanner's check type, sorted by learning data."""
@@ -370,7 +391,10 @@ class BaseScanner(ABC):
             context = context_mutator.detect_context(response_source, marker)
             context["marker"] = marker
             return response_source, surviving, context
-        except Exception:
+        except Exception as exc:
+            # probe 失敗（ナビゲーション不能・ブラウザ異常など）も観測可能にする。
+            # 文脈適応は失われるが、呼び出し側は空 context で従来挙動へ戻る。
+            self._note_wave_degradation("evolution_probe", exc)
             return "", set(), {}
 
     async def evolved_payloads(
@@ -407,7 +431,8 @@ class BaseScanner(ABC):
             if cap and cap > 0:
                 payloads = payloads[:cap]
             return payloads
-        except Exception:
+        except Exception as exc:
+            self._note_wave_degradation("evolution", exc)
             return []
 
     async def mutated_payloads(self, field_name: str, url: str, seeds: list[str]) -> list[str]:
@@ -429,8 +454,9 @@ class BaseScanner(ABC):
         try:
             from wscan import payload_mutator
             out.extend(payload_mutator.mutation_payloads(self.CHECK_TYPE, seeds))
-        except Exception:
+        except Exception as exc:
             out = []
+            self._note_wave_degradation("mutation", exc)
         # ② LLM 変異（プロバイダ有効時のみ・任意）
         try:
             if getattr(self.engine, "adaptive_enabled", False):

@@ -68,7 +68,12 @@ class MonitorPayloadEventTests(unittest.IsolatedAsyncioTestCase):
             False,
         )
 
-        event = engine.monitor.payload_tests[0]
+        # baseline 投入も log_payload_test を通すため、先頭は ldap_baseline。
+        self.assertEqual(engine.monitor.payload_tests[0]["check_type"], "ldap_baseline")
+        # 実ペイロードイベント（check_type == "ldap"）で引数順を検証する。
+        event = next(
+            e for e in engine.monitor.payload_tests if e["check_type"] == "ldap"
+        )
         self.assertEqual(event["field"], "username")
         self.assertEqual(event["check_type"], "ldap")
         self.assertEqual(event["url"], "http://fixture.test/ldap-login")

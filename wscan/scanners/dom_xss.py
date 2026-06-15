@@ -296,6 +296,9 @@ class DOMXSSScanner(BaseScanner):
         try:
             self.browser.reset_dialog()
             await self._ensure_hook()
+            await self.log_payload_test(
+                finding.field_name, finding.payload, "dom_xss_verify", finding.url
+            )
             await self._apply_payload(finding.url, finding.field_name, finding.payload)
             await asyncio.sleep(0.5 * self.sleep_factor)
             log = await self.browser.page.evaluate(

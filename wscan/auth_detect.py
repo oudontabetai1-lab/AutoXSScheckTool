@@ -148,12 +148,15 @@ def login_succeeded(
     # 誤認して未認証のままスキャンを進めるのを防ぐ。
     if failed or mfa_present:
         return False
+    # 認証 Cookie が「明示的に無い」と分かっている場合は、success_indicator が
+    # 本文/URL に出ていても成功と認めない（docstring の契約）。success_indicator
+    # は別ページにも現れ得るため、Cookie 不在の方を優先する。
+    if auth_cookie_present is False:
+        return False
     if success_indicator:
         hit = success_indicator in (post_url or "") or success_indicator in (body or "")
         return bool(hit)
 
-    if auth_cookie_present is False:
-        return False
     if on_login_page(post_url, login_url):
         return False
     if has_login_form(body):

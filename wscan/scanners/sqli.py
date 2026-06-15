@@ -293,6 +293,7 @@ class SQLiScanner(BaseScanner):
                 if payload not in (true_payload, false_payload):
                     continue
                 partner = false_payload if payload == true_payload else true_payload
+                await self.log_payload_test(field_name, partner, "sqli_boolean_partner", url)
                 partner_source, _ = await self._apply_payload(
                     url, form_index, field_name, partner, is_url_param
                 )
@@ -497,6 +498,8 @@ class SQLiScanner(BaseScanner):
         self, url: str, form_index: int, field_name: str, is_url_param: bool
     ) -> tuple[str, dict]:
         """Get a baseline response with a safe value."""
+        # baseline もフィールド投入なので監査ログに残す（log_payload_test 一元化の不変条件）。
+        await self.log_payload_test(field_name, "baseline_test", "sqli_baseline", url)
         try:
             if is_url_param:
                 return await self.browser.test_url_param(url, field_name, "baseline_test")
@@ -515,6 +518,9 @@ class SQLiScanner(BaseScanner):
         from urllib.parse import parse_qs, urlparse
         is_url_param = finding.field_name in parse_qs(
             urlparse(finding.url).query, keep_blank_values=True
+        )
+        await self.log_payload_test(
+            finding.field_name, finding.payload, "sqli_verify", finding.url
         )
         source, pair = await self._apply_payload(
             finding.url,
@@ -537,6 +543,7 @@ class SQLiScanner(BaseScanner):
             # no-sleep の対照リクエストを計測し、SLEEP 応答が対照より十分に遅い
             # ことを要求する。恒常的に遅いだけのエンドポイント（対照との差が小さい）を
             # time-based 陽性と誤判定しないため（注入 SLEEP は約3秒なので 2 秒の差を要求）。
+            await self.log_payload_test(finding.field_name, "1", "sqli_verify_control", finding.url)
             _, control_pair = await self._apply_payload(
                 finding.url, 0, finding.field_name, "1", is_url_param
             )
@@ -557,7 +564,9 @@ class SQLiScanner(BaseScanner):
             if not true_payload or not false_payload:
                 return None
             baseline_source, _ = await self._get_baseline(finding.url, 0, finding.field_name, is_url_param)
+            await self.log_payload_test(finding.field_name, true_payload, "sqli_verify_boolean", finding.url)
             true_src, _ = await self._apply_payload(finding.url, 0, finding.field_name, true_payload, is_url_param)
+            await self.log_payload_test(finding.field_name, false_payload, "sqli_verify_boolean", finding.url)
             false_src, _ = await self._apply_payload(finding.url, 0, finding.field_name, false_payload, is_url_param)
             baseline_len = len(baseline_source)
             diff_true_base = abs(len(true_src) - baseline_len)
@@ -597,6 +606,9 @@ class SQLiScanner(BaseScanner):
             previous_browser = self.browser
             self.browser = browser
             try:
+                await self.log_payload_test(
+                    finding.field_name, finding.payload, "sqli_verify", finding.url
+                )
                 source, _ = await self._apply_payload(
                     finding.url,
                     0,

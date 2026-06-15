@@ -129,6 +129,8 @@ class NoSQLInjectionScanner(BaseScanner):
         findings = []
 
         # ── Baseline request ──────────────────────────────────────────
+        # baseline もフィールド投入なので監査ログに残す（log_payload_test 一元化の不変条件）。
+        await self.log_payload_test(field_name, "baseline_value_wscan", "nosql_baseline", url)
         try:
             if is_url_param:
                 baseline_src, baseline_pair = await self.browser.test_url_param(
@@ -144,6 +146,7 @@ class NoSQLInjectionScanner(BaseScanner):
 
         baseline_len = len(baseline_src)
         baseline_src2 = ""
+        await self.log_payload_test(field_name, "baseline_value_wscan_2", "nosql_baseline_2", url)
         try:
             if is_url_param:
                 baseline_src2, _ = await self.browser.test_url_param(
@@ -316,6 +319,10 @@ class NoSQLInjectionScanner(BaseScanner):
             urlparse(finding.url).query, keep_blank_values=True
         )
         try:
+            # verify 時の再投入（baseline ×2 + payload）も監査ログに残す。
+            await self.log_payload_test(
+                finding.field_name, "baseline_value_wscan", "nosql_verify_baseline", finding.url
+            )
             baseline_src, _ = await self._apply_payload(
                 finding.url,
                 0,
@@ -323,12 +330,18 @@ class NoSQLInjectionScanner(BaseScanner):
                 "baseline_value_wscan",
                 is_url_param,
             )
+            await self.log_payload_test(
+                finding.field_name, "baseline_value_wscan_2", "nosql_verify_baseline_2", finding.url
+            )
             baseline_src2, _ = await self._apply_payload(
                 finding.url,
                 0,
                 finding.field_name,
                 "baseline_value_wscan_2",
                 is_url_param,
+            )
+            await self.log_payload_test(
+                finding.field_name, finding.payload, "nosql_verify", finding.url
             )
             probe_src, _ = await self._apply_payload(
                 finding.url,

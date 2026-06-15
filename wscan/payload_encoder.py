@@ -54,13 +54,33 @@ def html_entity_hex(s: str) -> str:
 
 
 def js_unicode(s: str) -> str:
-    """JavaScript Unicode エスケープ: a → \\u0061"""
-    return ''.join(f'\\u{ord(c):04x}' for c in s)
+    r"""JavaScript Unicode エスケープ: a → a
+
+    JS の ``\uXXXX`` は UTF-16 コードユニット単位なので、BMP 外（絵文字等）は
+    サロゲートペアで出す（例: 😀 → 😀）。``ord(c):04x`` を直接使うと
+    ``ὠ0`` のように 5 桁となり JS では別文字に化けるため UTF-16 で符号化する。
+    """
+    units = s.encode('utf-16-be')
+    return ''.join(
+        f'\\u{(units[i] << 8) | units[i + 1]:04x}'
+        for i in range(0, len(units), 2)
+    )
 
 
 def js_hex(s: str) -> str:
-    """JavaScript \\xNN エスケープ: a → \\x61"""
-    return ''.join(f'\\x{ord(c):02x}' for c in s)
+    r"""JavaScript \xNN エスケープ: a → \x61
+
+    ``\xNN`` は 2 桁固定なので 0xFF を超える文字は表現できない。超える場合は
+    ``\uXXXX``（UTF-16）へフォールバックする（``\x3042`` のような不正出力を避ける）。
+    """
+    out: list[str] = []
+    for c in s:
+        code = ord(c)
+        if code <= 0xFF:
+            out.append(f'\\x{code:02x}')
+        else:
+            out.append(js_unicode(c))
+    return ''.join(out)
 
 
 def base64_encode(s: str) -> str:
@@ -227,8 +247,11 @@ def _ssrf_variants(payload: str) -> list[str]:
     ip_m = re.search(r'(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})', payload)
     if ip_m:
         a, b, c, d = (int(ip_m.group(i)) for i in range(1, 5))
-        decimal_ip = (a << 24) | (b << 16) | (c << 8) | d
-        variants.append(payload.replace(ip_m.group(0), str(decimal_ip)))
+        # 各オクテットが 0..255 の妥当な IPv4 のときだけ 10 進へ変換する
+        # （999.999.999.999 のような不正値を誤変換しない）。
+        if all(0 <= o <= 255 for o in (a, b, c, d)):
+            decimal_ip = (a << 24) | (b << 16) | (c << 8) | d
+            variants.append(payload.replace(ip_m.group(0), str(decimal_ip)))
     return variants
 
 
