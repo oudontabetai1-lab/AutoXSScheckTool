@@ -121,9 +121,11 @@ python main.py scan http://127.0.0.1:8000 --checks xss sqli --no-monitor --llm n
 - `config/wscan.yaml` … 既定設定と機能フラグ（`ai_analysis` / `waf_detection` /
   `payload_learning` / 適応ペイロード / `sitemap_crawl` / `spa_crawl` 等）。`checks` 既定は `["sqli","xss","os"]`。
 - `config/default_payloads.yaml` … 手キュレーションのフォールバックペイロード。
-- `config/community_payloads.yaml` … `python main.py import-payloads` が公開集(PaTT/SecLists)から
-  生成。**スキャン実行時はネット非依存**（生成済みYAMLを読むだけ）。エンジンは既定を前置・
-  community未収録分のみ後置でマージ（`features.community_payloads`）。出典/取得日時/ライセンスを冒頭に記録。
+- `config/community_payloads.yaml` … `python main.py import-payloads` が公開集
+  (PayloadsAllTheThings。`payload_importer.SOURCES`)から生成。**スキャン実行時はネット非依存**
+  （生成済みYAMLを読むだけ）。`engine.merge_community_payloads` が既定(curated)に未収録の
+  community のみを重複排除し、件数 cap 内にも行き渡るよう curated:community=2:1 で
+  インターリーブしてマージ（`features.community_payloads`）。出典/取得日時/ライセンスを冒頭に記録。
 - LLM プロバイダ: `ollama|claude|openai|gemini|none`。APIキー env: `ANTHROPIC_API_KEY` /
   `OPENAI_API_KEY` / `GEMINI_API_KEY`。役割別モデル上書き（planner/payload/adaptive/triage/report）あり。
 
