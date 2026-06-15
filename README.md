@@ -166,6 +166,7 @@ PEM の cert/key は Playwright と httpx の両方で使われます。PFX は 
 ### スキャン精度・カバレッジ
 
 - **AI 攻撃計画（AttackPlanner）** — スキャン前にページを分析し、フィールドごとに優先チェックとターゲット特化ペイロードを計画
+- **多層ペイロード強化パイプライン** — 誤検知ゼロを保ったまま検出力を段階的に上げる 4 層構成（各層とも既存の検知判定を共有）。①**既定 + community**（手キュレーション + 公開集を成功率で並べ替え）→ ②**文脈適応 evolution wave**（標準掃射で未検出のとき、反射文脈と生存文字を観測し breakout を **LLM 不要**で合成）→ ③**変異 mutation wave**（シードを二重エンコード/NULL バイト/バックスラッシュ/コメント挿入などの**バイパス変種**へ変化。`max_payloads` で埋もれがちな blind/time 系も確実に投入）→ ④**適応（LLM）**（`--llm none` 以外で creative bypass を生成）。②③は LLM 非依存・決定論的で、無効時や失敗時は従来挙動にフォールバック
 - **DOM-based XSS 検出** — `innerHTML` / `document.write` / `eval` / `location.href` 等の危険シンクを Playwright でフック、クライアントサイド実行を検出
 - **危険な JavaScript 静的評価（`js_static`）** — DOM XSS をペイロードで確証する前段階として、ページのインライン JS と読み込まれた外部 `.js` を**注入なしで静的解析**。`eval` / `Function` / `innerHTML` / `document.write` / `setTimeout(文字列)` 等の危険シンクと、`location.hash` / `document.cookie` / `postMessage` 等のユーザ制御ソースの **source→sink フロー**（簡易な変数汚染追跡つき）を洗い出す。汚染フローが辿れたものを高確度（`likely`）、単独の危険シンクを参考情報（`tentative`）として報告し、誤検知を抑制。`--checks js_static` で有効化
 - **格納型 XSS 検出** — ユニークマーカーを注入し、全クロールページを横断してペイロードの出現を確認
@@ -186,6 +187,8 @@ PEM の cert/key は Playwright と httpx の両方で使われます。PFX は 
 
 ### AI / 自動化強化
 
+- **Agent モード（LLM 自律ブラウザ操作）** — `agent` サブコマンドで、LLM が実ブラウザを直接操作して脆弱性を自律的に発見・実証する（`browser-use` ベース。`pip install -r requirements-agent.txt` が必要）。フォーム探索・ログイン・複数手順の攻撃を LLM が判断しながら進め、ステップ数の上限（`--max-steps`）で制御。通常の `scan` がルールベースの掃射なのに対し、こちらは探索的・対話的な検査に向く
+- **コミュニティペイロード取り込み** — `import-payloads` サブコマンドで公開集（[PayloadsAllTheThings](https://github.com/swisskyrepo/PayloadsAllTheThings)）から `config/community_payloads.yaml` を生成。**スキャン実行時はネット非依存**（生成済み YAML を読むだけ）。既定(curated)に未収録の community のみを重複排除し、`payload_gen` の件数上限内にも行き渡るよう curated:community = 2:1 でインターリーブしてマージする
 - **WAF 自動検出** — スキャン前にプローブを送り Cloudflare / AWS WAF / ModSecurity 等を判定。LLM がバイパス戦略を提案
 - **ペイロード継続学習（ドメイン別）** — 成功・失敗ペイロードをグローバル + ドメイン別に JSON 記録し、同一ターゲットへの再スキャン時にドメイン固有の成功ペイロードを 2 倍の重みで優先使用
 - **脆弱性チェーン推論** — 全 Finding を LLM に渡し、多段攻撃シナリオ（最大 3 チェーン）を推論。各チェーンにステップ・使用脆弱性・最終的なビジネス影響を含む
@@ -233,6 +236,13 @@ cd AutoXSScheckTool
 pip install -r requirements.txt
 playwright install chromium
 ```
+
+機能ごとに追加の依存があります（必要なときだけ入れれば動きます）。
+
+| 追加依存 | 用途 |
+| --- | --- |
+| `pip install -r requirements-agent.txt` | Agent モード（LLM がブラウザを自律操作。`browser-use` が必要） |
+| `pip install -r requirements-mcp.txt` | OOB メール受信 MCP（blind XSS/SSRF・メールヘッダ注入の確証） |
 
 LLM を使う場合は、利用するプロバイダーに応じて API キーやローカルモデルを準備します。LLM を使わずに固定ペイロード中心で確認する場合は、`--llm none` またはダッシュボードの LLM 設定で無効化して実行できます。
 
@@ -483,6 +493,48 @@ python main.py scan https://example.com \
 python main.py setup "ECサイトで管理画面あり、RESTful APIも使用"
 ```
 
+### Agent モード（LLM がブラウザを自律操作）
+
+```bash
+# 事前に: pip install -r requirements-agent.txt
+# LLM が実ブラウザを操作して脆弱性を自律探索（API キーが必要）
+python main.py agent https://example.com --llm claude --max-steps 100
+
+# 認証つき・チェック種別と表示ブラウザを指定
+python main.py agent https://example.com \
+  --llm claude --no-headless \
+  --login-url https://example.com/login --auth-user admin --auth-pass 'pass' \
+  --checks xss sqli ssti os
+```
+
+通常の `scan`（ルールベースの掃射）に対し、`agent` は LLM が手順を判断しながら進める探索的検査です。`--max-steps` でステップ上限を制御します。
+
+### コミュニティペイロードの取り込み（import-payloads）
+
+```bash
+# 公開集(PayloadsAllTheThings)から config/community_payloads.yaml を生成（取得時のみネット使用）
+python main.py import-payloads
+
+# 取り込む検査種別を限定 / 1 種別あたりの上限を指定
+python main.py import-payloads --check xss,sqli --per-type-cap 200
+```
+
+生成後の**スキャン実行はネット非依存**で、既定(curated)と 2:1 でインターリーブしてマージされます（未収録分のみ・重複排除）。
+
+### サブコマンド早見表
+
+| サブコマンド | 用途 |
+| --- | --- |
+| `serve` | ダッシュボード常駐（推奨の起点） |
+| `scan` | CLI から直接スキャン |
+| `agent` | LLM がブラウザを自律操作して探索的に検査 |
+| `triage` | ペイロード非投入の高速リスク評価 |
+| `setup` | 自然言語からスキャン設定を生成 |
+| `batch` | 複数ターゲットを YAML で一括スキャン（→ [advanced_features.md](docs/advanced_features.md)） |
+| `record` | ブラウザ操作を再生可能な JSON フローに記録（→ [advanced_features.md](docs/advanced_features.md)） |
+| `manual-crawl` | 可視/遠隔ブラウザで手動巡回し巡回シードを保存 |
+| `import-payloads` | 公開集からコミュニティペイロードを生成 |
+
 ---
 
 ## コマンドラインオプション一覧
@@ -611,6 +663,9 @@ features:
   ai_analysis: true
   waf_detection: true
   payload_learning: true
+  payload_evolution: true  # 文脈適応 evolution wave（LLM 不要）
+  payload_mutation: true   # 変異 mutation wave（LLM 不要）
+  community_payloads: true # community_payloads.yaml を 2:1 インターリーブでマージ
   sitemap_crawl: true
   spa_crawl: false         # --spa-crawl のデフォルト
   auto_config: false       # --auto-config のデフォルト
