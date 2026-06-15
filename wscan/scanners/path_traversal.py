@@ -59,7 +59,7 @@ class PathTraversalScanner(BaseScanner):
         await self.log_payload_test(
             field_name, "baseline_test_value", "path_traversal_baseline", url
         )
-        baseline_source, _ = await self._apply_payload(
+        baseline_source, baseline_pair = await self._apply_payload(
             url, form_index, field_name, "baseline_test_value", is_url_param
         )
 
@@ -73,10 +73,12 @@ class PathTraversalScanner(BaseScanner):
 
             match = self.check_response_for_patterns(source, PATH_TRAVERSAL_PATTERNS)
             if match:
-                # baseline が取れていない（空ボディ）場合は「既存 vs 新規」を判別
-                # できないため、誤検知ゼロ優先で finding を出さない。黙って見逃すと
-                # 検出力低下に気づけないので scan note に記録して観測可能にする。
-                if not baseline_source:
+                # baseline *リクエスト自体が失敗*（pair が空）したときだけ「既存 vs
+                # 新規」を判別できないので finding を出さない。空ボディでも*成功*した
+                # baseline（pair に response あり）は有効な対照として扱う——安全値で
+                # 空応答だが traversal 時のみファイル内容を返すエンドポイントを誤って
+                # 見逃さないため。黙って見逃すと気づけないので scan note に記録する。
+                if not baseline_pair:
                     self._record_scan_note(
                         f"baseline_unavailable:{self.CHECK_TYPE}: "
                         f"suppressed match '{match}' at {url}"
