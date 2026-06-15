@@ -459,6 +459,9 @@ class XSSScanner(BaseScanner):
         except Exception:
             baseline_source = ""
         self.browser.reset_dialog()
+        await self.log_payload_test(
+            finding.field_name, finding.payload, "xss_verify", finding.url
+        )
         source, pair = await self._apply_payload(
             finding.url,
             0,

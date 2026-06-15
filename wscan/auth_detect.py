@@ -87,6 +87,13 @@ def on_login_page(current_url: str, login_url: str) -> bool:
         # パス一致は同一ホストのときだけ適用する。SSO/IdP のログインで別ホスト
         # の同一パスへ遷移した場合（auth.example.com/ -> app.example.com/）を
         # 「まだログインページ」と誤判定して未認証スキャンに落とさない。
+        #
+        # NOTE: login_url がルート（空パス）の構成では、ここで空パスを "/" に
+        # 正規化して比較してはいけない。そうすると同一ホストのルート系 SPA 成功
+        # 遷移（"/?view=dashboard" や "/#/dashboard" 等）まで「ログインページ」と
+        # 誤判定し、success_indicator 未指定の auth_login がタイムアウトまで失敗扱い
+        # になる（偽陰性）。ルートログインに留まる失敗は has_login_form /
+        # has_failure_text 側で拾えるため、ここでは login パスが空なら判定しない。
         if cur_parsed.netloc == login_parsed.netloc and login_parsed.path:
             if cur_parsed.path == login_parsed.path:
                 return True
@@ -148,12 +155,15 @@ def login_succeeded(
     # 誤認して未認証のままスキャンを進めるのを防ぐ。
     if failed or mfa_present:
         return False
+    # 認証 Cookie が「明示的に無い」と分かっている場合は、success_indicator が
+    # 本文/URL に出ていても成功と認めない（docstring の契約）。success_indicator
+    # は別ページにも現れ得るため、Cookie 不在の方を優先する。
+    if auth_cookie_present is False:
+        return False
     if success_indicator:
         hit = success_indicator in (post_url or "") or success_indicator in (body or "")
         return bool(hit)
 
-    if auth_cookie_present is False:
-        return False
     if on_login_page(post_url, login_url):
         return False
     if has_login_form(body):

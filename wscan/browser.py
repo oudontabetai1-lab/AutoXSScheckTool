@@ -213,13 +213,17 @@ class BrowserManager:
         # Capture an evidence screenshot, but NEVER let it wedge the scan. While
         # a dialog is open Playwright blocks the page, and ``page.screenshot``
         # can in turn block until the dialog is handled — a deadlock if we
-        # screenshot *before* dismissing. Bound it with a short timeout and
-        # dismiss no matter what, so a flood of alert()-firing payloads (e.g. a
-        # stored-XSS listing) can't freeze every later navigation.
+        # screenshot *before* dismissing. Bound it with Playwright's *native*
+        # timeout (not ``asyncio.wait_for``): wait_for cancels our await at 3s
+        # but the screenshot keeps the page's default timeout running underneath,
+        # so when that later fires there is no awaiter left and asyncio logs
+        # "Future exception was never retrieved". Letting Playwright own the one
+        # timeout keeps a single timer and dismisses no matter what, so a flood
+        # of alert()-firing payloads (e.g. a stored-XSS listing) can't freeze
+        # every later navigation.
         try:
-            shot = await asyncio.wait_for(
-                self.page.screenshot(full_page=False, type="jpeg", quality=80),
-                timeout=3.0,
+            shot = await self.page.screenshot(
+                full_page=False, type="jpeg", quality=80, timeout=3000
             )
             self.dialog_screenshot_b64 = base64.b64encode(shot).decode()
         except Exception:

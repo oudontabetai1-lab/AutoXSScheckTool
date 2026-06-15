@@ -139,6 +139,10 @@ class SSRFScanner(BaseScanner):
             )
 
         # Capture a clean baseline to avoid false-positives from pre-existing content
+        # baseline もフィールド投入なので監査ログに残す（log_payload_test 一元化の不変条件）。
+        await self.log_payload_test(
+            field_name, "http://wscan-baseline-test.invalid/", "ssrf_baseline", url
+        )
         baseline_source, _ = await self._apply_payload(
             url, form_index, field_name, "http://wscan-baseline-test.invalid/", is_url_param
         )
@@ -202,12 +206,20 @@ class SSRFScanner(BaseScanner):
             urlparse(finding.url).query, keep_blank_values=True
         )
         try:
+            # verify 時の再投入（baseline + payload）も監査ログに残す。
+            await self.log_payload_test(
+                finding.field_name, "http://wscan-baseline-test.invalid/",
+                "ssrf_verify_baseline", finding.url,
+            )
             baseline_source, _ = await self._apply_payload(
                 finding.url,
                 0,
                 finding.field_name,
                 "http://wscan-baseline-test.invalid/",
                 is_url_param,
+            )
+            await self.log_payload_test(
+                finding.field_name, finding.payload, "ssrf_verify", finding.url
             )
             probe_source, _ = await self._apply_payload(
                 finding.url,

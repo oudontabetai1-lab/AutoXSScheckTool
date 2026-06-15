@@ -40,6 +40,19 @@ class OnLoginPageTests(unittest.TestCase):
             )
         )
 
+    def test_root_login_spa_success_is_not_login_page(self):
+        # login_url がルート（空パス）の構成では、同一ホストのルート系 SPA 成功遷移
+        # （"/?view=dashboard" / "/#/dashboard"）を「ログインページ」と誤判定しない。
+        # 空パスを "/" に正規化して path 一致を取ると、これらの成功遷移まで login と
+        # 判定して success_indicator 未指定の auth_login を偽陰性にしてしまうため、
+        # login パスが空のときは path 判定しない（失敗は has_login_form 等で拾う）。
+        self.assertFalse(
+            ad.on_login_page("https://app.test/?view=dashboard", "https://app.test/")
+        )
+        self.assertFalse(
+            ad.on_login_page("https://app.test/#/dashboard", "https://app.test/")
+        )
+
     def test_cross_host_same_login_path_is_not_login_page(self):
         # 別ホストの同一パス（/signin）でもログインページ扱いしない。
         self.assertFalse(
@@ -172,6 +185,19 @@ class LoginSucceededTests(unittest.TestCase):
                 post_url="http://x.test/dashboard",
                 login_url="http://x.test/login",
                 body=_DASHBOARD,
+                auth_cookie_present=False,
+            )
+        )
+
+    def test_success_indicator_denied_when_auth_cookie_absent(self):
+        # success_indicator が URL に出ていても、認証 Cookie が明示的に無ければ
+        # 成功としない（docstring の契約。success_indicator 経路でも Cookie 不在を優先）。
+        self.assertFalse(
+            ad.login_succeeded(
+                post_url="http://x.test/app#/home",
+                login_url="http://x.test/login",
+                body="<div>nav</div>",
+                success_indicator="/app",
                 auth_cookie_present=False,
             )
         )

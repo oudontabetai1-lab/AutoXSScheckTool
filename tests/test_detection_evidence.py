@@ -1896,8 +1896,10 @@ class DetectionEvidenceTests(unittest.TestCase):
             scanner = PathTraversalScanner(_DummyEngine())
             scanner.get_payloads = AsyncMock(return_value=["../../var/www/html/config.php"])
             scanner._apply_payload = AsyncMock(side_effect=[
-                # baseline: normal page mentioning PHP version — must NOT match <\?php
-                ("<html><body>Powered by PHP 8.2</body></html>", {}),
+                # baseline: 成功（pair に response あり）。PHP バージョン文字列を含むが
+                # <\?php には該当しない通常ページ。
+                ("<html><body>Powered by PHP 8.2</body></html>",
+                 {"response": {"body": "<html><body>Powered by PHP 8.2</body></html>"}}),
                 # payload: path traversal leaks PHP source starting with <?php
                 ("<?php\n$db_pass = 'secret';\n?>", {}),
             ])

@@ -6,6 +6,7 @@ then suggests WAF-specific bypass encodings via LLM or built-in rules.
 import re
 import time
 from typing import Optional
+from urllib.parse import urlparse
 
 import httpx
 
@@ -130,7 +131,10 @@ class WAFDetector:
                 # Second: benign-looking anomaly probe — path traversal fragment and
                 # a custom tag are enough to trigger most WAF rule sets without
                 # resembling a real exploit that IDS/abuse filters flag.
-                probe_url = url + "?wscan=..%2F..%2F&x=%00<wscan-probe>"
+                # 既存クエリがある URL でも壊れない正しい区切りで連結する
+                # （?x=1 のとき "?x=1?wscan=..." にしない）。
+                _sep = "&" if urlparse(url).query else "?"
+                probe_url = url + _sep + "wscan=..%2F..%2F&x=%00<wscan-probe>"
                 resp2 = await client.get(probe_url)
                 waf_headers = {k.lower(): v.lower() for k, v in resp2.headers.items()}
                 waf_body = resp2.text[:5000].lower()

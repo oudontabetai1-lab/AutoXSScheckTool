@@ -55,7 +55,11 @@ class PathTraversalScanner(BaseScanner):
             )
 
         # Baseline: capture what patterns already appear in a neutral response
-        baseline_source, _ = await self._apply_payload(
+        # baseline もフィールド投入なので監査ログに残す（log_payload_test 一元化の不変条件）。
+        await self.log_payload_test(
+            field_name, "baseline_test_value", "path_traversal_baseline", url
+        )
+        baseline_source, baseline_pair = await self._apply_payload(
             url, form_index, field_name, "baseline_test_value", is_url_param
         )
 
@@ -69,19 +73,22 @@ class PathTraversalScanner(BaseScanner):
 
             match = self.check_response_for_patterns(source, PATH_TRAVERSAL_PATTERNS)
             if match:
-                # Skip when baseline already contained the same pattern.
-                # When baseline retrieval failed (baseline_source is empty) we fall
-                # through and flag — but we note this as a lower confidence case
-                # below via evidence text.
-                if baseline_source:
-                    baseline_match = self.check_response_for_patterns(
-                        baseline_source, PATH_TRAVERSAL_PATTERNS
+                # baseline が *まったく取れなかった*（本文も pair も無い＝リクエスト
+                # 失敗）ときだけ「既存 vs 新規」を判別できないので finding を出さない。
+                # 本文 or 成功 pair のどちらかが有れば対照として使う（フォーム送信で
+                # pair 未捕捉でも本文はある場合／空 200 でも本文比較できる場合を
+                # 偽陰性にしない）。黙って見逃すと気づけないので scan note に記録する。
+                if not baseline_source and not baseline_pair:
+                    self._record_scan_note(
+                        f"baseline_unavailable:{self.CHECK_TYPE}: "
+                        f"suppressed match '{match}' at {url}"
                     )
-                    if baseline_match:
-                        return False  # Pattern pre-existed — not caused by our payload
-                evidence_suffix = (
-                    "" if baseline_source else " (baseline unavailable — verify manually)"
+                    return False
+                baseline_match = self.check_response_for_patterns(
+                    baseline_source, PATH_TRAVERSAL_PATTERNS
                 )
+                if baseline_match:
+                    return False  # Pattern pre-existed — not caused by our payload
 
                 finding = await self.record_finding(
                     url=url,
@@ -89,7 +96,6 @@ class PathTraversalScanner(BaseScanner):
                     payload=payload,
                     evidence=(
                         f"Path traversal successful — file content in response: '{match}'"
-                        f"{evidence_suffix}"
                     ),
                     pair=pair,
                     severity="high",
@@ -124,12 +130,21 @@ class PathTraversalScanner(BaseScanner):
         is_url_param = finding.field_name in parse_qs(
             urlparse(finding.url).query, keep_blank_values=True
         )
+        # verify 時の再投入（baseline + payload）も監査ログに残す。
+        await self.log_payload_test(
+            finding.field_name, "baseline_test_value",
+            "path_traversal_verify_baseline", finding.url,
+        )
         baseline_source, _ = await self._apply_payload(
             finding.url,
             0,
             finding.field_name,
             "baseline_test_value",
             is_url_param,
+        )
+        await self.log_payload_test(
+            finding.field_name, finding.payload,
+            "path_traversal_verify", finding.url,
         )
         source, _pair = await self._apply_payload(
             finding.url,

@@ -113,6 +113,8 @@ class OSInjectionScanner(BaseScanner):
             )
 
         # Baseline: capture pre-existing patterns and response time
+        # baseline もフィールドへの投入なので監査ログに残す（log_payload_test 一元化の不変条件）。
+        await self.log_payload_test(field_name, "baseline_os_test", "os_baseline", url)
         baseline_source, baseline_pair = await self._apply_payload(
             url, form_index, field_name, "baseline_os_test", is_url_param
         )
@@ -159,34 +161,35 @@ class OSInjectionScanner(BaseScanner):
             ):
                 match = marker
             if match:
-                # If baseline request failed (empty body), we can't reliably say
-                # whether the pattern was pre-existing. Skip the baseline check
-                # only when baseline was actually captured.
-                pattern_pre_existed = False
-                if baseline_source:
+                # baseline が *まったく取れなかった*（本文も pair も無い＝リクエスト
+                # 失敗）ときだけ「既存 vs 新規」を判別できないので finding を出さない。
+                # 次のいずれかが有れば有効な対照として使う:
+                #   - baseline_source（本文）… フォーム送信で network pair は捕捉でき
+                #     なくてもページ本文は得られる場合がある（pair 空・本文あり）。
+                #   - baseline_pair（成功リクエスト）… 空 200/204 でも本文比較で
+                #     「既存パターン無し」を示せる（本文空・pair あり）。
+                # 黙って見逃すと検出力低下に気づけないので scan note に記録する。
+                if not baseline_source and not baseline_pair:
+                    self._record_scan_note(
+                        f"baseline_unavailable:{self.CHECK_TYPE}: "
+                        f"suppressed match '{match}' at {url}"
+                    )
+                else:
                     baseline_match = self.check_response_for_patterns(
                         baseline_source, OS_OUTPUT_PATTERNS
                     )
-                    if baseline_match:
-                        pattern_pre_existed = True
-                if not pattern_pre_existed:
-                    evidence_suffix = (
-                        "" if baseline_source else " (baseline unavailable — verify manually)"
-                    )
-                    finding = await self.record_finding(
-                        url=url,
-                        field_name=field_name,
-                        payload=payload,
-                        evidence=(
-                            f"OS command output detected in response: '{match}'"
-                            f"{evidence_suffix}"
-                        ),
-                        pair=pair,
-                        severity="critical",
-                        confidence="likely",
-                    )
-                    findings.append(finding)
-                    return True
+                    if not baseline_match:
+                        finding = await self.record_finding(
+                            url=url,
+                            field_name=field_name,
+                            payload=payload,
+                            evidence=f"OS command output detected in response: '{match}'",
+                            pair=pair,
+                            severity="critical",
+                            confidence="likely",
+                        )
+                        findings.append(finding)
+                        return True
 
             # --- Check 2: Time-based blind injection ---
             # 固定リストに加え、sleep/ping/timeout を含む任意のペイロード
@@ -220,6 +223,9 @@ class OSInjectionScanner(BaseScanner):
             # echo マーカー誤検知ガード（_test_payload 内）に渡す。
             echo_baseline = ""
             if extra_payloads:
+                await self.log_payload_test(
+                    field_name, "baseline_os_test", "os_baseline", url
+                )
                 echo_baseline, _ = await self._apply_payload(
                     url, form_index, field_name, "baseline_os_test", is_url_param
                 )
@@ -240,12 +246,19 @@ class OSInjectionScanner(BaseScanner):
         is_url_param = finding.field_name in parse_qs(
             urlparse(finding.url).query, keep_blank_values=True
         )
+        # verify 時の再投入（baseline + payload）も監査ログに残す。
+        await self.log_payload_test(
+            finding.field_name, "baseline_os_test", "os_verify_baseline", finding.url
+        )
         baseline_source, baseline_pair = await self._apply_payload(
             finding.url,
             0,
             finding.field_name,
             "baseline_os_test",
             is_url_param,
+        )
+        await self.log_payload_test(
+            finding.field_name, finding.payload, "os_verify", finding.url
         )
         source, pair = await self._apply_payload(
             finding.url,
@@ -288,17 +301,21 @@ class OSInjectionScanner(BaseScanner):
                 return True
 
         if finding.payload in TIME_BASED_PAYLOADS or _is_time_based_os(finding.payload):
-            _b_req = baseline_pair.get("request", {})
-            _b_resp = baseline_pair.get("response", {})
-            _b_ts_req = _b_req.get("timestamp", 0)
-            _b_ts_resp = _b_resp.get("timestamp", 0)
-            baseline_time = (
-                float(_b_ts_resp - _b_ts_req)
-                if _b_ts_req and _b_ts_resp
-                else 0.0
-            )
+            # baseline_pair は no-sleep の対照リクエスト。これと payload 応答の
+            # 経過時間を比較し、(1) 閾値超え かつ (2) 対照より十分(>=2.0s)遅い
+            # ことを両方要求する。恒常的に遅いだけのエンドポイント（対照も遅い）を
+            # time-based 陽性と誤検知しないため（sqli の verify と同じ判定）。
+            sleep_elapsed = self.response_elapsed(pair)
+            control_elapsed = self.response_elapsed(baseline_pair)
+            baseline_time = control_elapsed or 0.0
             time_threshold = max(2.8, baseline_time + 2.8)
-            return self.response_time_exceeded(pair, threshold=time_threshold)
+            if sleep_elapsed is None:
+                return self.response_time_exceeded(pair, threshold=time_threshold)
+            if sleep_elapsed < time_threshold:
+                return False
+            if control_elapsed is not None and (sleep_elapsed - control_elapsed) < 2.0:
+                return False
+            return True
 
         return False
 

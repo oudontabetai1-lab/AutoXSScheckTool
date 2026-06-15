@@ -112,6 +112,9 @@ class HeaderInjectionScanner(BaseScanner):
         is_url_param = finding.field_name in parse_qs(
             urlparse(finding.url).query, keep_blank_values=True
         )
+        await self.log_payload_test(
+            finding.field_name, finding.payload, "header_injection_verify", finding.url
+        )
         _source, pair = await self._apply_payload(
             finding.url,
             0,

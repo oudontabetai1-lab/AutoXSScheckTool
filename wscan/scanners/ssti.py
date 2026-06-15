@@ -47,6 +47,8 @@ class SSTIScanner(BaseScanner):
             await self.monitor.emit_status(f"SSTI testing: {field_name} on {url}")
 
         # Baseline: submit a neutral value to capture any pre-existing numbers in the response.
+        # baseline もフィールド投入なので監査ログに残す（log_payload_test 一元化の不変条件）。
+        await self.log_payload_test(field_name, "wscan_ssti_baseline", "ssti_baseline", url)
         baseline_source, _ = await self._apply_payload(
             url, form_index, field_name, "wscan_ssti_baseline", is_url_param
         )
@@ -149,9 +151,12 @@ class SSTIScanner(BaseScanner):
             urlparse(finding.url).query,
             keep_blank_values=True,
         )
+        # verify 時の再投入（baseline + payload）も監査ログに残す。
+        await self.log_payload_test(field_name, "wscan_ssti_baseline", "ssti_verify_baseline", finding.url)
         baseline_source, _ = await self._apply_payload(
             finding.url, 0, field_name, "wscan_ssti_baseline", is_url_param
         )
+        await self.log_payload_test(field_name, payload, "ssti_verify", finding.url)
         source, _ = await self._apply_payload(
             finding.url, 0, field_name, payload, is_url_param
         )
