@@ -157,18 +157,22 @@ def _choose(prompt_text: str, options: list[str], default: str = "") -> str:
         _err(f"1〜{len(options)} または選択肢を直接入力してください。")
 
 
-def _prompt_bind() -> tuple[str, str]:
+def _prompt_bind() -> tuple[str, str, bool]:
     """ダッシュボードの公開範囲(bind 先)と認証トークンを対話で決める。
 
     WSCAN_HOST が環境変数で明示されていればプロンプトを出さずに尊重する
     （バッチ／上級者の明示指定を優先）。それ以外は localhost 限定か LAN 公開かを
     選ばせ、LAN 公開時は無認証で晒さないよう認証トークンを促す。
-    戻り値は (host, auth_token)。
+    戻り値は (host, auth_token, insecure)。insecure は「LAN 公開かつトークン空」を
+    対話で明示選択したときだけ True。run_serve のグローバル公開ガードは LAN IP を
+    8.8.8.8 プローブで解決するため、オフライン／デフォルトルート無しのラボ網では
+    プライベート bind でも判定不能で起動中止になる。意図した無認証 LAN 公開を
+    尊重するため、この明示選択時のみガードを上書きする。
     """
     env_host = os.environ.get("WSCAN_HOST", "").strip()
     env_token = os.environ.get("WSCAN_AUTH_TOKEN", "")
     if env_host:
-        return env_host, env_token
+        return env_host, env_token, False
 
     _header("公開範囲")
     _print("    この端末だけで使うか、同一 LAN の別端末からもアクセスできるようにするか選びます。")
@@ -178,7 +182,7 @@ def _prompt_bind() -> tuple[str, str]:
         default="この端末のみ (localhost)",
     )
     if choice.startswith("この端末"):
-        return "127.0.0.1", env_token
+        return "127.0.0.1", env_token, False
 
     # LAN 公開 — 同一ネットワークの誰でもスキャナを操作できてしまうため、
     # 無認証で晒さないよう認証トークンを促す（空ならその旨を警告して続行）。
@@ -186,7 +190,9 @@ def _prompt_bind() -> tuple[str, str]:
     token = env_token or _ask("認証トークン (推奨。空=無認証で公開)").strip()
     if not token:
         _warn("無認証のまま公開します。社内・検証ネットワークに限定してください。")
-    return "0.0.0.0", token
+    # トークン空 = 利用者が無認証 LAN 公開を意図的に選んだケース。オフライン
+    # ラボ網でガードに弾かれないよう insecure を立てて意図を尊重する。
+    return "0.0.0.0", token, not token
 
 
 # ── セクション: 対象 URL ─────────────────────────────────────────
@@ -811,7 +817,8 @@ def main():
         "WSCAN_LAUNCHER_MENU", ""
     ).strip().lower() in ("1", "true", "yes", "on")
 
-    def _launch_serve(port: int, host: str = "127.0.0.1", auth_token: str = "") -> None:
+    def _launch_serve(port: int, host: str = "127.0.0.1", auth_token: str = "",
+                      insecure: bool = False) -> None:
         if host in ("127.0.0.1", "localhost", "::1"):
             _ok(f"http://localhost:{port} でダッシュボードを起動します")
         else:
@@ -832,6 +839,9 @@ def main():
             port=port,
             host=host,
             auth_token=auth_token,
+            # 無認証 LAN 公開を対話で明示選択したときのみ True（run_serve の
+            # グローバル公開ガードをオフライン網でも越えて意図を尊重するため）。
+            insecure=insecure,
             # ランチャーはダッシュボードを開くのが目的なので必ずブラウザを開く
             # （run_serve 既定は loopback bind 時のみ開く）。
             open_browser=True,
@@ -852,8 +862,8 @@ def main():
         _print("    [dim]scan / agent を使うには `python launcher.py menu`[/dim]"
                if _USE_RICH else
                "    scan / agent を使うには `python launcher.py menu`")
-        host, auth_token = _prompt_bind()
-        _launch_serve(port, host, auth_token)
+        host, auth_token, insecure = _prompt_bind()
+        _launch_serve(port, host, auth_token, insecure)
         return
 
     # ── モード選択（menu 指定時のみ） ────────────────────────────────
@@ -873,8 +883,8 @@ def main():
             port = int(port_raw)
         except ValueError:
             port = 8765
-        host, auth_token = _prompt_bind()
-        _launch_serve(port, host, auth_token)
+        host, auth_token, insecure = _prompt_bind()
+        _launch_serve(port, host, auth_token, insecure)
         return
 
     # ── Agent Browser モード ─────────────────────────────────────

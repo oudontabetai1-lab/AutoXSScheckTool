@@ -30,29 +30,31 @@ def test_env_host_skips_prompt(monkeypatch):
         raise AssertionError("プロンプトを出してはいけない")
 
     monkeypatch.setattr(builtins, "input", _boom)
-    assert launcher._prompt_bind() == ("0.0.0.0", "tok")
+    # env 明示時は insecure を立てない（serve の既定ガードを尊重）。
+    assert launcher._prompt_bind() == ("0.0.0.0", "tok", False)
 
 
 def test_localhost_choice(monkeypatch):
-    # 選択肢1 = この端末のみ → loopback、トークンは要求しない。
+    # 選択肢1 = この端末のみ → loopback、トークンは要求しない、insecure 不要。
     _feed_inputs(monkeypatch, ["1"])
-    assert launcher._prompt_bind() == ("127.0.0.1", "")
+    assert launcher._prompt_bind() == ("127.0.0.1", "", False)
 
 
 def test_lan_choice_with_token(monkeypatch):
-    # 選択肢2 = LAN 公開 → 0.0.0.0、続けてトークンを入力。
+    # 選択肢2 = LAN 公開 → 0.0.0.0、続けてトークンを入力。トークンありなら insecure 不要。
     _feed_inputs(monkeypatch, ["2", "secret"])
-    assert launcher._prompt_bind() == ("0.0.0.0", "secret")
+    assert launcher._prompt_bind() == ("0.0.0.0", "secret", False)
 
 
-def test_lan_choice_without_token(monkeypatch):
-    # LAN 公開でトークン空 → 無認証で公開（警告は出すが host は 0.0.0.0）。
+def test_lan_choice_without_token_sets_insecure(monkeypatch):
+    # LAN 公開でトークン空 → 意図的な無認証公開。オフライン網でも起動できるよう
+    # insecure=True を返し、run_serve のグローバル公開ガードを越える。
     _feed_inputs(monkeypatch, ["2", ""])
-    assert launcher._prompt_bind() == ("0.0.0.0", "")
+    assert launcher._prompt_bind() == ("0.0.0.0", "", True)
 
 
 def test_lan_choice_uses_env_token(monkeypatch):
     # WSCAN_HOST 未指定でも WSCAN_AUTH_TOKEN があれば LAN 公開時に再入力を求めない。
     monkeypatch.setenv("WSCAN_AUTH_TOKEN", "envtok")
     _feed_inputs(monkeypatch, ["2"])
-    assert launcher._prompt_bind() == ("0.0.0.0", "envtok")
+    assert launcher._prompt_bind() == ("0.0.0.0", "envtok", False)
