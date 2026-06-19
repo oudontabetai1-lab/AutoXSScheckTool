@@ -166,11 +166,12 @@ def _prompt_bind() -> tuple[str, str, bool]:
     戻り値は (host, auth_token, insecure)。
 
     insecure は run_serve のグローバル公開ガード（無認証で公開IPへ晒すのを既定で
-    拒否）を上書きするフラグ。トークン空の LAN 公開でこれを一律に立てると、
-    デフォルトIFが公開のホストでは「LAN 公開」と説明しつつ全インタフェースに
-    無認証露出してしまう。そのため insecure は「bind が private と確認できず、かつ
-    利用者がグローバル公開のリスクを理解した上で明示確認したとき」だけ True にする。
-    private と確認できた社内網ではガードがそもそも発火しないため insecure 不要。
+    拒否）を上書きするフラグ。トークン空のワイルドカード bind(0.0.0.0) は本質的に
+    危険で、ローカルIFが RFC1918 でも NAT/ポート転送配下では公開到達しうるため、
+    `_bind_is_intranet` のような private 判定だけでは安全と断定できない。そのため
+    トークン空の LAN 公開では private 判定に関わらず常に明示確認を取り、了承時のみ
+    insecure を True にする（社内網ではガード自体が発火しないので未使用だが、NAT／
+    オフライン網でも起動できるよう一律に立てて意図を尊重する）。
     """
     env_host = os.environ.get("WSCAN_HOST", "").strip()
     env_token = os.environ.get("WSCAN_AUTH_TOKEN", "")
@@ -194,20 +195,13 @@ def _prompt_bind() -> tuple[str, str, bool]:
     if token:
         return "0.0.0.0", token, False
 
-    # トークン空 = 無認証公開。bind が実際に private か確認する。run_serve と同じ
-    # 判定を用い、private と確認できれば（社内網など）ガードは発火しないので
-    # insecure 不要でそのまま起動できる。
-    from main import _bind_is_intranet
-    if _bind_is_intranet("0.0.0.0"):
-        _warn("無認証のまま公開します。社内・検証ネットワークに限定してください。")
-        return "0.0.0.0", "", False
-
-    # private と確認できない（オフライン網 or 公開IFを持つホスト）。グローバルへ
-    # 無認証露出する恐れがあるため、一律 bypass はせず明示確認を取る。
-    _warn("この端末のプライベートIPを確認できませんでした。グローバルIPを持つ場合、"
-          "インターネットへ無認証で公開される恐れがあります。")
+    # トークン空 = 無認証のワイルドカード公開。NAT/ポート転送配下ではローカルIFが
+    # private でも公開到達しうるため private 判定に頼らず、常にリスクを警告して
+    # 明示確認を取る。了承時のみ insecure を立てて起動を許す。
+    _warn("無認証で全インタフェース(0.0.0.0)に公開します。NAT／ポート転送配下では"
+          "意図した LAN を越えてインターネットから到達される恐れがあります。")
     confirm = _choose(
-        "それでも無認証で全インタフェースに公開しますか?",
+        "それでも無認証のまま公開しますか?",
         ["いいえ — 認証トークンを設定する", "はい — リスクを理解した上で公開する"],
         default="いいえ — 認証トークンを設定する",
     )
