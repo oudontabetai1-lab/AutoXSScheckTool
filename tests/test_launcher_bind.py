@@ -8,6 +8,7 @@ import builtins
 import pytest
 
 import launcher
+import main
 
 
 @pytest.fixture(autouse=True)
@@ -46,11 +47,27 @@ def test_lan_choice_with_token(monkeypatch):
     assert launcher._prompt_bind() == ("0.0.0.0", "secret", False)
 
 
-def test_lan_choice_without_token_sets_insecure(monkeypatch):
-    # LAN 公開でトークン空 → 意図的な無認証公開。オフライン網でも起動できるよう
-    # insecure=True を返し、run_serve のグローバル公開ガードを越える。
+def test_lan_blank_token_verified_private_no_insecure(monkeypatch):
+    # トークン空でも bind が private と確認できれば（社内網）ガードは発火しないので
+    # insecure を立てずそのまま無認証公開する。
+    monkeypatch.setattr(main, "_bind_is_intranet", lambda h: True)
     _feed_inputs(monkeypatch, ["2", ""])
+    assert launcher._prompt_bind() == ("0.0.0.0", "", False)
+
+
+def test_lan_blank_token_unverified_confirm_sets_insecure(monkeypatch):
+    # private と確認できない（オフライン/公開IF）状況で、利用者がリスクを理解して
+    # 明示確認した場合のみ insecure=True を返す。
+    monkeypatch.setattr(main, "_bind_is_intranet", lambda h: False)
+    _feed_inputs(monkeypatch, ["2", "", "2"])  # LAN / 空トークン / 確認=はい
     assert launcher._prompt_bind() == ("0.0.0.0", "", True)
+
+
+def test_lan_blank_token_unverified_decline_requires_token(monkeypatch):
+    # 確認を拒否したらトークンを要求し、insecure は立てない（公開ガードを尊重）。
+    monkeypatch.setattr(main, "_bind_is_intranet", lambda h: False)
+    _feed_inputs(monkeypatch, ["2", "", "1", "tok"])  # LAN / 空 / 確認=いいえ / トークン
+    assert launcher._prompt_bind() == ("0.0.0.0", "tok", False)
 
 
 def test_lan_choice_uses_env_token(monkeypatch):

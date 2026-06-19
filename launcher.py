@@ -163,11 +163,14 @@ def _prompt_bind() -> tuple[str, str, bool]:
     WSCAN_HOST が環境変数で明示されていればプロンプトを出さずに尊重する
     （バッチ／上級者の明示指定を優先）。それ以外は localhost 限定か LAN 公開かを
     選ばせ、LAN 公開時は無認証で晒さないよう認証トークンを促す。
-    戻り値は (host, auth_token, insecure)。insecure は「LAN 公開かつトークン空」を
-    対話で明示選択したときだけ True。run_serve のグローバル公開ガードは LAN IP を
-    8.8.8.8 プローブで解決するため、オフライン／デフォルトルート無しのラボ網では
-    プライベート bind でも判定不能で起動中止になる。意図した無認証 LAN 公開を
-    尊重するため、この明示選択時のみガードを上書きする。
+    戻り値は (host, auth_token, insecure)。
+
+    insecure は run_serve のグローバル公開ガード（無認証で公開IPへ晒すのを既定で
+    拒否）を上書きするフラグ。トークン空の LAN 公開でこれを一律に立てると、
+    デフォルトIFが公開のホストでは「LAN 公開」と説明しつつ全インタフェースに
+    無認証露出してしまう。そのため insecure は「bind が private と確認できず、かつ
+    利用者がグローバル公開のリスクを理解した上で明示確認したとき」だけ True にする。
+    private と確認できた社内網ではガードがそもそも発火しないため insecure 不要。
     """
     env_host = os.environ.get("WSCAN_HOST", "").strip()
     env_token = os.environ.get("WSCAN_AUTH_TOKEN", "")
@@ -185,14 +188,35 @@ def _prompt_bind() -> tuple[str, str, bool]:
         return "127.0.0.1", env_token, False
 
     # LAN 公開 — 同一ネットワークの誰でもスキャナを操作できてしまうため、
-    # 無認証で晒さないよう認証トークンを促す（空ならその旨を警告して続行）。
+    # 無認証で晒さないよう認証トークンを促す。
     _warn("LAN に公開します。同一ネットワークの誰でもダッシュボードにアクセスできます。")
     token = env_token or _ask("認証トークン (推奨。空=無認証で公開)").strip()
-    if not token:
+    if token:
+        return "0.0.0.0", token, False
+
+    # トークン空 = 無認証公開。bind が実際に private か確認する。run_serve と同じ
+    # 判定を用い、private と確認できれば（社内網など）ガードは発火しないので
+    # insecure 不要でそのまま起動できる。
+    from main import _bind_is_intranet
+    if _bind_is_intranet("0.0.0.0"):
         _warn("無認証のまま公開します。社内・検証ネットワークに限定してください。")
-    # トークン空 = 利用者が無認証 LAN 公開を意図的に選んだケース。オフライン
-    # ラボ網でガードに弾かれないよう insecure を立てて意図を尊重する。
-    return "0.0.0.0", token, not token
+        return "0.0.0.0", "", False
+
+    # private と確認できない（オフライン網 or 公開IFを持つホスト）。グローバルへ
+    # 無認証露出する恐れがあるため、一律 bypass はせず明示確認を取る。
+    _warn("この端末のプライベートIPを確認できませんでした。グローバルIPを持つ場合、"
+          "インターネットへ無認証で公開される恐れがあります。")
+    confirm = _choose(
+        "それでも無認証で全インタフェースに公開しますか?",
+        ["いいえ — 認証トークンを設定する", "はい — リスクを理解した上で公開する"],
+        default="いいえ — 認証トークンを設定する",
+    )
+    if confirm.startswith("はい"):
+        return "0.0.0.0", "", True
+
+    # 拒否 → トークンを要求（空のままなら run_serve のガードで安全側に中止される）。
+    token = _ask("認証トークン").strip()
+    return "0.0.0.0", token, False
 
 
 # ── セクション: 対象 URL ─────────────────────────────────────────
