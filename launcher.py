@@ -4,9 +4,11 @@ WScan CUI Launcher
 ダブルクリック / launcher.bat から起動できます。
 
 既定では引数なし起動でダッシュボード(serve)を自動で開きます（実運用はほぼ
-ブラウザ UI のため）。bind 先は安全側の localhost(127.0.0.1)、ポートは環境変数
-WSCAN_PORT（既定 8765）。LAN へ公開するときは WSCAN_HOST を明示し、併せて
-WSCAN_AUTH_TOKEN の設定を推奨します。
+ブラウザ UI のため）。起動時に公開範囲（この端末のみ=localhost / LAN 公開）を
+対話で選べます。bind 先は安全側の localhost(127.0.0.1) が既定、ポートは環境変数
+WSCAN_PORT（既定 8765）。LAN 公開を選ぶと別端末からアクセスでき、無認証で晒さない
+よう認証トークンの入力を促します。WSCAN_HOST を環境変数で明示した場合はプロンプトを
+出さずそれを尊重します（併せて WSCAN_AUTH_TOKEN の設定を推奨）。
 scan / agent モードを対話的に選ぶには `python launcher.py menu`（または
 環境変数 WSCAN_LAUNCHER_MENU=1）でモード選択メニューを表示します。
 """
@@ -153,6 +155,66 @@ def _choose(prompt_text: str, options: list[str], default: str = "") -> str:
         if raw in options:
             return raw
         _err(f"1〜{len(options)} または選択肢を直接入力してください。")
+
+
+def _prompt_bind() -> tuple[str, str, bool]:
+    """ダッシュボードの公開範囲(bind 先)と認証トークンを対話で決める。
+
+    WSCAN_HOST が環境変数で明示されていればプロンプトを出さずに尊重する
+    （バッチ／上級者の明示指定を優先）。それ以外は localhost 限定か LAN 公開かを
+    選ばせ、LAN 公開時は無認証で晒さないよう認証トークンを促す。
+    戻り値は (host, auth_token, insecure)。
+
+    insecure は run_serve のグローバル公開ガード（無認証で公開IPへ晒すのを既定で
+    拒否）を上書きするフラグ。トークン空のワイルドカード bind(0.0.0.0) は本質的に
+    危険で、ローカルIFが RFC1918 でも NAT/ポート転送配下では公開到達しうるため、
+    `_bind_is_intranet` のような private 判定だけでは安全と断定できない。そのため
+    トークン空の LAN 公開では private 判定に関わらず常に明示確認を取り、了承時のみ
+    insecure を True にする（社内網ではガード自体が発火しないので未使用だが、NAT／
+    オフライン網でも起動できるよう一律に立てて意図を尊重する）。
+    """
+    env_host = os.environ.get("WSCAN_HOST", "").strip()
+    env_token = os.environ.get("WSCAN_AUTH_TOKEN", "")
+    if env_host:
+        return env_host, env_token, False
+
+    _header("公開範囲")
+    _print("    この端末だけで使うか、同一 LAN の別端末からもアクセスできるようにするか選びます。")
+    choice = _choose(
+        "公開範囲",
+        ["この端末のみ (localhost)", "LAN に公開 (別端末からアクセス可)"],
+        default="この端末のみ (localhost)",
+    )
+    if choice.startswith("この端末"):
+        return "127.0.0.1", env_token, False
+
+    # LAN 公開 — 同一ネットワークの誰でもスキャナを操作できてしまうため、
+    # 無認証で晒さないよう認証トークンを促す。
+    _warn("LAN に公開します。同一ネットワークの誰でもダッシュボードにアクセスできます。")
+    token = env_token or _ask("認証トークン (推奨。空=無認証で公開)").strip()
+    if token:
+        return "0.0.0.0", token, False
+
+    # トークン空 = 無認証のワイルドカード公開。NAT/ポート転送配下ではローカルIFが
+    # private でも公開到達しうるため private 判定に頼らず、常にリスクを警告して
+    # 明示確認を取る。了承時のみ insecure を立てて起動を許す。
+    _warn("無認証で全インタフェース(0.0.0.0)に公開します。NAT／ポート転送配下では"
+          "意図した LAN を越えてインターネットから到達される恐れがあります。")
+    confirm = _choose(
+        "それでも無認証のまま公開しますか?",
+        ["いいえ — 認証トークンを設定する", "はい — リスクを理解した上で公開する"],
+        default="いいえ — 認証トークンを設定する",
+    )
+    if confirm.startswith("はい"):
+        return "0.0.0.0", "", True
+
+    # 拒否 → トークンを要求。空のままなら無認証 LAN 公開を拒否した意図に沿って
+    # 安全側に倒し、この端末のみ(localhost)へフォールバックする。
+    token = _ask("認証トークン (空=この端末のみ localhost に切替)").strip()
+    if not token:
+        _warn("トークン未設定のため、この端末のみ(localhost)に切り替えます。")
+        return "127.0.0.1", "", False
+    return "0.0.0.0", token, False
 
 
 # ── セクション: 対象 URL ─────────────────────────────────────────
@@ -777,22 +839,31 @@ def main():
         "WSCAN_LAUNCHER_MENU", ""
     ).strip().lower() in ("1", "true", "yes", "on")
 
-    def _launch_serve(port: int) -> None:
-        _ok(f"http://localhost:{port} でダッシュボードを起動します")
+    def _launch_serve(port: int, host: str = "127.0.0.1", auth_token: str = "",
+                      insecure: bool = False) -> None:
+        if host in ("127.0.0.1", "localhost", "::1"):
+            _ok(f"http://localhost:{port} でダッシュボードを起動します")
+        else:
+            _ok(f"http://localhost:{port} （別端末からは http://<このPCのIP>:{port}）"
+                f"でダッシュボードを起動します")
         _print()
-        # host / auth_token は serve サブコマンドのパーサ既定（WSCAN_HOST /
-        # auth_token は WSCAN_AUTH_TOKEN（無ければ config）と揃える。これを省くと
-        # run_serve がトークン無しにフォールバックし、設定済みでも未認証になる。
+        # host / auth_token は呼び出し側(_prompt_bind)で決定して渡す。WSCAN_HOST が
+        # 明示されていればそれを、無ければ対話選択の結果(既定 localhost)を渡す。
+        # auth_token を省くと run_serve がトークン無しにフォールバックし、設定済みでも
+        # 未認証になるため明示的に渡す。
         #
         # bind 先はローカルツールとして安全側に倒し、既定で localhost(127.0.0.1)。
-        # ダブルクリック起動が無認証のままスキャナ制御画面を LAN へ晒さないため。
-        # LAN 公開したいときは WSCAN_HOST を明示指定する（その際は WSCAN_AUTH_TOKEN
-        # 推奨）。サーバ常駐は `python main.py serve` を使う（config の host を尊重）。
+        # ダブルクリック起動が無認証のままスキャナ制御画面を LAN へ晒さないため、
+        # LAN 公開は対話で明示選択したときのみ（その際は認証トークンを促す）。
+        # サーバ常駐は `python main.py serve` を使う（config の host を尊重）。
         from main import run_serve
         serve_args = argparse.Namespace(
             port=port,
-            host=os.environ.get("WSCAN_HOST", "127.0.0.1"),
-            auth_token=os.environ.get("WSCAN_AUTH_TOKEN", ""),
+            host=host,
+            auth_token=auth_token,
+            # 無認証 LAN 公開を対話で明示選択したときのみ True（run_serve の
+            # グローバル公開ガードをオフライン網でも越えて意図を尊重するため）。
+            insecure=insecure,
             # ランチャーはダッシュボードを開くのが目的なので必ずブラウザを開く
             # （run_serve 既定は loopback bind 時のみ開く）。
             open_browser=True,
@@ -813,7 +884,8 @@ def main():
         _print("    [dim]scan / agent を使うには `python launcher.py menu`[/dim]"
                if _USE_RICH else
                "    scan / agent を使うには `python launcher.py menu`")
-        _launch_serve(port)
+        host, auth_token, insecure = _prompt_bind()
+        _launch_serve(port, host, auth_token, insecure)
         return
 
     # ── モード選択（menu 指定時のみ） ────────────────────────────────
@@ -833,7 +905,8 @@ def main():
             port = int(port_raw)
         except ValueError:
             port = 8765
-        _launch_serve(port)
+        host, auth_token, insecure = _prompt_bind()
+        _launch_serve(port, host, auth_token, insecure)
         return
 
     # ── Agent Browser モード ─────────────────────────────────────
