@@ -53,10 +53,16 @@ def test_lan_blank_token_always_confirms_then_insecure(monkeypatch):
     assert launcher._prompt_bind() == ("0.0.0.0", "", True)
 
 
-def test_lan_blank_token_decline_requires_token(monkeypatch):
-    # 確認を拒否したらトークンを要求し、insecure は立てない（公開ガードを尊重）。
+def test_lan_blank_token_decline_with_token(monkeypatch):
+    # 確認を拒否してトークンを入力したら、そのトークンで LAN 公開（insecure 不要）。
     _feed_inputs(monkeypatch, ["2", "", "1", "tok"])  # LAN / 空 / 確認=いいえ / トークン
     assert launcher._prompt_bind() == ("0.0.0.0", "tok", False)
+
+
+def test_lan_blank_token_decline_blank_falls_back_to_localhost(monkeypatch):
+    # 拒否かつトークンも空 → 無認証公開を避け、この端末のみ(localhost)へフォールバック。
+    _feed_inputs(monkeypatch, ["2", "", "1", ""])  # LAN / 空 / 確認=いいえ / 空トークン
+    assert launcher._prompt_bind() == ("127.0.0.1", "", False)
 
 
 def test_lan_choice_uses_env_token(monkeypatch):

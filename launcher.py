@@ -208,8 +208,12 @@ def _prompt_bind() -> tuple[str, str, bool]:
     if confirm.startswith("はい"):
         return "0.0.0.0", "", True
 
-    # 拒否 → トークンを要求（空のままなら run_serve のガードで安全側に中止される）。
-    token = _ask("認証トークン").strip()
+    # 拒否 → トークンを要求。空のままなら無認証 LAN 公開を拒否した意図に沿って
+    # 安全側に倒し、この端末のみ(localhost)へフォールバックする。
+    token = _ask("認証トークン (空=この端末のみ localhost に切替)").strip()
+    if not token:
+        _warn("トークン未設定のため、この端末のみ(localhost)に切り替えます。")
+        return "127.0.0.1", "", False
     return "0.0.0.0", token, False
 
 
