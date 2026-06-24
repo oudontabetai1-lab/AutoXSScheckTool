@@ -31,8 +31,13 @@ jobs:
         run: pytest -q --ignore=tests/test_end_to_end_scan.py
 
       # Browser-driven end-to-end test. Needs a real Chromium; kept as a
-      # non-blocking step while it is being stabilised in CI.
+      # non-blocking step while it is being stabilised in CI. The browser
+      # install itself is also non-blocking: ``--with-deps`` pulls OS packages
+      # via apt, which intermittently 403s on the hosted runner mirror
+      # (packages.microsoft.com). That infra hiccup must not fail the whole job
+      # when the blocking unit/integration suite above already passed.
       - name: Install Chromium for Playwright
+        continue-on-error: true
         run: playwright install --with-deps chromium
 
       - name: End-to-end (browser) test

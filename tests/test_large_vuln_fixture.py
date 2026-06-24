@@ -236,6 +236,35 @@ class LargeVulnerableFixtureTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("wscan-probe-8.2", resp.text)
 
+    async def test_upload_endpoint_executes_magic_byte_polyglot(self):
+        # GIF89a polyglot でもサーバが .php を実行すれば probe マーカーが現れる。
+        resp = await self.client.post(
+            "/upload",
+            files={
+                "file": (
+                    "wscan_probe_gif.php",
+                    b"GIF89a\n<?php echo 'wscan-probe-' . phpversion(); ?>",
+                    "image/gif",
+                )
+            },
+        )
+
+        self.assertIn("wscan-probe-8.2", resp.text)
+
+    async def test_contact_reflects_raw_crlf_injection(self):
+        payload = "user@example.com\r\nCc: attacker@evil.example.com"
+        resp = await self.client.post("/contact", data={"email": payload})
+
+        # 脆弱: 生 CR/LF + Cc ヘッダがそのまま反射する。
+        self.assertIn("\nCc: attacker@evil.example.com", resp.text)
+
+    async def test_contact_safe_strips_crlf(self):
+        payload = "user@example.com\r\nCc: attacker@evil.example.com"
+        resp = await self.client.post("/contact-safe", data={"email": payload})
+
+        # 安全ツイン: CR/LF 除去後は注入ヘッダが独立行として現れない。
+        self.assertNotIn("\nCc: attacker@evil.example.com", resp.text)
+
     async def test_coupon_endpoint_allows_parallel_successes(self):
         import asyncio
 

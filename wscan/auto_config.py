@@ -22,11 +22,9 @@ from rich import box as rbox
 console = Console()
 
 # ── 利用可能なチェック一覧 ──────────────────────────────────────────
-# NOTE: "mail_header" は無効化済み（wscan/scanners/__init__.py 参照）。ウィザードが
-# 選択肢として提示・受理しないよう、利用可能チェック一覧からも除外している。
 _ALL_CHECKS = [
     "sqli", "xss", "dom_xss", "os", "ssti", "path_traversal",
-    "csrf", "header_injection", "open_redirect",
+    "csrf", "header_injection", "mail_header", "open_redirect",
     "clickjacking", "session", "privesc",
 ]
 
@@ -44,6 +42,7 @@ _SYSTEM_PROMPT = """\
   path_traversal - パストラバーサル
   csrf           - CSRF
   header_injection - HTTPヘッダーインジェクション
+  mail_header    - メールヘッダインジェクション
   open_redirect  - オープンリダイレクト
   clickjacking   - クリックジャッキング
   session        - セッション管理の問題

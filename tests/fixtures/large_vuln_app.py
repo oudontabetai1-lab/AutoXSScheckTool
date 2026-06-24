@@ -51,6 +51,8 @@ def _layout(title: str, body: str) -> str:
             '<a href="/ldap-login">LDAP Login</a>',
             '<a href="/xml">XML Import</a>',
             '<a href="/upload">Upload</a>',
+            '<a href="/contact">Contact</a>',
+            '<a href="/contact-safe">Contact Safe</a>',
             '<a href="/coupon">Coupon</a>',
             '<a href="/ws-lab">WebSocket Lab</a>',
             '<a href="/login">Login</a>',
@@ -474,6 +476,43 @@ def create_app(page_count: int = 48) -> FastAPI:
             if b"wscan-probe-" in data:
                 return "uploaded and executed: wscan-probe-8.2"
         return f"uploaded {file.filename}"
+
+    # ── メールヘッダインジェクション（反射型・脆弱 / 安全ツイン） ──────────
+    @app.get("/contact", response_class=HTMLResponse)
+    async def contact_form():
+        return _layout(
+            "Contact",
+            """
+            <form method="post" action="/contact">
+              <input name="email" value="user@example.com">
+              <button>Send</button>
+            </form>
+            """,
+        )
+
+    @app.post("/contact", response_class=PlainTextResponse)
+    async def contact(email: str = Form("")):
+        # 脆弱: 受け取った値をメールヘッダ風にそのまま組み立てて反射する。
+        # CR/LF を除去しないため、注入された Cc/Bcc ヘッダが生のまま現れる。
+        return f"Sending confirmation...\nTo: {email}\nSubject: Thanks"
+
+    @app.get("/contact-safe", response_class=HTMLResponse)
+    async def contact_safe_form():
+        return _layout(
+            "Contact Safe",
+            """
+            <form method="post" action="/contact-safe">
+              <input name="email" value="user@example.com">
+              <button>Send</button>
+            </form>
+            """,
+        )
+
+    @app.post("/contact-safe", response_class=PlainTextResponse)
+    async def contact_safe(email: str = Form("")):
+        # 安全ツイン: CR/LF を除去してからヘッダへ組み込む（注入不成立）。
+        clean = email.replace("\r", "").replace("\n", "")
+        return f"Sending confirmation...\nTo: {clean}\nSubject: Thanks"
 
     @app.get("/coupon", response_class=HTMLResponse)
     async def coupon_form():

@@ -53,6 +53,13 @@ export WSCAN_OOB_PASSWORD=********
 export WSCAN_OOB_DOMAIN=oob.example.com
 ```
 
+> **メールヘッダインジェクション検査での自動利用**: 上記 env（特に
+> `WSCAN_OOB_HOST` / `WSCAN_OOB_USERNAME` / `WSCAN_OOB_PASSWORD` /
+> `WSCAN_OOB_DOMAIN`）が揃っていると、`mail_header` 検査がスキャン中に
+> 一意の `Bcc: <token>@<domain>` を注入し、その宛先へメールが届いたかを
+> ポーリングして**確証済み（confidence=confirmed）**の Finding を生成します。
+> env 未設定でも反射/メールエラー漏えいのヒューリスティック検知は動きます。
+
 ## 3. MCP サーバの起動
 
 ```bash

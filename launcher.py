@@ -89,9 +89,7 @@ _ALL_CHECKS = {
     "xss":              "クロスサイトスクリプティング         (IPA 1.5)",
     "csrf":             "CSRF                               (IPA 1.6)",
     "header_injection": "HTTP ヘッダインジェクション         (IPA 1.7)",
-    # "mail_header" (IPA 1.8) は無効化済み。確証に OOB メール受信が必要で
-    # 黒box では実用的に検知できないため、選択肢として提示しない
-    # (wscan/scanners/__init__.py 参照)。
+    "mail_header":      "メールヘッダインジェクション         (IPA 1.8)",
     "clickjacking":     "クリックジャッキング               (IPA 1.9)",
     "open_redirect":    "オープンリダイレクト               (IPA 1.11)",
     "ssti":             "サーバーサイドテンプレートインジェクション",

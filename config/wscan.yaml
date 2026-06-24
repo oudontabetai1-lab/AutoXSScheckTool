@@ -12,8 +12,9 @@ scan:
   #   path_traversal csrf header_injection clickjacking
   #   open_redirect session privesc
   #   graphql jwt  ← 新規スキャナー (② ④))
-  # ※ mail_header (IPA 1.8) は無効化済み: 確証に OOB メール受信が必要で黒box では
-  #    実用的に検知できないため選択肢から除外 (wscan/scanners/__init__.py 参照)
+  # ※ mail_header (IPA 1.8) は再有効化済み: 確証は OOB メール受信 (env: WSCAN_OOB_*)
+  #    で行い、未設定時も反射/エラー漏えいのヒューリスティック検知が動く
+  #    (wscan/scanners/__init__.py / wscan/scanners/mail_header.py 参照)
   checks:
     - sqli
     - xss

@@ -89,6 +89,7 @@ from .scanners.cms import CmsScanner
 from .waf_detector import WAFDetector
 from .payload_learning import PayloadLearner
 from .flow_runner import ScanFlow, FlowRunner
+from .oob_email import OOBEmailConfig, EmailSink, make_oob_token, oob_address
 
 console = Console()
 
@@ -641,6 +642,16 @@ class ScanEngine:
         self.adaptive_engine = AdaptivePayloadEngine(self.payload_gen)
         self.adaptive_enabled = enable_adaptive_payloads and llm_provider != "none"
 
+        # OOB（帯域外）メール受信シンク。環境変数（WSCAN_OOB_*）から構築し、
+        # 設定が揃っているときだけ EmailSink を有効化する（未設定なら None）。
+        # メールヘッダインジェクション等「アプリがメールを送って初めて確証できる」
+        # 検査が、注入した一意 Bcc 宛にメールが届いたかをポーリングするために使う。
+        # 認証情報はコードに埋めず env 経由（CLAUDE.md の不変条件）。
+        self.oob_config = OOBEmailConfig.from_env()
+        self.oob_sink: Optional[EmailSink] = (
+            EmailSink(self.oob_config) if self.oob_config.configured else None
+        )
+
         # Chain / stored vulnerability scanner (Phase 3c)
         self.chain_scanner = ChainScanner(
             browser=self._browser,
@@ -673,6 +684,20 @@ class ScanEngine:
         # Auto-login landing page. Seeded into the normal crawl so authenticated
         # pages are not missed when the scan target itself is the login URL.
         self.auth_landing_url: str = ""
+
+    def new_oob_address(self) -> Optional[tuple[str, str]]:
+        """OOB 受信用の一意トークンとメールアドレスを返す。
+
+        OOB シンクが未設定、または catch-all ドメイン未設定なら ``None``。
+        戻り値は ``(token, address)`` で、address を Cc/Bcc に注入し、token で
+        受信箱を検索する。スキャン ID（出力ディレクトリ名）をトークンに含め、
+        並行スキャン間の取り違えを避ける。
+        """
+        if not self.oob_sink or not self.oob_config.domain:
+            return None
+        scan_id = getattr(self, "output_dir", None)
+        token = make_oob_token(scan_id.name if scan_id else "")
+        return token, oob_address(token, self.oob_config.domain)
 
     def httpx_client_kwargs(self, **overrides) -> dict:
         """Return httpx kwargs with scanner-wide proxy/TLS settings applied."""

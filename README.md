@@ -141,7 +141,7 @@ PEM の cert/key は Playwright と httpx の両方で使われます。PFX は 
 | 1.5 | クロスサイト・スクリプティング（格納型） | `stored_xss` | マーカー注入 → 全ページ横断検出 |
 | 1.6 | CSRF | `csrf` | POST フォームの CSRF トークン有無 |
 | 1.7 | HTTPヘッダ・インジェクション | `header_injection` | CRLF 注入 → レスポンスヘッダ確認 |
-| 1.8 | メールヘッダ・インジェクション | `mail_header` | ⚠️ 無効化済み（確証に OOB メール受信が必要で黒box では実用的に検知できないため。実装は残置） |
+| 1.8 | メールヘッダ・インジェクション | `mail_header` | CRLF 注入 → 反射/メールエラー漏えい検知。OOB メール受信（`WSCAN_OOB_*`）設定時は注入 Bcc の到達を確証。CR/LF 除去対策に多様な改行表現でバイパスを試行 |
 | 1.9 | クリックジャッキング | `clickjacking` | X-Frame-Options / CSP frame-ancestors 確認 |
 | 1.11 | オープンリダイレクト | `open_redirect` | リダイレクト先未検証の検出 |
 | — | アクセス制御・権限昇格 | `privesc` | 未認証アクセス・垂直/水平権限昇格 (IDOR)・401/403 バイパス |
@@ -149,7 +149,7 @@ PEM の cert/key は Playwright と httpx の両方で使われます。PFX は 
 | — | 機密ファイル露出・情報漏洩 | `info_disclosure` | `.env`・`.git`・phpinfo 等へのアクセス確認 |
 | — | Host ヘッダインジェクション | `host_header` | パスワードリセット汚染 |
 | — | セキュリティヘッダ監査 | `security_headers` | HSTS・CSP・X-Content-Type-Options 等 |
-| — | ファイルアップロード脆弱性 | `file_upload` | Webシェル・二重拡張子・Content-Type 偽装 |
+| — | ファイルアップロード脆弱性 | `file_upload` | Webシェル・二重拡張子・Content-Type 偽装・代替拡張子・大小混在/末尾ドット空白・画像マジックバイト polyglot 等の WAF/フィルタ回避 |
 | — | NoSQL インジェクション | `nosql` | MongoDB オペレータ注入 (`$ne`, `$gt`, `$regex`) |
 | — | 安全でないデシリアライズ | `deserialization` | PHP/Java/Python pickle プローブ |
 | — | HTTP リクエストスマグリング | `request_smuggling` | CL.TE / TE.CL / TE.TE タイミング検出 |
@@ -548,7 +548,7 @@ usage: main.py scan [オプション] URL
 主要オプション:
   --checks CHECK ...       実行するチェック (デフォルト: config/wscan.yaml)
                            選択肢: sqli xss dom_xss stored_xss os path_traversal
-                                   session csrf header_injection
+                                   session csrf header_injection mail_header
                                    clickjacking open_redirect ssti privesc
                                    cors info_disclosure host_header security_headers
                                    file_upload nosql deserialization request_smuggling
