@@ -3,6 +3,8 @@
 ブラウザ/HTTP 非依存で、誤検知ゼロ方針（反射のみ・保護ありは非検出）を守れるか
 を検証する。
 """
+import asyncio
+import types
 import unittest
 
 from wscan.scanners.graphql import (
@@ -154,6 +156,39 @@ class MassAssignmentTests(unittest.TestCase):
     def test_sentinels_unique(self):
         s = make_sentinels(("role", "isAdmin"))
         self.assertEqual(len(set(s.values())), 2)
+
+
+class MassAssignmentDoneGatingTests(unittest.TestCase):
+    """テンプレート未取込（認証付きスキャンの未認証ページレベル検査）の段階で
+    _done を立てて以降の本来の検査を飛ばさないこと（Codex P2 回帰）。"""
+
+    def _scanner(self, templates):
+        from wscan.scanners.mass_assignment import MassAssignmentScanner
+
+        engine = types.SimpleNamespace(
+            browser=None, monitor=None, payload_gen=None,
+            api_seed_requests=templates,
+        )
+        return MassAssignmentScanner(engine)
+
+    def test_empty_templates_does_not_set_done(self):
+        sc = self._scanner([])
+        result = asyncio.run(sc.scan_page("http://h/"))
+        self.assertEqual(result, [])
+        # スペックが後から読まれる可能性があるので _done は立てない
+        self.assertFalse(sc._done)
+
+    def test_second_call_after_templates_appear_runs(self):
+        sc = self._scanner([])
+        asyncio.run(sc.scan_page("http://h/login"))  # pre-auth page, no templates
+        self.assertFalse(sc._done)
+        # スペック取込後（GET 操作だけ → POST/PUT/PATCH 無し）でも _done は立つ
+        sc.engine.api_seed_requests = [
+            types.SimpleNamespace(method="GET", url="http://h/api", json_body=None,
+                                  content_type="application/json")
+        ]
+        asyncio.run(sc.scan_page("http://h/dashboard"))
+        self.assertTrue(sc._done)
 
 
 if __name__ == "__main__":

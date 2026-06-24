@@ -97,11 +97,16 @@ class MassAssignmentScanner(BaseScanner):
         # API 由来の JSON 操作群を一度だけまとめて検査する。
         if self._done:
             return []
-        self._done = True
 
+        # 認証付きスキャンでは run() が _phase_crawl（= API スペック取込）より前に
+        # 未認証ログインページのページレベル検査を走らせる。その時点では
+        # api_seed_requests が空なので、ここで _done を立ててしまうと、スペック
+        # 取込後の本来の操作群が永久に飛ばされて mass_assignment が動かない。
+        # テンプレートが揃うまで _done は立てない（毎回 no-op で安全）。
         templates = list(getattr(self.engine, "api_seed_requests", []) or [])
         if not templates:
             return []
+        self._done = True
 
         if self.monitor:
             await self.monitor.emit_status(

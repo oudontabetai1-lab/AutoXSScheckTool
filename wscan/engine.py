@@ -976,16 +976,25 @@ class ScanEngine:
     # Session expiry / auto re-login
     # =========================================================================
 
-    async def _relogin_if_needed(self, *, status=None, final_url: str = "", body: str = "") -> bool:
-        """応答がセッション失効を示す場合に自動再ログインする。
+    async def _relogin_if_needed(
+        self, browser, *, status=None, final_url: str = "", body: str = ""
+    ) -> bool:
+        """応答がセッション失効を示す場合に ``browser`` 上で自動再ログインする。
 
         再ログインに成功したら True。失効していない／再ログイン不可なら False。
         誤った連続再ログインを避けるため :mod:`wscan.session_guard` の厳しめの
         判定（401 か「ログインフォーム残存」）を通った場合だけ実行する。
+
+        ``browser`` は呼び出し側が渡す文脈対応ブラウザ（並列時は worker、直列時は
+        メイン）。worker 自身のコンテキストで再ログインすることで、別 worker が
+        攻撃中のメインページを動かす副作用を避ける。
         """
         if not self.relogin_on_expiry:
             return False
-        if not (self.login_url and self._browser.auth_user and self._browser.auth_pass):
+        if not (self.login_url and getattr(browser, "auth_user", "")
+                and getattr(browser, "auth_pass", "")):
+            return False
+        if not hasattr(browser, "auto_login"):
             return False
         from wscan import session_guard
 
@@ -1009,7 +1018,7 @@ class ScanEngine:
             except Exception:
                 pass
         try:
-            success = await self._browser.auto_login(
+            success = await browser.auto_login(
                 self.login_url,
                 user_field=self.login_user_field,
                 pass_field=self.login_pass_field,
@@ -1027,39 +1036,42 @@ class ScanEngine:
     async def _maybe_relogin_for_page(self, url: str) -> None:
         """攻撃対象ページの状態を見てセッション失効なら再ログインする。
 
-        再ログインに必要な前提（login_url + 認証情報）が無ければ即 no-op。
-        worker ブラウザには ``auto_login`` が無いため、メインブラウザでのみ動く
-        （並列時はベストエフォート、失敗してもスキャンは継続）。
+        並列時に別ワーカーのメインページを動かさないよう、文脈対応の
+        ``self.browser``（worker 実行中は worker、直列時はメイン）を使う。worker は
+        これから ``url`` を攻撃するので、ここでの遷移は自分自身のページに対する
+        無害なものになる。``auto_login`` を持たないブラウザなら no-op。
         """
         if not self.relogin_on_expiry:
             return
-        if not (self.login_url and self._browser.auth_user and self._browser.auth_pass):
+        browser = self.browser  # 文脈対応（worker or main）
+        if not (self.login_url and getattr(browser, "auth_user", "")
+                and getattr(browser, "auth_pass", "")):
             return
-        if not hasattr(self._browser, "auto_login"):
+        if not hasattr(browser, "auto_login"):
             return
         try:
-            ok = await self._browser.navigate(url, retries=self.navigation_retries)
+            ok = await browser.navigate(url, retries=self.navigation_retries)
             if not ok:
                 return
-            body = await self._browser.page.content()
-            final_url = self._browser.page.url
+            body = await browser.page.content()
+            final_url = browser.page.url
         except Exception:
             return
         status = None
         try:
-            network = getattr(self._browser, "network", None)
+            network = getattr(browser, "network", None)
             pair = network.latest_for_url(url, match_query=False) if network else None
             if pair:
                 status = (pair.get("response", {}) or {}).get("status")
         except Exception:
             status = None
         relogged = await self._relogin_if_needed(
-            status=status, final_url=final_url, body=body
+            browser, status=status, final_url=final_url, body=body
         )
         if relogged:
             # 認証済みコンテンツを攻撃で見るため、対象ページへ再遷移する。
             try:
-                await self._browser.navigate(url, retries=self.navigation_retries)
+                await browser.navigate(url, retries=self.navigation_retries)
             except Exception:
                 pass
 
@@ -3331,6 +3343,7 @@ class ScanEngine:
                 current_overrides = _FIELD_PAYLOAD_OVERRIDES.get() or {}
                 _override_token = _FIELD_PAYLOAD_OVERRIDES.set({**current_overrides, check_name: merged})
 
+            check_errored = False
             try:
                 before_count = len(self.all_findings)
                 findings = await scanner.scan_field(url, form_index, field, is_url_param)
@@ -3352,6 +3365,7 @@ class ScanEngine:
                     finding_count=len(new_findings),
                 )
             except Exception as e:
+                check_errored = True
                 self._record_scan_matrix(
                     url=url,
                     field_name=field_name,
@@ -3364,8 +3378,12 @@ class ScanEngine:
             finally:
                 if _override_token is not None:
                     _FIELD_PAYLOAD_OVERRIDES.reset(_override_token)
-                # この (url, field, check) 単位を完了として記録（再開時に飛ばす）
-                self._checkpoint_mark_done(url, field_name, form_index, check_name)
+                # この (url, field, check) 単位を完了として記録（再開時に飛ばす）。
+                # ただし例外で終わった単位は「未完了」のまま残し、再開時に再試行する
+                # （一時的なブラウザ/ネットワーク障害で取りこぼした検査を resume が
+                # 飛ばしてしまわないようにする — 再開の網羅性を守る）。
+                if not check_errored:
+                    self._checkpoint_mark_done(url, field_name, form_index, check_name)
 
         # CTF: check page source after all scanners ran on this field
         if self.flag_finder:
