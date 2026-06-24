@@ -51,6 +51,7 @@ python main.py scan http://127.0.0.1:8000 --checks xss sqli --no-monitor --llm n
 | `adaptive_payload.py` / `payload_gen.py` / `payload_encoder.py` / `payload_learning.py` | バイパス生成(LLM)・ペイロード生成/符号化/成功率学習 |
 | `context_mutator.py` | **LLM不要**の決定論的な文脈適応ミューテーション（反射文脈判定＋breakout合成、純粋関数） |
 | `payload_mutator.py` | **LLM不要**の決定論的ペイロード変異（シード→バイパス変種：二重エンコード/NULLバイト/バックスラッシュ/コメント挿入、純粋関数）。LLM版は `adaptive_payload.AdaptivePayloadEngine.mutate_payload` |
+| `waf_bypass.py` | **LLM不要**の純粋関数。WAF/入力フィルタ回避の種を生成。`crlf_bypass_variants`（メールヘッダ用の多様な改行表現：生CR/LF・%エンコード・二重エンコード・Unicode行区切り・オーバーロングUTF-8）と `upload_bypass_probes`（ファイルアップロード用：代替拡張子/大小混在/末尾ドット・空白/画像マジックバイトpolyglot/Content-Type偽装）。`mail_header`・`file_upload` スキャナが共有 |
 | `js_analysis.py` | **LLM不要**の純粋関数。JS ソースを静的解析し危険シンク×汚染ソースの source→sink を抽出（`js_static` スキャナの実体）。HTMLからのインラインscript抽出も提供 |
 | `auth_detect.py` | ログイン成否判定の純粋関数（フォーム残存/失敗文言/ログインページ離脱/MFA を統合）。`browser.auto_login` の判定を集約 |
 | `payload_importer.py` | 公開ペイロード集(PaTT/SecLists)の取込ツール（`import-payloads` サブコマンドの実体） |
@@ -58,7 +59,7 @@ python main.py scan http://127.0.0.1:8000 --checks xss sqli --no-monitor --llm n
 | `waf_detector.py` / `triage.py` | WAF 判定 / ペイロード未投入の高速分析 |
 | `agent_engine.py` / `llm_agent_browser.py` / `llm_web_tools.py` | Agent モード（LLM がブラウザ自律操作） |
 | `notification.py` | Slack/Webhook 送信（送信専用） |
-| `oob_email.py` / `oob_email_mcp.py` | OOB メール受信シンク＋自前 MCP（blind系の確証、`WSCAN_OOB_*`） |
+| `oob_email.py` / `oob_email_mcp.py` | OOB メール受信シンク＋自前 MCP（blind系の確証、`WSCAN_OOB_*`）。`engine.oob_sink`/`engine.new_oob_address()` 経由で `mail_header` が注入 Bcc の到達をポーリング確証する（未設定時はヒューリスティックのみ） |
 | `mfa.py` | MFA(2FA) ワンタイムコード取得。外部 MCP（TOTP=mcp-totp-authenticator / Email=mcp-email-server）を stdio クライアントで呼ぶ。抽出/判定は純粋関数、`WSCAN_MFA_*`。`BrowserManager.auto_login` のパスワード送信後に配線。Email は account_name 指定（CLI/UI/config/env）に加え、**動的 IMAP 認証情報**（`build_email_server_env` が `MCP_EMAIL_SERVER_*` を生成→spawn する MCP サブプロセスへ注入）で事前登録なしの任意アドレスも受信可 |
 | `request_logger.py` | 全 HTTP / ペイロードの JSONL 監査ログ |
 | `diff_scan.py` / `batch_runner.py` / `flow_runner.py` / `flow_recorder.py` / `manual_crawl.py` / `har_importer.py` | 差分/バッチ/フロー再生・記録/手動巡回/HAR取込。`manual_crawl.py` は (1)可視ブラウザ記録 (2)CDPスクリーンキャストによる遠隔操作（`stream=True`、`coerce_input_event`/`scale_point` は純粋関数）(3)URLリスト取込(`build_seed_payload`) を提供。遠隔操作のフレームは `MonitorServer.broadcast_ephemeral`（履歴非保存）で配信し、入力は WS `manual_crawl_input` で受ける |

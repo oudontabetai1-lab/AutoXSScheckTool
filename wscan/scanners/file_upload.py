@@ -5,6 +5,9 @@ Detects insecure file upload endpoints that allow:
   2. Unrestricted MIME type acceptance
   3. Double-extension bypass (shell.php.jpg)
   4. Path traversal in filename parameter
+  5. WAF/フィルタ・バイパス変種（代替拡張子・大文字小文字・末尾ドット/空白・
+     画像マジックバイト polyglot・Content-Type 偽装）。種は
+     :func:`wscan.waf_bypass.upload_bypass_probes` が決定論的に列挙する。
 """
 import io
 import re
@@ -14,26 +17,13 @@ from urllib.parse import urljoin
 import httpx
 
 from .base import BaseScanner, Finding
+from ..waf_bypass import UploadProbe, upload_bypass_probes
 
 if TYPE_CHECKING:
     from wscan.engine import ScanEngine
 
-# Minimal PHP webshell as bytes (the string "<?php echo shell_exec($_GET['c']);?>"
-# is clearly harmful only if served; here it functions as a probe to test whether
-# the server rejects it or stores it).
-_PHP_SHELL_CONTENT = b"<?php echo 'wscan-probe-' . phpversion(); ?>"
-_JSP_SHELL_CONTENT = b'<% out.print("wscan-probe-jsp"); %>'
-
-_PROBE_FILES: list[tuple[str, bytes, str]] = [
-    # (filename, content, description)
-    ("wscan_probe.php",         _PHP_SHELL_CONTENT, "PHP file upload"),
-    ("wscan_probe.php.jpg",     _PHP_SHELL_CONTENT, "double-extension PHP"),
-    ("wscan_probe.phtml",       _PHP_SHELL_CONTENT, "phtml extension bypass"),
-    ("wscan_probe.jsp",         _JSP_SHELL_CONTENT, "JSP file upload"),
-    ("../wscan_probe.php",      _PHP_SHELL_CONTENT, "path traversal in filename"),
-    ("wscan\x00probe.php",      _PHP_SHELL_CONTENT, "null byte extension bypass"),
-    ("wscan_probe.php%00.jpg",  _PHP_SHELL_CONTENT, "URL-encoded null byte bypass"),
-]
+# 投入するプローブファイル一式（WAF/フィルタ・バイパス変種を含む）。
+_PROBE_FILES: list[UploadProbe] = upload_bypass_probes()
 
 _UPLOAD_FIELD_NAMES = re.compile(
     r"(?:file|upload|image|photo|avatar|attachment|document|picture|media)",
@@ -62,9 +52,9 @@ class FileUploadScanner(BaseScanner):
         super().__init__(engine)
         self._checked_forms: set[tuple] = set()
 
-    def _probe_by_filename(self, filename: str) -> tuple[str, bytes, str] | None:
+    def _probe_by_filename(self, filename: str) -> UploadProbe | None:
         for probe in _PROBE_FILES:
-            if probe[0] == filename:
+            if probe.filename == filename:
                 return probe
         return None
 
@@ -90,6 +80,7 @@ class FileUploadScanner(BaseScanner):
         field_name: str,
         filename: str,
         content: bytes,
+        content_type: str = "image/jpeg",
     ) -> tuple[str, int, dict]:
         timeout = getattr(self.engine, "timeout", 15)
         client_kwargs: dict = {
@@ -105,7 +96,7 @@ class FileUploadScanner(BaseScanner):
             client_kwargs["headers"] = self.engine.auth_headers()
 
         request_kwargs = {
-            "files": {field_name: (filename, io.BytesIO(content), "image/jpeg")},
+            "files": {field_name: (filename, io.BytesIO(content), content_type)},
         }
         async with httpx.AsyncClient(**client_kwargs) as client:
             response = await client.post(url, **request_kwargs)
@@ -164,14 +155,15 @@ class FileUploadScanner(BaseScanner):
         findings: list[Finding] = []
         action_url = await self._form_action_url(url, form_index)
 
-        for filename, content, description in _PROBE_FILES:
+        for probe in _PROBE_FILES:
+            filename, description = probe.filename, probe.description
             # log_payload_test(field_name, payload, check_type, url)
             await self.log_payload_test(
                 field_name, filename, self.CHECK_TYPE, url
             )
             try:
                 body, status_code, pair = await self._upload_file(
-                    action_url, field_name, filename, content
+                    action_url, field_name, filename, probe.content, probe.content_type
                 )
 
             except Exception as exc:
@@ -208,15 +200,15 @@ class FileUploadScanner(BaseScanner):
         probe = self._probe_by_filename(finding.payload)
         if not probe:
             return None
-        filename, content, description = probe
         try:
             body, status_code, _pair = await self._upload_file(
                 finding.url,
                 finding.field_name,
-                filename,
-                content,
+                probe.filename,
+                probe.content,
+                probe.content_type,
             )
         except Exception:
             return None
-        classified = self._classify(body, status_code, filename, description)
+        classified = self._classify(body, status_code, probe.filename, probe.description)
         return bool(classified and classified[0] == finding.evidence_type)

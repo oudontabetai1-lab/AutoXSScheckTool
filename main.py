@@ -200,11 +200,11 @@ Examples:
         help="Custom payloads YAML file (see config/default_payloads.yaml for format)",
     )
     _ALL_CHECKS = [
-        # NOTE: "mail_header" は無効化済み（wscan/scanners/__init__.py 参照）。
-        # 確証にOOBメール受信が必要で黒boxでは実用的に検知できないため、
-        # 既定の選択肢から除外している。
+        # mail_header（IPA 1.8）は再有効化済み（wscan/scanners/__init__.py 参照）。
+        # 確証は OOB メール受信（env: WSCAN_OOB_*）で行い、未設定時も反射/エラー
+        # 漏えいのヒューリスティック検知が動く。
         "sqli", "xss", "dom_xss", "stored_xss", "os", "path_traversal",
-        "session", "csrf", "header_injection",
+        "session", "csrf", "header_injection", "mail_header",
         "clickjacking", "open_redirect", "ssti", "privesc",
         "cors", "info_disclosure", "host_header", "security_headers",
         "nosql", "deserialization", "request_smuggling", "ssrf",
@@ -2182,7 +2182,7 @@ async def run_setup(args):
         f"You are a web security scanner configuration assistant.\n"
         f"The user wants to scan this target: {description}\n\n"
         f"Available checks: sqli, xss, dom_xss, os, ssti, path_traversal, "
-        f"csrf, header_injection, open_redirect, clickjacking, session, privesc, "
+        f"csrf, header_injection, mail_header, open_redirect, clickjacking, session, privesc, "
         f"nosql, deserialization, ssrf, graphql, jwt, cms, xxe, ldap, file_upload, "
         f"race_condition, websocket\n\n"
         f"Based on the description, suggest the optimal scan command. "

