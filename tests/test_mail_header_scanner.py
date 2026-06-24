@@ -155,11 +155,13 @@ class _MailErrorBrowser:
     """投入値に応じて応答を変えるブラウザ。ベースライン誤検知ガードの検証用。
 
     ``always_error=True`` なら良性値でもメールエラーを返す（恒常エラー）。
-    そうでなければ良性値は正常応答、CRLF 注入値のみメールエラーを返す。
+    ``distinct_error=True`` なら良性値は汎用エラー、注入値は別の注入特有エラーを返す。
+    どちらでもなければ良性値は正常応答、CRLF 注入値のみメールエラーを返す。
     """
 
-    def __init__(self, always_error=False):
+    def __init__(self, always_error=False, distinct_error=False):
         self.always_error = always_error
+        self.distinct_error = distinct_error
         self.navigate = AsyncMock(return_value=True)
 
     async def screenshot_b64(self, label=""):
@@ -168,10 +170,14 @@ class _MailErrorBrowser:
     async def fill_and_submit_form(self, form_index, field_name, payload):
         err = "sendmail returned an error while sending mail"
         ok = "Thanks, your message was sent."
-        if self.always_error:
+        is_baseline = payload == "baseline@example.com"
+        if self.distinct_error:
+            # 良性値は汎用 SMTP error、注入値は別の注入特有エラー。
+            body = "SMTP error" if is_baseline else "invalid mail header detected"
+        elif self.always_error:
             body = err
         else:
-            body = err if payload != "baseline@example.com" else ok
+            body = err if not is_baseline else ok
         return body, {"request": {}, "response": {"body": body}}
 
 
@@ -197,6 +203,19 @@ class MailErrorBaselineGuardTests(unittest.TestCase):
         )
         errs = [f for f in findings if f.evidence_type == "mail_header_error"]
         self.assertEqual(errs, [])
+
+    def test_injection_specific_error_flagged_despite_baseline_error(self):
+        # ベースラインが汎用 SMTP error でも、注入特有の別エラーは取りこぼさない。
+        scanner = MailHeaderInjectionScanner(
+            _Engine(_MailErrorBrowser(distinct_error=True))
+        )
+        findings = _run(
+            scanner.scan_field(
+                "http://t.test/contact", 0, {"name": "email"}, is_url_param=False
+            )
+        )
+        errs = [f for f in findings if f.evidence_type == "mail_header_error"]
+        self.assertEqual(len(errs), 1)
 
 
 class RawSubmissionTests(unittest.TestCase):

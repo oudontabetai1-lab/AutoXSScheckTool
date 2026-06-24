@@ -177,10 +177,12 @@ class MailHeaderInjectionScanner(BaseScanner):
         is_url_param: bool,
     ) -> list[Finding]:
         """注入した CR/LF + ヘッダの反射、またはメールエラー漏えいを検知する。"""
-        # ベースライン: CRLF を含まない良性値を投入し、メールエラーが常時出るか観測。
-        # メールサーバ停止や恒常的な「SMTP error」等は注入と無関係なので、これと
-        # 同じエラーは Check 1 で誤検知として除外する（誤検知ゼロ優先）。
-        baseline_error = await self._baseline_mail_error(
+        # ベースライン: CRLF を含まない良性値を投入し、常時出るメールエラーの
+        # *パターン集合* を観測。メールサーバ停止や恒常的な「SMTP error」等は注入と
+        # 無関係なので、ベースラインと同じパターンは除外する。一方、ベースラインに
+        # 無い注入特有のエラー（例: invalid mail header）が新たに出た場合は記録する
+        # （恒常エラーのある環境でも取りこぼさない）。
+        baseline_patterns = await self._baseline_mail_error_patterns(
             url, form_index, field_name, is_url_param
         )
 
@@ -193,9 +195,10 @@ class MailHeaderInjectionScanner(BaseScanner):
             await asyncio.sleep(0.2 * self.sleep_factor)
 
             # Check 1: mail-related error message in response (leaks unsanitised input)。
-            # ベースラインでも同種のエラーが出る場合は注入起因でないため記録しない。
-            match = self.check_response_for_patterns(source, MAIL_ERROR_PATTERNS)
-            if match and not baseline_error:
+            # ベースラインに無いエラーパターンが新たに出たときのみ記録する。
+            new_patterns = self._matched_mail_error_patterns(source) - baseline_patterns
+            if new_patterns:
+                match = self.check_response_for_patterns(source, list(new_patterns))
                 finding = await self.record_finding(
                     url=url,
                     field_name=field_name,
@@ -229,18 +232,28 @@ class MailHeaderInjectionScanner(BaseScanner):
 
         return []
 
-    async def _baseline_mail_error(
+    @staticmethod
+    def _matched_mail_error_patterns(body: str) -> set:
+        """応答本文にマッチした ``MAIL_ERROR_PATTERNS`` の集合を返す（純粋）。"""
+        out: set = set()
+        for pat in MAIL_ERROR_PATTERNS:
+            if re.search(pat, body or "", re.IGNORECASE | re.DOTALL):
+                out.add(pat)
+        return out
+
+    async def _baseline_mail_error_patterns(
         self,
         url: str,
         form_index: int,
         field_name: str,
         is_url_param: bool,
-    ) -> Optional[str]:
-        """CRLF を含まない良性値を投入し、恒常的なメールエラーの有無を返す。
+    ) -> set:
+        """CRLF を含まない良性値を投入し、恒常的に出るメールエラーのパターン集合を返す。
 
-        返り値が非 None なら、その応答は注入と無関係にメールエラーを含むので、
-        Check 1（mail_header_error）はその種のエラーを記録しない。失敗時は None
-        （= ベースライン不明）として従来挙動に倣う。
+        この集合に含まれるパターンは注入と無関係（サーバ停止・恒常エラー等）なので
+        Check 1 で除外する。一方この集合に**無い**パターンが注入時に新たに出れば、
+        それは注入特有のエラーとして記録対象になる。失敗時は空集合（= 既知の恒常
+        エラー無し）として従来挙動に倣う。
         """
         try:
             await self.log_payload_test(
@@ -250,10 +263,10 @@ class MailHeaderInjectionScanner(BaseScanner):
                 url, form_index, field_name, "baseline@example.com", is_url_param
             )
             await asyncio.sleep(0.2 * self.sleep_factor)
-            return self.check_response_for_patterns(source, MAIL_ERROR_PATTERNS)
+            return self._matched_mail_error_patterns(source)
         except Exception as exc:
             self._note_wave_degradation("mail_baseline", exc)
-            return None
+            return set()
 
     async def _scan_oob(
         self,
