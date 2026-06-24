@@ -533,6 +533,13 @@ class MailHeaderInjectionScanner(BaseScanner):
                     if (el.checked) fields[name] = el.value || 'on';
                     return;
                 }
+                // hidden は実値（CSRF トークン等）または意図的な空（ハニーポット/
+                // anti-bot）なので、デフォルト補完せず値をそのまま保持する。空欄を
+                // 'test' で埋めるとハニーポット検知でサーバに拒否され偽陰性になる。
+                if (type === 'hidden') {
+                    fields[name] = el.value;
+                    return;
+                }
                 let v = el.value;
                 if (!v) {
                     v = (type === 'email' || /mail/.test(name.toLowerCase()))
