@@ -265,6 +265,25 @@ body {
 }
 .sitemap-legend { margin-left:auto; display:flex; gap:6px; flex-wrap:wrap; }
 .sm-dot { width:8px; height:8px; border-radius:50%; display:inline-block; margin-right:4px; }
+/* 検査前レビュー: 画面遷移図の上に出すアクションバー（巡回レビューON時のみ表示） */
+.crawl-review-bar {
+  display:none; flex-shrink:0; align-items:center; gap:10px; flex-wrap:wrap;
+  padding:8px 12px; z-index:4;
+  background:linear-gradient(90deg, rgba(56,139,253,.20), rgba(56,139,253,.05));
+  border-bottom:1px solid var(--accent);
+}
+.crawl-review-bar.active { display:flex; }
+.crb-badge { background:var(--accent); color:#fff; border-radius:999px; padding:4px 12px;
+  font-size:.74rem; font-weight:700; white-space:nowrap; }
+.crb-text { color:var(--text); font-size:.82rem; }
+.crb-text strong { color:var(--accent); }
+.crb-actions { margin-left:auto; display:flex; gap:8px; flex-wrap:wrap; }
+.crb-btn { border-radius:6px; padding:6px 14px; font-size:.8rem; font-weight:700; cursor:pointer;
+  border:1px solid var(--border); background:var(--surface2); color:var(--text); }
+.crb-btn:hover { border-color:var(--accent); }
+.crb-btn.detail { background:rgba(56,139,253,.15); color:var(--accent); border-color:var(--accent); }
+.crb-btn.start { background:var(--accent); color:#fff; border:none; }
+.crb-btn.cancel { background:var(--surface2); color:var(--text-muted); }
 .sm-tooltip {
   position:absolute;
   z-index:3;
@@ -1723,6 +1742,16 @@ https://example.com/search?q=test" style="width:100%;font-family:monospace;font-
             <span class="sitemap-pill"><span class="sm-dot" style="background:#f85149"></span>検出</span>
           </div>
         </div>
+        <!-- 検査前レビュー: 遷移図を見ながら検査開始/再巡回/中止を選ぶバー -->
+        <div class="crawl-review-bar" id="crawlReviewBar">
+          <span class="crb-badge">🔍 巡回完了</span>
+          <span class="crb-text">遷移図を確認して検査を開始してください — <strong id="crawlReviewBarCount">0</strong> 画面</span>
+          <div class="crb-actions">
+            <button class="crb-btn cancel" onclick="sendCrawlReview('cancel')">⏹ 中止</button>
+            <button class="crb-btn detail" onclick="openCrawlReviewDetails()">🔁 再巡回・URL追加・シナリオ…</button>
+            <button class="crb-btn start" onclick="sendCrawlReview('continue')">✅ この内容で検査開始</button>
+          </div>
+        </div>
         <div class="sitemap-canvas" id="sitemapCanvas">
           <svg id="sitemapSvg" style="width:100%;height:100%"></svg>
           <div class="sitemap-explorer" id="sitemapExplorer">
@@ -1858,9 +1887,10 @@ https://example.com/search?q=test" style="width:100%;font-family:monospace;font-
   <div class="plan-modal" style="max-width:980px">
     <div class="plan-modal-header">
       <div>
-        <h2>🔍 巡回完了 — 検査前レビュー</h2>
+        <h2>🔍 巡回結果の補完 — 再巡回・URL追加・シナリオ</h2>
         <div class="pm-subtitle">
-          発見された画面を確認してください。不足があれば「再巡回」または「手動巡回JSONを追加」で補完できます。
+          画面の確認は遷移図（巡回マップ）で行えます。ここでは不足の補完だけを行います
+          — 「再巡回」「手動巡回JSONを追加」「手動シナリオ作成」。そのまま検査するなら遷移図バーの「検査開始」へ。
         </div>
       </div>
     </div>
@@ -3675,8 +3705,8 @@ function handleEvent(event) {
       break;
 
     case 'crawl_review':
-      showCrawlReviewModal(data.pages || []);
-      addEventLog('status', `巡回完了: ${(data.pages||[]).length} 画面 — レビューしてください`);
+      beginCrawlReview(data.pages || []);
+      addEventLog('status', `巡回完了: ${(data.pages||[]).length} 画面 — 遷移図で確認してください`);
       break;
 
     case 'intervention_state':
@@ -4216,18 +4246,51 @@ function closeInteractiveModals() {
     const el = document.getElementById(id);
     if (el) el.classList.remove('active');
   });
+  const bar = document.getElementById('crawlReviewBar');
+  if (bar) bar.classList.remove('active');
 }
 
-function showCrawlReviewModal(pages) {
+// 検査前レビューの本体: 画面遷移図（巡回マップ）上でレビューする。
+// 以前のフラットURL一覧ポップアップは自動表示しない（「再巡回・URL追加・シナリオ」は
+// バーの詳細ボタンから openCrawlReviewDetails() で必要なときだけ開く）。
+function beginCrawlReview(pages) {
   _crawlReviewPages = Array.isArray(pages) ? pages.slice() : [];
+  // 新しいレビューを開始するたびに、詳細パネルの一時状態（前スキャン/前イテレーションの
+  // 手動シナリオ・追加URL・手動巡回ファイル・フィルタ）をリセットする。これを怠ると、
+  // 詳細パネルを開かずバーから直接「検査開始」したとき sendCrawlReview() が古い flows を
+  // 送ってしまい、意図しないナビゲーション/入力ステップが新スキャンで再実行される。
+  resetCrawlReviewDetailState();
+  const cnt = document.getElementById('crawlReviewBarCount');
+  if (cnt) cnt.textContent = _crawlReviewPages.length;
+  const bar = document.getElementById('crawlReviewBar');
+  if (bar) bar.classList.add('active');
+  // 遷移図タブへ切り替えて全体像を見せる
+  switchCenterTab('sitemap', document.getElementById('ctab-sitemap'));
+}
+
+// 詳細パネルの一時入力状態をクリアする（新規レビュー開始時に一度だけ呼ぶ）。
+function resetCrawlReviewDetailState() {
+  reviewFlows = [];
+  if (typeof renderReviewFlows === 'function') renderReviewFlows();
+  const extra = document.getElementById('crawlReviewExtraUrls'); if (extra) extra.value = '';
+  const manual = document.getElementById('crawlReviewManualFile'); if (manual) manual.value = '';
+  const filt = document.getElementById('crawlReviewFilter'); if (filt) filt.value = '';
+}
+
+// バーの「再巡回・URL追加・シナリオ」から、補完用の詳細パネル（旧レビューモーダル）を開く。
+function openCrawlReviewDetails() {
+  showCrawlReviewModal(_crawlReviewPages);
+}
+
+// 詳細パネルを開く（表示更新のみ）。一時状態のリセットは beginCrawlReview 側で行うので
+// ここではクリアしない＝同一レビュー中に開き直しても作成中のシナリオ/入力を保持する。
+function showCrawlReviewModal(pages) {
+  if (Array.isArray(pages)) _crawlReviewPages = pages.slice();
   document.getElementById('crawlReviewCount').textContent = _crawlReviewPages.length;
-  document.getElementById('crawlReviewFilter').value = '';
-  document.getElementById('crawlReviewExtraUrls').value = '';
   const manualEl = document.getElementById('crawlReviewManualFile');
   if (manualEl && !manualEl.value) {
     manualEl.value = document.getElementById('cfgManualCrawlFile')?.value || '';
   }
-  reviewFlows = [];
   renderReviewFlows();
   renderCrawlReviewList();
   document.getElementById('crawlReviewOverlay').classList.add('active');
@@ -4277,6 +4340,8 @@ function sendCrawlReview(command) {
     flows: reviewFlows.map(f => ({name: f.name, steps: (f.steps || []).map(s => Object.assign({}, s))})),
   }));
   document.getElementById('crawlReviewOverlay').classList.remove('active');
+  const reviewBar = document.getElementById('crawlReviewBar');
+  if (reviewBar) reviewBar.classList.remove('active');
   const label = command === 'recrawl' ? '再巡回中...' :
                 command === 'cancel'  ? '検査を中止しました' :
                 '検査を続行します';
