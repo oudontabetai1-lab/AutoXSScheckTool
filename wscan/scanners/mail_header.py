@@ -136,11 +136,6 @@ class MailHeaderInjectionScanner(BaseScanner):
     CHECK_TYPE = "mail_header"
     SEVERITY = "high"
 
-    def __init__(self, engine: "ScanEngine"):
-        super().__init__(engine)
-        # (url, form_index) → 抽出済みフォーム情報（action/method/fields）のキャッシュ。
-        self._form_cache: dict = {}
-
     async def scan_field(
         self,
         url: str,
@@ -412,6 +407,13 @@ class MailHeaderInjectionScanner(BaseScanner):
 
         フォーム情報を取得できない場合は ``None`` を返し、呼び出し側が従来の
         ブラウザ経路へフォールバックできるようにする。
+
+        フォームは**毎回再抽出**する（キャッシュしない）。ワンタイム CSRF/nonce な
+        hidden 値を payload 間で使い回すとサーバに拒否され検出を逃すため。さらに、
+        認証セッションは Playwright ブラウザコンテキスト側に存在し得るので、その
+        cookie を httpx リクエストへ引き継ぐ（``engine.cookies`` だけでは
+        ``--login-url`` / ``--cookie-file`` 由来のセッションが抜け落ち、未認証で
+        ログインへリダイレクトされてしまう）。
         """
         if is_url_param:
             parts = urlsplit(url)
@@ -434,8 +436,16 @@ class MailHeaderInjectionScanner(BaseScanner):
         }
         if hasattr(self.engine, "httpx_client_kwargs"):
             client_kwargs = self.engine.httpx_client_kwargs(**client_kwargs)
+        # cookie はブラウザコンテキストと engine.cookies を統合して一元化する。
+        # auth_headers の Cookie ヘッダと二重化しないよう include_cookie=False で取得。
         if hasattr(self.engine, "auth_headers"):
-            client_kwargs["headers"] = self.engine.auth_headers()
+            try:
+                client_kwargs["headers"] = self.engine.auth_headers(include_cookie=False)
+            except TypeError:
+                client_kwargs["headers"] = self.engine.auth_headers()
+        cookies = await self._collect_cookies()
+        if cookies:
+            client_kwargs["cookies"] = cookies
 
         async with httpx.AsyncClient(**client_kwargs) as client:
             if method == "GET":
@@ -448,6 +458,33 @@ class MailHeaderInjectionScanner(BaseScanner):
             "response": {"status": resp.status_code, "body": body[:2000]},
         }
         return body, pair
+
+    async def _collect_cookies(self) -> dict:
+        """raw httpx 用の cookie を統合して返す。
+
+        ``engine.cookies``（``--cookie`` の明示文字列）に加え、Playwright ブラウザ
+        コンテキストの cookie（``--login-url`` / ``--cookie-file`` 由来のセッション）を
+        重ねる（後者を優先）。取得不能・未配線なら空 dict。
+        """
+        cookies: dict = {}
+        # ① engine.cookies（"a=b; c=d" 形式）をパース
+        raw = getattr(self.engine, "cookies", "") or ""
+        for part in raw.split(";"):
+            if "=" in part:
+                k, v = part.split("=", 1)
+                k = k.strip()
+                if k:
+                    cookies[k] = v.strip()
+        # ② ブラウザコンテキストのセッション cookie（authoritative）
+        try:
+            context = self.browser.page.context
+            for c in await context.cookies():
+                name = c.get("name")
+                if name:
+                    cookies[name] = c.get("value", "")
+        except Exception:
+            pass
+        return cookies
 
     # フォーム情報を抽出する JS（action 絶対URL / method / 既定値つきフィールド辞書）。
     _EXTRACT_FORM_JS = """
@@ -485,16 +522,17 @@ class MailHeaderInjectionScanner(BaseScanner):
     """
 
     async def _extract_form(self, url: str, form_index: int) -> Optional[dict]:
-        """対象フォームの action/method/フィールド既定値を抽出する（キャッシュ付き）。"""
-        key = (url, form_index)
-        if key in self._form_cache:
-            return self._form_cache[key]
+        """対象フォームの action/method/フィールド既定値を**毎回**抽出する。
+
+        キャッシュしないのは、ワンタイム CSRF/nonce な hidden 値を payload 間で
+        使い回すとサーバに拒否され検出を逃すため。投入直前に navigate して
+        新鮮なトークンを取り込む（同時に同セッションの cookie が
+        ``_collect_cookies`` で送出され、トークンと cookie が整合する）。
+        """
         await self.browser.navigate(url)
         result = await self.browser.page.evaluate(self._EXTRACT_FORM_JS, [form_index])
         if not result or not result.get("action"):
-            self._form_cache[key] = None
             return None
-        self._form_cache[key] = result
         return result
 
     async def _apply_payload(

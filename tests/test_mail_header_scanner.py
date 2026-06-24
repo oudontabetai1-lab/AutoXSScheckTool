@@ -236,6 +236,41 @@ class RawSubmissionTests(unittest.TestCase):
         browser.fill_and_submit_form.assert_called()
 
 
+class _CookieBrowser:
+    """``page.context.cookies()`` でセッション cookie を返すブラウザスタブ。"""
+
+    def __init__(self, ctx_cookies):
+        ctx = type("Ctx", (), {})()
+        async def _cookies():
+            return ctx_cookies
+        ctx.cookies = _cookies
+        page = type("Page", (), {})()
+        page.context = ctx
+        self.page = page
+
+    async def screenshot_b64(self, label=""):
+        return ""
+
+
+class CollectCookiesTests(unittest.TestCase):
+    def test_browser_session_cookies_merge_and_override(self):
+        engine = _Engine(_CookieBrowser([
+            {"name": "sid", "value": "browser"},
+            {"name": "b", "value": "2"},
+        ]))
+        engine.cookies = "sid=explicit; a=1"
+        scanner = MailHeaderInjectionScanner(engine)
+        cookies = _run(scanner._collect_cookies())
+        # engine.cookies の値はブラウザセッション cookie に上書きされる。
+        self.assertEqual(cookies["sid"], "browser")
+        self.assertEqual(cookies["a"], "1")
+        self.assertEqual(cookies["b"], "2")
+
+    def test_no_cookies_returns_empty(self):
+        scanner = MailHeaderInjectionScanner(_Engine(_Browser("x")))
+        self.assertEqual(_run(scanner._collect_cookies()), {})
+
+
 class OOBConfirmationTests(unittest.TestCase):
     def setUp(self):
         # ポーリング待ちをゼロにしてテストを即時化する。
