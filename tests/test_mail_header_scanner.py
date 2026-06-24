@@ -199,6 +199,43 @@ class MailErrorBaselineGuardTests(unittest.TestCase):
         self.assertEqual(errs, [])
 
 
+class RawSubmissionTests(unittest.TestCase):
+    """生 HTTP 送信を優先し、不能時のみブラウザ DOM 送信へフォールバックする。"""
+
+    def test_raw_path_preferred_over_dom(self):
+        body = "To: x\r\nCc: attacker@evil.example.com"
+        browser = _Browser(body)
+        scanner = MailHeaderInjectionScanner(_Engine(browser))
+        scanner._apply_payload_raw = AsyncMock(
+            return_value=(body, {"request": {}, "response": {"body": body}})
+        )
+        findings = _run(
+            scanner.scan_field(
+                "http://t.test/contact", 0, {"name": "email"}, is_url_param=False
+            )
+        )
+        self.assertTrue(
+            any(f.evidence_type == "mail_header_reflected" for f in findings)
+        )
+        # CRLF を落とす DOM 送信は使われないこと。
+        browser.fill_and_submit_form.assert_not_called()
+
+    def test_fallback_to_dom_when_raw_unavailable(self):
+        body = "To: x\r\nCc: attacker@evil.example.com"
+        browser = _Browser(body)
+        scanner = MailHeaderInjectionScanner(_Engine(browser))
+        scanner._apply_payload_raw = AsyncMock(side_effect=RuntimeError("no page"))
+        findings = _run(
+            scanner.scan_field(
+                "http://t.test/contact", 0, {"name": "email"}, is_url_param=False
+            )
+        )
+        self.assertTrue(
+            any(f.evidence_type == "mail_header_reflected" for f in findings)
+        )
+        browser.fill_and_submit_form.assert_called()
+
+
 class OOBConfirmationTests(unittest.TestCase):
     def setUp(self):
         # ポーリング待ちをゼロにしてテストを即時化する。

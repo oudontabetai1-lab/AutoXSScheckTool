@@ -19,6 +19,9 @@ CR/LF が単純除去される素朴な防御に対しては、:func:`wscan.waf_
 import asyncio
 import re
 from typing import TYPE_CHECKING, Optional
+from urllib.parse import urlsplit, urlunsplit, parse_qsl
+
+import httpx
 
 from .base import BaseScanner, Finding
 from ..waf_bypass import crlf_bypass_variants
@@ -133,6 +136,11 @@ class MailHeaderInjectionScanner(BaseScanner):
     CHECK_TYPE = "mail_header"
     SEVERITY = "high"
 
+    def __init__(self, engine: "ScanEngine"):
+        super().__init__(engine)
+        # (url, form_index) → 抽出済みフォーム情報（action/method/fields）のキャッシュ。
+        self._form_cache: dict = {}
+
     async def scan_field(
         self,
         url: str,
@@ -184,7 +192,7 @@ class MailHeaderInjectionScanner(BaseScanner):
         for payload in reflection_payloads():
             await self.log_payload_test(field_name, payload, "mail_header", url)
 
-            source, pair = await self._apply_payload(
+            source, pair = await self._submit_probe(
                 url, form_index, field_name, payload, is_url_param
             )
             await asyncio.sleep(0.2 * self.sleep_factor)
@@ -243,7 +251,7 @@ class MailHeaderInjectionScanner(BaseScanner):
             await self.log_payload_test(
                 field_name, "baseline@example.com", "mail_header_baseline", url
             )
-            source, _pair = await self._apply_payload(
+            source, _pair = await self._submit_probe(
                 url, form_index, field_name, "baseline@example.com", is_url_param
             )
             await asyncio.sleep(0.2 * self.sleep_factor)
@@ -287,7 +295,7 @@ class MailHeaderInjectionScanner(BaseScanner):
                 break
             payload, desc = variants[i]
             await self.log_payload_test(field_name, payload, "mail_header", url)
-            _source, pair = await self._apply_payload(
+            _source, pair = await self._submit_probe(
                 url, form_index, field_name, payload, is_url_param
             )
             attempts.append(
@@ -363,6 +371,131 @@ class MailHeaderInjectionScanner(BaseScanner):
             if _time.time() >= deadline:
                 return None
             _time.sleep(max(0.5, OOB_POLL_INTERVAL))
+
+    async def _submit_probe(
+        self,
+        url: str,
+        form_index: int,
+        field_name: str,
+        payload: str,
+        is_url_param: bool,
+    ) -> tuple[str, dict]:
+        """注入プローブを投入する。生 HTTP 経路を優先し、不能ならブラウザへ。
+
+        ブラウザの単一行 ``<input>`` は値設定時に CR/LF を除去し、``type=email``
+        等は制約検証で送信自体を弾く。そのため CRLF を保つには DOM を介さない
+        生 HTTP 送信が必要（メールヘッダ注入が実際にサーバへ到達する経路）。
+        フォーム抽出や送信が失敗した場合のみ従来のブラウザ経由へフォールバックする。
+        """
+        try:
+            raw = await self._apply_payload_raw(
+                url, form_index, field_name, payload, is_url_param
+            )
+        except Exception as exc:
+            raw = None
+            self._note_wave_degradation("mail_raw_submit", exc)
+        if raw is not None:
+            return raw
+        return await self._apply_payload(
+            url, form_index, field_name, payload, is_url_param
+        )
+
+    async def _apply_payload_raw(
+        self,
+        url: str,
+        form_index: int,
+        field_name: str,
+        payload: str,
+        is_url_param: bool,
+    ) -> Optional[tuple[str, dict]]:
+        """DOM を介さない生 HTTP 送信で CRLF を保ったままプローブを投入する。
+
+        フォーム情報を取得できない場合は ``None`` を返し、呼び出し側が従来の
+        ブラウザ経路へフォールバックできるようにする。
+        """
+        if is_url_param:
+            parts = urlsplit(url)
+            params = dict(parse_qsl(parts.query, keep_blank_values=True))
+            params[field_name] = payload
+            action = urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))
+            method, data = "GET", params
+        else:
+            form = await self._extract_form(url, form_index)
+            if not form:
+                return None
+            action = form["action"]
+            method = form["method"]
+            data = dict(form["fields"])
+            data[field_name] = payload
+
+        client_kwargs: dict = {
+            "timeout": getattr(self.engine, "timeout", 15),
+            "follow_redirects": True,
+        }
+        if hasattr(self.engine, "httpx_client_kwargs"):
+            client_kwargs = self.engine.httpx_client_kwargs(**client_kwargs)
+        if hasattr(self.engine, "auth_headers"):
+            client_kwargs["headers"] = self.engine.auth_headers()
+
+        async with httpx.AsyncClient(**client_kwargs) as client:
+            if method == "GET":
+                resp = await client.get(action, params=data)
+            else:
+                resp = await client.post(action, data=data)
+        body = resp.text
+        pair = {
+            "request": {"url": action, "method": method, "payload": payload},
+            "response": {"status": resp.status_code, "body": body[:2000]},
+        }
+        return body, pair
+
+    # フォーム情報を抽出する JS（action 絶対URL / method / 既定値つきフィールド辞書）。
+    _EXTRACT_FORM_JS = """
+        ([formIndex]) => {
+            const form = document.querySelectorAll('form')[formIndex];
+            if (!form) return null;
+            const fields = {};
+            form.querySelectorAll('input, textarea, select').forEach(el => {
+                const name = el.name || el.id;
+                if (!name) return;
+                const type = (el.type || 'text').toLowerCase();
+                if (['submit','button','reset','image','file'].includes(type)) return;
+                if (el.tagName === 'SELECT') {
+                    const opts = Array.from(el.options).filter(o => o.value !== '');
+                    fields[name] = el.value || (opts.length ? opts[0].value : '');
+                    return;
+                }
+                if (type === 'checkbox' || type === 'radio') {
+                    if (el.checked) fields[name] = el.value || 'on';
+                    return;
+                }
+                let v = el.value;
+                if (!v) {
+                    v = (type === 'email' || /mail/.test(name.toLowerCase()))
+                        ? 'tester@example.com' : 'test';
+                }
+                fields[name] = v;
+            });
+            return {
+                action: form.action || window.location.href,
+                method: (form.method || 'GET').toUpperCase(),
+                fields: fields
+            };
+        }
+    """
+
+    async def _extract_form(self, url: str, form_index: int) -> Optional[dict]:
+        """対象フォームの action/method/フィールド既定値を抽出する（キャッシュ付き）。"""
+        key = (url, form_index)
+        if key in self._form_cache:
+            return self._form_cache[key]
+        await self.browser.navigate(url)
+        result = await self.browser.page.evaluate(self._EXTRACT_FORM_JS, [form_index])
+        if not result or not result.get("action"):
+            self._form_cache[key] = None
+            return None
+        self._form_cache[key] = result
+        return result
 
     async def _apply_payload(
         self,
