@@ -500,16 +500,30 @@ class MailHeaderInjectionScanner(BaseScanner):
         return cookies
 
     # フォーム情報を抽出する JS（action 絶対URL / method / 既定値つきフィールド辞書）。
+    # 名前付き submit/image ボタンは **先頭の 1 つだけ** name=value で含める。バック
+    # エンドが送信ボタンのパラメータ（例: send=Send）でメール送信を分岐することがあり、
+    # これを落とすと反射/OOB 検査が実際の脆弱性を取りこぼすため（ブラウザは押した
+    # ボタン 1 つだけ送るので先頭のみ採用する）。reset / type=button / file は非送信の
+    # ため除外する。
     _EXTRACT_FORM_JS = """
         ([formIndex]) => {
             const form = document.querySelectorAll('form')[formIndex];
             if (!form) return null;
             const fields = {};
-            form.querySelectorAll('input, textarea, select').forEach(el => {
+            let submitAdded = false;
+            form.querySelectorAll('input, textarea, select, button').forEach(el => {
                 const name = el.name || el.id;
                 if (!name) return;
-                const type = (el.type || 'text').toLowerCase();
-                if (['submit','button','reset','image','file'].includes(type)) return;
+                const tag = el.tagName.toLowerCase();
+                const type = (el.type || (tag === 'button' ? 'submit' : 'text')).toLowerCase();
+                if (type === 'submit' || type === 'image') {
+                    if (!submitAdded) {
+                        fields[name] = el.value || '';
+                        submitAdded = true;
+                    }
+                    return;
+                }
+                if (['button', 'reset', 'file'].includes(type)) return;
                 if (el.tagName === 'SELECT') {
                     const opts = Array.from(el.options).filter(o => o.value !== '');
                     fields[name] = el.value || (opts.length ? opts[0].value : '');
