@@ -450,16 +450,18 @@ class MailHeaderInjectionScanner(BaseScanner):
         }
         if hasattr(self.engine, "httpx_client_kwargs"):
             client_kwargs = self.engine.httpx_client_kwargs(**client_kwargs)
-        # cookie はブラウザコンテキストと engine.cookies を統合して一元化する。
-        # auth_headers の Cookie ヘッダと二重化しないよう include_cookie=False で取得。
+        # cookie はブラウザコンテキストと engine.cookies を統合し、**スコープ
+        # （domain/path）を保持した cookie jar** として渡す。素の name/value 辞書に
+        # すると、フォーム action が別オリジンを指す場合に httpx が対象セッション
+        # cookie を第三者へ送ってしまう（漏洩）。jar なら httpx がリクエスト URL に
+        # マッチする cookie だけを送る。auth_headers の Cookie ヘッダと二重化しない
+        # よう include_cookie=False で取得。
         if hasattr(self.engine, "auth_headers"):
             try:
                 client_kwargs["headers"] = self.engine.auth_headers(include_cookie=False)
             except TypeError:
                 client_kwargs["headers"] = self.engine.auth_headers()
-        cookies = await self._collect_cookies()
-        if cookies:
-            client_kwargs["cookies"] = cookies
+        client_kwargs["cookies"] = await self._collect_cookies()
 
         async with httpx.AsyncClient(**client_kwargs) as client:
             if method == "GET":
@@ -479,32 +481,41 @@ class MailHeaderInjectionScanner(BaseScanner):
         }
         return body, pair
 
-    async def _collect_cookies(self) -> dict:
-        """raw httpx 用の cookie を統合して返す。
+    async def _collect_cookies(self) -> "httpx.Cookies":
+        """raw httpx 用の **スコープ付き** cookie jar を返す。
 
-        ``engine.cookies``（``--cookie`` の明示文字列）に加え、Playwright ブラウザ
-        コンテキストの cookie（``--login-url`` / ``--cookie-file`` 由来のセッション）を
-        重ねる（後者を優先）。取得不能・未配線なら空 dict。
+        ``engine.cookies``（``--cookie`` の明示文字列。scan 対象ホストにスコープ）に
+        加え、Playwright ブラウザコンテキストの cookie（``--login-url`` /
+        ``--cookie-file`` 由来）を *元の domain/path を保持したまま* 重ねる。
+        httpx はリクエスト URL にマッチする cookie だけを送るため、別オリジンの
+        フォーム action へ対象セッション cookie を漏らさない。取得不能・未配線なら
+        空 jar。
         """
-        cookies: dict = {}
-        # ① engine.cookies（"a=b; c=d" 形式）をパース
+        jar = httpx.Cookies()
+        target_host = urlsplit(getattr(self.engine, "target_url", "") or "").hostname or ""
+        # ① engine.cookies（"a=b; c=d" 形式）。対象ホストにスコープする。
         raw = getattr(self.engine, "cookies", "") or ""
-        for part in raw.split(";"):
-            if "=" in part:
-                k, v = part.split("=", 1)
-                k = k.strip()
-                if k:
-                    cookies[k] = v.strip()
-        # ② ブラウザコンテキストのセッション cookie（authoritative）
+        if target_host:
+            for part in raw.split(";"):
+                if "=" in part:
+                    k, v = part.split("=", 1)
+                    k = k.strip()
+                    if k:
+                        jar.set(k, v.strip(), domain=target_host, path="/")
+        # ② ブラウザコンテキストの cookie（domain/path を保持して優先）。
         try:
             context = self.browser.page.context
             for c in await context.cookies():
                 name = c.get("name")
-                if name:
-                    cookies[name] = c.get("value", "")
+                if not name:
+                    continue
+                domain = c.get("domain") or target_host
+                if not domain:
+                    continue
+                jar.set(name, c.get("value", ""), domain=domain, path=c.get("path") or "/")
         except Exception:
             pass
-        return cookies
+        return jar
 
     # フォーム情報を抽出する JS（action 絶対URL / method / 既定値つきフィールド辞書）。
     # 名前付き submit/image ボタンは **先頭の 1 つだけ** name=value で含める。バック

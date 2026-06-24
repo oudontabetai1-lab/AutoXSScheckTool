@@ -333,22 +333,74 @@ class _CookieBrowser:
 
 
 class CollectCookiesTests(unittest.TestCase):
-    def test_browser_session_cookies_merge_and_override(self):
-        engine = _Engine(_CookieBrowser([
-            {"name": "sid", "value": "browser"},
-            {"name": "b", "value": "2"},
-        ]))
-        engine.cookies = "sid=explicit; a=1"
-        scanner = MailHeaderInjectionScanner(engine)
-        cookies = _run(scanner._collect_cookies())
-        # engine.cookies の値はブラウザセッション cookie に上書きされる。
-        self.assertEqual(cookies["sid"], "browser")
-        self.assertEqual(cookies["a"], "1")
-        self.assertEqual(cookies["b"], "2")
+    """raw httpx 用 cookie jar が domain/path スコープを保持することを検証。"""
 
-    def test_no_cookies_returns_empty(self):
-        scanner = MailHeaderInjectionScanner(_Engine(_Browser("x")))
-        self.assertEqual(_run(scanner._collect_cookies()), {})
+    def _echo_app(self):
+        from fastapi import FastAPI, Request
+
+        app = FastAPI()
+
+        @app.post("/contact")
+        async def contact(request: Request):
+            return {"cookies": dict(request.cookies)}
+
+        return app
+
+    def _scanner(self, app, ctx_cookies, engine_cookie="", target="http://t.test/"):
+        import httpx
+
+        engine = _Engine(_CookieBrowser(ctx_cookies))
+        engine.cookies = engine_cookie
+        engine.target_url = target
+
+        def _kwargs(**ov):
+            ov["transport"] = httpx.ASGITransport(app=app)
+            return ov
+
+        engine.httpx_client_kwargs = _kwargs
+        return MailHeaderInjectionScanner(engine)
+
+    def _probe(self, scanner, action):
+        import json
+
+        scanner._extract_form = AsyncMock(
+            return_value={
+                "action": action,
+                "method": "POST",
+                "enctype": "application/x-www-form-urlencoded",
+                "fields": {"email": ""},
+            }
+        )
+        body, _ = _run(
+            scanner._apply_payload_raw(action, 0, "email", "a@b.test", False)
+        )
+        return json.loads(body)["cookies"]
+
+    def test_same_origin_action_receives_session_cookie(self):
+        scanner = self._scanner(
+            self._echo_app(),
+            [{"name": "sid", "value": "browser", "domain": "t.test", "path": "/"}],
+            engine_cookie="a=1",
+        )
+        cookies = self._probe(scanner, "http://t.test/contact")
+        # ブラウザセッション cookie と対象ホストの明示 cookie が届く。
+        self.assertEqual(cookies.get("sid"), "browser")
+        self.assertEqual(cookies.get("a"), "1")
+
+    def test_cross_origin_action_does_not_leak_session_cookie(self):
+        scanner = self._scanner(
+            self._echo_app(),
+            [{"name": "sid", "value": "browser", "domain": "t.test", "path": "/"}],
+            engine_cookie="a=1",
+        )
+        cookies = self._probe(scanner, "http://evil.test/contact")
+        # 別オリジンの action へ対象セッション/明示 cookie を漏らさない（P1）。
+        self.assertNotIn("sid", cookies)
+        self.assertNotIn("a", cookies)
+
+    def test_no_cookies(self):
+        scanner = self._scanner(self._echo_app(), [], engine_cookie="")
+        self.assertEqual(self._probe(scanner, "http://t.test/contact"), {})
 
 
 class OOBConfirmationTests(unittest.TestCase):
