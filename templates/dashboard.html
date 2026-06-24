@@ -1499,6 +1499,7 @@ https://example.com/search?q=test" style="width:100%;font-family:monospace;font-
           <label style="display:flex;align-items:center;gap:4px;font-size:0.82rem"><input type="checkbox" value="open_redirect"> Open Redirect</label>
           <label style="display:flex;align-items:center;gap:4px;font-size:0.82rem"><input type="checkbox" value="csrf"> CSRF</label>
           <label style="display:flex;align-items:center;gap:4px;font-size:0.82rem"><input type="checkbox" value="header_injection"> Header Injection</label>
+          <label style="display:flex;align-items:center;gap:4px;font-size:0.82rem"><input type="checkbox" value="mail_header"> Mail Header Injection</label>
         </div>
 
         <div class="cfg-section-title">認証 (エージェントがログインページを操作)</div>
@@ -2088,8 +2089,7 @@ const CHECK_GROUPS = {
   ],
   header: [
     {id:'header_injection',  label:'ヘッダインジェクション', def:false},
-    // 'mail_header' は無効化済み（OOBメール受信が必要で黒boxでは検知不可、
-    // wscan/scanners/__init__.py 参照）。UIの選択肢からも除外している。
+    {id:'mail_header',       label:'メールヘッダインジェクション', def:false},
     {id:'open_redirect',     label:'オープンリダイレクト',   def:false},
     {id:'path_traversal',    label:'パストラバーサル',       def:false},
     {id:'host_header',       label:'Hostヘッダ攻撃',         def:false},

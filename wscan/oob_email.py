@@ -225,8 +225,16 @@ class EmailSink:
         conn = self._connect_imap()
         try:
             uids: list[bytes] = []
-            # サーバ側検索（To / Subject / Body）。catch-all 宛なので To が主。
-            for crit in (["TO", token], ["SUBJECT", token], ["BODY", token]):
+            # サーバ側検索（To / Cc / Subject / Body / Delivered-To）。catch-all 宛
+            # なので To/Delivered-To が主だが、メールヘッダ注入で追加された Cc に
+            # トークンが現れるケースも拾えるよう CC と HEADER も検索する。
+            for crit in (
+                ["TO", token],
+                ["CC", token],
+                ["SUBJECT", token],
+                ["BODY", token],
+                ["HEADER", "Delivered-To", token],
+            ):
                 try:
                     typ, data = conn.uid("search", None, *crit)
                 except Exception:

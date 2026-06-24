@@ -111,19 +111,20 @@ def reflection_payloads() -> list[str]:
     return out
 
 
-def oob_payloads(oob_address: str) -> list[str]:
-    """OOB 確証フェーズで投入するペイロード群（純粋関数）。
+def oob_payloads(oob_address: str) -> list[tuple[str, str]]:
+    """OOB 確証フェーズで投入する ``(payload, 改行表現の説明)`` 群（純粋関数）。
 
-    一意 OOB アドレス宛の ``Bcc: <addr>`` を、多様な改行表現で注入する。
+    一意 OOB アドレス宛の ``Cc: <addr>`` を多様な改行表現で注入する。
+
+    注入ヘッダに **Bcc ではなく Cc を使う**のは確証可能性のため: Bcc は配送時に
+    削除されるのが通常で、受信メールのヘッダにも IMAP 検索にも現れず突合できない。
+    Cc は配送後も可視ヘッダとして残り、``oob_email.parse_email`` が記録し
+    ``EmailSink`` の IMAP CC 検索でも拾える。任意宛先を Cc に追加できる時点で
+    メールヘッダインジェクションの成立を示せる。
     """
     if not oob_address:
         return []
-    return [
-        payload
-        for payload, _desc in crlf_bypass_variants(
-            "test@example.com", f"Bcc: {oob_address}"
-        )
-    ]
+    return list(crlf_bypass_variants("test@example.com", f"Cc: {oob_address}"))
 
 
 class MailHeaderInjectionScanner(BaseScanner):
@@ -224,67 +225,105 @@ class MailHeaderInjectionScanner(BaseScanner):
         field_name: str,
         is_url_param: bool,
     ) -> Optional[Finding]:
-        """OOB メール受信で注入の実発火を確証する（OOB 未設定なら no-op）。"""
+        """OOB メール受信で注入の実発火を確証する（OOB 未設定なら no-op）。
+
+        CRLF 変種ごとに**別トークン**の Cc を注入することで、どの変種が実際に
+        外向きメールを発火させたかを一意に識別する。確証された Finding は、
+        その変種の payload / request-response pair に正しく帰属させる
+        （取りこぼされた後続変種を誤って「確証済み」と記録しない）。
+        """
         new_addr = getattr(self.engine, "new_oob_address", None)
         if not callable(new_addr):
             return None
-        issued = new_addr()
-        if not issued:
+        sink = getattr(self.engine, "oob_sink", None)
+        if sink is None:
             return None
-        token, oob_addr = issued
 
-        last_pair: dict = {}
-        last_payload = ""
-        for payload in oob_payloads(oob_addr):
+        # 変種 i に対し一意トークン i を割り当て、payload/pair を保持する。
+        # 改行表現の列挙は決定論的なので、i 番目のトークンを i 番目の変種へ対応づけられる。
+        attempts: list[dict] = []  # {token, payload, desc, pair}
+        seps = crlf_bypass_variants("x", "Cc: x")  # 変種数の参照（順序は決定論的）
+        for i in range(len(seps)):
+            issued = new_addr()
+            if not issued:
+                break
+            token, oob_addr = issued
+            variants = oob_payloads(oob_addr)
+            if i >= len(variants):
+                break
+            payload, desc = variants[i]
             await self.log_payload_test(field_name, payload, "mail_header", url)
             _source, pair = await self._apply_payload(
                 url, form_index, field_name, payload, is_url_param
             )
-            last_pair = pair or last_pair
-            last_payload = payload
+            attempts.append(
+                {"token": token, "address": oob_addr, "payload": payload,
+                 "desc": desc, "pair": pair or {}}
+            )
             await asyncio.sleep(0.2 * self.sleep_factor)
 
-        if not last_payload:
+        if not attempts:
             return None
 
         if self.monitor:
             await self.monitor.emit_status(
-                f"mail_header: waiting up to {OOB_WAIT_SECONDS:.0f}s for OOB mail ({token})"
+                f"mail_header: waiting up to {OOB_WAIT_SECONDS:.0f}s for OOB mail "
+                f"({len(attempts)} variants)"
             )
 
-        sink = getattr(self.engine, "oob_sink", None)
-        if sink is None:
-            return None
         try:
-            received = await asyncio.to_thread(
-                sink.wait_for, token, OOB_WAIT_SECONDS, OOB_POLL_INTERVAL
-            )
+            hit = await asyncio.to_thread(self._poll_oob, sink, attempts)
         except Exception as exc:
             self._note_wave_degradation("mail_oob", exc)
             return None
 
-        if not received:
+        if not hit:
             return None
+        attempt, received = hit
 
         return await self.record_finding(
             url=url,
             field_name=field_name,
-            payload=last_payload,
+            payload=attempt["payload"],
             evidence=(
                 "Mail header injection CONFIRMED via OOB: the application sent an "
-                f"email whose injected Bcc reached the out-of-band mailbox (token {token})."
+                "email whose injected Cc reached the out-of-band mailbox "
+                f"(token {attempt['token']}, {attempt['desc']} newline)."
             ),
-            pair=last_pair,
+            pair=attempt["pair"],
             severity="high",
             confidence="confirmed",
             evidence_type="mail_header_oob",
             evidence_details={
-                "oob_token": token,
-                "oob_address": oob_addr,
+                "oob_token": attempt["token"],
+                "oob_address": attempt["address"],
+                "newline_variant": attempt["desc"],
                 "received_subject": received.subject,
                 "received_to": received.to_addrs,
             },
         )
+
+    @staticmethod
+    def _poll_oob(sink, attempts: list[dict]) -> "Optional[tuple[dict, object]]":
+        """各変種のトークンを締切まで検索し、最初に着信した変種を返す（同期）。
+
+        ``asyncio.to_thread`` から呼ぶ前提のブロッキング・ヘルパー。1 つでも着信
+        したら即座にその変種を返す（どの変種が発火したかの一意な帰属になる）。
+        """
+        import time as _time
+
+        deadline = _time.time() + max(0.0, OOB_WAIT_SECONDS)
+        while True:
+            for attempt in attempts:
+                try:
+                    hits = sink.search(attempt["token"])
+                except Exception:
+                    hits = []
+                if hits:
+                    return attempt, hits[0]
+            if _time.time() >= deadline:
+                return None
+            _time.sleep(max(0.5, OOB_POLL_INTERVAL))
 
     async def _apply_payload(
         self,

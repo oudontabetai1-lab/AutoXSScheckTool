@@ -8,6 +8,7 @@ import unittest
 from unittest.mock import AsyncMock
 
 from wscan.oob_email import ReceivedEmail
+from wscan.scanners import mail_header as mail_header_mod
 from wscan.scanners.mail_header import (
     MailHeaderInjectionScanner,
     _field_name_suggests_mail,
@@ -53,17 +54,29 @@ class _Engine:
 class _OOBEngine(_Engine):
     """OOB が設定済みのダミーエンジン。``oob_sink.wait_for`` をスタブする。"""
 
-    def __init__(self, browser, received):
+    def __init__(self, browser, received, winning_index=0):
         super().__init__(browser)
+        self._counter = 0
+        # 当たりトークン（received を返す変種）。received=None なら誰も当たらない。
+        self.winning_token = None
+
+        engine = self
 
         class _Sink:
-            def wait_for(self, token, timeout, interval):
-                return received
+            def search(self, token):
+                if received is not None and token == engine.winning_token:
+                    return [received]
+                return []
 
         self.oob_sink = _Sink()
+        self._winning_index = winning_index
 
     def new_oob_address(self):
-        return ("wscan-oob-tok", "wscan-oob-tok@collab.test")
+        token = f"wscan-oob-tok{self._counter}"
+        if self._counter == self._winning_index:
+            self.winning_token = token
+        self._counter += 1
+        return (token, f"{token}@collab.test")
 
 
 def _run(coro):
@@ -81,11 +94,14 @@ class PayloadHelperTests(unittest.TestCase):
         self.assertEqual(len(payloads), len(set(payloads)))
         self.assertGreater(len(payloads), len(set(payloads)) - 1)
 
-    def test_oob_payloads_embed_address(self):
+    def test_oob_payloads_embed_address_as_cc(self):
+        # 確証可能性のため Bcc ではなく Cc を注入する（配送後も残る可視ヘッダ）。
         payloads = oob_payloads("tok@collab.test")
         self.assertTrue(payloads)
-        for p in payloads:
-            self.assertIn("Bcc: tok@collab.test", p)
+        for payload, desc in payloads:
+            self.assertIn("Cc: tok@collab.test", payload)
+            self.assertNotIn("Bcc:", payload)
+            self.assertTrue(desc)
 
     def test_oob_payloads_empty_for_blank_address(self):
         self.assertEqual(oob_payloads(""), [])
@@ -139,14 +155,32 @@ class ReflectionDetectionTests(unittest.TestCase):
 
 
 class OOBConfirmationTests(unittest.TestCase):
-    def test_oob_received_yields_confirmed_finding(self):
+    def setUp(self):
+        # ポーリング待ちをゼロにしてテストを即時化する。
+        self._orig_wait = mail_header_mod.OOB_WAIT_SECONDS
+        self._orig_interval = mail_header_mod.OOB_POLL_INTERVAL
+        mail_header_mod.OOB_WAIT_SECONDS = 0
+        mail_header_mod.OOB_POLL_INTERVAL = 0
+
+    def tearDown(self):
+        mail_header_mod.OOB_WAIT_SECONDS = self._orig_wait
+        mail_header_mod.OOB_POLL_INTERVAL = self._orig_interval
+
+    def test_oob_received_attributes_finding_to_firing_variant(self):
+        # 2 番目の変種(index=2)だけが着信する → その変種に正しく帰属すること。
+        winning_index = 2
+        winning_token = f"wscan-oob-tok{winning_index}"
         received = ReceivedEmail(
             uid="1",
-            to_addrs=["wscan-oob-tok@collab.test"],
+            to_addrs=[f"{winning_token}@collab.test"],
             subject="Thanks",
         )
         scanner = MailHeaderInjectionScanner(
-            _OOBEngine(_Browser("Thanks, your message was sent."), received)
+            _OOBEngine(
+                _Browser("Thanks, your message was sent."),
+                received,
+                winning_index=winning_index,
+            )
         )
         findings = _run(
             scanner.scan_field(
@@ -156,7 +190,9 @@ class OOBConfirmationTests(unittest.TestCase):
         oob = [f for f in findings if f.evidence_type == "mail_header_oob"]
         self.assertEqual(len(oob), 1)
         self.assertEqual(oob[0].confidence, "confirmed")
-        self.assertEqual(oob[0].evidence_details["oob_token"], "wscan-oob-tok")
+        # last_payload ではなく実際に発火した変種のトークンに帰属している。
+        self.assertEqual(oob[0].evidence_details["oob_token"], winning_token)
+        self.assertIn("Cc: %s@collab.test" % winning_token, oob[0].payload)
 
     def test_oob_no_mail_yields_no_oob_finding(self):
         scanner = MailHeaderInjectionScanner(
