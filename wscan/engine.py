@@ -228,6 +228,17 @@ class CrawledPage:
     external_scripts: dict = dc_field(default_factory=dict)
 
 
+def _crawl_review_wants_recrawl(command: str) -> bool:
+    """検査前レビューの応答が「再巡回」要求かを判定する純粋関数。
+
+    「検査開始(continue)」では再巡回しない＝レビューを再表示するループを防ぐ。
+    追加URL/手動巡回JSONはユーザーが明示的に「再巡回」を選んだときだけ反映する
+    （以前は continue でも追加URL/手動ファイルがあると再巡回に入り、設定の手動巡回
+    ファイルが自動補完されると無限にレビューが出続けてしまっていた）。
+    """
+    return (command or "").strip().lower() == "recrawl"
+
+
 # ---------------------------------------------------------------------------
 # Scan Engine
 # ---------------------------------------------------------------------------
@@ -2186,9 +2197,12 @@ class ScanEngine:
     async def _phase_crawl_review(self, pages: list) -> list:
         """
         Pause between crawl and plan phases so the operator can review the
-        discovered pages, request a re-crawl, add manually-recorded URLs, or
-        proceed to the attack phase.  Repeats until the operator clicks
-        "continue" (or the review times out).
+        discovered pages on the screen-transition diagram (dashboard 巡回マップ),
+        request a re-crawl, add manually-recorded URLs, or proceed to the attack
+        phase.  Only an explicit "recrawl" command loops back to crawl; "continue"
+        always proceeds (so the review never re-appears after the operator starts
+        the scan).  Repeats until the operator clicks "continue" / "cancel" (or the
+        review times out).
         """
         current = list(pages)
         # Track scenarios already merged so re-crawl loops do not duplicate them.
@@ -2271,7 +2285,7 @@ class ScanEngine:
                 except Exception as exc:
                     console.print(f"  [yellow][Crawl Review] シナリオ取り込み失敗: {exc}[/yellow]")
 
-            if command == "recrawl" or extra_urls or manual_file:
+            if _crawl_review_wants_recrawl(command):
                 console.print(
                     f"  [cyan][Crawl Review][/cyan] 再巡回を実行 "
                     f"(+{len(extra_urls)} URL, manual={'on' if manual_file else 'off'})"
