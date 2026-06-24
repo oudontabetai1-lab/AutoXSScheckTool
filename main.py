@@ -210,6 +210,8 @@ Examples:
         "nosql", "deserialization", "request_smuggling", "ssrf",
         "graphql", "jwt", "cms", "xxe", "ldap", "file_upload",
         "race_condition", "websocket", "secret_leak", "sri", "js_static",
+        # 新クラス
+        "prototype_pollution", "cache_poisoning", "mass_assignment",
     ]
     _default_checks = _CFG.get("checks", ["sqli", "xss", "os"])
     scan.add_argument(
@@ -622,6 +624,53 @@ Examples:
     scan.add_argument(
         "--manual-crawl", metavar="FILE", default=_CFG.get("manual_crawl_file", ""),
         help="手動巡回で保存した JSON から URL と Cookie をインポートしてスキャンのシードに使用する。",
+    )
+    # API ファースト検査
+    scan.add_argument(
+        "--api-spec", metavar="FILE", default="",
+        help=(
+            "OpenAPI/Swagger(JSON/YAML) または Postman Collection からエンドポイント・"
+            "共通ヘッダ・JSON 操作を取り込み、API を直接攻撃面にする。"
+        ),
+    )
+    # 再開可能スキャン
+    scan.add_argument(
+        "--resume", metavar="DIR", default="",
+        help=(
+            "前回スキャンの出力ディレクトリの checkpoint.json を読み、完了済みの"
+            "(URL×フィールド×チェック)単位を飛ばして再開する。"
+        ),
+    )
+    scan.add_argument(
+        "--no-checkpoint", action="store_true",
+        help="チェックポイント(checkpoint.json)の保存を無効化する。",
+    )
+    # 検査時間帯ゲート
+    scan.add_argument(
+        "--allowed-hours", metavar="WINDOW", action="append", default=None,
+        help=(
+            "検査を許可する時間帯。複数指定可。例: --allowed-hours '22:00-06:00' "
+            "--allowed-hours 'Sat,Sun 00:00-24:00'。この時間帯以外は自動的に待機する。"
+        ),
+    )
+    scan.add_argument(
+        "--forbidden-hours", metavar="WINDOW", action="append", default=None,
+        help=(
+            "検査を禁止する時間帯（業務ピーク保護等）。複数指定可。例: "
+            "--forbidden-hours 'Mon-Fri 09:00-18:00'。この時間帯は攻撃を停止し待機する。"
+        ),
+    )
+    # セッション自動再ログイン
+    scan.add_argument(
+        "--no-relogin", action="store_true",
+        help="長時間スキャン中のセッション失効を検知しての自動再ログインを無効化する。",
+    )
+    scan.add_argument(
+        "--logged-in-marker", metavar="TEXT", default="",
+        help=(
+            "認証済みページに必ず現れる文字列。セッション失効検知の精度を上げる"
+            "（未指定時は --login-success を流用）。"
+        ),
     )
     # A: Multi-account privilege escalation
     scan.add_argument(
@@ -1458,6 +1507,17 @@ async def run_scan(args):
             # O: HAR インポート
             har_path=getattr(args, "har", "") or "",
             manual_crawl_path=getattr(args, "manual_crawl", "") or "",
+            # API ファースト検査
+            api_spec_path=getattr(args, "api_spec", "") or "",
+            # 再開可能スキャン
+            resume_dir=getattr(args, "resume", "") or "",
+            enable_checkpoint=not getattr(args, "no_checkpoint", False),
+            # 検査時間帯ゲート
+            allowed_hours=getattr(args, "allowed_hours", None),
+            forbidden_hours=getattr(args, "forbidden_hours", None),
+            # セッション自動再ログイン
+            relogin_on_expiry=not getattr(args, "no_relogin", False),
+            logged_in_marker=getattr(args, "logged_in_marker", "") or "",
             # Custom headers + periodic refresh
             headers=_resolved_headers,
             header_refresh_cmd=getattr(args, "header_refresh_cmd", "") or "",

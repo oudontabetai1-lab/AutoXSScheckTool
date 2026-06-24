@@ -46,6 +46,7 @@ _CVSS_TABLE: dict[str, tuple[str, float]] = {
     "graphql_injection":     ("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H", 10.0),
     "graphql_batch":         ("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:L",  5.3),
     "graphql_sensitive":     ("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N",  5.3),
+    "graphql_dos":           ("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:N/I:N/A:H",  7.5),
     # ④ JWT scanner
     "jwt_alg_none":      ("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:N",  9.6),
     "jwt_weak_secret":   ("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:N",  9.6),
@@ -67,6 +68,13 @@ _CVSS_TABLE: dict[str, tuple[str, float]] = {
     # 静的 JS 監査（DOM XSS 前段階）。実行確証前のため XSS よりやや低め。
     "js_static":         ("CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:H/I:L/A:N",  8.8),
     "js_dangerous_sink": ("CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:H/I:L/A:N",  8.8),
+    # 新クラス
+    "prototype_pollution":        ("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:N",  8.1),
+    "prototype_pollution_dom":    ("CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:H/I:L/A:N",  8.8),
+    "prototype_pollution_server": ("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:N",  8.1),
+    "cache_poisoning":   ("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:L/I:H/A:N",  8.1),
+    "cache_deception":   ("CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:H/I:N/A:N",  7.4),
+    "mass_assignment":   ("CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:N",  8.1),
 }
 
 
@@ -122,6 +130,37 @@ class Finding:
     evidence_type: str = ""          # Structured signal, e.g. xss_dialog, sqli_error
     evidence_details: dict = field(default_factory=dict)
     reproduction_steps: list[str] = field(default_factory=list)
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "Finding":
+        """``to_dict`` 由来の dict から Finding を復元する（再開スキャン用）。
+
+        ``to_dict`` は ``cvss_*`` 等の算出値を足し、response.body を落とすため
+        完全な往復ではない。レポート継続に必要なフィールドのみ復元する。
+        """
+        resp = dict(data.get("response", {}) or {})
+        if data.get("response_body_excerpt") and "body" not in resp:
+            resp["body"] = data.get("response_body_excerpt", "")
+        return cls(
+            check_type=data.get("check_type", ""),
+            severity=data.get("severity", "medium"),
+            url=data.get("url", ""),
+            field_name=data.get("field_name", ""),
+            payload=data.get("payload", ""),
+            evidence=data.get("evidence", ""),
+            request=dict(data.get("request", {}) or {}),
+            response=resp,
+            screenshot_b64=data.get("screenshot_b64", ""),
+            dialog_confirmed=bool(data.get("dialog_confirmed", False)),
+            dialog_message=data.get("dialog_message", ""),
+            timestamp=data.get("timestamp", time.time()),
+            verified=bool(data.get("verified", True)),
+            verification_note=data.get("verification_note", ""),
+            confidence=data.get("confidence", "tentative"),
+            evidence_type=data.get("evidence_type", ""),
+            evidence_details=dict(data.get("evidence_details", {}) or {}),
+            reproduction_steps=list(data.get("reproduction_steps", []) or []),
+        )
 
     @property
     def cvss_vector(self) -> str:

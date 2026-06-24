@@ -102,6 +102,71 @@ _SQL_ERROR_RE = re.compile(
     re.IGNORECASE,
 )
 
+# GraphQL の複雑度/量制限を欠く DoS リスク検査用。
+# サーバを実際に痛めないよう「無害だが安くない数」だけを送り、制限の有無を見る。
+_DOS_ALIAS_COUNT = 100   # エイリアス増幅（field 重複）の本数
+_DOS_NEST_DEPTH = 12     # introspection の深いネストの段数
+
+# 複雑度/深度/量の制限に引っかかったことを示すエラー語彙。これらが返るなら
+# サーバ側に保護があるとみなし DoS リスクは報告しない（誤検知抑止）。
+_DOS_LIMIT_ERROR_RE = re.compile(
+    r"(max(imum)?[\s_-]*(query)?[\s_-]*(depth|complexity|alias|node|cost)"
+    r"|query[\s_-]*(is[\s_-]*)?too[\s_-]*(deep|complex|large)"
+    r"|depth[\s_-]*limit|complexity[\s_-]*(limit|exceeded)"
+    r"|too[\s_-]*many[\s_-]*(aliases|nodes)|cost[\s_-]*limit"
+    r"|exceeds[\s_-]*maximum)",
+    re.IGNORECASE,
+)
+
+
+def build_alias_amplification_query(count: int) -> str:
+    """``count`` 本のエイリアスで同一フィールド(__typename)を増幅するクエリ（純粋）。
+
+    例: ``{ a0: __typename a1: __typename ... }``。alias/複雑度の上限が無ければ
+    サーバは全 alias を素直に処理する。__typename は安価なので、上限の有無を
+    確かめつつ実害を出さない。
+    """
+    count = max(1, int(count))
+    aliases = " ".join(f"a{i}: __typename" for i in range(count))
+    return "{ " + aliases + " }"
+
+
+def build_deep_introspection_query(depth: int) -> str:
+    """``depth`` 段ネストした introspection クエリを組む（純粋）。
+
+    ``__type.ofType.ofType...`` を深く重ね、深度制限の有無を観測する。
+    """
+    depth = max(1, int(depth))
+    inner = "name"
+    for _ in range(depth):
+        inner = f"ofType {{ name {inner} }}"
+    return "{ __schema { types { name kind " + inner + " } } }"
+
+
+def detect_alias_amplification(data: object, count: int) -> bool:
+    """エイリアス増幅クエリが「制限なく」受理されたかを判定する（純粋）。
+
+    ``data`` は ``resp.json()`` 済みの値。最後の alias キー（``a{count-1}``）が
+    ``data`` 配下に存在し、かつ complexity/alias 制限エラーが無ければ True。
+    制限エラーが含まれていれば（保護あり）False。
+    """
+    if not isinstance(data, dict):
+        return False
+    # 制限系エラーがあれば保護されている → 報告しない
+    errors = data.get("errors")
+    if errors:
+        try:
+            blob = json.dumps(errors)
+        except (TypeError, ValueError):
+            blob = str(errors)
+        if _DOS_LIMIT_ERROR_RE.search(blob):
+            return False
+    payload = data.get("data")
+    if not isinstance(payload, dict):
+        return False
+    last_alias = f"a{max(1, int(count)) - 1}"
+    return last_alias in payload
+
 
 # ---------------------------------------------------------------------------
 # Scanner
@@ -232,6 +297,9 @@ class GraphQLScanner(BaseScanner):
         # 2. Batch queries
         await self._test_batch(endpoint, headers, timeout, findings)
 
+        # 2b. Complexity/amount limits missing (DoS risk)
+        await self._test_dos(endpoint, headers, timeout, findings)
+
         # 3. Injection via discovered fields (or generic string args)
         await self._test_injection(endpoint, headers, timeout, findings, schema_data)
 
@@ -337,6 +405,58 @@ class GraphQLScanner(BaseScanner):
             confidence="likely",
             evidence_type="graphql_batch",
             evidence_details={"operation_count": len(batch_query)},
+        ))
+
+    async def _test_dos(
+        self,
+        endpoint: str,
+        headers: dict,
+        timeout: float,
+        findings: list[Finding],
+    ) -> None:
+        """クエリ複雑度/量の制限が無いか（DoS リスク）を検査する。
+
+        エイリアス増幅クエリ（安価な ``__typename`` を ``_DOS_ALIAS_COUNT`` 本）を
+        送り、制限エラー無しに全 alias が処理されれば「上限なし」と判定する。
+        実害を出さないため本数は控えめで、複雑度上限の *有無* だけを確かめる。
+        """
+        query = build_alias_amplification_query(_DOS_ALIAS_COUNT)
+        try:
+            async with httpx.AsyncClient(
+                follow_redirects=True,
+                timeout=timeout,
+                headers=headers,
+                **self._client_transport_kwargs(),
+            ) as client:
+                resp = await client.post(endpoint, json={"query": query})
+                if resp.status_code != 200:
+                    return
+                data = resp.json()
+        except Exception:
+            return
+
+        if not detect_alias_amplification(data, _DOS_ALIAS_COUNT):
+            return
+
+        findings.append(Finding(
+            check_type="graphql_dos",
+            severity="medium",
+            url=endpoint,
+            field_name="(GraphQL query cost)",
+            payload=f"{{ a0: __typename ... a{_DOS_ALIAS_COUNT - 1}: __typename }}",
+            evidence=(
+                f"GraphQL endpoint {endpoint} accepted a query with "
+                f"{_DOS_ALIAS_COUNT} aliased fields without any complexity, depth, "
+                f"or alias limit. An attacker can craft expensive nested/aliased "
+                f"queries to exhaust server resources (DoS). Enforce query "
+                f"depth/complexity limits and alias/node caps."
+            ),
+            request={"url": endpoint, "method": "POST",
+                     "body": json.dumps({"query": query})[:500]},
+            response={"status": 200, "url": endpoint},
+            confidence="likely",
+            evidence_type="graphql_dos",
+            evidence_details={"alias_count": _DOS_ALIAS_COUNT},
         ))
 
     async def _test_injection(

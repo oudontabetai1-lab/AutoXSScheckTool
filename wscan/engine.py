@@ -344,6 +344,17 @@ class ScanEngine:
         tls_client_cert_password: str = "",
         tls_ca_cert: str = "",
         tls_verify: bool = False,
+        # API ファースト検査: OpenAPI/Swagger/Postman スペックのパス
+        api_spec_path: str = "",
+        # 再開可能スキャン: 直前スキャンの出力ディレクトリ（checkpoint.json を読む）
+        resume_dir: str = "",
+        enable_checkpoint: bool = True,
+        # 検査時間帯ゲート（"09:00-18:00" / "Mon-Fri 22:00-06:00" 等のリスト）
+        allowed_hours: Optional[list] = None,
+        forbidden_hours: Optional[list] = None,
+        # セッション失効時の自動再ログイン
+        relogin_on_expiry: bool = True,
+        logged_in_marker: str = "",
     ):
         # ユーザーが指定した URL は末尾スラッシュも含めてそのまま保持する。
         # 以前は url.rstrip("/") で末尾の "/" を一律に除去していたが、
@@ -410,6 +421,19 @@ class ScanEngine:
         self.har_path: str = har_path
         # 手動巡回インポートパス
         self.manual_crawl_path: str = manual_crawl_path
+        # API ファースト検査: スペック取り込みパスと、取り込んだ JSON 操作群
+        # （mass_assignment 等が利用する RequestTemplate のリスト）
+        self.api_spec_path: str = api_spec_path
+        self.api_seed_requests: list = []
+        # 再開可能スキャン
+        self.resume_dir: str = resume_dir
+        self.enable_checkpoint: bool = enable_checkpoint
+        self.checkpoint = None  # CheckpointState（run() で初期化）
+        # セッション失効時の自動再ログイン
+        self.relogin_on_expiry: bool = relogin_on_expiry
+        # 認証済みの目印（指定が無ければログイン成功判定文字列を流用）
+        self.logged_in_marker: str = logged_in_marker or login_success_indicator
+        self._relogin_count: int = 0
         # L: Webhook/Slack 通知マネージャー
         if webhook_url:
             from wscan.notification import NotificationManager
@@ -662,6 +686,7 @@ class ScanEngine:
 
         # State
         self.all_findings: list = []
+        self.wave_errors: list = []                  # 検出力低下事象の観測ログ（base から共有）
         self._finding_dedup: set[tuple] = set()     # (url, field_name, check_type) — prevent duplicates
         self.attack_plans: list = []
         self.visited_urls: set = set()
@@ -677,6 +702,11 @@ class ScanEngine:
         self._transition_via: dict = {}
         # Scan controller (intervention system)
         self.controller = ScanController()
+        # 検査時間帯ゲートをコントローラへ設定（空なら常時許可）
+        self.allowed_hours: list = list(allowed_hours or [])
+        self.forbidden_hours: list = list(forbidden_hours or [])
+        if self.allowed_hours or self.forbidden_hours:
+            self.controller.set_time_windows(self.allowed_hours, self.forbidden_hours)
         # SQLi auth-bypass signal: set by signal_auth_bypass() when a scanner detects bypass
         self.auth_bypass_detected: bool = False
         self.auth_bypass_login_url: str = ""
@@ -873,6 +903,167 @@ class ScanEngine:
         return worker if worker is not None else self._browser
 
     # =========================================================================
+    # Checkpoint / resume
+    # =========================================================================
+
+    def _init_checkpoint(self) -> None:
+        """チェックポイントを初期化する。``resume_dir`` 指定時は進捗を復元する。"""
+        if not self.enable_checkpoint:
+            return
+        from wscan import checkpoint as cp
+
+        state = None
+        if self.resume_dir:
+            loaded = cp.load_checkpoint(self.resume_dir)
+            if loaded is None:
+                console.print(
+                    f"  [yellow][Resume] checkpoint が見つかりません: {self.resume_dir}"
+                    f" — 最初から実行します。[/yellow]"
+                )
+            elif not loaded.is_compatible_with(self.target_url, self.checks):
+                console.print(
+                    "  [yellow][Resume] checkpoint のターゲット/チェックが今回と"
+                    "整合しないため破棄します（最初から実行）。[/yellow]"
+                )
+            else:
+                state = loaded
+                # 既出 Finding をレポートへ復元（重複防止のため dedup へも登録）
+                restored = 0
+                for fd in state.findings:
+                    try:
+                        f = Finding.from_dict(fd)
+                    except Exception:
+                        continue
+                    key = finding_dedup_key_for(f)
+                    if key not in self._finding_dedup:
+                        self._finding_dedup.add(key)
+                        self.all_findings.append(f)
+                        restored += 1
+                console.print(
+                    f"  [green][Resume] {len(state.completed_units)} 済み単位 / "
+                    f"{restored} 件の既出 Finding を復元しました。[/green]"
+                )
+
+        if state is None:
+            state = cp.CheckpointState(target_url=self.target_url, checks=list(self.checks))
+        self.checkpoint = state
+        self._save_checkpoint()
+
+    def _save_checkpoint(self) -> None:
+        """現在の進捗（済み単位 + Finding スナップショット）を書き出す。"""
+        if not self.enable_checkpoint or self.checkpoint is None:
+            return
+        from wscan import checkpoint as cp
+
+        try:
+            # Finding は all_findings から都度スナップショット（最新を保存）
+            self.checkpoint.findings = [f.to_dict() for f in self.all_findings]
+            cp.save_checkpoint(self.output_dir, self.checkpoint)
+        except Exception as exc:
+            self.wave_errors.append(f"checkpoint_save: {type(exc).__name__}: {exc}")
+
+    def _checkpoint_is_done(self, url: str, field_name: str, form_index: int, check: str) -> bool:
+        if not self.enable_checkpoint or self.checkpoint is None:
+            return False
+        return self.checkpoint.is_done(url, field_name, form_index, check)
+
+    def _checkpoint_mark_done(self, url: str, field_name: str, form_index: int, check: str) -> None:
+        if not self.enable_checkpoint or self.checkpoint is None:
+            return
+        self.checkpoint.mark_done(url, field_name, form_index, check)
+
+    # =========================================================================
+    # Session expiry / auto re-login
+    # =========================================================================
+
+    async def _relogin_if_needed(self, *, status=None, final_url: str = "", body: str = "") -> bool:
+        """応答がセッション失効を示す場合に自動再ログインする。
+
+        再ログインに成功したら True。失効していない／再ログイン不可なら False。
+        誤った連続再ログインを避けるため :mod:`wscan.session_guard` の厳しめの
+        判定（401 か「ログインフォーム残存」）を通った場合だけ実行する。
+        """
+        if not self.relogin_on_expiry:
+            return False
+        if not (self.login_url and self._browser.auth_user and self._browser.auth_pass):
+            return False
+        from wscan import session_guard
+
+        if not session_guard.looks_logged_out(
+            status=status,
+            final_url=final_url,
+            body=body,
+            login_url=self.login_url,
+            logged_in_marker=self.logged_in_marker,
+        ):
+            return False
+
+        self._relogin_count += 1
+        console.print(
+            f"  [bold yellow][Auth] セッション失効を検知 — 自動再ログインを試みます "
+            f"(#{self._relogin_count})[/bold yellow]"
+        )
+        if self.monitor:
+            try:
+                await self.monitor.emit_status("セッション失効を検知 — 自動再ログイン中", "running")
+            except Exception:
+                pass
+        try:
+            success = await self._browser.auto_login(
+                self.login_url,
+                user_field=self.login_user_field,
+                pass_field=self.login_pass_field,
+                success_indicator=self.login_success_indicator,
+            )
+        except Exception as exc:
+            console.print(f"  [yellow][Auth] 再ログイン失敗: {exc}[/yellow]")
+            return False
+        if success:
+            console.print("  [green][Auth] 再ログイン成功 — セッションを更新しました。[/green]")
+        else:
+            console.print("  [yellow][Auth] 再ログインできませんでした。[/yellow]")
+        return bool(success)
+
+    async def _maybe_relogin_for_page(self, url: str) -> None:
+        """攻撃対象ページの状態を見てセッション失効なら再ログインする。
+
+        再ログインに必要な前提（login_url + 認証情報）が無ければ即 no-op。
+        worker ブラウザには ``auto_login`` が無いため、メインブラウザでのみ動く
+        （並列時はベストエフォート、失敗してもスキャンは継続）。
+        """
+        if not self.relogin_on_expiry:
+            return
+        if not (self.login_url and self._browser.auth_user and self._browser.auth_pass):
+            return
+        if not hasattr(self._browser, "auto_login"):
+            return
+        try:
+            ok = await self._browser.navigate(url, retries=self.navigation_retries)
+            if not ok:
+                return
+            body = await self._browser.page.content()
+            final_url = self._browser.page.url
+        except Exception:
+            return
+        status = None
+        try:
+            network = getattr(self._browser, "network", None)
+            pair = network.latest_for_url(url, match_query=False) if network else None
+            if pair:
+                status = (pair.get("response", {}) or {}).get("status")
+        except Exception:
+            status = None
+        relogged = await self._relogin_if_needed(
+            status=status, final_url=final_url, body=body
+        )
+        if relogged:
+            # 認証済みコンテンツを攻撃で見るため、対象ページへ再遷移する。
+            try:
+                await self._browser.navigate(url, retries=self.navigation_retries)
+            except Exception:
+                pass
+
+    # =========================================================================
     # Public entry point
     # =========================================================================
 
@@ -891,6 +1082,9 @@ class ScanEngine:
 
         loop = asyncio.get_event_loop()
         self.controller.start(loop, monitor=self.monitor)
+
+        # 再開可能スキャン: チェックポイントを初期化（resume 指定時は復元）
+        self._init_checkpoint()
 
         # U-3: Start manual payload listener if monitor active
         if self.monitor:
@@ -1311,6 +1505,39 @@ class ScanEngine:
                     await self.browser.page.context.add_cookies(manual_seed.cookies)
             except Exception as _manual_err:
                 console.print(f"  [yellow][Manual Crawl] 読み込み失敗: {_manual_err}[/yellow]")
+
+        # API ファースト検査 — OpenAPI/Swagger/Postman スペックからエンドポイント・
+        # 共通ヘッダ・JSON 操作（mass_assignment 等が使う）をシードする。
+        if self.api_spec_path:
+            try:
+                from wscan.api_spec_importer import ApiSpecImporter
+                api_seed = ApiSpecImporter().load(self.api_spec_path, self.target_url)
+                console.print(
+                    f"  [dim cyan][API][/dim cyan] {len(api_seed.urls)} URL, "
+                    f"{len(api_seed.requests)} JSON 操作を読み込みました: {self.api_spec_path}"
+                )
+                for _aurl in api_seed.urls:
+                    if (
+                        _aurl not in self.visited_urls
+                        and self._is_access_allowed_url(_aurl)
+                        and not self._is_url_excluded(_aurl)
+                    ):
+                        self.visited_urls.add(_aurl)
+                        queue.append((_aurl, 0, self.target_url))
+                # JSON ボディ操作はスコープ内のものだけ mass_assignment へ渡す
+                self.api_seed_requests = [
+                    r for r in api_seed.requests
+                    if self._is_attack_target_url(r.url) and not self._is_url_excluded(r.url)
+                ]
+                if getattr(api_seed, "headers", None):
+                    api_hdrs = {
+                        k: v for k, v in api_seed.headers.items()
+                        if k.lower() not in ("cookie", "content-length", "host")
+                    }
+                    if api_hdrs:
+                        await self.header_manager.update(api_hdrs)
+            except Exception as _api_err:
+                console.print(f"  [yellow][API] スペック読み込み失敗: {_api_err}[/yellow]")
 
         # C-3: Seed crawl queue from sitemap.xml / robots.txt (if enabled)
         sitemap_urls = await self._fetch_sitemap_urls() if self.enable_sitemap_crawl else []
@@ -2659,6 +2886,12 @@ class ScanEngine:
         if not page.forms and not page.url_params:
             return
 
+        # ── セッション失効チェック（攻撃前に一度）────────────────────────
+        # 長時間スキャンでセッションが切れると以降が全てログイン画面に化け、
+        # 検出力が静かにゼロになる。攻撃対象ページに遷移して状態を確認し、
+        # 失効していれば自動再ログインして認証済みコンテンツを取り直す。
+        await self._maybe_relogin_for_page(page.url)
+
         # ── Run multi-step attack flows that target this page ─────────────
         matched_flow = None
         for flow in self.flows:
@@ -3059,6 +3292,18 @@ class ScanEngine:
             if scanner is None:
                 continue
 
+            # 再開可能スキャン: 既に完了した (url, field, check) 単位は飛ばす
+            if self._checkpoint_is_done(url, field_name, form_index, check_name):
+                self._record_scan_matrix(
+                    url=url,
+                    field_name=field_name,
+                    check_name=check_name,
+                    status="skipped",
+                    location=location,
+                    note="Skipped — already completed in a previous run (resume).",
+                )
+                continue
+
             # Early exit: if a critical finding was already confirmed for this field,
             # skip remaining checks — critical is the highest severity so further
             # testing would only duplicate evidence.
@@ -3119,6 +3364,8 @@ class ScanEngine:
             finally:
                 if _override_token is not None:
                     _FIELD_PAYLOAD_OVERRIDES.reset(_override_token)
+                # この (url, field, check) 単位を完了として記録（再開時に飛ばす）
+                self._checkpoint_mark_done(url, field_name, form_index, check_name)
 
         # CTF: check page source after all scanners ran on this field
         if self.flag_finder:
@@ -3139,6 +3386,8 @@ class ScanEngine:
             )
 
         self.completed_fields += 1
+        # フィールド完了ごとに進捗を永続化（中断しても次回ここから再開できる）
+        self._save_checkpoint()
         if self.monitor and self.total_fields > 0:
             await self.monitor.emit_progress(
                 current=self.completed_fields,

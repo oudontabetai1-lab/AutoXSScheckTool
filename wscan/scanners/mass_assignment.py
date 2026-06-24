@@ -1,0 +1,176 @@
+"""
+Mass Assignment Scanner（新クラス・API ファースト連携）
+======================================================
+OWASP API Top 10 の「Mass Assignment / 過剰割り当て」。クライアントが送れない
+はずの特権プロパティ（``role`` / ``isAdmin`` / ``verified`` 等）を JSON ボディに
+混ぜて送り、サーバがそれを受理して反映するかを検査する。
+
+検査対象は **API スペック（OpenAPI/Postman）取り込みで得た JSON 操作**
+（``engine.api_seed_requests`` の :class:`RequestTemplate`）。各操作について
+  1. テンプレートのボディでベースライン応答を取り、
+  2. 特権フィールド（一意なセンチネル値つき）を足したボディを送り、
+  3. センチネル値がベースラインに無く汚染応答に現れたら過剰割り当てと判定。
+
+検知判定は純粋関数（``augment_body`` / ``detect_mass_assignment``）に切り出す。
+"""
+from __future__ import annotations
+
+import json
+import secrets
+from typing import Optional, TYPE_CHECKING
+
+import httpx
+
+from .base import BaseScanner, Finding
+
+if TYPE_CHECKING:
+    from wscan.engine import ScanEngine
+
+
+# 攻撃者が握れてはいけない特権/機微プロパティ名
+PRIVILEGED_FIELDS = (
+    "role", "roles", "is_admin", "isAdmin", "admin", "is_staff",
+    "is_superuser", "superuser", "verified", "is_verified", "email_verified",
+    "active", "is_active", "approved", "permissions", "scope", "scopes",
+    "group", "groups", "account_type", "plan", "premium", "balance",
+    "credit", "account_balance", "price", "discount",
+)
+
+
+def make_sentinels(fields=PRIVILEGED_FIELDS) -> dict[str, str]:
+    """各特権フィールドに一意なセンチネル値を割り当てる（純粋）。
+
+    値を一意にすることで、応答に現れた値がどのフィールド由来か特定でき、
+    かつ偶然の一致による誤検知を避けられる。
+    """
+    token = secrets.token_hex(4)
+    return {f: f"wscanMA{token}{i}" for i, f in enumerate(fields)}
+
+
+def augment_body(base_body: Optional[dict], sentinels: dict[str, str]) -> dict:
+    """ベースボディに特権フィールド（センチネル値）を足した dict を返す（純粋）。"""
+    out = dict(base_body or {})
+    for field_name, value in sentinels.items():
+        out[field_name] = value
+    return out
+
+
+def detect_mass_assignment(
+    baseline_body: str,
+    polluted_body: str,
+    sentinels: dict[str, str],
+) -> Optional[tuple[str, str]]:
+    """過剰割り当ての証拠を探す（純粋）。
+
+    センチネル値が汚染応答に現れ、ベースライン応答には無いものを 1 件返す
+    （``(field_name, value)``）。無ければ None。ベースラインにも在る値は
+    単なる入力反射として除外する（誤検知抑止）。
+    """
+    base = baseline_body or ""
+    polluted = polluted_body or ""
+    for field_name, value in sentinels.items():
+        if value in polluted and value not in base:
+            return field_name, value
+    return None
+
+
+class MassAssignmentScanner(BaseScanner):
+    """Mass Assignment（過剰割り当て）スキャナ。API スペック由来の JSON 操作を検査。"""
+
+    CHECK_TYPE = "mass_assignment"
+    SEVERITY = "high"
+
+    def __init__(self, engine: "ScanEngine"):
+        super().__init__(engine)
+        self._done = False
+
+    async def scan_field(
+        self,
+        url: str,
+        form_index: int,
+        field: dict,
+        is_url_param: bool = False,
+    ) -> list[Finding]:
+        return []
+
+    async def scan_page(self, url: str) -> list[Finding]:
+        # API 由来の JSON 操作群を一度だけまとめて検査する。
+        if self._done:
+            return []
+        self._done = True
+
+        templates = list(getattr(self.engine, "api_seed_requests", []) or [])
+        if not templates:
+            return []
+
+        if self.monitor:
+            await self.monitor.emit_status(
+                f"Mass assignment check on {len(templates)} API operation(s)"
+            )
+
+        findings: list[Finding] = []
+        for tmpl in templates:
+            if (tmpl.method or "GET").upper() not in ("POST", "PUT", "PATCH"):
+                continue
+            f = await self._test_template(tmpl)
+            if f:
+                findings.append(f)
+        return findings
+
+    def _client_kwargs(self, content_type: str) -> dict:
+        hdrs: dict = {"Content-Type": content_type}
+        if hasattr(self.engine, "auth_headers"):
+            base = self.engine.auth_headers()
+            base.update(hdrs)
+            hdrs = base
+        kwargs: dict = {"timeout": getattr(self.engine, "timeout", 15),
+                        "follow_redirects": True, "headers": hdrs}
+        if hasattr(self.engine, "httpx_client_kwargs"):
+            kwargs = self.engine.httpx_client_kwargs(**kwargs)
+        elif getattr(self.engine, "proxy", ""):
+            kwargs["proxy"] = self.engine.proxy
+        return kwargs
+
+    async def _test_template(self, tmpl) -> Optional[Finding]:
+        sentinels = make_sentinels()
+        base_body = tmpl.json_body if isinstance(tmpl.json_body, dict) else {}
+        polluted = augment_body(base_body, sentinels)
+        kwargs = self._client_kwargs(getattr(tmpl, "content_type", "application/json"))
+        method = (tmpl.method or "POST").upper()
+
+        baseline_payload = json.dumps(base_body)
+        polluted_payload = json.dumps(polluted)
+        await self.log_payload_test("(JSON body)", polluted_payload, "mass_assignment", tmpl.url)
+
+        try:
+            async with httpx.AsyncClient(**kwargs) as client:
+                baseline = await client.request(method, tmpl.url, content=baseline_payload)
+                tainted = await client.request(method, tmpl.url, content=polluted_payload)
+        except Exception:
+            return None
+
+        hit = detect_mass_assignment(baseline.text, tainted.text, sentinels)
+        if not hit:
+            return None
+        field_name, value = hit
+
+        return await self.record_finding(
+            url=tmpl.url,
+            field_name=f"(JSON body: {field_name})",
+            payload=polluted_payload,
+            evidence=(
+                f"Mass assignment: the privileged property '{field_name}' was "
+                f"accepted and reflected (value '{value}') when added to the "
+                f"{method} body of {tmpl.url}, but was absent from the baseline "
+                f"response. Clients can set fields they should not control "
+                f"(e.g. role/admin/verified/balance)."
+            ),
+            pair={
+                "request": {"url": tmpl.url, "method": method, "body": polluted_payload},
+                "response": {"status": tainted.status_code, "body": tainted.text[:1000]},
+            },
+            severity="high",
+            confidence="likely",
+            evidence_type="mass_assignment",
+            evidence_details={"field": field_name, "method": method},
+        )

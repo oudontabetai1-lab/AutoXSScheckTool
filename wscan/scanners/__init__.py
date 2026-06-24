@@ -36,6 +36,9 @@ from .race_condition import RaceConditionScanner
 from .secret_leak import SecretLeakScanner
 from .sri import SRIScanner
 from .websocket import WebSocketScanner
+from .prototype_pollution import PrototypePollutionScanner
+from .cache_poisoning import CachePoisoningScanner
+from .mass_assignment import MassAssignmentScanner
 
 
 # check-type string → scanner class
@@ -77,6 +80,9 @@ SCANNERS: dict[str, type] = {
     "secret_leak":       SecretLeakScanner,
     "sri":               SRIScanner,
     "js_static":         JsStaticScanner,
+    "prototype_pollution": PrototypePollutionScanner,
+    "cache_poisoning":   CachePoisoningScanner,
+    "mass_assignment":   MassAssignmentScanner,
 }
 
 
@@ -92,4 +98,5 @@ __all__ = [
     "StoredXSSScanner", "XSSScanner",
     "XXEScanner", "LDAPScanner", "FileUploadScanner", "RaceConditionScanner",
     "WebSocketScanner", "SecretLeakScanner", "SRIScanner", "JsStaticScanner",
+    "PrototypePollutionScanner", "CachePoisoningScanner", "MassAssignmentScanner",
 ]
