@@ -4255,6 +4255,11 @@ function closeInteractiveModals() {
 // バーの詳細ボタンから openCrawlReviewDetails() で必要なときだけ開く）。
 function beginCrawlReview(pages) {
   _crawlReviewPages = Array.isArray(pages) ? pages.slice() : [];
+  // 新しいレビューを開始するたびに、詳細パネルの一時状態（前スキャン/前イテレーションの
+  // 手動シナリオ・追加URL・手動巡回ファイル・フィルタ）をリセットする。これを怠ると、
+  // 詳細パネルを開かずバーから直接「検査開始」したとき sendCrawlReview() が古い flows を
+  // 送ってしまい、意図しないナビゲーション/入力ステップが新スキャンで再実行される。
+  resetCrawlReviewDetailState();
   const cnt = document.getElementById('crawlReviewBarCount');
   if (cnt) cnt.textContent = _crawlReviewPages.length;
   const bar = document.getElementById('crawlReviewBar');
@@ -4263,21 +4268,29 @@ function beginCrawlReview(pages) {
   switchCenterTab('sitemap', document.getElementById('ctab-sitemap'));
 }
 
+// 詳細パネルの一時入力状態をクリアする（新規レビュー開始時に一度だけ呼ぶ）。
+function resetCrawlReviewDetailState() {
+  reviewFlows = [];
+  if (typeof renderReviewFlows === 'function') renderReviewFlows();
+  const extra = document.getElementById('crawlReviewExtraUrls'); if (extra) extra.value = '';
+  const manual = document.getElementById('crawlReviewManualFile'); if (manual) manual.value = '';
+  const filt = document.getElementById('crawlReviewFilter'); if (filt) filt.value = '';
+}
+
 // バーの「再巡回・URL追加・シナリオ」から、補完用の詳細パネル（旧レビューモーダル）を開く。
 function openCrawlReviewDetails() {
   showCrawlReviewModal(_crawlReviewPages);
 }
 
+// 詳細パネルを開く（表示更新のみ）。一時状態のリセットは beginCrawlReview 側で行うので
+// ここではクリアしない＝同一レビュー中に開き直しても作成中のシナリオ/入力を保持する。
 function showCrawlReviewModal(pages) {
-  _crawlReviewPages = Array.isArray(pages) ? pages.slice() : [];
+  if (Array.isArray(pages)) _crawlReviewPages = pages.slice();
   document.getElementById('crawlReviewCount').textContent = _crawlReviewPages.length;
-  document.getElementById('crawlReviewFilter').value = '';
-  document.getElementById('crawlReviewExtraUrls').value = '';
   const manualEl = document.getElementById('crawlReviewManualFile');
   if (manualEl && !manualEl.value) {
     manualEl.value = document.getElementById('cfgManualCrawlFile')?.value || '';
   }
-  reviewFlows = [];
   renderReviewFlows();
   renderCrawlReviewList();
   document.getElementById('crawlReviewOverlay').classList.add('active');
