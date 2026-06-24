@@ -255,6 +255,67 @@ class RawSubmissionTests(unittest.TestCase):
         browser.fill_and_submit_form.assert_called()
 
 
+class RawEncodingTests(unittest.TestCase):
+    """raw httpx 送信のエンコーディング（urlencoded / multipart）を ASGI で検証。"""
+
+    def _echo_app(self):
+        from fastapi import FastAPI, Request
+
+        app = FastAPI()
+
+        @app.post("/contact")
+        async def contact(request: Request):
+            ct = request.headers.get("content-type", "")
+            form = await request.form()
+            return {"content_type": ct, "email": form.get("email", "")}
+
+        return app
+
+    def _engine_with_app(self, app):
+        import httpx
+
+        engine = _Engine(_Browser(""))
+
+        def _kwargs(**ov):
+            ov["transport"] = httpx.ASGITransport(app=app)
+            return ov
+
+        engine.httpx_client_kwargs = _kwargs
+        return engine
+
+    def _run_probe(self, enctype):
+        import json
+
+        scanner = MailHeaderInjectionScanner(self._engine_with_app(self._echo_app()))
+        scanner._extract_form = AsyncMock(
+            return_value={
+                "action": "http://t.test/contact",
+                "method": "POST",
+                "enctype": enctype,
+                "fields": {"email": ""},
+            }
+        )
+        payload = "user@example.com\r\nCc: attacker@evil.example.com"
+        body, _pair = _run(
+            scanner._apply_payload_raw(
+                "http://t.test/contact", 0, "email", payload, False
+            )
+        )
+        return json.loads(body), payload
+
+    def test_multipart_form_uses_multipart_and_preserves_crlf(self):
+        data, payload = self._run_probe("multipart/form-data")
+        self.assertIn("multipart/form-data", data["content_type"])
+        # 値中の CR/LF が生のままサーバへ届く（注入が成立し得る）。
+        self.assertEqual(data["email"], payload)
+
+    def test_urlencoded_form_roundtrips_crlf(self):
+        data, payload = self._run_probe("application/x-www-form-urlencoded")
+        self.assertIn("urlencoded", data["content_type"])
+        # urlencoded は %0D%0A としてエンコード→サーバ側でデコードされ復元する。
+        self.assertEqual(data["email"], payload)
+
+
 class _CookieBrowser:
     """``page.context.cookies()`` でセッション cookie を返すブラウザスタブ。"""
 

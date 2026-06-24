@@ -433,13 +433,14 @@ class MailHeaderInjectionScanner(BaseScanner):
             params = dict(parse_qsl(parts.query, keep_blank_values=True))
             params[field_name] = payload
             action = urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))
-            method, data = "GET", params
+            method, data, enctype = "GET", params, ""
         else:
             form = await self._extract_form(url, form_index)
             if not form:
                 return None
             action = form["action"]
             method = form["method"]
+            enctype = (form.get("enctype") or "").lower()
             data = dict(form["fields"])
             data[field_name] = payload
 
@@ -463,6 +464,12 @@ class MailHeaderInjectionScanner(BaseScanner):
         async with httpx.AsyncClient(**client_kwargs) as client:
             if method == "GET":
                 resp = await client.get(action, params=data)
+            elif "multipart" in enctype:
+                # multipart/form-data 必須のハンドラ向け。各フィールドを
+                # ``(None, value)`` の非ファイルパートとして送ると multipart で
+                # エンコードされ、値中の CR/LF も生のまま保持される（注入に有効）。
+                files = {k: (None, v) for k, v in data.items()}
+                resp = await client.post(action, files=files)
             else:
                 resp = await client.post(action, data=data)
         body = resp.text
@@ -550,6 +557,8 @@ class MailHeaderInjectionScanner(BaseScanner):
             return {
                 action: form.action || window.location.href,
                 method: (form.method || 'GET').toUpperCase(),
+                enctype: (form.enctype || form.getAttribute('enctype')
+                          || 'application/x-www-form-urlencoded').toLowerCase(),
                 fields: fields
             };
         }
