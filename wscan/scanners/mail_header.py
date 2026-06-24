@@ -174,6 +174,13 @@ class MailHeaderInjectionScanner(BaseScanner):
         is_url_param: bool,
     ) -> list[Finding]:
         """注入した CR/LF + ヘッダの反射、またはメールエラー漏えいを検知する。"""
+        # ベースライン: CRLF を含まない良性値を投入し、メールエラーが常時出るか観測。
+        # メールサーバ停止や恒常的な「SMTP error」等は注入と無関係なので、これと
+        # 同じエラーは Check 1 で誤検知として除外する（誤検知ゼロ優先）。
+        baseline_error = await self._baseline_mail_error(
+            url, form_index, field_name, is_url_param
+        )
+
         for payload in reflection_payloads():
             await self.log_payload_test(field_name, payload, "mail_header", url)
 
@@ -182,9 +189,10 @@ class MailHeaderInjectionScanner(BaseScanner):
             )
             await asyncio.sleep(0.2 * self.sleep_factor)
 
-            # Check 1: mail-related error message in response (leaks unsanitised input)
+            # Check 1: mail-related error message in response (leaks unsanitised input)。
+            # ベースラインでも同種のエラーが出る場合は注入起因でないため記録しない。
             match = self.check_response_for_patterns(source, MAIL_ERROR_PATTERNS)
-            if match:
+            if match and not baseline_error:
                 finding = await self.record_finding(
                     url=url,
                     field_name=field_name,
@@ -217,6 +225,32 @@ class MailHeaderInjectionScanner(BaseScanner):
                 return [finding] if finding else []
 
         return []
+
+    async def _baseline_mail_error(
+        self,
+        url: str,
+        form_index: int,
+        field_name: str,
+        is_url_param: bool,
+    ) -> Optional[str]:
+        """CRLF を含まない良性値を投入し、恒常的なメールエラーの有無を返す。
+
+        返り値が非 None なら、その応答は注入と無関係にメールエラーを含むので、
+        Check 1（mail_header_error）はその種のエラーを記録しない。失敗時は None
+        （= ベースライン不明）として従来挙動に倣う。
+        """
+        try:
+            await self.log_payload_test(
+                field_name, "baseline@example.com", "mail_header_baseline", url
+            )
+            source, _pair = await self._apply_payload(
+                url, form_index, field_name, "baseline@example.com", is_url_param
+            )
+            await asyncio.sleep(0.2 * self.sleep_factor)
+            return self.check_response_for_patterns(source, MAIL_ERROR_PATTERNS)
+        except Exception as exc:
+            self._note_wave_degradation("mail_baseline", exc)
+            return None
 
     async def _scan_oob(
         self,
@@ -305,22 +339,27 @@ class MailHeaderInjectionScanner(BaseScanner):
 
     @staticmethod
     def _poll_oob(sink, attempts: list[dict]) -> "Optional[tuple[dict, object]]":
-        """各変種のトークンを締切まで検索し、最初に着信した変種を返す（同期）。
+        """締切まで受信箱をポーリングし、最初に着信した変種を返す（同期）。
 
-        ``asyncio.to_thread`` から呼ぶ前提のブロッキング・ヘルパー。1 つでも着信
-        したら即座にその変種を返す（どの変種が発火したかの一意な帰属になる）。
+        ``asyncio.to_thread`` から呼ぶ前提のブロッキング・ヘルパー。1 ポーリングで
+        ``fetch_recent`` を **1 回だけ**呼んで直近メールを取得し、全トークンを
+        メモリ内で突合する（トークン毎に search すると毎回 IMAP/POP ログインが
+        発生し、メールボックスを絞られて確証を取りこぼし得るため）。1 つでも着信
+        したらその変種を返す（どの変種が発火したかの一意な帰属になる）。
         """
         import time as _time
+        from wscan.oob_email import email_matches_token
 
         deadline = _time.time() + max(0.0, OOB_WAIT_SECONDS)
         while True:
-            for attempt in attempts:
-                try:
-                    hits = sink.search(attempt["token"])
-                except Exception:
-                    hits = []
-                if hits:
-                    return attempt, hits[0]
+            try:
+                emails = sink.fetch_recent()
+            except Exception:
+                emails = []
+            for received in emails:
+                for attempt in attempts:
+                    if email_matches_token(received, attempt["token"]):
+                        return attempt, received
             if _time.time() >= deadline:
                 return None
             _time.sleep(max(0.5, OOB_POLL_INTERVAL))

@@ -52,29 +52,26 @@ class _Engine:
 
 
 class _OOBEngine(_Engine):
-    """OOB が設定済みのダミーエンジン。``oob_sink.wait_for`` をスタブする。"""
+    """OOB が設定済みのダミーエンジン。``oob_sink.fetch_recent`` をスタブする。
+
+    ``received`` の To に当たり変種のアドレスを持たせ、``_poll_oob`` が
+    ``email_matches_token`` でその変種に帰属することを検証できるようにする。
+    """
 
     def __init__(self, browser, received, winning_index=0):
         super().__init__(browser)
         self._counter = 0
-        # 当たりトークン（received を返す変種）。received=None なら誰も当たらない。
-        self.winning_token = None
-
-        engine = self
 
         class _Sink:
-            def search(self, token):
-                if received is not None and token == engine.winning_token:
-                    return [received]
-                return []
+            def fetch_recent(self, limit=50):
+                # 1 ポーリングで直近メールを一括返却（received があれば 1 件）。
+                return [received] if received is not None else []
 
         self.oob_sink = _Sink()
         self._winning_index = winning_index
 
     def new_oob_address(self):
         token = f"wscan-oob-tok{self._counter}"
-        if self._counter == self._winning_index:
-            self.winning_token = token
         self._counter += 1
         return (token, f"{token}@collab.test")
 
@@ -152,6 +149,54 @@ class ReflectionDetectionTests(unittest.TestCase):
             )
         )
         self.assertEqual(findings, [])
+
+
+class _MailErrorBrowser:
+    """投入値に応じて応答を変えるブラウザ。ベースライン誤検知ガードの検証用。
+
+    ``always_error=True`` なら良性値でもメールエラーを返す（恒常エラー）。
+    そうでなければ良性値は正常応答、CRLF 注入値のみメールエラーを返す。
+    """
+
+    def __init__(self, always_error=False):
+        self.always_error = always_error
+        self.navigate = AsyncMock(return_value=True)
+
+    async def screenshot_b64(self, label=""):
+        return ""
+
+    async def fill_and_submit_form(self, form_index, field_name, payload):
+        err = "sendmail returned an error while sending mail"
+        ok = "Thanks, your message was sent."
+        if self.always_error:
+            body = err
+        else:
+            body = err if payload != "baseline@example.com" else ok
+        return body, {"request": {}, "response": {"body": body}}
+
+
+class MailErrorBaselineGuardTests(unittest.TestCase):
+    def test_injection_introduced_error_is_flagged(self):
+        # ベースライン(良性値)は正常、注入値でのみメールエラー → 記録する。
+        scanner = MailHeaderInjectionScanner(_Engine(_MailErrorBrowser(always_error=False)))
+        findings = _run(
+            scanner.scan_field(
+                "http://t.test/contact", 0, {"name": "email"}, is_url_param=False
+            )
+        )
+        errs = [f for f in findings if f.evidence_type == "mail_header_error"]
+        self.assertEqual(len(errs), 1)
+
+    def test_constant_mail_error_is_not_flagged(self):
+        # 良性値でも同じメールエラーが出る（サーバ恒常エラー）→ 誤検知として記録しない。
+        scanner = MailHeaderInjectionScanner(_Engine(_MailErrorBrowser(always_error=True)))
+        findings = _run(
+            scanner.scan_field(
+                "http://t.test/contact", 0, {"name": "email"}, is_url_param=False
+            )
+        )
+        errs = [f for f in findings if f.evidence_type == "mail_header_error"]
+        self.assertEqual(errs, [])
 
 
 class OOBConfirmationTests(unittest.TestCase):

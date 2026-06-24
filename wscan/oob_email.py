@@ -295,6 +295,73 @@ class EmailSink:
             return self._search_pop3(token)
         return self._search_imap(token)
 
+    # -- 直近メールの一括取得（複数トークンをメモリ内で突合するため） --
+    def _fetch_recent_imap(self, limit: int) -> list:
+        conn = self._connect_imap()
+        try:
+            typ, data = conn.uid("search", None, "ALL")
+            if typ != "OK" or not data or not data[0]:
+                return []
+            uids = data[0].split()[-max(1, limit):]
+            out = []
+            for uid in uids:
+                typ, msg_data = conn.uid("fetch", uid, "(RFC822)")
+                if typ != "OK" or not msg_data or not msg_data[0]:
+                    continue
+                try:
+                    out.append(parse_email(msg_data[0][1], uid=uid.decode()))
+                except Exception:
+                    continue
+            return out
+        finally:
+            try:
+                conn.logout()
+            except Exception:
+                pass
+
+    def _fetch_recent_pop3(self, limit: int) -> list:
+        import poplib
+
+        cfg = self.config
+        if cfg.use_ssl:
+            conn = poplib.POP3_SSL(cfg.host, cfg.effective_port)
+        else:
+            conn = poplib.POP3(cfg.host, cfg.effective_port)
+        try:
+            conn.user(cfg.username)
+            conn.pass_(cfg.password)
+            count = len(conn.list()[1])
+            out = []
+            start = max(1, count - max(1, limit) + 1)
+            for i in range(start, count + 1):
+                resp, lines, octets = conn.retr(i)
+                try:
+                    out.append(parse_email(b"\r\n".join(lines), uid=str(i)))
+                except Exception:
+                    continue
+            return out
+        finally:
+            try:
+                conn.quit()
+            except Exception:
+                pass
+
+    def fetch_recent(self, limit: int = 50) -> list:
+        """直近 ``limit`` 件の受信メールを **1 回のログイン**で取得・解析して返す。
+
+        複数トークンを 1 ポーリングで突合したいときに使う。トークン毎に
+        :meth:`search` を呼ぶとログインが多発しメールボックスを絞られ得るため、
+        ここで一括取得し、突合は ``email_matches_token`` でメモリ内に行う。
+        """
+        if not self.config.configured:
+            raise RuntimeError(
+                "OOB email is not configured (set WSCAN_OOB_HOST / "
+                "WSCAN_OOB_USERNAME / WSCAN_OOB_PASSWORD)."
+            )
+        if self.config.protocol == "pop3":
+            return self._fetch_recent_pop3(limit)
+        return self._fetch_recent_imap(limit)
+
     def wait_for(
         self, token: str, timeout: float = 60.0, interval: float = 5.0
     ) -> Optional[ReceivedEmail]:
