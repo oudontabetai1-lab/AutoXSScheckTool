@@ -152,6 +152,20 @@ class OpenApiTests(unittest.TestCase):
         self.assertEqual(len(posts), 1)
         self.assertIn("api-version=2024", posts[0].url)
 
+    def test_referenced_parameter_resolved(self):
+        # components.parameters の $ref を解決し、必須クエリを URL に含める
+        spec = {
+            "openapi": "3.0.0",
+            "servers": [{"url": "https://api.example.com"}],
+            "components": {"parameters": {"ApiVersion": {
+                "name": "api-version", "in": "query",
+                "schema": {"type": "string", "default": "2024"}}}},
+            "paths": {"/items": {"get": {
+                "parameters": [{"$ref": "#/components/parameters/ApiVersion"}]}}},
+        }
+        seed = parse_openapi(spec)
+        self.assertTrue(any("api-version=2024" in u for u in seed.urls))
+
     def test_request_body_ref_resolved(self):
         spec = {
             "openapi": "3.0.0",

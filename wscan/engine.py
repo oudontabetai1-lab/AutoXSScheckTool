@@ -45,6 +45,13 @@ _CURRENT_WORKER: ContextVar = ContextVar("wscan_worker", default=None)
 # of a single scan_field call so parallel workers never clobber each other.
 _FIELD_PAYLOAD_OVERRIDES: ContextVar = ContextVar("wscan_payload_overrides", default=None)
 
+# 検査名と一致／前置しない別 check_type を出すスキャナのエイリアス。
+# resume 時の Finding 絞り込み（_check_type_in_scope）で使う。
+# 例: cache_poisoning スキャナは cache_deception も出す。
+_CHECK_EXTRA_TYPES: dict[str, tuple[str, ...]] = {
+    "cache_poisoning": ("cache_deception",),
+}
+
 import yaml
 from rich.console import Console
 from rich.rule import Rule
@@ -1001,11 +1008,13 @@ class ScanEngine:
 
         スキャナの ``CHECK_TYPE`` は実際の検査名と一致するもの（``xss``/``sqli``）と、
         サブタイプを持つもの（``graphql_introspection``/``jwt_alg_none``/``privesc_*``）
-        がある。完全一致または ``"<check>_"`` 前置で判定する。
+        がある。完全一致・``"<check>_"`` 前置・エイリアス表で判定する。
         """
         ct = check_type or ""
         for check in self.checks:
             if ct == check or ct.startswith(check + "_"):
+                return True
+            if ct in _CHECK_EXTRA_TYPES.get(check, ()):
                 return True
         return False
 
@@ -1082,9 +1091,47 @@ class ScanEngine:
             return False
         if success:
             console.print("  [green][Auth] 再ログイン成功 — セッションを更新しました。[/green]")
+            # 新しい Cookie を httpx 系（auth_headers）にも反映する。これを怠ると
+            # mass_assignment/graphql/cache_poisoning/server-side proto などの直接
+            # httpx 検査が失効 Cookie を送り続けて認証 API を取りこぼす。
+            await self._sync_cookies_from_browser(browser)
         else:
             console.print("  [yellow][Auth] 再ログインできませんでした。[/yellow]")
         return bool(success)
+
+    async def _sync_cookies_from_browser(self, browser) -> None:
+        """ブラウザコンテキストの Cookie を ``self.cookies`` 文字列へ反映する。
+
+        ``auth_headers()`` は ``self.cookies`` を Cookie ヘッダに使うため、再ログイン
+        後にここを更新しないと httpx ベースの検査が古い Cookie を送ってしまう。
+        対象ホストにマッチする Cookie のみを採用する（無関係ドメインの混入防止）。
+        """
+        try:
+            from urllib.parse import urlparse as _up
+            page = getattr(browser, "page", None)
+            if page is None:
+                return
+            cookies = await page.context.cookies()
+        except Exception:
+            return
+        if not cookies:
+            return
+        target_host = (_up(self.target_url).hostname or "").lower()
+        pairs: list[str] = []
+        for c in cookies:
+            name = c.get("name")
+            if not name:
+                continue
+            dom = str(c.get("domain", "")).lstrip(".").lower()
+            # 対象ホストに一致／サブドメイン関係の Cookie のみ採用
+            if dom and target_host and not (
+                target_host == dom or target_host.endswith("." + dom)
+                or dom.endswith("." + target_host)
+            ):
+                continue
+            pairs.append(f"{name}={c.get('value', '')}")
+        if pairs:
+            self.cookies = "; ".join(pairs)
 
     async def _maybe_relogin_for_page(self, url: str) -> None:
         """攻撃対象ページの状態を見てセッション失効なら再ログインする。

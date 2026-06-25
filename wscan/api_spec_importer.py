@@ -137,6 +137,19 @@ def _openapi_base_urls(spec: dict, fallback_base: str = "") -> list[str]:
     return out
 
 
+def _resolve_params(params: list, spec: Optional[dict]) -> list:
+    """parameters リスト中の ``$ref``（``#/components/parameters/X``）を解決する（純粋）。"""
+    out: list = []
+    for p in params or []:
+        if isinstance(p, dict) and "$ref" in p:
+            resolved = _resolve_ref(spec, p["$ref"])
+            if isinstance(resolved, dict):
+                out.append(resolved)
+        elif isinstance(p, dict):
+            out.append(p)
+    return out
+
+
 _HTTP_METHODS = ("get", "post", "put", "patch", "delete", "options", "head")
 
 
@@ -162,6 +175,10 @@ def parse_openapi(spec: dict, fallback_base: str = "") -> ApiSeedData:
             if not isinstance(op, dict):
                 continue
             params = list(common_params) + list(op.get("parameters", []) or [])
+            # parameters が component 参照（{"$ref": "#/components/parameters/X"}）の
+            # 場合は解決してから扱う。未解決だと in/name が読めず必須クエリ
+            # （api-version/tenant/locale 等）が URL から落ちて 400/404 になる。
+            params = _resolve_params(params, spec)
 
             # path パラメータのスキーマ表を作る
             path_schemas = {

@@ -86,6 +86,14 @@ class CheckTypeScopeTests(unittest.TestCase):
         # "xss" は "dom_xss" にマッチしない
         self.assertFalse(in_scope("dom_xss"))
 
+    def test_cache_deception_alias_in_scope(self):
+        # cache_poisoning スキャナは cache_deception も出すので復元対象に含める
+        in_scope = self._engine(["cache_poisoning"])
+        self.assertTrue(in_scope("cache_poisoning"))
+        self.assertTrue(in_scope("cache_deception"))
+        # 無関係チェックでは含めない
+        self.assertFalse(self._engine(["xss"])("cache_deception"))
+
 
 class IoTests(unittest.TestCase):
     def test_save_load_roundtrip(self):
