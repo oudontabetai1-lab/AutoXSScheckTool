@@ -927,12 +927,17 @@ class ScanEngine:
                 )
             else:
                 state = loaded
-                # 既出 Finding をレポートへ復元（重複防止のため dedup へも登録）
+                # 既出 Finding をレポートへ復元（重複防止のため dedup へも登録）。
+                # ただし今回要求されたチェックに属する Finding のみ復元する
+                # （xss sqli の結果を --checks xss で再開したとき、SQLi の古い
+                # Finding をレポートへ持ち込まないため）。
                 restored = 0
                 for fd in state.findings:
                     try:
                         f = Finding.from_dict(fd)
                     except Exception:
+                        continue
+                    if not self._check_type_in_scope(f.check_type):
                         continue
                     key = finding_dedup_key_for(f)
                     if key not in self._finding_dedup:
@@ -961,6 +966,42 @@ class ScanEngine:
             cp.save_checkpoint(self.output_dir, self.checkpoint)
         except Exception as exc:
             self.wave_errors.append(f"checkpoint_save: {type(exc).__name__}: {exc}")
+
+    async def _run_api_template_checks(self) -> None:
+        """API スペック由来の JSON 操作（``api_seed_requests``）を、クロール結果に
+        依存せず検査する。
+
+        ``mass_assignment`` は ``scan_page`` 内で ``api_seed_requests`` を回すが、
+        その呼び出しはクロールできたページに対してのみ行われる。JSON API のように
+        GET がページ化されないと一度も呼ばれないため、ここで明示的に一度起動する
+        （``scan_page`` は ``_done`` ガードで冪等なので二重実行は無害）。
+        """
+        if not self.api_seed_requests:
+            return
+        scanner = self.scanners.get("mass_assignment")
+        if scanner is None:
+            return
+        try:
+            findings = await scanner.scan_page(self.target_url)
+            for f in (findings or []):
+                self._record_finding(f, source="api-spec")
+        except AbortScan:
+            raise
+        except Exception as e:
+            console.print(f"  [yellow]API template check (mass_assignment): {e}[/yellow]")
+
+    def _check_type_in_scope(self, check_type: str) -> bool:
+        """Finding の check_type が今回要求されたチェック集合に属するか。
+
+        スキャナの ``CHECK_TYPE`` は実際の検査名と一致するもの（``xss``/``sqli``）と、
+        サブタイプを持つもの（``graphql_introspection``/``jwt_alg_none``/``privesc_*``）
+        がある。完全一致または ``"<check>_"`` 前置で判定する。
+        """
+        ct = check_type or ""
+        for check in self.checks:
+            if ct == check or ct.startswith(check + "_"):
+                return True
+        return False
 
     def _checkpoint_is_done(
         self, url: str, field_name: str, form_index: int, check: str,
@@ -1205,6 +1246,15 @@ class ScanEngine:
                     "\n[bold red][Intervention] Scan aborted by operator.[/bold red] "
                     "Generating partial report …"
                 )
+
+            # ── Phase 3b: API スペック由来の本文検査（クロール非依存）──────
+            # JSON API は GET に 404/405 を返してページ化されないことが多く、
+            # その場合 page-level の scan_page が一度も呼ばれず mass_assignment 等が
+            # 空振りする。クロール結果に依存せず api_seed_requests を直接検査する。
+            try:
+                await self._run_api_template_checks()
+            except AbortScan:
+                pass
 
             # ── Phase 3c: Post-Auth Crawl + Attack (if SQLi bypass detected) ──
             if self.auth_bypass_detected:
@@ -2803,6 +2853,11 @@ class ScanEngine:
         """
         br = self.browser  # context-aware: returns worker in concurrent mode
         if not self.login_url and not br.auth_user:
+            return True
+        # --no-relogin（relogin_on_expiry=False）のときは、セッション失効を検知しても
+        # 自動再ログインしない。利用者が保とうとした対象状態を勝手に変えないため、
+        # 新フラグをこの既存パスでも尊重する。
+        if not self.relogin_on_expiry:
             return True
         if self._is_login_target_url(intended_url):
             return True

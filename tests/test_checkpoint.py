@@ -63,6 +63,30 @@ class StateTests(unittest.TestCase):
         self.assertFalse(s.is_compatible_with("http://other", ["xss"]))
 
 
+class CheckTypeScopeTests(unittest.TestCase):
+    """エンジンの _check_type_in_scope（復元 Finding のチェック絞り込み）。"""
+
+    def _engine(self, checks):
+        import types
+        from wscan.engine import ScanEngine
+        e = types.SimpleNamespace(checks=checks)
+        # bound method を借用
+        return lambda ct: ScanEngine._check_type_in_scope(e, ct)
+
+    def test_exact_and_prefix_match(self):
+        in_scope = self._engine(["xss", "graphql", "jwt"])
+        self.assertTrue(in_scope("xss"))
+        self.assertTrue(in_scope("graphql_introspection"))
+        self.assertTrue(in_scope("jwt_alg_none"))
+
+    def test_out_of_scope_excluded(self):
+        in_scope = self._engine(["xss"])
+        self.assertFalse(in_scope("sqli"))
+        self.assertFalse(in_scope("sqli_error"))
+        # "xss" は "dom_xss" にマッチしない
+        self.assertFalse(in_scope("dom_xss"))
+
+
 class IoTests(unittest.TestCase):
     def test_save_load_roundtrip(self):
         with tempfile.TemporaryDirectory() as d:
