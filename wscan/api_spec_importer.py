@@ -119,7 +119,11 @@ def _openapi_base_urls(spec: dict, fallback_base: str = "") -> list[str]:
             resolved.append(b)
         elif fallback_base:
             origin = "{u.scheme}://{u.netloc}".format(u=urlparse(fallback_base))
-            resolved.append((origin + b).rstrip("/"))
+            # 相対 server URL が "/" で始まらない場合（"api/v1" 等）でも
+            # "https://example.comapi/v1" のような不正ホストにならないよう
+            # 区切りスラッシュを補う。
+            rel = b if b.startswith("/") else "/" + b
+            resolved.append((origin + rel).rstrip("/"))
         else:
             resolved.append(b)
     # 重複除去（順序保持）
@@ -174,7 +178,7 @@ def parse_openapi(spec: dict, fallback_base: str = "") -> ApiSeedData:
                 schema = p.get("schema") or p
                 query_pairs.append((p["name"], str(_sample_for_name(p["name"], schema))))
 
-            body_schema = _openapi_request_body_schema(op)
+            body_schema = _openapi_request_body_schema(op, spec)
             is_body_op = body_schema is not None and method in ("post", "put", "patch")
             example = _example_from_schema(body_schema, spec) if is_body_op else None
 
@@ -201,11 +205,19 @@ def parse_openapi(spec: dict, fallback_base: str = "") -> ApiSeedData:
     return seed
 
 
-def _openapi_request_body_schema(op: dict) -> Optional[dict]:
-    """操作の JSON requestBody スキーマを取り出す（OpenAPI3 / Swagger2 両対応）。"""
+def _openapi_request_body_schema(op: dict, spec: Optional[dict] = None) -> Optional[dict]:
+    """操作の JSON requestBody スキーマを取り出す（OpenAPI3 / Swagger2 両対応）。
+
+    ``requestBody`` 自体が ``$ref``（``#/components/requestBodies/X``）の component
+    参照のことがあるため、先に解決してから ``content`` を見る。解決しないと
+    component ベースの spec で RequestTemplate が作られず mass_assignment が
+    JSON エンドポイントを取りこぼす。
+    """
     # OpenAPI 3.x
     rb = op.get("requestBody")
     if isinstance(rb, dict):
+        if "$ref" in rb:
+            rb = _resolve_ref(spec, rb["$ref"]) or {}
         content = rb.get("content", {}) or {}
         for ctype, media in content.items():
             if "json" in (ctype or "").lower():

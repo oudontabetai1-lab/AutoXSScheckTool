@@ -161,6 +161,33 @@ class OpenApiTests(unittest.TestCase):
         posts = [r for r in seed.requests if r.method == "POST"]
         self.assertEqual(posts[0].json_body, {"user": "test"})
 
+    def test_component_request_body_ref_resolved(self):
+        # requestBody 自体が component 参照のケース
+        spec = {
+            "openapi": "3.0.0",
+            "servers": [{"url": "https://api.example.com"}],
+            "components": {
+                "requestBodies": {"CreateUser": {"content": {
+                    "application/json": {"schema": {"$ref": "#/components/schemas/User"}}}}},
+                "schemas": {"User": {"type": "object",
+                                     "properties": {"name": {"type": "string"}}}},
+            },
+            "paths": {"/users": {"post": {
+                "requestBody": {"$ref": "#/components/requestBodies/CreateUser"}}}},
+        }
+        seed = parse_openapi(spec)
+        posts = [r for r in seed.requests if r.method == "POST"]
+        self.assertEqual(len(posts), 1)
+        self.assertEqual(posts[0].json_body, {"name": "test"})
+
+    def test_relative_server_without_leading_slash(self):
+        # "api/v1" のような相対 server URL でも不正ホストにしない
+        spec = {"openapi": "3.0.0", "servers": [{"url": "api/v1"}],
+                "paths": {"/ping": {"get": {}}}}
+        seed = parse_openapi(spec, fallback_base="https://h.example.com/app")
+        self.assertIn("https://h.example.com/api/v1/ping", seed.urls)
+        self.assertNotIn("https://h.example.comapi/v1/ping", seed.urls)
+
     def test_swagger2_base(self):
         seed = parse_openapi(SWAGGER2)
         # body operation → request template, base from host+basePath
