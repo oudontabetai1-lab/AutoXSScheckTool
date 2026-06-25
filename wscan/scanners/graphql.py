@@ -209,6 +209,7 @@ class GraphQLScanner(BaseScanner):
     def __init__(self, engine: "ScanEngine"):
         super().__init__(engine)
         self._tested_endpoints: set[str] = set()
+        self._tested_urls: set[str] = set()
         self._confirmed_endpoints: list[str] = []
 
     def _client_proxy_kwargs(self) -> dict:
@@ -232,15 +233,25 @@ class GraphQLScanner(BaseScanner):
     async def scan_page(self, url: str) -> list[Finding]:
         """
         On first call (or whenever a new origin is encountered) probe all
-        known GraphQL paths on that origin.
+        known GraphQL paths on that origin. The exact ``url`` is also probed so
+        API-spec endpoints on non-standard paths (e.g. ``/gql``) are exercised.
         """
         parsed = urlparse(url)
         origin = f"{parsed.scheme}://{parsed.netloc}"
 
-        # Only probe each origin once
-        if origin in self._tested_endpoints:
+        candidates: list[str] = []
+        # 既知パスは origin ごとに 1 回だけ掃引する
+        if origin not in self._tested_endpoints:
+            self._tested_endpoints.add(origin)
+            candidates.extend(urljoin(origin, p) for p in _GRAPHQL_PATHS)
+        # API スペック等から渡された具体 URL（/gql 等の非標準パス）も明示的に検査
+        norm_url = url.split("#", 1)[0]
+        if norm_url and norm_url not in self._tested_urls:
+            self._tested_urls.add(norm_url)
+            if norm_url not in candidates:
+                candidates.append(norm_url)
+        if not candidates:
             return []
-        self._tested_endpoints.add(origin)
 
         timeout = float(getattr(self.engine, "timeout", 30))
 
@@ -257,8 +268,7 @@ class GraphQLScanner(BaseScanner):
 
         findings: list[Finding] = []
 
-        for path in _GRAPHQL_PATHS:
-            endpoint = urljoin(origin, path)
+        for endpoint in candidates:
             if await self._is_graphql(endpoint, req_headers, timeout):
                 self._confirmed_endpoints.append(endpoint)
                 endpoint_findings = await self._test_endpoint(

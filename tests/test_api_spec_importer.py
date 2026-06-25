@@ -302,6 +302,17 @@ class PostmanTests(unittest.TestCase):
         seed = parse_postman(coll, fallback_base="https://target.example.com/app")
         self.assertIn("https://target.example.com/api/items", seed.urls)
 
+    def test_host_variable_in_authority_falls_back(self):
+        # scheme://{{host}}/path も origin に解決し https:///path 化しない
+        coll = {
+            "info": {"schema": "https://schema.getpostman.com/json/collection/v2.1.0/"},
+            "item": [{"name": "g", "request": {"method": "GET",
+                                               "url": {"raw": "https://{{host}}/users"}}}],
+        }
+        seed = parse_postman(coll, fallback_base="https://target.example.com")
+        self.assertIn("https://target.example.com/users", seed.urls)
+        self.assertFalse(any(":///" in u for u in seed.urls))
+
     def test_auth_header_variable_resolved(self):
         coll = {
             "info": {"schema": "https://schema.getpostman.com/json/collection/v2.1.0/"},

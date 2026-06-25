@@ -139,6 +139,18 @@ class TimeGateActiveDecouplingTests(unittest.TestCase):
         with self.assertRaises(AbortScan):
             asyncio.run(c._time_gate())
 
+    def test_unreachable_window_fails_closed(self):
+        import asyncio
+        from wscan.intervention import ScanController, AbortScan
+
+        c = ScanController()
+        # 到達不能（終日禁止）かつ abort なし → 素通りせず AbortScan で fail-closed
+        c.set_time_windows(forbidden=["00:00-24:00"])
+        c._active = True
+        c._abort = False
+        with self.assertRaises(AbortScan):
+            asyncio.run(c._time_gate())
+
 
 if __name__ == "__main__":
     unittest.main()

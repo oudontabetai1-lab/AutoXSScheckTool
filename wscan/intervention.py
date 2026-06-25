@@ -147,13 +147,22 @@ class ScanController:
                 datetime.now(), self._allowed_windows, self._forbidden_windows
             )
             if wait == float("inf"):
-                # 到達不能な設定 — 無限待ちを避け、状況を出して通常進行に戻す。
+                # 到達不能な設定（終日禁止など）。本機能は本番保護スロットルなので
+                # 「素通りして攻撃を流す」のは最も危険。fail-closed としてスキャンを
+                # 中断する（操作者が時間帯設定を見直せるよう明示メッセージを出す）。
                 print(
-                    "[TimeWindow] 設定された許可時間帯に到達できません。"
-                    "時間帯ゲートを無視して続行します。",
+                    "[TimeWindow] 設定された許可時間帯に到達できません"
+                    "（終日禁止など）。安全のためスキャンを中断します。",
                     flush=True,
                 )
-                break
+                if self._monitor:
+                    try:
+                        await self._monitor.emit_status(
+                            "検査可能時間帯に到達不能 — 安全のため中断", "error"
+                        )
+                    except Exception:
+                        pass
+                raise AbortScan("No reachable scan window — aborting (fail closed)")
             if not announced:
                 print(
                     f"[TimeWindow] 検査可能時間外です。約 {int(wait)} 秒後に再開します…",

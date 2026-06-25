@@ -407,9 +407,15 @@ def _resolve_postman_vars(raw: str, varmap: dict, fallback_base: str) -> str:
             raw = raw.replace("{{" + key + "}}", val)
     if "{{" in raw and fallback_base:
         origin = "{u.scheme}://{u.netloc}".format(u=urlparse(fallback_base))
-        # 先頭の未解決変数（{{baseUrl}} 等）をスキャン対象の origin に置換
+        # (A) scheme://<authority に変数を含む>（例: https://{{host}}/users、
+        #     {{baseUrl}} を host list で組んだ https://{{baseUrl}}/path）。
+        #     authority ごと fallback origin に置換し、"https:///users" 化を防ぐ。
+        m = re.match(r"^[a-zA-Z][\w+.\-]*://[^/]*", raw)
+        if m and "{{" in m.group(0):
+            raw = origin + raw[m.end():]
+        # (B) 先頭の変数のみ（scheme 無し。例: {{baseUrl}}/users）→ origin に置換
         raw = re.sub(r"^\{\{[^}]+\}\}", origin, raw)
-        # 残る未解決変数は除去（パス断片のみ残す）
+        # 残るパス中の未解決変数は除去（パス断片のみ残す）
         raw = re.sub(r"\{\{[^}]+\}\}", "", raw)
     return raw
 
