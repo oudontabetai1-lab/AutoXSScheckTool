@@ -132,6 +132,35 @@ class OpenApiTests(unittest.TestCase):
         self.assertEqual(posts[0].url, "https://api.example.com/v1/users")
         self.assertEqual(posts[0].json_body, {"name": "test", "age": 1})
 
+    def test_request_body_ref_resolved(self):
+        spec = {
+            "openapi": "3.0.0",
+            "servers": [{"url": "https://api.example.com"}],
+            "components": {"schemas": {
+                "User": {"type": "object", "properties": {
+                    "name": {"type": "string"}, "age": {"type": "integer"}}},
+            }},
+            "paths": {"/users": {"post": {"requestBody": {"content": {
+                "application/json": {"schema": {"$ref": "#/components/schemas/User"}}}}}}},
+        }
+        seed = parse_openapi(spec)
+        posts = [r for r in seed.requests if r.method == "POST"]
+        self.assertEqual(len(posts), 1)
+        # $ref が解決され、通常フィールドを含む本文になる（空 {} ではない）
+        self.assertEqual(posts[0].json_body, {"name": "test", "age": 1})
+
+    def test_swagger2_definitions_ref_resolved(self):
+        spec = {
+            "swagger": "2.0", "host": "api.example.com", "schemes": ["https"],
+            "definitions": {"Creds": {"type": "object",
+                                      "properties": {"user": {"type": "string"}}}},
+            "paths": {"/login": {"post": {"parameters": [
+                {"in": "body", "name": "b", "schema": {"$ref": "#/definitions/Creds"}}]}}},
+        }
+        seed = parse_openapi(spec)
+        posts = [r for r in seed.requests if r.method == "POST"]
+        self.assertEqual(posts[0].json_body, {"user": "test"})
+
     def test_swagger2_base(self):
         seed = parse_openapi(SWAGGER2)
         # body operation → request template, base from host+basePath

@@ -11,6 +11,7 @@ from wscan.scanners.graphql import (
     build_alias_amplification_query,
     build_deep_introspection_query,
     detect_alias_amplification,
+    detect_no_depth_limit,
 )
 from wscan.scanners.prototype_pollution import (
     proto_query_variants,
@@ -58,6 +59,19 @@ class GraphQLDosTests(unittest.TestCase):
 
     def test_detect_non_dict(self):
         self.assertFalse(detect_alias_amplification("[]", 100))
+
+    def test_depth_limit_present_rejected(self):
+        # 深いクエリが depth-limit エラーで弾かれた → 制限あり → 非検出
+        data = {"errors": [{"message": "Query depth limit of 10 exceeded"}]}
+        self.assertFalse(detect_no_depth_limit(data))
+
+    def test_depth_no_limit_accepted(self):
+        data = {"data": {"__schema": {"types": []}}}
+        self.assertTrue(detect_no_depth_limit(data))
+
+    def test_depth_other_error_rejected(self):
+        # 何らかのエラーが返るなら（制限の可能性）報告しない
+        self.assertFalse(detect_no_depth_limit({"errors": [{"message": "nope"}]}))
 
 
 class PrototypePollutionTests(unittest.TestCase):

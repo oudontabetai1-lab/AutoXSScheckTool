@@ -176,7 +176,7 @@ def parse_openapi(spec: dict, fallback_base: str = "") -> ApiSeedData:
 
             body_schema = _openapi_request_body_schema(op)
             is_body_op = body_schema is not None and method in ("post", "put", "patch")
-            example = _example_from_schema(body_schema) if is_body_op else None
+            example = _example_from_schema(body_schema, spec) if is_body_op else None
 
             # 全ベース URL に展開（スコープ外は engine 側で除外される）
             for base in bases:
@@ -217,30 +217,89 @@ def _openapi_request_body_schema(op: dict) -> Optional[dict]:
     return None
 
 
-def _example_from_schema(schema: dict, _depth: int = 0) -> Any:
-    """JSON スキーマからサンプルボディを構築する（純粋・浅い再帰）。"""
-    if not isinstance(schema, dict) or _depth > 5:
+def _resolve_ref(spec: Optional[dict], ref: str) -> Optional[dict]:
+    """ローカル ``$ref``（``#/components/schemas/X`` / ``#/definitions/X``）を解決する（純粋）。
+
+    外部参照（別ファイル/URL）や解決不能なものは None。
+    """
+    if not spec or not isinstance(ref, str) or not ref.startswith("#/"):
+        return None
+    node: Any = spec
+    for part in ref[2:].split("/"):
+        part = part.replace("~1", "/").replace("~0", "~")  # JSON Pointer エスケープ
+        if isinstance(node, dict) and part in node:
+            node = node[part]
+        else:
+            return None
+    return node if isinstance(node, dict) else None
+
+
+def _example_from_schema(
+    schema: dict,
+    spec: Optional[dict] = None,
+    _depth: int = 0,
+    _seen: Optional[frozenset] = None,
+) -> Any:
+    """JSON スキーマからサンプルボディを構築する（純粋・浅い再帰）。
+
+    ``$ref``（ローカル component 参照）と ``allOf`` を解決してから組み立てる。
+    解決しないと component ベースの spec で本文が ``{}`` になり、mass_assignment が
+    必須フィールドを欠いたボディを送って弾かれ、検査を取りこぼす。
+    """
+    if not isinstance(schema, dict) or _depth > 6:
         return {}
+    _seen = _seen or frozenset()
+
+    # $ref を解決（循環参照は打ち切り）
+    ref = schema.get("$ref")
+    if isinstance(ref, str):
+        if ref in _seen:
+            return {}
+        resolved = _resolve_ref(spec, ref)
+        if resolved is None:
+            return {}
+        return _example_from_schema(resolved, spec, _depth + 1, _seen | {ref})
+
     if "example" in schema:
         return schema["example"]
     if "default" in schema:
         return schema["default"]
+
+    # allOf: 合成スキーマ → プロパティをマージ
+    if "allOf" in schema and isinstance(schema["allOf"], list):
+        merged: dict = {}
+        for sub in schema["allOf"]:
+            if isinstance(sub, dict):
+                part = _example_from_schema(sub, spec, _depth + 1, _seen)
+                if isinstance(part, dict):
+                    merged.update(part)
+        # allOf 直下に properties があれば併合
+        for name, sub in (schema.get("properties", {}) or {}).items():
+            merged[name] = (
+                _example_from_schema(sub, spec, _depth + 1, _seen)
+                if isinstance(sub, dict) else "test"
+            )
+        return merged
+
     typ = schema.get("type")
     if typ == "object" or "properties" in schema:
         out: dict = {}
         for name, sub in (schema.get("properties", {}) or {}).items():
-            out[name] = _example_from_schema(sub, _depth + 1) if isinstance(sub, dict) else "test"
+            out[name] = (
+                _example_from_schema(sub, spec, _depth + 1, _seen)
+                if isinstance(sub, dict) else "test"
+            )
         return out
     if typ == "array":
         item = schema.get("items", {})
-        return [_example_from_schema(item, _depth + 1)] if isinstance(item, dict) else []
+        return [_example_from_schema(item, spec, _depth + 1, _seen)] if isinstance(item, dict) else []
     if typ in ("integer", "number"):
         return 1
     if typ == "boolean":
         return True
     if typ == "string":
         return "test"
-    # 型不明（$ref 等は未解決）→ 空オブジェクト
+    # 型不明 → 空オブジェクト
     return {}
 
 

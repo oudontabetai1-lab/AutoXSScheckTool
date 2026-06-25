@@ -168,6 +168,31 @@ def detect_alias_amplification(data: object, count: int) -> bool:
     return last_alias in payload
 
 
+def detect_no_depth_limit(data: object) -> bool:
+    """深いネスト introspection が深度/複雑度制限なく受理されたか（純粋）。
+
+    深度制限を持つサーバは深いクエリを depth/complexity エラーで弾く。``data`` に
+    制限系エラーが無く、かつ ``data.__schema`` が返っていれば「深度制限なし」と
+    みなす。エイリアス増幅（breadth）と本判定（depth）の **両方** が成立して初めて
+    DoS リスクと報告することで、「安いエイリアスを 100 個受けただけ」では誤検知
+    しないようにする。
+    """
+    if not isinstance(data, dict):
+        return False
+    errors = data.get("errors")
+    if errors:
+        try:
+            blob = json.dumps(errors)
+        except (TypeError, ValueError):
+            blob = str(errors)
+        if _DOS_LIMIT_ERROR_RE.search(blob):
+            return False
+        # 深いクエリでエラーが出た（depth 以外でも）なら制限ありとみなし報告しない
+        return False
+    payload = data.get("data")
+    return isinstance(payload, dict) and "__schema" in payload
+
+
 # ---------------------------------------------------------------------------
 # Scanner
 # ---------------------------------------------------------------------------
@@ -416,11 +441,13 @@ class GraphQLScanner(BaseScanner):
     ) -> None:
         """クエリ複雑度/量の制限が無いか（DoS リスク）を検査する。
 
-        エイリアス増幅クエリ（安価な ``__typename`` を ``_DOS_ALIAS_COUNT`` 本）を
-        送り、制限エラー無しに全 alias が処理されれば「上限なし」と判定する。
-        実害を出さないため本数は控えめで、複雑度上限の *有無* だけを確かめる。
+        誤検知を避けるため **breadth（エイリアス増幅）と depth（深いネスト
+        introspection）の両方** が制限エラー無しに受理されたときだけ報告する。
+        「安価な __typename を 100 個受け付けた」だけでは（複雑度制限を持つ正常な
+        サーバでも起こりうるため）報告しない。実害を出さないよう本数/段数は控えめ。
         """
-        query = build_alias_amplification_query(_DOS_ALIAS_COUNT)
+        alias_query = build_alias_amplification_query(_DOS_ALIAS_COUNT)
+        depth_query = build_deep_introspection_query(_DOS_NEST_DEPTH)
         try:
             async with httpx.AsyncClient(
                 follow_redirects=True,
@@ -428,14 +455,19 @@ class GraphQLScanner(BaseScanner):
                 headers=headers,
                 **self._client_transport_kwargs(),
             ) as client:
-                resp = await client.post(endpoint, json={"query": query})
-                if resp.status_code != 200:
+                r1 = await client.post(endpoint, json={"query": alias_query})
+                r2 = await client.post(endpoint, json={"query": depth_query})
+                if r1.status_code != 200 or r2.status_code != 200:
                     return
-                data = resp.json()
+                alias_data = r1.json()
+                depth_data = r2.json()
         except Exception:
             return
 
-        if not detect_alias_amplification(data, _DOS_ALIAS_COUNT):
+        alias_ok = detect_alias_amplification(alias_data, _DOS_ALIAS_COUNT)
+        depth_ok = detect_no_depth_limit(depth_data)
+        # 両シグナルが揃ったときのみ報告（breadth だけ／depth だけでは不十分）
+        if not (alias_ok and depth_ok):
             return
 
         findings.append(Finding(
@@ -443,20 +475,22 @@ class GraphQLScanner(BaseScanner):
             severity="medium",
             url=endpoint,
             field_name="(GraphQL query cost)",
-            payload=f"{{ a0: __typename ... a{_DOS_ALIAS_COUNT - 1}: __typename }}",
+            payload=f"aliases={_DOS_ALIAS_COUNT}, introspection depth={_DOS_NEST_DEPTH}",
             evidence=(
-                f"GraphQL endpoint {endpoint} accepted a query with "
-                f"{_DOS_ALIAS_COUNT} aliased fields without any complexity, depth, "
-                f"or alias limit. An attacker can craft expensive nested/aliased "
-                f"queries to exhaust server resources (DoS). Enforce query "
-                f"depth/complexity limits and alias/node caps."
+                f"GraphQL endpoint {endpoint} accepted both a {_DOS_ALIAS_COUNT}-alias "
+                f"query (breadth) and a depth-{_DOS_NEST_DEPTH} nested introspection "
+                f"query (depth) with no complexity/depth/alias limit error. The absence "
+                f"of limits on both axes lets an attacker craft expensive queries to "
+                f"exhaust server resources (DoS). Enforce query depth/complexity limits "
+                f"and alias/node caps."
             ),
             request={"url": endpoint, "method": "POST",
-                     "body": json.dumps({"query": query})[:500]},
+                     "body": json.dumps({"query": alias_query})[:500]},
             response={"status": 200, "url": endpoint},
-            confidence="likely",
+            confidence="tentative",
             evidence_type="graphql_dos",
-            evidence_details={"alias_count": _DOS_ALIAS_COUNT},
+            evidence_details={"alias_count": _DOS_ALIAS_COUNT,
+                              "introspection_depth": _DOS_NEST_DEPTH},
         ))
 
     async def _test_injection(
