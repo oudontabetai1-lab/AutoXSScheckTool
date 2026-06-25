@@ -978,30 +978,46 @@ class ScanEngine:
         """API スペック由来の JSON 操作（``api_seed_requests``）を、クロール結果に
         依存せず検査する。
 
-        ``mass_assignment`` は ``scan_page`` 内で ``api_seed_requests`` を回すが、
-        その呼び出しはクロールできたページに対してのみ行われる。JSON API のように
-        GET がページ化されないと一度も呼ばれないため、ここで明示的に一度起動する
-        （``scan_page`` は ``_done`` ガードで冪等なので二重実行は無害）。
+        JSON API は GET がページ化されない（404/405）ことが多く、その場合 page-level の
+        ``scan_page`` がそれらの URL に対して一度も呼ばれない。``mass_assignment`` は
+        テンプレートを直接回すが、``prototype_pollution``/``cache_poisoning``/``graphql``
+        のような URL 起点の page-level 検査も取りこぼす。ここでテンプレートの URL 群に
+        対して全 page-level スキャナの ``scan_page`` を明示的に起動する（各スキャナの
+        ``_checked_urls``/``_done`` ガードで二重実行は無害）。
         """
         if not self.api_seed_requests:
             return
-        scanner = self.scanners.get("mass_assignment")
-        if scanner is None:
-            return
-        # 時間帯ゲート/一時停止/スキップ/Abort を尊重する。クロール無しの API スキャンでは
-        # この検査が最初の攻撃リクエストになり得るため、controller を必ず通す。
-        try:
-            await self.controller.checkpoint()
-        except (SkipField, SkipPage):
-            return  # 操作者がスキップ → API 本文検査も飛ばす
-        try:
-            findings = await scanner.scan_page(self.target_url)
-            for f in (findings or []):
-                self._record_finding(f, source="api-spec")
-        except AbortScan:
-            raise
-        except Exception as e:
-            console.print(f"  [yellow]API template check (mass_assignment): {e}[/yellow]")
+        # 検査対象 URL: 各テンプレートの URL（重複除去）＋ターゲット（mass_assignment 用）。
+        urls: list[str] = []
+        seen: set[str] = set()
+        for tmpl in self.api_seed_requests:
+            u = getattr(tmpl, "url", "") or ""
+            if u and u not in seen:
+                seen.add(u)
+                urls.append(u)
+        if self.target_url not in seen:
+            urls.append(self.target_url)
+
+        for url in urls:
+            # 時間帯ゲート/一時停止/スキップ/Abort を尊重する。クロール無しの API
+            # スキャンではここが最初の攻撃になり得るため controller を必ず通す。
+            try:
+                await self.controller.checkpoint()
+            except SkipField:
+                continue
+            except SkipPage:
+                continue
+            for check_name, scanner in self.scanners.items():
+                try:
+                    findings = await scanner.scan_page(url)
+                    for f in (findings or []):
+                        self._record_finding(f, source="api-spec")
+                except AbortScan:
+                    raise
+                except Exception as e:
+                    console.print(
+                        f"  [yellow]API template check ({check_name}) on {url}: {e}[/yellow]"
+                    )
 
     def _check_type_in_scope(self, check_type: str) -> bool:
         """Finding の check_type が今回要求されたチェック集合に属するか。

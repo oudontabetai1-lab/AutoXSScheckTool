@@ -46,6 +46,11 @@ class ParseTests(unittest.TestCase):
         self.assertEqual(len(rules), 1)
         self.assertEqual(rules[0].days, frozenset({5, 6}))
 
+    def test_parse_windows_list_element_with_semicolon(self):
+        # CLI が ['09:00-12:00; 13:00-18:00'] のように 1 要素で複数窓を渡しても割る
+        rules = parse_windows(["09:00-12:00; 13:00-18:00"])
+        self.assertEqual(len(rules), 2)
+
     def test_parse_windows_list_skips_bad(self):
         rules = parse_windows(["09:00-18:00", "garbage"])
         self.assertEqual(len(rules), 1)
