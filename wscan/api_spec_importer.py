@@ -242,8 +242,8 @@ def _openapi_request_body_schema(op: dict, spec: Optional[dict] = None) -> Optio
         for ctype, media in content.items():
             if "json" in (ctype or "").lower():
                 return (media or {}).get("schema") or {}
-    # Swagger 2.0: parameters[in=body].schema
-    for p in op.get("parameters", []) or []:
+    # Swagger 2.0: parameters[in=body].schema（param 自体が $ref のことがある）
+    for p in _resolve_params(op.get("parameters", []) or [], spec):
         if p.get("in") == "body":
             return p.get("schema") or {}
     return None

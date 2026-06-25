@@ -115,11 +115,16 @@ def parse_window(spec: str) -> Optional[WindowRule]:
 
 
 def parse_windows(specs: Optional[Iterable[str]]) -> list[WindowRule]:
-    """複数仕様（リスト or カンマ/セミコロン区切り文字列）を WindowRule 群に。"""
+    """複数仕様を WindowRule 群に解釈する。
+
+    リスト（CLI の ``action="append"`` 等）か、**セミコロン/改行区切り**の文字列を
+    受け付ける。カンマは曜日リスト（``"Sat,Sun 00:00-24:00"``）専用なので、
+    複数ウィンドウの区切りには使わない（カンマで割ると曜日リストが壊れるため）。
+    """
     if not specs:
         return []
     if isinstance(specs, str):
-        specs = re.split(r"[;,]", specs)
+        specs = re.split(r"[;\n]", specs)
     rules: list[WindowRule] = []
     for s in specs:
         rule = parse_window(s)

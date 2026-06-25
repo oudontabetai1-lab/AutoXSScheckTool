@@ -1246,6 +1246,8 @@ class ScanEngine:
                 if success:
                     self.auth_landing_url = getattr(self._browser, "last_login_url", "") or self._browser.page.url
                     console.print("  [green][Auth] Login successful — session cookies captured.[/green]")
+                    # httpx 系検査も認証されるよう、初回ログイン直後に Cookie を同期する。
+                    await self._sync_cookies_from_browser(self._browser)
                     if self.auth_landing_url:
                         console.print(f"  [dim][Auth] Authenticated landing:[/dim] {self.auth_landing_url}")
                 else:
@@ -1747,6 +1749,7 @@ class ScanEngine:
                 )
                 if ok:
                     console.print("  [green][Auth] Re-login successful — resuming crawl.[/green]")
+                    await self._sync_cookies_from_browser(self._browser)
                     # Navigate back to the intended page after re-login
                     success = await self.browser.navigate(url, retries=self.navigation_retries)
                     if not success:
@@ -2754,6 +2757,7 @@ class ScanEngine:
                         "  [red][Post-Auth] Re-authentication failed — cannot crawl authenticated surface.[/red]"
                     )
                     return []
+                await self._sync_cookies_from_browser(self._browser)
                 landing_url = self._browser.page.url.rstrip("/")
 
         new_pages: list = []
@@ -2930,6 +2934,7 @@ class ScanEngine:
             )
             if success:
                 console.print("  [green][Auth] Re-login successful.[/green]")
+                await self._sync_cookies_from_browser(br)
             else:
                 console.print("  [yellow][Auth] Re-login may have failed — continuing.[/yellow]")
             return success

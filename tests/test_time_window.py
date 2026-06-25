@@ -36,8 +36,15 @@ class ParseTests(unittest.TestCase):
         self.assertIsNone(parse_window("10:00-10:00"))  # ゼロ幅
 
     def test_parse_windows_csv(self):
-        rules = parse_windows("09:00-12:00, 13:00-18:00")
+        # 複数ウィンドウはセミコロン区切り（カンマは曜日リスト専用）
+        rules = parse_windows("09:00-12:00; 13:00-18:00")
         self.assertEqual(len(rules), 2)
+
+    def test_parse_windows_weekday_list_not_split(self):
+        # "Sat,Sun 00:00-24:00" を 1 本のルールとして扱う（カンマで割らない）
+        rules = parse_windows("Sat,Sun 00:00-24:00")
+        self.assertEqual(len(rules), 1)
+        self.assertEqual(rules[0].days, frozenset({5, 6}))
 
     def test_parse_windows_list_skips_bad(self):
         rules = parse_windows(["09:00-18:00", "garbage"])

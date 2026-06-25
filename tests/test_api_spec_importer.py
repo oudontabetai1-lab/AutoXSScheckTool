@@ -183,6 +183,22 @@ class OpenApiTests(unittest.TestCase):
         # $ref が解決され、通常フィールドを含む本文になる（空 {} ではない）
         self.assertEqual(posts[0].json_body, {"name": "test", "age": 1})
 
+    def test_swagger2_body_param_ref_resolved(self):
+        # body パラメータ自体が $ref のケース（#/parameters/...）
+        spec = {
+            "swagger": "2.0", "host": "api.example.com", "schemes": ["https"],
+            "parameters": {"CreateUser": {
+                "in": "body", "name": "b",
+                "schema": {"type": "object", "properties": {"u": {"type": "string"}}}}},
+            "definitions": {},
+            "paths": {"/users": {"post": {"parameters": [
+                {"$ref": "#/parameters/CreateUser"}]}}},
+        }
+        seed = parse_openapi(spec)
+        posts = [r for r in seed.requests if r.method == "POST"]
+        self.assertEqual(len(posts), 1)
+        self.assertEqual(posts[0].json_body, {"u": "test"})
+
     def test_swagger2_definitions_ref_resolved(self):
         spec = {
             "swagger": "2.0", "host": "api.example.com", "schemes": ["https"],
