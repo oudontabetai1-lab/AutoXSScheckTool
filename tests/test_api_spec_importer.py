@@ -143,6 +143,27 @@ class OpenApiTests(unittest.TestCase):
         seed = parse_openapi(spec, fallback_base="https://h.example.com/app")
         self.assertIn("https://h.example.com/api/ping", seed.urls)
 
+    def test_all_servers_expanded(self):
+        # 先頭サーバがスコープ外でも後続を落とさないよう全ベースに展開する
+        spec = {
+            "openapi": "3.0.0",
+            "servers": [
+                {"url": "https://staging.example.com/v1"},
+                {"url": "https://prod.example.com/v1"},
+            ],
+            "paths": {
+                "/users": {"get": {}, "post": {"requestBody": {"content": {
+                    "application/json": {"schema": {"type": "object",
+                                                    "properties": {"n": {"type": "string"}}}}}}}},
+            },
+        }
+        seed = parse_openapi(spec)
+        self.assertIn("https://staging.example.com/v1/users", seed.urls)
+        self.assertIn("https://prod.example.com/v1/users", seed.urls)
+        post_urls = {r.url for r in seed.requests if r.method == "POST"}
+        self.assertIn("https://staging.example.com/v1/users", post_urls)
+        self.assertIn("https://prod.example.com/v1/users", post_urls)
+
 
 class PostmanTests(unittest.TestCase):
     def test_walk_folders(self):

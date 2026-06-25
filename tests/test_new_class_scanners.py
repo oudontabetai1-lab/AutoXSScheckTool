@@ -18,11 +18,13 @@ from wscan.scanners.prototype_pollution import (
     is_polluted,
     server_pollution_reflected,
 )
+from urllib.parse import urlparse
 from wscan.scanners.cache_poisoning import (
     is_cacheable,
     cache_hit,
     reflected,
     deception_succeeded,
+    _build_deception_url,
 )
 from wscan.scanners.mass_assignment import (
     augment_body,
@@ -119,6 +121,15 @@ class CachePoisoningTests(unittest.TestCase):
             css_status=404, css_body="not found",
             css_headers={"Cache-Control": "public"},
         ))
+
+    def test_build_deception_url_with_query(self):
+        # クエリ付き URL でも拡張子はパス側へ、クエリは保持
+        u = _build_deception_url(urlparse("http://h/account?tab=1"), "x.css")
+        self.assertEqual(u, "http://h/account/x.css?tab=1")
+
+    def test_build_deception_url_no_query(self):
+        u = _build_deception_url(urlparse("http://h/account/"), "x.css")
+        self.assertEqual(u, "http://h/account/x.css")
 
     def test_deception_not_cacheable_safe(self):
         body = "dashboard" * 20

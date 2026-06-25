@@ -136,10 +136,14 @@ _HTTP_METHODS = ("get", "post", "put", "patch", "delete", "options", "head")
 
 
 def parse_openapi(spec: dict, fallback_base: str = "") -> ApiSeedData:
-    """OpenAPI/Swagger dict をシードへ（純粋関数）。"""
+    """OpenAPI/Swagger dict をシードへ（純粋関数）。
+
+    ``servers``/scheme が複数あるときは **全ベース URL** に対して URL・操作を
+    展開する。先頭サーバがスコープ外でも後続にスコープ内サーバがあれば、engine
+    のスコープフィルタが拾えるようにする（先頭固定だと API が丸ごと落ちる）。
+    """
     seed = ApiSeedData()
-    bases = _openapi_base_urls(spec, fallback_base)
-    base = bases[0] if bases else ""
+    bases = _openapi_base_urls(spec, fallback_base) or [""]
     paths = spec.get("paths", {}) or {}
     seen_urls: set[str] = set()
 
@@ -170,27 +174,29 @@ def parse_openapi(spec: dict, fallback_base: str = "") -> ApiSeedData:
                 schema = p.get("schema") or p
                 query_pairs.append((p["name"], str(_sample_for_name(p["name"], schema))))
 
-            full = (base + concrete_path) if base else concrete_path
-            if query_pairs:
-                full = f"{full}?{urlencode(query_pairs)}"
-
-            # GET 系はクロール URL シードに（URL パラメータ攻撃ループへ）
-            if full and full not in seen_urls:
-                seen_urls.add(full)
-                seed.urls.append(full)
-
-            # requestBody(JSON) を持つ操作は RequestTemplate に
             body_schema = _openapi_request_body_schema(op)
-            if body_schema is not None and method in ("post", "put", "patch"):
-                example = _example_from_schema(body_schema)
-                url_no_query = (base + concrete_path) if base else concrete_path
-                seed.requests.append(
-                    RequestTemplate(
-                        method=method.upper(),
-                        url=url_no_query,
-                        json_body=example,
+            is_body_op = body_schema is not None and method in ("post", "put", "patch")
+            example = _example_from_schema(body_schema) if is_body_op else None
+
+            # 全ベース URL に展開（スコープ外は engine 側で除外される）
+            for base in bases:
+                full = (base + concrete_path) if base else concrete_path
+                if query_pairs:
+                    full = f"{full}?{urlencode(query_pairs)}"
+                # GET 系はクロール URL シードに（URL パラメータ攻撃ループへ）
+                if full and full not in seen_urls:
+                    seen_urls.add(full)
+                    seed.urls.append(full)
+                # requestBody(JSON) を持つ操作は RequestTemplate に
+                if is_body_op:
+                    url_no_query = (base + concrete_path) if base else concrete_path
+                    seed.requests.append(
+                        RequestTemplate(
+                            method=method.upper(),
+                            url=url_no_query,
+                            json_body=example,
+                        )
                     )
-                )
 
     return seed
 

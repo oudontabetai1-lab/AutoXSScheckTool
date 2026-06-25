@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import secrets
 from typing import TYPE_CHECKING
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlunparse
 
 import httpx
 
@@ -114,6 +114,20 @@ def deception_succeeded(
     if not _bodies_similar(base_body, css_body):
         return False
     return is_cacheable(css_headers)
+
+
+def _build_deception_url(parsed, suffix: str) -> str:
+    """パス末尾に静的拡張子付きセグメントを足した URL を組む（純粋）。
+
+    クエリ文字列は保持したまま、suffix はパス側にだけ付与する
+    （例: ``/account?tab=1`` → ``/account/wscanXXX.css?tab=1``）。
+    """
+    base_path = (parsed.path or "/").rstrip("/")
+    new_path = f"{base_path}/{suffix}"
+    return urlunparse((
+        parsed.scheme, parsed.netloc, new_path,
+        parsed.params, parsed.query, "",
+    ))
 
 
 def _bodies_similar(a: str, b: str, threshold: float = 0.9) -> bool:
@@ -253,7 +267,10 @@ class CachePoisoningScanner(BaseScanner):
             return []
 
         ext = _DECEPTION_EXTENSIONS[0]
-        css_url = f"{url.rstrip('/')}/wscan{secrets.token_hex(3)}{ext}"
+        # 静的拡張子はパス末尾に付ける。クエリ付き URL に生のまま付けると
+        # "/account?tab=1/x.css" のようにクエリ値へ紛れ込むため、パスとクエリを
+        # 分けて "/account/x.css?tab=1" を組み立てる。
+        css_url = _build_deception_url(parsed, f"wscan{secrets.token_hex(3)}{ext}")
         try:
             async with httpx.AsyncClient(**self._client_kwargs()) as client:
                 base = await client.get(url, headers=self._auth_headers())

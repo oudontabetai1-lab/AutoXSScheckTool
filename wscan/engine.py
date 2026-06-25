@@ -1062,13 +1062,14 @@ class ScanEngine:
         if not hasattr(browser, "auto_login"):
             return
         try:
-            ok = await browser.navigate(url, retries=self.navigation_retries)
-            if not ok:
-                return
+            # navigate() は >=400 応答で False を返すが、401 は失効の最強シグナル
+            # なので bool で早期 return せず、ステータス/本文を見て判定する。
+            await browser.navigate(url, retries=self.navigation_retries)
             body = await browser.page.content()
             final_url = browser.page.url
         except Exception:
-            return
+            body = ""
+            final_url = url
         status = None
         try:
             network = getattr(browser, "network", None)
@@ -1077,6 +1078,9 @@ class ScanEngine:
                 status = (pair.get("response", {}) or {}).get("status")
         except Exception:
             status = None
+        # 判定材料が全く得られなければ何もしない
+        if not body and status is None:
+            return
         relogged = await self._relogin_if_needed(
             browser, status=status, final_url=final_url, body=body
         )
@@ -2895,6 +2899,12 @@ class ScanEngine:
         Uses ``self.browser`` which transparently returns the worker's browser
         when called from inside a concurrent worker task.
         """
+        # ── セッション失効チェック（全検査の前に一度）────────────────────
+        # 長時間スキャンでセッションが切れると以降が全てログイン画面/401 に化け、
+        # 検出力が静かにゼロになる。ページ単位検査（graphql/cache/proto/mass 等）も
+        # 失効レスポンスに当ててしまわないよう、page-level・field 双方の前に実行する。
+        await self._maybe_relogin_for_page(page.url)
+
         # ── Page-level checks (header inspection, clickjacking, session, etc.) ──
         for check_name, scanner in self.scanners.items():
             try:
@@ -2909,12 +2919,6 @@ class ScanEngine:
 
         if not page.forms and not page.url_params:
             return
-
-        # ── セッション失効チェック（攻撃前に一度）────────────────────────
-        # 長時間スキャンでセッションが切れると以降が全てログイン画面に化け、
-        # 検出力が静かにゼロになる。攻撃対象ページに遷移して状態を確認し、
-        # 失効していれば自動再ログインして認証済みコンテンツを取り直す。
-        await self._maybe_relogin_for_page(page.url)
 
         # ── Run multi-step attack flows that target this page ─────────────
         matched_flow = None
