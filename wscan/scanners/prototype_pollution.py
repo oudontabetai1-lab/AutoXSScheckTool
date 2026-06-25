@@ -111,7 +111,11 @@ class PrototypePollutionScanner(BaseScanner):
 
     # ── クライアントサイド（DOM）──────────────────────────────────────
     async def _scan_client_side(self, url: str) -> list[Finding]:
-        page = getattr(self.browser, "page", None)
+        # 並列時(--concurrency>1)は engine.browser が現在のワーカーを返す。
+        # self.browser は構築時（ワーカー文脈成立前）に固定されたメインブラウザ
+        # なので、ここで動的に engine 側から取り直してページ取り違えを防ぐ。
+        browser = getattr(self.engine, "browser", None) or self.browser
+        page = getattr(browser, "page", None)
         if page is None:
             return []
         marker = make_marker()
@@ -122,7 +126,7 @@ class PrototypePollutionScanner(BaseScanner):
             probe_url = _append_query(url, fragment)
             await self.log_payload_test("(URL)", fragment, "prototype_pollution", url)
             try:
-                await self.browser.navigate(probe_url)
+                await browser.navigate(probe_url)
                 evaluated = await page.evaluate(
                     "(k) => Object.prototype[k]", marker
                 )

@@ -28,6 +28,7 @@ from wscan.scanners.mass_assignment import (
     augment_body,
     detect_mass_assignment,
     make_sentinels,
+    acceptance_ok,
 )
 
 
@@ -156,6 +157,14 @@ class MassAssignmentTests(unittest.TestCase):
     def test_sentinels_unique(self):
         s = make_sentinels(("role", "isAdmin"))
         self.assertEqual(len(set(s.values())), 2)
+
+    def test_acceptance_ok(self):
+        # 受理(2xx)のみ過剰割り当てとみなす。400/422 のエコーは誤検知になるため除外
+        self.assertTrue(acceptance_ok(200))
+        self.assertTrue(acceptance_ok(201))
+        self.assertFalse(acceptance_ok(400))
+        self.assertFalse(acceptance_ok(422))
+        self.assertFalse(acceptance_ok(500))
 
 
 class MassAssignmentDoneGatingTests(unittest.TestCase):

@@ -27,14 +27,25 @@ CHECKPOINT_VERSION = 1
 CHECKPOINT_FILENAME = "checkpoint.json"
 
 
-def unit_key(url: str, field_name: str, form_index: int, check_type: str) -> str:
+def unit_key(
+    url: str,
+    field_name: str,
+    form_index: int,
+    check_type: str,
+    is_url_param: bool = False,
+) -> str:
     """攻撃の作業単位を一意な文字列キーにする（純粋関数）。
 
     URL は末尾スラッシュを ``rstrip`` してスコープ照合と同じ前提に揃える
     （``engine`` の正規化規約に従う）。区切りは衝突しにくい ``\\x1f``。
+
+    同名の URL パラメータとフォームフィールド（例: どちらも ``id`` で
+    ``form_index=0``）が同じキーに潰れて一方が未検査のまま resume にスキップ
+    されるのを防ぐため、入力種別（URL param / form）もキーに含める。
     """
     norm_url = (url or "").rstrip("/")
-    return "\x1f".join([norm_url, field_name or "", str(form_index), check_type or ""])
+    location = "u" if is_url_param else "f"
+    return "\x1f".join([norm_url, field_name or "", str(form_index), location, check_type or ""])
 
 
 @dataclass
@@ -48,11 +59,17 @@ class CheckpointState:
     updated_at: float = field(default_factory=time.time)
 
     # ── 進捗操作（純粋） ────────────────────────────────────────────
-    def is_done(self, url: str, field_name: str, form_index: int, check_type: str) -> bool:
-        return unit_key(url, field_name, form_index, check_type) in self.completed_units
+    def is_done(
+        self, url: str, field_name: str, form_index: int, check_type: str,
+        is_url_param: bool = False,
+    ) -> bool:
+        return unit_key(url, field_name, form_index, check_type, is_url_param) in self.completed_units
 
-    def mark_done(self, url: str, field_name: str, form_index: int, check_type: str) -> None:
-        self.completed_units.add(unit_key(url, field_name, form_index, check_type))
+    def mark_done(
+        self, url: str, field_name: str, form_index: int, check_type: str,
+        is_url_param: bool = False,
+    ) -> None:
+        self.completed_units.add(unit_key(url, field_name, form_index, check_type, is_url_param))
         self.updated_at = time.time()
 
     def add_finding(self, finding_dict: dict) -> None:

@@ -55,6 +55,16 @@ def augment_body(base_body: Optional[dict], sentinels: dict[str, str]) -> dict:
     return out
 
 
+def acceptance_ok(status: int) -> bool:
+    """更新が「受理された」とみなせる HTTP ステータスか（純粋）。
+
+    API は 400/422 等のバリデーションエラーでも送信 JSON をそのままエコーする
+    ことが多く、その場合 sentinel が応答に現れても特権フィールドは *拒否* されて
+    いる。受理（2xx）でないレスポンスは過剰割り当ての証拠にしない（誤検知抑止）。
+    """
+    return 200 <= int(status) < 300
+
+
 def detect_mass_assignment(
     baseline_body: str,
     polluted_body: str,
@@ -152,6 +162,11 @@ class MassAssignmentScanner(BaseScanner):
                 baseline = await client.request(method, tmpl.url, content=baseline_payload)
                 tainted = await client.request(method, tmpl.url, content=polluted_payload)
         except Exception:
+            return None
+
+        # 受理（2xx）された場合のみ過剰割り当てとみなす。400/422 等の
+        # バリデーションエラーで送信 JSON がエコーされただけのケースを除外する。
+        if not acceptance_ok(tainted.status_code):
             return None
 
         hit = detect_mass_assignment(baseline.text, tainted.text, sentinels)

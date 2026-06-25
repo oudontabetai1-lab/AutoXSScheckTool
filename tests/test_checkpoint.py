@@ -25,6 +25,13 @@ class UnitKeyTests(unittest.TestCase):
             unit_key("http://h/a", "q", 0, "sqli"),
         )
 
+    def test_url_param_vs_form_distinct_keys(self):
+        # 同名・同 form_index でも URL param と form field は別単位
+        self.assertNotEqual(
+            unit_key("http://h/a", "id", 0, "sqli", is_url_param=True),
+            unit_key("http://h/a", "id", 0, "sqli", is_url_param=False),
+        )
+
 
 class StateTests(unittest.TestCase):
     def test_mark_and_is_done(self):
@@ -34,6 +41,8 @@ class StateTests(unittest.TestCase):
         self.assertTrue(s.is_done("http://h/a", "q", 0, "xss"))
         # slash-insensitive
         self.assertTrue(s.is_done("http://h/a/", "q", 0, "xss"))
+        # 同名の URL param 単位はまだ未完了（位置がキーに含まれる）
+        self.assertFalse(s.is_done("http://h/a", "q", 0, "xss", is_url_param=True))
 
     def test_roundtrip(self):
         s = CheckpointState(target_url="http://h", checks=["xss", "sqli"])

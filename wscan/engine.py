@@ -962,15 +962,21 @@ class ScanEngine:
         except Exception as exc:
             self.wave_errors.append(f"checkpoint_save: {type(exc).__name__}: {exc}")
 
-    def _checkpoint_is_done(self, url: str, field_name: str, form_index: int, check: str) -> bool:
+    def _checkpoint_is_done(
+        self, url: str, field_name: str, form_index: int, check: str,
+        is_url_param: bool = False,
+    ) -> bool:
         if not self.enable_checkpoint or self.checkpoint is None:
             return False
-        return self.checkpoint.is_done(url, field_name, form_index, check)
+        return self.checkpoint.is_done(url, field_name, form_index, check, is_url_param)
 
-    def _checkpoint_mark_done(self, url: str, field_name: str, form_index: int, check: str) -> None:
+    def _checkpoint_mark_done(
+        self, url: str, field_name: str, form_index: int, check: str,
+        is_url_param: bool = False,
+    ) -> None:
         if not self.enable_checkpoint or self.checkpoint is None:
             return
-        self.checkpoint.mark_done(url, field_name, form_index, check)
+        self.checkpoint.mark_done(url, field_name, form_index, check, is_url_param)
 
     # =========================================================================
     # Session expiry / auto re-login
@@ -1042,6 +1048,12 @@ class ScanEngine:
         無害なものになる。``auto_login`` を持たないブラウザなら no-op。
         """
         if not self.relogin_on_expiry:
+            return
+        # ログインページ自体を攻撃対象にしている場合は再ログインしない。
+        # ここで auto_login するとログインフォームが認証後画面に化け、ログイン
+        # サーフェスへの SQLi/XSS 検査が空振りになる（_scan_login_form_preauth が
+        # この経路を通るため）。
+        if self._is_login_target_url(url):
             return
         browser = self.browser  # 文脈対応（worker or main）
         if not (self.login_url and getattr(browser, "auth_user", "")
@@ -3304,8 +3316,8 @@ class ScanEngine:
             if scanner is None:
                 continue
 
-            # 再開可能スキャン: 既に完了した (url, field, check) 単位は飛ばす
-            if self._checkpoint_is_done(url, field_name, form_index, check_name):
+            # 再開可能スキャン: 既に完了した (url, field, location, check) 単位は飛ばす
+            if self._checkpoint_is_done(url, field_name, form_index, check_name, is_url_param):
                 self._record_scan_matrix(
                     url=url,
                     field_name=field_name,
@@ -3383,7 +3395,7 @@ class ScanEngine:
                 # （一時的なブラウザ/ネットワーク障害で取りこぼした検査を resume が
                 # 飛ばしてしまわないようにする — 再開の網羅性を守る）。
                 if not check_errored:
-                    self._checkpoint_mark_done(url, field_name, form_index, check_name)
+                    self._checkpoint_mark_done(url, field_name, form_index, check_name, is_url_param)
 
         # CTF: check page source after all scanners ran on this field
         if self.flag_finder:
