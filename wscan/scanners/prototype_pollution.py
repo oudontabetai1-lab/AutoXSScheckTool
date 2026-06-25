@@ -206,6 +206,10 @@ class PrototypePollutionScanner(BaseScanner):
             except Exception:
                 continue
 
+            # 受理(2xx)された場合のみ汚染とみなす。__proto__/constructor を 400/422 で
+            # 拒否しつつエラー本文にマーカーをエコーするケースを誤検知しない。
+            if not (200 <= r.status_code < 300):
+                continue
             if server_pollution_reflected(baseline_body, resp_text, value):
                 pair = {
                     "request": {"url": url, "method": "POST", "body": body},

@@ -192,13 +192,15 @@ def parse_openapi(spec: dict, fallback_base: str = "") -> ApiSeedData:
                 if full and full not in seen_urls:
                     seen_urls.add(full)
                     seed.urls.append(full)
-                # requestBody(JSON) を持つ操作は RequestTemplate に
+                # requestBody(JSON) を持つ操作は RequestTemplate に。
+                # 必須クエリパラメータ（api-version/tenant/locale 等）を落とすと
+                # 別エンドポイント扱いで 400/404 になり mass_assignment が空振りするため、
+                # クエリ込みの URL（full）をそのまま使う。
                 if is_body_op:
-                    url_no_query = (base + concrete_path) if base else concrete_path
                     seed.requests.append(
                         RequestTemplate(
                             method=method.upper(),
-                            url=url_no_query,
+                            url=full,
                             json_body=example,
                         )
                     )

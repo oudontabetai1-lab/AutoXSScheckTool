@@ -193,13 +193,15 @@ class CachePoisoningScanner(BaseScanner):
 
     async def _scan_poisoning(self, url: str) -> list[Finding]:
         findings: list[Finding] = []
-        # 自分専用のキャッシュキーになるよう cache-buster を付ける（本番を汚さない）
-        cb = secrets.token_hex(6)
         sep = "&" if "?" in url else "?"
-        probe_url = f"{url}{sep}cb={cb}"
         marker_host = f"wscan{secrets.token_hex(4)}.example.com"
 
         for header in UNKEYED_HEADERS:
+            # ヘッダごとに固有の cache-buster を使う。共通 URL だと最初の試行が
+            # （当該ヘッダが反射しなくても）キャッシュを温め、後続ヘッダが
+            # キャッシュから返って X-Host 等の脆弱性を取りこぼす。
+            cb = secrets.token_hex(6)
+            probe_url = f"{url}{sep}cb={cb}"
             inj_headers = self._auth_headers()
             inj_headers[header] = marker_host
             await self.log_payload_test(

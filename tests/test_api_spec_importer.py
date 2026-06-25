@@ -132,6 +132,26 @@ class OpenApiTests(unittest.TestCase):
         self.assertEqual(posts[0].url, "https://api.example.com/v1/users")
         self.assertEqual(posts[0].json_body, {"name": "test", "age": 1})
 
+    def test_body_template_preserves_query(self):
+        # 必須クエリ付き POST は RequestTemplate にもクエリを保持する
+        body_schema = {"type": "object", "properties": {"n": {"type": "string"}}}
+        op = {
+            "parameters": [
+                {"name": "api-version", "in": "query",
+                 "schema": {"type": "string", "default": "2024"}}
+            ],
+            "requestBody": {"content": {"application/json": {"schema": body_schema}}},
+        }
+        spec = {
+            "openapi": "3.0.0",
+            "servers": [{"url": "https://api.example.com"}],
+            "paths": {"/items": {"post": op}},
+        }
+        seed = parse_openapi(spec)
+        posts = [r for r in seed.requests if r.method == "POST"]
+        self.assertEqual(len(posts), 1)
+        self.assertIn("api-version=2024", posts[0].url)
+
     def test_request_body_ref_resolved(self):
         spec = {
             "openapi": "3.0.0",
