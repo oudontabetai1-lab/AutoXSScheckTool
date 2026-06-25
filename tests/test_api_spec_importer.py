@@ -229,6 +229,29 @@ class PostmanTests(unittest.TestCase):
         self.assertEqual(seed.headers.get("Authorization"), "Bearer x")
         self.assertTrue(any(r.json_body == {"name": "x"} for r in seed.requests))
 
+    def test_collection_variable_resolved(self):
+        coll = {
+            "info": {"schema": "https://schema.getpostman.com/json/collection/v2.1.0/"},
+            "variable": [{"key": "baseUrl", "value": "https://api.example.com"}],
+            "item": [{
+                "name": "get", "request": {"method": "POST",
+                    "url": {"raw": "{{baseUrl}}/users"},
+                    "body": {"mode": "raw", "raw": '{"n":"x"}'}},
+            }],
+        }
+        seed = parse_postman(coll)
+        self.assertIn("https://api.example.com/users", seed.urls)
+        self.assertTrue(any(r.url == "https://api.example.com/users" for r in seed.requests))
+
+    def test_unresolved_var_falls_back_to_target(self):
+        coll = {
+            "info": {"schema": "https://schema.getpostman.com/json/collection/v2.1.0/"},
+            "item": [{"name": "g", "request": {"method": "GET",
+                                               "url": {"raw": "{{baseUrl}}/api/items"}}}],
+        }
+        seed = parse_postman(coll, fallback_base="https://target.example.com/app")
+        self.assertIn("https://target.example.com/api/items", seed.urls)
+
 
 class LoadTests(unittest.TestCase):
     def test_load_json_openapi(self):

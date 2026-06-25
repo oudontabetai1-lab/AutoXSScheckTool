@@ -981,6 +981,12 @@ class ScanEngine:
         scanner = self.scanners.get("mass_assignment")
         if scanner is None:
             return
+        # 時間帯ゲート/一時停止/スキップ/Abort を尊重する。クロール無しの API スキャンでは
+        # この検査が最初の攻撃リクエストになり得るため、controller を必ず通す。
+        try:
+            await self.controller.checkpoint()
+        except (SkipField, SkipPage):
+            return  # 操作者がスキップ → API 本文検査も飛ばす
         try:
             findings = await scanner.scan_page(self.target_url)
             for f in (findings or []):
@@ -1679,6 +1685,7 @@ class ScanEngine:
             # rather than mistaken for an expired session.
             if (
                 self.login_url
+                and self.relogin_on_expiry
                 and self._browser.is_on_login_page(self.login_url)
                 and not self._is_login_target_url(url)
             ):
@@ -2683,7 +2690,8 @@ class ScanEngine:
         # If we landed on the login page, session may have expired — try to re-login.
         # Unless the target itself is the login page (then staying on it is expected).
         if (
-            self._browser.is_on_login_page(self.login_url)
+            self.relogin_on_expiry
+            and self._browser.is_on_login_page(self.login_url)
             and not self._is_login_target_url(self.target_url)
         ):
             console.print("  [yellow][Post-Auth] Session appears expired — re-authenticating …[/yellow]")

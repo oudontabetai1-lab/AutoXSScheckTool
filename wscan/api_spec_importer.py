@@ -19,6 +19,7 @@ Collection v2 を読み込み、:class:`HarSeedData` と同形の
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
@@ -319,10 +320,15 @@ def _example_from_schema(
 # Postman Collection v2
 # ──────────────────────────────────────────────────────────────────────────
 
-def parse_postman(collection: dict) -> ApiSeedData:
-    """Postman Collection v2 dict をシードへ（純粋関数）。"""
+def parse_postman(collection: dict, fallback_base: str = "") -> ApiSeedData:
+    """Postman Collection v2 dict をシードへ（純粋関数）。
+
+    ``{{baseUrl}}`` 等のコレクション変数を解決してから URL を組む。未解決のまま
+    だとスコープ判定で非 HTTP として落ち、``--api-spec`` が無言で取りこぼす。
+    """
     seed = ApiSeedData()
     seen: set[str] = set()
+    varmap = _collection_var_map(collection)
 
     def _walk(items: list):
         for it in items or []:
@@ -334,7 +340,7 @@ def parse_postman(collection: dict) -> ApiSeedData:
             req = it.get("request")
             if not isinstance(req, dict):
                 continue
-            url = _postman_url(req.get("url"))
+            url = _postman_url(req.get("url"), varmap, fallback_base)
             method = (req.get("method") or "GET").upper()
             if url and url not in seen:
                 seen.add(url)
@@ -361,17 +367,54 @@ def parse_postman(collection: dict) -> ApiSeedData:
     return seed
 
 
-def _postman_url(url_field: Any) -> str:
-    """Postman の url（文字列 or {raw,host,path}）を URL 文字列に（純粋）。"""
+def _collection_var_map(collection: dict) -> dict[str, str]:
+    """Postman コレクションの ``variable`` 定義を {key: value} に（純粋）。"""
+    out: dict[str, str] = {}
+    for v in collection.get("variable", []) or []:
+        if isinstance(v, dict) and v.get("key"):
+            out[str(v["key"])] = str(v.get("value", ""))
+    return out
+
+
+def _resolve_postman_vars(raw: str, varmap: dict, fallback_base: str) -> str:
+    """``{{var}}`` をコレクション変数→fallback の順で解決する（純粋）。"""
+    if not raw:
+        return raw
+    for key, val in (varmap or {}).items():
+        if val:
+            raw = raw.replace("{{" + key + "}}", val)
+    if "{{" in raw and fallback_base:
+        origin = "{u.scheme}://{u.netloc}".format(u=urlparse(fallback_base))
+        # 先頭の未解決変数（{{baseUrl}} 等）をスキャン対象の origin に置換
+        raw = re.sub(r"^\{\{[^}]+\}\}", origin, raw)
+        # 残る未解決変数は除去（パス断片のみ残す）
+        raw = re.sub(r"\{\{[^}]+\}\}", "", raw)
+    return raw
+
+
+def _postman_url(url_field: Any, varmap: Optional[dict] = None, fallback_base: str = "") -> str:
+    """Postman の url（文字列 or {raw,host,path}）を URL 文字列に（純粋）。
+
+    ``{{var}}`` はコレクション変数／fallback_base で解決してから返す。
+    """
+    varmap = varmap or {}
+
+    def _finalize(u: str) -> str:
+        u = _resolve_postman_vars(u, varmap, fallback_base)
+        if u and not u.startswith(("http://", "https://")) and fallback_base:
+            # ホストの無い相対 URL は scan 対象の origin を補う
+            origin = "{u.scheme}://{u.netloc}".format(u=urlparse(fallback_base))
+            u = origin.rstrip("/") + "/" + u.lstrip("/")
+        return u if u.startswith(("http://", "https://")) else ""
+
     if isinstance(url_field, str):
-        return url_field
+        return _finalize(url_field)
     if isinstance(url_field, dict):
         raw = url_field.get("raw")
         if raw:
-            # {{baseUrl}} 等の変数は解決できないので、そのままだと無効。
-            # host/path から組み立て可能ならそちらを優先する。
-            if "{{" not in raw:
-                return raw
+            resolved = _finalize(raw)
+            if resolved:
+                return resolved
         host = url_field.get("host")
         path = url_field.get("path")
         if host:
@@ -379,6 +422,7 @@ def _postman_url(url_field: Any) -> str:
             path_s = "/".join(str(p) for p in path) if isinstance(path, list) else str(path or "")
             scheme = url_field.get("protocol") or "https"
             built = f"{scheme}://{host_s}/{path_s}".rstrip("/")
+            built = _resolve_postman_vars(built, varmap, fallback_base)
             if "{{" not in built:
                 return built
     return ""
@@ -393,11 +437,11 @@ def _detect_and_parse(data: dict, fallback_base: str = "") -> ApiSeedData:
     if "swagger" in data or "openapi" in data or "paths" in data:
         return parse_openapi(data, fallback_base)
     if "item" in data and isinstance(data.get("item"), list):
-        return parse_postman(data)
+        return parse_postman(data, fallback_base)
     # info.schema が Postman のことがある
     info = data.get("info", {})
     if isinstance(info, dict) and "postman" in str(info.get("schema", "")).lower():
-        return parse_postman(data)
+        return parse_postman(data, fallback_base)
     # 既定は OpenAPI として試す
     return parse_openapi(data, fallback_base)
 
