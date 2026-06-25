@@ -135,7 +135,11 @@ class ScanController:
         if not self._allowed_windows and not self._forbidden_windows:
             return
         announced = False
-        while self._active and not self.is_within_window():
+        # NOTE: `_active` には依存しない。非 TTY/--no-monitor 実行では
+        # `_key_reader()` が termios 失敗で `_active=False` にするため、これに
+        # 依存すると時間帯ゲートが無言で無効化され、禁止時間帯でも攻撃が流れる。
+        # ゲートは abort でのみ抜ける。
+        while not self.is_within_window():
             if self._abort:
                 raise AbortScan("Scan aborted by operator")
             self._in_time_gate = True

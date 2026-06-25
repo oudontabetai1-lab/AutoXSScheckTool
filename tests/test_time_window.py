@@ -111,5 +111,22 @@ class SecondsUntilAllowedTests(unittest.TestCase):
         self.assertEqual(seconds_until_allowed(now, allowed, forbidden), float("inf"))
 
 
+class TimeGateActiveDecouplingTests(unittest.TestCase):
+    """時間帯ゲートが controller._active に依存しないこと（非TTY/--no-monitor 回帰）。"""
+
+    def test_gate_runs_when_inactive(self):
+        import asyncio
+        from wscan.intervention import ScanController, AbortScan
+
+        c = ScanController()
+        # 終日禁止 → 常に窓の外。_active=False（非TTYでキーリーダーが落ちた状態）でも
+        # ゲートはループに入り、abort で抜ける（= 黙って素通りしない）。
+        c.set_time_windows(forbidden=["00:00-24:00"])
+        c._active = False
+        c._abort = True
+        with self.assertRaises(AbortScan):
+            asyncio.run(c._time_gate())
+
+
 if __name__ == "__main__":
     unittest.main()

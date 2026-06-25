@@ -252,6 +252,18 @@ class PostmanTests(unittest.TestCase):
         seed = parse_postman(coll, fallback_base="https://target.example.com/app")
         self.assertIn("https://target.example.com/api/items", seed.urls)
 
+    def test_auth_header_variable_resolved(self):
+        coll = {
+            "info": {"schema": "https://schema.getpostman.com/json/collection/v2.1.0/"},
+            "variable": [{"key": "token", "value": "secret123"}],
+            "item": [{"name": "g", "request": {
+                "method": "GET",
+                "header": [{"key": "Authorization", "value": "Bearer {{token}}"}],
+                "url": "https://api.example.com/me"}}],
+        }
+        seed = parse_postman(coll)
+        self.assertEqual(seed.headers.get("Authorization"), "Bearer secret123")
+
 
 class LoadTests(unittest.TestCase):
     def test_load_json_openapi(self):

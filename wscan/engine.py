@@ -3378,6 +3378,10 @@ class ScanEngine:
         if field_plan and field_plan.rationale:
             console.print(f"    [dim cyan]Plan:[/dim cyan] [dim]{field_plan.rationale[:100]}[/dim]")
 
+        # 実際に実行した（resume でスキップしなかった）チェック数。すべて resume で
+        # スキップされた場合は末尾の adaptive パスも飛ばし、完了済みフィールドを
+        # 新規 payload で再攻撃しない（チェックポイントの約束を守る）。
+        checks_executed = 0
         for check_name in ordered_checks:
             scanner = self.scanners.get(check_name)
             if scanner is None:
@@ -3423,6 +3427,7 @@ class ScanEngine:
                 _override_token = _FIELD_PAYLOAD_OVERRIDES.set({**current_overrides, check_name: merged})
 
             check_errored = False
+            checks_executed += 1
             try:
                 before_count = len(self.all_findings)
                 findings = await scanner.scan_field(url, form_index, field, is_url_param)
@@ -3477,7 +3482,9 @@ class ScanEngine:
         field_findings = [f for f in self.all_findings if f.field_name == field_name and f.url == url]
         already_critical = any(f.severity in ("critical",) for f in field_findings)
 
-        if self.adaptive_enabled and not already_critical:
+        # resume で全チェックがスキップされたフィールドでは adaptive も走らせない
+        # （新規生成 payload で完了済みフィールドを再攻撃しないため）。
+        if self.adaptive_enabled and not already_critical and checks_executed > 0:
             await self._adaptive_attack_field(
                 url, form_index, field, is_url_param, ordered_checks, field_plan
             )

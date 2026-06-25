@@ -345,11 +345,14 @@ def parse_postman(collection: dict, fallback_base: str = "") -> ApiSeedData:
             if url and url not in seen:
                 seen.add(url)
                 seed.urls.append(url)
-            # ヘッダ（Authorization など）
+            # ヘッダ（Authorization など）。値中の {{token}} 等も解決する
+            # （未解決のままだと "Bearer {{token}}" を送って 401 になる）。
             for h in req.get("header", []) or []:
                 name = (h.get("key") or "").strip()
                 if name.lower() in ("authorization", "x-api-key", "x-auth-token"):
-                    seed.headers[name] = h.get("value", "")
+                    seed.headers[name] = _resolve_postman_vars(
+                        h.get("value", ""), varmap, ""
+                    )
             # JSON ボディ
             body = req.get("body") or {}
             if body.get("mode") == "raw" and url:
