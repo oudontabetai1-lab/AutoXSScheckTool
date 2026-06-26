@@ -411,6 +411,18 @@ class PostmanTests(unittest.TestCase):
         seed = parse_postman(coll)
         self.assertEqual(seed.headers.get("X-Tenant"), "acme")
 
+    def test_unresolved_header_placeholder_skipped(self):
+        # 解決できない {{token}} を含むヘッダは seed.headers に入れない
+        # （利用者の --header Authorization をリテラルで上書きしないため）
+        coll = {
+            "info": {"schema": "https://schema.getpostman.com/json/collection/v2.1.0/"},
+            "item": [{"name": "g", "request": {
+                "method": "GET", "url": "https://api.example.com/me",
+                "header": [{"key": "Authorization", "value": "Bearer {{token}}"}]}}],
+        }
+        seed = parse_postman(coll)
+        self.assertNotIn("Authorization", seed.headers)
+
     def test_auth_header_variable_resolved(self):
         coll = {
             "info": {"schema": "https://schema.getpostman.com/json/collection/v2.1.0/"},

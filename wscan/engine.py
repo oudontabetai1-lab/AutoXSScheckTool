@@ -1044,12 +1044,20 @@ class ScanEngine:
                 await self._sync_cookies_from_browser(self.browser, for_url=url)
             except Exception:
                 pass
+            # httpx ベースのセッション確認。ブラウザの GET プレフライトが見逃す API の
+            # 401/login を、scanner が使うのと同じ Cookie で検出する。mass_assignment 以外
+            # （graphql/cache/proto）は 401 でも空 Finding を返すだけなので、ここで失効を
+            # 捉えて再ログインしないと未認証の空振りを「済み」記録→resume 恒久スキップになる。
+            url_auth_failed = False
+            if await self._api_session_looks_expired(url):
+                if not await self._force_relogin(for_url=url):
+                    url_auth_failed = True  # 復旧不能 → この URL の単位は済みにしない
             for check_name, scanner in self.scanners.items():
                 # 再開: 済みの API テンプレート単位は飛ばす（合成フィールド名で記録）。
                 if self._checkpoint_is_done(url, "(api-template)", 0, check_name):
                     continue
                 try:
-                    self._api_auth_failed = False
+                    self._api_auth_failed = url_auth_failed
                     findings = await scanner.scan_page(url)
                     # 実テンプレ要求で認証失効を観測したら、再ログイン+1回だけ再試行。
                     # GET プレフライトでは検知できないメソッド限定保護(POST=401)を救済。
@@ -1317,6 +1325,37 @@ class ScanEngine:
             self._relogin_count += 1
             await self._sync_cookies_from_browser(browser, for_url=for_url)
         return bool(success)
+
+    async def _api_session_looks_expired(self, url: str) -> bool:
+        """``url`` への httpx GET（scanner と同じ auth_headers）で失効を判定する。
+
+        ブラウザ GET プレフライトと異なり、httpx ベース検査が実際に送る Cookie/ヘッダで
+        確認するため、API の 401/login リダイレクトを正しく捉えられる。再ログイン未設定
+        なら常に False（無駄な判定をしない）。判定不能（例外）も False。
+        """
+        if not (self.relogin_on_expiry and self.login_url):
+            return False
+        import httpx
+        from wscan import session_guard
+
+        kwargs: dict = {"timeout": getattr(self, "timeout", 15), "follow_redirects": True}
+        if hasattr(self, "httpx_client_kwargs"):
+            kwargs = self.httpx_client_kwargs(**kwargs)
+        elif getattr(self, "proxy", ""):
+            kwargs["proxy"] = self.proxy
+        headers = self.auth_headers() if hasattr(self, "auth_headers") else {}
+        try:
+            async with httpx.AsyncClient(**kwargs) as client:
+                r = await client.get(url, headers=headers)
+        except Exception:
+            return False
+        return session_guard.looks_logged_out(
+            status=r.status_code,
+            final_url=str(r.url),
+            body=r.text,
+            login_url=self.login_url,
+            logged_in_marker=self.logged_in_marker,
+        )
 
     # =========================================================================
     # Public entry point
