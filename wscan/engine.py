@@ -1003,12 +1003,6 @@ class ScanEngine:
         if self.target_url not in seen:
             urls.append(self.target_url)
 
-        # クロール/攻撃フェーズの後にセッションが失効していると、ここで httpx 検査が
-        # 古い self.cookies で 401/login を受け、Finding 0 のまま「済み」記録されて
-        # resume が認証済み JSON 操作を恒久スキップしてしまう。API テンプレート検査の
-        # 前に page 攻撃と同じ再ログインガードを通し、失効していれば cookie を更新する。
-        await self._maybe_relogin_for_page(self.target_url)
-
         for url in urls:
             # 時間帯ゲート/一時停止/スキップ/Abort を尊重する。クロール無しの API
             # スキャンではここが最初の攻撃になり得るため controller を必ず通す。
@@ -1018,6 +1012,11 @@ class ScanEngine:
                 continue
             except SkipPage:
                 continue
+            # これから叩く URL でセッション失効を検知して再ログインする。target が
+            # 公開ページで API テンプレートだけ保護されている場合、target_url だけ
+            # 見ても失効を検知できず、httpx 検査が 401 を Finding 0 で「済み」記録し
+            # resume が恒久スキップしてしまうため、URL 単位で確認・cookie 更新する。
+            await self._maybe_relogin_for_page(url)
             for check_name, scanner in self.scanners.items():
                 # 再開: 済みの API テンプレート単位は飛ばす（合成フィールド名で記録）。
                 if self._checkpoint_is_done(url, "(api-template)", 0, check_name):
@@ -1166,10 +1165,13 @@ class ScanEngine:
             if not name:
                 continue
             dom = str(c.get("domain", "")).lstrip(".").lower()
-            # 対象ホストに一致／サブドメイン関係の Cookie のみ採用
+            # ブラウザの送出規則に合わせ、対象ホスト宛に送られる Cookie のみ採用する。
+            # = ドメイン完全一致、または Cookie が親ドメインスコープ（target が
+            #   その子孫）の場合のみ。逆方向（admin.example.com の Cookie を
+            #   example.com へ）はブラウザも送らないので除外し、サブドメイン間の
+            #   セッション漏えい/別ID 実行を防ぐ。
             if dom and target_host and not (
                 target_host == dom or target_host.endswith("." + dom)
-                or dom.endswith("." + target_host)
             ):
                 continue
             pairs.append(f"{name}={c.get('value', '')}")
