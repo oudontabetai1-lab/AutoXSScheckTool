@@ -192,9 +192,9 @@ class MassAssignmentTests(unittest.TestCase):
         self.assertFalse(acceptance_ok(500))
 
 
-class MassAssignmentDoneGatingTests(unittest.TestCase):
-    """テンプレート未取込（認証付きスキャンの未認証ページレベル検査）の段階で
-    _done を立てて以降の本来の検査を飛ばさないこと（Codex P2 回帰）。"""
+class MassAssignmentUrlFilterTests(unittest.TestCase):
+    """scan_page(url) は URL 一致の POST/PUT/PATCH テンプレートのみ検査すること
+    （resume 時の全テンプレート再送を防ぐ Codex P2 回帰）。"""
 
     def _scanner(self, templates):
         from wscan.scanners.mass_assignment import MassAssignmentScanner
@@ -205,24 +205,25 @@ class MassAssignmentDoneGatingTests(unittest.TestCase):
         )
         return MassAssignmentScanner(engine)
 
-    def test_empty_templates_does_not_set_done(self):
+    def test_empty_templates_noop(self):
         sc = self._scanner([])
-        result = asyncio.run(sc.scan_page("http://h/"))
-        self.assertEqual(result, [])
-        # スペックが後から読まれる可能性があるので _done は立てない
-        self.assertFalse(sc._done)
+        self.assertEqual(asyncio.run(sc.scan_page("http://h/")), [])
 
-    def test_second_call_after_templates_appear_runs(self):
-        sc = self._scanner([])
-        asyncio.run(sc.scan_page("http://h/login"))  # pre-auth page, no templates
-        self.assertFalse(sc._done)
-        # スペック取込後（GET 操作だけ → POST/PUT/PATCH 無し）でも _done は立つ
-        sc.engine.api_seed_requests = [
-            types.SimpleNamespace(method="GET", url="http://h/api", json_body=None,
-                                  content_type="application/json")
-        ]
-        asyncio.run(sc.scan_page("http://h/dashboard"))
-        self.assertTrue(sc._done)
+    def test_non_matching_url_noop(self):
+        # URL が一致しないテンプレートは検査しない（HTTP も送らない）
+        sc = self._scanner([
+            types.SimpleNamespace(method="POST", url="http://h/api/users",
+                                  json_body={}, content_type="application/json")
+        ])
+        self.assertEqual(asyncio.run(sc.scan_page("http://h/other")), [])
+
+    def test_get_only_template_noop(self):
+        # GET 操作は対象外（mass assignment は本文系のみ）
+        sc = self._scanner([
+            types.SimpleNamespace(method="GET", url="http://h/api",
+                                  json_body=None, content_type="application/json")
+        ])
+        self.assertEqual(asyncio.run(sc.scan_page("http://h/api")), [])
 
 
 if __name__ == "__main__":

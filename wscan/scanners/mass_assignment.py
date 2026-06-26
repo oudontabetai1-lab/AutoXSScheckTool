@@ -92,7 +92,6 @@ class MassAssignmentScanner(BaseScanner):
 
     def __init__(self, engine: "ScanEngine"):
         super().__init__(engine)
-        self._done = False
 
     async def scan_field(
         self,
@@ -104,29 +103,29 @@ class MassAssignmentScanner(BaseScanner):
         return []
 
     async def scan_page(self, url: str) -> list[Finding]:
-        # API 由来の JSON 操作群を一度だけまとめて検査する。
-        if self._done:
-            return []
+        """渡された ``url`` に一致する API テンプレート（JSON 操作）だけを検査する。
 
-        # 認証付きスキャンでは run() が _phase_crawl（= API スペック取込）より前に
-        # 未認証ログインページのページレベル検査を走らせる。その時点では
-        # api_seed_requests が空なので、ここで _done を立ててしまうと、スペック
-        # 取込後の本来の操作群が永久に飛ばされて mass_assignment が動かない。
-        # テンプレートが揃うまで _done は立てない（毎回 no-op で安全）。
-        templates = list(getattr(self.engine, "api_seed_requests", []) or [])
+        以前は全テンプレートを一括検査して ``_done`` を立てていたが、エンジンは
+        テンプレート URL ごとに ``scan_page`` を呼び `(url, check)` 単位で
+        チェックポイントを刻む。URL でフィルタしないと、resume 時に未マークの URL を
+        処理する際へ全テンプレート（状態変更系 POST/PUT/PATCH 含む）を再送して
+        しまう。URL 一致のテンプレートのみを対象にして冪等性と再開整合性を保つ。
+        """
+        templates = [
+            t for t in (getattr(self.engine, "api_seed_requests", []) or [])
+            if getattr(t, "url", None) == url
+            and (getattr(t, "method", "GET") or "GET").upper() in ("POST", "PUT", "PATCH")
+        ]
         if not templates:
             return []
-        self._done = True
 
         if self.monitor:
             await self.monitor.emit_status(
-                f"Mass assignment check on {len(templates)} API operation(s)"
+                f"Mass assignment check on {len(templates)} API operation(s) for {url}"
             )
 
         findings: list[Finding] = []
         for tmpl in templates:
-            if (tmpl.method or "GET").upper() not in ("POST", "PUT", "PATCH"):
-                continue
             f = await self._test_template(tmpl)
             if f:
                 findings.append(f)

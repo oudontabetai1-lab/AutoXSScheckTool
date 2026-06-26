@@ -380,10 +380,12 @@ def parse_postman(collection: dict, fallback_base: str = "") -> ApiSeedData:
                     seed.headers[name] = _resolve_postman_vars(
                         h.get("value", ""), varmap, ""
                     )
-            # JSON ボディ
+            # JSON ボディ。collection 変数を json.loads 前に解決する
+            # （`{"id": {{userId}}}` は未解決だと不正 JSON で落ち、`{{userEmail}}`
+            # はリテラルのまま送られてしまうため）。ボディに origin は補わない。
             body = req.get("body") or {}
             if body.get("mode") == "raw" and url:
-                raw = body.get("raw", "")
+                raw = _resolve_postman_vars(body.get("raw", ""), varmap, "")
                 try:
                     parsed = json.loads(raw)
                     if isinstance(parsed, dict):
