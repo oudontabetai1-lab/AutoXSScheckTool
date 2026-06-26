@@ -386,14 +386,22 @@ def parse_postman(collection: dict, fallback_base: str = "") -> ApiSeedData:
             if url and url not in seen:
                 seen.add(url)
                 seed.urls.append(url)
-            # ヘッダ（Authorization など）。値中の {{token}} 等も解決する
-            # （未解決のままだと "Bearer {{token}}" を送って 401 になる）。
+            # リクエストヘッダを収集（値中の {{token}} 等も解決）。auth 系は共通
+            # ヘッダ（seed.headers）に、安全な必須ヘッダ（X-API-Version/tenant/routing 等）は
+            # RequestTemplate に載せる。欠落すると 400/401/404 で API 検査が空振りする。
+            req_headers: dict[str, str] = {}
             for h in req.get("header", []) or []:
                 name = (h.get("key") or "").strip()
-                if name.lower() in ("authorization", "x-api-key", "x-auth-token"):
-                    seed.headers[name] = _resolve_postman_vars(
-                        h.get("value", ""), varmap, ""
-                    )
+                if not name or h.get("disabled"):
+                    continue
+                value = _resolve_postman_vars(h.get("value", ""), varmap, "")
+                low = name.lower()
+                if low in ("authorization", "x-api-key", "x-auth-token"):
+                    seed.headers[name] = value
+                    req_headers[name] = value
+                elif low not in ("cookie", "content-length", "host",
+                                 "content-type", "accept"):
+                    req_headers[name] = value
             # JSON ボディ。collection 変数を json.loads 前に解決する
             # （`{"id": {{userId}}}` は未解決だと不正 JSON で落ち、`{{userEmail}}`
             # はリテラルのまま送られてしまうため）。ボディに origin は補わない。
@@ -404,7 +412,8 @@ def parse_postman(collection: dict, fallback_base: str = "") -> ApiSeedData:
                     parsed = json.loads(raw)
                     if isinstance(parsed, dict):
                         seed.requests.append(
-                            RequestTemplate(method=method, url=url, json_body=parsed)
+                            RequestTemplate(method=method, url=url, json_body=parsed,
+                                            headers=dict(req_headers))
                         )
                 except (json.JSONDecodeError, TypeError):
                     pass

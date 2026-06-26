@@ -57,6 +57,22 @@ _CHECK_EXTRA_TYPES: dict[str, tuple[str, ...]] = {
 # する（状態変更系プローブの二重送信・resume 重複を防ぐ）。
 _API_TEMPLATE_ONLY_CHECKS: frozenset[str] = frozenset({"mass_assignment"})
 
+
+def _cookie_path_matches(request_path: str, cookie_path: str) -> bool:
+    """RFC 6265 の path-match（純粋関数）。
+
+    Cookie の ``Path`` 属性が要求パスにマッチするか。``cookie_path`` が要求パスの
+    プレフィックス（境界はスラッシュ）であれば送出してよい。
+    """
+    req = request_path or "/"
+    cp = cookie_path or "/"
+    if cp == req:
+        return True
+    if not req.startswith(cp):
+        return False
+    # 境界が "/" であること（/admin が /administrator に誤マッチしないように）
+    return cp.endswith("/") or req[len(cp):len(cp) + 1] == "/"
+
 import yaml
 from rich.console import Console
 from rich.rule import Rule
@@ -1188,7 +1204,9 @@ class ScanEngine:
             # できないため上の except/None 経路では据え置く（無闇に消さない）。
             self.cookies = ""
             return
-        target_host = (_up(for_url or self.target_url).hostname or "").lower()
+        _parsed = _up(for_url or self.target_url)
+        target_host = (_parsed.hostname or "").lower()
+        req_path = _parsed.path or "/"
         pairs: list[str] = []
         for c in cookies:
             name = c.get("name")
@@ -1207,6 +1225,9 @@ class ScanEngine:
                 target_host == dom
                 or (is_domain_cookie and target_host.endswith("." + dom))
             ):
+                continue
+            # path スコープも照合（Path=/admin の Cookie を /api へ送らない）。
+            if not _cookie_path_matches(req_path, str(c.get("path", "/") or "/")):
                 continue
             pairs.append(f"{name}={c.get('value', '')}")
         # マッチ集合で**常に置換**する（空でも）。per-URL 同期では、前の URL で

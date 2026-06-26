@@ -26,6 +26,23 @@ def _run_sync(target_url, cookies, initial="", for_url=""):
     return eng.cookies
 
 
+class CookiePathMatchTests(unittest.TestCase):
+    def test_path_match_pure(self):
+        from wscan.engine import _cookie_path_matches
+        self.assertTrue(_cookie_path_matches("/api/users", "/"))
+        self.assertTrue(_cookie_path_matches("/admin/x", "/admin"))
+        self.assertTrue(_cookie_path_matches("/admin", "/admin"))
+        self.assertFalse(_cookie_path_matches("/api/users", "/admin"))
+        # 境界チェック: /admin は /administrator にマッチしない
+        self.assertFalse(_cookie_path_matches("/administrator", "/admin"))
+
+    def test_path_scoped_cookie_not_sent_to_other_path(self):
+        cookies = [{"name": "s", "value": "x", "domain": "example.com", "path": "/admin"}]
+        result = _run_sync("https://example.com/", cookies,
+                           for_url="https://example.com/api/users")
+        self.assertEqual(result, "")
+
+
 class CookieDomainSyncTests(unittest.TestCase):
     def test_exact_and_parent_accepted_subdomain_rejected(self):
         cookies = [

@@ -384,6 +384,22 @@ class PostmanTests(unittest.TestCase):
         self.assertIn("https://target.example.com/users", seed.urls)
         self.assertFalse(any(":///" in u for u in seed.urls))
 
+    def test_request_headers_on_template(self):
+        # Postman の必須ヘッダ(X-API-Version 等)を RequestTemplate に載せる
+        coll = {
+            "info": {"schema": "https://schema.getpostman.com/json/collection/v2.1.0/"},
+            "variable": [{"key": "ver", "value": "2024"}],
+            "item": [{"name": "c", "request": {
+                "method": "POST", "url": "https://api.example.com/users",
+                "header": [{"key": "X-API-Version", "value": "{{ver}}"},
+                           {"key": "X-Off", "value": "n", "disabled": True}],
+                "body": {"mode": "raw", "raw": '{"n":"x"}'}}}],
+        }
+        seed = parse_postman(coll)
+        posts = [r for r in seed.requests if r.method == "POST"]
+        self.assertEqual(posts[0].headers.get("X-API-Version"), "2024")
+        self.assertNotIn("X-Off", posts[0].headers)
+
     def test_auth_header_variable_resolved(self):
         coll = {
             "info": {"schema": "https://schema.getpostman.com/json/collection/v2.1.0/"},
