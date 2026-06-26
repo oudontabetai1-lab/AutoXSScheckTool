@@ -1201,8 +1201,10 @@ class ScanEngine:
             ):
                 continue
             pairs.append(f"{name}={c.get('value', '')}")
-        if pairs:
-            self.cookies = "; ".join(pairs)
+        # マッチ集合で**常に置換**する（空でも）。per-URL 同期では、前の URL で
+        # 別ホスト用に設定した self.cookies が残ると、当該ホストに無関係な Cookie を
+        # 送って別セッションで検査してしまう。一致が無ければクリアして未認証で送る。
+        self.cookies = "; ".join(pairs)
 
     async def _maybe_relogin_for_page(self, url: str) -> None:
         """攻撃対象ページの状態を見てセッション失効なら再ログインする。

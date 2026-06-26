@@ -19,10 +19,10 @@ class _Ctx:
         return self._cookies
 
 
-def _run_sync(target_url, cookies):
+def _run_sync(target_url, cookies, initial="", for_url=""):
     browser = types.SimpleNamespace(page=types.SimpleNamespace(context=_Ctx(cookies)))
-    eng = types.SimpleNamespace(target_url=target_url, cookies="")
-    asyncio.run(ScanEngine._sync_cookies_from_browser(eng, browser))
+    eng = types.SimpleNamespace(target_url=target_url, cookies=initial)
+    asyncio.run(ScanEngine._sync_cookies_from_browser(eng, browser, for_url=for_url))
     return eng.cookies
 
 
@@ -47,6 +47,16 @@ class CookieDomainSyncTests(unittest.TestCase):
     def test_unrelated_domain_rejected(self):
         cookies = [{"name": "z", "value": "9", "domain": "evil.test"}]
         result = _run_sync("https://example.com/", cookies)
+        self.assertEqual(result, "")
+
+    def test_stale_cookie_cleared_when_no_match(self):
+        # 前 URL 用の cookie が残っていても、当該ホストに一致が無ければクリアする
+        # （別ホストの Cookie を誤送信しない）。
+        cookies = [{"name": "api", "value": "1", "domain": "api.example.com"}]
+        result = _run_sync(
+            "https://www.example.com/", cookies,
+            initial="old=fromprevioushost", for_url="https://other.example.org/x",
+        )
         self.assertEqual(result, "")
 
 
