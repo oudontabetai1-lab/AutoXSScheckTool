@@ -472,8 +472,14 @@ def _postman_url(url_field: Any, varmap: Optional[dict] = None, fallback_base: s
             # — api-version/tenant/filter 等 — を落とさない）。
             query = url_field.get("query")
             if isinstance(query, list):
+                # 変数は urlencode の前に解決する。先に encode すると {{apiVersion}} が
+                # %7B%7B...%7D%7D になり _resolve_postman_vars が見つけられず未解決の
+                # まま送られて 400/404 になる。
                 pairs = [
-                    (str(q.get("key")), str(q.get("value", "")))
+                    (
+                        _resolve_postman_vars(str(q.get("key")), varmap, ""),
+                        _resolve_postman_vars(str(q.get("value", "")), varmap, ""),
+                    )
                     for q in query
                     if isinstance(q, dict) and q.get("key") and not q.get("disabled")
                 ]

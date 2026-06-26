@@ -1183,6 +1183,10 @@ class ScanEngine:
         except Exception:
             return
         if not cookies:
+            # jar が空（ログアウトで消去 / Bearer・localStorage 認証など）。stale な
+            # Cookie を送り続けないようクリアする。なお page 取得不能・例外時は判定
+            # できないため上の except/None 経路では据え置く（無闇に消さない）。
+            self.cookies = ""
             return
         target_host = (_up(for_url or self.target_url).hostname or "").lower()
         pairs: list[str] = []

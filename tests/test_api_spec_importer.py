@@ -328,6 +328,19 @@ class PostmanTests(unittest.TestCase):
         # disabled なクエリは含めない
         self.assertFalse(any("off=x" in u for u in seed.urls))
 
+    def test_url_object_query_variable_resolved(self):
+        # query 値が {{apiVersion}} のとき urlencode 前に解決する
+        coll = {
+            "info": {"schema": "https://schema.getpostman.com/json/collection/v2.1.0/"},
+            "variable": [{"key": "apiVersion", "value": "2024"}],
+            "item": [{"name": "g", "request": {"method": "GET", "url": {
+                "host": ["api", "example", "com"], "path": ["items"],
+                "query": [{"key": "api-version", "value": "{{apiVersion}}"}]}}}],
+        }
+        seed = parse_postman(coll)
+        self.assertTrue(any("api-version=2024" in u for u in seed.urls))
+        self.assertFalse(any("%7B%7B" in u for u in seed.urls))
+
     def test_host_variable_absolute_base(self):
         # host:["{{baseUrl}}"] が絶対URLに解決される場合 scheme を二重化しない
         coll = {

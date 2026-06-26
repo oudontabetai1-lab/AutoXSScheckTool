@@ -49,6 +49,11 @@ class CookieDomainSyncTests(unittest.TestCase):
         result = _run_sync("https://example.com/", cookies)
         self.assertEqual(result, "")
 
+    def test_empty_jar_clears_cookies(self):
+        # ブラウザの cookie jar が空ならクリアする（stale を送り続けない）
+        result = _run_sync("https://example.com/", [], initial="old=stale")
+        self.assertEqual(result, "")
+
     def test_stale_cookie_cleared_when_no_match(self):
         # 前 URL 用の cookie が残っていても、当該ホストに一致が無ければクリアする
         # （別ホストの Cookie を誤送信しない）。
