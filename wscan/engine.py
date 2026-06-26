@@ -437,6 +437,10 @@ class ScanEngine:
         # （mass_assignment 等が利用する RequestTemplate のリスト）
         self.api_spec_path: str = api_spec_path
         self.api_seed_requests: list = []
+        # API テンプレート検査中に認証失効（401/login）を観測したときに立つフラグ。
+        # mass_assignment 等がベースライン応答で検知し、_run_api_template_checks が
+        # 「済み」記録を抑止して resume での恒久スキップを防ぐ。
+        self._api_auth_failed: bool = False
         # 再開可能スキャン
         self.resume_dir: str = resume_dir
         self.enable_checkpoint: bool = enable_checkpoint
@@ -1022,7 +1026,15 @@ class ScanEngine:
                 if self._checkpoint_is_done(url, "(api-template)", 0, check_name):
                     continue
                 try:
+                    self._api_auth_failed = False
                     findings = await scanner.scan_page(url)
+                    # 実テンプレ要求で認証失効を観測したら、再ログイン+1回だけ再試行。
+                    # GET プレフライトでは検知できないメソッド限定保護(POST=401)を救済。
+                    if self._api_auth_failed:
+                        relogged = await self._maybe_relogin_for_page(url)
+                        if relogged:
+                            self._api_auth_failed = False
+                            findings = await scanner.scan_page(url)
                     for f in (findings or []):
                         self._record_finding(f, source="api-spec")
                 except AbortScan:
@@ -1035,7 +1047,10 @@ class ScanEngine:
                         f"  [yellow]API template check ({check_name}) on {url}: {e}[/yellow]"
                     )
                 else:
-                    self._checkpoint_mark_done(url, "(api-template)", 0, check_name)
+                    # 認証失効が解消しないまま空振りした単位は「済み」にしない
+                    # （resume が再試行できるようにする）。
+                    if not self._api_auth_failed:
+                        self._checkpoint_mark_done(url, "(api-template)", 0, check_name)
             # URL 単位で進捗＋Finding スナップショットを保存（クラッシュ耐性）。
             self._save_checkpoint()
 
@@ -1081,7 +1096,7 @@ class ScanEngine:
     # =========================================================================
 
     async def _relogin_if_needed(
-        self, browser, *, status=None, final_url: str = "", body: str = ""
+        self, browser, *, status=None, final_url: str = "", body: str = "", for_url: str = ""
     ) -> bool:
         """応答がセッション失効を示す場合に ``browser`` 上で自動再ログインする。
 
@@ -1135,18 +1150,21 @@ class ScanEngine:
             console.print("  [green][Auth] 再ログイン成功 — セッションを更新しました。[/green]")
             # 新しい Cookie を httpx 系（auth_headers）にも反映する。これを怠ると
             # mass_assignment/graphql/cache_poisoning/server-side proto などの直接
-            # httpx 検査が失効 Cookie を送り続けて認証 API を取りこぼす。
-            await self._sync_cookies_from_browser(browser)
+            # httpx 検査が失効 Cookie を送り続けて認証 API を取りこぼす。これから叩く
+            # ホスト（for_url）の Cookie を採るため for_url を渡す。
+            await self._sync_cookies_from_browser(browser, for_url=for_url or final_url)
         else:
             console.print("  [yellow][Auth] 再ログインできませんでした。[/yellow]")
         return bool(success)
 
-    async def _sync_cookies_from_browser(self, browser) -> None:
+    async def _sync_cookies_from_browser(self, browser, for_url: str = "") -> None:
         """ブラウザコンテキストの Cookie を ``self.cookies`` 文字列へ反映する。
 
         ``auth_headers()`` は ``self.cookies`` を Cookie ヘッダに使うため、再ログイン
         後にここを更新しないと httpx ベースの検査が古い Cookie を送ってしまう。
-        対象ホストにマッチする Cookie のみを採用する（無関係ドメインの混入防止）。
+        ``for_url`` のホスト（未指定なら target_url）宛に送られる Cookie のみ採用する。
+        マルチスコープ（www とは別サブドメインの API/ログイン）では、これから叩く
+        ホストを渡さないと host-only Cookie が落ちて API 検査が未認証になる。
         """
         try:
             from urllib.parse import urlparse as _up
@@ -1158,7 +1176,7 @@ class ScanEngine:
             return
         if not cookies:
             return
-        target_host = (_up(self.target_url).hostname or "").lower()
+        target_host = (_up(for_url or self.target_url).hostname or "").lower()
         pairs: list[str] = []
         for c in cookies:
             name = c.get("name")
@@ -1221,7 +1239,7 @@ class ScanEngine:
         if not body and status is None:
             return
         relogged = await self._relogin_if_needed(
-            browser, status=status, final_url=final_url, body=body
+            browser, status=status, final_url=final_url, body=body, for_url=url
         )
         if relogged:
             # 認証済みコンテンツを攻撃で見るため、対象ページへ再遷移する。

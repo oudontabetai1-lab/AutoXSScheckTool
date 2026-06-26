@@ -163,6 +163,24 @@ class MassAssignmentScanner(BaseScanner):
         except Exception:
             return None
 
+        # 実メソッドの応答で認証失効を検知したらエンジンへ通知する。GET プレフライトでは
+        # 検知できない「メソッド限定保護」エンドポイント（GET=404/405, POST=401）で、
+        # 失効 cookie のまま検査して空 Finding を「済み」記録するのを防ぐ
+        # （_run_api_template_checks が再ログイン+再試行/未マークにする）。
+        from wscan import session_guard
+        if session_guard.looks_logged_out(
+            status=baseline.status_code,
+            final_url=str(getattr(baseline, "url", tmpl.url)),
+            body=baseline.text,
+            login_url=getattr(self.engine, "login_url", ""),
+            logged_in_marker=getattr(self.engine, "logged_in_marker", ""),
+        ):
+            try:
+                self.engine._api_auth_failed = True
+            except Exception:
+                pass
+            return None
+
         # 受理（2xx）された場合のみ過剰割り当てとみなす。400/422 等の
         # バリデーションエラーで送信 JSON がエコーされただけのケースを除外する。
         if not acceptance_ok(tainted.status_code):
