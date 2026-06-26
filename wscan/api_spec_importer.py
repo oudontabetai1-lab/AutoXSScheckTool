@@ -101,8 +101,16 @@ def _openapi_base_urls(spec: dict, fallback_base: str = "") -> list[str]:
     # OpenAPI 3.x
     for srv in spec.get("servers", []) or []:
         url = (srv or {}).get("url", "")
-        if url:
-            bases.append(url.rstrip("/"))
+        if not url:
+            continue
+        # サーバ変数（{host} 等）を default で展開。展開しないと netloc が "{host}" の
+        # まま生成され、スコープ照合で全て弾かれて API が 1 件も拾えなくなる。
+        variables = (srv or {}).get("variables", {}) or {}
+        for vname, vdef in variables.items():
+            default = (vdef or {}).get("default")
+            if default is not None:
+                url = url.replace("{" + str(vname) + "}", str(default))
+        bases.append(url.rstrip("/"))
     # Swagger 2.0
     if not bases and spec.get("host"):
         schemes = spec.get("schemes") or ["https"]

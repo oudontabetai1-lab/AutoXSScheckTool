@@ -243,6 +243,18 @@ class OpenApiTests(unittest.TestCase):
         # body operation → request template, base from host+basePath
         self.assertTrue(any(r.url == "https://api.example.com/v2/login" for r in seed.requests))
 
+    def test_server_variables_expanded(self):
+        # servers[].variables の default を展開してからシードする
+        spec = {
+            "openapi": "3.0.0",
+            "servers": [{"url": "https://{host}/v1",
+                         "variables": {"host": {"default": "api.example.com"}}}],
+            "paths": {"/ping": {"get": {}}},
+        }
+        seed = parse_openapi(spec)
+        self.assertIn("https://api.example.com/v1/ping", seed.urls)
+        self.assertFalse(any("{host}" in u for u in seed.urls))
+
     def test_relative_server_resolved_with_fallback(self):
         spec = {"openapi": "3.0.0", "servers": [{"url": "/api"}],
                 "paths": {"/ping": {"get": {}}}}

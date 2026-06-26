@@ -1008,16 +1008,26 @@ class ScanEngine:
             except SkipPage:
                 continue
             for check_name, scanner in self.scanners.items():
+                # 再開: 済みの API テンプレート単位は飛ばす（合成フィールド名で記録）。
+                if self._checkpoint_is_done(url, "(api-template)", 0, check_name):
+                    continue
                 try:
                     findings = await scanner.scan_page(url)
                     for f in (findings or []):
                         self._record_finding(f, source="api-spec")
                 except AbortScan:
+                    # 中断前に、ここまでの Finding と進捗を必ず永続化してから伝播する
+                    # （resume が状態変更系テンプレートを再実行しないように）。
+                    self._save_checkpoint()
                     raise
                 except Exception as e:
                     console.print(
                         f"  [yellow]API template check ({check_name}) on {url}: {e}[/yellow]"
                     )
+                else:
+                    self._checkpoint_mark_done(url, "(api-template)", 0, check_name)
+            # URL 単位で進捗＋Finding スナップショットを保存（クラッシュ耐性）。
+            self._save_checkpoint()
 
     def _check_type_in_scope(self, check_type: str) -> bool:
         """Finding の check_type が今回要求されたチェック集合に属するか。
