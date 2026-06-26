@@ -1021,6 +1021,13 @@ class ScanEngine:
             # 見ても失効を検知できず、httpx 検査が 401 を Finding 0 で「済み」記録し
             # resume が恒久スキップしてしまうため、URL 単位で確認・cookie 更新する。
             await self._maybe_relogin_for_page(url)
+            # 再ログインが起きなくても、ブラウザが既に保持する当該ホストの Cookie を
+            # self.cookies へ写す。マルチスコープ（別サブドメインの API/ログイン）で
+            # 初期ログインが API ホストに着地済みでも httpx 検査が認証されるようにする。
+            try:
+                await self._sync_cookies_from_browser(self.browser, for_url=url)
+            except Exception:
+                pass
             for check_name, scanner in self.scanners.items():
                 # 再開: 済みの API テンプレート単位は飛ばす（合成フィールド名で記録）。
                 if self._checkpoint_is_done(url, "(api-template)", 0, check_name):
@@ -1030,8 +1037,9 @@ class ScanEngine:
                     findings = await scanner.scan_page(url)
                     # 実テンプレ要求で認証失効を観測したら、再ログイン+1回だけ再試行。
                     # GET プレフライトでは検知できないメソッド限定保護(POST=401)を救済。
+                    # 失効は既知なので _force_relogin（検知を介さず直接 auto_login）を使う。
                     if self._api_auth_failed:
-                        relogged = await self._maybe_relogin_for_page(url)
+                        relogged = await self._force_relogin(for_url=url)
                         if relogged:
                             self._api_auth_failed = False
                             findings = await scanner.scan_page(url)
@@ -1237,7 +1245,7 @@ class ScanEngine:
             status = None
         # 判定材料が全く得られなければ何もしない
         if not body and status is None:
-            return
+            return False
         relogged = await self._relogin_if_needed(
             browser, status=status, final_url=final_url, body=body, for_url=url
         )
@@ -1247,6 +1255,37 @@ class ScanEngine:
                 await browser.navigate(url, retries=self.navigation_retries)
             except Exception:
                 pass
+        return bool(relogged)
+
+    async def _force_relogin(self, for_url: str = "") -> bool:
+        """検知を介さず直接再ログインする（失効が既知のとき用）。成功で True。
+
+        実テンプレ要求(POST 等)で 401 を観測済みの場合、GET プレフライトでは
+        失効を再検知できない（メソッド限定保護で 404/405）。そのときは検知を
+        飛ばして直接 auto_login し、``for_url`` のホスト宛 Cookie を同期する。
+        """
+        if not self.relogin_on_expiry:
+            return False
+        browser = self.browser
+        if not (self.login_url and getattr(browser, "auth_user", "")
+                and getattr(browser, "auth_pass", "")):
+            return False
+        if not hasattr(browser, "auto_login"):
+            return False
+        try:
+            success = await browser.auto_login(
+                self.login_url,
+                user_field=self.login_user_field,
+                pass_field=self.login_pass_field,
+                success_indicator=self.login_success_indicator,
+            )
+        except Exception as exc:
+            console.print(f"  [yellow][Auth] 再ログイン失敗: {exc}[/yellow]")
+            return False
+        if success:
+            self._relogin_count += 1
+            await self._sync_cookies_from_browser(browser, for_url=for_url)
+        return bool(success)
 
     # =========================================================================
     # Public entry point
