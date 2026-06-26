@@ -423,6 +423,31 @@ class PostmanTests(unittest.TestCase):
         seed = parse_postman(coll)
         self.assertNotIn("Authorization", seed.headers)
 
+    def test_native_bearer_auth_block_imported(self):
+        # request.auth(bearer) を Authorization ヘッダへ展開する
+        coll = {
+            "info": {"schema": "https://schema.getpostman.com/json/collection/v2.1.0/"},
+            "item": [{"name": "g", "request": {
+                "method": "GET", "url": "https://api.example.com/me",
+                "auth": {"type": "bearer",
+                         "bearer": [{"key": "token", "value": "abc123"}]}}}],
+        }
+        seed = parse_postman(coll)
+        self.assertEqual(seed.headers.get("Authorization"), "Bearer abc123")
+
+    def test_collection_level_auth_inherited(self):
+        # collection 直下の auth を request が継承する
+        coll = {
+            "info": {"schema": "https://schema.getpostman.com/json/collection/v2.1.0/"},
+            "auth": {"type": "apikey", "apikey": [
+                {"key": "key", "value": "X-API-Key"},
+                {"key": "value", "value": "secret"}]},
+            "item": [{"name": "g", "request": {
+                "method": "GET", "url": "https://api.example.com/me"}}],
+        }
+        seed = parse_postman(coll)
+        self.assertEqual(seed.headers.get("X-API-Key"), "secret")
+
     def test_auth_header_variable_resolved(self):
         coll = {
             "info": {"schema": "https://schema.getpostman.com/json/collection/v2.1.0/"},

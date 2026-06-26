@@ -56,8 +56,13 @@ class WindowRule:
         return prev_day in self.days and minute < self.end
 
 
-def _parse_days(token: str) -> frozenset[int]:
-    """"Mon-Fri" / "Sat,Sun" / "Wed" などを weekday 集合へ。空なら全曜日。"""
+def _parse_days(token: str) -> Optional[frozenset[int]]:
+    """"Mon-Fri" / "Sat,Sun" / "Wed" などを weekday 集合へ。
+
+    空トークンは「曜日指定なし＝全曜日」（意図的）。一方、非空なのに有効な曜日を
+    1 つも解釈できない（"Weekdays" 等の誤記）場合は **None を返して不正を通知** する。
+    全曜日へ黙って広げると ``--allowed-hours`` の許可窓を意図せず広げてしまうため。
+    """
     token = token.strip().lower()
     if not token:
         return frozenset(range(7))
@@ -81,7 +86,8 @@ def _parse_days(token: str) -> frozenset[int]:
             key = part[:3]
             if key in _DAY_INDEX:
                 days.add(_DAY_INDEX[key])
-    return frozenset(days) if days else frozenset(range(7))
+    # 非空トークンで 1 つも解釈できなければ不正（None）
+    return frozenset(days) if days else None
 
 
 def _parse_hhmm(token: str) -> Optional[int]:
@@ -111,7 +117,12 @@ def parse_window(spec: str) -> Optional[WindowRule]:
     if start is None or end is None or start == end:
         return None
     day_token = spec[: m.start()].strip()
-    return WindowRule(days=_parse_days(day_token), start=start, end=end)
+    days = _parse_days(day_token)
+    if days is None:
+        # 曜日トークンが不正（"Weekdays" 等の誤記）→ ルールごと破棄（黙って全曜日に
+        # 広げない）。許可窓が意図せず広がるのを防ぐ。
+        return None
+    return WindowRule(days=days, start=start, end=end)
 
 
 def parse_windows(specs: Optional[Iterable[str]]) -> list[WindowRule]:

@@ -35,6 +35,13 @@ class ParseTests(unittest.TestCase):
         self.assertIsNone(parse_window(""))
         self.assertIsNone(parse_window("10:00-10:00"))  # ゼロ幅
 
+    def test_invalid_day_token_rejected(self):
+        # 不正な曜日トークンは全曜日に広げず破棄する（許可窓を勝手に広げない）
+        self.assertIsNone(parse_window("Weekdays 22:00-06:00"))
+        self.assertEqual(parse_windows(["Weekdays 22:00-06:00"]), [])
+        # 正しい曜日指定はそのまま
+        self.assertEqual(len(parse_windows(["Mon-Fri 22:00-06:00"])), 1)
+
     def test_parse_windows_csv(self):
         # 複数ウィンドウはセミコロン区切り（カンマは曜日リスト専用）
         rules = parse_windows("09:00-12:00; 13:00-18:00")

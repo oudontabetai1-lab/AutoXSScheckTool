@@ -58,6 +58,27 @@ _CHECK_EXTRA_TYPES: dict[str, tuple[str, ...]] = {
 _API_TEMPLATE_ONLY_CHECKS: frozenset[str] = frozenset({"mass_assignment"})
 
 
+def _reset_scanner_url_guard(scanner, url: str) -> None:
+    """scanner の per-URL/per-origin 重複ガードから ``url`` を外す（純粋・副作用最小）。
+
+    再ログイン後の再試行で scan_page(url) を確実に再実行させるため、各スキャナが
+    使う既知のガード集合（``_checked_urls`` / ``_tested_urls`` / ``_tested_endpoints``）
+    から該当エントリを取り除く。
+    """
+    for attr in ("_checked_urls", "_tested_urls"):
+        s = getattr(scanner, attr, None)
+        if isinstance(s, set):
+            s.discard(url)
+    origins = getattr(scanner, "_tested_endpoints", None)
+    if isinstance(origins, set):
+        try:
+            from urllib.parse import urlparse as _up
+            p = _up(url)
+            origins.discard(f"{p.scheme}://{p.netloc}")
+        except Exception:
+            pass
+
+
 def _cookie_path_matches(request_path: str, cookie_path: str) -> bool:
     """RFC 6265 の path-match（純粋関数）。
 
@@ -1066,6 +1087,10 @@ class ScanEngine:
                         relogged = await self._force_relogin(for_url=url)
                         if relogged:
                             self._api_auth_failed = False
+                            # scanner は初回で url を per-URL ガード（_checked_urls 等）に
+                            # 登録済みのことがあり、そのまま再実行すると [] を返す。
+                            # 再試行が実際に走るようガードからこの url を外す。
+                            _reset_scanner_url_guard(scanner, url)
                             findings = await scanner.scan_page(url)
                     for f in (findings or []):
                         self._record_finding(f, source="api-spec")

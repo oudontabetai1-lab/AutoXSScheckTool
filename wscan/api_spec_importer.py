@@ -378,12 +378,12 @@ def parse_postman(collection: dict, fallback_base: str = "") -> ApiSeedData:
     seen: set[str] = set()
     varmap = _collection_var_map(collection)
 
-    def _walk(items: list):
+    def _walk(items: list, inherited_auth=None):
         for it in items or []:
             if not isinstance(it, dict):
                 continue
-            if "item" in it:  # フォルダ → 再帰
-                _walk(it.get("item", []))
+            if "item" in it:  # フォルダ → 再帰（フォルダ auth を継承）
+                _walk(it.get("item", []), it.get("auth") or inherited_auth)
                 continue
             req = it.get("request")
             if not isinstance(req, dict):
@@ -397,6 +397,12 @@ def parse_postman(collection: dict, fallback_base: str = "") -> ApiSeedData:
             # ヘッダ（seed.headers）に、安全な必須ヘッダ（X-API-Version/tenant/routing 等）は
             # RequestTemplate に載せる。欠落すると 400/401/404 で API 検査が空振りする。
             req_headers: dict[str, str] = {}
+            # Postman ネイティブ auth ブロック（request → folder/collection 継承）を
+            # Authorization/API-key ヘッダへ展開する（明示ヘッダがあれば後段で上書き）。
+            auth_block = req.get("auth") or inherited_auth
+            for hk, hv in _postman_auth_headers(auth_block, varmap).items():
+                req_headers[hk] = hv
+                seed.headers[hk] = hv
             for h in req.get("header", []) or []:
                 name = (h.get("key") or "").strip()
                 if not name or h.get("disabled"):
@@ -435,8 +441,47 @@ def parse_postman(collection: dict, fallback_base: str = "") -> ApiSeedData:
                 except (json.JSONDecodeError, TypeError):
                     pass
 
-    _walk(collection.get("item", []))
+    _walk(collection.get("item", []), collection.get("auth"))
     return seed
+
+
+def _postman_auth_headers(auth: Any, varmap: dict) -> dict[str, str]:
+    """Postman の auth ブロックを Authorization/API-key ヘッダへ展開する（純粋）。
+
+    bearer / apikey(header) / basic に対応。値の ``{{var}}`` は解決し、未解決のまま
+    なら採用しない（利用者の --header を壊さない）。
+    """
+    if not isinstance(auth, dict):
+        return {}
+    atype = auth.get("type")
+    items = auth.get(atype) if isinstance(auth.get(atype), list) else []
+    kv: dict[str, str] = {}
+    for it in items:
+        if isinstance(it, dict) and it.get("key") is not None:
+            kv[str(it["key"])] = _resolve_postman_vars(str(it.get("value", "")), varmap, "")
+
+    def _ok(*vals: str) -> bool:
+        return all(v and "{{" not in v for v in vals)
+
+    if atype == "bearer":
+        tok = kv.get("token", "")
+        if _ok(tok):
+            return {"Authorization": f"Bearer {tok}"}
+    elif atype == "apikey":
+        loc = (kv.get("in") or "header").lower()
+        keyname = kv.get("key") or "X-API-Key"
+        val = kv.get("value", "")
+        if loc == "header" and _ok(keyname, val):
+            return {keyname: val}
+    elif atype == "basic":
+        import base64
+        user = kv.get("username", "")
+        pw = kv.get("password", "")
+        if _ok(user) or _ok(pw):
+            if "{{" not in user and "{{" not in pw:
+                token = base64.b64encode(f"{user}:{pw}".encode()).decode()
+                return {"Authorization": f"Basic {token}"}
+    return {}
 
 
 def _collection_var_map(collection: dict) -> dict[str, str]:
