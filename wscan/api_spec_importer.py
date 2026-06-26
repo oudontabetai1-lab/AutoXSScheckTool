@@ -402,6 +402,11 @@ def parse_postman(collection: dict, fallback_base: str = "") -> ApiSeedData:
                 elif low not in ("cookie", "content-length", "host",
                                  "content-type", "accept"):
                     req_headers[name] = value
+                    # URL-only(GET 等, body 無し)の必須ヘッダ（X-Tenant/X-API-Version 等）も
+                    # クロール/全リクエストへ効くよう共通ヘッダに反映する。RequestTemplate は
+                    # body 操作にしか作られないため、ここで seed.headers にも載せないと
+                    # GET シードが必須ヘッダ無しで叩かれて 400/401/404 になる。
+                    seed.headers[name] = value
             # JSON ボディ。collection 変数を json.loads 前に解決する
             # （`{"id": {{userId}}}` は未解決だと不正 JSON で落ち、`{{userEmail}}`
             # はリテラルのまま送られてしまうため）。ボディに origin は補わない。

@@ -3157,6 +3157,14 @@ class ScanEngine:
         # 検出力が静かにゼロになる。ページ単位検査（graphql/cache/proto/mass 等）も
         # 失効レスポンスに当ててしまわないよう、page-level・field 双方の前に実行する。
         await self._maybe_relogin_for_page(page.url)
+        # 再ログインが起きなくても、この page.url 宛に送られる Cookie を self.cookies へ
+        # 同期する。domain/path フィルタにより target_url 同期では Path=/admin の
+        # セッション Cookie が落ちるため、graphql/cache/proto の httpx 検査が認証 Cookie
+        # 無しで /admin を叩かないよう、ページ毎にそのパス宛 Cookie を採り直す。
+        try:
+            await self._sync_cookies_from_browser(self.browser, for_url=page.url)
+        except Exception:
+            pass
 
         # ── Page-level checks (header inspection, clickjacking, session, etc.) ──
         for check_name, scanner in self.scanners.items():

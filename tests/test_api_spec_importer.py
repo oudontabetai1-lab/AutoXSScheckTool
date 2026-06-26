@@ -400,6 +400,17 @@ class PostmanTests(unittest.TestCase):
         self.assertEqual(posts[0].headers.get("X-API-Version"), "2024")
         self.assertNotIn("X-Off", posts[0].headers)
 
+    def test_url_only_request_headers_in_seed(self):
+        # body 無し(GET)の必須ヘッダも seed.headers に載る
+        coll = {
+            "info": {"schema": "https://schema.getpostman.com/json/collection/v2.1.0/"},
+            "item": [{"name": "g", "request": {
+                "method": "GET", "url": "https://api.example.com/items",
+                "header": [{"key": "X-Tenant", "value": "acme"}]}}],
+        }
+        seed = parse_postman(coll)
+        self.assertEqual(seed.headers.get("X-Tenant"), "acme")
+
     def test_auth_header_variable_resolved(self):
         coll = {
             "info": {"schema": "https://schema.getpostman.com/json/collection/v2.1.0/"},
