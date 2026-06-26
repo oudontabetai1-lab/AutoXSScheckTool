@@ -1327,16 +1327,27 @@ class ScanEngine:
         return bool(success)
 
     async def _api_session_looks_expired(self, url: str) -> bool:
-        """``url`` への httpx GET（scanner と同じ auth_headers）で失効を判定する。
+        """``url`` への httpx 要求（scanner と同じ auth_headers）で失効を判定する。
 
         ブラウザ GET プレフライトと異なり、httpx ベース検査が実際に送る Cookie/ヘッダで
-        確認するため、API の 401/login リダイレクトを正しく捉えられる。再ログイン未設定
-        なら常に False（無駄な判定をしない）。判定不能（例外）も False。
+        確認する。POST 専用エンドポイント（GET=404/405 だが実 POST=401）も捉えるため、
+        当該 url に一致する API テンプレートがあればその method/baseline body で確認し、
+        無ければ GET する。再ログイン未設定なら常に False。判定不能（例外）も False。
         """
         if not (self.relogin_on_expiry and self.login_url):
             return False
         import httpx
+        import json as _json
         from wscan import session_guard
+
+        # url 一致テンプレートを探す（POST/PUT/PATCH なら同 method で確認）
+        tmpl = None
+        for t in (self.api_seed_requests or []):
+            if getattr(t, "url", None) == url and (
+                getattr(t, "method", "GET") or "GET"
+            ).upper() in ("POST", "PUT", "PATCH"):
+                tmpl = t
+                break
 
         kwargs: dict = {"timeout": getattr(self, "timeout", 15), "follow_redirects": True}
         if hasattr(self, "httpx_client_kwargs"):
@@ -1346,7 +1357,15 @@ class ScanEngine:
         headers = self.auth_headers() if hasattr(self, "auth_headers") else {}
         try:
             async with httpx.AsyncClient(**kwargs) as client:
-                r = await client.get(url, headers=headers)
+                if tmpl is not None:
+                    h = dict(headers)
+                    h["Content-Type"] = "application/json"
+                    if isinstance(getattr(tmpl, "headers", None), dict):
+                        h.update(tmpl.headers)
+                    body = _json.dumps(tmpl.json_body if isinstance(tmpl.json_body, dict) else {})
+                    r = await client.request(tmpl.method.upper(), url, headers=h, content=body)
+                else:
+                    r = await client.get(url, headers=headers)
         except Exception:
             return False
         return session_guard.looks_logged_out(

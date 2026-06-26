@@ -176,11 +176,26 @@ class PrototypePollutionScanner(BaseScanner):
         value = "polluted" + secrets.token_hex(2)
         findings: list[Finding] = []
 
+        # API スペック由来のテンプレートがあれば、その method と必須フィールドを使う。
+        # 裸の POST({pollution}) だと PUT/PATCH 専用や必須フィールド要求の endpoint で
+        # 405/400 になり server-side proto を検査できないため。
+        tmpl = None
+        for t in (getattr(self.engine, "api_seed_requests", []) or []):
+            if getattr(t, "url", None) == url and (
+                getattr(t, "method", "POST") or "POST"
+            ).upper() in ("POST", "PUT", "PATCH"):
+                tmpl = t
+                break
+        method = (getattr(tmpl, "method", "POST") or "POST").upper() if tmpl else "POST"
+        base_obj = dict(tmpl.json_body) if (tmpl and isinstance(tmpl.json_body, dict)) else {}
+
         hdrs: dict = {"Content-Type": "application/json"}
         if hasattr(self.engine, "auth_headers"):
             base = self.engine.auth_headers()
             base.update(hdrs)
             hdrs = base
+        if tmpl and isinstance(getattr(tmpl, "headers", None), dict):
+            hdrs.update(tmpl.headers)
         kwargs: dict = {"timeout": getattr(self.engine, "timeout", 15),
                         "follow_redirects": True, "headers": hdrs}
         if hasattr(self.engine, "httpx_client_kwargs"):
@@ -188,20 +203,38 @@ class PrototypePollutionScanner(BaseScanner):
         elif getattr(self.engine, "proxy", ""):
             kwargs["proxy"] = self.engine.proxy
 
-        # ベースライン（汚染なし）
+        # ベースライン（汚染なし＝テンプレ本体。value を含めない）
         try:
             async with httpx.AsyncClient(**kwargs) as client:
-                baseline = await client.post(url, content=json.dumps({"wscan": value}))
+                baseline = await client.request(method, url, content=json.dumps(base_obj))
                 baseline_body = baseline.text
         except Exception:
             return []
 
+        # 認証失効を検知したらエンジンへ通知（API テンプレ検査の resume 誤スキップ防止）。
+        from wscan import session_guard
+        if session_guard.looks_logged_out(
+            status=baseline.status_code,
+            final_url=str(getattr(baseline, "url", url)),
+            body=baseline_body,
+            login_url=getattr(self.engine, "login_url", ""),
+            logged_in_marker=getattr(self.engine, "logged_in_marker", ""),
+        ):
+            try:
+                self.engine._api_auth_failed = True
+            except Exception:
+                pass
+            return []
+
         for body_obj in proto_json_bodies(marker, value):
-            body = json.dumps(body_obj)
+            # 必須フィールドを保ちつつ汚染キーを足す
+            merged = dict(base_obj)
+            merged.update(body_obj)
+            body = json.dumps(merged)
             await self.log_payload_test("(JSON body)", body, "prototype_pollution", url)
             try:
                 async with httpx.AsyncClient(**kwargs) as client:
-                    r = await client.post(url, content=body)
+                    r = await client.request(method, url, content=body)
                 resp_text = r.text
             except Exception:
                 continue
@@ -212,7 +245,7 @@ class PrototypePollutionScanner(BaseScanner):
                 continue
             if server_pollution_reflected(baseline_body, resp_text, value):
                 pair = {
-                    "request": {"url": url, "method": "POST", "body": body},
+                    "request": {"url": url, "method": method, "body": body},
                     "response": {"status": r.status_code, "body": resp_text[:1000]},
                 }
                 finding = await self.record_finding(

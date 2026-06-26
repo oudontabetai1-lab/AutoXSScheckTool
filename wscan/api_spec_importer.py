@@ -210,9 +210,16 @@ def parse_openapi(spec: dict, fallback_base: str = "") -> ApiSeedData:
                 if loc == "query":
                     query_pairs.append((name, str(_sample_for_name(name, schema))))
                 elif loc == "header" and name.lower() not in (
-                    "cookie", "content-length", "host", "content-type", "accept"
+                    "cookie", "content-length", "host", "content-type", "accept",
+                    # 認証系は合成しない。default/example が無いと "test" 等のダミーに
+                    # なり、HeaderManager.update が利用者の --header Authorization を
+                    # 上書きして API スキャンが未認証になるため。
+                    "authorization", "x-api-key", "x-auth-token", "x-access-token",
+                    "proxy-authorization",
                 ):
-                    header_params[name] = str(_sample_for_name(name, schema))
+                    # default/example がある時のみ採用（合成ダミーは入れない）
+                    if "default" in schema or "example" in schema:
+                        header_params[name] = str(_sample_for_name(name, schema))
             # クロール/全リクエストに効くよう共通ヘッダへ反映（後勝ち）
             if header_params:
                 seed.headers.update(header_params)
