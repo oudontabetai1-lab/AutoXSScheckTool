@@ -460,6 +460,17 @@ def _postman_url(url_field: Any, varmap: Optional[dict] = None, fallback_base: s
             path_s = "/".join(str(p) for p in path) if isinstance(path, list) else str(path or "")
             scheme = url_field.get("protocol") or "https"
             built = f"{scheme}://{host_s}/{path_s}".rstrip("/")
+            # query 配列があれば付与する（raw が無い URL オブジェクトで必須クエリ
+            # — api-version/tenant/filter 等 — を落とさない）。
+            query = url_field.get("query")
+            if isinstance(query, list):
+                pairs = [
+                    (str(q.get("key")), str(q.get("value", "")))
+                    for q in query
+                    if isinstance(q, dict) and q.get("key") and not q.get("disabled")
+                ]
+                if pairs:
+                    built = f"{built}?{urlencode(pairs)}"
             built = _resolve_postman_vars(built, varmap, fallback_base)
             if "{{" not in built:
                 return built

@@ -314,6 +314,20 @@ class PostmanTests(unittest.TestCase):
         seed = parse_postman(coll, fallback_base="https://target.example.com/app")
         self.assertIn("https://target.example.com/api/items", seed.urls)
 
+    def test_url_object_query_preserved(self):
+        # raw 無し・host/path/query の URL オブジェクトでクエリを落とさない
+        coll = {
+            "info": {"schema": "https://schema.getpostman.com/json/collection/v2.1.0/"},
+            "item": [{"name": "g", "request": {"method": "GET", "url": {
+                "host": ["api", "example", "com"], "path": ["items"],
+                "query": [{"key": "api-version", "value": "2024"},
+                          {"key": "off", "value": "x", "disabled": True}]}}}],
+        }
+        seed = parse_postman(coll)
+        self.assertTrue(any("api-version=2024" in u for u in seed.urls))
+        # disabled なクエリは含めない
+        self.assertFalse(any("off=x" in u for u in seed.urls))
+
     def test_host_variable_in_authority_falls_back(self):
         # scheme://{{host}}/path も origin に解決し https:///path 化しない
         coll = {

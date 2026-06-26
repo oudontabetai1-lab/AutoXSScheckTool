@@ -1003,6 +1003,12 @@ class ScanEngine:
         if self.target_url not in seen:
             urls.append(self.target_url)
 
+        # クロール/攻撃フェーズの後にセッションが失効していると、ここで httpx 検査が
+        # 古い self.cookies で 401/login を受け、Finding 0 のまま「済み」記録されて
+        # resume が認証済み JSON 操作を恒久スキップしてしまう。API テンプレート検査の
+        # 前に page 攻撃と同じ再ログインガードを通し、失効していれば cookie を更新する。
+        await self._maybe_relogin_for_page(self.target_url)
+
         for url in urls:
             # 時間帯ゲート/一時停止/スキップ/Abort を尊重する。クロール無しの API
             # スキャンではここが最初の攻撃になり得るため controller を必ず通す。
