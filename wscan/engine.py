@@ -52,6 +52,11 @@ _CHECK_EXTRA_TYPES: dict[str, tuple[str, ...]] = {
     "cache_poisoning": ("cache_deception",),
 }
 
+# API スペック由来テンプレート（api_seed_requests）でのみ動くスキャナ。通常の
+# page-level ループからは除外し、checkpoint を刻む _run_api_template_checks に一本化
+# する（状態変更系プローブの二重送信・resume 重複を防ぐ）。
+_API_TEMPLATE_ONLY_CHECKS: frozenset[str] = frozenset({"mass_assignment"})
+
 import yaml
 from rich.console import Console
 from rich.rule import Rule
@@ -1320,9 +1325,11 @@ class ScanEngine:
 
             # ── Phase 3: Attack ──────────────────────────────────────────
             if self.monitor: await self.monitor.emit_phase("attack")
+            scan_aborted = False
             try:
                 await self._phase_attack(crawled_pages, plans)
             except AbortScan:
+                scan_aborted = True
                 console.print(
                     "\n[bold red][Intervention] Scan aborted by operator.[/bold red] "
                     "Generating partial report …"
@@ -1332,13 +1339,16 @@ class ScanEngine:
             # JSON API は GET に 404/405 を返してページ化されないことが多く、
             # その場合 page-level の scan_page が一度も呼ばれず mass_assignment 等が
             # 空振りする。クロール結果に依存せず api_seed_requests を直接検査する。
-            try:
-                await self._run_api_template_checks()
-            except AbortScan:
-                pass
+            # 既に Abort 済みなら、状態変更系（POST/PUT/PATCH）を新たに送らないため
+            # この後続フェーズは実行しない（abort 制御の信頼性を保つ）。
+            if not scan_aborted:
+                try:
+                    await self._run_api_template_checks()
+                except AbortScan:
+                    scan_aborted = True
 
             # ── Phase 3c: Post-Auth Crawl + Attack (if SQLi bypass detected) ──
-            if self.auth_bypass_detected:
+            if not scan_aborted and self.auth_bypass_detected:
                 console.print(
                     "\n[bold red][Auth Bypass][/bold red] "
                     "SQL injection bypass confirmed — "
@@ -3048,6 +3058,12 @@ class ScanEngine:
 
         # ── Page-level checks (header inspection, clickjacking, session, etc.) ──
         for check_name, scanner in self.scanners.items():
+            # API テンプレート専用スキャナ（mass_assignment）はここで動かさない。
+            # body-operation の URL は crawl キューにも入るため、GET 可能なら本ループと
+            # _run_api_template_checks の両方で状態変更系プローブを二重送信し、resume も
+            # 重複する。これらは checkpoint を刻む _run_api_template_checks に一本化する。
+            if check_name in _API_TEMPLATE_ONLY_CHECKS:
+                continue
             try:
                 if hasattr(scanner, "scan_page_context"):
                     page_findings = await scanner.scan_page_context(page)
