@@ -1194,14 +1194,18 @@ class ScanEngine:
             name = c.get("name")
             if not name:
                 continue
-            dom = str(c.get("domain", "")).lstrip(".").lower()
-            # ブラウザの送出規則に合わせ、対象ホスト宛に送られる Cookie のみ採用する。
-            # = ドメイン完全一致、または Cookie が親ドメインスコープ（target が
-            #   その子孫）の場合のみ。逆方向（admin.example.com の Cookie を
-            #   example.com へ）はブラウザも送らないので除外し、サブドメイン間の
-            #   セッション漏えい/別ID 実行を防ぐ。
+            raw_dom = str(c.get("domain", ""))
+            # 先頭ドットの有無で host-only か domain-scoped かを判別する
+            # （Playwright: ドメイン Cookie は ".example.com"、host-only は "example.com"）。
+            is_domain_cookie = raw_dom.startswith(".")
+            dom = raw_dom.lstrip(".").lower()
+            # ブラウザの送出規則に合わせて採用する:
+            #  - 完全一致は常に可
+            #  - サブドメインへの suffix 一致は **domain-scoped Cookie のときだけ** 可
+            #    （host-only な example.com の Cookie を api.example.com へ送らない）。
             if dom and target_host and not (
-                target_host == dom or target_host.endswith("." + dom)
+                target_host == dom
+                or (is_domain_cookie and target_host.endswith("." + dom))
             ):
                 continue
             pairs.append(f"{name}={c.get('value', '')}")

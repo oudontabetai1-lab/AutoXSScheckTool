@@ -198,11 +198,24 @@ def parse_openapi(spec: dict, fallback_base: str = "") -> ApiSeedData:
 
             # query パラメータを集める
             query_pairs: list[tuple[str, str]] = []
+            # header パラメータ（X-API-Version/tenant/API-key 等）をサンプル値で集める。
+            # 落とすと必須ヘッダ欠落で 400/401/404 になり API-first 検査が空振りする。
+            header_params: dict[str, str] = {}
             for p in params:
-                if p.get("in") != "query" or not p.get("name"):
+                loc = p.get("in")
+                name = p.get("name")
+                if not name:
                     continue
                 schema = p.get("schema") or p
-                query_pairs.append((p["name"], str(_sample_for_name(p["name"], schema))))
+                if loc == "query":
+                    query_pairs.append((name, str(_sample_for_name(name, schema))))
+                elif loc == "header" and name.lower() not in (
+                    "cookie", "content-length", "host", "content-type", "accept"
+                ):
+                    header_params[name] = str(_sample_for_name(name, schema))
+            # クロール/全リクエストに効くよう共通ヘッダへ反映（後勝ち）
+            if header_params:
+                seed.headers.update(header_params)
 
             body_schema = _openapi_request_body_schema(op, spec)
             is_body_op = body_schema is not None and method in ("post", "put", "patch")
@@ -227,6 +240,7 @@ def parse_openapi(spec: dict, fallback_base: str = "") -> ApiSeedData:
                             method=method.upper(),
                             url=full,
                             json_body=example,
+                            headers=dict(header_params),
                         )
                     )
 

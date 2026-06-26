@@ -150,6 +150,13 @@ class MassAssignmentScanner(BaseScanner):
         base_body = tmpl.json_body if isinstance(tmpl.json_body, dict) else {}
         polluted = augment_body(base_body, sentinels)
         kwargs = self._client_kwargs(getattr(tmpl, "content_type", "application/json"))
+        # スペックで宣言された必須ヘッダ（X-API-Version/tenant/API-key 等）を載せる。
+        # 欠落すると 400/401/404 で検査が空振りするため。
+        tmpl_headers = getattr(tmpl, "headers", None)
+        if isinstance(tmpl_headers, dict) and tmpl_headers:
+            merged = dict(kwargs.get("headers", {}))
+            merged.update(tmpl_headers)
+            kwargs["headers"] = merged
         method = (tmpl.method or "POST").upper()
 
         baseline_payload = json.dumps(base_body)

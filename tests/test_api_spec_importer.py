@@ -152,6 +152,26 @@ class OpenApiTests(unittest.TestCase):
         self.assertEqual(len(posts), 1)
         self.assertIn("api-version=2024", posts[0].url)
 
+    def test_header_parameters_forwarded(self):
+        # in: header の必須ヘッダをサンプル値で seed.headers と RequestTemplate に載せる
+        op = {
+            "parameters": [
+                {"name": "X-API-Version", "in": "header",
+                 "schema": {"type": "string", "default": "v2"}}
+            ],
+            "requestBody": {"content": {"application/json": {
+                "schema": {"type": "object", "properties": {"n": {"type": "string"}}}}}},
+        }
+        spec = {
+            "openapi": "3.0.0",
+            "servers": [{"url": "https://api.example.com"}],
+            "paths": {"/items": {"post": op}},
+        }
+        seed = parse_openapi(spec)
+        self.assertEqual(seed.headers.get("X-API-Version"), "v2")
+        posts = [r for r in seed.requests if r.method == "POST"]
+        self.assertEqual(posts[0].headers.get("X-API-Version"), "v2")
+
     def test_referenced_parameter_resolved(self):
         # components.parameters の $ref を解決し、必須クエリを URL に含める
         spec = {

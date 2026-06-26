@@ -38,11 +38,17 @@ class CookieDomainSyncTests(unittest.TestCase):
         self.assertIn("c=3", result)
         self.assertNotIn("b=2", result)
 
-    def test_subdomain_target_accepts_parent_cookie(self):
-        # target が app.example.com なら親 example.com の Cookie は届く
-        cookies = [{"name": "s", "value": "x", "domain": "example.com"}]
+    def test_domain_cookie_reaches_subdomain(self):
+        # ドメイン Cookie（先頭ドット）は子サブドメインへ届く
+        cookies = [{"name": "s", "value": "x", "domain": ".example.com"}]
         result = _run_sync("https://app.example.com/", cookies)
         self.assertIn("s=x", result)
+
+    def test_host_only_cookie_not_sent_to_subdomain(self):
+        # host-only Cookie（先頭ドット無し）は子サブドメインへ送らない
+        cookies = [{"name": "s", "value": "x", "domain": "example.com"}]
+        result = _run_sync("https://app.example.com/", cookies)
+        self.assertEqual(result, "")
 
     def test_unrelated_domain_rejected(self):
         cookies = [{"name": "z", "value": "9", "domain": "evil.test"}]
