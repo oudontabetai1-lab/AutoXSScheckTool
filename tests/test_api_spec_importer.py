@@ -435,6 +435,20 @@ class PostmanTests(unittest.TestCase):
         seed = parse_postman(coll)
         self.assertEqual(seed.headers.get("Authorization"), "Bearer abc123")
 
+    def test_apikey_query_auth_appended_to_url(self):
+        # apikey(in:query) は URL にキーを付与する
+        coll = {
+            "info": {"schema": "https://schema.getpostman.com/json/collection/v2.1.0/"},
+            "item": [{"name": "g", "request": {
+                "method": "GET", "url": "https://api.example.com/items",
+                "auth": {"type": "apikey", "apikey": [
+                    {"key": "key", "value": "api_key"},
+                    {"key": "value", "value": "secret"},
+                    {"key": "in", "value": "query"}]}}}],
+        }
+        seed = parse_postman(coll)
+        self.assertTrue(any("api_key=secret" in u for u in seed.urls))
+
     def test_collection_level_auth_inherited(self):
         # collection 直下の auth を request が継承する
         coll = {

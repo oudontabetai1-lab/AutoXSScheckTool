@@ -390,6 +390,12 @@ def parse_postman(collection: dict, fallback_base: str = "") -> ApiSeedData:
                 continue
             url = _postman_url(req.get("url"), varmap, fallback_base)
             method = (req.get("method") or "GET").upper()
+            # apikey 認証が in:query の場合は URL にキーを付与する（ヘッダ展開だけだと
+            # クエリ型 API キーが落ちて未認証になるため）。
+            auth_q = _postman_auth_query(req.get("auth") or inherited_auth, varmap)
+            if url and auth_q:
+                sep = "&" if "?" in url else "?"
+                url = f"{url}{sep}{urlencode(auth_q)}"
             if url and url not in seen:
                 seen.add(url)
                 seed.urls.append(url)
@@ -481,6 +487,27 @@ def _postman_auth_headers(auth: Any, varmap: dict) -> dict[str, str]:
             if "{{" not in user and "{{" not in pw:
                 token = base64.b64encode(f"{user}:{pw}".encode()).decode()
                 return {"Authorization": f"Basic {token}"}
+    return {}
+
+
+def _postman_auth_query(auth: Any, varmap: dict) -> dict[str, str]:
+    """Postman の apikey(in:query) 認証をクエリ {key: value} へ展開する（純粋）。
+
+    header 型や bearer/basic は ``_postman_auth_headers`` 側で扱う。未解決変数は除外。
+    """
+    if not isinstance(auth, dict) or auth.get("type") != "apikey":
+        return {}
+    items = auth.get("apikey") if isinstance(auth.get("apikey"), list) else []
+    kv: dict[str, str] = {}
+    for it in items:
+        if isinstance(it, dict) and it.get("key") is not None:
+            kv[str(it["key"])] = _resolve_postman_vars(str(it.get("value", "")), varmap, "")
+    if (kv.get("in") or "header").lower() != "query":
+        return {}
+    keyname = kv.get("key") or "api_key"
+    val = kv.get("value", "")
+    if keyname and val and "{{" not in keyname and "{{" not in val:
+        return {keyname: val}
     return {}
 
 

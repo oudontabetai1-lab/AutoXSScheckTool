@@ -1352,27 +1352,19 @@ class ScanEngine:
         return bool(success)
 
     async def _api_session_looks_expired(self, url: str) -> bool:
-        """``url`` への httpx 要求（scanner と同じ auth_headers）で失効を判定する。
+        """``url`` への **非破壊 GET**（scanner と同じ auth_headers）で失効を判定する。
 
         ブラウザ GET プレフライトと異なり、httpx ベース検査が実際に送る Cookie/ヘッダで
-        確認する。POST 専用エンドポイント（GET=404/405 だが実 POST=401）も捉えるため、
-        当該 url に一致する API テンプレートがあればその method/baseline body で確認し、
-        無ければ GET する。再ログイン未設定なら常に False。判定不能（例外）も False。
+        確認する。状態変更を避けるため必ず GET のみ（POST/PUT/PATCH テンプレを
+        プレフライトで実行すると create 等が二重実行され state を壊す）。POST 専用
+        エンドポイント（GET=404/405 だが実 POST=401）の失効は、実際に POST する
+        mass_assignment / prototype_pollution が ``_api_auth_failed`` を立てて救済する。
+        再ログイン未設定なら常に False。判定不能（例外）も False。
         """
         if not (self.relogin_on_expiry and self.login_url):
             return False
         import httpx
-        import json as _json
         from wscan import session_guard
-
-        # url 一致テンプレートを探す（POST/PUT/PATCH なら同 method で確認）
-        tmpl = None
-        for t in (self.api_seed_requests or []):
-            if getattr(t, "url", None) == url and (
-                getattr(t, "method", "GET") or "GET"
-            ).upper() in ("POST", "PUT", "PATCH"):
-                tmpl = t
-                break
 
         kwargs: dict = {"timeout": getattr(self, "timeout", 15), "follow_redirects": True}
         if hasattr(self, "httpx_client_kwargs"):
@@ -1382,15 +1374,7 @@ class ScanEngine:
         headers = self.auth_headers() if hasattr(self, "auth_headers") else {}
         try:
             async with httpx.AsyncClient(**kwargs) as client:
-                if tmpl is not None:
-                    h = dict(headers)
-                    h["Content-Type"] = "application/json"
-                    if isinstance(getattr(tmpl, "headers", None), dict):
-                        h.update(tmpl.headers)
-                    body = _json.dumps(tmpl.json_body if isinstance(tmpl.json_body, dict) else {})
-                    r = await client.request(tmpl.method.upper(), url, headers=h, content=body)
-                else:
-                    r = await client.get(url, headers=headers)
+                r = await client.get(url, headers=headers)
         except Exception:
             return False
         return session_guard.looks_logged_out(
