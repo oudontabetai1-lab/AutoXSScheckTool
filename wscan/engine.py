@@ -1041,14 +1041,20 @@ class ScanEngine:
             self._save_checkpoint()
 
     def _check_type_in_scope(self, check_type: str) -> bool:
-        """Finding の check_type が今回要求されたチェック集合に属するか。
+        """Finding の check_type が今回有効なチェック集合に属するか。
 
         スキャナの ``CHECK_TYPE`` は実際の検査名と一致するもの（``xss``/``sqli``）と、
         サブタイプを持つもの（``graphql_introspection``/``jwt_alg_none``/``privesc_*``）
         がある。完全一致・``"<check>_"`` 前置・エイリアス表で判定する。
+
+        判定対象は ``self.checks`` ではなく **実際に有効なスキャナ**（``self.scanners``）。
+        Cookie 認証時に自動追加される ``privesc``/``cms`` 等は ``checks`` には入らないが
+        スキャナは動く。``checks`` だけで絞ると、それらの完了単位は honor される一方で
+        既出 ``privesc_*`` Finding が復元されず、レポートから消えてしまう。
         """
         ct = check_type or ""
-        for check in self.checks:
+        effective = set(self.checks) | set(getattr(self, "scanners", {}).keys())
+        for check in effective:
             if ct == check or ct.startswith(check + "_"):
                 return True
             if ct in _CHECK_EXTRA_TYPES.get(check, ()):

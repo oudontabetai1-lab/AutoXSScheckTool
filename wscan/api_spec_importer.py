@@ -458,8 +458,16 @@ def _postman_url(url_field: Any, varmap: Optional[dict] = None, fallback_base: s
         if host:
             host_s = ".".join(host) if isinstance(host, list) else str(host)
             path_s = "/".join(str(p) for p in path) if isinstance(path, list) else str(path or "")
-            scheme = url_field.get("protocol") or "https"
-            built = f"{scheme}://{host_s}/{path_s}".rstrip("/")
+            # host 変数を先に解決する。``{{baseUrl}}`` が絶対 URL（https://...）に
+            # 解決される場合、``scheme://`` を前置すると "https://https://..." と
+            # 壊れてスコープ外になるため、絶対値ならそのまま基底にする。
+            host_resolved = _resolve_postman_vars(host_s, varmap, "")
+            if host_resolved.startswith(("http://", "https://")):
+                base = host_resolved.rstrip("/")
+            else:
+                scheme = url_field.get("protocol") or "https"
+                base = f"{scheme}://{host_resolved}"
+            built = f"{base}/{path_s}".rstrip("/")
             # query 配列があれば付与する（raw が無い URL オブジェクトで必須クエリ
             # — api-version/tenant/filter 等 — を落とさない）。
             query = url_field.get("query")
@@ -471,6 +479,7 @@ def _postman_url(url_field: Any, varmap: Optional[dict] = None, fallback_base: s
                 ]
                 if pairs:
                     built = f"{built}?{urlencode(pairs)}"
+            # 残るパス変数や未解決 authority 変数を fallback origin 等で解決
             built = _resolve_postman_vars(built, varmap, fallback_base)
             if "{{" not in built:
                 return built

@@ -66,12 +66,19 @@ class StateTests(unittest.TestCase):
 class CheckTypeScopeTests(unittest.TestCase):
     """エンジンの _check_type_in_scope（復元 Finding のチェック絞り込み）。"""
 
-    def _engine(self, checks):
+    def _engine(self, checks, scanners=None):
         import types
         from wscan.engine import ScanEngine
-        e = types.SimpleNamespace(checks=checks)
+        e = types.SimpleNamespace(checks=checks, scanners=dict.fromkeys(scanners or []))
         # bound method を借用
         return lambda ct: ScanEngine._check_type_in_scope(e, ct)
+
+    def test_auto_enabled_scanner_findings_in_scope(self):
+        # privesc は checks に無くても scanners にあれば復元対象（Cookie 認証時の自動追加）
+        in_scope = self._engine(["xss"], scanners=["xss", "privesc"])
+        self.assertTrue(in_scope("privesc_vertical"))
+        self.assertTrue(in_scope("xss"))
+        self.assertFalse(in_scope("sqli"))
 
     def test_exact_and_prefix_match(self):
         in_scope = self._engine(["xss", "graphql", "jwt"])

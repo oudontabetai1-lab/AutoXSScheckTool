@@ -328,6 +328,18 @@ class PostmanTests(unittest.TestCase):
         # disabled なクエリは含めない
         self.assertFalse(any("off=x" in u for u in seed.urls))
 
+    def test_host_variable_absolute_base(self):
+        # host:["{{baseUrl}}"] が絶対URLに解決される場合 scheme を二重化しない
+        coll = {
+            "info": {"schema": "https://schema.getpostman.com/json/collection/v2.1.0/"},
+            "variable": [{"key": "baseUrl", "value": "https://api.example.com"}],
+            "item": [{"name": "g", "request": {"method": "GET", "url": {
+                "host": ["{{baseUrl}}"], "path": ["users"]}}}],
+        }
+        seed = parse_postman(coll)
+        self.assertIn("https://api.example.com/users", seed.urls)
+        self.assertFalse(any("https://https://" in u for u in seed.urls))
+
     def test_host_variable_in_authority_falls_back(self):
         # scheme://{{host}}/path も origin に解決し https:///path 化しない
         coll = {
