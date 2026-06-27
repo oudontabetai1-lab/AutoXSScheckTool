@@ -63,6 +63,25 @@ class StateTests(unittest.TestCase):
         self.assertFalse(s.is_compatible_with("http://other", ["xss"]))
 
 
+class PageCheckCpUrlTests(unittest.TestCase):
+    def test_origin_scoped_uses_origin(self):
+        from wscan.engine import _page_check_cp_url
+        # graphql は origin スコープ → 同一オリジンの別ページで同じキー
+        self.assertEqual(
+            _page_check_cp_url("graphql", "http://h/a"),
+            _page_check_cp_url("graphql", "http://h/b"),
+        )
+        self.assertEqual(_page_check_cp_url("graphql", "http://h/a?x=1"), "http://h")
+
+    def test_non_origin_scoped_uses_url(self):
+        from wscan.engine import _page_check_cp_url
+        self.assertEqual(_page_check_cp_url("cache_poisoning", "http://h/a"), "http://h/a")
+        self.assertNotEqual(
+            _page_check_cp_url("cache_poisoning", "http://h/a"),
+            _page_check_cp_url("cache_poisoning", "http://h/b"),
+        )
+
+
 class CheckTypeScopeTests(unittest.TestCase):
     """エンジンの _check_type_in_scope（復元 Finding のチェック絞り込み）。"""
 

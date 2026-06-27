@@ -57,6 +57,23 @@ _CHECK_EXTRA_TYPES: dict[str, tuple[str, ...]] = {
 # する（状態変更系プローブの二重送信・resume 重複を防ぐ）。
 _API_TEMPLATE_ONLY_CHECKS: frozenset[str] = frozenset({"mass_assignment"})
 
+# オリジン単位でしか走らないスキャナ（graphql は origin ごとに 1 回掃引）。
+# page-level チェックポイントを page.url ではなく origin で刻まないと、resume 後に
+# 同一オリジンの別ページで intrusive なプローブを再送してしまう。
+_ORIGIN_SCOPED_CHECKS: frozenset[str] = frozenset({"graphql"})
+
+
+def _page_check_cp_url(check_name: str, url: str) -> str:
+    """page-level チェックポイントの url 成分を返す（origin スコープ検査は origin）。"""
+    if check_name in _ORIGIN_SCOPED_CHECKS:
+        try:
+            from urllib.parse import urlparse as _up
+            p = _up(url)
+            return f"{p.scheme}://{p.netloc}"
+        except Exception:
+            return url
+    return url
+
 
 def _reset_scanner_url_guard(scanner, url: str) -> None:
     """scanner の per-URL/per-origin 重複ガードから ``url`` を外す（純粋・副作用最小）。
@@ -3228,10 +3245,13 @@ class ScanEngine:
         # 同期する。domain/path フィルタにより target_url 同期では Path=/admin の
         # セッション Cookie が落ちるため、graphql/cache/proto の httpx 検査が認証 Cookie
         # 無しで /admin を叩かないよう、ページ毎にそのパス宛 Cookie を採り直す。
-        try:
-            await self._sync_cookies_from_browser(self.browser, for_url=page.url)
-        except Exception:
-            pass
+        # ただし self.cookies はエンジン共有なので、並列(--concurrency>1)では別ワーカーの
+        # 検査中に書き換える競合になる。直列時のみ行う（並列は既存の共有 cookie 前提）。
+        if (getattr(self, "concurrency", 1) or 1) <= 1:
+            try:
+                await self._sync_cookies_from_browser(self.browser, for_url=page.url)
+            except Exception:
+                pass
 
         # ── Page-level checks (header inspection, clickjacking, session, etc.) ──
         for check_name, scanner in self.scanners.items():
@@ -3243,8 +3263,9 @@ class ScanEngine:
                 continue
             # 再開: 済みの page-level 単位 (url,"(page)",check) は飛ばす。intrusive な
             # page-level プローブ（proto の JSON POST、graphql コスト探索）を resume で
-            # 再送しないため。
-            if self._checkpoint_is_done(page.url, "(page)", 0, check_name):
+            # 再送しないため。graphql 等の origin スコープ検査は origin で刻む。
+            cp_url = _page_check_cp_url(check_name, page.url)
+            if self._checkpoint_is_done(cp_url, "(page)", 0, check_name):
                 continue
             page_errored = False
             try:
@@ -3258,7 +3279,7 @@ class ScanEngine:
                 page_errored = True
                 console.print(f"  [yellow]Page-level ({check_name}): {e}[/yellow]")
             if not page_errored:
-                self._checkpoint_mark_done(page.url, "(page)", 0, check_name)
+                self._checkpoint_mark_done(cp_url, "(page)", 0, check_name)
         # page-level のみのページ（フォーム/URLパラメータ無し）でも進捗を永続化する。
         self._save_checkpoint()
 

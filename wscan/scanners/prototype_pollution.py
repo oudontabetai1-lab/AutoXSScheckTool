@@ -188,8 +188,11 @@ class PrototypePollutionScanner(BaseScanner):
                 break
         method = (getattr(tmpl, "method", "POST") or "POST").upper() if tmpl else "POST"
         base_obj = dict(tmpl.json_body) if (tmpl and isinstance(tmpl.json_body, dict)) else {}
+        # テンプレートが vendor/patch JSON メディアタイプ（application/merge-patch+json 等）を
+        # 宣言していればそれを使う。application/json 固定だと 415 で取りこぼす。
+        ctype = (getattr(tmpl, "content_type", None) or "application/json") if tmpl else "application/json"
 
-        hdrs: dict = {"Content-Type": "application/json"}
+        hdrs: dict = {"Content-Type": ctype}
         if hasattr(self.engine, "auth_headers"):
             base = self.engine.auth_headers()
             base.update(hdrs)
