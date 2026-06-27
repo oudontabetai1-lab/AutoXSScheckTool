@@ -122,10 +122,13 @@ class ScanController:
         """
         self._allowed_windows = time_window.parse_windows(allowed)
         self._forbidden_windows = time_window.parse_windows(forbidden)
-        # 利用者が --allowed-hours を指定したのに有効ルールが 1 つも無い（全て誤記）
-        # 場合は fail-closed にする。空の allowed を「常時許可」と区別できないと、
-        # 誤記で安全ゲートが無効化され 24/7 でスキャンが走ってしまうため。
-        self._gate_failclosed = bool(allowed) and not self._allowed_windows
+        # 利用者が --allowed-hours / --forbidden-hours を指定したのに有効ルールが
+        # 1 つも無い（全て誤記）場合は fail-closed にする。空＝「ゲート無し（常時許可）」
+        # と区別できないと、誤記で安全ゲートが無効化され 24/7 で走ってしまうため。
+        self._gate_failclosed = (
+            (bool(allowed) and not self._allowed_windows)
+            or (bool(forbidden) and not self._forbidden_windows)
+        )
 
     def is_within_window(self, now: Optional[datetime] = None) -> bool:
         """現在が検査許可時間帯か。ゲート未設定なら常に True。"""
@@ -142,7 +145,7 @@ class ScanController:
         if getattr(self, "_gate_failclosed", False):
             # 許可窓が全て不正 → 安全のため fail-closed で中断（無言で走らせない）。
             print(
-                "[TimeWindow] --allowed-hours の指定が全て不正です。"
+                "[TimeWindow] 時間帯指定(--allowed-hours/--forbidden-hours)が全て不正です。"
                 "安全のためスキャンを中断します（fail closed）。",
                 flush=True,
             )

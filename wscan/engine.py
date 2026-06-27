@@ -3241,6 +3241,12 @@ class ScanEngine:
             # 重複する。これらは checkpoint を刻む _run_api_template_checks に一本化する。
             if check_name in _API_TEMPLATE_ONLY_CHECKS:
                 continue
+            # 再開: 済みの page-level 単位 (url,"(page)",check) は飛ばす。intrusive な
+            # page-level プローブ（proto の JSON POST、graphql コスト探索）を resume で
+            # 再送しないため。
+            if self._checkpoint_is_done(page.url, "(page)", 0, check_name):
+                continue
+            page_errored = False
             try:
                 if hasattr(scanner, "scan_page_context"):
                     page_findings = await scanner.scan_page_context(page)
@@ -3249,7 +3255,12 @@ class ScanEngine:
                 for f in (page_findings or []):
                     self._record_finding(f, source="page-level")
             except Exception as e:
+                page_errored = True
                 console.print(f"  [yellow]Page-level ({check_name}): {e}[/yellow]")
+            if not page_errored:
+                self._checkpoint_mark_done(page.url, "(page)", 0, check_name)
+        # page-level のみのページ（フォーム/URLパラメータ無し）でも進捗を永続化する。
+        self._save_checkpoint()
 
         if not page.forms and not page.url_params:
             return

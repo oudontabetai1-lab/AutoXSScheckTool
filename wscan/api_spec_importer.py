@@ -224,7 +224,7 @@ def parse_openapi(spec: dict, fallback_base: str = "") -> ApiSeedData:
             if header_params:
                 seed.headers.update(header_params)
 
-            body_schema = _openapi_request_body_schema(op, spec)
+            body_schema, body_ctype = _openapi_request_body_schema(op, spec)
             is_body_op = body_schema is not None and method in ("post", "put", "patch")
             example = _example_from_schema(body_schema, spec) if is_body_op else None
 
@@ -248,19 +248,26 @@ def parse_openapi(spec: dict, fallback_base: str = "") -> ApiSeedData:
                             url=full,
                             json_body=example,
                             headers=dict(header_params),
+                            content_type=body_ctype or "application/json",
                         )
                     )
 
     return seed
 
 
-def _openapi_request_body_schema(op: dict, spec: Optional[dict] = None) -> Optional[dict]:
-    """操作の JSON requestBody スキーマを取り出す（OpenAPI3 / Swagger2 両対応）。
+def _openapi_request_body_schema(
+    op: dict, spec: Optional[dict] = None
+) -> tuple[Optional[dict], str]:
+    """操作の JSON requestBody スキーマと Content-Type を返す（OpenAPI3 / Swagger2 両対応）。
 
     ``requestBody`` 自体が ``$ref``（``#/components/requestBodies/X``）の component
     参照のことがあるため、先に解決してから ``content`` を見る。解決しないと
     component ベースの spec で RequestTemplate が作られず mass_assignment が
     JSON エンドポイントを取りこぼす。
+
+    戻り値は ``(schema, content_type)``。``application/merge-patch+json`` 等の
+    ベンダ/patch JSON メディアタイプはその名前をそのまま返す（既定で
+    application/json に潰すと 415 になる API があるため）。スキーマ無しは ``(None, "")``。
     """
     # OpenAPI 3.x
     rb = op.get("requestBody")
@@ -270,12 +277,12 @@ def _openapi_request_body_schema(op: dict, spec: Optional[dict] = None) -> Optio
         content = rb.get("content", {}) or {}
         for ctype, media in content.items():
             if "json" in (ctype or "").lower():
-                return (media or {}).get("schema") or {}
+                return ((media or {}).get("schema") or {}), (ctype or "application/json")
     # Swagger 2.0: parameters[in=body].schema（param 自体が $ref のことがある）
     for p in _resolve_params(op.get("parameters", []) or [], spec):
         if p.get("in") == "body":
-            return p.get("schema") or {}
-    return None
+            return (p.get("schema") or {}), "application/json"
+    return None, ""
 
 
 def _resolve_ref(spec: Optional[dict], ref: str) -> Optional[dict]:

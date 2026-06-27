@@ -172,6 +172,21 @@ class OpenApiTests(unittest.TestCase):
         posts = [r for r in seed.requests if r.method == "POST"]
         self.assertEqual(posts[0].headers.get("X-API-Version"), "v2")
 
+    def test_vendor_json_media_type_preserved(self):
+        # application/merge-patch+json 等のメディアタイプを template に保持する
+        op = {
+            "requestBody": {"content": {"application/merge-patch+json": {
+                "schema": {"type": "object", "properties": {"n": {"type": "string"}}}}}},
+        }
+        spec = {
+            "openapi": "3.0.0",
+            "servers": [{"url": "https://api.example.com"}],
+            "paths": {"/items": {"patch": op}},
+        }
+        seed = parse_openapi(spec)
+        patches = [r for r in seed.requests if r.method == "PATCH"]
+        self.assertEqual(patches[0].content_type, "application/merge-patch+json")
+
     def test_referenced_parameter_resolved(self):
         # components.parameters の $ref を解決し、必須クエリを URL に含める
         spec = {
