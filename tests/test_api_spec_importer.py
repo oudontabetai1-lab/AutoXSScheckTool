@@ -489,6 +489,35 @@ class PostmanTests(unittest.TestCase):
         seed = parse_postman(coll)
         self.assertEqual(seed.headers.get("Authorization"), "Bearer secret123")
 
+    def test_raw_body_preserves_json_media_type(self):
+        # raw JSON body の非既定 JSON メディアタイプ（vendor/patch）を
+        # RequestTemplate.content_type に保持する（application/json 固定にしない）。
+        coll = {
+            "info": {"schema": "https://schema.getpostman.com/json/collection/v2.1.0/"},
+            "item": [{"name": "patch", "request": {
+                "method": "PATCH", "url": "https://api.example.com/items/1",
+                "header": [{"key": "Content-Type",
+                            "value": "application/merge-patch+json"}],
+                "body": {"mode": "raw", "raw": '{"name": "x"}'}}}],
+        }
+        seed = parse_postman(coll)
+        tmpls = [t for t in seed.requests if t.url.endswith("/items/1")]
+        self.assertEqual(len(tmpls), 1)
+        self.assertEqual(tmpls[0].content_type, "application/merge-patch+json")
+
+    def test_raw_body_defaults_json_media_type(self):
+        # Content-Type 未指定の raw JSON body は application/json を既定とする。
+        coll = {
+            "info": {"schema": "https://schema.getpostman.com/json/collection/v2.1.0/"},
+            "item": [{"name": "post", "request": {
+                "method": "POST", "url": "https://api.example.com/items",
+                "body": {"mode": "raw", "raw": '{"name": "x"}'}}}],
+        }
+        seed = parse_postman(coll)
+        tmpls = [t for t in seed.requests if t.url.endswith("/items")]
+        self.assertEqual(len(tmpls), 1)
+        self.assertEqual(tmpls[0].content_type, "application/json")
+
 
 class LoadTests(unittest.TestCase):
     def test_load_json_openapi(self):

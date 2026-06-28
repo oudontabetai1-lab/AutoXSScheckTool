@@ -1092,7 +1092,10 @@ class ScanEngine:
                     url_auth_failed = True  # 復旧不能 → この URL の単位は済みにしない
             for check_name, scanner in self.scanners.items():
                 # 再開: 済みの API テンプレート単位は飛ばす（合成フィールド名で記録）。
-                if self._checkpoint_is_done(url, "(api-template)", 0, check_name):
+                # graphql 等 origin スコープ検査は origin キーで刻み、同一オリジンの
+                # 別テンプレ URL で alias/depth コスト探索を再送しないようにする。
+                cp_url = _page_check_cp_url(check_name, url)
+                if self._checkpoint_is_done(cp_url, "(api-template)", 0, check_name):
                     continue
                 try:
                     self._api_auth_failed = url_auth_failed
@@ -1124,7 +1127,7 @@ class ScanEngine:
                     # 認証失効が解消しないまま空振りした単位は「済み」にしない
                     # （resume が再試行できるようにする）。
                     if not self._api_auth_failed:
-                        self._checkpoint_mark_done(url, "(api-template)", 0, check_name)
+                        self._checkpoint_mark_done(cp_url, "(api-template)", 0, check_name)
             # URL 単位で進捗＋Finding スナップショットを保存（クラッシュ耐性）。
             self._save_checkpoint()
 

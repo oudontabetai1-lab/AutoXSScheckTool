@@ -410,6 +410,7 @@ def parse_postman(collection: dict, fallback_base: str = "") -> ApiSeedData:
             # ヘッダ（seed.headers）に、安全な必須ヘッダ（X-API-Version/tenant/routing 等）は
             # RequestTemplate に載せる。欠落すると 400/401/404 で API 検査が空振りする。
             req_headers: dict[str, str] = {}
+            body_ctype = "application/json"  # raw JSON body の既定 Content-Type
             # Postman ネイティブ auth ブロック（request → folder/collection 継承）を
             # Authorization/API-key ヘッダへ展開する（明示ヘッダがあれば後段で上書き）。
             auth_block = req.get("auth") or inherited_auth
@@ -427,6 +428,12 @@ def parse_postman(collection: dict, fallback_base: str = "") -> ApiSeedData:
                 if "{{" in value:
                     continue
                 low = name.lower()
+                if low == "content-type":
+                    # raw JSON の宣言メディアタイプ（vendor/patch JSON 含む）を保持し、
+                    # RequestTemplate に伝える（application/json 固定で 415 になるのを防ぐ）。
+                    if value and "json" in value.lower():
+                        body_ctype = value
+                    continue
                 if low in ("authorization", "x-api-key", "x-auth-token"):
                     seed.headers[name] = value
                     req_headers[name] = value
@@ -449,7 +456,8 @@ def parse_postman(collection: dict, fallback_base: str = "") -> ApiSeedData:
                     if isinstance(parsed, dict):
                         seed.requests.append(
                             RequestTemplate(method=method, url=url, json_body=parsed,
-                                            headers=dict(req_headers))
+                                            headers=dict(req_headers),
+                                            content_type=body_ctype)
                         )
                 except (json.JSONDecodeError, TypeError):
                     pass
