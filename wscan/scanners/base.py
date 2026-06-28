@@ -84,6 +84,33 @@ def _cvss_for(check_type: str) -> tuple[str, float]:
     return _CVSS_TABLE.get(check_type) or _CVSS_TABLE.get(base, ("", 0.0))
 
 
+# spec（OpenAPI/Postman）由来のテンプレヘッダで上書きしてはいけない認証情報ヘッダ。
+# 利用者の --header / トークン更新（auth_headers 由来）が常に優先される。
+_CREDENTIAL_HEADERS = frozenset({
+    "authorization", "x-api-key", "x-auth-token", "x-access-token",
+    "proxy-authorization", "cookie",
+})
+
+
+def merge_template_headers(base: dict, tmpl_headers: dict) -> dict:
+    """auth_headers ベースに spec テンプレヘッダを重ねる（純粋）。
+
+    認証情報ヘッダ（``_CREDENTIAL_HEADERS``）が ``base`` に既にあれば、テンプレの値
+    （spec/Postman の Authorization/API-key の example・default）で上書きしない。
+    利用者が ``--header`` で渡した実値や更新トークンを spec のプレースホルダで潰すと、
+    保護 API への直接 httpx 検査（mass_assignment / server-side proto）が未認証になり
+    脆弱性を取りこぼすため。認証情報以外（必須の X-API-Version/tenant 等）はテンプレ値
+    で上書きしてよい（operation 固有の必須ヘッダを補完する）。
+    """
+    out = dict(base or {})
+    present = {k.lower() for k in out}
+    for k, v in (tmpl_headers or {}).items():
+        if k.lower() in _CREDENTIAL_HEADERS and k.lower() in present:
+            continue
+        out[k] = v
+    return out
+
+
 def finding_dedup_key(
     check_type: str,
     url: str,

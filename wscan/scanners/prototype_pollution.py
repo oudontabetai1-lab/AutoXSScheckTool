@@ -22,7 +22,7 @@ from typing import Any, TYPE_CHECKING
 
 import httpx
 
-from .base import BaseScanner, Finding
+from .base import BaseScanner, Finding, merge_template_headers
 
 if TYPE_CHECKING:
     from wscan.engine import ScanEngine
@@ -214,7 +214,9 @@ class PrototypePollutionScanner(BaseScanner):
             base.update(hdrs)
             hdrs = base
         if tmpl and isinstance(getattr(tmpl, "headers", None), dict):
-            hdrs.update(tmpl.headers)
+            # 認証情報ヘッダは利用者の --header / 更新トークン（auth_headers 由来）を
+            # spec の example/default で上書きしない（必須の非認証ヘッダのみ補完）。
+            hdrs = merge_template_headers(hdrs, tmpl.headers)
         kwargs: dict = {"timeout": getattr(self.engine, "timeout", 15),
                         "follow_redirects": True, "headers": hdrs}
         if hasattr(self.engine, "httpx_client_kwargs"):

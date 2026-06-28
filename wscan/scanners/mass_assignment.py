@@ -21,7 +21,7 @@ from typing import Optional, TYPE_CHECKING
 
 import httpx
 
-from .base import BaseScanner, Finding
+from .base import BaseScanner, Finding, merge_template_headers
 
 if TYPE_CHECKING:
     from wscan.engine import ScanEngine
@@ -150,13 +150,15 @@ class MassAssignmentScanner(BaseScanner):
         base_body = tmpl.json_body if isinstance(tmpl.json_body, dict) else {}
         polluted = augment_body(base_body, sentinels)
         kwargs = self._client_kwargs(getattr(tmpl, "content_type", "application/json"))
-        # スペックで宣言された必須ヘッダ（X-API-Version/tenant/API-key 等）を載せる。
-        # 欠落すると 400/401/404 で検査が空振りするため。
+        # スペックで宣言された必須ヘッダ（X-API-Version/tenant 等）を載せる。欠落すると
+        # 400/401/404 で検査が空振りするため。ただし認証情報ヘッダ（Authorization/
+        # API-key）は利用者の --header / 更新トークン（auth_headers 由来）を spec の
+        # example/default で上書きしない（merge_template_headers が保護）。
         tmpl_headers = getattr(tmpl, "headers", None)
         if isinstance(tmpl_headers, dict) and tmpl_headers:
-            merged = dict(kwargs.get("headers", {}))
-            merged.update(tmpl_headers)
-            kwargs["headers"] = merged
+            kwargs["headers"] = merge_template_headers(
+                kwargs.get("headers", {}), tmpl_headers
+            )
         method = (tmpl.method or "POST").upper()
 
         baseline_payload = json.dumps(base_body)

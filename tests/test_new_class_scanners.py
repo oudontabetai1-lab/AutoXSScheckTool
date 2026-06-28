@@ -107,6 +107,32 @@ class PrototypePollutionTests(unittest.TestCase):
         self.assertFalse(pollution_persisted("a", "b", ""))
 
 
+class MergeTemplateHeadersTests(unittest.TestCase):
+    def test_user_auth_not_overridden_by_template(self):
+        from wscan.scanners.base import merge_template_headers
+        base = {"Authorization": "Bearer real-token", "X-API-Key": "user-key"}
+        tmpl = {"Authorization": "Bearer spec-placeholder",
+                "x-api-key": "spec-key", "X-API-Version": "v2"}
+        out = merge_template_headers(base, tmpl)
+        # 認証情報は base（利用者）の値を維持（大小無視で照合）
+        self.assertEqual(out["Authorization"], "Bearer real-token")
+        self.assertEqual(out["X-API-Key"], "user-key")
+        self.assertNotIn("x-api-key", out)  # 重複キーを増やさない
+        # 非認証の必須ヘッダはテンプレ値で補完する
+        self.assertEqual(out["X-API-Version"], "v2")
+
+    def test_template_auth_used_when_base_missing(self):
+        from wscan.scanners.base import merge_template_headers
+        # base に認証情報が無ければテンプレの値を採用する（spec 提供キーの救済）
+        out = merge_template_headers({}, {"Authorization": "Bearer spec"})
+        self.assertEqual(out["Authorization"], "Bearer spec")
+
+    def test_non_credential_template_overrides(self):
+        from wscan.scanners.base import merge_template_headers
+        out = merge_template_headers({"X-API-Version": "v1"}, {"X-API-Version": "v2"})
+        self.assertEqual(out["X-API-Version"], "v2")
+
+
 class CachePoisoningTests(unittest.TestCase):
     def test_is_cacheable_public(self):
         self.assertTrue(is_cacheable({"Cache-Control": "public, max-age=60"}))
