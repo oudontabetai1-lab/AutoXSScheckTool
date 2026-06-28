@@ -57,21 +57,17 @@ _CHECK_EXTRA_TYPES: dict[str, tuple[str, ...]] = {
 # する（状態変更系プローブの二重送信・resume 重複を防ぐ）。
 _API_TEMPLATE_ONLY_CHECKS: frozenset[str] = frozenset({"mass_assignment"})
 
-# オリジン単位でしか走らないスキャナ（graphql は origin ごとに 1 回掃引）。
-# page-level チェックポイントを page.url ではなく origin で刻まないと、resume 後に
-# 同一オリジンの別ページで intrusive なプローブを再送してしまう。
-_ORIGIN_SCOPED_CHECKS: frozenset[str] = frozenset({"graphql"})
-
-
 def _page_check_cp_url(check_name: str, url: str) -> str:
-    """page-level チェックポイントの url 成分を返す（origin スコープ検査は origin）。"""
-    if check_name in _ORIGIN_SCOPED_CHECKS:
-        try:
-            from urllib.parse import urlparse as _up
-            p = _up(url)
-            return f"{p.scheme}://{p.netloc}"
-        except Exception:
-            return url
+    """page-level チェックポイントの url 成分を返す（exact URL）。
+
+    以前は graphql を origin スコープで刻んでいたが、それだと API スペック等が
+    同一オリジンの **別 URL**（例: 先に ``/users``、後に非標準の ``/gql``）を持つとき、
+    先行 URL で origin を「済み」にした時点で後続の ``/gql`` が丸ごと飛ばされ、
+    ``GraphQLScanner.scan_page`` の exact-URL プローブが走らなくなる。チェック
+    ポイントは exact URL で刻む。標準パスの origin 単位掃引は scanner 内部の
+    ``_tested_endpoints``/``_tested_urls`` ガードが run 内で重複を防ぐため、
+    intrusive な再送は起きない（resume 跨ぎの標準パス再掃引は冪等な introspection）。
+    """
     return url
 
 
@@ -1092,8 +1088,8 @@ class ScanEngine:
                     url_auth_failed = True  # 復旧不能 → この URL の単位は済みにしない
             for check_name, scanner in self.scanners.items():
                 # 再開: 済みの API テンプレート単位は飛ばす（合成フィールド名で記録）。
-                # graphql 等 origin スコープ検査は origin キーで刻み、同一オリジンの
-                # 別テンプレ URL で alias/depth コスト探索を再送しないようにする。
+                # exact URL で刻む。graphql を origin で刻むと、先行テンプレ URL の後に
+                # 続く非標準 GraphQL エンドポイント（/gql 等）が丸ごと飛ばされるため。
                 cp_url = _page_check_cp_url(check_name, url)
                 if self._checkpoint_is_done(cp_url, "(api-template)", 0, check_name):
                     continue
@@ -3266,7 +3262,7 @@ class ScanEngine:
                 continue
             # 再開: 済みの page-level 単位 (url,"(page)",check) は飛ばす。intrusive な
             # page-level プローブ（proto の JSON POST、graphql コスト探索）を resume で
-            # 再送しないため。graphql 等の origin スコープ検査は origin で刻む。
+            # 再送しないため。exact URL で刻む（origin だと別 URL を取りこぼす）。
             cp_url = _page_check_cp_url(check_name, page.url)
             if self._checkpoint_is_done(cp_url, "(page)", 0, check_name):
                 continue

@@ -18,6 +18,7 @@ from wscan.scanners.prototype_pollution import (
     proto_json_bodies,
     is_polluted,
     server_pollution_reflected,
+    pollution_persisted,
 )
 from urllib.parse import urlparse
 from wscan.scanners.cache_poisoning import (
@@ -95,6 +96,15 @@ class PrototypePollutionTests(unittest.TestCase):
         # value already in baseline → just reflection, not pollution
         self.assertFalse(server_pollution_reflected("polluted1", "polluted1", "polluted1"))
         self.assertFalse(server_pollution_reflected("a", "b", ""))
+
+    def test_pollution_persisted_requires_clean_followup_leak(self):
+        # 汚染後の CLEAN 応答に value が現れ、ベースラインには無い → 汚染（エコー不可）
+        self.assertTrue(pollution_persisted("baseline", "baseline polluted1", "polluted1"))
+        # CLEAN 応答に value が無い（=エコーのみ、波及していない）→ 非検出
+        self.assertFalse(pollution_persisted("baseline", "baseline clean", "polluted1"))
+        # value が汚染前ベースラインにもある → 偶然一致として除外
+        self.assertFalse(pollution_persisted("polluted1", "polluted1", "polluted1"))
+        self.assertFalse(pollution_persisted("a", "b", ""))
 
 
 class CachePoisoningTests(unittest.TestCase):

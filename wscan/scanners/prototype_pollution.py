@@ -69,6 +69,22 @@ def server_pollution_reflected(baseline_body: str, polluted_body: str, value: st
     return value in (polluted_body or "") and value not in (baseline_body or "")
 
 
+def pollution_persisted(baseline_body: str, followup_body: str, value: str) -> bool:
+    """汚染**後**の CLEAN リクエスト応答に汚染値が現れたか（純粋）。
+
+    汚染送信そのものの応答ではなく、``value`` を含まない後続 CLEAN リクエスト
+    （汚染前ベースラインと同一ボディ）の応答で判定する。create/update API は
+    送信 JSON をそのままエコーするため、汚染送信の応答に ``value`` が出ても単なる
+    エコーで汚染の証拠にならない。一方 CLEAN リクエストの応答に ``value`` が出るのは、
+    ``Object.prototype`` が実際に汚染されて後続の新規オブジェクトへ波及した結果で
+    あり、エコーでは説明できない強い証拠になる。汚染前ベースラインに既に ``value``
+    があれば偶然一致として除外（誤検知抑止）。
+    """
+    if not value:
+        return False
+    return value in (followup_body or "") and value not in (baseline_body or "")
+
+
 def _append_query(url: str, fragment: str) -> str:
     sep = "&" if "?" in url else "?"
     return f"{url}{sep}{fragment}"
@@ -229,6 +245,7 @@ class PrototypePollutionScanner(BaseScanner):
                 pass
             return []
 
+        clean_body = json.dumps(base_obj)
         for body_obj in proto_json_bodies(marker, value):
             # 必須フィールドを保ちつつ汚染キーを足す
             merged = dict(base_obj)
@@ -238,33 +255,44 @@ class PrototypePollutionScanner(BaseScanner):
             try:
                 async with httpx.AsyncClient(**kwargs) as client:
                     r = await client.request(method, url, content=body)
-                resp_text = r.text
+                    # 受理(2xx)された場合のみ汚染候補。__proto__/constructor を 400/422 で
+                    # 拒否しつつエラー本文にマーカーをエコーするケースを誤検知しない。
+                    if not (200 <= r.status_code < 300):
+                        continue
+                    # 汚染送信そのものの応答（r.text）は create/update のエコーで value を
+                    # 含みうるため証拠にしない。value を含まない CLEAN リクエストを再送し、
+                    # その応答に value が現れたら Object.prototype 汚染の波及（=エコーでは
+                    # 説明できない）と判定する。
+                    followup = await client.request(method, url, content=clean_body)
+                followup_text = followup.text
             except Exception:
                 continue
 
-            # 受理(2xx)された場合のみ汚染とみなす。__proto__/constructor を 400/422 で
-            # 拒否しつつエラー本文にマーカーをエコーするケースを誤検知しない。
-            if not (200 <= r.status_code < 300):
+            if not (200 <= followup.status_code < 300):
                 continue
-            if server_pollution_reflected(baseline_body, resp_text, value):
+            if pollution_persisted(baseline_body, followup_text, value):
                 pair = {
-                    "request": {"url": url, "method": method, "body": body},
-                    "response": {"status": r.status_code, "body": resp_text[:1000]},
+                    "request": {"url": url, "method": method, "body": body,
+                                "followup": clean_body},
+                    "response": {"status": followup.status_code,
+                                 "body": followup_text[:1000]},
                 }
                 finding = await self.record_finding(
                     url=url,
                     field_name="(JSON body — prototype pollution)",
                     payload=body,
                     evidence=(
-                        f"Server-side prototype pollution: injecting "
-                        f"'{body}' caused the value '{value}' to appear in the "
-                        f"response where it was absent in the baseline. The server "
-                        f"merges untrusted JSON into objects without guarding "
-                        f"__proto__/constructor."
+                        f"Server-side prototype pollution: after injecting "
+                        f"'{body}', a subsequent clean request (without the marker) "
+                        f"returned the polluted value '{value}', which was absent "
+                        f"from the baseline. The leak into an unrelated clean "
+                        f"response (not a mere echo of the submitted body) shows the "
+                        f"server merges untrusted JSON into Object.prototype without "
+                        f"guarding __proto__/constructor."
                     ),
                     pair=pair,
                     severity="high",
-                    confidence="likely",
+                    confidence="confirmed",
                     evidence_type="prototype_pollution_server",
                     evidence_details={"marker": marker, "value": value},
                 )

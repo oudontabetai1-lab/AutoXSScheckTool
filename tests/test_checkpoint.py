@@ -64,14 +64,16 @@ class StateTests(unittest.TestCase):
 
 
 class PageCheckCpUrlTests(unittest.TestCase):
-    def test_origin_scoped_uses_origin(self):
+    def test_graphql_uses_exact_url(self):
         from wscan.engine import _page_check_cp_url
-        # graphql は origin スコープ → 同一オリジンの別ページで同じキー
-        self.assertEqual(
-            _page_check_cp_url("graphql", "http://h/a"),
-            _page_check_cp_url("graphql", "http://h/b"),
+        # graphql も exact URL で刻む。origin で刻むと、先行 URL（/users 等）で
+        # origin を「済み」にした後、非標準 GraphQL エンドポイント（/gql）が
+        # 丸ごと飛ばされてしまうため（exact-URL プローブが走らない）。
+        self.assertNotEqual(
+            _page_check_cp_url("graphql", "http://h/users"),
+            _page_check_cp_url("graphql", "http://h/gql"),
         )
-        self.assertEqual(_page_check_cp_url("graphql", "http://h/a?x=1"), "http://h")
+        self.assertEqual(_page_check_cp_url("graphql", "http://h/gql"), "http://h/gql")
 
     def test_non_origin_scoped_uses_url(self):
         from wscan.engine import _page_check_cp_url
