@@ -30,6 +30,7 @@ from wscan.scanners.cache_poisoning import (
 )
 from wscan.scanners.mass_assignment import (
     augment_body,
+    injectable_sentinels,
     detect_mass_assignment,
     make_sentinels,
     acceptance_ok,
@@ -197,6 +198,23 @@ class MassAssignmentTests(unittest.TestCase):
         self.assertEqual(out["name"], "x")
         self.assertEqual(out["role"], "r1")
 
+    def test_augment_does_not_overwrite_documented_field(self):
+        # base に既出のフィールドは sentinel で上書きしない（文書化フィールド保護）
+        out = augment_body({"role": "user"}, {"role": "sentinel", "isAdmin": "a1"})
+        self.assertEqual(out["role"], "user")
+        self.assertEqual(out["isAdmin"], "a1")
+
+    def test_injectable_skips_documented_fields(self):
+        # base に既出の特権フィールドは注入対象から外す（2xx エコー誤検知の回避）
+        s = {"role": "r1", "isAdmin": "a1", "verified": "v1"}
+        out = injectable_sentinels({"role": "user", "name": "x"}, s)
+        self.assertNotIn("role", out)        # 文書化済み → 除外
+        self.assertIn("isAdmin", out)        # 未文書 → 注入対象
+        self.assertIn("verified", out)
+        # 全フィールドが文書化済みなら空（→ scanner はそのテンプレをスキップ）
+        self.assertEqual(injectable_sentinels({"role": "x", "isAdmin": "y"},
+                                              {"role": "r", "isAdmin": "a"}), {})
+
     def test_detect_reflected_privilege(self):
         s = {"role": "wscanMA_role", "isAdmin": "wscanMA_admin"}
         baseline = '{"name":"x"}'
@@ -287,6 +305,93 @@ class GraphQLAuthFailureTests(unittest.TestCase):
                                      text='{"data": {"__typename": "Query"}}')
         self.assertFalse(sc._note_auth_failure(resp, "https://h/gql"))
         self.assertFalse(engine._api_auth_failed)
+
+
+class GraphQLExactUrlGateTests(unittest.TestCase):
+    """具体 URL probe は API スペック由来 or GraphQL らしいパスのみ
+    （全クロールページへ probe を撒かない Codex P2 回帰）。"""
+
+    def _scanner(self, api_urls=(), templates=()):
+        from wscan.scanners.graphql import GraphQLScanner
+        engine = types.SimpleNamespace(
+            browser=None, monitor=None, payload_gen=None,
+            api_seed_urls=set(api_urls), api_seed_requests=list(templates),
+        )
+        return GraphQLScanner(engine)
+
+    def test_graphql_looking_path_allowed(self):
+        sc = self._scanner()
+        self.assertTrue(sc._is_api_or_graphql_url("https://h/graphql"))
+        self.assertTrue(sc._is_api_or_graphql_url("https://h/api/graphql"))
+        self.assertTrue(sc._is_api_or_graphql_url("https://h/gql"))
+
+    def test_plain_html_route_rejected(self):
+        sc = self._scanner()
+        self.assertFalse(sc._is_api_or_graphql_url("https://h/about"))
+        self.assertFalse(sc._is_api_or_graphql_url("https://h/account"))
+
+    def test_api_spec_url_allowed(self):
+        sc = self._scanner(api_urls=["https://h/custom-endpoint"])
+        self.assertTrue(sc._is_api_or_graphql_url("https://h/custom-endpoint"))
+        # テンプレート URL も許可
+        sc2 = self._scanner(
+            templates=[types.SimpleNamespace(url="https://h/tmpl-ep")]
+        )
+        self.assertTrue(sc2._is_api_or_graphql_url("https://h/tmpl-ep"))
+
+
+class PrototypePollutionMultiTemplateTests(unittest.TestCase):
+    """server-side proto は URL 一致の全 body テンプレートを試すこと
+    （POST/PATCH で必須フィールドが異なるケースの取りこぼし防止 Codex P2 回帰）。"""
+
+    def _scanner(self, templates):
+        from wscan.scanners.prototype_pollution import PrototypePollutionScanner
+        engine = types.SimpleNamespace(
+            browser=None, monitor=None, payload_gen=None,
+            api_seed_requests=templates, _api_auth_failed=False,
+        )
+        return PrototypePollutionScanner(engine)
+
+    def _tmpl(self, method):
+        return types.SimpleNamespace(url="http://h/x", method=method,
+                                     json_body={}, content_type="application/json",
+                                     headers={})
+
+    def test_iterates_all_matching_templates(self):
+        t1, t2 = self._tmpl("POST"), self._tmpl("PATCH")
+        sc = self._scanner([t1, t2])
+        seen = []
+
+        async def fake(url, tmpl):
+            seen.append(tmpl)
+            return None
+        sc._probe_server_template = fake
+        asyncio.run(sc._scan_server_side("http://h/x"))
+        self.assertEqual(seen, [t1, t2])
+
+    def test_stops_on_first_finding(self):
+        t1, t2 = self._tmpl("POST"), self._tmpl("PATCH")
+        sc = self._scanner([t1, t2])
+        seen = []
+
+        async def fake(url, tmpl):
+            seen.append(tmpl)
+            return "FINDING"
+        sc._probe_server_template = fake
+        out = asyncio.run(sc._scan_server_side("http://h/x"))
+        self.assertEqual(seen, [t1])
+        self.assertEqual(out, ["FINDING"])
+
+    def test_no_template_uses_bare_post(self):
+        sc = self._scanner([])
+        seen = []
+
+        async def fake(url, tmpl):
+            seen.append(tmpl)
+            return None
+        sc._probe_server_template = fake
+        asyncio.run(sc._scan_server_side("http://h/y"))
+        self.assertEqual(seen, [None])
 
 
 if __name__ == "__main__":

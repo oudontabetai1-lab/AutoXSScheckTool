@@ -47,10 +47,29 @@ def make_sentinels(fields=PRIVILEGED_FIELDS) -> dict[str, str]:
     return {f: f"wscanMA{token}{i}" for i, f in enumerate(fields)}
 
 
+def injectable_sentinels(
+    base_body: Optional[dict], sentinels: dict[str, str]
+) -> dict[str, str]:
+    """ベースボディに**無い**特権フィールドだけを残す（純粋）。
+
+    テンプレートが既に ``role``/``isAdmin`` 等を文書化している（＝契約上クライアントが
+    送れる）場合、その値を sentinel で上書きして 2xx エコーを「過剰割り当て」と誤検知
+    してしまう。文書化済みフィールドは対象外にし、未文書のものだけを注入する。
+    """
+    base = base_body or {}
+    return {k: v for k, v in sentinels.items() if k not in base}
+
+
 def augment_body(base_body: Optional[dict], sentinels: dict[str, str]) -> dict:
-    """ベースボディに特権フィールド（センチネル値）を足した dict を返す（純粋）。"""
+    """ベースボディに特権フィールド（センチネル値）を足した dict を返す（純粋）。
+
+    既に base にあるキーは上書きしない（文書化済みフィールドの保護）。注入対象の
+    絞り込みは :func:`injectable_sentinels` で行い、本関数は冪等な合成に徹する。
+    """
     out = dict(base_body or {})
     for field_name, value in sentinels.items():
+        if field_name in out:
+            continue
         out[field_name] = value
     return out
 
@@ -148,6 +167,12 @@ class MassAssignmentScanner(BaseScanner):
     async def _test_template(self, tmpl) -> Optional[Finding]:
         sentinels = make_sentinels()
         base_body = tmpl.json_body if isinstance(tmpl.json_body, dict) else {}
+        # 文書化済み（base に既出）の特権フィールドは対象外。未文書のものだけ注入し、
+        # 検出も注入したフィールドに限定する（契約上のフィールドの 2xx エコーを誤検知
+        # しない）。注入できるものが無ければこのテンプレートはスキップ。
+        sentinels = injectable_sentinels(base_body, sentinels)
+        if not sentinels:
+            return None
         polluted = augment_body(base_body, sentinels)
         kwargs = self._client_kwargs(getattr(tmpl, "content_type", "application/json"))
         # スペックで宣言された必須ヘッダ（X-API-Version/tenant 等）を載せる。欠落すると

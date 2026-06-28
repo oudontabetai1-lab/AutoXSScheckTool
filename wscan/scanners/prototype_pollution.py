@@ -188,20 +188,38 @@ class PrototypePollutionScanner(BaseScanner):
 
     # ── サーバサイド（JSON）─────────────────────────────────────────
     async def _scan_server_side(self, url: str) -> list[Finding]:
+        # URL 一致の body 操作テンプレートを全て試す。同一パスに POST と PATCH 等、
+        # 必須フィールドの異なる複数操作があると、最初の1件だけでは別メソッド/別ボディ
+        # でのみ顕在化する汚染を取りこぼすため。テンプレートが無ければ裸の POST({}) を1回。
+        templates = [
+            t for t in (getattr(self.engine, "api_seed_requests", []) or [])
+            if getattr(t, "url", None) == url and (
+                getattr(t, "method", "POST") or "POST"
+            ).upper() in ("POST", "PUT", "PATCH")
+        ]
+        if not templates:
+            templates = [None]
+
+        findings: list[Finding] = []
+        for tmpl in templates:
+            finding = await self._probe_server_template(url, tmpl)
+            if finding:
+                findings.append(finding)
+                break
+            # 認証失効を検知したら以降のテンプレートは無駄打ちせず中断
+            # （_run_api_template_checks が再ログイン+再試行する）。
+            if getattr(self.engine, "_api_auth_failed", False):
+                break
+        return findings
+
+    async def _probe_server_template(self, url: str, tmpl) -> "Finding | None":
+        """単一テンプレート（None 可）で server-side proto を検査する。"""
         marker = make_marker()
         value = "polluted" + secrets.token_hex(2)
-        findings: list[Finding] = []
 
         # API スペック由来のテンプレートがあれば、その method と必須フィールドを使う。
         # 裸の POST({pollution}) だと PUT/PATCH 専用や必須フィールド要求の endpoint で
         # 405/400 になり server-side proto を検査できないため。
-        tmpl = None
-        for t in (getattr(self.engine, "api_seed_requests", []) or []):
-            if getattr(t, "url", None) == url and (
-                getattr(t, "method", "POST") or "POST"
-            ).upper() in ("POST", "PUT", "PATCH"):
-                tmpl = t
-                break
         method = (getattr(tmpl, "method", "POST") or "POST").upper() if tmpl else "POST"
         base_obj = dict(tmpl.json_body) if (tmpl and isinstance(tmpl.json_body, dict)) else {}
         # テンプレートが vendor/patch JSON メディアタイプ（application/merge-patch+json 等）を
@@ -230,7 +248,7 @@ class PrototypePollutionScanner(BaseScanner):
                 baseline = await client.request(method, url, content=json.dumps(base_obj))
                 baseline_body = baseline.text
         except Exception:
-            return []
+            return None
 
         # 認証失効を検知したらエンジンへ通知（API テンプレ検査の resume 誤スキップ防止）。
         from wscan import session_guard
@@ -245,7 +263,7 @@ class PrototypePollutionScanner(BaseScanner):
                 self.engine._api_auth_failed = True
             except Exception:
                 pass
-            return []
+            return None
 
         clean_body = json.dumps(base_obj)
         for body_obj in proto_json_bodies(marker, value):
@@ -299,6 +317,6 @@ class PrototypePollutionScanner(BaseScanner):
                     evidence_details={"marker": marker, "value": value},
                 )
                 if finding:
-                    findings.append(finding)
+                    return finding
                 break
-        return findings
+        return None

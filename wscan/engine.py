@@ -492,6 +492,9 @@ class ScanEngine:
         # （mass_assignment 等が利用する RequestTemplate のリスト）
         self.api_spec_path: str = api_spec_path
         self.api_seed_requests: list = []
+        # API スペック由来 URL の集合（GraphQL の具体 URL probe を API/GraphQL 系のみへ
+        # 限定するために参照。全クロールページへ probe を撒かないためのゲート）。
+        self.api_seed_urls: set = set()
         # API テンプレート検査中に認証失効（401/login）を観測したときに立つフラグ。
         # mass_assignment 等がベースライン応答で検知し、_run_api_template_checks が
         # 「済み」記録を抑止して resume での恒久スキップを防ぐ。
@@ -1909,6 +1912,11 @@ class ScanEngine:
                     r for r in api_seed.requests
                     if self._is_attack_target_url(r.url) and not self._is_url_excluded(r.url)
                 ]
+                # スペック由来 URL（GET 含む全操作）を記録（graphql の具体 URL probe ゲート用）
+                self.api_seed_urls = {
+                    u for u in (api_seed.urls or [])
+                    if not self._is_url_excluded(u)
+                } | {r.url for r in self.api_seed_requests}
                 if getattr(api_seed, "headers", None):
                     # 利用者が --header で明示した値は seed（スペックの default/example、
                     # 例えば API キーのプレースホルダ）で上書きしない。has() で既存を尊重。

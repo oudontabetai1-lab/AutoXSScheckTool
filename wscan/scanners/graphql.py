@@ -230,6 +230,28 @@ class GraphQLScanner(BaseScanner):
     ) -> list[Finding]:
         return []  # GraphQL scanning is endpoint-level
 
+    def _is_api_or_graphql_url(self, url: str) -> bool:
+        """具体 URL を probe 対象にしてよいか（API スペック由来 or GraphQL らしいパス）。
+
+        全クロールページへ GraphQL probe を撒かないためのゲート。API スペック由来 URL
+        （``api_seed_urls`` / ``api_seed_requests``）か、パスが GraphQL を示唆する
+        （``graphql`` を含む / ``/gql`` 等）ときだけ True。
+        """
+        try:
+            if url in (getattr(self.engine, "api_seed_urls", None) or ()):
+                return True
+            for t in (getattr(self.engine, "api_seed_requests", None) or ()):
+                if getattr(t, "url", None) == url:
+                    return True
+        except Exception:
+            pass
+        path = urlparse(url).path.lower()
+        return (
+            "graphql" in path
+            or path.endswith("/gql")
+            or "/gql/" in path
+        )
+
     async def scan_page(self, url: str) -> list[Finding]:
         """
         On first call (or whenever a new origin is encountered) probe all
@@ -244,11 +266,14 @@ class GraphQLScanner(BaseScanner):
         if origin not in self._tested_endpoints:
             self._tested_endpoints.add(origin)
             candidates.extend(urljoin(origin, p) for p in _GRAPHQL_PATHS)
-        # API スペック等から渡された具体 URL（/gql 等の非標準パス）も明示的に検査
+        # API スペック等から渡された具体 URL（/gql 等の非標準パス）も明示的に検査する。
+        # ただし全クロールページ（/about, /account 等）へ GraphQL probe を撒かないよう、
+        # API スペック由来 URL か GraphQL らしいパスのときだけ候補に加える（既知パスの
+        # origin 掃引は別途無条件で実施済み）。
         norm_url = url.split("#", 1)[0]
         if norm_url and norm_url not in self._tested_urls:
             self._tested_urls.add(norm_url)
-            if norm_url not in candidates:
+            if norm_url not in candidates and self._is_api_or_graphql_url(norm_url):
                 candidates.append(norm_url)
         if not candidates:
             return []
