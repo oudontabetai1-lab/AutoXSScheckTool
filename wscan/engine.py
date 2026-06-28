@@ -1267,7 +1267,8 @@ class ScanEngine:
         _parsed = _up(for_url or self.target_url)
         target_host = (_parsed.hostname or "").lower()
         req_path = _parsed.path or "/"
-        pairs: list[str] = []
+        # (path, "name=value") を集めてから RFC 6265 §5.4 の並びへ整える。
+        matched: list[tuple[str, str]] = []
         for c in cookies:
             name = c.get("name")
             if not name:
@@ -1286,14 +1287,20 @@ class ScanEngine:
                 or (is_domain_cookie and target_host.endswith("." + dom))
             ):
                 continue
+            cpath = str(c.get("path", "/") or "/")
             # path スコープも照合（Path=/admin の Cookie を /api へ送らない）。
-            if not _cookie_path_matches(req_path, str(c.get("path", "/") or "/")):
+            if not _cookie_path_matches(req_path, cpath):
                 continue
-            pairs.append(f"{name}={c.get('value', '')}")
+            matched.append((cpath, f"{name}={c.get('value', '')}"))
+        # RFC 6265 §5.4: path の長いものを先に送る（同名 Cookie が / と /admin に
+        # ある場合、より具体的な /admin を先頭に）。最初の値を使うフレームワークで
+        # 誤ったセッション（root cookie）で検査するのを防ぐ。stable sort なので同じ
+        # path 長は元の順序（概ね生成順）を保つ。
+        matched.sort(key=lambda pv: len(pv[0]), reverse=True)
         # マッチ集合で**常に置換**する（空でも）。per-URL 同期では、前の URL で
         # 別ホスト用に設定した self.cookies が残ると、当該ホストに無関係な Cookie を
         # 送って別セッションで検査してしまう。一致が無ければクリアして未認証で送る。
-        self.cookies = "; ".join(pairs)
+        self.cookies = "; ".join(pv[1] for pv in matched)
 
     async def _maybe_relogin_for_page(self, url: str) -> None:
         """攻撃対象ページの状態を見てセッション失効なら再ログインする。
@@ -1895,9 +1902,12 @@ class ScanEngine:
                     if self._is_attack_target_url(r.url) and not self._is_url_excluded(r.url)
                 ]
                 if getattr(api_seed, "headers", None):
+                    # 利用者が --header で明示した値は seed（スペックの default/example、
+                    # 例えば API キーのプレースホルダ）で上書きしない。has() で既存を尊重。
                     api_hdrs = {
                         k: v for k, v in api_seed.headers.items()
                         if k.lower() not in ("cookie", "content-length", "host")
+                        and not self.header_manager.has(k)
                     }
                     if api_hdrs:
                         await self.header_manager.update(api_hdrs)

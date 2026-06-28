@@ -172,6 +172,43 @@ class OpenApiTests(unittest.TestCase):
         posts = [r for r in seed.requests if r.method == "POST"]
         self.assertEqual(posts[0].headers.get("X-API-Version"), "v2")
 
+    def test_explicit_apikey_header_preserved(self):
+        # 認証系ヘッダでも、スペックが明示した default/example があれば実値として採用
+        # （利用者の --header は engine 側で優先されるので上書き害は無い）。
+        op = {
+            "parameters": [
+                {"name": "X-API-Key", "in": "header",
+                 "schema": {"type": "string", "example": "spec-key-123"}}
+            ],
+            "requestBody": {"content": {"application/json": {
+                "schema": {"type": "object", "properties": {"n": {"type": "string"}}}}}},
+        }
+        spec = {
+            "openapi": "3.0.0",
+            "servers": [{"url": "https://api.example.com"}],
+            "paths": {"/items": {"post": op}},
+        }
+        seed = parse_openapi(spec)
+        self.assertEqual(seed.headers.get("X-API-Key"), "spec-key-123")
+
+    def test_auth_header_without_value_not_synthesized(self):
+        # default/example の無い認証系は "test" 等のダミー合成を避けて採らない
+        op = {
+            "parameters": [
+                {"name": "Authorization", "in": "header",
+                 "schema": {"type": "string"}}
+            ],
+            "requestBody": {"content": {"application/json": {
+                "schema": {"type": "object", "properties": {"n": {"type": "string"}}}}}},
+        }
+        spec = {
+            "openapi": "3.0.0",
+            "servers": [{"url": "https://api.example.com"}],
+            "paths": {"/items": {"post": op}},
+        }
+        seed = parse_openapi(spec)
+        self.assertNotIn("Authorization", seed.headers)
+
     def test_vendor_json_media_type_preserved(self):
         # application/merge-patch+json 等のメディアタイプを template に保持する
         op = {

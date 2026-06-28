@@ -42,6 +42,19 @@ class CookiePathMatchTests(unittest.TestCase):
                            for_url="https://example.com/api/users")
         self.assertEqual(result, "")
 
+    def test_longer_path_cookie_sent_first(self):
+        # RFC 6265 §5.4: 同名 Cookie が / と /admin にあるとき、より具体的な
+        # /admin（長い path）を先頭に送る。最初の値を使うフレームワークが
+        # root の Cookie で誤ったセッションを選ばないようにする。
+        cookies = [
+            {"name": "sid", "value": "root", "domain": "example.com", "path": "/"},
+            {"name": "sid", "value": "admin", "domain": "example.com", "path": "/admin"},
+        ]
+        result = _run_sync("https://example.com/admin/panel", cookies,
+                           for_url="https://example.com/admin/panel")
+        # 両方 path 一致するが、/admin が先頭に来る
+        self.assertEqual(result, "sid=admin; sid=root")
+
 
 class CookieDomainSyncTests(unittest.TestCase):
     def test_exact_and_parent_accepted_subdomain_rejected(self):

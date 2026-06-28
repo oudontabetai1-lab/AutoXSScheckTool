@@ -240,14 +240,14 @@ def parse_openapi(spec: dict, fallback_base: str = "") -> ApiSeedData:
                 if loc == "query":
                     query_pairs.append((name, str(_sample_for_name(name, schema))))
                 elif loc == "header" and name.lower() not in (
+                    # 転送制御/ネゴシエーション系は param として絶対にシードしない。
                     "cookie", "content-length", "host", "content-type", "accept",
-                    # 認証系は合成しない。default/example が無いと "test" 等のダミーに
-                    # なり、HeaderManager.update が利用者の --header Authorization を
-                    # 上書きして API スキャンが未認証になるため。
-                    "authorization", "x-api-key", "x-auth-token", "x-access-token",
-                    "proxy-authorization",
                 ):
-                    # default/example がある時のみ採用（合成ダミーは入れない）
+                    # default/example がある時のみ採用（合成ダミーは入れない）。認証系
+                    # （authorization/x-api-key 等）も、スペックが明示した default/example
+                    # があれば実値として採用する（API キーをスペックに書く運用の救済）。
+                    # 値が無い認証系は "test" 等のダミー合成を避けて採らない。なお
+                    # 利用者の --header は engine 側で seed より優先される（上書きしない）。
                     if "default" in schema or "example" in schema:
                         header_params[name] = str(_sample_for_name(name, schema))
             # クロール/全リクエストに効くよう共通ヘッダへ反映（後勝ち）
