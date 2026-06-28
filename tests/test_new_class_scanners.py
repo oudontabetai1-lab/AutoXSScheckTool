@@ -262,5 +262,32 @@ class MassAssignmentUrlFilterTests(unittest.TestCase):
         self.assertEqual(asyncio.run(sc.scan_page("http://h/api")), [])
 
 
+class GraphQLAuthFailureTests(unittest.TestCase):
+    """保護 GraphQL の POST が 401 のとき engine._api_auth_failed を立てること
+    （GET プレフライトで検知できない失効を救済する Codex P2 回帰）。"""
+
+    def _scanner(self):
+        from wscan.scanners.graphql import GraphQLScanner
+        engine = types.SimpleNamespace(
+            browser=None, monitor=None, payload_gen=None,
+            login_url="https://h/login", logged_in_marker="",
+            _api_auth_failed=False,
+        )
+        return GraphQLScanner(engine), engine
+
+    def test_401_post_sets_auth_failed(self):
+        sc, engine = self._scanner()
+        resp = types.SimpleNamespace(status_code=401, url="https://h/gql", text="unauthorized")
+        self.assertTrue(sc._note_auth_failure(resp, "https://h/gql"))
+        self.assertTrue(engine._api_auth_failed)
+
+    def test_200_does_not_set_auth_failed(self):
+        sc, engine = self._scanner()
+        resp = types.SimpleNamespace(status_code=200, url="https://h/gql",
+                                     text='{"data": {"__typename": "Query"}}')
+        self.assertFalse(sc._note_auth_failure(resp, "https://h/gql"))
+        self.assertFalse(engine._api_auth_failed)
+
+
 if __name__ == "__main__":
     unittest.main()

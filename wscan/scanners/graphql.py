@@ -282,6 +282,33 @@ class GraphQLScanner(BaseScanner):
     # Detection
     # ------------------------------------------------------------------
 
+    def _note_auth_failure(self, resp, endpoint: str) -> bool:
+        """応答がセッション失効（401/ログインフォーム）なら engine へ通知する。
+
+        保護された GraphQL エンドポイントは GET プレフライト（_api_session_looks_expired）
+        が 400/405 で失効を検知できない一方、実 POST が 401 を返すことがある。その場合
+        engine._api_auth_failed を立てないと、_run_api_template_checks が未認証の空結果を
+        「済み」記録し --resume が恒久スキップしてしまう。mass_assignment/proto と同じく
+        session_guard で判定して失効を通知する。
+        """
+        from wscan import session_guard
+        try:
+            out = session_guard.looks_logged_out(
+                status=resp.status_code,
+                final_url=str(getattr(resp, "url", endpoint)),
+                body=resp.text,
+                login_url=getattr(self.engine, "login_url", ""),
+                logged_in_marker=getattr(self.engine, "logged_in_marker", ""),
+            )
+        except Exception:
+            return False
+        if out:
+            try:
+                self.engine._api_auth_failed = True
+            except Exception:
+                pass
+        return out
+
     async def _is_graphql(
         self,
         endpoint: str,
@@ -298,6 +325,9 @@ class GraphQLScanner(BaseScanner):
                 **self._client_transport_kwargs(),
             ) as client:
                 resp = await client.post(endpoint, json=query)
+                # 実 POST が 401/ログイン化 → 失効を通知して中断（resume の誤スキップ防止）
+                if self._note_auth_failure(resp, endpoint):
+                    return False
                 if resp.status_code in (200, 400):
                     body = resp.text
                     if _GQL_RESPONSE_RE.search(body):
@@ -307,6 +337,8 @@ class GraphQLScanner(BaseScanner):
                     endpoint,
                     params={"query": "{ __typename }"},
                 )
+                if self._note_auth_failure(resp2, endpoint):
+                    return False
                 if resp2.status_code in (200, 400):
                     if _GQL_RESPONSE_RE.search(resp2.text):
                         return True
