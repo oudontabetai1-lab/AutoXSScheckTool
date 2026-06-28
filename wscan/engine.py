@@ -1093,6 +1093,17 @@ class ScanEngine:
                 cp_url = _page_check_cp_url(check_name, url)
                 if self._checkpoint_is_done(cp_url, "(api-template)", 0, check_name):
                     continue
+                # page-level 攻撃（_attack_one_page）はこの API テンプレ pass より前に
+                # 走り、proto/cache/graphql 等の非テンプレ専用検査を crawl 済み URL に
+                # 対して scan_page 済みにしている。page 攻撃後・本 pass 前にクラッシュ/
+                # Abort して resume すると、(page) 単位は済みでも (api-template) は未済の
+                # ため scan_page を再送してしまう（proto の JSON POST 等、状態変更を伴う）。
+                # API テンプレ専用でない検査は (page) 単位の完了も尊重して二重送信を防ぐ。
+                if (
+                    check_name not in _API_TEMPLATE_ONLY_CHECKS
+                    and self._checkpoint_is_done(cp_url, "(page)", 0, check_name)
+                ):
+                    continue
                 try:
                     self._api_auth_failed = url_auth_failed
                     findings = await scanner.scan_page(url)

@@ -201,6 +201,26 @@ class OpenApiTests(unittest.TestCase):
         seed = parse_openapi(spec)
         self.assertTrue(any("api-version=2024" in u for u in seed.urls))
 
+    def test_operation_param_overrides_path_param(self):
+        # operation-level の parameter が同名・同 location の path-level を上書きし、
+        # 重複クエリキー（?api-version=v1&api-version=v2）を出力しない
+        spec = {
+            "openapi": "3.0.0",
+            "servers": [{"url": "https://api.example.com"}],
+            "paths": {"/items": {
+                "parameters": [{"name": "api-version", "in": "query",
+                                "schema": {"type": "string", "default": "v1"}}],
+                "get": {"parameters": [{"name": "api-version", "in": "query",
+                                        "schema": {"type": "string", "default": "v2"}}]},
+            }},
+        }
+        seed = parse_openapi(spec)
+        url = next(u for u in seed.urls if "/items" in u)
+        # op が path を上書き → v2 のみ、v1 は出ない、キーは 1 回だけ
+        self.assertIn("api-version=v2", url)
+        self.assertNotIn("api-version=v1", url)
+        self.assertEqual(url.count("api-version="), 1)
+
     def test_request_body_ref_resolved(self):
         spec = {
             "openapi": "3.0.0",

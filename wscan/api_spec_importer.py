@@ -158,6 +158,31 @@ def _resolve_params(params: list, spec: Optional[dict]) -> list:
     return out
 
 
+def _dedup_params(params: list) -> list:
+    """同一 ``(in, name)`` の parameter を後勝ち（op が path を上書き）で重複排除する（純粋）。
+
+    OpenAPI 仕様では operation-level parameter が同名・同 location の path-level
+    parameter を上書きする。``common_params + op_params`` の連結後に呼ぶと、後者
+    （op）が前者（path）を置き換える。``in``/``name`` が無いものは識別できないので
+    そのまま残す（URL 構築側で name 無しは無視される）。順序は概ね維持する。
+    """
+    by_key: dict[tuple, dict] = {}
+    order: list = []  # (key or unique sentinel) で出現順を保つ
+    extras: list = []  # in/name を持たないもの
+    for p in params or []:
+        if not isinstance(p, dict):
+            continue
+        loc, name = p.get("in"), p.get("name")
+        if loc and name:
+            key = (loc, name)
+            if key not in by_key:
+                order.append(key)
+            by_key[key] = p  # 後勝ち
+        else:
+            extras.append(p)
+    return [by_key[k] for k in order] + extras
+
+
 _HTTP_METHODS = ("get", "post", "put", "patch", "delete", "options", "head")
 
 
@@ -187,6 +212,11 @@ def parse_openapi(spec: dict, fallback_base: str = "") -> ApiSeedData:
             # 場合は解決してから扱う。未解決だと in/name が読めず必須クエリ
             # （api-version/tenant/locale 等）が URL から落ちて 400/404 になる。
             params = _resolve_params(params, spec)
+            # OpenAPI 仕様: operation の parameter は同一 (in, name) の path-level
+            # parameter を上書きする。解決後に (in, name) で重複排除（後勝ち=op 優先）
+            # しないと、?api-version=v1&api-version=v2 のように両値を出力してしまい、
+            # 重複キーを拒否する/先頭値を使う API では誤ったシードURLで検査される。
+            params = _dedup_params(params)
 
             # path パラメータのスキーマ表を作る
             path_schemas = {
