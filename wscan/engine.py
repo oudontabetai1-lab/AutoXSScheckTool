@@ -52,6 +52,11 @@ _CHECK_EXTRA_TYPES: dict[str, tuple[str, ...]] = {
     "cache_poisoning": ("cache_deception",),
 }
 
+# crawl 中／構築時に条件付きで自動有効化されるスキャナ（cms は CMS 検出時、privesc は
+# Cookie 認証時）。resume の Finding 復元（_init_checkpoint）は crawl の cms 自動追加より
+# 前に走るため、これらを常に in-scope 扱いにしないと既出 cms Finding を取りこぼす。
+_AUTO_ENABLED_CHECKS: frozenset[str] = frozenset({"cms", "privesc"})
+
 # API スペック由来テンプレート（api_seed_requests）でのみ動くスキャナ。通常の
 # page-level ループからは除外し、checkpoint を刻む _run_api_template_checks に一本化
 # する（状態変更系プローブの二重送信・resume 重複を防ぐ）。
@@ -1152,6 +1157,9 @@ class ScanEngine:
         """
         ct = check_type or ""
         effective = set(self.checks) | set(getattr(self, "scanners", {}).keys())
+        # crawl 中に条件付きで自動有効化される検査（cms/privesc）は、復元時点では
+        # まだ scanners に無いことがあるため常に in-scope 扱いで既出 Finding を保つ。
+        effective |= _AUTO_ENABLED_CHECKS
         for check in effective:
             if ct == check or ct.startswith(check + "_"):
                 return True

@@ -114,6 +114,17 @@ class CheckTypeScopeTests(unittest.TestCase):
         # "xss" は "dom_xss" にマッチしない
         self.assertFalse(in_scope("dom_xss"))
 
+    def test_auto_enabled_cms_in_scope_before_crawl(self):
+        # cms は crawl 中に自動有効化されるため、復元時点（scanners 未追加）でも
+        # in-scope 扱いにして既出 cms Finding を取りこぼさない。
+        in_scope = self._engine(["xss"], scanners=["xss"])
+        self.assertTrue(in_scope("cms"))
+        self.assertTrue(in_scope("cms_version_disclosure"))
+        # privesc も同様（Cookie 認証時に自動有効化）
+        self.assertTrue(in_scope("privesc_vertical"))
+        # 無関係チェックは依然 out-of-scope
+        self.assertFalse(in_scope("sqli"))
+
     def test_cache_deception_alias_in_scope(self):
         # cache_poisoning スキャナは cache_deception も出すので復元対象に含める
         in_scope = self._engine(["cache_poisoning"])
