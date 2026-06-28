@@ -209,6 +209,60 @@ class OpenApiTests(unittest.TestCase):
         seed = parse_openapi(spec)
         self.assertNotIn("Authorization", seed.headers)
 
+    def test_required_noncred_header_synthesized_without_example(self):
+        # 非認証の required ヘッダ（default/example 無し）は安全なサンプルで合成する
+        op = {
+            "parameters": [
+                {"name": "X-Tenant", "in": "header", "required": True,
+                 "schema": {"type": "string"}}
+            ],
+            "requestBody": {"content": {"application/json": {
+                "schema": {"type": "object", "properties": {"n": {"type": "string"}}}}}},
+        }
+        spec = {
+            "openapi": "3.0.0",
+            "servers": [{"url": "https://api.example.com"}],
+            "paths": {"/items": {"post": op}},
+        }
+        seed = parse_openapi(spec)
+        self.assertEqual(seed.headers.get("X-Tenant"), "test")
+
+    def test_required_cred_header_not_synthesized_without_value(self):
+        # required でも認証系（値無し）はダミー合成しない
+        op = {
+            "parameters": [
+                {"name": "X-API-Key", "in": "header", "required": True,
+                 "schema": {"type": "string"}}
+            ],
+            "requestBody": {"content": {"application/json": {
+                "schema": {"type": "object", "properties": {"n": {"type": "string"}}}}}},
+        }
+        spec = {
+            "openapi": "3.0.0",
+            "servers": [{"url": "https://api.example.com"}],
+            "paths": {"/items": {"post": op}},
+        }
+        seed = parse_openapi(spec)
+        self.assertNotIn("X-API-Key", seed.headers)
+
+    def test_swagger2_path_level_body_param(self):
+        # Swagger 2.0 の in:body が path-item レベルにある場合も RequestTemplate を作る
+        spec = {
+            "swagger": "2.0",
+            "host": "api.example.com",
+            "schemes": ["https"],
+            "paths": {"/items": {
+                "parameters": [{"name": "body", "in": "body",
+                                "schema": {"type": "object",
+                                           "properties": {"n": {"type": "string"}}}}],
+                "post": {},
+            }},
+        }
+        seed = parse_openapi(spec)
+        posts = [r for r in seed.requests if r.method == "POST" and "/items" in r.url]
+        self.assertEqual(len(posts), 1)
+        self.assertIn("n", posts[0].json_body)
+
     def test_vendor_json_media_type_preserved(self):
         # application/merge-patch+json 等のメディアタイプを template に保持する
         op = {

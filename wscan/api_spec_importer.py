@@ -185,6 +185,13 @@ def _dedup_params(params: list) -> list:
 
 _HTTP_METHODS = ("get", "post", "put", "patch", "delete", "options", "head")
 
+# 認証情報ヘッダ（小文字）。default/example が無いとき "test" 等のダミーを合成しない。
+# ダミーを seed.headers に入れると HeaderManager が利用者の --header を上書きし得るため。
+_AUTH_HEADER_NAMES = frozenset({
+    "authorization", "x-api-key", "x-auth-token", "x-access-token",
+    "proxy-authorization",
+})
+
 
 def parse_openapi(spec: dict, fallback_base: str = "") -> ApiSeedData:
     """OpenAPI/Swagger dict をシードへ（純粋関数）。
@@ -243,18 +250,23 @@ def parse_openapi(spec: dict, fallback_base: str = "") -> ApiSeedData:
                     # 転送制御/ネゴシエーション系は param として絶対にシードしない。
                     "cookie", "content-length", "host", "content-type", "accept",
                 ):
-                    # default/example がある時のみ採用（合成ダミーは入れない）。認証系
-                    # （authorization/x-api-key 等）も、スペックが明示した default/example
-                    # があれば実値として採用する（API キーをスペックに書く運用の救済）。
-                    # 値が無い認証系は "test" 等のダミー合成を避けて採らない。なお
-                    # 利用者の --header は engine 側で seed より優先される（上書きしない）。
-                    if "default" in schema or "example" in schema:
+                    is_cred = name.lower() in _AUTH_HEADER_NAMES
+                    has_value = "default" in schema or "example" in schema
+                    required = bool(p.get("required"))
+                    # 認証系（authorization/x-api-key 等）: スペックが明示した default/
+                    #   example があるときだけ実値として採用（API キーをスペックに書く運用の
+                    #   救済）。値が無ければ "test" 等のダミー合成を避けて採らない。利用者の
+                    #   --header は engine 側で seed より優先される（上書きしない）。
+                    # 非認証系（X-Tenant/X-API-Version 等）: default/example があれば採用。
+                    #   無くても required なら _sample_for_name で安全なサンプルを合成する
+                    #   （必須ヘッダ欠落で 400/401/404 になり API-first 検査が空振りするのを防ぐ）。
+                    if has_value or (not is_cred and required):
                         header_params[name] = str(_sample_for_name(name, schema))
             # クロール/全リクエストに効くよう共通ヘッダへ反映（後勝ち）
             if header_params:
                 seed.headers.update(header_params)
 
-            body_schema, body_ctype = _openapi_request_body_schema(op, spec)
+            body_schema, body_ctype = _openapi_request_body_schema(op, spec, params)
             is_body_op = body_schema is not None and method in ("post", "put", "patch")
             example = _example_from_schema(body_schema, spec) if is_body_op else None
 
@@ -286,7 +298,7 @@ def parse_openapi(spec: dict, fallback_base: str = "") -> ApiSeedData:
 
 
 def _openapi_request_body_schema(
-    op: dict, spec: Optional[dict] = None
+    op: dict, spec: Optional[dict] = None, params: Optional[list] = None
 ) -> tuple[Optional[dict], str]:
     """操作の JSON requestBody スキーマと Content-Type を返す（OpenAPI3 / Swagger2 両対応）。
 
@@ -308,8 +320,12 @@ def _openapi_request_body_schema(
         for ctype, media in content.items():
             if "json" in (ctype or "").lower():
                 return ((media or {}).get("schema") or {}), (ctype or "application/json")
-    # Swagger 2.0: parameters[in=body].schema（param 自体が $ref のことがある）
-    for p in _resolve_params(op.get("parameters", []) or [], spec):
+    # Swagger 2.0: parameters[in=body].schema（param 自体が $ref のことがある）。
+    # body param は path-item レベル（common_params）に置かれることがあるため、呼び出し
+    # 側が path+op をマージ済みの ``params`` を渡したらそれを使う（op.parameters だけ
+    # 見ると path-level body を取りこぼし RequestTemplate が作られない）。
+    body_params = params if params is not None else (op.get("parameters", []) or [])
+    for p in _resolve_params(body_params, spec):
         if p.get("in") == "body":
             return (p.get("schema") or {}), "application/json"
     return None, ""
