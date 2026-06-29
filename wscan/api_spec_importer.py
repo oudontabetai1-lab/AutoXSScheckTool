@@ -78,6 +78,37 @@ def _sample_for_name(name: str, schema: Optional[dict] = None) -> Any:
     return "test"
 
 
+def _query_scalar(v: Any) -> str:
+    """クエリ用にスカラ値を OpenAPI 慣習へシリアライズする（純粋）。
+
+    boolean は ``True``/``False``（Python 表現）ではなく ``true``/``false`` に。
+    その他は ``str()``。
+    """
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    return str(v)
+
+
+def _serialize_query_pairs(name: str, schema: Optional[dict] = None) -> list[tuple[str, str]]:
+    """OpenAPI query パラメータをサンプル値からシリアライズする（純粋）。
+
+    ``str(_sample_for_name(...))`` を直接使うと array/boolean が ``['test']`` /
+    ``True`` のような Python 表現になり、``tags=%5B%27test%27%5D`` / ``active=True``
+    という不正なクエリをシードして厳格な API で 400 になる。array は form/explode
+    相当（``name=a&name=b``）で各要素を別ペアに、boolean は ``true``/``false`` に整える。
+    object はクエリに載せない（deepObject 等のスタイルは未対応）。
+    """
+    sample = _sample_for_name(name, schema)
+    # bool は int のサブクラスなので list/dict より先に判定する
+    if isinstance(sample, bool):
+        return [(name, _query_scalar(sample))]
+    if isinstance(sample, list):
+        return [(name, _query_scalar(item)) for item in sample]
+    if isinstance(sample, dict):
+        return []
+    return [(name, _query_scalar(sample))]
+
+
 def _fill_path(path: str, params: dict) -> str:
     """``/users/{id}`` の ``{id}`` をサンプル値で埋める（純粋）。"""
     out = path
@@ -245,7 +276,7 @@ def parse_openapi(spec: dict, fallback_base: str = "") -> ApiSeedData:
                     continue
                 schema = p.get("schema") or p
                 if loc == "query":
-                    query_pairs.append((name, str(_sample_for_name(name, schema))))
+                    query_pairs.extend(_serialize_query_pairs(name, schema))
                 elif loc == "header" and name.lower() not in (
                     # 転送制御/ネゴシエーション系は param として絶対にシードしない。
                     "cookie", "content-length", "host", "content-type", "accept",

@@ -116,6 +116,30 @@ class HelperTests(unittest.TestCase):
             "/users/1/posts/test",
         )
 
+    def test_serialize_query_pairs_scalar_and_bool(self):
+        from wscan.api_spec_importer import _serialize_query_pairs
+        self.assertEqual(_serialize_query_pairs("q", {"type": "string"}), [("q", "test")])
+        # boolean は true/false（Python の True/False にしない）
+        self.assertEqual(
+            _serialize_query_pairs("active", {"type": "boolean", "default": True}),
+            [("active", "true")],
+        )
+
+    def test_serialize_query_pairs_array_explodes(self):
+        from wscan.api_spec_importer import _serialize_query_pairs
+        # array は form/explode 相当で各要素を別ペアに（["test"] → tags=test）
+        self.assertEqual(
+            _serialize_query_pairs("tags", {"type": "array"}), [("tags", "test")],
+        )
+        self.assertEqual(
+            _serialize_query_pairs("ids", {"type": "array", "default": [1, 2]}),
+            [("ids", "1"), ("ids", "2")],
+        )
+
+    def test_serialize_query_pairs_object_skipped(self):
+        from wscan.api_spec_importer import _serialize_query_pairs
+        self.assertEqual(_serialize_query_pairs("o", {"type": "object"}), [])
+
 
 class OpenApiTests(unittest.TestCase):
     def test_urls_and_base(self):
@@ -311,6 +335,28 @@ class OpenApiTests(unittest.TestCase):
         self.assertIn("api-version=v2", url)
         self.assertNotIn("api-version=v1", url)
         self.assertEqual(url.count("api-version="), 1)
+
+    def test_boolean_array_query_params_serialized_in_url(self):
+        # array/boolean のクエリが Python 表現（['test']/True）でシードされないこと
+        spec = {
+            "openapi": "3.0.0",
+            "servers": [{"url": "https://api.example.com"}],
+            "paths": {"/items": {"get": {"parameters": [
+                {"name": "active", "in": "query",
+                 "schema": {"type": "boolean", "default": True}},
+                {"name": "tags", "in": "query",
+                 "schema": {"type": "array", "default": ["a", "b"]}},
+            ]}}},
+        }
+        seed = parse_openapi(spec)
+        url = next(u for u in seed.urls if "/items" in u)
+        self.assertIn("active=true", url)
+        self.assertIn("tags=a", url)
+        self.assertIn("tags=b", url)
+        # Python 表現の混入が無い
+        self.assertNotIn("True", url)
+        self.assertNotIn("%5B", url)  # '['
+        self.assertNotIn("%27", url)  # "'"
 
     def test_request_body_ref_resolved(self):
         spec = {
