@@ -45,6 +45,73 @@ _CURRENT_WORKER: ContextVar = ContextVar("wscan_worker", default=None)
 # of a single scan_field call so parallel workers never clobber each other.
 _FIELD_PAYLOAD_OVERRIDES: ContextVar = ContextVar("wscan_payload_overrides", default=None)
 
+# 検査名と一致／前置しない別 check_type を出すスキャナのエイリアス。
+# resume 時の Finding 絞り込み（_check_type_in_scope）で使う。
+# 例: cache_poisoning スキャナは cache_deception も出す。
+_CHECK_EXTRA_TYPES: dict[str, tuple[str, ...]] = {
+    "cache_poisoning": ("cache_deception",),
+}
+
+# crawl 中／構築時に条件付きで自動有効化されるスキャナ（cms は CMS 検出時、privesc は
+# Cookie 認証時）。resume の Finding 復元（_init_checkpoint）は crawl の cms 自動追加より
+# 前に走るため、これらを常に in-scope 扱いにしないと既出 cms Finding を取りこぼす。
+_AUTO_ENABLED_CHECKS: frozenset[str] = frozenset({"cms", "privesc"})
+
+# API スペック由来テンプレート（api_seed_requests）でのみ動くスキャナ。通常の
+# page-level ループからは除外し、checkpoint を刻む _run_api_template_checks に一本化
+# する（状態変更系プローブの二重送信・resume 重複を防ぐ）。
+_API_TEMPLATE_ONLY_CHECKS: frozenset[str] = frozenset({"mass_assignment"})
+
+def _page_check_cp_url(check_name: str, url: str) -> str:
+    """page-level チェックポイントの url 成分を返す（exact URL）。
+
+    以前は graphql を origin スコープで刻んでいたが、それだと API スペック等が
+    同一オリジンの **別 URL**（例: 先に ``/users``、後に非標準の ``/gql``）を持つとき、
+    先行 URL で origin を「済み」にした時点で後続の ``/gql`` が丸ごと飛ばされ、
+    ``GraphQLScanner.scan_page`` の exact-URL プローブが走らなくなる。チェック
+    ポイントは exact URL で刻む。標準パスの origin 単位掃引は scanner 内部の
+    ``_tested_endpoints``/``_tested_urls`` ガードが run 内で重複を防ぐため、
+    intrusive な再送は起きない（resume 跨ぎの標準パス再掃引は冪等な introspection）。
+    """
+    return url
+
+
+def _reset_scanner_url_guard(scanner, url: str) -> None:
+    """scanner の per-URL/per-origin 重複ガードから ``url`` を外す（純粋・副作用最小）。
+
+    再ログイン後の再試行で scan_page(url) を確実に再実行させるため、各スキャナが
+    使う既知のガード集合（``_checked_urls`` / ``_tested_urls`` / ``_tested_endpoints``）
+    から該当エントリを取り除く。
+    """
+    for attr in ("_checked_urls", "_tested_urls"):
+        s = getattr(scanner, attr, None)
+        if isinstance(s, set):
+            s.discard(url)
+    origins = getattr(scanner, "_tested_endpoints", None)
+    if isinstance(origins, set):
+        try:
+            from urllib.parse import urlparse as _up
+            p = _up(url)
+            origins.discard(f"{p.scheme}://{p.netloc}")
+        except Exception:
+            pass
+
+
+def _cookie_path_matches(request_path: str, cookie_path: str) -> bool:
+    """RFC 6265 の path-match（純粋関数）。
+
+    Cookie の ``Path`` 属性が要求パスにマッチするか。``cookie_path`` が要求パスの
+    プレフィックス（境界はスラッシュ）であれば送出してよい。
+    """
+    req = request_path or "/"
+    cp = cookie_path or "/"
+    if cp == req:
+        return True
+    if not req.startswith(cp):
+        return False
+    # 境界が "/" であること（/admin が /administrator に誤マッチしないように）
+    return cp.endswith("/") or req[len(cp):len(cp) + 1] == "/"
+
 import yaml
 from rich.console import Console
 from rich.rule import Rule
@@ -344,6 +411,17 @@ class ScanEngine:
         tls_client_cert_password: str = "",
         tls_ca_cert: str = "",
         tls_verify: bool = False,
+        # API ファースト検査: OpenAPI/Swagger/Postman スペックのパス
+        api_spec_path: str = "",
+        # 再開可能スキャン: 直前スキャンの出力ディレクトリ（checkpoint.json を読む）
+        resume_dir: str = "",
+        enable_checkpoint: bool = True,
+        # 検査時間帯ゲート（"09:00-18:00" / "Mon-Fri 22:00-06:00" 等のリスト）
+        allowed_hours: Optional[list] = None,
+        forbidden_hours: Optional[list] = None,
+        # セッション失効時の自動再ログイン
+        relogin_on_expiry: bool = True,
+        logged_in_marker: str = "",
     ):
         # ユーザーが指定した URL は末尾スラッシュも含めてそのまま保持する。
         # 以前は url.rstrip("/") で末尾の "/" を一律に除去していたが、
@@ -410,6 +488,26 @@ class ScanEngine:
         self.har_path: str = har_path
         # 手動巡回インポートパス
         self.manual_crawl_path: str = manual_crawl_path
+        # API ファースト検査: スペック取り込みパスと、取り込んだ JSON 操作群
+        # （mass_assignment 等が利用する RequestTemplate のリスト）
+        self.api_spec_path: str = api_spec_path
+        self.api_seed_requests: list = []
+        # API スペック由来 URL の集合（GraphQL の具体 URL probe を API/GraphQL 系のみへ
+        # 限定するために参照。全クロールページへ probe を撒かないためのゲート）。
+        self.api_seed_urls: set = set()
+        # API テンプレート検査中に認証失効（401/login）を観測したときに立つフラグ。
+        # mass_assignment 等がベースライン応答で検知し、_run_api_template_checks が
+        # 「済み」記録を抑止して resume での恒久スキップを防ぐ。
+        self._api_auth_failed: bool = False
+        # 再開可能スキャン
+        self.resume_dir: str = resume_dir
+        self.enable_checkpoint: bool = enable_checkpoint
+        self.checkpoint = None  # CheckpointState（run() で初期化）
+        # セッション失効時の自動再ログイン
+        self.relogin_on_expiry: bool = relogin_on_expiry
+        # 認証済みの目印（指定が無ければログイン成功判定文字列を流用）
+        self.logged_in_marker: str = logged_in_marker or login_success_indicator
+        self._relogin_count: int = 0
         # L: Webhook/Slack 通知マネージャー
         if webhook_url:
             from wscan.notification import NotificationManager
@@ -662,6 +760,7 @@ class ScanEngine:
 
         # State
         self.all_findings: list = []
+        self.wave_errors: list = []                  # 検出力低下事象の観測ログ（base から共有）
         self._finding_dedup: set[tuple] = set()     # (url, field_name, check_type) — prevent duplicates
         self.attack_plans: list = []
         self.visited_urls: set = set()
@@ -677,6 +776,11 @@ class ScanEngine:
         self._transition_via: dict = {}
         # Scan controller (intervention system)
         self.controller = ScanController()
+        # 検査時間帯ゲートをコントローラへ設定（空なら常時許可）
+        self.allowed_hours: list = list(allowed_hours or [])
+        self.forbidden_hours: list = list(forbidden_hours or [])
+        if self.allowed_hours or self.forbidden_hours:
+            self.controller.set_time_windows(self.allowed_hours, self.forbidden_hours)
         # SQLi auth-bypass signal: set by signal_auth_bypass() when a scanner detects bypass
         self.auth_bypass_detected: bool = False
         self.auth_bypass_login_url: str = ""
@@ -873,6 +977,460 @@ class ScanEngine:
         return worker if worker is not None else self._browser
 
     # =========================================================================
+    # Checkpoint / resume
+    # =========================================================================
+
+    def _init_checkpoint(self) -> None:
+        """チェックポイントを初期化する。``resume_dir`` 指定時は進捗を復元する。"""
+        if not self.enable_checkpoint:
+            return
+        from wscan import checkpoint as cp
+
+        state = None
+        if self.resume_dir:
+            loaded = cp.load_checkpoint(self.resume_dir)
+            if loaded is None:
+                console.print(
+                    f"  [yellow][Resume] checkpoint が見つかりません: {self.resume_dir}"
+                    f" — 最初から実行します。[/yellow]"
+                )
+            elif not loaded.is_compatible_with(self.target_url, self.checks):
+                console.print(
+                    "  [yellow][Resume] checkpoint のターゲット/チェックが今回と"
+                    "整合しないため破棄します（最初から実行）。[/yellow]"
+                )
+            else:
+                state = loaded
+                # 既出 Finding をレポートへ復元（重複防止のため dedup へも登録）。
+                # ただし今回要求されたチェックに属する Finding のみ復元する
+                # （xss sqli の結果を --checks xss で再開したとき、SQLi の古い
+                # Finding をレポートへ持ち込まないため）。
+                restored = 0
+                for fd in state.findings:
+                    try:
+                        f = Finding.from_dict(fd)
+                    except Exception:
+                        continue
+                    if not self._check_type_in_scope(f.check_type):
+                        continue
+                    key = finding_dedup_key_for(f)
+                    if key not in self._finding_dedup:
+                        self._finding_dedup.add(key)
+                        self.all_findings.append(f)
+                        restored += 1
+                console.print(
+                    f"  [green][Resume] {len(state.completed_units)} 済み単位 / "
+                    f"{restored} 件の既出 Finding を復元しました。[/green]"
+                )
+
+        if state is None:
+            state = cp.CheckpointState(target_url=self.target_url, checks=list(self.checks))
+        self.checkpoint = state
+        self._save_checkpoint()
+
+    def _save_checkpoint(self) -> None:
+        """現在の進捗（済み単位 + Finding スナップショット）を書き出す。"""
+        if not self.enable_checkpoint or self.checkpoint is None:
+            return
+        from wscan import checkpoint as cp
+
+        try:
+            # Finding は all_findings から都度スナップショット（最新を保存）
+            self.checkpoint.findings = [f.to_dict() for f in self.all_findings]
+            cp.save_checkpoint(self.output_dir, self.checkpoint)
+        except Exception as exc:
+            self.wave_errors.append(f"checkpoint_save: {type(exc).__name__}: {exc}")
+
+    async def _run_api_template_checks(self) -> None:
+        """API スペック由来の JSON 操作（``api_seed_requests``）を、クロール結果に
+        依存せず検査する。
+
+        JSON API は GET がページ化されない（404/405）ことが多く、その場合 page-level の
+        ``scan_page`` がそれらの URL に対して一度も呼ばれない。``mass_assignment`` は
+        テンプレートを直接回すが、``prototype_pollution``/``cache_poisoning``/``graphql``
+        のような URL 起点の page-level 検査も取りこぼす。ここでテンプレートの URL 群に
+        対して全 page-level スキャナの ``scan_page`` を明示的に起動する（各スキャナの
+        ``_checked_urls``/``_done`` ガードで二重実行は無害）。
+        """
+        if not self.api_seed_requests:
+            return
+        # 検査対象 URL: 各テンプレートの URL（重複除去）＋ターゲット（mass_assignment 用）。
+        urls: list[str] = []
+        seen: set[str] = set()
+        for tmpl in self.api_seed_requests:
+            u = getattr(tmpl, "url", "") or ""
+            if u and u not in seen:
+                seen.add(u)
+                urls.append(u)
+        if self.target_url not in seen:
+            urls.append(self.target_url)
+
+        for url in urls:
+            # 時間帯ゲート/一時停止/スキップ/Abort を尊重する。クロール無しの API
+            # スキャンではここが最初の攻撃になり得るため controller を必ず通す。
+            try:
+                await self.controller.checkpoint()
+            except SkipField:
+                continue
+            except SkipPage:
+                continue
+            # これから叩く URL でセッション失効を検知して再ログインする。target が
+            # 公開ページで API テンプレートだけ保護されている場合、target_url だけ
+            # 見ても失効を検知できず、httpx 検査が 401 を Finding 0 で「済み」記録し
+            # resume が恒久スキップしてしまうため、URL 単位で確認・cookie 更新する。
+            await self._maybe_relogin_for_page(url)
+            # 再ログインが起きなくても、ブラウザが既に保持する当該ホストの Cookie を
+            # self.cookies へ写す。マルチスコープ（別サブドメインの API/ログイン）で
+            # 初期ログインが API ホストに着地済みでも httpx 検査が認証されるようにする。
+            try:
+                await self._sync_cookies_from_browser(self.browser, for_url=url)
+            except Exception:
+                pass
+            # httpx ベースのセッション確認。ブラウザの GET プレフライトが見逃す API の
+            # 401/login を、scanner が使うのと同じ Cookie で検出する。mass_assignment 以外
+            # （graphql/cache/proto）は 401 でも空 Finding を返すだけなので、ここで失効を
+            # 捉えて再ログインしないと未認証の空振りを「済み」記録→resume 恒久スキップになる。
+            url_auth_failed = False
+            if await self._api_session_looks_expired(url):
+                if not await self._force_relogin(for_url=url):
+                    url_auth_failed = True  # 復旧不能 → この URL の単位は済みにしない
+            for check_name, scanner in self.scanners.items():
+                # 再開: 済みの API テンプレート単位は飛ばす（合成フィールド名で記録）。
+                # exact URL で刻む。graphql を origin で刻むと、先行テンプレ URL の後に
+                # 続く非標準 GraphQL エンドポイント（/gql 等）が丸ごと飛ばされるため。
+                cp_url = _page_check_cp_url(check_name, url)
+                if self._checkpoint_is_done(cp_url, "(api-template)", 0, check_name):
+                    continue
+                # page-level 攻撃（_attack_one_page）はこの API テンプレ pass より前に
+                # 走り、proto/cache/graphql 等の非テンプレ専用検査を crawl 済み URL に
+                # 対して scan_page 済みにしている。page 攻撃後・本 pass 前にクラッシュ/
+                # Abort して resume すると、(page) 単位は済みでも (api-template) は未済の
+                # ため scan_page を再送してしまう（proto の JSON POST 等、状態変更を伴う）。
+                # API テンプレ専用でない検査は (page) 単位の完了も尊重して二重送信を防ぐ。
+                if (
+                    check_name not in _API_TEMPLATE_ONLY_CHECKS
+                    and self._checkpoint_is_done(cp_url, "(page)", 0, check_name)
+                ):
+                    continue
+                try:
+                    self._api_auth_failed = url_auth_failed
+                    findings = await scanner.scan_page(url)
+                    # 実テンプレ要求で認証失効を観測したら、再ログイン+1回だけ再試行。
+                    # GET プレフライトでは検知できないメソッド限定保護(POST=401)を救済。
+                    # 失効は既知なので _force_relogin（検知を介さず直接 auto_login）を使う。
+                    if self._api_auth_failed:
+                        relogged = await self._force_relogin(for_url=url)
+                        if relogged:
+                            self._api_auth_failed = False
+                            # scanner は初回で url を per-URL ガード（_checked_urls 等）に
+                            # 登録済みのことがあり、そのまま再実行すると [] を返す。
+                            # 再試行が実際に走るようガードからこの url を外す。
+                            _reset_scanner_url_guard(scanner, url)
+                            findings = await scanner.scan_page(url)
+                    for f in (findings or []):
+                        self._record_finding(f, source="api-spec")
+                except AbortScan:
+                    # 中断前に、ここまでの Finding と進捗を必ず永続化してから伝播する
+                    # （resume が状態変更系テンプレートを再実行しないように）。
+                    self._save_checkpoint()
+                    raise
+                except Exception as e:
+                    console.print(
+                        f"  [yellow]API template check ({check_name}) on {url}: {e}[/yellow]"
+                    )
+                else:
+                    # 認証失効が解消しないまま空振りした単位は「済み」にしない
+                    # （resume が再試行できるようにする）。
+                    if not self._api_auth_failed:
+                        self._checkpoint_mark_done(cp_url, "(api-template)", 0, check_name)
+            # URL 単位で進捗＋Finding スナップショットを保存（クラッシュ耐性）。
+            self._save_checkpoint()
+
+    def _check_type_in_scope(self, check_type: str) -> bool:
+        """Finding の check_type が今回有効なチェック集合に属するか。
+
+        スキャナの ``CHECK_TYPE`` は実際の検査名と一致するもの（``xss``/``sqli``）と、
+        サブタイプを持つもの（``graphql_introspection``/``jwt_alg_none``/``privesc_*``）
+        がある。完全一致・``"<check>_"`` 前置・エイリアス表で判定する。
+
+        判定対象は ``self.checks`` ではなく **実際に有効なスキャナ**（``self.scanners``）。
+        Cookie 認証時に自動追加される ``privesc``/``cms`` 等は ``checks`` には入らないが
+        スキャナは動く。``checks`` だけで絞ると、それらの完了単位は honor される一方で
+        既出 ``privesc_*`` Finding が復元されず、レポートから消えてしまう。
+        """
+        ct = check_type or ""
+        effective = set(self.checks) | set(getattr(self, "scanners", {}).keys())
+        # crawl 中に条件付きで自動有効化される検査（cms/privesc）は、復元時点では
+        # まだ scanners に無いことがあるため常に in-scope 扱いで既出 Finding を保つ。
+        effective |= _AUTO_ENABLED_CHECKS
+        for check in effective:
+            if ct == check or ct.startswith(check + "_"):
+                return True
+            if ct in _CHECK_EXTRA_TYPES.get(check, ()):
+                return True
+        return False
+
+    def _checkpoint_is_done(
+        self, url: str, field_name: str, form_index: int, check: str,
+        is_url_param: bool = False,
+    ) -> bool:
+        if not self.enable_checkpoint or self.checkpoint is None:
+            return False
+        return self.checkpoint.is_done(url, field_name, form_index, check, is_url_param)
+
+    def _checkpoint_mark_done(
+        self, url: str, field_name: str, form_index: int, check: str,
+        is_url_param: bool = False,
+    ) -> None:
+        if not self.enable_checkpoint or self.checkpoint is None:
+            return
+        self.checkpoint.mark_done(url, field_name, form_index, check, is_url_param)
+
+    # =========================================================================
+    # Session expiry / auto re-login
+    # =========================================================================
+
+    async def _relogin_if_needed(
+        self, browser, *, status=None, final_url: str = "", body: str = "", for_url: str = ""
+    ) -> bool:
+        """応答がセッション失効を示す場合に ``browser`` 上で自動再ログインする。
+
+        再ログインに成功したら True。失効していない／再ログイン不可なら False。
+        誤った連続再ログインを避けるため :mod:`wscan.session_guard` の厳しめの
+        判定（401 か「ログインフォーム残存」）を通った場合だけ実行する。
+
+        ``browser`` は呼び出し側が渡す文脈対応ブラウザ（並列時は worker、直列時は
+        メイン）。worker 自身のコンテキストで再ログインすることで、別 worker が
+        攻撃中のメインページを動かす副作用を避ける。
+        """
+        if not self.relogin_on_expiry:
+            return False
+        if not (self.login_url and getattr(browser, "auth_user", "")
+                and getattr(browser, "auth_pass", "")):
+            return False
+        if not hasattr(browser, "auto_login"):
+            return False
+        from wscan import session_guard
+
+        if not session_guard.looks_logged_out(
+            status=status,
+            final_url=final_url,
+            body=body,
+            login_url=self.login_url,
+            logged_in_marker=self.logged_in_marker,
+        ):
+            return False
+
+        self._relogin_count += 1
+        console.print(
+            f"  [bold yellow][Auth] セッション失効を検知 — 自動再ログインを試みます "
+            f"(#{self._relogin_count})[/bold yellow]"
+        )
+        if self.monitor:
+            try:
+                await self.monitor.emit_status("セッション失効を検知 — 自動再ログイン中", "running")
+            except Exception:
+                pass
+        try:
+            success = await browser.auto_login(
+                self.login_url,
+                user_field=self.login_user_field,
+                pass_field=self.login_pass_field,
+                success_indicator=self.login_success_indicator,
+            )
+        except Exception as exc:
+            console.print(f"  [yellow][Auth] 再ログイン失敗: {exc}[/yellow]")
+            return False
+        if success:
+            console.print("  [green][Auth] 再ログイン成功 — セッションを更新しました。[/green]")
+            # 新しい Cookie を httpx 系（auth_headers）にも反映する。これを怠ると
+            # mass_assignment/graphql/cache_poisoning/server-side proto などの直接
+            # httpx 検査が失効 Cookie を送り続けて認証 API を取りこぼす。これから叩く
+            # ホスト（for_url）の Cookie を採るため for_url を渡す。
+            await self._sync_cookies_from_browser(browser, for_url=for_url or final_url)
+        else:
+            console.print("  [yellow][Auth] 再ログインできませんでした。[/yellow]")
+        return bool(success)
+
+    async def _sync_cookies_from_browser(self, browser, for_url: str = "") -> None:
+        """ブラウザコンテキストの Cookie を ``self.cookies`` 文字列へ反映する。
+
+        ``auth_headers()`` は ``self.cookies`` を Cookie ヘッダに使うため、再ログイン
+        後にここを更新しないと httpx ベースの検査が古い Cookie を送ってしまう。
+        ``for_url`` のホスト（未指定なら target_url）宛に送られる Cookie のみ採用する。
+        マルチスコープ（www とは別サブドメインの API/ログイン）では、これから叩く
+        ホストを渡さないと host-only Cookie が落ちて API 検査が未認証になる。
+        """
+        try:
+            from urllib.parse import urlparse as _up
+            page = getattr(browser, "page", None)
+            if page is None:
+                return
+            cookies = await page.context.cookies()
+        except Exception:
+            return
+        if not cookies:
+            # jar が空（ログアウトで消去 / Bearer・localStorage 認証など）。stale な
+            # Cookie を送り続けないようクリアする。なお page 取得不能・例外時は判定
+            # できないため上の except/None 経路では据え置く（無闇に消さない）。
+            self.cookies = ""
+            return
+        _parsed = _up(for_url or self.target_url)
+        target_host = (_parsed.hostname or "").lower()
+        req_path = _parsed.path or "/"
+        # (path, "name=value") を集めてから RFC 6265 §5.4 の並びへ整える。
+        matched: list[tuple[str, str]] = []
+        for c in cookies:
+            name = c.get("name")
+            if not name:
+                continue
+            raw_dom = str(c.get("domain", ""))
+            # 先頭ドットの有無で host-only か domain-scoped かを判別する
+            # （Playwright: ドメイン Cookie は ".example.com"、host-only は "example.com"）。
+            is_domain_cookie = raw_dom.startswith(".")
+            dom = raw_dom.lstrip(".").lower()
+            # ブラウザの送出規則に合わせて採用する:
+            #  - 完全一致は常に可
+            #  - サブドメインへの suffix 一致は **domain-scoped Cookie のときだけ** 可
+            #    （host-only な example.com の Cookie を api.example.com へ送らない）。
+            if dom and target_host and not (
+                target_host == dom
+                or (is_domain_cookie and target_host.endswith("." + dom))
+            ):
+                continue
+            cpath = str(c.get("path", "/") or "/")
+            # path スコープも照合（Path=/admin の Cookie を /api へ送らない）。
+            if not _cookie_path_matches(req_path, cpath):
+                continue
+            matched.append((cpath, f"{name}={c.get('value', '')}"))
+        # RFC 6265 §5.4: path の長いものを先に送る（同名 Cookie が / と /admin に
+        # ある場合、より具体的な /admin を先頭に）。最初の値を使うフレームワークで
+        # 誤ったセッション（root cookie）で検査するのを防ぐ。stable sort なので同じ
+        # path 長は元の順序（概ね生成順）を保つ。
+        matched.sort(key=lambda pv: len(pv[0]), reverse=True)
+        # マッチ集合で**常に置換**する（空でも）。per-URL 同期では、前の URL で
+        # 別ホスト用に設定した self.cookies が残ると、当該ホストに無関係な Cookie を
+        # 送って別セッションで検査してしまう。一致が無ければクリアして未認証で送る。
+        self.cookies = "; ".join(pv[1] for pv in matched)
+
+    async def _maybe_relogin_for_page(self, url: str) -> None:
+        """攻撃対象ページの状態を見てセッション失効なら再ログインする。
+
+        並列時に別ワーカーのメインページを動かさないよう、文脈対応の
+        ``self.browser``（worker 実行中は worker、直列時はメイン）を使う。worker は
+        これから ``url`` を攻撃するので、ここでの遷移は自分自身のページに対する
+        無害なものになる。``auto_login`` を持たないブラウザなら no-op。
+        """
+        if not self.relogin_on_expiry:
+            return
+        # ログインページ自体を攻撃対象にしている場合は再ログインしない。
+        # ここで auto_login するとログインフォームが認証後画面に化け、ログイン
+        # サーフェスへの SQLi/XSS 検査が空振りになる（_scan_login_form_preauth が
+        # この経路を通るため）。
+        if self._is_login_target_url(url):
+            return
+        browser = self.browser  # 文脈対応（worker or main）
+        if not (self.login_url and getattr(browser, "auth_user", "")
+                and getattr(browser, "auth_pass", "")):
+            return
+        if not hasattr(browser, "auto_login"):
+            return
+        try:
+            # navigate() は >=400 応答で False を返すが、401 は失効の最強シグナル
+            # なので bool で早期 return せず、ステータス/本文を見て判定する。
+            await browser.navigate(url, retries=self.navigation_retries)
+            body = await browser.page.content()
+            final_url = browser.page.url
+        except Exception:
+            body = ""
+            final_url = url
+        status = None
+        try:
+            network = getattr(browser, "network", None)
+            pair = network.latest_for_url(url, match_query=False) if network else None
+            if pair:
+                status = (pair.get("response", {}) or {}).get("status")
+        except Exception:
+            status = None
+        # 判定材料が全く得られなければ何もしない
+        if not body and status is None:
+            return False
+        relogged = await self._relogin_if_needed(
+            browser, status=status, final_url=final_url, body=body, for_url=url
+        )
+        if relogged:
+            # 認証済みコンテンツを攻撃で見るため、対象ページへ再遷移する。
+            try:
+                await browser.navigate(url, retries=self.navigation_retries)
+            except Exception:
+                pass
+        return bool(relogged)
+
+    async def _force_relogin(self, for_url: str = "") -> bool:
+        """検知を介さず直接再ログインする（失効が既知のとき用）。成功で True。
+
+        実テンプレ要求(POST 等)で 401 を観測済みの場合、GET プレフライトでは
+        失効を再検知できない（メソッド限定保護で 404/405）。そのときは検知を
+        飛ばして直接 auto_login し、``for_url`` のホスト宛 Cookie を同期する。
+        """
+        if not self.relogin_on_expiry:
+            return False
+        browser = self.browser
+        if not (self.login_url and getattr(browser, "auth_user", "")
+                and getattr(browser, "auth_pass", "")):
+            return False
+        if not hasattr(browser, "auto_login"):
+            return False
+        try:
+            success = await browser.auto_login(
+                self.login_url,
+                user_field=self.login_user_field,
+                pass_field=self.login_pass_field,
+                success_indicator=self.login_success_indicator,
+            )
+        except Exception as exc:
+            console.print(f"  [yellow][Auth] 再ログイン失敗: {exc}[/yellow]")
+            return False
+        if success:
+            self._relogin_count += 1
+            await self._sync_cookies_from_browser(browser, for_url=for_url)
+        return bool(success)
+
+    async def _api_session_looks_expired(self, url: str) -> bool:
+        """``url`` への **非破壊 GET**（scanner と同じ auth_headers）で失効を判定する。
+
+        ブラウザ GET プレフライトと異なり、httpx ベース検査が実際に送る Cookie/ヘッダで
+        確認する。状態変更を避けるため必ず GET のみ（POST/PUT/PATCH テンプレを
+        プレフライトで実行すると create 等が二重実行され state を壊す）。POST 専用
+        エンドポイント（GET=404/405 だが実 POST=401）の失効は、実際に POST する
+        mass_assignment / prototype_pollution が ``_api_auth_failed`` を立てて救済する。
+        再ログイン未設定なら常に False。判定不能（例外）も False。
+        """
+        if not (self.relogin_on_expiry and self.login_url):
+            return False
+        import httpx
+        from wscan import session_guard
+
+        kwargs: dict = {"timeout": getattr(self, "timeout", 15), "follow_redirects": True}
+        if hasattr(self, "httpx_client_kwargs"):
+            kwargs = self.httpx_client_kwargs(**kwargs)
+        elif getattr(self, "proxy", ""):
+            kwargs["proxy"] = self.proxy
+        headers = self.auth_headers() if hasattr(self, "auth_headers") else {}
+        try:
+            async with httpx.AsyncClient(**kwargs) as client:
+                r = await client.get(url, headers=headers)
+        except Exception:
+            return False
+        return session_guard.looks_logged_out(
+            status=r.status_code,
+            final_url=str(r.url),
+            body=r.text,
+            login_url=self.login_url,
+            logged_in_marker=self.logged_in_marker,
+        )
+
+    # =========================================================================
     # Public entry point
     # =========================================================================
 
@@ -891,6 +1449,9 @@ class ScanEngine:
 
         loop = asyncio.get_event_loop()
         self.controller.start(loop, monitor=self.monitor)
+
+        # 再開可能スキャン: チェックポイントを初期化（resume 指定時は復元）
+        self._init_checkpoint()
 
         # U-3: Start manual payload listener if monitor active
         if self.monitor:
@@ -930,6 +1491,8 @@ class ScanEngine:
                 if success:
                     self.auth_landing_url = getattr(self._browser, "last_login_url", "") or self._browser.page.url
                     console.print("  [green][Auth] Login successful — session cookies captured.[/green]")
+                    # httpx 系検査も認証されるよう、初回ログイン直後に Cookie を同期する。
+                    await self._sync_cookies_from_browser(self._browser)
                     if self.auth_landing_url:
                         console.print(f"  [dim][Auth] Authenticated landing:[/dim] {self.auth_landing_url}")
                 else:
@@ -976,16 +1539,30 @@ class ScanEngine:
 
             # ── Phase 3: Attack ──────────────────────────────────────────
             if self.monitor: await self.monitor.emit_phase("attack")
+            scan_aborted = False
             try:
                 await self._phase_attack(crawled_pages, plans)
             except AbortScan:
+                scan_aborted = True
                 console.print(
                     "\n[bold red][Intervention] Scan aborted by operator.[/bold red] "
                     "Generating partial report …"
                 )
 
+            # ── Phase 3b: API スペック由来の本文検査（クロール非依存）──────
+            # JSON API は GET に 404/405 を返してページ化されないことが多く、
+            # その場合 page-level の scan_page が一度も呼ばれず mass_assignment 等が
+            # 空振りする。クロール結果に依存せず api_seed_requests を直接検査する。
+            # 既に Abort 済みなら、状態変更系（POST/PUT/PATCH）を新たに送らないため
+            # この後続フェーズは実行しない（abort 制御の信頼性を保つ）。
+            if not scan_aborted:
+                try:
+                    await self._run_api_template_checks()
+                except AbortScan:
+                    scan_aborted = True
+
             # ── Phase 3c: Post-Auth Crawl + Attack (if SQLi bypass detected) ──
-            if self.auth_bypass_detected:
+            if not scan_aborted and self.auth_bypass_detected:
                 console.print(
                     "\n[bold red][Auth Bypass][/bold red] "
                     "SQL injection bypass confirmed — "
@@ -1312,6 +1889,47 @@ class ScanEngine:
             except Exception as _manual_err:
                 console.print(f"  [yellow][Manual Crawl] 読み込み失敗: {_manual_err}[/yellow]")
 
+        # API ファースト検査 — OpenAPI/Swagger/Postman スペックからエンドポイント・
+        # 共通ヘッダ・JSON 操作（mass_assignment 等が使う）をシードする。
+        if self.api_spec_path:
+            try:
+                from wscan.api_spec_importer import ApiSpecImporter
+                api_seed = ApiSpecImporter().load(self.api_spec_path, self.target_url)
+                console.print(
+                    f"  [dim cyan][API][/dim cyan] {len(api_seed.urls)} URL, "
+                    f"{len(api_seed.requests)} JSON 操作を読み込みました: {self.api_spec_path}"
+                )
+                for _aurl in api_seed.urls:
+                    if (
+                        _aurl not in self.visited_urls
+                        and self._is_access_allowed_url(_aurl)
+                        and not self._is_url_excluded(_aurl)
+                    ):
+                        self.visited_urls.add(_aurl)
+                        queue.append((_aurl, 0, self.target_url))
+                # JSON ボディ操作はスコープ内のものだけ mass_assignment へ渡す
+                self.api_seed_requests = [
+                    r for r in api_seed.requests
+                    if self._is_attack_target_url(r.url) and not self._is_url_excluded(r.url)
+                ]
+                # スペック由来 URL（GET 含む全操作）を記録（graphql の具体 URL probe ゲート用）
+                self.api_seed_urls = {
+                    u for u in (api_seed.urls or [])
+                    if not self._is_url_excluded(u)
+                } | {r.url for r in self.api_seed_requests}
+                if getattr(api_seed, "headers", None):
+                    # 利用者が --header で明示した値は seed（スペックの default/example、
+                    # 例えば API キーのプレースホルダ）で上書きしない。has() で既存を尊重。
+                    api_hdrs = {
+                        k: v for k, v in api_seed.headers.items()
+                        if k.lower() not in ("cookie", "content-length", "host")
+                        and not self.header_manager.has(k)
+                    }
+                    if api_hdrs:
+                        await self.header_manager.update(api_hdrs)
+            except Exception as _api_err:
+                console.print(f"  [yellow][API] スペック読み込み失敗: {_api_err}[/yellow]")
+
         # C-3: Seed crawl queue from sitemap.xml / robots.txt (if enabled)
         sitemap_urls = await self._fetch_sitemap_urls() if self.enable_sitemap_crawl else []
         if sitemap_urls:
@@ -1374,6 +1992,7 @@ class ScanEngine:
             # rather than mistaken for an expired session.
             if (
                 self.login_url
+                and self.relogin_on_expiry
                 and self._browser.is_on_login_page(self.login_url)
                 and not self._is_login_target_url(url)
             ):
@@ -1388,6 +2007,7 @@ class ScanEngine:
                 )
                 if ok:
                     console.print("  [green][Auth] Re-login successful — resuming crawl.[/green]")
+                    await self._sync_cookies_from_browser(self._browser)
                     # Navigate back to the intended page after re-login
                     success = await self.browser.navigate(url, retries=self.navigation_retries)
                     if not success:
@@ -2378,7 +2998,8 @@ class ScanEngine:
         # If we landed on the login page, session may have expired — try to re-login.
         # Unless the target itself is the login page (then staying on it is expected).
         if (
-            self._browser.is_on_login_page(self.login_url)
+            self.relogin_on_expiry
+            and self._browser.is_on_login_page(self.login_url)
             and not self._is_login_target_url(self.target_url)
         ):
             console.print("  [yellow][Post-Auth] Session appears expired — re-authenticating …[/yellow]")
@@ -2394,6 +3015,7 @@ class ScanEngine:
                         "  [red][Post-Auth] Re-authentication failed — cannot crawl authenticated surface.[/red]"
                     )
                     return []
+                await self._sync_cookies_from_browser(self._browser)
                 landing_url = self._browser.page.url.rstrip("/")
 
         new_pages: list = []
@@ -2549,6 +3171,11 @@ class ScanEngine:
         br = self.browser  # context-aware: returns worker in concurrent mode
         if not self.login_url and not br.auth_user:
             return True
+        # --no-relogin（relogin_on_expiry=False）のときは、セッション失効を検知しても
+        # 自動再ログインしない。利用者が保とうとした対象状態を勝手に変えないため、
+        # 新フラグをこの既存パスでも尊重する。
+        if not self.relogin_on_expiry:
+            return True
         if self._is_login_target_url(intended_url):
             return True
         if br.is_on_login_page(self.login_url):
@@ -2565,6 +3192,7 @@ class ScanEngine:
             )
             if success:
                 console.print("  [green][Auth] Re-login successful.[/green]")
+                await self._sync_cookies_from_browser(br)
             else:
                 console.print("  [yellow][Auth] Re-login may have failed — continuing.[/yellow]")
             return success
@@ -2644,8 +3272,38 @@ class ScanEngine:
         Uses ``self.browser`` which transparently returns the worker's browser
         when called from inside a concurrent worker task.
         """
+        # ── セッション失効チェック（全検査の前に一度）────────────────────
+        # 長時間スキャンでセッションが切れると以降が全てログイン画面/401 に化け、
+        # 検出力が静かにゼロになる。ページ単位検査（graphql/cache/proto/mass 等）も
+        # 失効レスポンスに当ててしまわないよう、page-level・field 双方の前に実行する。
+        await self._maybe_relogin_for_page(page.url)
+        # 再ログインが起きなくても、この page.url 宛に送られる Cookie を self.cookies へ
+        # 同期する。domain/path フィルタにより target_url 同期では Path=/admin の
+        # セッション Cookie が落ちるため、graphql/cache/proto の httpx 検査が認証 Cookie
+        # 無しで /admin を叩かないよう、ページ毎にそのパス宛 Cookie を採り直す。
+        # ただし self.cookies はエンジン共有なので、並列(--concurrency>1)では別ワーカーの
+        # 検査中に書き換える競合になる。直列時のみ行う（並列は既存の共有 cookie 前提）。
+        if (getattr(self, "concurrency", 1) or 1) <= 1:
+            try:
+                await self._sync_cookies_from_browser(self.browser, for_url=page.url)
+            except Exception:
+                pass
+
         # ── Page-level checks (header inspection, clickjacking, session, etc.) ──
         for check_name, scanner in self.scanners.items():
+            # API テンプレート専用スキャナ（mass_assignment）はここで動かさない。
+            # body-operation の URL は crawl キューにも入るため、GET 可能なら本ループと
+            # _run_api_template_checks の両方で状態変更系プローブを二重送信し、resume も
+            # 重複する。これらは checkpoint を刻む _run_api_template_checks に一本化する。
+            if check_name in _API_TEMPLATE_ONLY_CHECKS:
+                continue
+            # 再開: 済みの page-level 単位 (url,"(page)",check) は飛ばす。intrusive な
+            # page-level プローブ（proto の JSON POST、graphql コスト探索）を resume で
+            # 再送しないため。exact URL で刻む（origin だと別 URL を取りこぼす）。
+            cp_url = _page_check_cp_url(check_name, page.url)
+            if self._checkpoint_is_done(cp_url, "(page)", 0, check_name):
+                continue
+            page_errored = False
             try:
                 if hasattr(scanner, "scan_page_context"):
                     page_findings = await scanner.scan_page_context(page)
@@ -2654,7 +3312,12 @@ class ScanEngine:
                 for f in (page_findings or []):
                     self._record_finding(f, source="page-level")
             except Exception as e:
+                page_errored = True
                 console.print(f"  [yellow]Page-level ({check_name}): {e}[/yellow]")
+            if not page_errored:
+                self._checkpoint_mark_done(cp_url, "(page)", 0, check_name)
+        # page-level のみのページ（フォーム/URLパラメータ無し）でも進捗を永続化する。
+        self._save_checkpoint()
 
         if not page.forms and not page.url_params:
             return
@@ -3054,9 +3717,25 @@ class ScanEngine:
         if field_plan and field_plan.rationale:
             console.print(f"    [dim cyan]Plan:[/dim cyan] [dim]{field_plan.rationale[:100]}[/dim]")
 
+        # 実際に実行した（resume でスキップしなかった）チェック数。すべて resume で
+        # スキップされた場合は末尾の adaptive パスも飛ばし、完了済みフィールドを
+        # 新規 payload で再攻撃しない（チェックポイントの約束を守る）。
+        checks_executed = 0
         for check_name in ordered_checks:
             scanner = self.scanners.get(check_name)
             if scanner is None:
+                continue
+
+            # 再開可能スキャン: 既に完了した (url, field, location, check) 単位は飛ばす
+            if self._checkpoint_is_done(url, field_name, form_index, check_name, is_url_param):
+                self._record_scan_matrix(
+                    url=url,
+                    field_name=field_name,
+                    check_name=check_name,
+                    status="skipped",
+                    location=location,
+                    note="Skipped — already completed in a previous run (resume).",
+                )
                 continue
 
             # Early exit: if a critical finding was already confirmed for this field,
@@ -3086,6 +3765,8 @@ class ScanEngine:
                 current_overrides = _FIELD_PAYLOAD_OVERRIDES.get() or {}
                 _override_token = _FIELD_PAYLOAD_OVERRIDES.set({**current_overrides, check_name: merged})
 
+            check_errored = False
+            checks_executed += 1
             try:
                 before_count = len(self.all_findings)
                 findings = await scanner.scan_field(url, form_index, field, is_url_param)
@@ -3107,6 +3788,7 @@ class ScanEngine:
                     finding_count=len(new_findings),
                 )
             except Exception as e:
+                check_errored = True
                 self._record_scan_matrix(
                     url=url,
                     field_name=field_name,
@@ -3119,6 +3801,12 @@ class ScanEngine:
             finally:
                 if _override_token is not None:
                     _FIELD_PAYLOAD_OVERRIDES.reset(_override_token)
+                # この (url, field, check) 単位を完了として記録（再開時に飛ばす）。
+                # ただし例外で終わった単位は「未完了」のまま残し、再開時に再試行する
+                # （一時的なブラウザ/ネットワーク障害で取りこぼした検査を resume が
+                # 飛ばしてしまわないようにする — 再開の網羅性を守る）。
+                if not check_errored:
+                    self._checkpoint_mark_done(url, field_name, form_index, check_name, is_url_param)
 
         # CTF: check page source after all scanners ran on this field
         if self.flag_finder:
@@ -3133,12 +3821,16 @@ class ScanEngine:
         field_findings = [f for f in self.all_findings if f.field_name == field_name and f.url == url]
         already_critical = any(f.severity in ("critical",) for f in field_findings)
 
-        if self.adaptive_enabled and not already_critical:
+        # resume で全チェックがスキップされたフィールドでは adaptive も走らせない
+        # （新規生成 payload で完了済みフィールドを再攻撃しないため）。
+        if self.adaptive_enabled and not already_critical and checks_executed > 0:
             await self._adaptive_attack_field(
                 url, form_index, field, is_url_param, ordered_checks, field_plan
             )
 
         self.completed_fields += 1
+        # フィールド完了ごとに進捗を永続化（中断しても次回ここから再開できる）
+        self._save_checkpoint()
         if self.monitor and self.total_fields > 0:
             await self.monitor.emit_progress(
                 current=self.completed_fields,

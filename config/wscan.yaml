@@ -249,6 +249,13 @@ features:
   # 巡回完了後に画面一覧を確認し、手動巡回や追加URLで再巡回できるようにするか
   interactive_crawl_review: false
 
+  # 以下は CLI フラグで制御する運用機能（設定ファイルでは管理しない）:
+  #   --api-spec FILE            API ファースト検査（OpenAPI/Swagger/Postman 取り込み）
+  #   --resume DIR / --no-checkpoint  再開可能スキャン（checkpoint.json）
+  #   --allowed-hours / --forbidden-hours  検査時間帯ゲート（許可/禁止時間帯）
+  #   --no-relogin / --logged-in-marker    セッション失効時の自動再ログイン
+  # 詳細は README「API ファースト検査 / 長時間スキャン運用」を参照。
+
 # ──────────────────────────────────────────────────────────
 # A: 複数アカウント権限昇格
 # ──────────────────────────────────────────────────────────

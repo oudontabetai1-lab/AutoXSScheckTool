@@ -158,6 +158,10 @@ PEM の cert/key は Playwright と httpx の両方で使われます。PFX は 
 | — | JWT 脆弱性（署名なし / 弱シークレット / kid インジェクション） | `jwt` | alg:none 攻撃・HMAC ブルートフォース・ペイロード改ざん |
 | — | シークレット / API キー漏洩 | `secret_leak` | レスポンスボディ内のクラウド/SaaS トークン・秘密鍵を高精度パターン + エントロピー検査で検出 |
 | — | Subresource Integrity (SRI) 不備 | `sri` | サードパーティ `<script>` / `<link>` の `integrity` 属性欠如を検出（サプライチェーン保護） |
+| — | Prototype Pollution | `prototype_pollution` | クライアント DOM（`__proto__[x]=v` → `Object.prototype` 確認）＋サーバ JSON 反射 |
+| — | Web Cache Poisoning / Deception | `cache_poisoning` | unkeyed ヘッダ反射×キャッシュ可能性／静的拡張子での動的コンテンツキャッシュ |
+| — | Mass Assignment（過剰割り当て） | `mass_assignment` | API スペック由来の JSON 操作に特権フィールド（role/isAdmin 等）を注入し反映を検出 |
+| — | GraphQL DoS（複雑度/量制限の欠如） | `graphql` | エイリアス増幅で複雑度/深度/量制限の欠如を検出 |
 
 ---
 
@@ -195,6 +199,13 @@ PEM の cert/key は Playwright と httpx の両方で使われます。PFX は 
 - **Finding 別 AI 修正提案** — Critical/High の各 Finding に対し LLM がビジネス影響（非技術者向け）・修正コード例・OWASP/CWE 参照を生成し HTML レポートに組み込む
 - **スキャン後 AI 総合分析** — 全 Finding を LLM に渡し、攻撃シナリオ・優先修正順位・推奨 WAF ルールを自然言語レポートとして生成
 - **自動設定ウィザード** (`--auto-config`) — ターゲットの説明・禁止事項・必須チェックを入力すると LLM が最適なスキャン設定を生成しレビュー後に適用
+
+### API ファースト検査・長時間スキャン運用
+
+- **API ファースト検査** — `--api-spec FILE` で **OpenAPI 2.0(Swagger)/3.x・Postman Collection** を取り込み、エンドポイント URL・共通ヘッダ（Authorization 等）・JSON 操作を直接攻撃面にする。パスパラメータ（`/users/{id}`）はサンプル値で具体化し、クエリはスキーマ既定値で補完。フォームを辿らない API/SPA バックエンドでも網羅的に検査でき、`mass_assignment`（過剰割り当て）検査の駆動源にもなる
+- **セッション失効の自動再ログイン** — 長時間スキャン中にセッションが切れても、攻撃対象ページの状態（401・ログインフォーム残存など）から失効を検知し自動で再ログイン。誤った連続再ログインを避けるため強いシグナルが揃った時だけ実行。`--no-relogin` で無効化、`--logged-in-marker` で検知精度を補強
+- **再開可能スキャン（チェックポイント）** — 攻撃の `(URL × フィールド × チェック)` 単位の進捗と既出 Finding を `output/<timestamp>/checkpoint.json` に保存。中断（時間帯ゲート停止・ネットワーク断・Abort・クラッシュ）後、`--resume <前回出力ディレクトリ>` で完了済み単位を飛ばして再開する。`--no-checkpoint` で保存を無効化
+- **検査時間帯ゲート（禁止/許可時間帯）** — `--allowed-hours`（この時間帯だけ検査）/ `--forbidden-hours`（この時間帯は停止）で攻撃可能な時間帯を制御。許可時間外は自動的に待機し、許可時間になると再開する。`"09:00-18:00"`・`"Mon-Fri 22:00-06:00"`（日跨ぎ対応）・`"Sat,Sun 00:00-24:00"` のように曜日付き・複数指定が可能
 
 ### クロール・対象拡大
 
@@ -452,6 +463,42 @@ python main.py scan https://example.com --exclude csrf_token __RequestVerificati
 python main.py scan https://example.com --checks graphql jwt
 ```
 
+### API ファースト検査（OpenAPI/Swagger/Postman 取り込み）
+
+```bash
+# OpenAPI/Swagger(JSON/YAML) からエンドポイント・ヘッダ・JSON 操作を取り込む
+python main.py scan https://api.example.com \
+  --api-spec ./openapi.yaml \
+  --checks sqli xss nosql mass_assignment prototype_pollution
+
+# Postman Collection も同じフラグで取り込める
+python main.py scan https://api.example.com --api-spec ./collection.json
+```
+
+### 新クラス（Prototype Pollution / Cache Poisoning / Mass Assignment / GraphQL DoS）
+
+```bash
+python main.py scan https://example.com \
+  --checks prototype_pollution cache_poisoning mass_assignment graphql
+```
+
+### 長時間スキャンの運用（時間帯ゲート・再開・自動再ログイン）
+
+```bash
+# 業務時間外（平日夜間＋週末終日）だけ検査し、ピーク時は停止
+python main.py scan https://example.com \
+  --allowed-hours "Mon-Fri 22:00-06:00" --allowed-hours "Sat,Sun 00:00-24:00" \
+  --forbidden-hours "Mon-Fri 12:00-13:00"
+
+# 認証付き長時間スキャン。セッションが切れたら自動再ログイン（既定で有効）
+python main.py scan https://example.com \
+  --login-url https://example.com/login --auth-user ops --auth-pass 'p@ss' \
+  --logged-in-marker "Logout"
+
+# 中断したスキャンを前回の出力ディレクトリから再開（完了済み単位はスキップ）
+python main.py scan https://example.com --resume output/20240101_120000
+```
+
 ### 複数アカウント権限昇格テスト（手動指定）
 
 ```bash
@@ -554,6 +601,7 @@ usage: main.py scan [オプション] URL
                                    file_upload nosql deserialization request_smuggling
                                    ssrf graphql jwt cms xxe ldap race_condition
                                    websocket secret_leak sri js_static
+                                   prototype_pollution cache_poisoning mass_assignment
   --depth N                クロール深度 (デフォルト: 2)
   --headless               ブラウザをヘッドレスモードで起動
   --no-monitor             リアルタイム監視ダッシュボードを無効化
@@ -625,6 +673,13 @@ usage: main.py scan [オプション] URL
   --header-file FILE       JSON / YAML / Name: Value 形式のヘッダファイル
   --har FILE               HAR から URL と Cookie を取り込む
   --manual-crawl FILE      手動巡回 JSON から URL と Cookie を取り込む
+  --api-spec FILE          OpenAPI/Swagger/Postman を取り込み API を攻撃面にする
+  --resume DIR             前回出力の checkpoint.json から完了単位を飛ばして再開
+  --no-checkpoint          checkpoint.json の保存を無効化
+  --allowed-hours WINDOW   検査を許可する時間帯（複数可, 例 "Mon-Fri 22:00-06:00"）
+  --forbidden-hours WINDOW 検査を禁止する時間帯（複数可, ピーク保護等）
+  --no-relogin             セッション失効時の自動再ログインを無効化
+  --logged-in-marker TEXT  認証済みページに必ず現れる文字列（失効検知の精度向上）
   --previous-scan DIR      前回 evidence.json と比較して新規/修正/継続 Finding を表示
   --concurrency N          攻撃フェーズの並列ブラウザワーカー数
   --fast                   高速スキャンモード

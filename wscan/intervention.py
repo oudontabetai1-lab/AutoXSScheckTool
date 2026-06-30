@@ -18,7 +18,10 @@ Call ``await checkpoint()`` frequently inside scan loops.
 import asyncio
 import sys
 import threading
+from datetime import datetime
 from typing import Optional, TYPE_CHECKING
+
+from . import time_window
 
 if TYPE_CHECKING:
     from .monitor import MonitorServer
@@ -65,6 +68,11 @@ class ScanController:
         self._thread: Optional[threading.Thread] = None
         self._active = False
         self._monitor: "Optional[MonitorServer]" = None
+        # 検査時間帯ゲート（WindowRule のリスト）。空なら常時許可。
+        self._allowed_windows: list = []
+        self._forbidden_windows: list = []
+        self._gate_failclosed = False
+        self._in_time_gate = False
 
     # ------------------------------------------------------------------
     # Public API
@@ -106,6 +114,97 @@ class ScanController:
         if self._loop and not self._pause_event.is_set():
             self._loop.call_soon_threadsafe(self._pause_event.set)
 
+    def set_time_windows(self, allowed: Optional[list] = None, forbidden: Optional[list] = None) -> None:
+        """検査を許可する/禁止する時間帯を設定する。
+
+        ``allowed`` / ``forbidden`` は仕様文字列のリスト（``time_window.parse_windows``
+        が解釈）。両方空なら時間帯ゲートは無効（常時許可）。
+        """
+        self._allowed_windows = time_window.parse_windows(allowed)
+        self._forbidden_windows = time_window.parse_windows(forbidden)
+        # 利用者が --allowed-hours / --forbidden-hours を指定したのに有効ルールが
+        # 1 つも無い（全て誤記）場合は fail-closed にする。空＝「ゲート無し（常時許可）」
+        # と区別できないと、誤記で安全ゲートが無効化され 24/7 で走ってしまうため。
+        self._gate_failclosed = (
+            (bool(allowed) and not self._allowed_windows)
+            or (bool(forbidden) and not self._forbidden_windows)
+        )
+
+    def is_within_window(self, now: Optional[datetime] = None) -> bool:
+        """現在が検査許可時間帯か。ゲート未設定なら常に True。"""
+        if getattr(self, "_gate_failclosed", False):
+            return False
+        if not self._allowed_windows and not self._forbidden_windows:
+            return True
+        return time_window.is_allowed(
+            now or datetime.now(), self._allowed_windows, self._forbidden_windows
+        )
+
+    async def _time_gate(self) -> None:
+        """許可時間帯外なら、許可される時刻まで待機する（abort で中断可能）。"""
+        if getattr(self, "_gate_failclosed", False):
+            # 許可窓が全て不正 → 安全のため fail-closed で中断（無言で走らせない）。
+            print(
+                "[TimeWindow] 時間帯指定(--allowed-hours/--forbidden-hours)が全て不正です。"
+                "安全のためスキャンを中断します（fail closed）。",
+                flush=True,
+            )
+            if self._monitor:
+                try:
+                    await self._monitor.emit_status(
+                        "許可時間帯の指定が不正 — 安全のため中断", "error"
+                    )
+                except Exception:
+                    pass
+            raise AbortScan("All --allowed-hours entries are invalid (fail closed)")
+        if not self._allowed_windows and not self._forbidden_windows:
+            return
+        announced = False
+        # NOTE: `_active` には依存しない。非 TTY/--no-monitor 実行では
+        # `_key_reader()` が termios 失敗で `_active=False` にするため、これに
+        # 依存すると時間帯ゲートが無言で無効化され、禁止時間帯でも攻撃が流れる。
+        # ゲートは abort でのみ抜ける。
+        while not self.is_within_window():
+            if self._abort:
+                raise AbortScan("Scan aborted by operator")
+            self._in_time_gate = True
+            wait = time_window.seconds_until_allowed(
+                datetime.now(), self._allowed_windows, self._forbidden_windows
+            )
+            if wait == float("inf"):
+                # 到達不能な設定（終日禁止など）。本機能は本番保護スロットルなので
+                # 「素通りして攻撃を流す」のは最も危険。fail-closed としてスキャンを
+                # 中断する（操作者が時間帯設定を見直せるよう明示メッセージを出す）。
+                print(
+                    "[TimeWindow] 設定された許可時間帯に到達できません"
+                    "（終日禁止など）。安全のためスキャンを中断します。",
+                    flush=True,
+                )
+                if self._monitor:
+                    try:
+                        await self._monitor.emit_status(
+                            "検査可能時間帯に到達不能 — 安全のため中断", "error"
+                        )
+                    except Exception:
+                        pass
+                raise AbortScan("No reachable scan window — aborting (fail closed)")
+            if not announced:
+                print(
+                    f"[TimeWindow] 検査可能時間外です。約 {int(wait)} 秒後に再開します…",
+                    flush=True,
+                )
+                if self._monitor:
+                    try:
+                        await self._monitor.emit_status(
+                            f"検査可能時間外 — 約 {int(wait)} 秒後に再開", "paused"
+                        )
+                    except Exception:
+                        pass
+                announced = True
+            # 細かく刻んで待ち、abort/解除に素早く反応する
+            await asyncio.sleep(min(5.0, max(0.5, wait)))
+        self._in_time_gate = False
+
     async def checkpoint(self) -> None:
         """
         Yield control point inside a scan loop.
@@ -114,9 +213,12 @@ class ScanController:
         - skip-page        → raise SkipPage  (clears flag)
         - skip-field       → raise SkipField (clears flag)
         - paused           → waits until resumed
+        - outside scan window → waits until the next allowed window
         """
         if self._abort:
             raise AbortScan("Scan aborted by operator")
+        # 時間帯ゲート: 許可時間外なら待機（abort で抜けられる）
+        await self._time_gate()
         if self._skip_page:
             self._skip_page = False
             raise SkipPage("Page skipped by operator")

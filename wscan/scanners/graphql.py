@@ -102,6 +102,96 @@ _SQL_ERROR_RE = re.compile(
     re.IGNORECASE,
 )
 
+# GraphQL の複雑度/量制限を欠く DoS リスク検査用。
+# サーバを実際に痛めないよう「無害だが安くない数」だけを送り、制限の有無を見る。
+_DOS_ALIAS_COUNT = 100   # エイリアス増幅（field 重複）の本数
+_DOS_NEST_DEPTH = 12     # introspection の深いネストの段数
+
+# 複雑度/深度/量の制限に引っかかったことを示すエラー語彙。これらが返るなら
+# サーバ側に保護があるとみなし DoS リスクは報告しない（誤検知抑止）。
+_DOS_LIMIT_ERROR_RE = re.compile(
+    r"(max(imum)?[\s_-]*(query)?[\s_-]*(depth|complexity|alias|node|cost)"
+    r"|query[\s_-]*(is[\s_-]*)?too[\s_-]*(deep|complex|large)"
+    r"|depth[\s_-]*limit|complexity[\s_-]*(limit|exceeded)"
+    r"|too[\s_-]*many[\s_-]*(aliases|nodes)|cost[\s_-]*limit"
+    r"|exceeds[\s_-]*maximum)",
+    re.IGNORECASE,
+)
+
+
+def build_alias_amplification_query(count: int) -> str:
+    """``count`` 本のエイリアスで同一フィールド(__typename)を増幅するクエリ（純粋）。
+
+    例: ``{ a0: __typename a1: __typename ... }``。alias/複雑度の上限が無ければ
+    サーバは全 alias を素直に処理する。__typename は安価なので、上限の有無を
+    確かめつつ実害を出さない。
+    """
+    count = max(1, int(count))
+    aliases = " ".join(f"a{i}: __typename" for i in range(count))
+    return "{ " + aliases + " }"
+
+
+def build_deep_introspection_query(depth: int) -> str:
+    """``depth`` 段ネストした introspection クエリを組む（純粋）。
+
+    ``__type.ofType.ofType...`` を深く重ね、深度制限の有無を観測する。
+    """
+    depth = max(1, int(depth))
+    inner = "name"
+    for _ in range(depth):
+        inner = f"ofType {{ name {inner} }}"
+    return "{ __schema { types { name kind " + inner + " } } }"
+
+
+def detect_alias_amplification(data: object, count: int) -> bool:
+    """エイリアス増幅クエリが「制限なく」受理されたかを判定する（純粋）。
+
+    ``data`` は ``resp.json()`` 済みの値。最後の alias キー（``a{count-1}``）が
+    ``data`` 配下に存在し、かつ complexity/alias 制限エラーが無ければ True。
+    制限エラーが含まれていれば（保護あり）False。
+    """
+    if not isinstance(data, dict):
+        return False
+    # 制限系エラーがあれば保護されている → 報告しない
+    errors = data.get("errors")
+    if errors:
+        try:
+            blob = json.dumps(errors)
+        except (TypeError, ValueError):
+            blob = str(errors)
+        if _DOS_LIMIT_ERROR_RE.search(blob):
+            return False
+    payload = data.get("data")
+    if not isinstance(payload, dict):
+        return False
+    last_alias = f"a{max(1, int(count)) - 1}"
+    return last_alias in payload
+
+
+def detect_no_depth_limit(data: object) -> bool:
+    """深いネスト introspection が深度/複雑度制限なく受理されたか（純粋）。
+
+    深度制限を持つサーバは深いクエリを depth/complexity エラーで弾く。``data`` に
+    制限系エラーが無く、かつ ``data.__schema`` が返っていれば「深度制限なし」と
+    みなす。エイリアス増幅（breadth）と本判定（depth）の **両方** が成立して初めて
+    DoS リスクと報告することで、「安いエイリアスを 100 個受けただけ」では誤検知
+    しないようにする。
+    """
+    if not isinstance(data, dict):
+        return False
+    errors = data.get("errors")
+    if errors:
+        try:
+            blob = json.dumps(errors)
+        except (TypeError, ValueError):
+            blob = str(errors)
+        if _DOS_LIMIT_ERROR_RE.search(blob):
+            return False
+        # 深いクエリでエラーが出た（depth 以外でも）なら制限ありとみなし報告しない
+        return False
+    payload = data.get("data")
+    return isinstance(payload, dict) and "__schema" in payload
+
 
 # ---------------------------------------------------------------------------
 # Scanner
@@ -119,6 +209,7 @@ class GraphQLScanner(BaseScanner):
     def __init__(self, engine: "ScanEngine"):
         super().__init__(engine)
         self._tested_endpoints: set[str] = set()
+        self._tested_urls: set[str] = set()
         self._confirmed_endpoints: list[str] = []
 
     def _client_proxy_kwargs(self) -> dict:
@@ -139,18 +230,53 @@ class GraphQLScanner(BaseScanner):
     ) -> list[Finding]:
         return []  # GraphQL scanning is endpoint-level
 
+    def _is_api_or_graphql_url(self, url: str) -> bool:
+        """具体 URL を probe 対象にしてよいか（API スペック由来 or GraphQL らしいパス）。
+
+        全クロールページへ GraphQL probe を撒かないためのゲート。API スペック由来 URL
+        （``api_seed_urls`` / ``api_seed_requests``）か、パスが GraphQL を示唆する
+        （``graphql`` を含む / ``/gql`` 等）ときだけ True。
+        """
+        try:
+            if url in (getattr(self.engine, "api_seed_urls", None) or ()):
+                return True
+            for t in (getattr(self.engine, "api_seed_requests", None) or ()):
+                if getattr(t, "url", None) == url:
+                    return True
+        except Exception:
+            pass
+        path = urlparse(url).path.lower()
+        return (
+            "graphql" in path
+            or path.endswith("/gql")
+            or "/gql/" in path
+        )
+
     async def scan_page(self, url: str) -> list[Finding]:
         """
         On first call (or whenever a new origin is encountered) probe all
-        known GraphQL paths on that origin.
+        known GraphQL paths on that origin. The exact ``url`` is also probed so
+        API-spec endpoints on non-standard paths (e.g. ``/gql``) are exercised.
         """
         parsed = urlparse(url)
         origin = f"{parsed.scheme}://{parsed.netloc}"
 
-        # Only probe each origin once
-        if origin in self._tested_endpoints:
+        candidates: list[str] = []
+        # 既知パスは origin ごとに 1 回だけ掃引する
+        if origin not in self._tested_endpoints:
+            self._tested_endpoints.add(origin)
+            candidates.extend(urljoin(origin, p) for p in _GRAPHQL_PATHS)
+        # API スペック等から渡された具体 URL（/gql 等の非標準パス）も明示的に検査する。
+        # ただし全クロールページ（/about, /account 等）へ GraphQL probe を撒かないよう、
+        # API スペック由来 URL か GraphQL らしいパスのときだけ候補に加える（既知パスの
+        # origin 掃引は別途無条件で実施済み）。
+        norm_url = url.split("#", 1)[0]
+        if norm_url and norm_url not in self._tested_urls:
+            self._tested_urls.add(norm_url)
+            if norm_url not in candidates and self._is_api_or_graphql_url(norm_url):
+                candidates.append(norm_url)
+        if not candidates:
             return []
-        self._tested_endpoints.add(origin)
 
         timeout = float(getattr(self.engine, "timeout", 30))
 
@@ -167,8 +293,7 @@ class GraphQLScanner(BaseScanner):
 
         findings: list[Finding] = []
 
-        for path in _GRAPHQL_PATHS:
-            endpoint = urljoin(origin, path)
+        for endpoint in candidates:
             if await self._is_graphql(endpoint, req_headers, timeout):
                 self._confirmed_endpoints.append(endpoint)
                 endpoint_findings = await self._test_endpoint(
@@ -181,6 +306,33 @@ class GraphQLScanner(BaseScanner):
     # ------------------------------------------------------------------
     # Detection
     # ------------------------------------------------------------------
+
+    def _note_auth_failure(self, resp, endpoint: str) -> bool:
+        """応答がセッション失効（401/ログインフォーム）なら engine へ通知する。
+
+        保護された GraphQL エンドポイントは GET プレフライト（_api_session_looks_expired）
+        が 400/405 で失効を検知できない一方、実 POST が 401 を返すことがある。その場合
+        engine._api_auth_failed を立てないと、_run_api_template_checks が未認証の空結果を
+        「済み」記録し --resume が恒久スキップしてしまう。mass_assignment/proto と同じく
+        session_guard で判定して失効を通知する。
+        """
+        from wscan import session_guard
+        try:
+            out = session_guard.looks_logged_out(
+                status=resp.status_code,
+                final_url=str(getattr(resp, "url", endpoint)),
+                body=resp.text,
+                login_url=getattr(self.engine, "login_url", ""),
+                logged_in_marker=getattr(self.engine, "logged_in_marker", ""),
+            )
+        except Exception:
+            return False
+        if out:
+            try:
+                self.engine._api_auth_failed = True
+            except Exception:
+                pass
+        return out
 
     async def _is_graphql(
         self,
@@ -198,6 +350,9 @@ class GraphQLScanner(BaseScanner):
                 **self._client_transport_kwargs(),
             ) as client:
                 resp = await client.post(endpoint, json=query)
+                # 実 POST が 401/ログイン化 → 失効を通知して中断（resume の誤スキップ防止）
+                if self._note_auth_failure(resp, endpoint):
+                    return False
                 if resp.status_code in (200, 400):
                     body = resp.text
                     if _GQL_RESPONSE_RE.search(body):
@@ -207,6 +362,8 @@ class GraphQLScanner(BaseScanner):
                     endpoint,
                     params={"query": "{ __typename }"},
                 )
+                if self._note_auth_failure(resp2, endpoint):
+                    return False
                 if resp2.status_code in (200, 400):
                     if _GQL_RESPONSE_RE.search(resp2.text):
                         return True
@@ -231,6 +388,9 @@ class GraphQLScanner(BaseScanner):
 
         # 2. Batch queries
         await self._test_batch(endpoint, headers, timeout, findings)
+
+        # 2b. Complexity/amount limits missing (DoS risk)
+        await self._test_dos(endpoint, headers, timeout, findings)
 
         # 3. Injection via discovered fields (or generic string args)
         await self._test_injection(endpoint, headers, timeout, findings, schema_data)
@@ -337,6 +497,67 @@ class GraphQLScanner(BaseScanner):
             confidence="likely",
             evidence_type="graphql_batch",
             evidence_details={"operation_count": len(batch_query)},
+        ))
+
+    async def _test_dos(
+        self,
+        endpoint: str,
+        headers: dict,
+        timeout: float,
+        findings: list[Finding],
+    ) -> None:
+        """クエリ複雑度/量の制限が無いか（DoS リスク）を検査する。
+
+        誤検知を避けるため **breadth（エイリアス増幅）と depth（深いネスト
+        introspection）の両方** が制限エラー無しに受理されたときだけ報告する。
+        「安価な __typename を 100 個受け付けた」だけでは（複雑度制限を持つ正常な
+        サーバでも起こりうるため）報告しない。実害を出さないよう本数/段数は控えめ。
+        """
+        alias_query = build_alias_amplification_query(_DOS_ALIAS_COUNT)
+        depth_query = build_deep_introspection_query(_DOS_NEST_DEPTH)
+        try:
+            async with httpx.AsyncClient(
+                follow_redirects=True,
+                timeout=timeout,
+                headers=headers,
+                **self._client_transport_kwargs(),
+            ) as client:
+                r1 = await client.post(endpoint, json={"query": alias_query})
+                r2 = await client.post(endpoint, json={"query": depth_query})
+                if r1.status_code != 200 or r2.status_code != 200:
+                    return
+                alias_data = r1.json()
+                depth_data = r2.json()
+        except Exception:
+            return
+
+        alias_ok = detect_alias_amplification(alias_data, _DOS_ALIAS_COUNT)
+        depth_ok = detect_no_depth_limit(depth_data)
+        # 両シグナルが揃ったときのみ報告（breadth だけ／depth だけでは不十分）
+        if not (alias_ok and depth_ok):
+            return
+
+        findings.append(Finding(
+            check_type="graphql_dos",
+            severity="medium",
+            url=endpoint,
+            field_name="(GraphQL query cost)",
+            payload=f"aliases={_DOS_ALIAS_COUNT}, introspection depth={_DOS_NEST_DEPTH}",
+            evidence=(
+                f"GraphQL endpoint {endpoint} accepted both a {_DOS_ALIAS_COUNT}-alias "
+                f"query (breadth) and a depth-{_DOS_NEST_DEPTH} nested introspection "
+                f"query (depth) with no complexity/depth/alias limit error. The absence "
+                f"of limits on both axes lets an attacker craft expensive queries to "
+                f"exhaust server resources (DoS). Enforce query depth/complexity limits "
+                f"and alias/node caps."
+            ),
+            request={"url": endpoint, "method": "POST",
+                     "body": json.dumps({"query": alias_query})[:500]},
+            response={"status": 200, "url": endpoint},
+            confidence="tentative",
+            evidence_type="graphql_dos",
+            evidence_details={"alias_count": _DOS_ALIAS_COUNT,
+                              "introspection_depth": _DOS_NEST_DEPTH},
         ))
 
     async def _test_injection(

@@ -1,0 +1,700 @@
+"""API スペック取り込み（OpenAPI/Swagger/Postman, 純粋関数）のテスト。"""
+import json
+import tempfile
+import unittest
+from pathlib import Path
+
+from wscan.api_spec_importer import (
+    ApiSpecImporter,
+    parse_openapi,
+    parse_postman,
+    _sample_for_name,
+    _fill_path,
+)
+
+OPENAPI3 = {
+    "openapi": "3.0.0",
+    "servers": [{"url": "https://api.example.com/v1"}],
+    "paths": {
+        "/users": {
+            "get": {
+                "parameters": [
+                    {"name": "page", "in": "query", "schema": {"type": "integer"}},
+                    {"name": "q", "in": "query", "schema": {"type": "string"}},
+                ]
+            },
+            "post": {
+                "requestBody": {
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "type": "object",
+                                "properties": {
+                                    "name": {"type": "string"},
+                                    "age": {"type": "integer"},
+                                },
+                            }
+                        }
+                    }
+                }
+            },
+        },
+        "/users/{id}": {
+            "get": {
+                "parameters": [
+                    {"name": "id", "in": "path", "schema": {"type": "integer"}}
+                ]
+            }
+        },
+    },
+}
+
+SWAGGER2 = {
+    "swagger": "2.0",
+    "host": "api.example.com",
+    "basePath": "/v2",
+    "schemes": ["https"],
+    "paths": {
+        "/login": {
+            "post": {
+                "parameters": [
+                    {
+                        "in": "body",
+                        "name": "creds",
+                        "schema": {
+                            "type": "object",
+                            "properties": {"user": {"type": "string"}},
+                        },
+                    }
+                ]
+            }
+        }
+    },
+}
+
+POSTMAN = {
+    "info": {"schema": "https://schema.getpostman.com/json/collection/v2.1.0/"},
+    "item": [
+        {
+            "name": "folder",
+            "item": [
+                {
+                    "name": "get users",
+                    "request": {
+                        "method": "GET",
+                        "header": [{"key": "Authorization", "value": "Bearer x"}],
+                        "url": "https://api.example.com/users?page=1",
+                    },
+                },
+                {
+                    "name": "create",
+                    "request": {
+                        "method": "POST",
+                        "url": {
+                            "raw": "https://api.example.com/users",
+                            "host": ["api", "example", "com"],
+                            "path": ["users"],
+                        },
+                        "body": {"mode": "raw", "raw": '{"name": "x"}'},
+                    },
+                },
+            ],
+        }
+    ],
+}
+
+
+class HelperTests(unittest.TestCase):
+    def test_sample_for_name_id(self):
+        self.assertEqual(_sample_for_name("user_id"), 1)
+        self.assertEqual(_sample_for_name("q", {"type": "string"}), "test")
+
+    def test_fill_path(self):
+        # {id} と {pid} は ID 名なので 1、{slug} は文字列なので test に具体化される
+        self.assertEqual(
+            _fill_path("/users/{id}/posts/{slug}", {"id": {"type": "integer"}}),
+            "/users/1/posts/test",
+        )
+
+    def test_serialize_query_pairs_scalar_and_bool(self):
+        from wscan.api_spec_importer import _serialize_query_pairs
+        self.assertEqual(_serialize_query_pairs("q", {"type": "string"}), [("q", "test")])
+        # boolean は true/false（Python の True/False にしない）
+        self.assertEqual(
+            _serialize_query_pairs("active", {"type": "boolean", "default": True}),
+            [("active", "true")],
+        )
+
+    def test_serialize_query_pairs_array_explodes(self):
+        from wscan.api_spec_importer import _serialize_query_pairs
+        # array は form/explode 相当で各要素を別ペアに（["test"] → tags=test）
+        self.assertEqual(
+            _serialize_query_pairs("tags", {"type": "array"}), [("tags", "test")],
+        )
+        self.assertEqual(
+            _serialize_query_pairs("ids", {"type": "array", "default": [1, 2]}),
+            [("ids", "1"), ("ids", "2")],
+        )
+
+    def test_serialize_query_pairs_object_skipped(self):
+        from wscan.api_spec_importer import _serialize_query_pairs
+        self.assertEqual(_serialize_query_pairs("o", {"type": "object"}), [])
+
+
+class OpenApiTests(unittest.TestCase):
+    def test_urls_and_base(self):
+        seed = parse_openapi(OPENAPI3)
+        joined = "\n".join(seed.urls)
+        self.assertIn("https://api.example.com/v1/users?", joined)
+        self.assertIn("page=1", joined)
+        self.assertIn("https://api.example.com/v1/users/1", joined)
+
+    def test_request_body_template(self):
+        seed = parse_openapi(OPENAPI3)
+        posts = [r for r in seed.requests if r.method == "POST"]
+        self.assertEqual(len(posts), 1)
+        self.assertEqual(posts[0].url, "https://api.example.com/v1/users")
+        self.assertEqual(posts[0].json_body, {"name": "test", "age": 1})
+
+    def test_body_template_preserves_query(self):
+        # 必須クエリ付き POST は RequestTemplate にもクエリを保持する
+        body_schema = {"type": "object", "properties": {"n": {"type": "string"}}}
+        op = {
+            "parameters": [
+                {"name": "api-version", "in": "query",
+                 "schema": {"type": "string", "default": "2024"}}
+            ],
+            "requestBody": {"content": {"application/json": {"schema": body_schema}}},
+        }
+        spec = {
+            "openapi": "3.0.0",
+            "servers": [{"url": "https://api.example.com"}],
+            "paths": {"/items": {"post": op}},
+        }
+        seed = parse_openapi(spec)
+        posts = [r for r in seed.requests if r.method == "POST"]
+        self.assertEqual(len(posts), 1)
+        self.assertIn("api-version=2024", posts[0].url)
+
+    def test_header_parameters_forwarded(self):
+        # in: header の必須ヘッダをサンプル値で seed.headers と RequestTemplate に載せる
+        op = {
+            "parameters": [
+                {"name": "X-API-Version", "in": "header",
+                 "schema": {"type": "string", "default": "v2"}}
+            ],
+            "requestBody": {"content": {"application/json": {
+                "schema": {"type": "object", "properties": {"n": {"type": "string"}}}}}},
+        }
+        spec = {
+            "openapi": "3.0.0",
+            "servers": [{"url": "https://api.example.com"}],
+            "paths": {"/items": {"post": op}},
+        }
+        seed = parse_openapi(spec)
+        self.assertEqual(seed.headers.get("X-API-Version"), "v2")
+        posts = [r for r in seed.requests if r.method == "POST"]
+        self.assertEqual(posts[0].headers.get("X-API-Version"), "v2")
+
+    def test_explicit_apikey_header_preserved(self):
+        # 認証系ヘッダでも、スペックが明示した default/example があれば実値として採用
+        # （利用者の --header は engine 側で優先されるので上書き害は無い）。
+        op = {
+            "parameters": [
+                {"name": "X-API-Key", "in": "header",
+                 "schema": {"type": "string", "example": "spec-key-123"}}
+            ],
+            "requestBody": {"content": {"application/json": {
+                "schema": {"type": "object", "properties": {"n": {"type": "string"}}}}}},
+        }
+        spec = {
+            "openapi": "3.0.0",
+            "servers": [{"url": "https://api.example.com"}],
+            "paths": {"/items": {"post": op}},
+        }
+        seed = parse_openapi(spec)
+        self.assertEqual(seed.headers.get("X-API-Key"), "spec-key-123")
+
+    def test_auth_header_without_value_not_synthesized(self):
+        # default/example の無い認証系は "test" 等のダミー合成を避けて採らない
+        op = {
+            "parameters": [
+                {"name": "Authorization", "in": "header",
+                 "schema": {"type": "string"}}
+            ],
+            "requestBody": {"content": {"application/json": {
+                "schema": {"type": "object", "properties": {"n": {"type": "string"}}}}}},
+        }
+        spec = {
+            "openapi": "3.0.0",
+            "servers": [{"url": "https://api.example.com"}],
+            "paths": {"/items": {"post": op}},
+        }
+        seed = parse_openapi(spec)
+        self.assertNotIn("Authorization", seed.headers)
+
+    def test_required_noncred_header_synthesized_without_example(self):
+        # 非認証の required ヘッダ（default/example 無し）は安全なサンプルで合成する
+        op = {
+            "parameters": [
+                {"name": "X-Tenant", "in": "header", "required": True,
+                 "schema": {"type": "string"}}
+            ],
+            "requestBody": {"content": {"application/json": {
+                "schema": {"type": "object", "properties": {"n": {"type": "string"}}}}}},
+        }
+        spec = {
+            "openapi": "3.0.0",
+            "servers": [{"url": "https://api.example.com"}],
+            "paths": {"/items": {"post": op}},
+        }
+        seed = parse_openapi(spec)
+        self.assertEqual(seed.headers.get("X-Tenant"), "test")
+
+    def test_required_cred_header_not_synthesized_without_value(self):
+        # required でも認証系（値無し）はダミー合成しない
+        op = {
+            "parameters": [
+                {"name": "X-API-Key", "in": "header", "required": True,
+                 "schema": {"type": "string"}}
+            ],
+            "requestBody": {"content": {"application/json": {
+                "schema": {"type": "object", "properties": {"n": {"type": "string"}}}}}},
+        }
+        spec = {
+            "openapi": "3.0.0",
+            "servers": [{"url": "https://api.example.com"}],
+            "paths": {"/items": {"post": op}},
+        }
+        seed = parse_openapi(spec)
+        self.assertNotIn("X-API-Key", seed.headers)
+
+    def test_swagger2_path_level_body_param(self):
+        # Swagger 2.0 の in:body が path-item レベルにある場合も RequestTemplate を作る
+        spec = {
+            "swagger": "2.0",
+            "host": "api.example.com",
+            "schemes": ["https"],
+            "paths": {"/items": {
+                "parameters": [{"name": "body", "in": "body",
+                                "schema": {"type": "object",
+                                           "properties": {"n": {"type": "string"}}}}],
+                "post": {},
+            }},
+        }
+        seed = parse_openapi(spec)
+        posts = [r for r in seed.requests if r.method == "POST" and "/items" in r.url]
+        self.assertEqual(len(posts), 1)
+        self.assertIn("n", posts[0].json_body)
+
+    def test_vendor_json_media_type_preserved(self):
+        # application/merge-patch+json 等のメディアタイプを template に保持する
+        op = {
+            "requestBody": {"content": {"application/merge-patch+json": {
+                "schema": {"type": "object", "properties": {"n": {"type": "string"}}}}}},
+        }
+        spec = {
+            "openapi": "3.0.0",
+            "servers": [{"url": "https://api.example.com"}],
+            "paths": {"/items": {"patch": op}},
+        }
+        seed = parse_openapi(spec)
+        patches = [r for r in seed.requests if r.method == "PATCH"]
+        self.assertEqual(patches[0].content_type, "application/merge-patch+json")
+
+    def test_referenced_parameter_resolved(self):
+        # components.parameters の $ref を解決し、必須クエリを URL に含める
+        spec = {
+            "openapi": "3.0.0",
+            "servers": [{"url": "https://api.example.com"}],
+            "components": {"parameters": {"ApiVersion": {
+                "name": "api-version", "in": "query",
+                "schema": {"type": "string", "default": "2024"}}}},
+            "paths": {"/items": {"get": {
+                "parameters": [{"$ref": "#/components/parameters/ApiVersion"}]}}},
+        }
+        seed = parse_openapi(spec)
+        self.assertTrue(any("api-version=2024" in u for u in seed.urls))
+
+    def test_operation_param_overrides_path_param(self):
+        # operation-level の parameter が同名・同 location の path-level を上書きし、
+        # 重複クエリキー（?api-version=v1&api-version=v2）を出力しない
+        spec = {
+            "openapi": "3.0.0",
+            "servers": [{"url": "https://api.example.com"}],
+            "paths": {"/items": {
+                "parameters": [{"name": "api-version", "in": "query",
+                                "schema": {"type": "string", "default": "v1"}}],
+                "get": {"parameters": [{"name": "api-version", "in": "query",
+                                        "schema": {"type": "string", "default": "v2"}}]},
+            }},
+        }
+        seed = parse_openapi(spec)
+        url = next(u for u in seed.urls if "/items" in u)
+        # op が path を上書き → v2 のみ、v1 は出ない、キーは 1 回だけ
+        self.assertIn("api-version=v2", url)
+        self.assertNotIn("api-version=v1", url)
+        self.assertEqual(url.count("api-version="), 1)
+
+    def test_boolean_array_query_params_serialized_in_url(self):
+        # array/boolean のクエリが Python 表現（['test']/True）でシードされないこと
+        spec = {
+            "openapi": "3.0.0",
+            "servers": [{"url": "https://api.example.com"}],
+            "paths": {"/items": {"get": {"parameters": [
+                {"name": "active", "in": "query",
+                 "schema": {"type": "boolean", "default": True}},
+                {"name": "tags", "in": "query",
+                 "schema": {"type": "array", "default": ["a", "b"]}},
+            ]}}},
+        }
+        seed = parse_openapi(spec)
+        url = next(u for u in seed.urls if "/items" in u)
+        self.assertIn("active=true", url)
+        self.assertIn("tags=a", url)
+        self.assertIn("tags=b", url)
+        # Python 表現の混入が無い
+        self.assertNotIn("True", url)
+        self.assertNotIn("%5B", url)  # '['
+        self.assertNotIn("%27", url)  # "'"
+
+    def test_request_body_ref_resolved(self):
+        spec = {
+            "openapi": "3.0.0",
+            "servers": [{"url": "https://api.example.com"}],
+            "components": {"schemas": {
+                "User": {"type": "object", "properties": {
+                    "name": {"type": "string"}, "age": {"type": "integer"}}},
+            }},
+            "paths": {"/users": {"post": {"requestBody": {"content": {
+                "application/json": {"schema": {"$ref": "#/components/schemas/User"}}}}}}},
+        }
+        seed = parse_openapi(spec)
+        posts = [r for r in seed.requests if r.method == "POST"]
+        self.assertEqual(len(posts), 1)
+        # $ref が解決され、通常フィールドを含む本文になる（空 {} ではない）
+        self.assertEqual(posts[0].json_body, {"name": "test", "age": 1})
+
+    def test_swagger2_body_param_ref_resolved(self):
+        # body パラメータ自体が $ref のケース（#/parameters/...）
+        spec = {
+            "swagger": "2.0", "host": "api.example.com", "schemes": ["https"],
+            "parameters": {"CreateUser": {
+                "in": "body", "name": "b",
+                "schema": {"type": "object", "properties": {"u": {"type": "string"}}}}},
+            "definitions": {},
+            "paths": {"/users": {"post": {"parameters": [
+                {"$ref": "#/parameters/CreateUser"}]}}},
+        }
+        seed = parse_openapi(spec)
+        posts = [r for r in seed.requests if r.method == "POST"]
+        self.assertEqual(len(posts), 1)
+        self.assertEqual(posts[0].json_body, {"u": "test"})
+
+    def test_swagger2_definitions_ref_resolved(self):
+        spec = {
+            "swagger": "2.0", "host": "api.example.com", "schemes": ["https"],
+            "definitions": {"Creds": {"type": "object",
+                                      "properties": {"user": {"type": "string"}}}},
+            "paths": {"/login": {"post": {"parameters": [
+                {"in": "body", "name": "b", "schema": {"$ref": "#/definitions/Creds"}}]}}},
+        }
+        seed = parse_openapi(spec)
+        posts = [r for r in seed.requests if r.method == "POST"]
+        self.assertEqual(posts[0].json_body, {"user": "test"})
+
+    def test_component_request_body_ref_resolved(self):
+        # requestBody 自体が component 参照のケース
+        spec = {
+            "openapi": "3.0.0",
+            "servers": [{"url": "https://api.example.com"}],
+            "components": {
+                "requestBodies": {"CreateUser": {"content": {
+                    "application/json": {"schema": {"$ref": "#/components/schemas/User"}}}}},
+                "schemas": {"User": {"type": "object",
+                                     "properties": {"name": {"type": "string"}}}},
+            },
+            "paths": {"/users": {"post": {
+                "requestBody": {"$ref": "#/components/requestBodies/CreateUser"}}}},
+        }
+        seed = parse_openapi(spec)
+        posts = [r for r in seed.requests if r.method == "POST"]
+        self.assertEqual(len(posts), 1)
+        self.assertEqual(posts[0].json_body, {"name": "test"})
+
+    def test_relative_server_without_leading_slash(self):
+        # "api/v1" のような相対 server URL でも不正ホストにしない
+        spec = {"openapi": "3.0.0", "servers": [{"url": "api/v1"}],
+                "paths": {"/ping": {"get": {}}}}
+        seed = parse_openapi(spec, fallback_base="https://h.example.com/app")
+        self.assertIn("https://h.example.com/api/v1/ping", seed.urls)
+        self.assertNotIn("https://h.example.comapi/v1/ping", seed.urls)
+
+    def test_swagger2_base(self):
+        seed = parse_openapi(SWAGGER2)
+        # body operation → request template, base from host+basePath
+        self.assertTrue(any(r.url == "https://api.example.com/v2/login" for r in seed.requests))
+
+    def test_server_variables_expanded(self):
+        # servers[].variables の default を展開してからシードする
+        spec = {
+            "openapi": "3.0.0",
+            "servers": [{"url": "https://{host}/v1",
+                         "variables": {"host": {"default": "api.example.com"}}}],
+            "paths": {"/ping": {"get": {}}},
+        }
+        seed = parse_openapi(spec)
+        self.assertIn("https://api.example.com/v1/ping", seed.urls)
+        self.assertFalse(any("{host}" in u for u in seed.urls))
+
+    def test_relative_server_resolved_with_fallback(self):
+        spec = {"openapi": "3.0.0", "servers": [{"url": "/api"}],
+                "paths": {"/ping": {"get": {}}}}
+        seed = parse_openapi(spec, fallback_base="https://h.example.com/app")
+        self.assertIn("https://h.example.com/api/ping", seed.urls)
+
+    def test_all_servers_expanded(self):
+        # 先頭サーバがスコープ外でも後続を落とさないよう全ベースに展開する
+        spec = {
+            "openapi": "3.0.0",
+            "servers": [
+                {"url": "https://staging.example.com/v1"},
+                {"url": "https://prod.example.com/v1"},
+            ],
+            "paths": {
+                "/users": {"get": {}, "post": {"requestBody": {"content": {
+                    "application/json": {"schema": {"type": "object",
+                                                    "properties": {"n": {"type": "string"}}}}}}}},
+            },
+        }
+        seed = parse_openapi(spec)
+        self.assertIn("https://staging.example.com/v1/users", seed.urls)
+        self.assertIn("https://prod.example.com/v1/users", seed.urls)
+        post_urls = {r.url for r in seed.requests if r.method == "POST"}
+        self.assertIn("https://staging.example.com/v1/users", post_urls)
+        self.assertIn("https://prod.example.com/v1/users", post_urls)
+
+
+class PostmanTests(unittest.TestCase):
+    def test_walk_folders(self):
+        seed = parse_postman(POSTMAN)
+        self.assertIn("https://api.example.com/users?page=1", seed.urls)
+        self.assertIn("https://api.example.com/users", seed.urls)
+        self.assertEqual(seed.headers.get("Authorization"), "Bearer x")
+        self.assertTrue(any(r.json_body == {"name": "x"} for r in seed.requests))
+
+    def test_collection_variable_resolved(self):
+        coll = {
+            "info": {"schema": "https://schema.getpostman.com/json/collection/v2.1.0/"},
+            "variable": [{"key": "baseUrl", "value": "https://api.example.com"}],
+            "item": [{
+                "name": "get", "request": {"method": "POST",
+                    "url": {"raw": "{{baseUrl}}/users"},
+                    "body": {"mode": "raw", "raw": '{"n":"x"}'}},
+            }],
+        }
+        seed = parse_postman(coll)
+        self.assertIn("https://api.example.com/users", seed.urls)
+        self.assertTrue(any(r.url == "https://api.example.com/users" for r in seed.requests))
+
+    def test_unresolved_var_falls_back_to_target(self):
+        coll = {
+            "info": {"schema": "https://schema.getpostman.com/json/collection/v2.1.0/"},
+            "item": [{"name": "g", "request": {"method": "GET",
+                                               "url": {"raw": "{{baseUrl}}/api/items"}}}],
+        }
+        seed = parse_postman(coll, fallback_base="https://target.example.com/app")
+        self.assertIn("https://target.example.com/api/items", seed.urls)
+
+    def test_url_object_query_preserved(self):
+        # raw 無し・host/path/query の URL オブジェクトでクエリを落とさない
+        coll = {
+            "info": {"schema": "https://schema.getpostman.com/json/collection/v2.1.0/"},
+            "item": [{"name": "g", "request": {"method": "GET", "url": {
+                "host": ["api", "example", "com"], "path": ["items"],
+                "query": [{"key": "api-version", "value": "2024"},
+                          {"key": "off", "value": "x", "disabled": True}]}}}],
+        }
+        seed = parse_postman(coll)
+        self.assertTrue(any("api-version=2024" in u for u in seed.urls))
+        # disabled なクエリは含めない
+        self.assertFalse(any("off=x" in u for u in seed.urls))
+
+    def test_url_object_query_variable_resolved(self):
+        # query 値が {{apiVersion}} のとき urlencode 前に解決する
+        coll = {
+            "info": {"schema": "https://schema.getpostman.com/json/collection/v2.1.0/"},
+            "variable": [{"key": "apiVersion", "value": "2024"}],
+            "item": [{"name": "g", "request": {"method": "GET", "url": {
+                "host": ["api", "example", "com"], "path": ["items"],
+                "query": [{"key": "api-version", "value": "{{apiVersion}}"}]}}}],
+        }
+        seed = parse_postman(coll)
+        self.assertTrue(any("api-version=2024" in u for u in seed.urls))
+        self.assertFalse(any("%7B%7B" in u for u in seed.urls))
+
+    def test_host_variable_absolute_base(self):
+        # host:["{{baseUrl}}"] が絶対URLに解決される場合 scheme を二重化しない
+        coll = {
+            "info": {"schema": "https://schema.getpostman.com/json/collection/v2.1.0/"},
+            "variable": [{"key": "baseUrl", "value": "https://api.example.com"}],
+            "item": [{"name": "g", "request": {"method": "GET", "url": {
+                "host": ["{{baseUrl}}"], "path": ["users"]}}}],
+        }
+        seed = parse_postman(coll)
+        self.assertIn("https://api.example.com/users", seed.urls)
+        self.assertFalse(any("https://https://" in u for u in seed.urls))
+
+    def test_host_variable_in_authority_falls_back(self):
+        # scheme://{{host}}/path も origin に解決し https:///path 化しない
+        coll = {
+            "info": {"schema": "https://schema.getpostman.com/json/collection/v2.1.0/"},
+            "item": [{"name": "g", "request": {"method": "GET",
+                                               "url": {"raw": "https://{{host}}/users"}}}],
+        }
+        seed = parse_postman(coll, fallback_base="https://target.example.com")
+        self.assertIn("https://target.example.com/users", seed.urls)
+        self.assertFalse(any(":///" in u for u in seed.urls))
+
+    def test_request_headers_on_template(self):
+        # Postman の必須ヘッダ(X-API-Version 等)を RequestTemplate に載せる
+        coll = {
+            "info": {"schema": "https://schema.getpostman.com/json/collection/v2.1.0/"},
+            "variable": [{"key": "ver", "value": "2024"}],
+            "item": [{"name": "c", "request": {
+                "method": "POST", "url": "https://api.example.com/users",
+                "header": [{"key": "X-API-Version", "value": "{{ver}}"},
+                           {"key": "X-Off", "value": "n", "disabled": True}],
+                "body": {"mode": "raw", "raw": '{"n":"x"}'}}}],
+        }
+        seed = parse_postman(coll)
+        posts = [r for r in seed.requests if r.method == "POST"]
+        self.assertEqual(posts[0].headers.get("X-API-Version"), "2024")
+        self.assertNotIn("X-Off", posts[0].headers)
+
+    def test_url_only_request_headers_in_seed(self):
+        # body 無し(GET)の必須ヘッダも seed.headers に載る
+        coll = {
+            "info": {"schema": "https://schema.getpostman.com/json/collection/v2.1.0/"},
+            "item": [{"name": "g", "request": {
+                "method": "GET", "url": "https://api.example.com/items",
+                "header": [{"key": "X-Tenant", "value": "acme"}]}}],
+        }
+        seed = parse_postman(coll)
+        self.assertEqual(seed.headers.get("X-Tenant"), "acme")
+
+    def test_unresolved_header_placeholder_skipped(self):
+        # 解決できない {{token}} を含むヘッダは seed.headers に入れない
+        # （利用者の --header Authorization をリテラルで上書きしないため）
+        coll = {
+            "info": {"schema": "https://schema.getpostman.com/json/collection/v2.1.0/"},
+            "item": [{"name": "g", "request": {
+                "method": "GET", "url": "https://api.example.com/me",
+                "header": [{"key": "Authorization", "value": "Bearer {{token}}"}]}}],
+        }
+        seed = parse_postman(coll)
+        self.assertNotIn("Authorization", seed.headers)
+
+    def test_native_bearer_auth_block_imported(self):
+        # request.auth(bearer) を Authorization ヘッダへ展開する
+        coll = {
+            "info": {"schema": "https://schema.getpostman.com/json/collection/v2.1.0/"},
+            "item": [{"name": "g", "request": {
+                "method": "GET", "url": "https://api.example.com/me",
+                "auth": {"type": "bearer",
+                         "bearer": [{"key": "token", "value": "abc123"}]}}}],
+        }
+        seed = parse_postman(coll)
+        self.assertEqual(seed.headers.get("Authorization"), "Bearer abc123")
+
+    def test_apikey_query_auth_appended_to_url(self):
+        # apikey(in:query) は URL にキーを付与する
+        coll = {
+            "info": {"schema": "https://schema.getpostman.com/json/collection/v2.1.0/"},
+            "item": [{"name": "g", "request": {
+                "method": "GET", "url": "https://api.example.com/items",
+                "auth": {"type": "apikey", "apikey": [
+                    {"key": "key", "value": "api_key"},
+                    {"key": "value", "value": "secret"},
+                    {"key": "in", "value": "query"}]}}}],
+        }
+        seed = parse_postman(coll)
+        self.assertTrue(any("api_key=secret" in u for u in seed.urls))
+
+    def test_collection_level_auth_inherited(self):
+        # collection 直下の auth を request が継承する
+        coll = {
+            "info": {"schema": "https://schema.getpostman.com/json/collection/v2.1.0/"},
+            "auth": {"type": "apikey", "apikey": [
+                {"key": "key", "value": "X-API-Key"},
+                {"key": "value", "value": "secret"}]},
+            "item": [{"name": "g", "request": {
+                "method": "GET", "url": "https://api.example.com/me"}}],
+        }
+        seed = parse_postman(coll)
+        self.assertEqual(seed.headers.get("X-API-Key"), "secret")
+
+    def test_auth_header_variable_resolved(self):
+        coll = {
+            "info": {"schema": "https://schema.getpostman.com/json/collection/v2.1.0/"},
+            "variable": [{"key": "token", "value": "secret123"}],
+            "item": [{"name": "g", "request": {
+                "method": "GET",
+                "header": [{"key": "Authorization", "value": "Bearer {{token}}"}],
+                "url": "https://api.example.com/me"}}],
+        }
+        seed = parse_postman(coll)
+        self.assertEqual(seed.headers.get("Authorization"), "Bearer secret123")
+
+    def test_raw_body_preserves_json_media_type(self):
+        # raw JSON body の非既定 JSON メディアタイプ（vendor/patch）を
+        # RequestTemplate.content_type に保持する（application/json 固定にしない）。
+        coll = {
+            "info": {"schema": "https://schema.getpostman.com/json/collection/v2.1.0/"},
+            "item": [{"name": "patch", "request": {
+                "method": "PATCH", "url": "https://api.example.com/items/1",
+                "header": [{"key": "Content-Type",
+                            "value": "application/merge-patch+json"}],
+                "body": {"mode": "raw", "raw": '{"name": "x"}'}}}],
+        }
+        seed = parse_postman(coll)
+        tmpls = [t for t in seed.requests if t.url.endswith("/items/1")]
+        self.assertEqual(len(tmpls), 1)
+        self.assertEqual(tmpls[0].content_type, "application/merge-patch+json")
+
+    def test_raw_body_defaults_json_media_type(self):
+        # Content-Type 未指定の raw JSON body は application/json を既定とする。
+        coll = {
+            "info": {"schema": "https://schema.getpostman.com/json/collection/v2.1.0/"},
+            "item": [{"name": "post", "request": {
+                "method": "POST", "url": "https://api.example.com/items",
+                "body": {"mode": "raw", "raw": '{"name": "x"}'}}}],
+        }
+        seed = parse_postman(coll)
+        tmpls = [t for t in seed.requests if t.url.endswith("/items")]
+        self.assertEqual(len(tmpls), 1)
+        self.assertEqual(tmpls[0].content_type, "application/json")
+
+
+class LoadTests(unittest.TestCase):
+    def test_load_json_openapi(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "spec.json"
+            p.write_text(json.dumps(OPENAPI3), encoding="utf-8")
+            seed = ApiSpecImporter().load(str(p))
+            self.assertTrue(seed.urls)
+
+    def test_load_detects_postman(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "collection.json"
+            p.write_text(json.dumps(POSTMAN), encoding="utf-8")
+            seed = ApiSpecImporter().load(str(p))
+            self.assertTrue(seed.urls)
+
+    def test_missing_raises(self):
+        with self.assertRaises(FileNotFoundError):
+            ApiSpecImporter().load("/no/such/file.json")
+
+
+if __name__ == "__main__":
+    unittest.main()
