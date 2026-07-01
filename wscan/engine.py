@@ -326,6 +326,7 @@ class ScanEngine:
         openai_model: str = "gpt-4o-mini",
         gemini_model: str = "gemini-2.0-flash",
         claude_model: str = "claude-haiku-4-5-20251001",
+        openai_base_url: str = "",
         role_models: Optional[dict] = None,
         checks: Optional[list] = None,
         output_dir: Optional[str] = None,
@@ -701,6 +702,7 @@ class ScanEngine:
             openai_model=openai_model,
             gemini_model=gemini_model,
             claude_model=claude_model,
+            openai_base_url=openai_base_url,
             role_models=role_models,
             default_payloads=payloads_data,
             prompt_templates=prompt_templates,
@@ -4868,12 +4870,13 @@ class ScanEngine:
                     )
                     return response.content[0].text
             elif provider == "openai":
-                import httpx, os
-                api_key = os.environ.get("OPENAI_API_KEY", "")
+                import httpx
+                from . import llm_endpoint
+                api_key = llm_endpoint.resolve_api_key()
                 if api_key:
                     async with httpx.AsyncClient(timeout=60.0) as client:
                         resp = await client.post(
-                            "https://api.openai.com/v1/chat/completions",
+                            llm_endpoint.chat_completions_url(),
                             headers={"Authorization": f"Bearer {api_key}"},
                             json={"model": self.payload_gen.openai_model,
                                   "messages": [{"role": "user", "content": prompt}],

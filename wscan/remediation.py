@@ -301,15 +301,15 @@ async def _call_llm_raw(payload_gen: "PayloadGenerator", prompt: str) -> str | N
             return None
 
     if provider == "openai":
-        import os
         import httpx
-        api_key = os.environ.get("OPENAI_API_KEY")
+        from . import llm_endpoint
+        api_key = llm_endpoint.resolve_api_key()
         if not api_key:
             return None
         try:
             async with httpx.AsyncClient(timeout=30.0) as client:
                 resp = await client.post(
-                    "https://api.openai.com/v1/chat/completions",
+                    llm_endpoint.chat_completions_url(),
                     headers={"Authorization": f"Bearer {api_key}"},
                     json={
                         "model": payload_gen.openai_model,

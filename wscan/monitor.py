@@ -643,6 +643,7 @@ class MonitorServer:
                     openai_model=cfg.get("openai_model", "gpt-4o-mini"),
                     gemini_model=cfg.get("gemini_model", "gemini-2.0-flash"),
                     claude_model=cfg.get("claude_model", "claude-haiku-4-5-20251001"),
+                    openai_base_url=cfg.get("openai_base_url", "") or "",
                     role_models=cfg.get("role_models", {}) or {},
                 )
                 result = await generate_from_description(gen, description)

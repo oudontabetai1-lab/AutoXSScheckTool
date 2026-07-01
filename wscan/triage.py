@@ -386,6 +386,7 @@ class TriageEngine:
         openai_model: str = "gpt-4o-mini",
         gemini_model: str = "gemini-2.0-flash",
         claude_model: str = "claude-haiku-4-5-20251001",
+        openai_base_url: str = "",
         role_models: Optional[dict] = None,
     ):
         self.target_url = url.rstrip("/")
@@ -396,6 +397,7 @@ class TriageEngine:
         self.llm_provider = llm_provider
         self.ollama_model = ollama_model
         self.openai_model = openai_model
+        self.openai_base_url = openai_base_url
         self.gemini_model = gemini_model
         self.claude_model = claude_model
         self.role_models = {
@@ -515,6 +517,7 @@ class TriageEngine:
                 openai_model=self.openai_model,
                 gemini_model=self.gemini_model,
                 claude_model=self.claude_model,
+                openai_base_url=self.openai_base_url,
                 role_models=self.role_models,
             )
             if not await pg._check_llm_available():

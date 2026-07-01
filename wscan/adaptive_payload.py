@@ -598,7 +598,8 @@ class AdaptivePayloadEngine:
             return None
 
     async def _stream_openai(self, prompt: str) -> Optional[str]:
-        api_key = os.environ.get("OPENAI_API_KEY")
+        from . import llm_endpoint
+        api_key = llm_endpoint.resolve_api_key()
         if not api_key:
             return None
         import httpx
@@ -607,7 +608,7 @@ class AdaptivePayloadEngine:
             async with httpx.AsyncClient(timeout=90.0) as client:
                 async with client.stream(
                     "POST",
-                    "https://api.openai.com/v1/chat/completions",
+                    llm_endpoint.chat_completions_url(),
                     headers={"Authorization": f"Bearer {api_key}"},
                     json={
                         "model": self.pg.openai_model,

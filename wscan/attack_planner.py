@@ -416,8 +416,9 @@ Consider stored / second-order attacks carefully:
 
     async def _call_openai(self, prompt: str) -> Optional[str]:
         """OpenAI streaming attack plan — prints chunks live."""
-        import os, httpx
-        api_key = os.environ.get("OPENAI_API_KEY")
+        import httpx
+        from . import llm_endpoint
+        api_key = llm_endpoint.resolve_api_key()
         if not api_key:
             return None
         _thinking_header("OpenAI", self.payload_gen.openai_model)
@@ -426,7 +427,7 @@ Consider stored / second-order attacks carefully:
             async with httpx.AsyncClient(timeout=90.0) as client:
                 async with client.stream(
                     "POST",
-                    "https://api.openai.com/v1/chat/completions",
+                    llm_endpoint.chat_completions_url(),
                     headers={"Authorization": f"Bearer {api_key}"},
                     json={
                         "model": self.payload_gen.openai_model,

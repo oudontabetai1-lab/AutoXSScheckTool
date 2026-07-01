@@ -131,13 +131,14 @@ async def _call_llm(payload_gen, prompt: str) -> Optional[str]:
             return response.content[0].text
 
         elif provider == "openai":
-            import os, httpx
-            api_key = os.environ.get("OPENAI_API_KEY", "")
+            import httpx
+            from . import llm_endpoint
+            api_key = llm_endpoint.resolve_api_key()
             if not api_key:
                 return None
             async with httpx.AsyncClient(timeout=60.0) as client:
                 resp = await client.post(
-                    "https://api.openai.com/v1/chat/completions",
+                    llm_endpoint.chat_completions_url(),
                     headers={"Authorization": f"Bearer {api_key}"},
                     json={
                         "model": payload_gen.openai_model,
