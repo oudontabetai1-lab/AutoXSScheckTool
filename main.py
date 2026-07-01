@@ -971,10 +971,15 @@ Examples:
     setup = sub.add_parser("setup", help="Interactively configure scan options via natural language")
     setup.add_argument("description", nargs="?", default="",
                        help="Natural language description of the target")
-    setup.add_argument("--llm", choices=["ollama", "claude", "openai", "gemini", "none"],
-                       default=_CFG.get("llm_provider", "ollama"))
+    setup.add_argument("--llm", choices=["ollama", "claude", "openai", "openai_compatible", "gemini", "none"],
+                       default=_CFG.get("llm_provider", "ollama"),
+                       help="LLM プロバイダー。openai_compatible は外部 OpenAI 互換 LLM（tsuzumi2 等）。")
     setup.add_argument("--ollama-model", default=_CFG.get("ollama_model", "llama3"), metavar="MODEL")
     setup.add_argument("--ollama-url", default=_CFG.get("ollama_url", "http://localhost:11434"), metavar="URL")
+    setup.add_argument("--openai-model", default=_CFG.get("openai_model", "gpt-4o-mini"), metavar="MODEL",
+                       help="OpenAI(互換) モデル名。openai_compatible では tsuzumi-2 等。")
+    setup.add_argument("--llm-base-url", default=_CFG.get("openai_base_url", ""), metavar="URL",
+                       help="外部 OpenAI 互換エンドポイントのベース URL（tsuzumi2 等）。")
 
     # M: Batch scan subcommand
     batch_cmd = sub.add_parser(
@@ -1166,8 +1171,9 @@ async def run_agent(args):
 
     console = Console()
 
-    # 外部 OpenAI 互換（tsuzumi2 等）のベース URL を env へ集約してから LLM を構築する。
-    llm_endpoint.apply_env(base_url=getattr(args, "llm_base_url", "") or "")
+    # 外部 OpenAI 互換（tsuzumi2 等）のベース URL をこの実行の値へ決定論的に反映
+    # （空なら公式にフォールバック）してから LLM を構築する。
+    llm_endpoint.set_base_url(getattr(args, "llm_base_url", "") or "")
 
     headless = not getattr(args, "no_headless", False)
 
@@ -1878,8 +1884,9 @@ async def run_serve(args):
         if cfg.get("agent_mode"):
             from wscan.agent_engine import AgentEngine
             from wscan import llm_endpoint
-            # 外部 OpenAI 互換（tsuzumi2 等）のベース URL を env へ集約。
-            llm_endpoint.apply_env(base_url=cfg.get("openai_base_url", "") or "")
+            # 外部 OpenAI 互換（tsuzumi2 等）のベース URL をこのスキャンの値へ
+            # 決定論的に反映（空なら公式へ戻す）。長時間プロセスでの持ち越しを防ぐ。
+            llm_endpoint.set_base_url(cfg.get("openai_base_url", "") or "")
             await monitor.emit_status(f"Agent Browser: {url} をスキャン中", "running")
             try:
                 agent_engine = AgentEngine(

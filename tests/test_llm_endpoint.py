@@ -73,6 +73,14 @@ class LlmEndpointTests(unittest.TestCase):
         e.apply_env(base_url="", api_key=None)
         self.assertEqual(os.environ["WSCAN_LLM_BASE_URL"], "https://keep/v1")
 
+    def test_set_base_url_sets_and_clears(self):
+        e.set_base_url("https://x/v1")
+        self.assertEqual(os.environ["WSCAN_LLM_BASE_URL"], "https://x/v1")
+        # 空値は明示的にクリア（前スキャンの持ち越し防止）。
+        e.set_base_url("")
+        self.assertNotIn("WSCAN_LLM_BASE_URL", os.environ)
+        self.assertEqual(e.chat_completions_url(), "https://api.openai.com/v1/chat/completions")
+
 
 class PayloadGeneratorCanonicalizeTests(unittest.TestCase):
     def setUp(self):
@@ -96,6 +104,23 @@ class PayloadGeneratorCanonicalizeTests(unittest.TestCase):
         )
         # openai_compatible のモデルは openai_model 経由で使われる。
         self.assertEqual(pg.get_model("payload"), "tsuzumi-2")
+
+    def test_sequential_scans_do_not_leak_base_url(self):
+        # ダッシュボード等の長時間プロセスを模擬: scan A で外部エンドポイントを
+        # 設定し、scan B が公式 OpenAI（base URL 空）を選ぶと、A の endpoint が
+        # 残ってはいけない。
+        from wscan.payload_gen import PayloadGenerator
+        PayloadGenerator(provider="openai_compatible", openai_model="tsuzumi-2",
+                         openai_base_url="https://tsuzumi.example/v1")
+        self.assertEqual(
+            e.chat_completions_url(), "https://tsuzumi.example/v1/chat/completions"
+        )
+        # 次のスキャンは公式 OpenAI（base URL なし）
+        PayloadGenerator(provider="openai", openai_model="gpt-4o-mini",
+                         openai_base_url="")
+        self.assertEqual(
+            e.chat_completions_url(), "https://api.openai.com/v1/chat/completions"
+        )
 
 
 if __name__ == "__main__":

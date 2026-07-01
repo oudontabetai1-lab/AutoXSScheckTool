@@ -84,7 +84,7 @@ def is_custom_endpoint() -> bool:
 
 
 def apply_env(*, base_url: str | None = None, api_key: str | None = None, model: str | None = None) -> None:
-    """CLI/config/ダッシュボード由来の値を環境変数へ集約する（空値は無視）。
+    """CLI/config/ダッシュボード由来の値を環境変数へ集約する（空値は無視・加算的）。
 
     既に env が設定済みの場合は **明示指定があるときだけ** 上書きする。これにより
     「env で渡す」運用と「CLI/config で渡す」運用を両立できる。
@@ -95,3 +95,18 @@ def apply_env(*, base_url: str | None = None, api_key: str | None = None, model:
         os.environ[ENV_API_KEY] = str(api_key).strip()
     if model and str(model).strip():
         os.environ[ENV_MODEL] = str(model).strip()
+
+
+def set_base_url(base_url: str | None) -> None:
+    """スキャン単位の権威的なベース URL を **決定論的に** env へ反映する。
+
+    ``apply_env`` は空値を無視する加算的な挙動のため、ダッシュボード等の長時間
+    プロセスで前のスキャンが設定した ``WSCAN_LLM_BASE_URL`` が残り、次のスキャンが
+    別エンドポイント/公式 OpenAI を選んでも古い値を使い続けてしまう。本関数は
+    値があれば設定し、空なら **明示的に削除** して、各スキャンを自己完結させる
+    （空にすると ``OPENAI_BASE_URL`` → 公式 の既定フォールバックに戻る）。
+    """
+    if base_url and str(base_url).strip():
+        os.environ[ENV_BASE_URL] = str(base_url).strip()
+    else:
+        os.environ.pop(ENV_BASE_URL, None)
