@@ -3738,22 +3738,11 @@ class ScanEngine:
                 )
                 continue
 
-            # Early exit: if a critical finding was already confirmed for this field,
-            # skip remaining checks — critical is the highest severity so further
-            # testing would only duplicate evidence.
-            if any(
-                f.severity == "critical" and f.field_name == field_name and f.url == url
-                for f in self.all_findings
-            ):
-                self._record_scan_matrix(
-                    url=url,
-                    field_name=field_name,
-                    check_name=check_name,
-                    status="skipped",
-                    location=location,
-                    note="Skipped because a critical finding was already confirmed for this field.",
-                )
-                break
+            # 注意: 以前はこのフィールドで critical finding が確定すると残りの
+            # チェックをスキップしていた。しかし critical が過検知（false positive）
+            # の場合、他の本物の脆弱性を取りこぼしてしまう。過検知の可能性がある以上、
+            # 「脆弱性が見つかったから」といって他チェックを飛ばさず、全チェック種別を
+            # 常に実行する（重複証跡は record_finding の dedup が抑止する）。
 
             # Merge plan payloads with defaults (LLM extras come first, defaults appended)
             # Use a per-task ContextVar so parallel workers never contaminate each other.
@@ -3817,13 +3806,11 @@ class ScanEngine:
                 pass
 
         # ── Adaptive AI round ────────────────────────────────────────────
-        # Skip if LLM disabled, or a critical/high finding already confirmed
-        field_findings = [f for f in self.all_findings if f.field_name == field_name and f.url == url]
-        already_critical = any(f.severity in ("critical",) for f in field_findings)
-
-        # resume で全チェックがスキップされたフィールドでは adaptive も走らせない
-        # （新規生成 payload で完了済みフィールドを再攻撃しないため）。
-        if self.adaptive_enabled and not already_critical and checks_executed > 0:
+        # 以前は critical finding があると adaptive パスをスキップしていたが、過検知で
+        # ある可能性を踏まえ「見つかったからスキップ」はしない。resume で全チェックが
+        # スキップされたフィールドだけは adaptive も走らせない（新規生成 payload で
+        # 完了済みフィールドを再攻撃しないため）。
+        if self.adaptive_enabled and checks_executed > 0:
             await self._adaptive_attack_field(
                 url, form_index, field, is_url_param, ordered_checks, field_plan
             )
@@ -3890,7 +3877,6 @@ class ScanEngine:
             # Run scanner again with adaptive payloads — isolated via ContextVar
             current_overrides = _FIELD_PAYLOAD_OVERRIDES.get() or {}
             _adaptive_token = _FIELD_PAYLOAD_OVERRIDES.set({**current_overrides, check_name: adaptive_payloads})
-            _critical_hit = False
 
             try:
                 findings = await scanner.scan_field(url, form_index, field, is_url_param)
@@ -3900,17 +3886,12 @@ class ScanEngine:
                     # Tag adaptive findings so they're identifiable
                     f.evidence = f"[AdaptiveAI] {f.evidence}"
                     self._record_finding(f, source=f"{field_name}[adaptive]")
-
-                # Stop adaptive passes for this field if critical hit confirmed
-                if any(f is not None and f.severity == "critical" for f in (findings or [])):
-                    _critical_hit = True
+                # 過検知の可能性があるため、critical が出ても残りのチェック種別の
+                # adaptive パスを打ち切らない（見つかったからスキップしない）。
             except Exception as e:
                 console.print(f"    [yellow]Adaptive scanner error ({check_name}): {e}[/yellow]")
             finally:
                 _FIELD_PAYLOAD_OVERRIDES.reset(_adaptive_token)
-
-            if _critical_hit:
-                break
 
             # CTF: scan page again after adaptive probe
             if self.flag_finder:
@@ -4328,8 +4309,11 @@ class ScanEngine:
                 from wscan.remediation import generate_fix
                 for finding in self.all_findings:
                     if not getattr(finding, "ai_fix", ""):
-                        fix_text = await generate_fix(finding, self.payload_gen)
+                        fix_text, fix_is_ai = await generate_fix(finding, self.payload_gen)
                         finding.ai_fix = fix_text
+                        # 実際に LLM で生成したか（静的テンプレートか）を記録し、
+                        # レポートで "AI 推奨修正" と静的ガイダンスを出し分ける。
+                        finding.ai_fix_is_ai = fix_is_ai
             except Exception:
                 pass
 
@@ -4841,6 +4825,7 @@ class ScanEngine:
                     })
                     # Attach to the Finding object for the report renderer
                     f.__dict__["ai_fix"] = fix_text
+                    f.__dict__["ai_fix_is_ai"] = True
             except Exception:
                 pass
 

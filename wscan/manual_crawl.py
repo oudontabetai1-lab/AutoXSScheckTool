@@ -80,7 +80,8 @@ def load_manual_crawl_seed(
     allowed_scopes: list[str] | None = None,
 ) -> ManualCrawlSeed:
     """Load a saved manual crawl JSON file and normalize seed URLs."""
-    data = json.loads(Path(path).read_text(encoding="utf-8"))
+    from .textio import read_text_resilient
+    data = json.loads(read_text_resilient(path))
     if not isinstance(data, dict):
         raise ValueError("manual crawl file must be a JSON object")
 

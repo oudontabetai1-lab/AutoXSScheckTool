@@ -222,7 +222,7 @@ _STATIC_FIX: dict[str, str] = {
 }
 
 
-async def generate_fix(finding: "Finding", payload_gen: "PayloadGenerator") -> str:
+async def generate_fix(finding: "Finding", payload_gen: "PayloadGenerator") -> tuple[str, bool]:
     """
     Finding の脆弱性に対する修正ガイダンスを生成する。
 
@@ -236,14 +236,17 @@ async def generate_fix(finding: "Finding", payload_gen: "PayloadGenerator") -> s
 
     Returns
     -------
-    修正ガイダンス文字列 (Markdown 形式)
+    ``(修正ガイダンス文字列, is_ai)`` のタプル。``is_ai`` は本文が実際に
+    LLM で生成されたか（True）静的テンプレートか（False）を示す。レポート側は
+    これを見て「AI 推奨修正」と「静的ガイダンス」を正しく出し分ける
+    （AI を使っていないのに "AI" と表示しないため）。
     """
     check_type = finding.check_type
     static = _get_static(check_type)
 
-    # LLM が無効な場合は静的テンプレートをそのまま返す
+    # LLM が無効な場合は静的テンプレートをそのまま返す（is_ai=False）
     if payload_gen.provider == "none":
-        return static
+        return static, False
 
     # LLM プロンプト構築
     prompt = (
@@ -262,16 +265,16 @@ async def generate_fix(finding: "Finding", payload_gen: "PayloadGenerator") -> s
     )
 
     try:
-        result = await payload_gen._call_llm(prompt)
-        # _call_llm returns list[str] for payloads; for remediation we need raw text
-        # So we use the internal methods directly
+        # remediation は生テキストが欲しいので専用の呼び出しを使う
+        # （_call_llm は payload 用に list[str] を返すため）
         llm_text = await _call_llm_raw(payload_gen, prompt)
         if llm_text and len(llm_text) > 20:
-            return llm_text
+            return llm_text.strip(), True
     except Exception:
         pass
 
-    return static
+    # LLM 呼び出しに失敗したときは静的テンプレートにフォールバック（is_ai=False）
+    return static, False
 
 
 async def _call_llm_raw(payload_gen: "PayloadGenerator", prompt: str) -> str | None:

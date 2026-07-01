@@ -25,6 +25,24 @@ from pathlib import Path
 # the last-resort fallback so we degrade gracefully rather than crash.
 _FALLBACK_ENCODINGS = ("utf-8-sig", "utf-8", "cp932", "shift_jis", "latin-1")
 
+# gzip マジックバイト。HAR / cookie エクスポート等が gzip 圧縮されて渡されると、
+# 生バイトを UTF-8 で読もうとして ``can't decode byte 0x8b in position 1``
+# （0x1f 0x8b = gzip）で落ちる。読み込み前に透過的に解凍する。
+_GZIP_MAGIC = b"\x1f\x8b"
+
+
+def _maybe_gunzip(data: bytes) -> bytes:
+    """gzip マジックで始まるなら解凍して返す（失敗時は元データ）。"""
+    if data[:2] != _GZIP_MAGIC:
+        return data
+    try:
+        import gzip
+
+        return gzip.decompress(data)
+    except Exception:
+        # 壊れた gzip 等。元バイトのまま後段のエンコーディング判定に委ねる。
+        return data
+
 
 def read_text_resilient(path: str | Path) -> str:
     """Read a text file, trying several encodings before failing.
@@ -35,7 +53,7 @@ def read_text_resilient(path: str | Path) -> str:
     encoding mismatch.
     """
     p = Path(path)
-    data = p.read_bytes()
+    data = _maybe_gunzip(p.read_bytes())
     last_exc: Exception | None = None
     for enc in _FALLBACK_ENCODINGS:
         try:
@@ -61,6 +79,7 @@ def safe_decode(data: bytes, limit: int | None = None) -> str:
     """
     if not data:
         return ""
+    data = _maybe_gunzip(data)
     if limit is not None:
         data = data[:limit]
     for enc in _FALLBACK_ENCODINGS:

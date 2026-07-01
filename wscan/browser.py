@@ -111,6 +111,44 @@ class NetworkCapture:
                         return pair
         return None
 
+    def best_pair_for_page(self, url: str) -> Optional[dict]:
+        """検査対象ページを最もよく表す request/response ペアを選ぶ。
+
+        フォーム送信 / URL パラメータ注入の後、ページはアナリティクスや
+        トラッキングのビーコン（多くは別オリジンの ``POST``）や、あとから
+        読まれるサブリソース（css/js/画像）も送信しうる。そのため単純に
+        ``latest()`` を採ると、レポートの「リクエスト/レスポンス」が検査対象
+        ではない別 URL（例: analytics）になってしまう。
+
+        優先順位: (1) 対象 URL の完全一致（パス一致・クエリ無視） →
+        (2) 同一オリジンで ``Content-Type`` が HTML の最新レスポンス（＝文書本体）
+        → (3) 同一オリジンの最新レスポンス。いずれも無ければ ``None``。
+        呼び出し側で最後の手段として ``latest()`` にフォールバックできる。
+        """
+        exact = self.latest_for_url(url, match_query=False)
+        if exact:
+            return exact
+        target = urlparse((url or "").split("#", 1)[0])
+        same_origin: Optional[dict] = None
+        same_origin_html: Optional[dict] = None
+        for pair in reversed(self.pairs):
+            resp = pair.get("response", {}) or {}
+            req = pair.get("request", {}) or {}
+            cand = urlparse((resp.get("url") or req.get("url") or "").split("#", 1)[0])
+            if cand.scheme != target.scheme or cand.netloc != target.netloc:
+                continue  # 別オリジン（アナリティクス等）は除外
+            if same_origin is None:
+                same_origin = pair  # reversed なので最新の同一オリジン
+            ctype = ""
+            for k, v in (resp.get("headers") or {}).items():
+                if str(k).lower() == "content-type":
+                    ctype = str(v).lower()
+                    break
+            if "html" in ctype:
+                same_origin_html = pair  # 文書本体（最新）
+                break
+        return same_origin_html or same_origin
+
     def clear(self):
         self.pairs.clear()
         self._pending.clear()
@@ -492,7 +530,9 @@ class BrowserManager:
 
             source = await self.get_page_source()
             action_url = result.get("action") or self.page.url
-            pair = self.network.latest_for_url(action_url, match_query=False) or self.network.latest() or {}
+            # アナリティクス等の別 URL ビーコンを掴まないよう、対象ページを最も
+            # よく表すペアを選ぶ（同一オリジンの文書本体を優先）。
+            pair = self.network.best_pair_for_page(action_url) or self.network.latest() or {}
             return source, pair
         except Exception as e:
             source = await self.get_page_source()
@@ -615,7 +655,9 @@ class BrowserManager:
 
             source = await self.get_page_source()
             action_url = result.get("action") or self.page.url
-            pair = self.network.latest_for_url(action_url, match_query=False) or self.network.latest() or {}
+            # アナリティクス等の別 URL ビーコンを掴まないよう、対象ページを最も
+            # よく表すペアを選ぶ（同一オリジンの文書本体を優先）。
+            pair = self.network.best_pair_for_page(action_url) or self.network.latest() or {}
             return source, pair
         except Exception:
             source = await self.get_page_source()
@@ -638,7 +680,14 @@ class BrowserManager:
         if _nav_wait > 0:
             await asyncio.sleep(_nav_wait)
         source = await self.get_page_source()
-        pair = self.network.latest_for_url(test_url) or self.network.latest() or {}
+        # 完全一致（クエリ込み）を最優先し、無ければ同一オリジンの文書本体を選ぶ。
+        # 別オリジンのアナリティクス POST を誤って掴まないため。
+        pair = (
+            self.network.latest_for_url(test_url)
+            or self.network.best_pair_for_page(test_url)
+            or self.network.latest()
+            or {}
+        )
         return source, pair
 
     async def collect_links(self, base_url: str, same_domain: bool = True) -> list[str]:

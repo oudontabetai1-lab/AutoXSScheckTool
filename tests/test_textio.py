@@ -1,3 +1,4 @@
+import gzip
 import tempfile
 import unittest
 from pathlib import Path
@@ -25,6 +26,12 @@ class ReadTextResilientTests(unittest.TestCase):
         path = self._write("日本語のコメント".encode("cp932"))
         self.assertEqual(read_text_resilient(path), "日本語のコメント")
 
+    def test_reads_gzipped_file_transparently(self):
+        # gzip 圧縮ファイル（マジック 0x1f 0x8b）を UTF-8 で読むと
+        # "can't decode byte 0x8b in position 1" で落ちる。透過的に解凍する。
+        path = self._write(gzip.compress('{"hello": "日本語"}'.encode("utf-8")))
+        self.assertEqual(read_text_resilient(path), '{"hello": "日本語"}')
+
 
 class SafeDecodeTests(unittest.TestCase):
     def test_empty(self):
@@ -43,6 +50,11 @@ class SafeDecodeTests(unittest.TestCase):
     def test_limit_truncates_before_decode(self):
         out = safe_decode(b"abcdefg", limit=3)
         self.assertEqual(out, "abc")
+
+    def test_gzip_bytes_are_decompressed(self):
+        # 0x1f 0x8b で始まる gzip バイト列を透過的に解凍してからデコードする。
+        out = safe_decode(gzip.compress("テスト body".encode("utf-8")))
+        self.assertEqual(out, "テスト body")
 
 
 if __name__ == "__main__":

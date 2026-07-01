@@ -410,14 +410,21 @@ class ReportGenerator:
                     f'title="{self._escape(cvss_vector)}">CVSS {sc:.1f}</span>'
                 )
 
-            # ⑨ AI fix suggestion (attached to Finding by engine._ai_analysis_report)
+            # ⑨ 修正ガイダンス。engine が付与した ai_fix を表示するが、実際に LLM で
+            # 生成したものだけを "AI 推奨修正" と表示する。LLM 未使用（静的テンプレート）
+            # のときは "AI" と偽らず「推奨修正（静的ガイダンス）」として出す。
             ai_fix_text = f.__dict__.get("ai_fix", "")
+            ai_fix_is_ai = bool(f.__dict__.get("ai_fix_is_ai", False))
             ai_fix_html = ""
             if ai_fix_text:
                 ai_fix_safe = self._escape(ai_fix_text).replace("\n", "<br>")
+                if ai_fix_is_ai:
+                    fix_heading = "🤖 AI 推奨修正 (AI Fix Suggestion)"
+                else:
+                    fix_heading = "🛠️ 推奨修正 (静的ガイダンス)"
                 ai_fix_html = f"""
                     <div class="finding-detail ai-fix-section">
-                        <h4>🤖 AI 推奨修正 (AI Fix Suggestion)</h4>
+                        <h4>{fix_heading}</h4>
                         <div class="ai-fix-body">{ai_fix_safe}</div>
                     </div>"""
 

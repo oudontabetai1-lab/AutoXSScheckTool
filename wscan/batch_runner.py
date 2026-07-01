@@ -114,10 +114,11 @@ class BatchRunner:
         YAML バッチ定義ファイルから BatchRunner を生成する。
         """
         import yaml  # PyYAML (requirements.txt に含まれる)
+        from .textio import read_text_resilient
         p = Path(yaml_path)
         if not p.exists():
             raise FileNotFoundError(f"バッチファイルが見つかりません: {yaml_path}")
-        data = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
+        data = yaml.safe_load(read_text_resilient(p)) or {}
         global_cfg: dict = data.get("global", {})
         targets: list[BatchTarget] = []
         for t in data.get("targets", []):
