@@ -42,17 +42,14 @@ class PayloadGenerator:
         openai_base_url: str = "",
     ):
         from . import llm_endpoint
+        # このスキャンのベース URL をプロバイダの意図に沿って env へ反映する
+        # （正規化する前の元プロバイダ名で判定: 公式 openai なら古い値をクリア、
+        # openai_compatible で base URL 空なら env フォールバックを保持）。
+        llm_endpoint.configure_endpoint(provider, openai_base_url)
         # ``openai_compatible``（tsuzumi2 等の外部 OpenAI 互換）は内部的には
         # ``openai`` と同じ経路で処理する。
         self.provider = llm_endpoint.canonical_provider(provider)
         self.openai_base_url = openai_base_url
-        # OpenAI 系のときは、このスキャンのベース URL を **決定論的に** env へ反映する。
-        # ダッシュボード等の長時間プロセスで前スキャンの値が残り、別エンドポイントや
-        # 公式 OpenAI を選んでも古い endpoint を使い続ける問題を防ぐ（空なら明示クリア）。
-        # スキャン設定の base URL は起動時に env(WSCAN_LLM_BASE_URL/OPENAI_BASE_URL)を
-        # 取り込んだ既定値を含むため、env 運用でも取りこぼさない。
-        if self.provider == "openai":
-            llm_endpoint.set_base_url(openai_base_url)
         self.ollama_model = ollama_model
         self.ollama_url = ollama_url
         self.openai_model = openai_model

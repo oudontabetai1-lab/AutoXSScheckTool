@@ -98,15 +98,40 @@ def apply_env(*, base_url: str | None = None, api_key: str | None = None, model:
 
 
 def set_base_url(base_url: str | None) -> None:
-    """スキャン単位の権威的なベース URL を **決定論的に** env へ反映する。
+    """ベース URL を env へ設定する。空なら ``WSCAN_LLM_BASE_URL`` を明示削除する。
 
-    ``apply_env`` は空値を無視する加算的な挙動のため、ダッシュボード等の長時間
-    プロセスで前のスキャンが設定した ``WSCAN_LLM_BASE_URL`` が残り、次のスキャンが
-    別エンドポイント/公式 OpenAI を選んでも古い値を使い続けてしまう。本関数は
-    値があれば設定し、空なら **明示的に削除** して、各スキャンを自己完結させる
-    （空にすると ``OPENAI_BASE_URL`` → 公式 の既定フォールバックに戻る）。
+    低レベルヘルパー。プロバイダの意図（公式か外部互換か）を考慮しないので、
+    スキャン単位の設定には :func:`configure_endpoint` を使うこと。
     """
     if base_url and str(base_url).strip():
         os.environ[ENV_BASE_URL] = str(base_url).strip()
     else:
         os.environ.pop(ENV_BASE_URL, None)
+
+
+def configure_endpoint(provider: str | None, base_url: str | None) -> None:
+    """スキャン単位でエンドポイント env を **プロバイダの意図に沿って** 設定する。
+
+    2 つの相反する要求を両立させる:
+    - 長時間プロセス（ダッシュボード）で前スキャンのカスタム endpoint を持ち越さない。
+    - ``openai_compatible`` で ``WSCAN_LLM_BASE_URL`` 環境変数だけに頼る運用
+      （明示的な base URL を渡さない API/旧 config 等）を壊さない。
+
+    ルール:
+    - 明示的な ``base_url`` があればそれを設定。
+    - ``provider == "openai"``（公式を明示選択）かつ ``base_url`` 空 → 古い
+      ``WSCAN_LLM_BASE_URL`` を **クリア**（公式エンドポイントへ）。
+    - ``provider == "openai_compatible"`` かつ ``base_url`` 空 → env フォールバック
+      （``WSCAN_LLM_BASE_URL`` / ``OPENAI_BASE_URL``）を **保持**（触らない）。
+    - その他のプロバイダ → 触らない。
+
+    ※ 公式/互換の区別が必要なので、``canonical_provider`` で正規化する **前** の
+      元プロバイダ名を渡すこと。
+    """
+    if base_url and str(base_url).strip():
+        os.environ[ENV_BASE_URL] = str(base_url).strip()
+        return
+    if provider == "openai":
+        # 公式 OpenAI を明示選択した場合のみ、前スキャンのカスタム値をクリアする。
+        os.environ.pop(ENV_BASE_URL, None)
+    # openai_compatible + 空、またはその他プロバイダ → env フォールバックを保持

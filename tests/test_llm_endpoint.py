@@ -81,6 +81,37 @@ class LlmEndpointTests(unittest.TestCase):
         self.assertNotIn("WSCAN_LLM_BASE_URL", os.environ)
         self.assertEqual(e.chat_completions_url(), "https://api.openai.com/v1/chat/completions")
 
+    def test_configure_endpoint_explicit_base_wins(self):
+        e.configure_endpoint("openai_compatible", "https://tsuzumi/v1")
+        self.assertEqual(os.environ["WSCAN_LLM_BASE_URL"], "https://tsuzumi/v1")
+
+    def test_configure_endpoint_official_openai_clears_stale(self):
+        # 前スキャンのカスタム値が残っている状態で公式 openai を明示選択 → クリア。
+        os.environ["WSCAN_LLM_BASE_URL"] = "https://stale/v1"
+        e.configure_endpoint("openai", "")
+        self.assertNotIn("WSCAN_LLM_BASE_URL", os.environ)
+
+    def test_configure_endpoint_compatible_blank_preserves_env(self):
+        # openai_compatible で明示 base URL なし → env フォールバックを保持する
+        # （WSCAN_LLM_BASE_URL だけで運用するケースを壊さない）。
+        os.environ["WSCAN_LLM_BASE_URL"] = "https://tsuzumi.env/v1"
+        e.configure_endpoint("openai_compatible", "")
+        self.assertEqual(os.environ["WSCAN_LLM_BASE_URL"], "https://tsuzumi.env/v1")
+        self.assertEqual(
+            e.chat_completions_url(), "https://tsuzumi.env/v1/chat/completions"
+        )
+
+    def test_configure_endpoint_compatible_blank_preserves_openai_base_env(self):
+        # OPENAI_BASE_URL だけで運用するケースも保持される。
+        os.environ["OPENAI_BASE_URL"] = "https://compat.env/v1"
+        e.configure_endpoint("openai_compatible", "")
+        self.assertEqual(e.resolve_base_url(), "https://compat.env/v1")
+
+    def test_configure_endpoint_other_provider_untouched(self):
+        os.environ["WSCAN_LLM_BASE_URL"] = "https://keep/v1"
+        e.configure_endpoint("claude", "")
+        self.assertEqual(os.environ["WSCAN_LLM_BASE_URL"], "https://keep/v1")
+
 
 class PayloadGeneratorCanonicalizeTests(unittest.TestCase):
     def setUp(self):
@@ -120,6 +151,19 @@ class PayloadGeneratorCanonicalizeTests(unittest.TestCase):
                          openai_base_url="")
         self.assertEqual(
             e.chat_completions_url(), "https://api.openai.com/v1/chat/completions"
+        )
+
+    def test_openai_compatible_env_only_is_preserved(self):
+        # openai_compatible を選び、明示 base URL は渡さず WSCAN_LLM_BASE_URL だけに
+        # 頼るケース（/api/v1/scan や新フィールド未対応の旧 config 等）でも、
+        # env が消されず正しい endpoint に解決される。
+        from wscan.payload_gen import PayloadGenerator
+        os.environ["WSCAN_LLM_BASE_URL"] = "https://tsuzumi.env/v1"
+        pg = PayloadGenerator(provider="openai_compatible", openai_model="tsuzumi-2",
+                              openai_base_url="")
+        self.assertEqual(pg.provider, "openai")
+        self.assertEqual(
+            e.chat_completions_url(), "https://tsuzumi.env/v1/chat/completions"
         )
 
 

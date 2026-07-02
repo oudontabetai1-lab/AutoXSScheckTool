@@ -1171,9 +1171,9 @@ async def run_agent(args):
 
     console = Console()
 
-    # 外部 OpenAI 互換（tsuzumi2 等）のベース URL をこの実行の値へ決定論的に反映
-    # （空なら公式にフォールバック）してから LLM を構築する。
-    llm_endpoint.set_base_url(getattr(args, "llm_base_url", "") or "")
+    # 外部 OpenAI 互換（tsuzumi2 等）のベース URL を provider の意図に沿って反映
+    # （公式 openai なら古い値をクリア、openai_compatible で空なら env を保持）。
+    llm_endpoint.configure_endpoint(getattr(args, "llm", ""), getattr(args, "llm_base_url", "") or "")
 
     headless = not getattr(args, "no_headless", False)
 
@@ -1880,16 +1880,15 @@ async def run_serve(args):
             })
         await monitor.emit_scan_started(cfg)
 
-        # 外部 OpenAI 互換（tsuzumi2 等）のベース URL をこのスキャンの値へ
-        # 決定論的に反映（空なら公式へ戻す）。ここで一度リセットしておくことで、
-        # agent / hybrid（Phase1 偵察 Agent は ScanEngine より先に作られる）/ 通常
-        # のどの経路でも、前スキャンの endpoint を持ち越さない。
         from wscan import llm_endpoint
-        llm_endpoint.set_base_url(cfg.get("openai_base_url", "") or "")
 
         # ── Agent Browser mode ─────────────────────────────────────
         if cfg.get("agent_mode"):
             from wscan.agent_engine import AgentEngine
+            # 外部 OpenAI 互換（tsuzumi2 等）のベース URL をこのスキャンの provider の
+            # 意図に沿って反映（公式 openai なら古い値をクリア、openai_compatible で
+            # base URL 空なら env フォールバックを保持）。長時間プロセスでの持ち越し防止。
+            llm_endpoint.configure_endpoint(cfg.get("llm"), cfg.get("openai_base_url", "") or "")
             await monitor.emit_status(f"Agent Browser: {url} をスキャン中", "running")
             try:
                 agent_engine = AgentEngine(
@@ -1920,6 +1919,9 @@ async def run_serve(args):
         seed_urls: list = []
         if cfg.get("hybrid_mode"):
             from wscan.agent_engine import AgentEngine
+            # Phase1 偵察 Agent は ScanEngine より先に作られるため、ここで偵察側の
+            # provider（hybrid_llm）の意図に沿ってベース URL を反映する（持ち越し防止）。
+            llm_endpoint.configure_endpoint(cfg.get("hybrid_llm"), cfg.get("openai_base_url", "") or "")
             await monitor.emit_status("🔀 ハイブリッド Phase 1: Agent偵察中...", "running")
             try:
                 recon_engine = AgentEngine(
