@@ -4876,7 +4876,7 @@ class ScanEngine:
                 if api_key:
                     async with httpx.AsyncClient(timeout=60.0) as client:
                         resp = await client.post(
-                            llm_endpoint.chat_completions_url(),
+                            llm_endpoint.chat_completions_url(getattr(self.payload_gen, "openai_base_url", "")),
                             headers={"Authorization": f"Bearer {api_key}"},
                             json={"model": self.payload_gen.openai_model,
                                   "messages": [{"role": "user", "content": prompt}],

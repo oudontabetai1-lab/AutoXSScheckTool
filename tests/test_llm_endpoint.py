@@ -120,7 +120,7 @@ class PayloadGeneratorCanonicalizeTests(unittest.TestCase):
 
     tearDown = setUp
 
-    def test_openai_compatible_canonicalized_and_base_url_applied(self):
+    def test_openai_compatible_canonicalized_and_base_url_snapshotted(self):
         from wscan.payload_gen import PayloadGenerator
         pg = PayloadGenerator(
             provider="openai_compatible",
@@ -129,41 +129,52 @@ class PayloadGeneratorCanonicalizeTests(unittest.TestCase):
         )
         # 内部プロバイダは openai に正規化される。
         self.assertEqual(pg.provider, "openai")
-        # ベース URL は env に集約され、エンドポイント解決へ反映される。
+        # ベース URL はインスタンスにスナップショットされ、呼び出しはこれを使う。
+        self.assertEqual(pg.openai_base_url, "https://tsuzumi.example/v1")
         self.assertEqual(
-            e.chat_completions_url(), "https://tsuzumi.example/v1/chat/completions"
+            e.chat_completions_url(pg.openai_base_url),
+            "https://tsuzumi.example/v1/chat/completions",
         )
         # openai_compatible のモデルは openai_model 経由で使われる。
         self.assertEqual(pg.get_model("payload"), "tsuzumi-2")
 
-    def test_sequential_scans_do_not_leak_base_url(self):
-        # ダッシュボード等の長時間プロセスを模擬: scan A で外部エンドポイントを
-        # 設定し、scan B が公式 OpenAI（base URL 空）を選ぶと、A の endpoint が
-        # 残ってはいけない。
+    def test_instances_are_isolated_from_env_mutation(self):
+        # 長時間プロセスを模擬: scan A(互換, カスタム endpoint) の後に、別リクエストが
+        # env を書き換えても、A のインスタンスの endpoint は変わらない。
         from wscan.payload_gen import PayloadGenerator
-        PayloadGenerator(provider="openai_compatible", openai_model="tsuzumi-2",
-                         openai_base_url="https://tsuzumi.example/v1")
+        pg_a = PayloadGenerator(provider="openai_compatible", openai_model="tsuzumi-2",
+                                openai_base_url="https://tsuzumi.example/v1")
+        # 別スキャン/リクエストが env を書き換え、公式 OpenAI を選ぶ
+        pg_b = PayloadGenerator(provider="openai", openai_model="gpt-4o-mini",
+                                openai_base_url="")
+        os.environ["WSCAN_LLM_BASE_URL"] = "https://someone-else/v1"
+        # A は自分の endpoint を保持（env 変更の影響を受けない）
         self.assertEqual(
-            e.chat_completions_url(), "https://tsuzumi.example/v1/chat/completions"
+            e.chat_completions_url(pg_a.openai_base_url),
+            "https://tsuzumi.example/v1/chat/completions",
         )
-        # 次のスキャンは公式 OpenAI（base URL なし）
-        PayloadGenerator(provider="openai", openai_model="gpt-4o-mini",
-                         openai_base_url="")
+        # B は公式 OpenAI（互換の持ち越しなし）
+        self.assertEqual(pg_b.openai_base_url, e.DEFAULT_OPENAI_BASE)
         self.assertEqual(
-            e.chat_completions_url(), "https://api.openai.com/v1/chat/completions"
+            e.chat_completions_url(pg_b.openai_base_url),
+            "https://api.openai.com/v1/chat/completions",
         )
 
-    def test_openai_compatible_env_only_is_preserved(self):
+    def test_openai_compatible_env_only_is_snapshotted(self):
         # openai_compatible を選び、明示 base URL は渡さず WSCAN_LLM_BASE_URL だけに
         # 頼るケース（/api/v1/scan や新フィールド未対応の旧 config 等）でも、
-        # env が消されず正しい endpoint に解決される。
+        # 構築時に env を解決してインスタンスに保持する。
         from wscan.payload_gen import PayloadGenerator
         os.environ["WSCAN_LLM_BASE_URL"] = "https://tsuzumi.env/v1"
         pg = PayloadGenerator(provider="openai_compatible", openai_model="tsuzumi-2",
                               openai_base_url="")
         self.assertEqual(pg.provider, "openai")
+        self.assertEqual(pg.openai_base_url, "https://tsuzumi.env/v1")
+        # 構築後に env が変わってもインスタンスは影響を受けない。
+        os.environ["WSCAN_LLM_BASE_URL"] = "https://changed/v1"
         self.assertEqual(
-            e.chat_completions_url(), "https://tsuzumi.env/v1/chat/completions"
+            e.chat_completions_url(pg.openai_base_url),
+            "https://tsuzumi.env/v1/chat/completions",
         )
 
 

@@ -138,7 +138,7 @@ async def _call_llm(payload_gen, prompt: str) -> Optional[str]:
                 return None
             async with httpx.AsyncClient(timeout=60.0) as client:
                 resp = await client.post(
-                    llm_endpoint.chat_completions_url(),
+                    llm_endpoint.chat_completions_url(getattr(payload_gen, "openai_base_url", "")),
                     headers={"Authorization": f"Bearer {api_key}"},
                     json={
                         "model": payload_gen.openai_model,

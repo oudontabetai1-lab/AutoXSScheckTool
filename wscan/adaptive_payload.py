@@ -608,7 +608,7 @@ class AdaptivePayloadEngine:
             async with httpx.AsyncClient(timeout=90.0) as client:
                 async with client.stream(
                     "POST",
-                    llm_endpoint.chat_completions_url(),
+                    llm_endpoint.chat_completions_url(self.pg.openai_base_url),
                     headers={"Authorization": f"Bearer {api_key}"},
                     json={
                         "model": self.pg.openai_model,

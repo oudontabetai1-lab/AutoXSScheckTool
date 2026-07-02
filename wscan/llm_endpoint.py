@@ -64,6 +64,26 @@ def chat_completions_url(configured_base: str | None = None) -> str:
     return base + "/chat/completions"
 
 
+def resolve_instance_base(provider: str | None, explicit: str | None = None) -> str:
+    """インスタンス（PayloadGenerator 等）が使う **具体的な** ベース URL を確定する。
+
+    長時間の serve プロセスでは複数スキャン/リクエストが並行し、グローバル env
+    (``WSCAN_LLM_BASE_URL``) を後から書き換えると、進行中スキャンの後続 LLM 呼び出しが
+    別エンドポイントに化ける。そこで **構築時に具体的な URL をスナップショット** し、
+    各呼び出しはこの値を渡す（呼び出し時に env を読み直さない）。
+
+    - 明示 ``explicit`` があればそれ。
+    - ``openai_compatible`` かつ ``explicit`` 空 → env (``WSCAN_LLM_BASE_URL`` /
+      ``OPENAI_BASE_URL``) を構築時点で解決。
+    - それ以外（公式 ``openai`` 等）→ 公式既定。
+    """
+    if explicit and str(explicit).strip():
+        return str(explicit).strip().rstrip("/")
+    if provider == OPENAI_COMPATIBLE:
+        return resolve_base_url()
+    return DEFAULT_OPENAI_BASE
+
+
 def resolve_api_key() -> str | None:
     """API キーを解決する（``WSCAN_LLM_API_KEY`` 優先、``OPENAI_API_KEY`` 後方互換）。"""
     for name in (ENV_API_KEY, "OPENAI_API_KEY"):

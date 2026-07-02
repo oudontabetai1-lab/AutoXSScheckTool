@@ -427,7 +427,7 @@ Consider stored / second-order attacks carefully:
             async with httpx.AsyncClient(timeout=90.0) as client:
                 async with client.stream(
                     "POST",
-                    llm_endpoint.chat_completions_url(),
+                    llm_endpoint.chat_completions_url(self.payload_gen.openai_base_url),
                     headers={"Authorization": f"Bearer {api_key}"},
                     json={
                         "model": self.payload_gen.openai_model,

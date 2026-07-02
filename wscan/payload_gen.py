@@ -42,14 +42,15 @@ class PayloadGenerator:
         openai_base_url: str = "",
     ):
         from . import llm_endpoint
-        # このスキャンのベース URL をプロバイダの意図に沿って env へ反映する
-        # （正規化する前の元プロバイダ名で判定: 公式 openai なら古い値をクリア、
-        # openai_compatible で base URL 空なら env フォールバックを保持）。
-        llm_endpoint.configure_endpoint(provider, openai_base_url)
+        # このインスタンスが使うベース URL を **構築時にスナップショット** する。
+        # グローバル env を呼び出し時に読み直すと、長時間 serve プロセスで別スキャン/
+        # リクエストが env を書き換えた際に、進行中スキャンの後続 LLM 呼び出しが
+        # 別エンドポイントへ化ける。以降の OpenAI 呼び出しは self.openai_base_url を
+        # 明示的に渡し、env に依存しない（元プロバイダ名で公式/互換を判定）。
+        self.openai_base_url = llm_endpoint.resolve_instance_base(provider, openai_base_url)
         # ``openai_compatible``（tsuzumi2 等の外部 OpenAI 互換）は内部的には
         # ``openai`` と同じ経路で処理する。
         self.provider = llm_endpoint.canonical_provider(provider)
-        self.openai_base_url = openai_base_url
         self.ollama_model = ollama_model
         self.ollama_url = ollama_url
         self.openai_model = openai_model
@@ -213,7 +214,7 @@ class PayloadGenerator:
         try:
             async with httpx.AsyncClient(timeout=30.0) as client:
                 resp = await client.post(
-                    llm_endpoint.chat_completions_url(),
+                    llm_endpoint.chat_completions_url(self.openai_base_url),
                     headers={"Authorization": f"Bearer {api_key}"},
                     json={
                         "model": self.openai_model,
@@ -424,7 +425,7 @@ class PayloadGenerator:
             try:
                 async with httpx.AsyncClient(timeout=30.0) as hc:
                     r = await hc.post(
-                        llm_endpoint.chat_completions_url(),
+                        llm_endpoint.chat_completions_url(self.openai_base_url),
                         headers={"Authorization": f"Bearer {api_key}"},
                         json={
                             "model": self.openai_model,
