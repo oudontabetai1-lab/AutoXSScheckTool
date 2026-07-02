@@ -30,15 +30,36 @@ _FALLBACK_ENCODINGS = ("utf-8-sig", "utf-8", "cp932", "shift_jis", "latin-1")
 # （0x1f 0x8b = gzip）で落ちる。読み込み前に透過的に解凍する。
 _GZIP_MAGIC = b"\x1f\x8b"
 
+# gzip 展開の既定上限（伸張爆弾対策）。小さな圧縮データが巨大に展開される
+# gzip bomb で `gzip.decompress` が全量を一括確保しメモリを食い潰す/スキャンを
+# 止めるのを防ぐため、ストリーム展開してこのバイト数で打ち切る。
+_MAX_GUNZIP_BYTES = 64 * 1024 * 1024  # 64 MB
 
-def _maybe_gunzip(data: bytes) -> bytes:
-    """gzip マジックで始まるなら解凍して返す（失敗時は元データ）。"""
+
+def _maybe_gunzip(data: bytes, max_bytes: int | None = None) -> bytes:
+    """gzip マジックで始まるなら **上限付きで** 解凍して返す（失敗時は元データ）。
+
+    ``gzip.decompress`` は展開後の全量を一度に確保するため、信頼できない応答
+    本文（例: ``NetworkCapture.enrich_response`` の ``safe_decode``）が gzip bomb
+    だとメモリ枯渇/停止を招く。``max_bytes`` までストリーム展開し、超過分は
+    捨てることで確保量を上限に抑える（呼び出し側が必要なバイト数を渡せば、
+    そのぶんだけ展開する）。
+    """
     if data[:2] != _GZIP_MAGIC:
         return data
+    cap = max_bytes if (max_bytes is not None and max_bytes > 0) else _MAX_GUNZIP_BYTES
     try:
         import gzip
+        import io
 
-        return gzip.decompress(data)
+        out = bytearray()
+        with gzip.GzipFile(fileobj=io.BytesIO(data)) as gz:
+            while len(out) < cap:
+                chunk = gz.read(min(65536, cap - len(out)))
+                if not chunk:
+                    break
+                out.extend(chunk)
+        return bytes(out)
     except Exception:
         # 壊れた gzip 等。元バイトのまま後段のエンコーディング判定に委ねる。
         return data
@@ -79,7 +100,9 @@ def safe_decode(data: bytes, limit: int | None = None) -> str:
     """
     if not data:
         return ""
-    data = _maybe_gunzip(data)
+    # 呼び出し側が limit を渡していれば、そのバイト数までしか展開しない
+    # （応答本文の gzip bomb でメモリを食い潰さないための上限）。
+    data = _maybe_gunzip(data, max_bytes=limit)
     if limit is not None:
         data = data[:limit]
     for enc in _FALLBACK_ENCODINGS:

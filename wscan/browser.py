@@ -78,7 +78,9 @@ class NetworkCapture:
                 body = await response.text()
             except UnicodeDecodeError:
                 from .textio import safe_decode
-                body = safe_decode(await response.body())
+                # 本文は 50KB でキャップする。limit を渡すことで、gzip 応答でも
+                # 展開量を 50KB に抑える（gzip bomb 対策）。
+                body = safe_decode(await response.body(), limit=50000)
             for pair in reversed(self.pairs):
                 if pair["response"]["url"] == response.url:
                     pair["response"]["body"] = body[:50000]  # cap at 50KB

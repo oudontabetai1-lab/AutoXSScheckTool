@@ -1880,13 +1880,16 @@ async def run_serve(args):
             })
         await monitor.emit_scan_started(cfg)
 
+        # 外部 OpenAI 互換（tsuzumi2 等）のベース URL をこのスキャンの値へ
+        # 決定論的に反映（空なら公式へ戻す）。ここで一度リセットしておくことで、
+        # agent / hybrid（Phase1 偵察 Agent は ScanEngine より先に作られる）/ 通常
+        # のどの経路でも、前スキャンの endpoint を持ち越さない。
+        from wscan import llm_endpoint
+        llm_endpoint.set_base_url(cfg.get("openai_base_url", "") or "")
+
         # ── Agent Browser mode ─────────────────────────────────────
         if cfg.get("agent_mode"):
             from wscan.agent_engine import AgentEngine
-            from wscan import llm_endpoint
-            # 外部 OpenAI 互換（tsuzumi2 等）のベース URL をこのスキャンの値へ
-            # 決定論的に反映（空なら公式へ戻す）。長時間プロセスでの持ち越しを防ぐ。
-            llm_endpoint.set_base_url(cfg.get("openai_base_url", "") or "")
             await monitor.emit_status(f"Agent Browser: {url} をスキャン中", "running")
             try:
                 agent_engine = AgentEngine(

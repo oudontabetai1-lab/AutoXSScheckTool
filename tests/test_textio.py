@@ -56,6 +56,20 @@ class SafeDecodeTests(unittest.TestCase):
         out = safe_decode(gzip.compress("テスト body".encode("utf-8")))
         self.assertEqual(out, "テスト body")
 
+    def test_gzip_bomb_is_bounded_by_limit(self):
+        # 大きく展開される gzip でも、limit を渡せばそのバイト数までしか
+        # 展開・確保しない（伸張爆弾でメモリを食い潰さない）。
+        bomb = gzip.compress(b"A" * (5 * 1024 * 1024))  # 5MB → 数KBに圧縮
+        out = safe_decode(bomb, limit=1000)
+        self.assertEqual(len(out), 1000)
+        self.assertEqual(out, "A" * 1000)
+
+    def test_gzip_default_cap_does_not_raise(self):
+        # limit 無しでも既定上限までで打ち切られ、例外を投げない。
+        out = safe_decode(gzip.compress(b"B" * (1024 * 1024)))
+        self.assertIsInstance(out, str)
+        self.assertTrue(out.startswith("B"))
+
 
 if __name__ == "__main__":
     unittest.main()
