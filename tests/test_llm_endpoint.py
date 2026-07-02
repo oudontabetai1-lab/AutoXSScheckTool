@@ -112,6 +112,16 @@ class LlmEndpointTests(unittest.TestCase):
         e.configure_endpoint("claude", "")
         self.assertEqual(os.environ["WSCAN_LLM_BASE_URL"], "https://keep/v1")
 
+    def test_resolve_instance_base_official_ignores_env(self):
+        # 公式 openai は明示 base が無ければ env が設定済みでも公式既定を使う
+        # （env 値を「明示指定」として公式リクエストに流用しない）。
+        os.environ["WSCAN_LLM_BASE_URL"] = "https://compat/v1"
+        self.assertEqual(e.resolve_instance_base("openai", ""), e.DEFAULT_OPENAI_BASE)
+        # 一方 openai_compatible は env を解決して使う。
+        self.assertEqual(e.resolve_instance_base("openai_compatible", ""), "https://compat/v1")
+        # 明示 base はどのプロバイダでも優先。
+        self.assertEqual(e.resolve_instance_base("openai", "https://x/v1"), "https://x/v1")
+
 
 class PayloadGeneratorCanonicalizeTests(unittest.TestCase):
     def setUp(self):

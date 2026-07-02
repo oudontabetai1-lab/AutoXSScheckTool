@@ -86,13 +86,12 @@ def _load_config(path: Path = _CONFIG_PATH) -> dict:
     cfg["openai_model"]            = str(l.get("openai_model", "gpt-4o-mini"))
     cfg["gemini_model"]            = str(l.get("gemini_model", "gemini-2.0-flash"))
     cfg["claude_model"]            = str(l.get("claude_model", "claude-haiku-4-5-20251001"))
-    # 外部 OpenAI 互換 LLM（tsuzumi2 等）のベース URL。config か env で指定可。
-    cfg["openai_base_url"]         = str(
-        l.get("openai_base_url", "")
-        or os.environ.get("WSCAN_LLM_BASE_URL", "")
-        or os.environ.get("OPENAI_BASE_URL", "")
-        or ""
-    )
+    # 外部 OpenAI 互換 LLM（tsuzumi2 等）のベース URL。config ファイルの値のみを
+    # CLI/ダッシュボードの既定にする。env(WSCAN_LLM_BASE_URL/OPENAI_BASE_URL)は
+    # ここで畳み込まない — 畳み込むと --llm openai(公式) 実行時に env 値が「明示指定」
+    # として渡り、公式リクエストが互換エンドポイントへ飛んでしまう。env は
+    # llm_endpoint 側で openai_compatible のときだけ解決される。
+    cfg["openai_base_url"]         = str(l.get("openai_base_url", "") or "")
     cfg["role_models"]             = {
         str(k): str(v).strip()
         for k, v in (l.get("models", {}) or {}).items()
@@ -1084,7 +1083,9 @@ def _llm_model_display(args) -> str:
     if args.llm == "openai":
         return f"Model    : [blue]{args.openai_model}[/blue] (OpenAI){role_suffix}"
     if args.llm == "openai_compatible":
-        base = getattr(args, "llm_base_url", "") or "(公式)"
+        # 明示 --llm-base-url が無ければ env(WSCAN_LLM_BASE_URL/OPENAI_BASE_URL)から解決した値を表示。
+        from wscan import llm_endpoint
+        base = (getattr(args, "llm_base_url", "") or "").strip() or llm_endpoint.resolve_base_url()
         return f"Model    : [blue]{args.openai_model}[/blue] (OpenAI互換 @ {base}){role_suffix}"
     if args.llm == "gemini":
         return f"Model    : [blue]{args.gemini_model}[/blue] (Gemini){role_suffix}"
@@ -1921,7 +1922,11 @@ async def run_serve(args):
             from wscan.agent_engine import AgentEngine
             # Phase1 偵察 Agent は ScanEngine より先に作られるため、ここで偵察側の
             # provider（hybrid_llm）の意図に沿ってベース URL を反映する（持ち越し防止）。
-            llm_endpoint.configure_endpoint(cfg.get("hybrid_llm"), cfg.get("openai_base_url", "") or "")
+            # base URL は偵察が openai_compatible のときだけ渡す。Phase2 が互換で
+            # 偵察が公式 openai の場合に、Phase2 用 URL を偵察へ誤適用しないため。
+            _recon_llm = cfg.get("hybrid_llm")
+            _recon_base = (cfg.get("openai_base_url", "") or "") if _recon_llm == "openai_compatible" else ""
+            llm_endpoint.configure_endpoint(_recon_llm, _recon_base)
             await monitor.emit_status("🔀 ハイブリッド Phase 1: Agent偵察中...", "running")
             try:
                 recon_engine = AgentEngine(
