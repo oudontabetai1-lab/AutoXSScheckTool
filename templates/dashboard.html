@@ -2957,11 +2957,13 @@ async function loadDefaultConfigFromServer() {
     if (cfg.tls_client_cert_password != null) document.getElementById('cfgTlsClientCertPassword').value = cfg.tls_client_cert_password;
     if (cfg.tls_ca_cert != null) document.getElementById('cfgTlsCaCert').value = cfg.tls_ca_cert;
     if (cfg.tls_verify != null) setCfgToggle('tls_verify', !!cfg.tls_verify);
-    if (cfg.llm) { document.getElementById('cfgLlm').value = cfg.llm; updateLlmModelField(); }
+    if (cfg.llm) { document.getElementById('cfgLlm').value = cfg.llm; }
     if (cfg.ollama_model) document.getElementById('cfgOllamaModel').value = cfg.ollama_model;
     if (cfg.openai_model) document.getElementById('cfgOpenaiModel').value = cfg.openai_model;
     if (cfg.gemini_model) document.getElementById('cfgGeminiModel').value = cfg.gemini_model;
     if (cfg.claude_model) document.getElementById('cfgClaudeModel').value = cfg.claude_model;
+    if (cfg.openai_base_url != null) document.getElementById('cfgLlmBaseUrl').value = cfg.openai_base_url;
+    if (cfg.llm) updateLlmModelField();
     if (cfg.role_models) restoreRoleModels(cfg.role_models);
     if (cfg.auth_user) document.getElementById('cfgAuthUser').value = cfg.auth_user;
     if (cfg.auth_pass) document.getElementById('cfgAuthPass').value = cfg.auth_pass;
