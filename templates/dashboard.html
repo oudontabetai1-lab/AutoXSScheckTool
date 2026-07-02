@@ -2541,7 +2541,11 @@ function submitScanConfig() {
     openai_model:  document.getElementById('cfgOpenaiModel').value.trim() || 'gpt-4o-mini',
     gemini_model:  document.getElementById('cfgGeminiModel').value.trim() || 'gemini-2.0-flash',
     claude_model:  document.getElementById('cfgClaudeModel').value.trim() || 'claude-haiku-4-5-20251001',
-    openai_base_url: document.getElementById('cfgLlmBaseUrl').value.trim(),
+    // ベースURLは openai_compatible のときだけ送る。openai(公式)等に切り替えると
+    // 欄は隠れるが値は残るため、そのまま送ると公式スキャンが前の互換endpointを
+    // 使い続けてしまう（configure_endpoint は非空を明示指定として扱う）。
+    openai_base_url: (document.getElementById('cfgLlm').value === 'openai_compatible'
+      ? document.getElementById('cfgLlmBaseUrl').value.trim() : ''),
     role_models:   collectRoleModels(),
     auth_user:   document.getElementById('cfgAuthUser').value.trim(),
     auth_pass:   document.getElementById('cfgAuthPass').value,
@@ -2622,7 +2626,7 @@ function _collectFullConfigForExport() {
     openai_model: collect('cfgOpenaiModel'),
     gemini_model: collect('cfgGeminiModel'),
     claude_model: collect('cfgClaudeModel'),
-    openai_base_url: collect('cfgLlmBaseUrl'),
+    openai_base_url: (collect('cfgLlm') === 'openai_compatible' ? collect('cfgLlmBaseUrl') : ''),
     role_models: collectRoleModels(),
     auth_user: collect('cfgAuthUser'),
     auth_pass: collect('cfgAuthPass'),
@@ -2846,7 +2850,8 @@ function saveConfigToStorage() {
       openai_model: document.getElementById('cfgOpenaiModel').value,
       gemini_model: document.getElementById('cfgGeminiModel').value,
       claude_model: document.getElementById('cfgClaudeModel').value,
-      openai_base_url: document.getElementById('cfgLlmBaseUrl').value,
+      openai_base_url: (document.getElementById('cfgLlm').value === 'openai_compatible'
+        ? document.getElementById('cfgLlmBaseUrl').value : ''),
       role_models: collectRoleModels(),
       auth_user: document.getElementById('cfgAuthUser').value,
       auth_pass: document.getElementById('cfgAuthPass').value,
