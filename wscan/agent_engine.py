@@ -77,11 +77,13 @@ class AgentEngine:
         open_report: bool = True,
         monitor: Optional["MonitorServer"] = None,
         port: int = 8765,
+        llm_base_url: str = "",
     ):
         self.url = url.rstrip("/")
         self.llm_provider = llm_provider
         self.llm_model = llm_model
         self.ollama_url = ollama_url
+        self.llm_base_url = llm_base_url
         self.checks = checks or ["xss", "sqli", "ssti", "os", "path_traversal", "ssrf"]
         self.headless = headless
         self.auth_user = auth_user
@@ -121,6 +123,7 @@ class AgentEngine:
             llm_provider=self.llm_provider,
             llm_model=self.llm_model,
             ollama_url=self.ollama_url,
+            llm_base_url=self.llm_base_url,
             checks=self.checks,
             headless=self.headless,
             auth_user=self.auth_user,
@@ -232,6 +235,7 @@ class AgentEngine:
             llm_provider=self.llm_provider,
             llm_model=self.llm_model,
             ollama_url=self.ollama_url,
+            llm_base_url=self.llm_base_url,
             checks=[],   # 偵察モードでは脆弱性テストなし
             headless=self.headless,
             auth_user=self.auth_user,

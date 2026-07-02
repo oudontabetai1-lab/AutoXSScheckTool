@@ -62,55 +62,28 @@ class LlmEndpointTests(unittest.TestCase):
         self.assertIsNone(e.resolve_api_key())
         self.assertFalse(e.api_key_present())
 
-    def test_apply_env_sets_values(self):
-        e.apply_env(base_url="https://x/v1", api_key="k", model="tsuzumi-2")
-        self.assertEqual(os.environ["WSCAN_LLM_BASE_URL"], "https://x/v1")
-        self.assertEqual(os.environ["WSCAN_LLM_API_KEY"], "k")
-        self.assertEqual(os.environ["WSCAN_LLM_MODEL"], "tsuzumi-2")
+    def test_no_env_mutators_exposed(self):
+        # env を書き換えるヘルパーは廃止済み（operator の env を壊さないため）。
+        for name in ("apply_env", "set_base_url", "configure_endpoint"):
+            self.assertFalse(hasattr(e, name), f"{name} should have been removed")
 
-    def test_apply_env_ignores_blanks(self):
-        os.environ["WSCAN_LLM_BASE_URL"] = "https://keep/v1"
-        e.apply_env(base_url="", api_key=None)
-        self.assertEqual(os.environ["WSCAN_LLM_BASE_URL"], "https://keep/v1")
-
-    def test_set_base_url_sets_and_clears(self):
-        e.set_base_url("https://x/v1")
-        self.assertEqual(os.environ["WSCAN_LLM_BASE_URL"], "https://x/v1")
-        # 空値は明示的にクリア（前スキャンの持ち越し防止）。
-        e.set_base_url("")
-        self.assertNotIn("WSCAN_LLM_BASE_URL", os.environ)
-        self.assertEqual(e.chat_completions_url(), "https://api.openai.com/v1/chat/completions")
-
-    def test_configure_endpoint_explicit_base_wins(self):
-        e.configure_endpoint("openai_compatible", "https://tsuzumi/v1")
-        self.assertEqual(os.environ["WSCAN_LLM_BASE_URL"], "https://tsuzumi/v1")
-
-    def test_configure_endpoint_official_openai_clears_stale(self):
-        # 前スキャンのカスタム値が残っている状態で公式 openai を明示選択 → クリア。
-        os.environ["WSCAN_LLM_BASE_URL"] = "https://stale/v1"
-        e.configure_endpoint("openai", "")
-        self.assertNotIn("WSCAN_LLM_BASE_URL", os.environ)
-
-    def test_configure_endpoint_compatible_blank_preserves_env(self):
-        # openai_compatible で明示 base URL なし → env フォールバックを保持する
-        # （WSCAN_LLM_BASE_URL だけで運用するケースを壊さない）。
+    def test_resolving_does_not_mutate_env(self):
+        # 解決系は純粋（env を読むだけで書き換えない）。
         os.environ["WSCAN_LLM_BASE_URL"] = "https://tsuzumi.env/v1"
-        e.configure_endpoint("openai_compatible", "")
+        e.resolve_instance_base("openai", "")       # 公式（env無視）
+        e.resolve_base_url("https://x/v1")
+        e.chat_completions_url("https://y/v1")
+        # env は解決系呼び出し後も変わらない。
         self.assertEqual(os.environ["WSCAN_LLM_BASE_URL"], "https://tsuzumi.env/v1")
-        self.assertEqual(
-            e.chat_completions_url(), "https://tsuzumi.env/v1/chat/completions"
-        )
 
-    def test_configure_endpoint_compatible_blank_preserves_openai_base_env(self):
-        # OPENAI_BASE_URL だけで運用するケースも保持される。
+    def test_compatible_env_only_resolution(self):
+        # openai_compatible で明示 base URL なし → WSCAN_LLM_BASE_URL を解決して使う。
+        os.environ["WSCAN_LLM_BASE_URL"] = "https://tsuzumi.env/v1"
+        self.assertEqual(e.resolve_instance_base("openai_compatible", ""), "https://tsuzumi.env/v1")
+        # OPENAI_BASE_URL だけで運用するケースも解決される。
+        del os.environ["WSCAN_LLM_BASE_URL"]
         os.environ["OPENAI_BASE_URL"] = "https://compat.env/v1"
-        e.configure_endpoint("openai_compatible", "")
-        self.assertEqual(e.resolve_base_url(), "https://compat.env/v1")
-
-    def test_configure_endpoint_other_provider_untouched(self):
-        os.environ["WSCAN_LLM_BASE_URL"] = "https://keep/v1"
-        e.configure_endpoint("claude", "")
-        self.assertEqual(os.environ["WSCAN_LLM_BASE_URL"], "https://keep/v1")
+        self.assertEqual(e.resolve_instance_base("openai_compatible", ""), "https://compat.env/v1")
 
     def test_resolve_instance_base_official_ignores_env(self):
         # 公式 openai は明示 base が無ければ env が設定済みでも公式既定を使う

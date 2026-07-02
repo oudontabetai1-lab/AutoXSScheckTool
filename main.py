@@ -1190,9 +1190,9 @@ async def run_agent(args):
 
     console = Console()
 
-    # 外部 OpenAI 互換（tsuzumi2 等）のベース URL を provider の意図に沿って反映
-    # （公式 openai なら古い値をクリア、openai_compatible で空なら env を保持）。
-    llm_endpoint.configure_endpoint(getattr(args, "llm", ""), _effective_llm_base_url(args))
+    # 外部 OpenAI 互換（tsuzumi2 等）のベース URL は AgentEngine 経由で明示的に渡す。
+    # グローバル env は書き換えない（serve での operator 設定を壊さないため）。
+    _agent_base = _effective_llm_base_url(args)
 
     headless = not getattr(args, "no_headless", False)
 
@@ -1213,6 +1213,7 @@ async def run_agent(args):
             llm_provider=args.llm,
             llm_model=args.model or "",
             ollama_url=getattr(args, "ollama_url", "http://localhost:11434"),
+            llm_base_url=_agent_base,
             checks=args.checks,
             headless=headless,
             auth_user=getattr(args, "auth_user", "") or "",
@@ -1251,6 +1252,7 @@ async def run_agent(args):
                 llm_provider=args.llm,
                 llm_model=args.model or "",
                 ollama_url=getattr(args, "ollama_url", "http://localhost:11434"),
+                llm_base_url=_agent_base,
                 checks=args.checks,
                 headless=headless,
                 auth_user=getattr(args, "auth_user", "") or "",
@@ -1900,15 +1902,15 @@ async def run_serve(args):
             })
         await monitor.emit_scan_started(cfg)
 
-        from wscan import llm_endpoint
+        # 外部 OpenAI 互換（tsuzumi2 等）のベース URL は各エンジン/PayloadGenerator に
+        # 明示的に渡す。グローバル env は書き換えない（serve での operator 設定
+        # WSCAN_LLM_BASE_URL を、公式 openai を使う別スキャンが消してしまうのを防ぐ）。
+        # 公式 openai へ互換 URL を誤適用しないよう、openai_compatible のときだけ渡す。
+        _scan_base = (cfg.get("openai_base_url", "") or "") if cfg.get("llm") == "openai_compatible" else ""
 
         # ── Agent Browser mode ─────────────────────────────────────
         if cfg.get("agent_mode"):
             from wscan.agent_engine import AgentEngine
-            # 外部 OpenAI 互換（tsuzumi2 等）のベース URL をこのスキャンの provider の
-            # 意図に沿って反映（公式 openai なら古い値をクリア、openai_compatible で
-            # base URL 空なら env フォールバックを保持）。長時間プロセスでの持ち越し防止。
-            llm_endpoint.configure_endpoint(cfg.get("llm"), cfg.get("openai_base_url", "") or "")
             await monitor.emit_status(f"Agent Browser: {url} をスキャン中", "running")
             try:
                 agent_engine = AgentEngine(
@@ -1916,6 +1918,7 @@ async def run_serve(args):
                     llm_provider=cfg.get("llm", "claude") or "claude",
                     llm_model=cfg.get("agent_model", "") or "",
                     ollama_url=cfg.get("agent_ollama_url", "http://localhost:11434") or "http://localhost:11434",
+                    llm_base_url=_scan_base,
                     checks=checks,
                     headless=bool(cfg.get("headless", True)),
                     auth_user=cfg.get("auth_user", "") or "",
@@ -1939,13 +1942,10 @@ async def run_serve(args):
         seed_urls: list = []
         if cfg.get("hybrid_mode"):
             from wscan.agent_engine import AgentEngine
-            # Phase1 偵察 Agent は ScanEngine より先に作られるため、ここで偵察側の
-            # provider（hybrid_llm）の意図に沿ってベース URL を反映する（持ち越し防止）。
-            # base URL は偵察が openai_compatible のときだけ渡す。Phase2 が互換で
-            # 偵察が公式 openai の場合に、Phase2 用 URL を偵察へ誤適用しないため。
-            _recon_llm = cfg.get("hybrid_llm")
-            _recon_base = (cfg.get("openai_base_url", "") or "") if _recon_llm == "openai_compatible" else ""
-            llm_endpoint.configure_endpoint(_recon_llm, _recon_base)
+            # 偵察側の base URL は、偵察(hybrid_llm)が openai_compatible のときだけ渡す。
+            # Phase2 が互換・偵察が公式 openai の場合に Phase2 用 URL を偵察へ誤適用しない。
+            # 明示的に AgentEngine へ渡し、グローバル env は書き換えない。
+            _recon_base = (cfg.get("openai_base_url", "") or "") if cfg.get("hybrid_llm") == "openai_compatible" else ""
             await monitor.emit_status("🔀 ハイブリッド Phase 1: Agent偵察中...", "running")
             try:
                 recon_engine = AgentEngine(
@@ -1953,6 +1953,7 @@ async def run_serve(args):
                     llm_provider=cfg.get("hybrid_llm", "claude") or "claude",
                     llm_model=cfg.get("hybrid_model", "") or "",
                     ollama_url=cfg.get("hybrid_ollama_url", "http://localhost:11434") or "http://localhost:11434",
+                    llm_base_url=_recon_base,
                     checks=[],
                     headless=bool(cfg.get("headless", True)),
                     auth_user=cfg.get("auth_user", "") or "",
@@ -1992,7 +1993,7 @@ async def run_serve(args):
                 openai_model=cfg.get("openai_model", "gpt-4o-mini") or "gpt-4o-mini",
                 gemini_model=cfg.get("gemini_model", "gemini-2.0-flash") or "gemini-2.0-flash",
                 claude_model=cfg.get("claude_model", "claude-haiku-4-5-20251001") or "claude-haiku-4-5-20251001",
-                openai_base_url=cfg.get("openai_base_url", "") or "",
+                openai_base_url=_scan_base,
                 role_models=cfg.get("role_models", {}) or {},
                 auth_user=cfg.get("auth_user", "") or "",
                 auth_pass=cfg.get("auth_pass", "") or "",
