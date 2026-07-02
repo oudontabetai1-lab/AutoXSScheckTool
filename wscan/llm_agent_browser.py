@@ -170,7 +170,7 @@ def _build_llm(provider: str, model: str, ollama_url: str = "http://localhost:11
     elif provider in ("openai", "openai_compatible"):
         from browser_use.llm import ChatOpenAI
         from . import llm_endpoint
-        api_key = llm_endpoint.resolve_api_key()
+        api_key = llm_endpoint.resolve_api_key(provider)
         if not api_key:
             raise RuntimeError(
                 "API キーが設定されていません（WSCAN_LLM_API_KEY または OPENAI_API_KEY）。"

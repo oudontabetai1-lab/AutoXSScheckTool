@@ -599,7 +599,7 @@ class AdaptivePayloadEngine:
 
     async def _stream_openai(self, prompt: str) -> Optional[str]:
         from . import llm_endpoint
-        api_key = llm_endpoint.resolve_api_key()
+        api_key = self.pg.openai_api_key
         if not api_key:
             return None
         import httpx

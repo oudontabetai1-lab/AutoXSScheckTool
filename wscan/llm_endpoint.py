@@ -88,18 +88,30 @@ def resolve_instance_base(provider: str | None, explicit: str | None = None) -> 
     return DEFAULT_OPENAI_BASE
 
 
-def resolve_api_key() -> str | None:
-    """API キーを解決する（``WSCAN_LLM_API_KEY`` 優先、``OPENAI_API_KEY`` 後方互換）。"""
-    for name in (ENV_API_KEY, "OPENAI_API_KEY"):
+def resolve_api_key(provider: str | None = None) -> str | None:
+    """API キーを **プロバイダの意図に沿って** 解決する。
+
+    - ``openai_compatible``: ``WSCAN_LLM_API_KEY`` 優先、``OPENAI_API_KEY`` フォールバック。
+    - ``openai``（公式）: ``OPENAI_API_KEY`` のみ。互換用の ``WSCAN_LLM_API_KEY`` を
+      公式 API へ流用しない（混在環境で公式スキャンが誤ったキーで認証失敗するのを防ぐ）。
+    - その他 / ``None``（後方互換）: ``WSCAN_LLM_API_KEY`` > ``OPENAI_API_KEY``。
+
+    公式/互換を区別するので、``canonical_provider`` で正規化する **前** の元プロバイダ名を渡すこと。
+    """
+    if provider == "openai":
+        names: tuple[str, ...] = ("OPENAI_API_KEY",)
+    else:
+        names = (ENV_API_KEY, "OPENAI_API_KEY")
+    for name in names:
         value = os.environ.get(name)
         if value and value.strip():
             return value.strip()
     return None
 
 
-def api_key_present() -> bool:
-    """OpenAI 互換エンドポイント用の API キーが設定済みか。"""
-    return resolve_api_key() is not None
+def api_key_present(provider: str | None = None) -> bool:
+    """指定プロバイダ用の API キーが設定済みか。"""
+    return resolve_api_key(provider) is not None
 
 
 def is_custom_endpoint() -> bool:

@@ -303,7 +303,7 @@ async def _call_llm_raw(payload_gen: "PayloadGenerator", prompt: str) -> str | N
     if provider == "openai":
         import httpx
         from . import llm_endpoint
-        api_key = llm_endpoint.resolve_api_key()
+        api_key = getattr(payload_gen, "openai_api_key", None)
         if not api_key:
             return None
         try:

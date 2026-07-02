@@ -133,7 +133,7 @@ async def _call_llm(payload_gen, prompt: str) -> Optional[str]:
         elif provider == "openai":
             import httpx
             from . import llm_endpoint
-            api_key = llm_endpoint.resolve_api_key()
+            api_key = getattr(payload_gen, "openai_api_key", None)
             if not api_key:
                 return None
             async with httpx.AsyncClient(timeout=60.0) as client:

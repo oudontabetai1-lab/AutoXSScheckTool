@@ -418,7 +418,7 @@ Consider stored / second-order attacks carefully:
         """OpenAI streaming attack plan — prints chunks live."""
         import httpx
         from . import llm_endpoint
-        api_key = llm_endpoint.resolve_api_key()
+        api_key = self.payload_gen.openai_api_key
         if not api_key:
             return None
         _thinking_header("OpenAI", self.payload_gen.openai_model)

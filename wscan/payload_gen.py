@@ -48,6 +48,10 @@ class PayloadGenerator:
         # 別エンドポイントへ化ける。以降の OpenAI 呼び出しは self.openai_base_url を
         # 明示的に渡し、env に依存しない（元プロバイダ名で公式/互換を判定）。
         self.openai_base_url = llm_endpoint.resolve_instance_base(provider, openai_base_url)
+        # API キーも provider の意図でスナップショットする（公式 openai は
+        # OPENAI_API_KEY のみ。互換キーを公式へ流用しない）。self.provider は正規化で
+        # 公式/互換の区別が消えるため、正規化前の provider で解決しておく。
+        self.openai_api_key = llm_endpoint.resolve_api_key(provider)
         # ``openai_compatible``（tsuzumi2 等の外部 OpenAI 互換）は内部的には
         # ``openai`` と同じ経路で処理する。
         self.provider = llm_endpoint.canonical_provider(provider)
@@ -135,8 +139,7 @@ class PayloadGenerator:
             self._llm_available = self._get_anthropic_client() is not None
             return self._llm_available
         if self.provider == "openai":
-            from . import llm_endpoint
-            self._llm_available = llm_endpoint.api_key_present()
+            self._llm_available = bool(self.openai_api_key)
             if not self._llm_available:
                 console.print(
                     "[yellow]LLM API key not set (WSCAN_LLM_API_KEY / OPENAI_API_KEY), "
@@ -208,7 +211,7 @@ class PayloadGenerator:
     async def _generate_with_openai(self, prompt: str) -> Optional[list[str]]:
         """Generate payloads using OpenAI (互換) API."""
         from . import llm_endpoint
-        api_key = llm_endpoint.resolve_api_key()
+        api_key = self.openai_api_key
         if not api_key:
             return None
         try:
@@ -419,7 +422,7 @@ class PayloadGenerator:
 
         elif self.provider == "openai":
             from . import llm_endpoint
-            api_key = llm_endpoint.resolve_api_key()
+            api_key = self.openai_api_key
             if not api_key:
                 return None
             try:

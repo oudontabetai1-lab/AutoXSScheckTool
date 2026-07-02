@@ -4872,7 +4872,7 @@ class ScanEngine:
             elif provider == "openai":
                 import httpx
                 from . import llm_endpoint
-                api_key = llm_endpoint.resolve_api_key()
+                api_key = getattr(self.payload_gen, "openai_api_key", None)
                 if api_key:
                     async with httpx.AsyncClient(timeout=60.0) as client:
                         resp = await client.post(

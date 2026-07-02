@@ -62,6 +62,22 @@ class LlmEndpointTests(unittest.TestCase):
         self.assertIsNone(e.resolve_api_key())
         self.assertFalse(e.api_key_present())
 
+    def test_official_openai_uses_only_openai_api_key(self):
+        # 公式 openai は OPENAI_API_KEY のみ。互換用 WSCAN_LLM_API_KEY を流用しない。
+        os.environ["WSCAN_LLM_API_KEY"] = "wscan-key"
+        os.environ["OPENAI_API_KEY"] = "official-key"
+        self.assertEqual(e.resolve_api_key("openai"), "official-key")
+        # WSCAN だけがある状態で公式を選ぶと、公式キー無しとして扱う（流用しない）。
+        del os.environ["OPENAI_API_KEY"]
+        self.assertIsNone(e.resolve_api_key("openai"))
+        self.assertFalse(e.api_key_present("openai"))
+
+    def test_compatible_prefers_wscan_then_openai(self):
+        os.environ["OPENAI_API_KEY"] = "official-key"
+        self.assertEqual(e.resolve_api_key("openai_compatible"), "official-key")
+        os.environ["WSCAN_LLM_API_KEY"] = "wscan-key"
+        self.assertEqual(e.resolve_api_key("openai_compatible"), "wscan-key")
+
     def test_no_env_mutators_exposed(self):
         # env を書き換えるヘルパーは廃止済み（operator の env を壊さないため）。
         for name in ("apply_env", "set_base_url", "configure_endpoint"):
