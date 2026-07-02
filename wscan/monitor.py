@@ -636,6 +636,9 @@ class MonitorServer:
                 from wscan.payload_gen import PayloadGenerator
                 from wscan.auto_config import generate_from_description
 
+                # base URL は openai_compatible のときだけ渡す（公式 openai へ
+                # 互換エンドポイントを誤適用しない）。
+                _ac_base = (cfg.get("openai_base_url", "") or "") if cfg.get("provider") == "openai_compatible" else ""
                 gen = PayloadGenerator(
                     provider=cfg.get("provider", "none"),
                     ollama_model=cfg.get("ollama_model", "llama3"),
@@ -643,6 +646,7 @@ class MonitorServer:
                     openai_model=cfg.get("openai_model", "gpt-4o-mini"),
                     gemini_model=cfg.get("gemini_model", "gemini-2.0-flash"),
                     claude_model=cfg.get("claude_model", "claude-haiku-4-5-20251001"),
+                    openai_base_url=_ac_base,
                     role_models=cfg.get("role_models", {}) or {},
                 )
                 result = await generate_from_description(gen, description)

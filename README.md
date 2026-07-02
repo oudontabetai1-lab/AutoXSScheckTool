@@ -257,6 +257,31 @@ playwright install chromium
 
 LLM を使う場合は、利用するプロバイダーに応じて API キーやローカルモデルを準備します。LLM を使わずに固定ペイロード中心で確認する場合は、`--llm none` またはダッシュボードの LLM 設定で無効化して実行できます。
 
+#### 外部 OpenAI 互換 LLM（NTT tsuzumi 2 など）
+
+`ollama` / `claude` / `openai` / `gemini` に加えて、**OpenAI 互換の chat/completions API** を
+提供する任意のエンドポイントを `--llm openai_compatible` で利用できます。NTT **tsuzumi 2**、
+Azure AI Foundry、vLLM、LiteLLM、LM Studio などが該当します。
+
+設定は次のいずれからも渡せます（**環境変数が推奨**。API キーは env のみ）。
+
+| 設定 | 環境変数 | CLI | config (`config/wscan.yaml`) | ダッシュボード |
+|---|---|---|---|---|
+| ベース URL | `WSCAN_LLM_BASE_URL`（`OPENAI_BASE_URL` でも可） | `--llm-base-url` | `llm.openai_base_url` | LLM 設定 → ベースURL |
+| API キー | `WSCAN_LLM_API_KEY`（`OPENAI_API_KEY` でも可） | —（秘匿情報は env のみ） | —（env） | —（env） |
+| モデル名 | — | `--openai-model` | `llm.openai_model` | OpenAIモデル名 |
+
+```bash
+# 例: tsuzumi 2（OpenAI 互換エンドポイント）で検査
+export WSCAN_LLM_BASE_URL="https://<your-tsuzumi-endpoint>/v1"
+export WSCAN_LLM_API_KEY="<api-key>"
+python main.py scan https://example.com \
+  --llm openai_compatible --openai-model tsuzumi-2 --headless
+```
+
+ベース URL が `/chat/completions` で終わる場合はそのまま使用し、`/v1` 等で終わる場合は
+自動で `/chat/completions` を付加します。
+
 ---
 
 ## 使い方
@@ -605,9 +630,12 @@ usage: main.py scan [オプション] URL
   --depth N                クロール深度 (デフォルト: 2)
   --headless               ブラウザをヘッドレスモードで起動
   --no-monitor             リアルタイム監視ダッシュボードを無効化
-  --llm PROVIDER           LLM プロバイダー: ollama|claude|openai|gemini|none
+  --llm PROVIDER           LLM プロバイダー: ollama|claude|openai|openai_compatible|gemini|none
   --ollama-model MODEL     Ollama モデル名 (デフォルト: llama3)
-  --openai-model MODEL     OpenAI モデル名 (デフォルト: gpt-4o-mini)
+  --openai-model MODEL     OpenAI(互換) モデル名 (デフォルト: gpt-4o-mini。
+                           openai_compatible では tsuzumi-2 等を指定)
+  --llm-base-url URL       外部 OpenAI 互換エンドポイントのベース URL
+                           (tsuzumi2 等。例: https://host/v1)
   --gemini-model MODEL     Google Gemini モデル名 (デフォルト: gemini-2.0-flash)
   --payloads FILE          カスタムペイロード YAML ファイル
   --output DIR             出力ディレクトリ (デフォルト: output/<タイムスタンプ>)

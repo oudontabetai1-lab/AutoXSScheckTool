@@ -39,8 +39,22 @@ class PayloadGenerator:
         prompt_templates: Optional[dict] = None,
         role_models: Optional[dict] = None,
         enable_web_browsing: bool = False,
+        openai_base_url: str = "",
     ):
-        self.provider = provider
+        from . import llm_endpoint
+        # このインスタンスが使うベース URL を **構築時にスナップショット** する。
+        # グローバル env を呼び出し時に読み直すと、長時間 serve プロセスで別スキャン/
+        # リクエストが env を書き換えた際に、進行中スキャンの後続 LLM 呼び出しが
+        # 別エンドポイントへ化ける。以降の OpenAI 呼び出しは self.openai_base_url を
+        # 明示的に渡し、env に依存しない（元プロバイダ名で公式/互換を判定）。
+        self.openai_base_url = llm_endpoint.resolve_instance_base(provider, openai_base_url)
+        # API キーも provider の意図でスナップショットする（公式 openai は
+        # OPENAI_API_KEY のみ。互換キーを公式へ流用しない）。self.provider は正規化で
+        # 公式/互換の区別が消えるため、正規化前の provider で解決しておく。
+        self.openai_api_key = llm_endpoint.resolve_api_key(provider)
+        # ``openai_compatible``（tsuzumi2 等の外部 OpenAI 互換）は内部的には
+        # ``openai`` と同じ経路で処理する。
+        self.provider = llm_endpoint.canonical_provider(provider)
         self.ollama_model = ollama_model
         self.ollama_url = ollama_url
         self.openai_model = openai_model
@@ -125,9 +139,12 @@ class PayloadGenerator:
             self._llm_available = self._get_anthropic_client() is not None
             return self._llm_available
         if self.provider == "openai":
-            self._llm_available = bool(os.environ.get("OPENAI_API_KEY"))
+            self._llm_available = bool(self.openai_api_key)
             if not self._llm_available:
-                console.print("[yellow]OPENAI_API_KEY not set, using default payloads[/yellow]")
+                console.print(
+                    "[yellow]LLM API key not set (WSCAN_LLM_API_KEY / OPENAI_API_KEY), "
+                    "using default payloads[/yellow]"
+                )
             return self._llm_available
         if self.provider == "gemini":
             self._llm_available = bool(os.environ.get("GEMINI_API_KEY"))
@@ -192,14 +209,15 @@ class PayloadGenerator:
         return None
 
     async def _generate_with_openai(self, prompt: str) -> Optional[list[str]]:
-        """Generate payloads using OpenAI API."""
-        api_key = os.environ.get("OPENAI_API_KEY")
+        """Generate payloads using OpenAI (互換) API."""
+        from . import llm_endpoint
+        api_key = self.openai_api_key
         if not api_key:
             return None
         try:
             async with httpx.AsyncClient(timeout=30.0) as client:
                 resp = await client.post(
-                    "https://api.openai.com/v1/chat/completions",
+                    llm_endpoint.chat_completions_url(self.openai_base_url),
                     headers={"Authorization": f"Bearer {api_key}"},
                     json={
                         "model": self.openai_model,
@@ -403,13 +421,14 @@ class PayloadGenerator:
                 return None
 
         elif self.provider == "openai":
-            api_key = os.environ.get("OPENAI_API_KEY")
+            from . import llm_endpoint
+            api_key = self.openai_api_key
             if not api_key:
                 return None
             try:
                 async with httpx.AsyncClient(timeout=30.0) as hc:
                     r = await hc.post(
-                        "https://api.openai.com/v1/chat/completions",
+                        llm_endpoint.chat_completions_url(self.openai_base_url),
                         headers={"Authorization": f"Bearer {api_key}"},
                         json={
                             "model": self.openai_model,

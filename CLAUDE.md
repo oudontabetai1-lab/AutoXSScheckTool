@@ -131,8 +131,24 @@ python main.py scan http://127.0.0.1:8000 --checks xss sqli --no-monitor --llm n
   （生成済みYAMLを読むだけ）。`engine.merge_community_payloads` が既定(curated)に未収録の
   community のみを重複排除し、件数 cap 内にも行き渡るよう curated:community=2:1 で
   インターリーブしてマージ（`features.community_payloads`）。出典/取得日時/ライセンスを冒頭に記録。
-- LLM プロバイダ: `ollama|claude|openai|gemini|none`。APIキー env: `ANTHROPIC_API_KEY` /
-  `OPENAI_API_KEY` / `GEMINI_API_KEY`。役割別モデル上書き（planner/payload/adaptive/triage/report）あり。
+- LLM プロバイダ: `ollama|claude|openai|openai_compatible|gemini|none`。APIキー env:
+  `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `GEMINI_API_KEY`。役割別モデル上書き
+  （planner/payload/adaptive/triage/report）あり。
+- 外部 OpenAI 互換 LLM（NTT tsuzumi 2、Azure AI Foundry、vLLM、LiteLLM 等）は
+  `provider=openai_compatible`。ベース URL・APIキー・モデル名の解決は純粋関数
+  `llm_endpoint.py` に一元化（全 LLM 呼び出しは `chat_completions_url(base)` /
+  `resolve_api_key()` 経由。`openai_compatible` は `canonical_provider` で内部的に
+  `openai` へ正規化）。設定は CLI(`--llm-base-url`) / config(`llm.openai_base_url`) /
+  ダッシュボード / env(`WSCAN_LLM_BASE_URL`・`WSCAN_LLM_API_KEY`。`OPENAI_BASE_URL`・
+  `OPENAI_API_KEY` にフォールバック) のいずれからも渡せる。モデル名は `openai_model`
+  （例: `tsuzumi-2`）。**ベース URL はグローバル env を書き換えず**、構築時に
+  `resolve_instance_base(provider, explicit)` で解決してインスタンス
+  （`PayloadGenerator.openai_base_url` / `AgentEngine.llm_base_url`）へ保持し、各呼び出しへ
+  明示的に渡す（長時間 serve プロセスで別スキャンが operator の env を壊す競合を回避）。
+  公式 `openai` は明示指定が無ければ env を無視し公式既定を使う（互換 URL を公式に漏らさない）。
+  CLI/ダッシュボードは provider が `openai_compatible` のときだけ base URL を渡す
+  （`_effective_llm_base_url` / フロントのゲート）。**新しく LLM を叩く箇所を足すときは
+  URL/キーをハードコードせず必ず `llm_endpoint` を経由し、base URL はインスタンス値を渡すこと。**
 
 ### ペイロード強化パイプライン（検知精度）
 注入系スキャナの投入は次の多層構成。誤検知ゼロを最優先（各層とも既存の検知判定を共有し、判定ロジックは変えない）。

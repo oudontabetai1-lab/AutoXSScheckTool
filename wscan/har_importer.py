@@ -73,8 +73,12 @@ class HarImporter:
         if not p.exists():
             raise FileNotFoundError(f"HAR ファイルが見つかりません: {har_path}")
 
+        # HAR は cp932/Shift-JIS で保存されたり gzip 圧縮で渡されることがあるため、
+        # 生の UTF-8 読み込みではなく耐性のあるデコーダを使う（byte 0x8b 対策）。
+        from .textio import read_text_resilient
+
         try:
-            har = json.loads(p.read_text(encoding="utf-8"))
+            har = json.loads(read_text_resilient(p))
         except json.JSONDecodeError as exc:
             raise ValueError(f"HAR ファイルの JSON 解析に失敗しました: {exc}") from exc
 

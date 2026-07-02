@@ -154,7 +154,8 @@ class AgentScanResult:
 
 # ── LLM ファクトリ ──────────────────────────────────────────────────────────
 
-def _build_llm(provider: str, model: str, ollama_url: str = "http://localhost:11434"):
+def _build_llm(provider: str, model: str, ollama_url: str = "http://localhost:11434",
+               base_url: str = ""):
     """
     browser-use の BaseChatModel インスタンスを provider 名から生成する。
     """
@@ -166,13 +167,23 @@ def _build_llm(provider: str, model: str, ollama_url: str = "http://localhost:11
             raise RuntimeError("ANTHROPIC_API_KEY 環境変数が設定されていません。")
         return ChatAnthropic(model=model or "claude-sonnet-4-5-20250929", api_key=api_key)
 
-    elif provider == "openai":
+    elif provider in ("openai", "openai_compatible"):
         from browser_use.llm import ChatOpenAI
-        import os
-        api_key = os.environ.get("OPENAI_API_KEY")
+        from . import llm_endpoint
+        api_key = llm_endpoint.resolve_api_key(provider)
         if not api_key:
-            raise RuntimeError("OPENAI_API_KEY 環境変数が設定されていません。")
-        return ChatOpenAI(model=model or "gpt-4o-mini", api_key=api_key)
+            raise RuntimeError(
+                "API キーが設定されていません（WSCAN_LLM_API_KEY または OPENAI_API_KEY）。"
+            )
+        # ベース URL は provider の意図で解決する（明示 base_url ＞ [互換のみ]env ＞
+        # 公式既定）。公式 openai は env が設定されていても既定(公式)を使い、
+        # openai_compatible のときだけカスタムエンドポイントへ向ける。値はここで
+        # 解決して直接渡すため、グローバル env を書き換えない（operator 設定を壊さない）。
+        kwargs = {"model": model or "gpt-4o-mini", "api_key": api_key}
+        base = llm_endpoint.resolve_instance_base(provider, base_url)
+        if base and base != llm_endpoint.DEFAULT_OPENAI_BASE:
+            kwargs["base_url"] = base
+        return ChatOpenAI(**kwargs)
 
     elif provider == "ollama":
         from browser_use.llm import ChatOllama
@@ -306,6 +317,7 @@ class AgentBrowserScanner:
         max_steps: int = 100,
         monitor: Optional["MonitorServer"] = None,
         recon_mode: bool = False,
+        llm_base_url: str = "",
     ):
         # Ensure URLs carry a scheme — CDP rejects scheme-less URLs with error -32000,
         # and browser_use's SecurityWatchdog raises ValueError parsing them.
@@ -327,6 +339,7 @@ class AgentBrowserScanner:
         self.max_steps = max_steps
         self.monitor = monitor
         self.recon_mode = recon_mode
+        self.llm_base_url = llm_base_url
         self._step_count = 0
         self._memory = AgentMemory()
         self._session_nonce = secrets.token_urlsafe(16)
@@ -346,7 +359,8 @@ class AgentBrowserScanner:
         )
 
         try:
-            llm = _build_llm(self.llm_provider, self.llm_model, self.ollama_url)
+            llm = _build_llm(self.llm_provider, self.llm_model, self.ollama_url,
+                             base_url=self.llm_base_url)
         except RuntimeError as e:
             console.print(f"[red]LLM初期化エラー: {e}[/red]")
             return AgentScanResult(target_url=self.target_url, error=str(e))

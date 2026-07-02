@@ -721,7 +721,10 @@ class ApiSpecImporter:
         p = Path(spec_path)
         if not p.exists():
             raise FileNotFoundError(f"API スペックが見つかりません: {spec_path}")
-        text = p.read_text(encoding="utf-8")
+        # cp932/Shift-JIS 保存や gzip 圧縮の spec でも落ちないよう耐性デコード。
+        from .textio import read_text_resilient
+
+        text = read_text_resilient(p)
         data = _load_structured(text, p.suffix.lower())
         if not isinstance(data, dict):
             raise ValueError("API スペックの形式を解釈できません（dict ではありません）")

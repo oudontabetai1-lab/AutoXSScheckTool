@@ -44,7 +44,19 @@ _RPT_SITEMAP_JS = r"""
   function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function(c){ return ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[c]; }); }
   function color(n) { if (n.status === 'vuln') return '#f85149'; if (n.status === 'scanning') return '#f0883e'; if (n.status === 'done') return '#388bfd'; return '#3a3f4a'; }
   function short(url) { try { var p = new URL(url).pathname || '/'; return p.length > 22 ? '…' + p.slice(-20) : p; } catch(e) { return (url || '').slice(-20); } }
-  function norm(via) { if (!via || !via.rect || !via.viewport || !via.viewport.w || !via.viewport.h) return null; var r = via.rect, v = via.viewport, cl = function(x){ return Math.max(0, Math.min(1, x)); }; return { x: cl(r.x/v.w), y: cl(r.y/v.h), w: cl(r.w/v.w), h: cl(r.h/v.h) }; }
+  function norm(via) {
+    if (!via || !via.rect || !via.viewport || !via.viewport.w || !via.viewport.h) return null;
+    var r = via.rect, v = via.viewport;
+    // クランプ前の端点。スクショ範囲外（下方向にスクロールした要素等）だと 0..1 を外れる。
+    var x1 = r.x/v.w, y1 = r.y/v.h, x2 = (r.x+r.w)/v.w, y2 = (r.y+r.h)/v.h;
+    var offscreen = x1 < 0 || y1 < 0 || x2 > 1 || y2 > 1;
+    var cl = function(x){ return Math.max(0, Math.min(1, x)); };
+    var cx1 = cl(x1), cy1 = cl(y1), cx2 = cl(x2), cy2 = cl(y2), MIN = 0.05;
+    // クランプで潰れる軸は最も近い端に最小サイズで固定し、範囲外でも赤い囲みが必ず見えるようにする。
+    if (cx2 - cx1 < MIN) { if (x2 <= 0) { cx1 = 0; cx2 = MIN; } else if (x1 >= 1) { cx2 = 1; cx1 = 1 - MIN; } else { var xc = cl((cx1+cx2)/2); cx1 = Math.max(0, Math.min(1-MIN, xc-MIN/2)); cx2 = cx1+MIN; } }
+    if (cy2 - cy1 < MIN) { if (y2 <= 0) { cy1 = 0; cy2 = MIN; } else if (y1 >= 1) { cy2 = 1; cy1 = 1 - MIN; } else { var yc = cl((cy1+cy2)/2); cy1 = Math.max(0, Math.min(1-MIN, yc-MIN/2)); cy2 = cy1+MIN; } }
+    return { x: cx1, y: cy1, w: cx2 - cx1, h: cy2 - cy1, offscreen: offscreen };
+  }
   function mk(tag, a) { var e = document.createElementNS(NS, tag); if (a) for (var k in a) e.setAttribute(k, a[k]); return e; }
   function hashId(s) { var h = 0; for (var i = 0; i < s.length; i++) { h = (h << 5) - h + s.charCodeAt(i); h |= 0; } return Math.abs(h); }
 
@@ -143,7 +155,7 @@ _RPT_SITEMAP_JS = r"""
       }
       (children[n.url] || []).forEach(function(ku){
         var k = byId[ku]; if (!k) return; var nr = norm(k.via); if (!nr) return;
-        g.appendChild(mk('rect', { x: 6 + (CW-12)*nr.x, y: 6 + IMGH*nr.y, width: Math.max(8, (CW-12)*nr.w), height: Math.max(7, IMGH*nr.h), rx: 3, fill: 'rgba(248,81,73,.18)', stroke: '#f85149', 'stroke-width': 1.5 }));
+        g.appendChild(mk('rect', { x: 6 + (CW-12)*nr.x, y: 6 + IMGH*nr.y, width: Math.max(8, (CW-12)*nr.w), height: Math.max(7, IMGH*nr.h), rx: 3, fill: 'rgba(248,81,73,.18)', stroke: '#f85149', 'stroke-width': 1.5, 'stroke-dasharray': nr.offscreen ? '3 2' : 'none' }));
       });
       var title = mk('text', { x: 8, y: CH-11, 'font-size': '10.5px', fill: '#e6edf3' }); title.textContent = short(n.url); g.appendChild(title);
       var sub = mk('text', { x: 8, y: CH-2, 'font-size': '9px', fill: '#8b949e' }); sub.textContent = (n.forms||0)+'f / '+(n.inputs||0)+'i / '+(n.params||0)+'p'; g.appendChild(sub);
@@ -161,7 +173,7 @@ _RPT_SITEMAP_JS = r"""
     var h = '<h4 style="margin:0 0 10px;color:#58a6ff;font-size:.86rem">' + (n.via ? ('クリック箇所： ' + esc(short(p ? p.url : '')) + ' → ' + esc(short(n.url))) : (esc(n.url) + '（起点）')) + '</h4>';
     if (shot) {
       h += '<div style="position:relative;border:1px solid #30363d;border-radius:8px;overflow:hidden;max-width:560px"><img style="display:block;width:100%" src="data:image/jpeg;base64,' + shot + '">';
-      if (nr && p && p.shot) h += '<div style="position:absolute;border:2px solid #f85149;border-radius:4px;box-shadow:0 0 0 3px rgba(248,81,73,.25);left:' + (nr.x*100) + '%;top:' + (nr.y*100) + '%;width:' + (nr.w*100) + '%;height:' + (nr.h*100) + '%"></div>';
+      if (nr && p && p.shot) h += '<div title="' + (nr.offscreen ? 'クリック箇所はスクショ範囲外（端に表示）' : 'クリック箇所') + '" style="position:absolute;border:2px ' + (nr.offscreen ? 'dashed' : 'solid') + ' #f85149;border-radius:4px;box-shadow:0 0 0 3px rgba(248,81,73,.25);left:' + (nr.x*100) + '%;top:' + (nr.y*100) + '%;width:' + (nr.w*100) + '%;height:' + (nr.h*100) + '%"></div>';
       h += '</div>';
     }
     h += '<div style="margin-top:12px;font-size:.78rem;color:#8b949e;line-height:1.8">';
@@ -223,10 +235,12 @@ _RPT_SITEMAP_JS = r"""
 
   function showPop(ev, n) {
     var p = n.parent && all[n.parent], nr = norm(n.via), shot = (p && p.shot) || n.shot;
-    var h = '<h4 style="margin:0 0 6px;color:#58a6ff;font-size:.78rem">' + (n.via ? ('クリック箇所： ' + esc(short(p ? p.url : '')) + ' → ' + esc(short(n.url))) : (esc(short(n.url)) + '（起点）')) + '</h4>';
+    // 閉じるボタン（一度開くと閉じられない問題の対策）。背景クリック / Esc でも閉じる。
+    var h = '<span onclick="rptSmClosePop()" title="閉じる" style="position:absolute;top:6px;right:8px;width:20px;height:20px;line-height:18px;text-align:center;border:1px solid #30363d;border-radius:5px;background:#161b22;color:#8b949e;cursor:pointer">×</span>';
+    h += '<h4 style="margin:0 20px 6px 0;color:#58a6ff;font-size:.78rem">' + (n.via ? ('クリック箇所： ' + esc(short(p ? p.url : '')) + ' → ' + esc(short(n.url))) : (esc(short(n.url)) + '（起点）')) + '</h4>';
     if (shot) {
       h += '<div style="position:relative;border:1px solid #30363d;border-radius:8px;overflow:hidden"><img style="display:block;width:100%" src="data:image/jpeg;base64,' + shot + '">';
-      if (nr && p && p.shot) h += '<div style="position:absolute;border:2px solid #f85149;border-radius:4px;box-shadow:0 0 0 3px rgba(248,81,73,.25);left:' + (nr.x*100) + '%;top:' + (nr.y*100) + '%;width:' + (nr.w*100) + '%;height:' + (nr.h*100) + '%"></div>';
+      if (nr && p && p.shot) h += '<div title="' + (nr.offscreen ? 'クリック箇所はスクショ範囲外（端に表示）' : 'クリック箇所') + '" style="position:absolute;border:2px ' + (nr.offscreen ? 'dashed' : 'solid') + ' #f85149;border-radius:4px;box-shadow:0 0 0 3px rgba(248,81,73,.25);left:' + (nr.x*100) + '%;top:' + (nr.y*100) + '%;width:' + (nr.w*100) + '%;height:' + (nr.h*100) + '%"></div>';
       h += '</div>';
     }
     h += '<div style="margin-top:8px;font-size:.74rem;color:#8b949e;line-height:1.7">';
@@ -247,12 +261,18 @@ _RPT_SITEMAP_JS = r"""
   window.rptSmExpand = function(open) { Object.keys(all).forEach(function(u){ st.collapsed[u] = !open; }); render(); };
   window.rptSmZoom = function(f) { st.view.scale = Math.max(0.2, Math.min(4, st.view.scale * f)); applyView(); };
   window.rptSmReset = function() { st.view = { scale: 1, tx: 0, ty: 0 }; applyView(); };
+  window.rptSmClosePop = function() { hidePop(); };
+  // Esc でも遷移元ポップオーバーを閉じられるようにする。
+  document.addEventListener('keydown', function(ev) { if (ev.key === 'Escape') hidePop(); });
 
   // Pan & zoom
   var drag = false, lx = 0, ly = 0;
   wrap.addEventListener('mousedown', function(ev) {
     if (st.mode === 'explorer') return;
     if (ev.target.closest('#rpt-sm-pop')) return;
+    // ノード以外（背景）をクリックしたら遷移元ポップオーバーを閉じる。
+    var onNode = ev.target.closest('g[transform]') && ev.target.tagName !== 'svg';
+    if (!onNode) hidePop();
     drag = true; lx = ev.clientX; ly = ev.clientY;
   });
   window.addEventListener('mousemove', function(ev) { if (!drag) return; st.view.tx += ev.clientX - lx; st.view.ty += ev.clientY - ly; lx = ev.clientX; ly = ev.clientY; applyView(); });
@@ -410,14 +430,21 @@ class ReportGenerator:
                     f'title="{self._escape(cvss_vector)}">CVSS {sc:.1f}</span>'
                 )
 
-            # ⑨ AI fix suggestion (attached to Finding by engine._ai_analysis_report)
+            # ⑨ 修正ガイダンス。engine が付与した ai_fix を表示するが、実際に LLM で
+            # 生成したものだけを "AI 推奨修正" と表示する。LLM 未使用（静的テンプレート）
+            # のときは "AI" と偽らず「推奨修正（静的ガイダンス）」として出す。
             ai_fix_text = f.__dict__.get("ai_fix", "")
+            ai_fix_is_ai = bool(f.__dict__.get("ai_fix_is_ai", False))
             ai_fix_html = ""
             if ai_fix_text:
                 ai_fix_safe = self._escape(ai_fix_text).replace("\n", "<br>")
+                if ai_fix_is_ai:
+                    fix_heading = "🤖 AI 推奨修正 (AI Fix Suggestion)"
+                else:
+                    fix_heading = "🛠️ 推奨修正 (静的ガイダンス)"
                 ai_fix_html = f"""
                     <div class="finding-detail ai-fix-section">
-                        <h4>🤖 AI 推奨修正 (AI Fix Suggestion)</h4>
+                        <h4>{fix_heading}</h4>
                         <div class="ai-fix-body">{ai_fix_safe}</div>
                     </div>"""
 

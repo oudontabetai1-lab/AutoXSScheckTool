@@ -1,3 +1,4 @@
+import gzip
 import tempfile
 import unittest
 from pathlib import Path
@@ -25,6 +26,12 @@ class ReadTextResilientTests(unittest.TestCase):
         path = self._write("日本語のコメント".encode("cp932"))
         self.assertEqual(read_text_resilient(path), "日本語のコメント")
 
+    def test_reads_gzipped_file_transparently(self):
+        # gzip 圧縮ファイル（マジック 0x1f 0x8b）を UTF-8 で読むと
+        # "can't decode byte 0x8b in position 1" で落ちる。透過的に解凍する。
+        path = self._write(gzip.compress('{"hello": "日本語"}'.encode("utf-8")))
+        self.assertEqual(read_text_resilient(path), '{"hello": "日本語"}')
+
 
 class SafeDecodeTests(unittest.TestCase):
     def test_empty(self):
@@ -43,6 +50,25 @@ class SafeDecodeTests(unittest.TestCase):
     def test_limit_truncates_before_decode(self):
         out = safe_decode(b"abcdefg", limit=3)
         self.assertEqual(out, "abc")
+
+    def test_gzip_bytes_are_decompressed(self):
+        # 0x1f 0x8b で始まる gzip バイト列を透過的に解凍してからデコードする。
+        out = safe_decode(gzip.compress("テスト body".encode("utf-8")))
+        self.assertEqual(out, "テスト body")
+
+    def test_gzip_bomb_is_bounded_by_limit(self):
+        # 大きく展開される gzip でも、limit を渡せばそのバイト数までしか
+        # 展開・確保しない（伸張爆弾でメモリを食い潰さない）。
+        bomb = gzip.compress(b"A" * (5 * 1024 * 1024))  # 5MB → 数KBに圧縮
+        out = safe_decode(bomb, limit=1000)
+        self.assertEqual(len(out), 1000)
+        self.assertEqual(out, "A" * 1000)
+
+    def test_gzip_default_cap_does_not_raise(self):
+        # limit 無しでも既定上限までで打ち切られ、例外を投げない。
+        out = safe_decode(gzip.compress(b"B" * (1024 * 1024)))
+        self.assertIsInstance(out, str)
+        self.assertTrue(out.startswith("B"))
 
 
 if __name__ == "__main__":

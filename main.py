@@ -86,6 +86,12 @@ def _load_config(path: Path = _CONFIG_PATH) -> dict:
     cfg["openai_model"]            = str(l.get("openai_model", "gpt-4o-mini"))
     cfg["gemini_model"]            = str(l.get("gemini_model", "gemini-2.0-flash"))
     cfg["claude_model"]            = str(l.get("claude_model", "claude-haiku-4-5-20251001"))
+    # 外部 OpenAI 互換 LLM（tsuzumi2 等）のベース URL。config ファイルの値のみを
+    # CLI/ダッシュボードの既定にする。env(WSCAN_LLM_BASE_URL/OPENAI_BASE_URL)は
+    # ここで畳み込まない — 畳み込むと --llm openai(公式) 実行時に env 値が「明示指定」
+    # として渡り、公式リクエストが互換エンドポイントへ飛んでしまう。env は
+    # llm_endpoint 側で openai_compatible のときだけ解決される。
+    cfg["openai_base_url"]         = str(l.get("openai_base_url", "") or "")
     cfg["role_models"]             = {
         str(k): str(v).strip()
         for k, v in (l.get("models", {}) or {}).items()
@@ -239,11 +245,13 @@ Examples:
     )
     scan.add_argument(
         "--llm",
-        choices=["ollama", "claude", "openai", "gemini", "none"],
+        choices=["ollama", "claude", "openai", "openai_compatible", "gemini", "none"],
         default=_CFG.get("llm_provider", "ollama"),
         help=(
             f"LLM for payload generation (default from config: {_CFG.get('llm_provider','ollama')}). "
-            "openai requires OPENAI_API_KEY. gemini requires GEMINI_API_KEY."
+            "openai requires OPENAI_API_KEY. gemini requires GEMINI_API_KEY. "
+            "openai_compatible は外部 OpenAI 互換 LLM（tsuzumi2 等）。--llm-base-url と "
+            "WSCAN_LLM_API_KEY（または OPENAI_API_KEY）を指定。"
         ),
     )
     scan.add_argument(
@@ -252,7 +260,13 @@ Examples:
     )
     scan.add_argument(
         "--openai-model", default=_CFG.get("openai_model", "gpt-4o-mini"), metavar="MODEL",
-        help=f"OpenAI model name (default: {_CFG.get('openai_model','gpt-4o-mini')})",
+        help=f"OpenAI (互換) model name (default: {_CFG.get('openai_model','gpt-4o-mini')}). "
+             "openai_compatible では tsuzumi-2 等のモデル名を指定。",
+    )
+    scan.add_argument(
+        "--llm-base-url", default=None, metavar="URL",
+        help="外部 OpenAI 互換エンドポイントのベース URL（例: https://host/v1）。"
+             "env WSCAN_LLM_BASE_URL / OPENAI_BASE_URL でも指定可。",
     )
     scan.add_argument(
         "--gemini-model", default=_CFG.get("gemini_model", "gemini-2.0-flash"), metavar="MODEL",
@@ -777,12 +791,17 @@ Examples:
     agent.add_argument("url", help="Target URL (e.g. https://example.com)")
     agent.add_argument(
         "--llm",
-        choices=["claude", "openai", "ollama"],
+        choices=["claude", "openai", "openai_compatible", "ollama"],
         default=_CFG.get("llm_provider", "claude"),
         help=(
             "LLM provider that drives the browser agent "
-            "(default: claude). Requires corresponding API key."
+            "(default: claude). Requires corresponding API key. "
+            "openai_compatible は外部 OpenAI 互換 LLM（tsuzumi2 等、--llm-base-url 指定）。"
         ),
+    )
+    agent.add_argument(
+        "--llm-base-url", default=None, metavar="URL",
+        help="外部 OpenAI 互換エンドポイントのベース URL（tsuzumi2 等、provider=openai_compatible 用）。",
     )
     agent.add_argument(
         "--model", metavar="MODEL", default="",
@@ -876,15 +895,20 @@ Examples:
         help=f"Page load timeout in seconds (default: {_CFG.get('timeout', 20)})",
     )
     triage.add_argument(
-        "--llm", choices=["ollama", "claude", "openai", "gemini", "none"],
+        "--llm", choices=["ollama", "claude", "openai", "openai_compatible", "gemini", "none"],
         default=_CFG.get("llm_provider", "none"),
-        help="LLM provider for AI attack-strategy insights (default: none)",
+        help="LLM provider for AI attack-strategy insights (default: none). "
+             "openai_compatible は外部 OpenAI 互換 LLM（tsuzumi2 等）。",
     )
     triage.add_argument(
         "--ollama-model", default=_CFG.get("ollama_model", "llama3"), metavar="MODEL",
     )
     triage.add_argument(
         "--openai-model", default=_CFG.get("openai_model", "gpt-4o-mini"), metavar="MODEL",
+    )
+    triage.add_argument(
+        "--llm-base-url", default=None, metavar="URL",
+        help="外部 OpenAI 互換エンドポイントのベース URL（tsuzumi2 等）。",
     )
     triage.add_argument(
         "--gemini-model", default=_CFG.get("gemini_model", "gemini-2.0-flash"), metavar="MODEL",
@@ -946,10 +970,15 @@ Examples:
     setup = sub.add_parser("setup", help="Interactively configure scan options via natural language")
     setup.add_argument("description", nargs="?", default="",
                        help="Natural language description of the target")
-    setup.add_argument("--llm", choices=["ollama", "claude", "openai", "gemini", "none"],
-                       default=_CFG.get("llm_provider", "ollama"))
+    setup.add_argument("--llm", choices=["ollama", "claude", "openai", "openai_compatible", "gemini", "none"],
+                       default=_CFG.get("llm_provider", "ollama"),
+                       help="LLM プロバイダー。openai_compatible は外部 OpenAI 互換 LLM（tsuzumi2 等）。")
     setup.add_argument("--ollama-model", default=_CFG.get("ollama_model", "llama3"), metavar="MODEL")
     setup.add_argument("--ollama-url", default=_CFG.get("ollama_url", "http://localhost:11434"), metavar="URL")
+    setup.add_argument("--openai-model", default=_CFG.get("openai_model", "gpt-4o-mini"), metavar="MODEL",
+                       help="OpenAI(互換) モデル名。openai_compatible では tsuzumi-2 等。")
+    setup.add_argument("--llm-base-url", default=None, metavar="URL",
+                       help="外部 OpenAI 互換エンドポイントのベース URL（tsuzumi2 等）。")
 
     # M: Batch scan subcommand
     batch_cmd = sub.add_parser(
@@ -1041,6 +1070,24 @@ def _load_cookie_file(path: str, console) -> list:
         return []
 
 
+def _effective_llm_base_url(args) -> str:
+    """provider を考慮した実効ベース URL を返す。
+
+    - ``--llm-base-url`` を明示指定していればそれ（最優先）。
+    - 未指定かつ provider が ``openai_compatible`` のときだけ config
+      (``llm.openai_base_url``) を採用する。
+    - それ以外（公式 ``openai`` 等）は空。config のベース URL を公式リクエストに
+      流用しない（config が互換用に設定されていても ``--llm openai`` は公式へ）。
+      env は下流の ``resolve_instance_base``（openai_compatible のみ）で解決される。
+    """
+    explicit = getattr(args, "llm_base_url", None)
+    if explicit is not None and str(explicit).strip():
+        return str(explicit).strip()
+    if getattr(args, "llm", "") == "openai_compatible":
+        return str(_CFG.get("openai_base_url", "") or "")
+    return ""
+
+
 def _llm_model_display(args) -> str:
     """Return a short model info string for the startup banner."""
     role_models = getattr(args, "role_models", {}) or {}
@@ -1053,6 +1100,11 @@ def _llm_model_display(args) -> str:
         return f"Model    : [blue]{args.ollama_model}[/blue] (Ollama){role_suffix}"
     if args.llm == "openai":
         return f"Model    : [blue]{args.openai_model}[/blue] (OpenAI){role_suffix}"
+    if args.llm == "openai_compatible":
+        # 明示 --llm-base-url が無ければ env(WSCAN_LLM_BASE_URL/OPENAI_BASE_URL)から解決した値を表示。
+        from wscan import llm_endpoint
+        base = _effective_llm_base_url(args) or llm_endpoint.resolve_base_url()
+        return f"Model    : [blue]{args.openai_model}[/blue] (OpenAI互換 @ {base}){role_suffix}"
     if args.llm == "gemini":
         return f"Model    : [blue]{args.gemini_model}[/blue] (Gemini){role_suffix}"
     if args.llm == "claude":
@@ -1134,8 +1186,13 @@ async def run_agent(args):
     from rich.panel import Panel
     from wscan.monitor import MonitorServer
     from wscan.agent_engine import AgentEngine
+    from wscan import llm_endpoint
 
     console = Console()
+
+    # 外部 OpenAI 互換（tsuzumi2 等）のベース URL は AgentEngine 経由で明示的に渡す。
+    # グローバル env は書き換えない（serve での operator 設定を壊さないため）。
+    _agent_base = _effective_llm_base_url(args)
 
     headless = not getattr(args, "no_headless", False)
 
@@ -1156,6 +1213,7 @@ async def run_agent(args):
             llm_provider=args.llm,
             llm_model=args.model or "",
             ollama_url=getattr(args, "ollama_url", "http://localhost:11434"),
+            llm_base_url=_agent_base,
             checks=args.checks,
             headless=headless,
             auth_user=getattr(args, "auth_user", "") or "",
@@ -1194,6 +1252,7 @@ async def run_agent(args):
                 llm_provider=args.llm,
                 llm_model=args.model or "",
                 ollama_url=getattr(args, "ollama_url", "http://localhost:11434"),
+                llm_base_url=_agent_base,
                 checks=args.checks,
                 headless=headless,
                 auth_user=getattr(args, "auth_user", "") or "",
@@ -1286,6 +1345,7 @@ async def run_scan(args):
             openai_model=getattr(args, "openai_model", "gpt-4o-mini"),
             gemini_model=getattr(args, "gemini_model", "gemini-2.0-flash"),
             claude_model=getattr(args, "claude_model", "claude-haiku-4-5-20251001"),
+            openai_base_url=_effective_llm_base_url(args),
             role_models=getattr(args, "role_models", {}),
         )
         _wizard_result = await run_wizard(_pg)
@@ -1434,6 +1494,7 @@ async def run_scan(args):
             openai_model=args.openai_model,
             gemini_model=args.gemini_model,
             claude_model=args.claude_model,
+            openai_base_url=_effective_llm_base_url(args),
             role_models=getattr(args, "role_models", {}),
             checks=checks_list,
             output_dir=args.output,
@@ -1758,6 +1819,7 @@ async def run_serve(args):
         "openai_model": _CFG.get("openai_model", "gpt-4o-mini"),
         "gemini_model": _CFG.get("gemini_model", "gemini-2.0-flash"),
         "claude_model": _CFG.get("claude_model", "claude-haiku-4-5-20251001"),
+        "openai_base_url": _CFG.get("openai_base_url", ""),
         "role_models": _CFG.get("role_models", {}),
         "auth_user": _CFG.get("auth_user", ""),
         "auth_pass": _CFG.get("auth_pass", ""),
@@ -1805,6 +1867,7 @@ async def run_serve(args):
         "openai_model": _CFG.get("openai_model", _llm_section.get("openai_model", "gpt-4o-mini")),
         "gemini_model": _CFG.get("gemini_model", _llm_section.get("gemini_model", "gemini-2.0-flash")),
         "claude_model": _CFG.get("claude_model", _llm_section.get("claude_model", "claude-haiku-4-5-20251001")),
+        "openai_base_url": _CFG.get("openai_base_url", _llm_section.get("openai_base_url", "")),
         "role_models":  _CFG.get("role_models", _llm_section.get("models", {}) or {}),
     }
     config = uvicorn.Config(app=monitor.app, host=host, port=port, log_level="error")
@@ -1834,9 +1897,16 @@ async def run_serve(args):
                 "openai_model": cfg.get("openai_model", "gpt-4o-mini"),
                 "gemini_model": cfg.get("gemini_model", "gemini-2.0-flash"),
                 "claude_model": cfg.get("claude_model", "claude-haiku-4-5-20251001"),
+                "openai_base_url": cfg.get("openai_base_url", "") or "",
                 "role_models":  cfg.get("role_models", {}) or {},
             })
         await monitor.emit_scan_started(cfg)
+
+        # 外部 OpenAI 互換（tsuzumi2 等）のベース URL は各エンジン/PayloadGenerator に
+        # 明示的に渡す。グローバル env は書き換えない（serve での operator 設定
+        # WSCAN_LLM_BASE_URL を、公式 openai を使う別スキャンが消してしまうのを防ぐ）。
+        # 公式 openai へ互換 URL を誤適用しないよう、openai_compatible のときだけ渡す。
+        _scan_base = (cfg.get("openai_base_url", "") or "") if cfg.get("llm") == "openai_compatible" else ""
 
         # ── Agent Browser mode ─────────────────────────────────────
         if cfg.get("agent_mode"):
@@ -1848,6 +1918,7 @@ async def run_serve(args):
                     llm_provider=cfg.get("llm", "claude") or "claude",
                     llm_model=cfg.get("agent_model", "") or "",
                     ollama_url=cfg.get("agent_ollama_url", "http://localhost:11434") or "http://localhost:11434",
+                    llm_base_url=_scan_base,
                     checks=checks,
                     headless=bool(cfg.get("headless", True)),
                     auth_user=cfg.get("auth_user", "") or "",
@@ -1871,6 +1942,10 @@ async def run_serve(args):
         seed_urls: list = []
         if cfg.get("hybrid_mode"):
             from wscan.agent_engine import AgentEngine
+            # 偵察側の base URL は、偵察(hybrid_llm)が openai_compatible のときだけ渡す。
+            # Phase2 が互換・偵察が公式 openai の場合に Phase2 用 URL を偵察へ誤適用しない。
+            # 明示的に AgentEngine へ渡し、グローバル env は書き換えない。
+            _recon_base = (cfg.get("openai_base_url", "") or "") if cfg.get("hybrid_llm") == "openai_compatible" else ""
             await monitor.emit_status("🔀 ハイブリッド Phase 1: Agent偵察中...", "running")
             try:
                 recon_engine = AgentEngine(
@@ -1878,6 +1953,7 @@ async def run_serve(args):
                     llm_provider=cfg.get("hybrid_llm", "claude") or "claude",
                     llm_model=cfg.get("hybrid_model", "") or "",
                     ollama_url=cfg.get("hybrid_ollama_url", "http://localhost:11434") or "http://localhost:11434",
+                    llm_base_url=_recon_base,
                     checks=[],
                     headless=bool(cfg.get("headless", True)),
                     auth_user=cfg.get("auth_user", "") or "",
@@ -1917,6 +1993,7 @@ async def run_serve(args):
                 openai_model=cfg.get("openai_model", "gpt-4o-mini") or "gpt-4o-mini",
                 gemini_model=cfg.get("gemini_model", "gemini-2.0-flash") or "gemini-2.0-flash",
                 claude_model=cfg.get("claude_model", "claude-haiku-4-5-20251001") or "claude-haiku-4-5-20251001",
+                openai_base_url=_scan_base,
                 role_models=cfg.get("role_models", {}) or {},
                 auth_user=cfg.get("auth_user", "") or "",
                 auth_pass=cfg.get("auth_pass", "") or "",
@@ -2198,6 +2275,7 @@ async def run_triage(args):
         openai_model=getattr(args, "openai_model", "gpt-4o-mini"),
         gemini_model=getattr(args, "gemini_model", "gemini-2.0-flash"),
         claude_model=getattr(args, "claude_model", "claude-haiku-4-5-20251001"),
+        openai_base_url=_effective_llm_base_url(args),
         role_models=getattr(args, "role_models", {}),
     )
 
@@ -2262,6 +2340,7 @@ async def run_setup(args):
         openai_model=getattr(args, "openai_model", "gpt-4o-mini"),
         gemini_model=getattr(args, "gemini_model", "gemini-2.0-flash"),
         claude_model=getattr(args, "claude_model", "claude-haiku-4-5-20251001"),
+        openai_base_url=_effective_llm_base_url(args),
         role_models=getattr(args, "role_models", {}),
     )
 

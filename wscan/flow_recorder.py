@@ -139,10 +139,11 @@ class FlowRecorder:
 
     def load(self, path: str) -> list[dict]:
         """JSON ファイルからステップを読み込む。"""
+        from .textio import read_text_resilient
         p = Path(path)
         if not p.exists():
             raise FileNotFoundError(f"Flow file not found: {path}")
-        steps = json.loads(p.read_text(encoding="utf-8"))
+        steps = json.loads(read_text_resilient(p))
         self._steps = steps
         return steps
 

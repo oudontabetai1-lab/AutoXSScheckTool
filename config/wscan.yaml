@@ -89,7 +89,10 @@ browser:
 # LLM 設定
 # ──────────────────────────────────────────────────────────
 llm:
-  # プロバイダー: ollama | claude | openai | gemini | none
+  # プロバイダー: ollama | claude | openai | openai_compatible | gemini | none
+  #  - openai_compatible: 外部の OpenAI 互換エンドポイント（NTT tsuzumi 2、
+  #    Azure AI Foundry、vLLM、LiteLLM 等）。openai_base_url とモデル名(openai_model)を
+  #    指定し、API キーは WSCAN_LLM_API_KEY（無ければ OPENAI_API_KEY）で渡す。
   provider: ollama
 
   # Ollama
@@ -98,6 +101,12 @@ llm:
 
   # OpenAI (OPENAI_API_KEY 環境変数が必要)
   openai_model: gpt-4o-mini
+
+  # 外部 OpenAI 互換エンドポイントのベース URL（provider=openai_compatible 用）。
+  # 例: "https://your-host/v1"。空欄なら公式 OpenAI。
+  # env の WSCAN_LLM_BASE_URL / OPENAI_BASE_URL でも指定可（env が優先されない場合は
+  # ここの値を使用）。openai_compatible では openai_model に tsuzumi-2 等を入れる。
+  openai_base_url: ""
 
   # Google Gemini (GEMINI_API_KEY 環境変数が必要)
   gemini_model: gemini-2.0-flash

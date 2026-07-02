@@ -349,6 +349,9 @@ body {
   box-shadow:0 0 0 3px rgba(248,81,73,.25); }
 .sm-marker::after { content:"クリック"; position:absolute; top:-16px; left:0;
   background:var(--critical); color:#fff; font-size:.6rem; padding:0 5px; border-radius:3px; white-space:nowrap; }
+/* スクショ範囲外で押した要素: 点線＋「画面外」ラベルで、端に寄せて必ず見えるようにする */
+.sm-marker.off { border-style:dashed; }
+.sm-marker.off::after { content:"クリック(画面外)"; }
 .sm-meta { margin-top:12px; font-size:.78rem; color:var(--text-muted); line-height:1.8; }
 .sm-meta b { color:var(--text); } .sm-meta code { color:#79c0ff; }
 .sm-popover {
@@ -356,7 +359,11 @@ body {
   border:1px solid var(--accent); border-radius:10px; padding:10px;
   box-shadow:0 10px 30px rgba(0,0,0,.6); font-size:.74rem;
 }
-.sm-popover h4 { margin:0 0 6px; font-size:.78rem; color:var(--accent); }
+.sm-popover h4 { margin:0 0 6px; font-size:.78rem; color:var(--accent); padding-right:20px; }
+.sm-pop-close { position:absolute; top:6px; right:8px; width:20px; height:20px; line-height:18px;
+  text-align:center; border:1px solid var(--border); border-radius:5px; background:var(--surface2);
+  color:var(--text-muted); cursor:pointer; font-size:.9rem; z-index:6; }
+.sm-pop-close:hover { border-color:var(--critical); color:#fff; }
 .check-progress-bar-wrap { display:grid; grid-template-columns:110px 1fr 42px; gap:8px; align-items:center; margin-bottom:8px; }
 .cp-label { color:var(--text); font-size:.75rem; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .cp-bar-bg { height:8px; background:var(--surface2); border:1px solid var(--border); border-radius:999px; overflow:hidden; }
@@ -1218,6 +1225,7 @@ body {
               <option value="ollama">Ollama (ローカル)</option>
               <option value="claude">Claude (Anthropic)</option>
               <option value="openai">OpenAI</option>
+              <option value="openai_compatible">OpenAI互換 (tsuzumi2 等)</option>
               <option value="gemini">Google Gemini</option>
             </select>
           </div>
@@ -1236,6 +1244,11 @@ body {
           <div class="cfg-field" id="cfgClaudeModelField" style="display:none">
             <label>Claudeモデル名</label>
             <input type="text" id="cfgClaudeModel" value="claude-haiku-4-5-20251001">
+          </div>
+          <div class="cfg-field" id="cfgLlmBaseUrlField" style="display:none">
+            <label>ベースURL (OpenAI互換)</label>
+            <input type="text" id="cfgLlmBaseUrl" placeholder="https://host/v1">
+            <div class="cfg-field-hint">tsuzumi2 等の外部エンドポイント。APIキーは環境変数 WSCAN_LLM_API_KEY（または OPENAI_API_KEY）で渡してください。モデル名は上の「OpenAIモデル名」欄に入力（例: tsuzumi-2）。</div>
           </div>
         </div>
         <div class="cfg-section-title" style="margin-top:18px">役割別モデル</div>
@@ -2212,10 +2225,13 @@ function applyScanProfile(profile) {
 
 function updateLlmModelField() {
   const llm = document.getElementById('cfgLlm').value;
+  // openai_compatible は OpenAI と同じモデル名欄を使い、加えてベースURL欄を出す。
+  const openaiStyle = (llm === 'openai' || llm === 'openai_compatible');
   document.getElementById('cfgOllamaModelField').style.display = llm === 'ollama' ? '' : 'none';
-  document.getElementById('cfgOpenaiModelField').style.display = llm === 'openai' ? '' : 'none';
+  document.getElementById('cfgOpenaiModelField').style.display = openaiStyle ? '' : 'none';
   document.getElementById('cfgGeminiModelField').style.display = llm === 'gemini' ? '' : 'none';
   document.getElementById('cfgClaudeModelField').style.display = llm === 'claude' ? '' : 'none';
+  document.getElementById('cfgLlmBaseUrlField').style.display = llm === 'openai_compatible' ? '' : 'none';
   document.getElementById('cfgRoleModelsGrid').style.display = llm === 'none' ? 'none' : '';
 }
 
@@ -2525,6 +2541,11 @@ function submitScanConfig() {
     openai_model:  document.getElementById('cfgOpenaiModel').value.trim() || 'gpt-4o-mini',
     gemini_model:  document.getElementById('cfgGeminiModel').value.trim() || 'gemini-2.0-flash',
     claude_model:  document.getElementById('cfgClaudeModel').value.trim() || 'claude-haiku-4-5-20251001',
+    // ベースURLは openai_compatible のときだけ送る。openai(公式)等に切り替えると
+    // 欄は隠れるが値は残るため、そのまま送ると公式スキャンが前の互換endpointを
+    // 使い続けてしまう（configure_endpoint は非空を明示指定として扱う）。
+    openai_base_url: (document.getElementById('cfgLlm').value === 'openai_compatible'
+      ? document.getElementById('cfgLlmBaseUrl').value.trim() : ''),
     role_models:   collectRoleModels(),
     auth_user:   document.getElementById('cfgAuthUser').value.trim(),
     auth_pass:   document.getElementById('cfgAuthPass').value,
@@ -2605,6 +2626,7 @@ function _collectFullConfigForExport() {
     openai_model: collect('cfgOpenaiModel'),
     gemini_model: collect('cfgGeminiModel'),
     claude_model: collect('cfgClaudeModel'),
+    openai_base_url: (collect('cfgLlm') === 'openai_compatible' ? collect('cfgLlmBaseUrl') : ''),
     role_models: collectRoleModels(),
     auth_user: collect('cfgAuthUser'),
     auth_pass: collect('cfgAuthPass'),
@@ -2698,6 +2720,8 @@ function applyImportedConfig(cfg) {
   setVal('cfgOpenaiModel', cfg.openai_model);
   setVal('cfgGeminiModel', cfg.gemini_model);
   setVal('cfgClaudeModel', cfg.claude_model);
+  setVal('cfgLlmBaseUrl', cfg.openai_base_url);
+  if (cfg.llm) updateLlmModelField();
   if (cfg.role_models) restoreRoleModels(cfg.role_models);
   setVal('cfgAuthUser', cfg.auth_user);
   setVal('cfgAuthPass', cfg.auth_pass);
@@ -2826,6 +2850,8 @@ function saveConfigToStorage() {
       openai_model: document.getElementById('cfgOpenaiModel').value,
       gemini_model: document.getElementById('cfgGeminiModel').value,
       claude_model: document.getElementById('cfgClaudeModel').value,
+      openai_base_url: (document.getElementById('cfgLlm').value === 'openai_compatible'
+        ? document.getElementById('cfgLlmBaseUrl').value : ''),
       role_models: collectRoleModels(),
       auth_user: document.getElementById('cfgAuthUser').value,
       auth_pass: document.getElementById('cfgAuthPass').value,
@@ -2871,11 +2897,13 @@ function loadConfigFromStorage() {
     if (cfg.tls_client_cert_password) document.getElementById('cfgTlsClientCertPassword').value = cfg.tls_client_cert_password;
     if (cfg.tls_ca_cert) document.getElementById('cfgTlsCaCert').value = cfg.tls_ca_cert;
     if (cfg.toggles) Object.assign(cfgToggles, cfg.toggles);
-    if (cfg.llm) { document.getElementById('cfgLlm').value = cfg.llm; updateLlmModelField(); }
+    if (cfg.llm) { document.getElementById('cfgLlm').value = cfg.llm; }
     if (cfg.ollama_model) document.getElementById('cfgOllamaModel').value = cfg.ollama_model;
     if (cfg.openai_model) document.getElementById('cfgOpenaiModel').value = cfg.openai_model;
     if (cfg.gemini_model) document.getElementById('cfgGeminiModel').value = cfg.gemini_model;
     if (cfg.claude_model) document.getElementById('cfgClaudeModel').value = cfg.claude_model;
+    if (cfg.openai_base_url != null) document.getElementById('cfgLlmBaseUrl').value = cfg.openai_base_url;
+    if (cfg.llm) updateLlmModelField();
     if (cfg.role_models) restoreRoleModels(cfg.role_models);
     if (cfg.auth_user) document.getElementById('cfgAuthUser').value = cfg.auth_user;
     if (cfg.auth_pass) document.getElementById('cfgAuthPass').value = cfg.auth_pass;
@@ -2929,11 +2957,13 @@ async function loadDefaultConfigFromServer() {
     if (cfg.tls_client_cert_password != null) document.getElementById('cfgTlsClientCertPassword').value = cfg.tls_client_cert_password;
     if (cfg.tls_ca_cert != null) document.getElementById('cfgTlsCaCert').value = cfg.tls_ca_cert;
     if (cfg.tls_verify != null) setCfgToggle('tls_verify', !!cfg.tls_verify);
-    if (cfg.llm) { document.getElementById('cfgLlm').value = cfg.llm; updateLlmModelField(); }
+    if (cfg.llm) { document.getElementById('cfgLlm').value = cfg.llm; }
     if (cfg.ollama_model) document.getElementById('cfgOllamaModel').value = cfg.ollama_model;
     if (cfg.openai_model) document.getElementById('cfgOpenaiModel').value = cfg.openai_model;
     if (cfg.gemini_model) document.getElementById('cfgGeminiModel').value = cfg.gemini_model;
     if (cfg.claude_model) document.getElementById('cfgClaudeModel').value = cfg.claude_model;
+    if (cfg.openai_base_url != null) document.getElementById('cfgLlmBaseUrl').value = cfg.openai_base_url;
+    if (cfg.llm) updateLlmModelField();
     if (cfg.role_models) restoreRoleModels(cfg.role_models);
     if (cfg.auth_user) document.getElementById('cfgAuthUser').value = cfg.auth_user;
     if (cfg.auth_pass) document.getElementById('cfgAuthPass').value = cfg.auth_pass;
@@ -4430,6 +4460,9 @@ async function runAutoConfig() {
           openai_model: (document.getElementById('cfgOpenaiModel')?.value || '').trim() || 'gpt-4o-mini',
           gemini_model: (document.getElementById('cfgGeminiModel')?.value || '').trim() || 'gemini-2.0-flash',
           claude_model: (document.getElementById('cfgClaudeModel')?.value || '').trim() || 'claude-haiku-4-5-20251001',
+          // openai_compatible のときだけ、入力されたベースURLを auto-config にも渡す。
+          openai_base_url: ((document.getElementById('cfgLlm')?.value === 'openai_compatible')
+            ? (document.getElementById('cfgLlmBaseUrl')?.value || '').trim() : ''),
           role_models: collectRoleModels(),
         },
       }),
@@ -4541,6 +4574,9 @@ function submitHybridScan() {
     openai_model: (document.getElementById('cfgOpenaiModel')?.value || '').trim() || 'gpt-4o-mini',
     gemini_model: (document.getElementById('cfgGeminiModel')?.value || '').trim() || 'gemini-2.0-flash',
     claude_model: (document.getElementById('cfgClaudeModel')?.value || '').trim() || 'claude-haiku-4-5-20251001',
+    // openai_compatible のときだけ、Phase2 通常スキャン用にベースURLを渡す。
+    openai_base_url: ((document.getElementById('cfgLlm')?.value === 'openai_compatible')
+      ? (document.getElementById('cfgLlmBaseUrl')?.value || '').trim() : ''),
     role_models:  collectRoleModels(),
     manual_crawl_file: (document.getElementById('cfgManualCrawlFile')?.value || '').trim(),
     target_urls:  (document.getElementById('cfgTargetUrls')?.value || '').split('\n').map(s=>s.trim()).filter(Boolean),
@@ -4606,8 +4642,29 @@ function _smNorm(via) {
   // Normalize a click rect (viewport px) into 0..1 fractions for overlay markers.
   if (!via || !via.rect || !via.viewport || !via.viewport.w || !via.viewport.h) return null;
   const r = via.rect, vp = via.viewport;
+  // クランプ前の端点（0..1）。スクショの範囲外（下にスクロールした要素等）だと
+  // ここが 0..1 を外れる。以前は x/y/w/h を個別にクランプしていたため、範囲外の
+  // マーカーは幅/高さ 0 に潰れて overflow:hidden で消え、「赤い囲みが出ない」状態に。
+  let x1 = r.x / vp.w, y1 = r.y / vp.h;
+  let x2 = (r.x + r.w) / vp.w, y2 = (r.y + r.h) / vp.h;
+  // 一部でもスクショ外にはみ出していれば offscreen（点線＋「画面外」ラベルにする）。
+  const offscreen = x1 < 0 || y1 < 0 || x2 > 1 || y2 > 1;
   const cl = (v) => Math.max(0, Math.min(1, v));
-  return { x: cl(r.x / vp.w), y: cl(r.y / vp.h), w: cl(r.w / vp.w), h: cl(r.h / vp.h) };
+  let cx1 = cl(x1), cy1 = cl(y1), cx2 = cl(x2), cy2 = cl(y2);
+  // クランプで潰れて見えなくなる軸は、最も近い端に最小サイズのマーカーを固定して
+  // 「この向きの画面外で押した」ことが必ず見えるようにする。
+  const MIN = 0.05;  // 5% の最小可視サイズ
+  if (cx2 - cx1 < MIN) {
+    if (x2 <= 0) { cx1 = 0; cx2 = MIN; }              // 左に完全にはみ出し
+    else if (x1 >= 1) { cx2 = 1; cx1 = 1 - MIN; }     // 右に完全にはみ出し
+    else { const c = cl((cx1 + cx2) / 2); cx1 = Math.max(0, Math.min(1 - MIN, c - MIN / 2)); cx2 = cx1 + MIN; }
+  }
+  if (cy2 - cy1 < MIN) {
+    if (y2 <= 0) { cy1 = 0; cy2 = MIN; }              // 上に完全にはみ出し
+    else if (y1 >= 1) { cy2 = 1; cy1 = 1 - MIN; }     // 下に完全にはみ出し
+    else { const c = cl((cy1 + cy2) / 2); cy1 = Math.max(0, Math.min(1 - MIN, c - MIN / 2)); cy2 = cy1 + MIN; }
+  }
+  return { x: cx1, y: cy1, w: cx2 - cx1, h: cy2 - cy1, offscreen };
 }
 
 // Build the visible model: children map, descendant counts, search/collapse filtering.
@@ -4836,7 +4893,7 @@ function _smRenderExplorer(model) {
   let html = `<h4>${n.via ? 'クリック箇所： ' + escapeHtml(_smShort(p ? p.url : '')) + ' → ' + escapeHtml(_smShort(n.url)) : escapeHtml(n.url) + '（起点）'}</h4>`;
   if (shot) {
     html += `<div class="sm-shot"><img src="data:image/jpeg;base64,${shot}">`;
-    if (nr && p && p.shot) html += `<div class="sm-marker" style="left:${nr.x * 100}%;top:${nr.y * 100}%;width:${nr.w * 100}%;height:${nr.h * 100}%"></div>`;
+    if (nr && p && p.shot) html += `<div class="sm-marker${nr.offscreen ? ' off' : ''}" style="left:${nr.x * 100}%;top:${nr.y * 100}%;width:${nr.w * 100}%;height:${nr.h * 100}%"></div>`;
     html += `</div>`;
   }
   html += `<div class="sm-meta">`;
@@ -4854,10 +4911,12 @@ function _smShowPopover(ev, n) {
   const p = n.parent && state.graphNodes[n.parent];
   const nr = _smNorm(n.via);
   const shot = (p && p.shot) || n.shot;
-  let html = `<h4>${n.via ? 'クリック箇所： ' + escapeHtml(_smShort(p ? p.url : '')) + ' → ' + escapeHtml(_smShort(n.url)) : escapeHtml(_smShort(n.url)) + '（起点）'}</h4>`;
+  // 閉じるボタン（一度開くと閉じられない問題の対策）。背景クリック / Esc でも閉じる。
+  let html = `<span class="sm-pop-close" onclick="_smHidePopover()" title="閉じる">×</span>`;
+  html += `<h4>${n.via ? 'クリック箇所： ' + escapeHtml(_smShort(p ? p.url : '')) + ' → ' + escapeHtml(_smShort(n.url)) : escapeHtml(_smShort(n.url)) + '（起点）'}</h4>`;
   if (shot) {
     html += `<div class="sm-shot"><img src="data:image/jpeg;base64,${shot}">`;
-    if (nr && p && p.shot) html += `<div class="sm-marker" style="left:${nr.x * 100}%;top:${nr.y * 100}%;width:${nr.w * 100}%;height:${nr.h * 100}%"></div>`;
+    if (nr && p && p.shot) html += `<div class="sm-marker${nr.offscreen ? ' off' : ''}" style="left:${nr.x * 100}%;top:${nr.y * 100}%;width:${nr.w * 100}%;height:${nr.h * 100}%"></div>`;
     html += `</div>`;
   }
   html += `<div class="sm-meta">`;
@@ -4896,11 +4955,16 @@ function _smWirePan() {
   const container = document.getElementById('sitemapCanvas') || document.getElementById('sitemapContainer');
   if (!container) return;
   state._smPanWired = true;
+  // Esc でも遷移元ポップオーバーを閉じられるようにする。
+  document.addEventListener('keydown', (ev) => { if (ev.key === 'Escape') _smHidePopover(); });
   let drag = false, lx = 0, ly = 0;
   container.addEventListener('mousedown', (ev) => {
     if (state.smMode === 'explorer') return;
     if (ev.target.closest('.sm-popover') || ev.target.closest('.sitemap-toolbar')) return;
-    if (ev.target.closest('g[transform]') && ev.target.tagName !== 'svg') { /* allow node clicks */ }
+    const onNode = ev.target.closest('g[transform]') && ev.target.tagName !== 'svg';
+    // ノード以外（背景）をクリックしたら遷移元ポップオーバーを閉じる。
+    // ノードクリックは直後の click で開き直すので消えない。
+    if (!onNode) _smHidePopover();
     drag = true; lx = ev.clientX; ly = ev.clientY;
   });
   window.addEventListener('mousemove', (ev) => {
