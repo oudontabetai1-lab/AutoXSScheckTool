@@ -174,10 +174,13 @@ def _build_llm(provider: str, model: str, ollama_url: str = "http://localhost:11
             raise RuntimeError(
                 "API キーが設定されていません（WSCAN_LLM_API_KEY または OPENAI_API_KEY）。"
             )
-        # openai_compatible（tsuzumi2 等）はベース URL を指定して OpenAI 互換で呼ぶ。
+        # ベース URL は provider の意図で解決する。公式 openai は env(OPENAI_BASE_URL
+        # 等)が設定されていても既定(公式)を使い、openai_compatible のときだけ
+        # カスタムエンドポイントへ向ける（公式 agent を互換 endpoint に誤誘導しない）。
         kwargs = {"model": model or "gpt-4o-mini", "api_key": api_key}
-        if llm_endpoint.is_custom_endpoint():
-            kwargs["base_url"] = llm_endpoint.resolve_base_url()
+        base = llm_endpoint.resolve_instance_base(provider)
+        if base and base != llm_endpoint.DEFAULT_OPENAI_BASE:
+            kwargs["base_url"] = base
         return ChatOpenAI(**kwargs)
 
     elif provider == "ollama":
