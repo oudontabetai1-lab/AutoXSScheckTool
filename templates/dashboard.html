@@ -4458,6 +4458,9 @@ async function runAutoConfig() {
           openai_model: (document.getElementById('cfgOpenaiModel')?.value || '').trim() || 'gpt-4o-mini',
           gemini_model: (document.getElementById('cfgGeminiModel')?.value || '').trim() || 'gemini-2.0-flash',
           claude_model: (document.getElementById('cfgClaudeModel')?.value || '').trim() || 'claude-haiku-4-5-20251001',
+          // openai_compatible のときだけ、入力されたベースURLを auto-config にも渡す。
+          openai_base_url: ((document.getElementById('cfgLlm')?.value === 'openai_compatible')
+            ? (document.getElementById('cfgLlmBaseUrl')?.value || '').trim() : ''),
           role_models: collectRoleModels(),
         },
       }),
