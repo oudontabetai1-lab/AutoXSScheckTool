@@ -161,6 +161,28 @@ class AdaptiveUnitTests(unittest.TestCase):
         restored = CheckpointState.from_dict(s.to_dict())
         self.assertTrue(restored.is_done("http://h/a", "q", 0, "(adaptive)"))
 
+    def test_fresh_state_is_current_version(self):
+        # 新規作成は現行版（>=2）。adaptive-on-resume を許可する側。
+        from wscan.checkpoint import CHECKPOINT_VERSION
+        s = CheckpointState(target_url="http://h", checks=["xss"])
+        self.assertEqual(s.source_version, CHECKPOINT_VERSION)
+        self.assertGreaterEqual(s.source_version, 2)
+
+    def test_legacy_checkpoint_detected_as_v1(self):
+        # version キー欠落の古い checkpoint は legacy(v1) 扱い。
+        legacy = CheckpointState.from_dict({
+            "target_url": "http://h",
+            "checks": ["xss"],
+            "completed_units": [],
+            "findings": [],
+        })
+        self.assertEqual(legacy.source_version, 1)
+
+    def test_v2_checkpoint_preserves_version(self):
+        s = CheckpointState(target_url="http://h", checks=["xss"])
+        restored = CheckpointState.from_dict(s.to_dict())
+        self.assertGreaterEqual(restored.source_version, 2)
+
 
 class SaveCheckpointFindingsTests(unittest.TestCase):
     """abort 時に `_save_checkpoint` が in-memory Finding を永続化することを守る。

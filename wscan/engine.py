@@ -3611,6 +3611,11 @@ class ScanEngine:
                     f"{', '.join(field_payloads)}[/dim magenta]"
                 )
 
+                # multi-param は fill_and_submit_form_multi で直接送信し log_payload_test を
+                # 通さないため、per-payload の abort フックが効かない。送信直前にここで
+                # 停止(abort)/一時停止を尊重し、残りの結合 payload を送り続けないようにする。
+                await self.controller.wait_if_paused_or_abort()
+
                 ok = await self.browser.navigate(page.url, retries=self.navigation_retries)
                 if not ok:
                     self._record_unscannable_url(
@@ -3855,10 +3860,19 @@ class ScanEngine:
         adaptive_done = self._checkpoint_is_done(
             url, field_name, form_index, "(adaptive)", is_url_param
         )
+        # legacy checkpoint（"(adaptive)" 単位を持たない v1）から resume した場合、
+        # 完了フィールドはマーカーが無いだけで adaptive 実行済みかもしれない。これを
+        # 「未実行」と誤認して adaptive を再送すると、完了済みフィールドへ新規 payload
+        # wave を送ってしまい（重複攻撃・状態変更系の再実行）checkpoint の約束を破る。
+        # そのため「全チェック resume skip のフィールドで adaptive を再試行」するのは、
+        # "(adaptive)" 単位を確実に記録する現行フォーマット(v2+)由来の checkpoint に限る。
+        # checkpoint 無効時(None)は resume 自体が無く checks_skipped_done も 0。
+        cp = self.checkpoint
+        adaptive_tracked = (cp is None) or getattr(cp, "source_version", 1) >= 2
         if (
             self.adaptive_enabled
             and not adaptive_done
-            and (checks_executed > 0 or checks_skipped_done > 0)
+            and (checks_executed > 0 or (checks_skipped_done > 0 and adaptive_tracked))
         ):
             await self._adaptive_attack_field(
                 url, form_index, field, is_url_param, ordered_checks, field_plan

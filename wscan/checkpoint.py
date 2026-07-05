@@ -23,7 +23,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-CHECKPOINT_VERSION = 1
+# v2: per-field の "(adaptive)" 完了単位を導入（abort→resume で adaptive を
+# 取りこぼさないため）。v1（legacy）由来の checkpoint は "(adaptive)" 単位を
+# 持たないので、engine の adaptive ゲートは source_version でこれを判別する。
+CHECKPOINT_VERSION = 2
 CHECKPOINT_FILENAME = "checkpoint.json"
 
 
@@ -57,6 +60,11 @@ class CheckpointState:
     findings: list[dict] = field(default_factory=list)
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
+    # 読み込んだデータのスキーマ版（新規作成は現行版）。"(adaptive)" 単位は v2 で
+    # 追加されたため、v1 由来では「(adaptive) マーカー欠落＝未実行」と断定できない。
+    # engine の adaptive ゲートがこの版で legacy を判別し、完了フィールドへの
+    # adaptive 再送（重複攻撃）を防ぐ。シリアライズ対象外（load 時のみ意味を持つ）。
+    source_version: int = CHECKPOINT_VERSION
 
     # ── 進捗操作（純粋） ────────────────────────────────────────────
     def is_done(
@@ -96,6 +104,8 @@ class CheckpointState:
             findings=list(data.get("findings", []) or []),
             created_at=data.get("created_at", time.time()),
             updated_at=data.get("updated_at", time.time()),
+            # 版キー欠落の古い checkpoint は v1（legacy）とみなす。
+            source_version=int(data.get("version", 1) or 1),
         )
 
     def is_compatible_with(self, target_url: str, checks: list[str]) -> bool:
