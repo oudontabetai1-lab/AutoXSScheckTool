@@ -1551,6 +1551,11 @@ class ScanEngine:
                 await self._phase_attack(crawled_pages, plans)
             except AbortScan:
                 scan_aborted = True
+                # 中断時点の Finding と進捗を必ず永続化してから続行する。payload 単位の
+                # 即時停止は _scan_field 末尾の _save_checkpoint より前に抜けるため、
+                # ここで保存しないと中断フィールドで既に記録した Finding が checkpoint
+                # に載らず、部分レポート（in-memory）と resume（snapshot 復元）が食い違う。
+                self._save_checkpoint()
                 console.print(
                     "\n[bold red][Intervention] Scan aborted by operator.[/bold red] "
                     "Generating partial report …"
@@ -1587,7 +1592,8 @@ class ScanEngine:
                     try:
                         await self._phase_attack(new_pages, new_plans)
                     except AbortScan:
-                        pass
+                        # 中断時点の Finding/進捗を永続化（resume と部分レポートの整合）。
+                        self._save_checkpoint()
                 else:
                     console.print(
                         "  [dim]No new pages discovered in post-auth crawl.[/dim]"

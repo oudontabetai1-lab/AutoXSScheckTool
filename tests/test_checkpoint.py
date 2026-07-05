@@ -134,6 +134,62 @@ class CheckTypeScopeTests(unittest.TestCase):
         self.assertFalse(self._engine(["xss"])("cache_deception"))
 
 
+class SaveCheckpointFindingsTests(unittest.TestCase):
+    """abort 時に `_save_checkpoint` が in-memory Finding を永続化することを守る。
+
+    payload 単位の即時停止は `_scan_field` 末尾の保存より前に抜けるため、run() の
+    abort ハンドラが `_save_checkpoint()` を呼んで中断時点の Finding を snapshot に
+    載せる。ここでは persistence 機構そのもの（all_findings → checkpoint.findings →
+    ディスク）が働くことを検証する。
+    """
+
+    def test_in_memory_findings_persisted_on_save(self):
+        import types
+        from wscan.engine import ScanEngine
+        from wscan.scanners.base import Finding
+
+        with tempfile.TemporaryDirectory() as d:
+            state = CheckpointState(target_url="http://h", checks=["xss"])
+            f = Finding(
+                check_type="xss",
+                severity="high",
+                url="http://h/a",
+                field_name="q",
+                payload="<script>",
+                evidence="reflected",
+            )
+            e = types.SimpleNamespace(
+                enable_checkpoint=True,
+                checkpoint=state,
+                all_findings=[f],
+                output_dir=Path(d),
+                wave_errors=[],
+            )
+            # 実メソッドを借用して保存（abort ハンドラが呼ぶのと同じ経路）。
+            ScanEngine._save_checkpoint(e)
+
+            loaded = load_checkpoint(d)
+            self.assertIsNotNone(loaded)
+            self.assertEqual(len(loaded.findings), 1)
+            self.assertEqual(loaded.findings[0]["check_type"], "xss")
+            self.assertEqual(loaded.findings[0]["field_name"], "q")
+
+    def test_save_noop_when_checkpoint_disabled(self):
+        import types
+        from wscan.engine import ScanEngine
+
+        with tempfile.TemporaryDirectory() as d:
+            e = types.SimpleNamespace(
+                enable_checkpoint=False,
+                checkpoint=None,
+                all_findings=[],
+                output_dir=Path(d),
+                wave_errors=[],
+            )
+            ScanEngine._save_checkpoint(e)  # 例外を出さず no-op
+            self.assertIsNone(load_checkpoint(d))
+
+
 class IoTests(unittest.TestCase):
     def test_save_load_roundtrip(self):
         with tempfile.TemporaryDirectory() as d:
