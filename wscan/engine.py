@@ -1470,59 +1470,61 @@ class ScanEngine:
             if self.cookie_list:
                 await self._browser.set_cookies_from_list(self.cookie_list, self.target_url)
 
-            # Auth-1: Auto-login if login URL provided
-            if self.login_url and self._browser.auth_user and self._browser.auth_pass:
-                # Inspect the login form FIRST, while still logged out. Apps that
-                # redirect authenticated users away from /login would otherwise
-                # hide the form, leaving this attack surface untested.
-                await self._scan_login_form_preauth()
-                console.print(
-                    f"  [cyan][Auth] Auto-login:[/cyan] {self.login_url}"
-                )
-                if self._mfa_solver is not None:
-                    console.print(
-                        f"  [cyan][Auth] MFA enabled:[/cyan] type={self._mfa_config.type} "
-                        f"(external MCP)"
-                    )
-                success = await self._browser.auto_login(
-                    self.login_url,
-                    user_field=self.login_user_field,
-                    pass_field=self.login_pass_field,
-                    success_indicator=self.login_success_indicator,
-                )
-                if success:
-                    self.auth_landing_url = getattr(self._browser, "last_login_url", "") or self._browser.page.url
-                    console.print("  [green][Auth] Login successful — session cookies captured.[/green]")
-                    # httpx 系検査も認証されるよう、初回ログイン直後に Cookie を同期する。
-                    await self._sync_cookies_from_browser(self._browser)
-                    if self.auth_landing_url:
-                        console.print(f"  [dim][Auth] Authenticated landing:[/dim] {self.auth_landing_url}")
-                else:
-                    console.print("  [yellow][Auth] Login may have failed — continuing anyway.[/yellow]")
-
-            # A: Set up multi-account sessions (if --accounts supplied)
-            if self.accounts and self.login_url:
-                await self._setup_account_sessions()
-
-            # A-2: Detect WAF before crawling (if enabled)
-            if self.enable_waf_detection:
-                waf_name = await self.waf_detector.detect(self.target_url, timeout=float(self.timeout))
-                if waf_name:
-                    console.print(f"  [bold yellow][WAF][/bold yellow] Detected: {waf_name}")
-                    bypass_hints = self.waf_detector.get_bypass_hints(waf_name)
-                    console.print(f"  [dim yellow]Bypass hints: {'; '.join(bypass_hints[:3])}[/dim yellow]")
-                    if self.monitor:
-                        await self.monitor.emit("waf_detected", {"waf": waf_name, "hints": bypass_hints})
-                else:
-                    console.print("  [dim]No WAF detected.[/dim]")
-            else:
-                console.print("  [dim]WAF detection disabled.[/dim]")
-
-            # crawl〜attack を通して停止(abort)を単一の捕捉点で扱う。crawl 中や
-            # crawl-review の cancel が投げる AbortScan もここで受け、部分レポート生成へ
-            # 進む（従来 crawl 由来の AbortScan は未捕捉で serve ループごと落とし得た）。
+            # pre-auth ログインフォーム検査〜attack までの停止(abort)を単一の捕捉点で
+            # 扱う。controller は既に _active のため、pre-auth 検査中の停止でも
+            # per-payload の AbortScan が飛ぶ。AbortScan は BaseException で外側の
+            # except Exception では捕まらず、ここで受けないと run() を抜けて serve
+            # ループごと落ちる（crawl 由来と同じ経路）。crawl-review の cancel も同様。
             scan_aborted = False
             try:
+                # Auth-1: Auto-login if login URL provided
+                if self.login_url and self._browser.auth_user and self._browser.auth_pass:
+                    # Inspect the login form FIRST, while still logged out. Apps that
+                    # redirect authenticated users away from /login would otherwise
+                    # hide the form, leaving this attack surface untested.
+                    await self._scan_login_form_preauth()
+                    console.print(
+                        f"  [cyan][Auth] Auto-login:[/cyan] {self.login_url}"
+                    )
+                    if self._mfa_solver is not None:
+                        console.print(
+                            f"  [cyan][Auth] MFA enabled:[/cyan] type={self._mfa_config.type} "
+                            f"(external MCP)"
+                        )
+                    success = await self._browser.auto_login(
+                        self.login_url,
+                        user_field=self.login_user_field,
+                        pass_field=self.login_pass_field,
+                        success_indicator=self.login_success_indicator,
+                    )
+                    if success:
+                        self.auth_landing_url = getattr(self._browser, "last_login_url", "") or self._browser.page.url
+                        console.print("  [green][Auth] Login successful — session cookies captured.[/green]")
+                        # httpx 系検査も認証されるよう、初回ログイン直後に Cookie を同期する。
+                        await self._sync_cookies_from_browser(self._browser)
+                        if self.auth_landing_url:
+                            console.print(f"  [dim][Auth] Authenticated landing:[/dim] {self.auth_landing_url}")
+                    else:
+                        console.print("  [yellow][Auth] Login may have failed — continuing anyway.[/yellow]")
+
+                # A: Set up multi-account sessions (if --accounts supplied)
+                if self.accounts and self.login_url:
+                    await self._setup_account_sessions()
+
+                # A-2: Detect WAF before crawling (if enabled)
+                if self.enable_waf_detection:
+                    waf_name = await self.waf_detector.detect(self.target_url, timeout=float(self.timeout))
+                    if waf_name:
+                        console.print(f"  [bold yellow][WAF][/bold yellow] Detected: {waf_name}")
+                        bypass_hints = self.waf_detector.get_bypass_hints(waf_name)
+                        console.print(f"  [dim yellow]Bypass hints: {'; '.join(bypass_hints[:3])}[/dim yellow]")
+                        if self.monitor:
+                            await self.monitor.emit("waf_detected", {"waf": waf_name, "hints": bypass_hints})
+                    else:
+                        console.print("  [dim]No WAF detected.[/dim]")
+                else:
+                    console.print("  [dim]WAF detection disabled.[/dim]")
+
                 # ── Phase 1: Crawl ───────────────────────────────────────
                 if self.monitor: await self.monitor.emit_phase("crawl")
                 crawled_pages = await self._phase_crawl()
