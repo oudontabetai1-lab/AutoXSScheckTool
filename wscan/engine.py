@@ -3860,19 +3860,16 @@ class ScanEngine:
         adaptive_done = self._checkpoint_is_done(
             url, field_name, form_index, "(adaptive)", is_url_param
         )
-        # legacy checkpoint（"(adaptive)" 単位を持たない v1）から resume した場合、
-        # 完了フィールドはマーカーが無いだけで adaptive 実行済みかもしれない。これを
-        # 「未実行」と誤認して adaptive を再送すると、完了済みフィールドへ新規 payload
-        # wave を送ってしまい（重複攻撃・状態変更系の再実行）checkpoint の約束を破る。
-        # そのため「全チェック resume skip のフィールドで adaptive を再試行」するのは、
-        # "(adaptive)" 単位を確実に記録する現行フォーマット(v2+)由来の checkpoint に限る。
-        # checkpoint 無効時(None)は resume 自体が無く checks_skipped_done も 0。
-        cp = self.checkpoint
-        adaptive_tracked = (cp is None) or getattr(cp, "source_version", 1) >= 2
+        # 完了フィールドは "(adaptive)" marker で一意に判定する。v1(legacy) から resume
+        # した場合も、CheckpointState.from_dict の load 時マイグレーションが v1 era の
+        # 完了フィールドへ marker を補完済みなので、marker 欠落＝未実行として扱ってよい
+        # （完了済みフィールドへの adaptive 再送は起きない）。checks_skipped_done>0 は
+        # 「first-pass 完了後・adaptive 実行前に abort→resume」で全 check が skip された
+        # フィールドを拾い、adaptive を確実に再試行するため。
         if (
             self.adaptive_enabled
             and not adaptive_done
-            and (checks_executed > 0 or (checks_skipped_done > 0 and adaptive_tracked))
+            and (checks_executed > 0 or checks_skipped_done > 0)
         ):
             await self._adaptive_attack_field(
                 url, form_index, field, is_url_param, ordered_checks, field_plan

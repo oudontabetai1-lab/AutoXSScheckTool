@@ -60,10 +60,9 @@ class CheckpointState:
     findings: list[dict] = field(default_factory=list)
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
-    # 読み込んだデータのスキーマ版（新規作成は現行版）。"(adaptive)" 単位は v2 で
-    # 追加されたため、v1 由来では「(adaptive) マーカー欠落＝未実行」と断定できない。
-    # engine の adaptive ゲートがこの版で legacy を判別し、完了フィールドへの
-    # adaptive 再送（重複攻撃）を防ぐ。シリアライズ対象外（load 時のみ意味を持つ）。
+    # 読み込んだデータのスキーマ版（新規作成は現行版）。情報用。v1→v2 の差分
+    # （per-field "(adaptive)" 単位）は from_dict の load 時マイグレーションで吸収
+    # するため、engine の判定はこの版に依存しない（marker のみで per-field 判定する）。
     source_version: int = CHECKPOINT_VERSION
 
     # ── 進捗操作（純粋） ────────────────────────────────────────────
@@ -85,13 +84,11 @@ class CheckpointState:
 
     # ── シリアライズ（純粋） ────────────────────────────────────────
     def to_dict(self) -> dict:
+        # 現行版で書き出す。v1 由来でも from_dict の load 時マイグレーションで
+        # per-field "(adaptive)" 単位を補完済み（＝実質 v2）なので、v2 として保存して
+        # 問題ない。次回 resume は追加マイグレーション不要で marker をそのまま使える。
         return {
-            # 由来の版を保持する（現行版へ勝手に昇格させない）。v1(legacy) を resume
-            # すると _init_checkpoint が即 _save_checkpoint する。ここで CHECKPOINT_VERSION
-            # に書き換えると、v1 era の完了フィールド（"(adaptive)" 単位を持たない）が
-            # v2 扱いになり、次回 resume で adaptive を再送（重複攻撃）してしまう。
-            # 由来版を保つことで legacy 判別が全 resume を通じて維持される。
-            "version": self.source_version,
+            "version": CHECKPOINT_VERSION,
             "target_url": self.target_url,
             "checks": list(self.checks),
             "completed_units": sorted(self.completed_units),
@@ -102,16 +99,50 @@ class CheckpointState:
 
     @classmethod
     def from_dict(cls, data: dict) -> "CheckpointState":
-        return cls(
+        state = cls(
             target_url=data.get("target_url", ""),
             checks=list(data.get("checks", []) or []),
             completed_units=set(data.get("completed_units", []) or []),
             findings=list(data.get("findings", []) or []),
             created_at=data.get("created_at", time.time()),
             updated_at=data.get("updated_at", time.time()),
-            # 版キー欠落の古い checkpoint は v1（legacy）とみなす。
+            # 版キー欠落の古い checkpoint は v1（legacy）とみなす（情報用）。
             source_version=int(data.get("version", 1) or 1),
         )
+        if state.source_version < 2:
+            state._migrate_v1_adaptive_units()
+        return state
+
+    def _migrate_v1_adaptive_units(self) -> None:
+        """v1→v2 マイグレーション: 完了フィールドに "(adaptive)" 単位を補完する（純粋）。
+
+        v1 は per-field の "(adaptive)" 単位を持たない。first-pass の全 configured
+        check が done のフィールドは v1 の attack で adaptive 実行済み（v1 は first-pass
+        後に adaptive を走らせてから完了記録する）なので、"(adaptive)" を補完して
+        次回 resume で完了済みフィールドへ adaptive を再送（重複攻撃・状態変更系の
+        再実行）しないようにする。部分完了フィールドは補完せず、resume で残り check と
+        ともに adaptive が走る（v1 挙動と一致）。
+
+        version フラグでの一括判定と違い per-field 粒度なので、v1 由来 checkpoint を
+        resume 中に新規完了したフィールド（正しく marker を持つ/持たない）と、v1 era の
+        完了フィールドを取り違えない。
+        """
+        checks = [c for c in (self.checks or []) if c]
+        if not checks:
+            return
+        # completed_units を (url, field, form, location) ごとの check 集合へ束ねる。
+        done_by_field: dict[tuple, set] = {}
+        for key in self.completed_units:
+            parts = key.split("\x1f")
+            if len(parts) != 5:
+                continue
+            url, field_name, form_s, location, check = parts
+            done_by_field.setdefault((url, field_name, form_s, location), set()).add(check)
+        # configured check を全て満たすフィールドだけ adaptive 完了とみなす。
+        for (url, field_name, form_s, location), got in done_by_field.items():
+            if all(c in got for c in checks):
+                adaptive_key = "\x1f".join([url, field_name, form_s, location, "(adaptive)"])
+                self.completed_units.add(adaptive_key)
 
     def is_compatible_with(self, target_url: str, checks: list[str]) -> bool:
         """再開先のターゲット/チェック集合が、保存時と整合するか（純粋）。

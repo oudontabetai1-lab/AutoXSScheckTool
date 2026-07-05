@@ -162,45 +162,61 @@ class AdaptiveUnitTests(unittest.TestCase):
         self.assertTrue(restored.is_done("http://h/a", "q", 0, "(adaptive)"))
 
     def test_fresh_state_is_current_version(self):
-        # 新規作成は現行版（>=2）。adaptive-on-resume を許可する側。
         from wscan.checkpoint import CHECKPOINT_VERSION
         s = CheckpointState(target_url="http://h", checks=["xss"])
         self.assertEqual(s.source_version, CHECKPOINT_VERSION)
         self.assertGreaterEqual(s.source_version, 2)
 
-    def test_legacy_checkpoint_detected_as_v1(self):
-        # version キー欠落の古い checkpoint は legacy(v1) 扱い。
+    def test_legacy_fully_done_field_backfills_adaptive(self):
+        # v1 で全 configured check が done のフィールドは adaptive 実行済みなので、
+        # load 時に "(adaptive)" を補完し、resume で再攻撃しない。
         legacy = CheckpointState.from_dict({
+            "version": 1,
             "target_url": "http://h",
-            "checks": ["xss"],
-            "completed_units": [],
+            "checks": ["xss", "sqli"],
+            "completed_units": [
+                unit_key("http://h/a", "q", 0, "xss"),
+                unit_key("http://h/a", "q", 0, "sqli"),
+            ],
             "findings": [],
         })
-        self.assertEqual(legacy.source_version, 1)
+        self.assertTrue(legacy.is_done("http://h/a", "q", 0, "(adaptive)"))
 
-    def test_v2_checkpoint_preserves_version(self):
-        s = CheckpointState(target_url="http://h", checks=["xss"])
-        restored = CheckpointState.from_dict(s.to_dict())
-        self.assertGreaterEqual(restored.source_version, 2)
+    def test_legacy_partial_field_not_backfilled(self):
+        # 一部の check だけ done の部分完了フィールドは補完しない
+        # （resume で残り check とともに adaptive が走る = v1 挙動）。
+        legacy = CheckpointState.from_dict({
+            "version": 1,
+            "target_url": "http://h",
+            "checks": ["xss", "sqli"],
+            "completed_units": [
+                unit_key("http://h/a", "q", 0, "xss"),  # sqli 未完
+            ],
+            "findings": [],
+        })
+        self.assertFalse(legacy.is_done("http://h/a", "q", 0, "(adaptive)"))
 
-    def test_legacy_checkpoint_not_promoted_on_save(self):
-        # v1 を resume→保存しても v2 へ昇格させない（legacy 判別を維持）。
-        # 昇格すると次回 resume で完了フィールドへ adaptive を再送してしまう。
+    def test_legacy_migrated_saved_as_v2(self):
+        # マイグレーション済み（marker 補完済み）は v2 として保存してよい。
         legacy = CheckpointState.from_dict({
             "version": 1,
             "target_url": "http://h",
             "checks": ["xss"],
-            "completed_units": [],
+            "completed_units": [unit_key("http://h/a", "q", 0, "xss")],
             "findings": [],
         })
-        self.assertEqual(legacy.source_version, 1)
-        # resume 中に "(adaptive)" 単位を足しても、書き出しは version=1 のまま。
-        legacy.mark_done("http://h/a", "q", 0, "(adaptive)")
-        dumped = legacy.to_dict()
-        self.assertEqual(dumped["version"], 1)
-        # 再読込でも legacy 判別が保たれる。
-        reloaded = CheckpointState.from_dict(dumped)
-        self.assertEqual(reloaded.source_version, 1)
+        from wscan.checkpoint import CHECKPOINT_VERSION
+        self.assertEqual(legacy.to_dict()["version"], CHECKPOINT_VERSION)
+        # 再読込でも adaptive marker は保持され、二重マイグレーションでも無害。
+        reloaded = CheckpointState.from_dict(legacy.to_dict())
+        self.assertTrue(reloaded.is_done("http://h/a", "q", 0, "(adaptive)"))
+
+    def test_v2_checkpoint_no_spurious_adaptive_backfill(self):
+        # v2 は marker をそのまま尊重し、マイグレーションで勝手に補完しない。
+        s = CheckpointState(target_url="http://h", checks=["xss"])
+        s.mark_done("http://h/a", "q", 0, "xss")  # adaptive 未完のまま
+        restored = CheckpointState.from_dict(s.to_dict())
+        self.assertFalse(restored.is_done("http://h/a", "q", 0, "(adaptive)"))
 
 
 class SaveCheckpointFindingsTests(unittest.TestCase):
