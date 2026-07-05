@@ -3735,10 +3735,12 @@ class ScanEngine:
         if field_plan and field_plan.rationale:
             console.print(f"    [dim cyan]Plan:[/dim cyan] [dim]{field_plan.rationale[:100]}[/dim]")
 
-        # 実際に実行した（resume でスキップしなかった）チェック数。すべて resume で
-        # スキップされた場合は末尾の adaptive パスも飛ばし、完了済みフィールドを
-        # 新規 payload で再攻撃しない（チェックポイントの約束を守る）。
+        # 実際に実行した（resume でスキップしなかった）チェック数と、resume で
+        # 完了済みとして飛ばしたチェック数。両方 0＝このフィールドに in-scope な
+        # チェックが無い（＝adaptive も走らせない）。adaptive の要否は下部で
+        # 「(adaptive) 完了マーカー」と併せて判定する（abort 中断時の再開網羅性のため）。
         checks_executed = 0
+        checks_skipped_done = 0
         for check_name in ordered_checks:
             scanner = self.scanners.get(check_name)
             if scanner is None:
@@ -3754,6 +3756,7 @@ class ScanEngine:
                     location=location,
                     note="Skipped — already completed in a previous run (resume).",
                 )
+                checks_skipped_done += 1
                 continue
 
             # 注意: 以前はこのフィールドで critical finding が確定すると残りの
@@ -3831,13 +3834,30 @@ class ScanEngine:
 
         # ── Adaptive AI round ────────────────────────────────────────────
         # 以前は critical finding があると adaptive パスをスキップしていたが、過検知で
-        # ある可能性を踏まえ「見つかったからスキップ」はしない。resume で全チェックが
-        # スキップされたフィールドだけは adaptive も走らせない（新規生成 payload で
-        # 完了済みフィールドを再攻撃しないため）。
-        if self.adaptive_enabled and checks_executed > 0:
+        # ある可能性を踏まえ「見つかったからスキップ」はしない。
+        #
+        # adaptive は per-field の独立単位として「(adaptive) 完了マーカー」で管理する。
+        # first-pass の各チェックは adaptive の前に done 化されるため、`checks_executed>0`
+        # だけを条件にすると「first-pass 完了後・adaptive 実行中に abort→resume」で
+        # 全チェックが skip されて checks_executed==0 となり adaptive が二度と走らない
+        # （＝adaptive payload を恒久的に取りこぼす）。完了マーカーを別途持つことで、
+        # adaptive 未完のフィールドだけ resume で adaptive を再試行できる。
+        # 実行条件: adaptive 有効 かつ 当該フィールドに in-scope チェックがある
+        # （今回実行 or 前回完了）かつ adaptive 未完。マーカーで一度だけ実行を保証し、
+        # 完了済みフィールドを新規 payload で再攻撃しない約束も守る。
+        adaptive_done = self._checkpoint_is_done(
+            url, field_name, form_index, "(adaptive)", is_url_param
+        )
+        if (
+            self.adaptive_enabled
+            and not adaptive_done
+            and (checks_executed > 0 or checks_skipped_done > 0)
+        ):
             await self._adaptive_attack_field(
                 url, form_index, field, is_url_param, ordered_checks, field_plan
             )
+            # adaptive 完了を記録（この後の abort/クラッシュでも resume が再実行しない）。
+            self._checkpoint_mark_done(url, field_name, form_index, "(adaptive)", is_url_param)
 
         self.completed_fields += 1
         # フィールド完了ごとに進捗を永続化（中断しても次回ここから再開できる）

@@ -134,6 +134,34 @@ class CheckTypeScopeTests(unittest.TestCase):
         self.assertFalse(self._engine(["xss"])("cache_deception"))
 
 
+class AdaptiveUnitTests(unittest.TestCase):
+    """adaptive パスを first-pass チェックと独立した checkpoint 単位で管理することを守る。
+
+    first-pass の各チェックが done でも "(adaptive)" 単位は未完で残せる。これにより
+    「first-pass 完了後・adaptive 実行中に abort→resume」で adaptive を再試行できる
+    （`_scan_field` の adaptive ゲートがこの区別に依存する）。
+    """
+
+    def test_adaptive_unit_independent_of_first_pass_checks(self):
+        s = CheckpointState(target_url="http://h", checks=["xss", "sqli"])
+        # first-pass の全チェックを done 化（adaptive はまだ）。
+        s.mark_done("http://h/a", "q", 0, "xss")
+        s.mark_done("http://h/a", "q", 0, "sqli")
+        self.assertTrue(s.is_done("http://h/a", "q", 0, "xss"))
+        self.assertTrue(s.is_done("http://h/a", "q", 0, "sqli"))
+        # adaptive 単位は未完 → resume で adaptive を再試行すべき状態。
+        self.assertFalse(s.is_done("http://h/a", "q", 0, "(adaptive)"))
+        # adaptive 完了を記録すると、以降は skip 判定になる。
+        s.mark_done("http://h/a", "q", 0, "(adaptive)")
+        self.assertTrue(s.is_done("http://h/a", "q", 0, "(adaptive)"))
+
+    def test_adaptive_unit_survives_roundtrip(self):
+        s = CheckpointState(target_url="http://h", checks=["xss"])
+        s.mark_done("http://h/a", "q", 0, "(adaptive)")
+        restored = CheckpointState.from_dict(s.to_dict())
+        self.assertTrue(restored.is_done("http://h/a", "q", 0, "(adaptive)"))
+
+
 class SaveCheckpointFindingsTests(unittest.TestCase):
     """abort 時に `_save_checkpoint` が in-memory Finding を永続化することを守る。
 
