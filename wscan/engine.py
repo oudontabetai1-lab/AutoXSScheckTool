@@ -1580,24 +1580,28 @@ class ScanEngine:
                     "SQL injection bypass confirmed — "
                     "re-crawling and attacking authenticated surface …"
                 )
-                new_pages = await self._phase_crawl_postauth()
-                if new_pages:
-                    new_plans = await self._phase_plan(new_pages)
-                    console.print(
-                        Rule(
-                            "[bold red] Post-Auth Attack [/bold red]",
-                            style="red",
+                # post-auth の crawl/plan/attack を通して停止(abort)を捕捉する。
+                # post-auth crawl も独自 BFS ループを持ち wait_if_paused_or_abort を
+                # 通すため、ここで受けないと crawl 由来の AbortScan が run() を抜ける。
+                try:
+                    new_pages = await self._phase_crawl_postauth()
+                    if new_pages:
+                        new_plans = await self._phase_plan(new_pages)
+                        console.print(
+                            Rule(
+                                "[bold red] Post-Auth Attack [/bold red]",
+                                style="red",
+                            )
                         )
-                    )
-                    try:
                         await self._phase_attack(new_pages, new_plans)
-                    except AbortScan:
-                        # 中断時点の Finding/進捗を永続化（resume と部分レポートの整合）。
-                        self._save_checkpoint()
-                else:
-                    console.print(
-                        "  [dim]No new pages discovered in post-auth crawl.[/dim]"
-                    )
+                    else:
+                        console.print(
+                            "  [dim]No new pages discovered in post-auth crawl.[/dim]"
+                        )
+                except AbortScan:
+                    scan_aborted = True
+                    # 中断時点の Finding/進捗を永続化（resume と部分レポートの整合）。
+                    self._save_checkpoint()
 
         except Exception as _run_exc:
             console.print(f"\n[bold red]Scan error:[/bold red] {_run_exc}")
@@ -3047,6 +3051,9 @@ class ScanEngine:
                 queue.append((seed, 0, None))
 
         while queue:
+            # 初回 crawl と同様、post-auth 再クロール中も停止(abort)/一時停止を尊重する。
+            await self.controller.wait_if_paused_or_abort()
+
             url, depth, parent_url = queue.popleft()
 
             if self._is_url_excluded(url):
