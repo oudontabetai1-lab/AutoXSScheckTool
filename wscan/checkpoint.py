@@ -99,6 +99,12 @@ class CheckpointState:
 
     @classmethod
     def from_dict(cls, data: dict) -> "CheckpointState":
+        # 版キー欠落/破損の古い checkpoint は v1（legacy）とみなす（情報用）。
+        # 非数値の version でも resume を落とさないよう安全にパースする。
+        try:
+            source_version = int(data.get("version", 1) or 1)
+        except (TypeError, ValueError):
+            source_version = 1
         state = cls(
             target_url=data.get("target_url", ""),
             checks=list(data.get("checks", []) or []),
@@ -106,8 +112,7 @@ class CheckpointState:
             findings=list(data.get("findings", []) or []),
             created_at=data.get("created_at", time.time()),
             updated_at=data.get("updated_at", time.time()),
-            # 版キー欠落の古い checkpoint は v1（legacy）とみなす（情報用）。
-            source_version=int(data.get("version", 1) or 1),
+            source_version=source_version,
         )
         if state.source_version < 2:
             state._migrate_v1_adaptive_units()
@@ -186,4 +191,9 @@ def load_checkpoint(path: str | Path) -> Optional[CheckpointState]:
         return None
     if not isinstance(data, dict):
         return None
-    return CheckpointState.from_dict(data)
+    try:
+        return CheckpointState.from_dict(data)
+    except Exception:
+        # メタデータ破損（型不整合など）で from_dict が落ちても resume を
+        # クラッシュさせず、「壊れた checkpoint = 使えない」として None を返す。
+        return None

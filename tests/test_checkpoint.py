@@ -294,6 +294,42 @@ class IoTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             self.assertIsNone(load_checkpoint(d))
 
+    def test_malformed_version_does_not_crash(self):
+        # 非数値 version でも from_dict は落ちず legacy(v1) 扱いにフォールバック。
+        s = CheckpointState.from_dict({
+            "version": "not-a-number",
+            "target_url": "http://h",
+            "checks": ["xss"],
+            "completed_units": [],
+            "findings": [],
+        })
+        self.assertEqual(s.source_version, 1)
+
+    def test_load_malformed_version_file_returns_state(self):
+        # ファイル経由でも resume がクラッシュせず、使える state を返す。
+        import json as _json
+        with tempfile.TemporaryDirectory() as d:
+            checkpoint_path(d).write_text(
+                _json.dumps({"version": None, "target_url": "http://h", "checks": []}),
+                encoding="utf-8",
+            )
+            loaded = load_checkpoint(d)
+            self.assertIsNotNone(loaded)
+            self.assertEqual(loaded.source_version, 1)
+
+    def test_load_corrupt_metadata_returns_none(self):
+        # from_dict が想定外の型で落ちる場合も None（クラッシュしない）。
+        import json as _json
+        with tempfile.TemporaryDirectory() as d:
+            checkpoint_path(d).write_text(
+                _json.dumps({"version": 2, "checks": "not-a-list"}),
+                encoding="utf-8",
+            )
+            # list("not-a-list") は落ちないが、completed_units 等が壊れても None 安全網。
+            # ここでは少なくともクラッシュしないことを保証する。
+            result = load_checkpoint(d)
+            self.assertTrue(result is None or isinstance(result, CheckpointState))
+
     def test_load_corrupt_returns_none(self):
         with tempfile.TemporaryDirectory() as d:
             p = checkpoint_path(d)
