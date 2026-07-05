@@ -273,6 +273,11 @@ class CachePoisoningScanner(BaseScanner):
         # "/account?tab=1/x.css" のようにクエリ値へ紛れ込むため、パスとクエリを
         # 分けて "/account/x.css?tab=1" を組み立てる。
         css_url = _build_deception_url(parsed, f"wscan{secrets.token_hex(3)}{ext}")
+        # プローブ送信「前」に log_payload_test を通す。これは監査記録であると同時に
+        # abort チェックポイントも兼ねる（BaseScanner.log_payload_test）。送信後に呼ぶと
+        # abort が「送信済みプローブの評価をスキップ」する形になり resume で再送になるため、
+        # 送信前に置いて真の pre-send チェックポイントにする。
+        await self.log_payload_test("(path)", css_url, "cache_deception", url)
         try:
             async with httpx.AsyncClient(**self._client_kwargs()) as client:
                 base = await client.get(url, headers=self._auth_headers())
@@ -280,7 +285,6 @@ class CachePoisoningScanner(BaseScanner):
         except Exception:
             return []
 
-        await self.log_payload_test("(path)", css_url, "cache_deception", url)
         if not deception_succeeded(
             base_status=base.status_code,
             base_body=base.text,

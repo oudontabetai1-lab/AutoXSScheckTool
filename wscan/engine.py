@@ -1470,82 +1470,92 @@ class ScanEngine:
             if self.cookie_list:
                 await self._browser.set_cookies_from_list(self.cookie_list, self.target_url)
 
-            # Auth-1: Auto-login if login URL provided
-            if self.login_url and self._browser.auth_user and self._browser.auth_pass:
-                # Inspect the login form FIRST, while still logged out. Apps that
-                # redirect authenticated users away from /login would otherwise
-                # hide the form, leaving this attack surface untested.
-                await self._scan_login_form_preauth()
-                console.print(
-                    f"  [cyan][Auth] Auto-login:[/cyan] {self.login_url}"
-                )
-                if self._mfa_solver is not None:
-                    console.print(
-                        f"  [cyan][Auth] MFA enabled:[/cyan] type={self._mfa_config.type} "
-                        f"(external MCP)"
-                    )
-                success = await self._browser.auto_login(
-                    self.login_url,
-                    user_field=self.login_user_field,
-                    pass_field=self.login_pass_field,
-                    success_indicator=self.login_success_indicator,
-                )
-                if success:
-                    self.auth_landing_url = getattr(self._browser, "last_login_url", "") or self._browser.page.url
-                    console.print("  [green][Auth] Login successful — session cookies captured.[/green]")
-                    # httpx 系検査も認証されるよう、初回ログイン直後に Cookie を同期する。
-                    await self._sync_cookies_from_browser(self._browser)
-                    if self.auth_landing_url:
-                        console.print(f"  [dim][Auth] Authenticated landing:[/dim] {self.auth_landing_url}")
-                else:
-                    console.print("  [yellow][Auth] Login may have failed — continuing anyway.[/yellow]")
-
-            # A: Set up multi-account sessions (if --accounts supplied)
-            if self.accounts and self.login_url:
-                await self._setup_account_sessions()
-
-            # A-2: Detect WAF before crawling (if enabled)
-            if self.enable_waf_detection:
-                waf_name = await self.waf_detector.detect(self.target_url, timeout=float(self.timeout))
-                if waf_name:
-                    console.print(f"  [bold yellow][WAF][/bold yellow] Detected: {waf_name}")
-                    bypass_hints = self.waf_detector.get_bypass_hints(waf_name)
-                    console.print(f"  [dim yellow]Bypass hints: {'; '.join(bypass_hints[:3])}[/dim yellow]")
-                    if self.monitor:
-                        await self.monitor.emit("waf_detected", {"waf": waf_name, "hints": bypass_hints})
-                else:
-                    console.print("  [dim]No WAF detected.[/dim]")
-            else:
-                console.print("  [dim]WAF detection disabled.[/dim]")
-
-            # ── Phase 1: Crawl ───────────────────────────────────────────
-            if self.monitor: await self.monitor.emit_phase("crawl")
-            crawled_pages = await self._phase_crawl()
-
-            # ── Phase 1b: Crawl Review (AeyeScan-style) ──────────────────
-            if self.interactive_crawl_review and self.monitor:
-                crawled_pages = await self._phase_crawl_review(crawled_pages)
-
-            # A: Auto-register accounts via registration forms (after crawl)
-            if self.auto_register and self.login_url:
-                await self._auto_register_accounts(crawled_pages)
-                if self.account_sessions:
-                    console.print(
-                        f"  [green][A] {len(self.account_sessions)} account session(s) ready "
-                        f"for privilege escalation testing.[/green]"
-                    )
-
-            # ── Phase 2: Plan ────────────────────────────────────────────
-            if self.monitor: await self.monitor.emit_phase("plan")
-            plans = await self._phase_plan(crawled_pages)
-
-            # ── Phase 3: Attack ──────────────────────────────────────────
-            if self.monitor: await self.monitor.emit_phase("attack")
+            # pre-auth ログインフォーム検査〜attack までの停止(abort)を単一の捕捉点で
+            # 扱う。controller は既に _active のため、pre-auth 検査中の停止でも
+            # per-payload の AbortScan が飛ぶ。AbortScan は BaseException で外側の
+            # except Exception では捕まらず、ここで受けないと run() を抜けて serve
+            # ループごと落ちる（crawl 由来と同じ経路）。crawl-review の cancel も同様。
             scan_aborted = False
             try:
+                # Auth-1: Auto-login if login URL provided
+                if self.login_url and self._browser.auth_user and self._browser.auth_pass:
+                    # Inspect the login form FIRST, while still logged out. Apps that
+                    # redirect authenticated users away from /login would otherwise
+                    # hide the form, leaving this attack surface untested.
+                    await self._scan_login_form_preauth()
+                    console.print(
+                        f"  [cyan][Auth] Auto-login:[/cyan] {self.login_url}"
+                    )
+                    if self._mfa_solver is not None:
+                        console.print(
+                            f"  [cyan][Auth] MFA enabled:[/cyan] type={self._mfa_config.type} "
+                            f"(external MCP)"
+                        )
+                    success = await self._browser.auto_login(
+                        self.login_url,
+                        user_field=self.login_user_field,
+                        pass_field=self.login_pass_field,
+                        success_indicator=self.login_success_indicator,
+                    )
+                    if success:
+                        self.auth_landing_url = getattr(self._browser, "last_login_url", "") or self._browser.page.url
+                        console.print("  [green][Auth] Login successful — session cookies captured.[/green]")
+                        # httpx 系検査も認証されるよう、初回ログイン直後に Cookie を同期する。
+                        await self._sync_cookies_from_browser(self._browser)
+                        if self.auth_landing_url:
+                            console.print(f"  [dim][Auth] Authenticated landing:[/dim] {self.auth_landing_url}")
+                    else:
+                        console.print("  [yellow][Auth] Login may have failed — continuing anyway.[/yellow]")
+
+                # A: Set up multi-account sessions (if --accounts supplied)
+                if self.accounts and self.login_url:
+                    await self._setup_account_sessions()
+
+                # A-2: Detect WAF before crawling (if enabled)
+                if self.enable_waf_detection:
+                    waf_name = await self.waf_detector.detect(self.target_url, timeout=float(self.timeout))
+                    if waf_name:
+                        console.print(f"  [bold yellow][WAF][/bold yellow] Detected: {waf_name}")
+                        bypass_hints = self.waf_detector.get_bypass_hints(waf_name)
+                        console.print(f"  [dim yellow]Bypass hints: {'; '.join(bypass_hints[:3])}[/dim yellow]")
+                        if self.monitor:
+                            await self.monitor.emit("waf_detected", {"waf": waf_name, "hints": bypass_hints})
+                    else:
+                        console.print("  [dim]No WAF detected.[/dim]")
+                else:
+                    console.print("  [dim]WAF detection disabled.[/dim]")
+
+                # ── Phase 1: Crawl ───────────────────────────────────────
+                if self.monitor: await self.monitor.emit_phase("crawl")
+                crawled_pages = await self._phase_crawl()
+
+                # ── Phase 1b: Crawl Review (AeyeScan-style) ──────────────
+                if self.interactive_crawl_review and self.monitor:
+                    crawled_pages = await self._phase_crawl_review(crawled_pages)
+
+                # A: Auto-register accounts via registration forms (after crawl)
+                if self.auto_register and self.login_url:
+                    await self._auto_register_accounts(crawled_pages)
+                    if self.account_sessions:
+                        console.print(
+                            f"  [green][A] {len(self.account_sessions)} account session(s) ready "
+                            f"for privilege escalation testing.[/green]"
+                        )
+
+                # ── Phase 2: Plan ────────────────────────────────────────
+                if self.monitor: await self.monitor.emit_phase("plan")
+                plans = await self._phase_plan(crawled_pages)
+
+                # ── Phase 3: Attack ──────────────────────────────────────
+                if self.monitor: await self.monitor.emit_phase("attack")
                 await self._phase_attack(crawled_pages, plans)
             except AbortScan:
                 scan_aborted = True
+                # 中断時点の Finding と進捗を必ず永続化してから続行する。payload 単位の
+                # 即時停止は _scan_field 末尾の _save_checkpoint より前に抜けるため、
+                # ここで保存しないと中断フィールドで既に記録した Finding が checkpoint
+                # に載らず、部分レポート（in-memory）と resume（snapshot 復元）が食い違う。
+                self._save_checkpoint()
                 console.print(
                     "\n[bold red][Intervention] Scan aborted by operator.[/bold red] "
                     "Generating partial report …"
@@ -1570,23 +1580,28 @@ class ScanEngine:
                     "SQL injection bypass confirmed — "
                     "re-crawling and attacking authenticated surface …"
                 )
-                new_pages = await self._phase_crawl_postauth()
-                if new_pages:
-                    new_plans = await self._phase_plan(new_pages)
-                    console.print(
-                        Rule(
-                            "[bold red] Post-Auth Attack [/bold red]",
-                            style="red",
+                # post-auth の crawl/plan/attack を通して停止(abort)を捕捉する。
+                # post-auth crawl も独自 BFS ループを持ち wait_if_paused_or_abort を
+                # 通すため、ここで受けないと crawl 由来の AbortScan が run() を抜ける。
+                try:
+                    new_pages = await self._phase_crawl_postauth()
+                    if new_pages:
+                        new_plans = await self._phase_plan(new_pages)
+                        console.print(
+                            Rule(
+                                "[bold red] Post-Auth Attack [/bold red]",
+                                style="red",
+                            )
                         )
-                    )
-                    try:
                         await self._phase_attack(new_pages, new_plans)
-                    except AbortScan:
-                        pass
-                else:
-                    console.print(
-                        "  [dim]No new pages discovered in post-auth crawl.[/dim]"
-                    )
+                    else:
+                        console.print(
+                            "  [dim]No new pages discovered in post-auth crawl.[/dim]"
+                        )
+                except AbortScan:
+                    scan_aborted = True
+                    # 中断時点の Finding/進捗を永続化（resume と部分レポートの整合）。
+                    self._save_checkpoint()
 
         except Exception as _run_exc:
             console.print(f"\n[bold red]Scan error:[/bold red] {_run_exc}")
@@ -1967,6 +1982,11 @@ class ScanEngine:
                 )
 
         while queue:
+            # 停止(abort)/一時停止(pause)をクロール中も尊重する。従来はこのループが
+            # チェックポイントを一切通さず、停止要求が attack フェーズ開始まで
+            # 無視されていた（深い/広いサイトほど「止まらない」体感になる）。
+            await self.controller.wait_if_paused_or_abort()
+
             url, depth, parent_url = queue.popleft()
 
             # Skip excluded URLs (exact match or prefix match)
@@ -3031,6 +3051,9 @@ class ScanEngine:
                 queue.append((seed, 0, None))
 
         while queue:
+            # 初回 crawl と同様、post-auth 再クロール中も停止(abort)/一時停止を尊重する。
+            await self.controller.wait_if_paused_or_abort()
+
             url, depth, parent_url = queue.popleft()
 
             if self._is_url_excluded(url):
@@ -3588,6 +3611,11 @@ class ScanEngine:
                     f"{', '.join(field_payloads)}[/dim magenta]"
                 )
 
+                # multi-param は fill_and_submit_form_multi で直接送信し log_payload_test を
+                # 通さないため、per-payload の abort フックが効かない。送信直前にここで
+                # 停止(abort)/一時停止を尊重し、残りの結合 payload を送り続けないようにする。
+                await self.controller.wait_if_paused_or_abort()
+
                 ok = await self.browser.navigate(page.url, retries=self.navigation_retries)
                 if not ok:
                     self._record_unscannable_url(
@@ -3719,10 +3747,12 @@ class ScanEngine:
         if field_plan and field_plan.rationale:
             console.print(f"    [dim cyan]Plan:[/dim cyan] [dim]{field_plan.rationale[:100]}[/dim]")
 
-        # 実際に実行した（resume でスキップしなかった）チェック数。すべて resume で
-        # スキップされた場合は末尾の adaptive パスも飛ばし、完了済みフィールドを
-        # 新規 payload で再攻撃しない（チェックポイントの約束を守る）。
+        # 実際に実行した（resume でスキップしなかった）チェック数と、resume で
+        # 完了済みとして飛ばしたチェック数。両方 0＝このフィールドに in-scope な
+        # チェックが無い（＝adaptive も走らせない）。adaptive の要否は下部で
+        # 「(adaptive) 完了マーカー」と併せて判定する（abort 中断時の再開網羅性のため）。
         checks_executed = 0
+        checks_skipped_done = 0
         for check_name in ordered_checks:
             scanner = self.scanners.get(check_name)
             if scanner is None:
@@ -3738,6 +3768,7 @@ class ScanEngine:
                     location=location,
                     note="Skipped — already completed in a previous run (resume).",
                 )
+                checks_skipped_done += 1
                 continue
 
             # 注意: 以前はこのフィールドで critical finding が確定すると残りの
@@ -3778,6 +3809,12 @@ class ScanEngine:
                     severity=max((f.severity for f in new_findings), default=""),
                     finding_count=len(new_findings),
                 )
+            except AbortScan:
+                # payload 単位の即時停止でこの check は途中終了した。「済み」に
+                # しないことで resume が未完の payload を取りこぼさない（finally の
+                # mark_done を抑止するため check_errored を立ててから伝播する）。
+                check_errored = True
+                raise
             except Exception as e:
                 check_errored = True
                 self._record_scan_matrix(
@@ -3809,13 +3846,36 @@ class ScanEngine:
 
         # ── Adaptive AI round ────────────────────────────────────────────
         # 以前は critical finding があると adaptive パスをスキップしていたが、過検知で
-        # ある可能性を踏まえ「見つかったからスキップ」はしない。resume で全チェックが
-        # スキップされたフィールドだけは adaptive も走らせない（新規生成 payload で
-        # 完了済みフィールドを再攻撃しないため）。
-        if self.adaptive_enabled and checks_executed > 0:
+        # ある可能性を踏まえ「見つかったからスキップ」はしない。
+        #
+        # adaptive は per-field の独立単位として「(adaptive) 完了マーカー」で管理する。
+        # first-pass の各チェックは adaptive の前に done 化されるため、`checks_executed>0`
+        # だけを条件にすると「first-pass 完了後・adaptive 実行中に abort→resume」で
+        # 全チェックが skip されて checks_executed==0 となり adaptive が二度と走らない
+        # （＝adaptive payload を恒久的に取りこぼす）。完了マーカーを別途持つことで、
+        # adaptive 未完のフィールドだけ resume で adaptive を再試行できる。
+        # 実行条件: adaptive 有効 かつ 当該フィールドに in-scope チェックがある
+        # （今回実行 or 前回完了）かつ adaptive 未完。マーカーで一度だけ実行を保証し、
+        # 完了済みフィールドを新規 payload で再攻撃しない約束も守る。
+        adaptive_done = self._checkpoint_is_done(
+            url, field_name, form_index, "(adaptive)", is_url_param
+        )
+        # 完了フィールドは "(adaptive)" marker で一意に判定する。v1(legacy) から resume
+        # した場合も、CheckpointState.from_dict の load 時マイグレーションが v1 era の
+        # 完了フィールドへ marker を補完済みなので、marker 欠落＝未実行として扱ってよい
+        # （完了済みフィールドへの adaptive 再送は起きない）。checks_skipped_done>0 は
+        # 「first-pass 完了後・adaptive 実行前に abort→resume」で全 check が skip された
+        # フィールドを拾い、adaptive を確実に再試行するため。
+        if (
+            self.adaptive_enabled
+            and not adaptive_done
+            and (checks_executed > 0 or checks_skipped_done > 0)
+        ):
             await self._adaptive_attack_field(
                 url, form_index, field, is_url_param, ordered_checks, field_plan
             )
+            # adaptive 完了を記録（この後の abort/クラッシュでも resume が再実行しない）。
+            self._checkpoint_mark_done(url, field_name, form_index, "(adaptive)", is_url_param)
 
         self.completed_fields += 1
         # フィールド完了ごとに進捗を永続化（中断しても次回ここから再開できる）

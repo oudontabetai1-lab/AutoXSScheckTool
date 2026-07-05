@@ -312,6 +312,14 @@ class BaseScanner(ABC):
         ``MonitorServer.emit_payload_test`` — so it is never skipped just
         because the dashboard is absent, and not duplicated when present.
         """
+        # operator が停止(abort)を要求していたら、次の payload 投入前にここで中断する。
+        # 全注入系 scanner が payload 投入直前に必ずこの helper を通す不変条件を利用し、
+        # 1 payload 単位で abort を反映する（フィールド完了まで待たない即時停止）。
+        # controller は attack 実行中のみ True を返す（検証フェーズは stop() 済みで無効）。
+        controller = getattr(getattr(self, "engine", None), "controller", None)
+        if controller is not None and controller.abort_requested():
+            from wscan.intervention import AbortScan
+            raise AbortScan("Scan aborted by operator")
         # engine/monitor が未配線でも壊れないようにする（baseline/verify などの再投入で
         # この helper を広く呼ぶため、stub 構築されたスキャナでも安全に no-op になる）。
         logger = getattr(getattr(self, "engine", None), "request_logger", None)

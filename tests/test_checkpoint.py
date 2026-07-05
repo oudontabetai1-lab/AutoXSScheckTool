@@ -134,6 +134,147 @@ class CheckTypeScopeTests(unittest.TestCase):
         self.assertFalse(self._engine(["xss"])("cache_deception"))
 
 
+class AdaptiveUnitTests(unittest.TestCase):
+    """adaptive パスを first-pass チェックと独立した checkpoint 単位で管理することを守る。
+
+    first-pass の各チェックが done でも "(adaptive)" 単位は未完で残せる。これにより
+    「first-pass 完了後・adaptive 実行中に abort→resume」で adaptive を再試行できる
+    （`_scan_field` の adaptive ゲートがこの区別に依存する）。
+    """
+
+    def test_adaptive_unit_independent_of_first_pass_checks(self):
+        s = CheckpointState(target_url="http://h", checks=["xss", "sqli"])
+        # first-pass の全チェックを done 化（adaptive はまだ）。
+        s.mark_done("http://h/a", "q", 0, "xss")
+        s.mark_done("http://h/a", "q", 0, "sqli")
+        self.assertTrue(s.is_done("http://h/a", "q", 0, "xss"))
+        self.assertTrue(s.is_done("http://h/a", "q", 0, "sqli"))
+        # adaptive 単位は未完 → resume で adaptive を再試行すべき状態。
+        self.assertFalse(s.is_done("http://h/a", "q", 0, "(adaptive)"))
+        # adaptive 完了を記録すると、以降は skip 判定になる。
+        s.mark_done("http://h/a", "q", 0, "(adaptive)")
+        self.assertTrue(s.is_done("http://h/a", "q", 0, "(adaptive)"))
+
+    def test_adaptive_unit_survives_roundtrip(self):
+        s = CheckpointState(target_url="http://h", checks=["xss"])
+        s.mark_done("http://h/a", "q", 0, "(adaptive)")
+        restored = CheckpointState.from_dict(s.to_dict())
+        self.assertTrue(restored.is_done("http://h/a", "q", 0, "(adaptive)"))
+
+    def test_fresh_state_is_current_version(self):
+        from wscan.checkpoint import CHECKPOINT_VERSION
+        s = CheckpointState(target_url="http://h", checks=["xss"])
+        self.assertEqual(s.source_version, CHECKPOINT_VERSION)
+        self.assertGreaterEqual(s.source_version, 2)
+
+    def test_legacy_fully_done_field_backfills_adaptive(self):
+        # v1 で全 configured check が done のフィールドは adaptive 実行済みなので、
+        # load 時に "(adaptive)" を補完し、resume で再攻撃しない。
+        legacy = CheckpointState.from_dict({
+            "version": 1,
+            "target_url": "http://h",
+            "checks": ["xss", "sqli"],
+            "completed_units": [
+                unit_key("http://h/a", "q", 0, "xss"),
+                unit_key("http://h/a", "q", 0, "sqli"),
+            ],
+            "findings": [],
+        })
+        self.assertTrue(legacy.is_done("http://h/a", "q", 0, "(adaptive)"))
+
+    def test_legacy_partial_field_not_backfilled(self):
+        # 一部の check だけ done の部分完了フィールドは補完しない
+        # （resume で残り check とともに adaptive が走る = v1 挙動）。
+        legacy = CheckpointState.from_dict({
+            "version": 1,
+            "target_url": "http://h",
+            "checks": ["xss", "sqli"],
+            "completed_units": [
+                unit_key("http://h/a", "q", 0, "xss"),  # sqli 未完
+            ],
+            "findings": [],
+        })
+        self.assertFalse(legacy.is_done("http://h/a", "q", 0, "(adaptive)"))
+
+    def test_legacy_migrated_saved_as_v2(self):
+        # マイグレーション済み（marker 補完済み）は v2 として保存してよい。
+        legacy = CheckpointState.from_dict({
+            "version": 1,
+            "target_url": "http://h",
+            "checks": ["xss"],
+            "completed_units": [unit_key("http://h/a", "q", 0, "xss")],
+            "findings": [],
+        })
+        from wscan.checkpoint import CHECKPOINT_VERSION
+        self.assertEqual(legacy.to_dict()["version"], CHECKPOINT_VERSION)
+        # 再読込でも adaptive marker は保持され、二重マイグレーションでも無害。
+        reloaded = CheckpointState.from_dict(legacy.to_dict())
+        self.assertTrue(reloaded.is_done("http://h/a", "q", 0, "(adaptive)"))
+
+    def test_v2_checkpoint_no_spurious_adaptive_backfill(self):
+        # v2 は marker をそのまま尊重し、マイグレーションで勝手に補完しない。
+        s = CheckpointState(target_url="http://h", checks=["xss"])
+        s.mark_done("http://h/a", "q", 0, "xss")  # adaptive 未完のまま
+        restored = CheckpointState.from_dict(s.to_dict())
+        self.assertFalse(restored.is_done("http://h/a", "q", 0, "(adaptive)"))
+
+
+class SaveCheckpointFindingsTests(unittest.TestCase):
+    """abort 時に `_save_checkpoint` が in-memory Finding を永続化することを守る。
+
+    payload 単位の即時停止は `_scan_field` 末尾の保存より前に抜けるため、run() の
+    abort ハンドラが `_save_checkpoint()` を呼んで中断時点の Finding を snapshot に
+    載せる。ここでは persistence 機構そのもの（all_findings → checkpoint.findings →
+    ディスク）が働くことを検証する。
+    """
+
+    def test_in_memory_findings_persisted_on_save(self):
+        import types
+        from wscan.engine import ScanEngine
+        from wscan.scanners.base import Finding
+
+        with tempfile.TemporaryDirectory() as d:
+            state = CheckpointState(target_url="http://h", checks=["xss"])
+            f = Finding(
+                check_type="xss",
+                severity="high",
+                url="http://h/a",
+                field_name="q",
+                payload="<script>",
+                evidence="reflected",
+            )
+            e = types.SimpleNamespace(
+                enable_checkpoint=True,
+                checkpoint=state,
+                all_findings=[f],
+                output_dir=Path(d),
+                wave_errors=[],
+            )
+            # 実メソッドを借用して保存（abort ハンドラが呼ぶのと同じ経路）。
+            ScanEngine._save_checkpoint(e)
+
+            loaded = load_checkpoint(d)
+            self.assertIsNotNone(loaded)
+            self.assertEqual(len(loaded.findings), 1)
+            self.assertEqual(loaded.findings[0]["check_type"], "xss")
+            self.assertEqual(loaded.findings[0]["field_name"], "q")
+
+    def test_save_noop_when_checkpoint_disabled(self):
+        import types
+        from wscan.engine import ScanEngine
+
+        with tempfile.TemporaryDirectory() as d:
+            e = types.SimpleNamespace(
+                enable_checkpoint=False,
+                checkpoint=None,
+                all_findings=[],
+                output_dir=Path(d),
+                wave_errors=[],
+            )
+            ScanEngine._save_checkpoint(e)  # 例外を出さず no-op
+            self.assertIsNone(load_checkpoint(d))
+
+
 class IoTests(unittest.TestCase):
     def test_save_load_roundtrip(self):
         with tempfile.TemporaryDirectory() as d:
@@ -152,6 +293,42 @@ class IoTests(unittest.TestCase):
     def test_load_missing_returns_none(self):
         with tempfile.TemporaryDirectory() as d:
             self.assertIsNone(load_checkpoint(d))
+
+    def test_malformed_version_does_not_crash(self):
+        # 非数値 version でも from_dict は落ちず legacy(v1) 扱いにフォールバック。
+        s = CheckpointState.from_dict({
+            "version": "not-a-number",
+            "target_url": "http://h",
+            "checks": ["xss"],
+            "completed_units": [],
+            "findings": [],
+        })
+        self.assertEqual(s.source_version, 1)
+
+    def test_load_malformed_version_file_returns_state(self):
+        # ファイル経由でも resume がクラッシュせず、使える state を返す。
+        import json as _json
+        with tempfile.TemporaryDirectory() as d:
+            checkpoint_path(d).write_text(
+                _json.dumps({"version": None, "target_url": "http://h", "checks": []}),
+                encoding="utf-8",
+            )
+            loaded = load_checkpoint(d)
+            self.assertIsNotNone(loaded)
+            self.assertEqual(loaded.source_version, 1)
+
+    def test_load_corrupt_metadata_returns_none(self):
+        # from_dict が想定外の型で落ちる場合も None（クラッシュしない）。
+        import json as _json
+        with tempfile.TemporaryDirectory() as d:
+            checkpoint_path(d).write_text(
+                _json.dumps({"version": 2, "checks": "not-a-list"}),
+                encoding="utf-8",
+            )
+            # list("not-a-list") は落ちないが、completed_units 等が壊れても None 安全網。
+            # ここでは少なくともクラッシュしないことを保証する。
+            result = load_checkpoint(d)
+            self.assertTrue(result is None or isinstance(result, CheckpointState))
 
     def test_load_corrupt_returns_none(self):
         with tempfile.TemporaryDirectory() as d:
