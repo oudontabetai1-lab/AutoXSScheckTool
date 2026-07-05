@@ -114,6 +114,17 @@ class ScanController:
         if self._loop and not self._pause_event.is_set():
             self._loop.call_soon_threadsafe(self._pause_event.set)
 
+    def abort_requested(self) -> bool:
+        """attack 実行中に operator が停止(abort)を要求しているか。
+
+        per-payload の即時停止判定に使う。``checkpoint()`` はページ/フィールド境界
+        でしか呼ばれないため、1 フィールドの全 payload 掃射が終わるまで abort が
+        反映されない。scanner は payload 投入直前に必ず ``log_payload_test`` を通す
+        不変条件があるので、そこで本メソッドを見て AbortScan を送出すれば 1 payload
+        単位で停止できる。``stop()`` 後（検証フェーズ）は ``_active=False`` になるため
+        False を返し、後処理の再投入を中断しない。"""
+        return self._active and self._abort
+
     def set_time_windows(self, allowed: Optional[list] = None, forbidden: Optional[list] = None) -> None:
         """検査を許可する/禁止する時間帯を設定する。
 
@@ -205,6 +216,22 @@ class ScanController:
             await asyncio.sleep(min(5.0, max(0.5, wait)))
         self._in_time_gate = False
 
+    async def wait_if_paused_or_abort(self) -> None:
+        """crawl 等、skip の概念が無いフェーズ用の軽量チェックポイント。
+
+        abort が要求されていれば AbortScan を送出し、pause 中なら解除まで待機する。
+        skip_field / skip_page / 時間帯ゲートは扱わない（crawl は非注入の「訪問のみ」で
+        フィールド単位の skip が意味を持たないため）。従来 crawl ループは
+        ``checkpoint()`` を呼ばず、停止要求が attack 開始まで無視されていた。
+        """
+        if self._abort:
+            raise AbortScan("Scan aborted by operator")
+        if not self._pause_event.is_set():
+            print("[Intervention] Paused — resume via dashboard or press 'p'…", flush=True)
+            await self._pause_event.wait()
+        if self._abort:
+            raise AbortScan("Scan aborted by operator")
+
     async def checkpoint(self) -> None:
         """
         Yield control point inside a scan loop.
@@ -249,11 +276,18 @@ class ScanController:
         while self._active:
             try:
                 cmd = await asyncio.wait_for(monitor.command_queue.get(), timeout=0.2)
-                await self._handle_command(cmd, monitor)
             except asyncio.TimeoutError:
                 continue
             except Exception:
+                # キュー自体が壊れた等の致命時のみ終了する。
                 break
+            try:
+                await self._handle_command(cmd, monitor)
+            except Exception:
+                # 単一コマンドの処理失敗（WS 送信エラー等）でリーダーを終わらせない。
+                # ここで break すると以降の abort/pause を一切拾えなくなり、
+                # 「ダッシュボードから停止できない」状態に陥る。
+                continue
 
     async def _handle_command(self, cmd: str, monitor: "Optional[MonitorServer]" = None) -> None:
         """Handle a single command string (web or keyboard)."""

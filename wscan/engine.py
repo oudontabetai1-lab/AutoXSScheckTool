@@ -1518,31 +1518,34 @@ class ScanEngine:
             else:
                 console.print("  [dim]WAF detection disabled.[/dim]")
 
-            # ── Phase 1: Crawl ───────────────────────────────────────────
-            if self.monitor: await self.monitor.emit_phase("crawl")
-            crawled_pages = await self._phase_crawl()
-
-            # ── Phase 1b: Crawl Review (AeyeScan-style) ──────────────────
-            if self.interactive_crawl_review and self.monitor:
-                crawled_pages = await self._phase_crawl_review(crawled_pages)
-
-            # A: Auto-register accounts via registration forms (after crawl)
-            if self.auto_register and self.login_url:
-                await self._auto_register_accounts(crawled_pages)
-                if self.account_sessions:
-                    console.print(
-                        f"  [green][A] {len(self.account_sessions)} account session(s) ready "
-                        f"for privilege escalation testing.[/green]"
-                    )
-
-            # ── Phase 2: Plan ────────────────────────────────────────────
-            if self.monitor: await self.monitor.emit_phase("plan")
-            plans = await self._phase_plan(crawled_pages)
-
-            # ── Phase 3: Attack ──────────────────────────────────────────
-            if self.monitor: await self.monitor.emit_phase("attack")
+            # crawl〜attack を通して停止(abort)を単一の捕捉点で扱う。crawl 中や
+            # crawl-review の cancel が投げる AbortScan もここで受け、部分レポート生成へ
+            # 進む（従来 crawl 由来の AbortScan は未捕捉で serve ループごと落とし得た）。
             scan_aborted = False
             try:
+                # ── Phase 1: Crawl ───────────────────────────────────────
+                if self.monitor: await self.monitor.emit_phase("crawl")
+                crawled_pages = await self._phase_crawl()
+
+                # ── Phase 1b: Crawl Review (AeyeScan-style) ──────────────
+                if self.interactive_crawl_review and self.monitor:
+                    crawled_pages = await self._phase_crawl_review(crawled_pages)
+
+                # A: Auto-register accounts via registration forms (after crawl)
+                if self.auto_register and self.login_url:
+                    await self._auto_register_accounts(crawled_pages)
+                    if self.account_sessions:
+                        console.print(
+                            f"  [green][A] {len(self.account_sessions)} account session(s) ready "
+                            f"for privilege escalation testing.[/green]"
+                        )
+
+                # ── Phase 2: Plan ────────────────────────────────────────
+                if self.monitor: await self.monitor.emit_phase("plan")
+                plans = await self._phase_plan(crawled_pages)
+
+                # ── Phase 3: Attack ──────────────────────────────────────
+                if self.monitor: await self.monitor.emit_phase("attack")
                 await self._phase_attack(crawled_pages, plans)
             except AbortScan:
                 scan_aborted = True
@@ -1967,6 +1970,11 @@ class ScanEngine:
                 )
 
         while queue:
+            # 停止(abort)/一時停止(pause)をクロール中も尊重する。従来はこのループが
+            # チェックポイントを一切通さず、停止要求が attack フェーズ開始まで
+            # 無視されていた（深い/広いサイトほど「止まらない」体感になる）。
+            await self.controller.wait_if_paused_or_abort()
+
             url, depth, parent_url = queue.popleft()
 
             # Skip excluded URLs (exact match or prefix match)
@@ -3778,6 +3786,12 @@ class ScanEngine:
                     severity=max((f.severity for f in new_findings), default=""),
                     finding_count=len(new_findings),
                 )
+            except AbortScan:
+                # payload 単位の即時停止でこの check は途中終了した。「済み」に
+                # しないことで resume が未完の payload を取りこぼさない（finally の
+                # mark_done を抑止するため check_errored を立ててから伝播する）。
+                check_errored = True
+                raise
             except Exception as e:
                 check_errored = True
                 self._record_scan_matrix(
