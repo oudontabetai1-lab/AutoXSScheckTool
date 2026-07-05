@@ -183,6 +183,25 @@ class AdaptiveUnitTests(unittest.TestCase):
         restored = CheckpointState.from_dict(s.to_dict())
         self.assertGreaterEqual(restored.source_version, 2)
 
+    def test_legacy_checkpoint_not_promoted_on_save(self):
+        # v1 を resume→保存しても v2 へ昇格させない（legacy 判別を維持）。
+        # 昇格すると次回 resume で完了フィールドへ adaptive を再送してしまう。
+        legacy = CheckpointState.from_dict({
+            "version": 1,
+            "target_url": "http://h",
+            "checks": ["xss"],
+            "completed_units": [],
+            "findings": [],
+        })
+        self.assertEqual(legacy.source_version, 1)
+        # resume 中に "(adaptive)" 単位を足しても、書き出しは version=1 のまま。
+        legacy.mark_done("http://h/a", "q", 0, "(adaptive)")
+        dumped = legacy.to_dict()
+        self.assertEqual(dumped["version"], 1)
+        # 再読込でも legacy 判別が保たれる。
+        reloaded = CheckpointState.from_dict(dumped)
+        self.assertEqual(reloaded.source_version, 1)
+
 
 class SaveCheckpointFindingsTests(unittest.TestCase):
     """abort 時に `_save_checkpoint` が in-memory Finding を永続化することを守る。

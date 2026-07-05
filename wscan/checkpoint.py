@@ -86,7 +86,12 @@ class CheckpointState:
     # ── シリアライズ（純粋） ────────────────────────────────────────
     def to_dict(self) -> dict:
         return {
-            "version": CHECKPOINT_VERSION,
+            # 由来の版を保持する（現行版へ勝手に昇格させない）。v1(legacy) を resume
+            # すると _init_checkpoint が即 _save_checkpoint する。ここで CHECKPOINT_VERSION
+            # に書き換えると、v1 era の完了フィールド（"(adaptive)" 単位を持たない）が
+            # v2 扱いになり、次回 resume で adaptive を再送（重複攻撃）してしまう。
+            # 由来版を保つことで legacy 判別が全 resume を通じて維持される。
+            "version": self.source_version,
             "target_url": self.target_url,
             "checks": list(self.checks),
             "completed_units": sorted(self.completed_units),
