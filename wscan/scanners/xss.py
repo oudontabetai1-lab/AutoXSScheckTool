@@ -48,6 +48,35 @@ _URL_ATTRS = {"href", "src", "action", "formaction", "xlink:href", "data", "post
 # 応答 DOM からダイアログハンドラを採取し、「新規に増えたハンドラ」判定の基準にする。
 _HANDLER_BASELINE_VALUE = "wscanxssbaseline"
 
+# 型付き入力（HTML5 validation）で中立値がフォームに弾かれると、baseline 送信が
+# フォームページに留まり action 応答（payload が到達するページ）のハンドラを採れない。
+# フィールド型ごとに *検証を通る* 中立値を用意し、payload と同じ応答ブランチへ確実に
+# 到達させる（英数字トークン wscanbaseline を各型の妥当な形に埋め込む）。
+_TYPED_BASELINE_VALUES = {
+    "url": "https://wscanbaseline.example/x",
+    "email": "wscanbaseline@example.com",
+    "number": "1",
+    "range": "1",
+    "tel": "0000000000",
+    "date": "2000-01-01",
+    "datetime-local": "2000-01-01T00:00",
+    "time": "12:00",
+    "month": "2000-01",
+    "week": "2000-W01",
+    "color": "#000000",
+}
+
+
+def _neutral_baseline_value(field_type: str) -> str:
+    """フィールド型に対して HTML5 検証を通る中立 baseline 値を返す。
+
+    未知/テキスト系は ``_HANDLER_BASELINE_VALUE``。型付きは検証を通る妥当値を返し、
+    baseline 送信が payload と同じ応答ブランチへ到達できるようにする（さもないと
+    型検証で中立値だけフォームに留まり、action 応答固有の正規ハンドラを baseline に
+    採れず誤発火＝誤検知の原因になる）。純粋関数。
+    """
+    return _TYPED_BASELINE_VALUES.get((field_type or "text").lower(), _HANDLER_BASELINE_VALUE)
+
 
 class XSSScanner(BaseScanner):
     """XSS vulnerability scanner."""
@@ -95,7 +124,8 @@ class XSSScanner(BaseScanner):
         # ハンドラ構成が異なりうるため、中立値を実際に投入した応答 DOM を基準にしないと
         # 結果ページ固有の onclick="alert(1)" 等を新規注入と誤認して誤検知する。
         baseline_handlers, baseline_path = await self._baseline_handlers(
-            url, form_index, field_name, is_url_param
+            url, form_index, field_name, is_url_param,
+            neutral_value=_neutral_baseline_value(field.get("type", "text")),
         )
 
         async def _test_payload(payload: str, check_label: str = "xss") -> bool:
@@ -490,7 +520,12 @@ class XSSScanner(BaseScanner):
         return pair.get("response", {}).get("body") or ""
 
     async def _baseline_handlers(
-        self, url: str, form_index: int, field_name: str, is_url_param: bool
+        self,
+        url: str,
+        form_index: int,
+        field_name: str,
+        is_url_param: bool,
+        neutral_value: str = _HANDLER_BASELINE_VALUE,
     ) -> tuple[list, str | None]:
         """発火トリガ層の baseline 用ダイアログハンドラと着地パスを採取する。
 
@@ -508,11 +543,11 @@ class XSSScanner(BaseScanner):
 
         try:
             await self.log_payload_test(
-                field_name, _HANDLER_BASELINE_VALUE, "xss_handler_baseline", url
+                field_name, neutral_value, "xss_handler_baseline", url
             )
             self.browser.reset_dialog()
             await self._apply_payload(
-                url, form_index, field_name, _HANDLER_BASELINE_VALUE, is_url_param
+                url, form_index, field_name, neutral_value, is_url_param
             )
             await asyncio.sleep(0.2 * self.sleep_factor)
             handlers = await self.browser.snapshot_dialog_handlers()

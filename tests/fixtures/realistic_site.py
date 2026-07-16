@@ -87,11 +87,9 @@ SAFE_ENDPOINTS = [
     {"path": "/support/result", "field": "q",
      "note": "action response escapes q while carrying a legit onclick=alert(1)"},
     {"path": "/linkcheck", "field": "dest",
-     "note": "type=url field; non-URL neutral baseline stays on the form while a "
-             "URL-valid payload reaches the escaped result page's onclick=alert(1) "
-             "— firing must be gated on a baseline/payload landing-path match"},
-    {"path": "/linkcheck/result", "field": "dest",
-     "note": "action response escapes dest while carrying a legit onclick=alert(1)"},
+     "note": "type=url field submitting to the SAME path; only a type-valid neutral "
+             "baseline follows the URL-valid payload into the escaped result branch "
+             "(onclick=alert(1)) so the firing layer skips that pre-existing handler"},
     {"path": "/files/manual", "field": "name",
      "note": "manual id allow-listed, traversal returns 'not found'"},
     {"path": "/account/continue", "field": "next",
@@ -335,27 +333,26 @@ def create_app() -> FastAPI:
             """,
         )
 
-    # ── Safe type=url form whose action response ships a legit alert() ────
-    # `dest` is type="url". A fixed non-URL neutral baseline value fails HTML5
-    # validation and stays on the form page, while a URL-valid payload such as
-    # `javascript:alert(1)` passes validation and reaches the escaped result
-    # page, which carries its own `onclick="alert(1)"`. The firing layer must
-    # only fire when the baseline was collected from the SAME landing page
-    # (path match); a form-trapped baseline therefore disables firing here.
+    # ── Safe type=url form that submits back to the SAME path ─────────────
+    # `dest` is type="url" and the form action is /linkcheck itself: the form
+    # branch (no dest) and the escaped result branch (dest present) share the
+    # path. A non-URL neutral baseline fails HTML5 validation and stays on the
+    # form (so a path-only gate would wrongly accept it), while a URL-valid
+    # payload like `javascript:alert(1)` reaches the result branch that ships a
+    # legit `onclick="alert(1)"`. Correctly handled only by a *type-valid*
+    # neutral baseline that follows the same branch and captures that handler.
     @app.get("/linkcheck", response_class=HTMLResponse)
-    async def linkcheck_form():
-        return _layout(
-            "Link checker",
-            """
-            <form method="get" action="/linkcheck/result">
-              <input type="url" name="dest" required>
-              <button type="submit">Check link</button>
-            </form>
-            """,
-        )
-
-    @app.get("/linkcheck/result", response_class=HTMLResponse)
-    async def linkcheck_result(dest: str = Query("")):
+    async def linkcheck(dest: str | None = Query(None)):
+        if dest is None:
+            return _layout(
+                "Link checker",
+                """
+                <form method="get" action="/linkcheck">
+                  <input type="url" name="dest" required>
+                  <button type="submit">Check link</button>
+                </form>
+                """,
+            )
         safe = html.escape(dest)
         return _layout(
             "Link check result",
