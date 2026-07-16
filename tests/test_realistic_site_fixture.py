@@ -63,6 +63,18 @@ class RealisticSiteFixtureTests(unittest.IsolatedAsyncioTestCase):
         body_after_h1 = resp.text.split("Order tracking</h1>")[-1]
         self.assertNotIn("<img", body_after_h1.lower())
 
+    async def test_account_delete_ships_legit_confirm_and_escapes_item(self):
+        """安全ページ: 正規の confirm() ボタンを持ちつつ item はエスケープ。
+        発火トリガ層がこの既存 confirm を誤発火しないための土台（値が payload に
+        含まれないので撃たれない）。フィクスチャ側の前提を固定する。"""
+        payload = '" onmouseover=alert(1) x="'
+        resp = await self.client.get("/account/delete", params={"item": payload})
+        # ページ固有の正規 confirm ハンドラが存在する
+        self.assertIn("confirm('Delete this item permanently?')", resp.text)
+        # item はエスケープされ、属性ブレイクアウトのハンドラは生成されない
+        self.assertNotIn('value="" onmouseover=alert(1)', resp.text)
+        self.assertIn(html.escape(payload), resp.text)
+
     async def test_track_safe_escapes_quote_breakout(self):
         """安全ツイン: クォートがエスケープされ、属性ブレイクアウトが成立しない。"""
         payload = '" onmouseover=alert(1) x="'

@@ -107,7 +107,7 @@ class XSSScanner(BaseScanner):
             # scan falls back to the reflection heuristic unchanged.
             if not self.browser.dialog_fired:
                 try:
-                    if await self.browser.trigger_injected_handlers():
+                    if await self.browser.trigger_injected_handlers(payload):
                         await asyncio.sleep(0.3 * self.sleep_factor)
                 except Exception:
                     pass
@@ -135,7 +135,10 @@ class XSSScanner(BaseScanner):
                         "Observe that the browser fires a JavaScript dialog.",
                     ],
                 )
-                findings.append(finding)
+                # record_finding は重複 evidence_type のとき None を返す。None を
+                # findings へ積むと後段の any(f.dialog_confirmed ...) が AttributeError。
+                if finding:
+                    findings.append(finding)
                 self.browser.reset_dialog()
                 return True
 
@@ -167,7 +170,8 @@ class XSSScanner(BaseScanner):
                             "Escalate manually with a context-specific event or script payload if no dialog fires.",
                         ],
                     )
-                    findings.append(finding)
+                    if finding:
+                        findings.append(finding)
                     return True
 
             await asyncio.sleep(0.2 * self.sleep_factor)
@@ -493,7 +497,7 @@ class XSSScanner(BaseScanner):
         await asyncio.sleep(0.5 * self.sleep_factor)
         if not self.browser.dialog_fired:
             try:
-                if await self.browser.trigger_injected_handlers():
+                if await self.browser.trigger_injected_handlers(finding.payload):
                     await asyncio.sleep(0.3 * self.sleep_factor)
             except Exception:
                 pass

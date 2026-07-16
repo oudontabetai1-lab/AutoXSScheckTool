@@ -74,6 +74,9 @@ SAFE_ENDPOINTS = [
      "note": "name HTML-escaped, never template-rendered"},
     {"path": "/track/safe", "field": "ref",
      "note": "ref HTML-escaped (quotes neutralised), no attribute breakout"},
+    {"path": "/account/delete", "field": "item",
+     "note": "item HTML-escaped; page has its own legitimate confirm() button "
+             "that the firing layer must not mis-trigger as XSS"},
     {"path": "/files/manual", "field": "name",
      "note": "manual id allow-listed, traversal returns 'not found'"},
     {"path": "/account/continue", "field": "next",
@@ -93,6 +96,7 @@ _NAV = [
     ('/greeting?name=guest', 'Greeting'),
     ('/welcome?name=guest', 'Welcome'),
     ('/track?ref=home', 'Tracking'),
+    ('/account/delete?item=draft', 'Delete item'),
     ('/files/download?doc=catalog.pdf', 'Brochure'),
     ('/files/manual?name=sizing', 'Size guide'),
     ('/redirect?url=/products', 'Partner link'),
@@ -233,6 +237,31 @@ def create_app() -> FastAPI:
               <button>Track</button>
             </form>
             <p>Tracking reference saved.</p>
+            """,
+        )
+
+    # ── Safe page that ships its OWN legitimate confirm() dialog ──────────
+    # A normal delete button carries an inline `confirm('…')` handler, and
+    # `item` is reflected HTML-escaped. The XSS active event-trigger layer must
+    # NOT dispatch this pre-existing confirm() and mis-record it as xss_dialog:
+    # its handler value never appears in the injected payload. Guards against
+    # false-positive confirmed XSS on ordinary confirmation UI.
+    @app.get("/account/delete", response_class=HTMLResponse)
+    async def account_delete(item: str = Query("draft")):
+        safe = html.escape(item)
+        # The confirm() button sits OUTSIDE the form so form submission never
+        # clicks it (only its own dialog); it stays in the DOM purely so the
+        # firing layer must skip a pre-existing, non-injected dialog handler.
+        return _layout(
+            "Delete item",
+            f"""
+            <form method="get" action="/account/delete">
+              <input name="item" value="{safe}">
+              <button type="submit">Find items</button>
+            </form>
+            <button type="button"
+              onclick="return confirm('Delete this item permanently?')">Delete</button>
+            <p>Selected item: {safe}</p>
             """,
         )
 
