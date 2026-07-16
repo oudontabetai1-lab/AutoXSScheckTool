@@ -119,14 +119,16 @@ class XSSScanner(BaseScanner):
                     f"[warn] xss: baseline fetch failed on {url}: {exc}"
                 )
 
-        # 発火トリガ層の baseline DOM ハンドラは「payload と同じ経路を中立値で開いた
-        # 応答」から採る。フォームは pre-submit のフォームページと action 応答で
-        # ハンドラ構成が異なりうるため、中立値を実際に投入した応答 DOM を基準にしないと
-        # 結果ページ固有の onclick="alert(1)" 等を新規注入と誤認して誤検知する。
-        baseline_handlers, baseline_path = await self._baseline_handlers(
+        # baseline（ハンドラ＋リフレクション本文）は「payload と同じ経路を中立値で
+        # 開いた応答」から採る。フォームは pre-submit のフォームページと action 応答で
+        # 構成が異なるため、中立投入の応答本文を baseline にしないと、結果ページ固有の
+        # onclick="alert(1)" 等を新規注入と誤認してリフレクション・発火の双方で誤検知する。
+        baseline_handlers, baseline_path, baseline_submit_source = await self._baseline_handlers(
             url, form_index, field_name, is_url_param,
             neutral_value=_neutral_baseline_value(field.get("type", "text")),
         )
+        if baseline_submit_source:
+            baseline_source = baseline_submit_source
 
         async def _test_payload(payload: str, check_label: str = "xss") -> bool:
             await self.log_payload_test(field_name, payload, check_label, url)
@@ -353,29 +355,51 @@ class XSSScanner(BaseScanner):
             if encoded != marker_lower and encoded in source_lower and marker_lower not in source_lower:
                 continue
 
-            idx = source_lower.find(marker_lower)
-            if idx == -1:
-                continue
+            # Inspect *every* occurrence of the marker, not just the first. The
+            # first one may be an inert escaped reflection (or, on a page whose own
+            # UI carries the same handler code, a pre-existing executable handler),
+            # while a genuinely injected executable occurrence sits later. Report
+            # the first occurrence that is (a) not in a comment, (b) executable in
+            # its context, and (c) NOT pre-existing in the baseline — so a page's
+            # own handler is never mis-attributed to the payload regardless of
+            # where it sits relative to the reflection.
+            start = 0
+            while True:
+                idx = source_lower.find(marker_lower, start)
+                if idx == -1:
+                    break
+                start = idx + 1
 
-            # Skip occurrences inside HTML comments (<!-- ... -->)
-            preceding = source_lower[max(0, idx - 300):idx]
-            if preceding.rfind("<!--") > preceding.rfind("-->"):
-                continue
+                # Skip occurrences inside HTML comments (<!-- ... -->)
+                preceding = source_lower[max(0, idx - 300):idx]
+                if preceding.rfind("<!--") > preceding.rfind("-->"):
+                    continue
 
-            context = self._classify_reflection_context(source, idx)
-            if not self._reflection_executable(source, idx, payload, marker, baseline_source, context):
-                continue
-            delta = None
-            if baseline_lower:
-                delta = source_lower.count(marker_lower) - baseline_lower.count(marker_lower)
-            return {
-                "context": context,
-                "match": marker,
-                "snippet": source[max(0, idx - 20):idx + len(marker) + 50],
-                "confidence": self._confidence_for_context(context),
-                "raw_payload_present": False,
-                "baseline_marker_delta": delta,
-            }
+                context = self._classify_reflection_context(source, idx)
+                if not self._reflection_executable(
+                    source, idx, payload, marker, baseline_source, context
+                ):
+                    continue
+
+                # Per-occurrence baseline newness: skip an occurrence whose
+                # surrounding text already appears verbatim in the baseline (a
+                # pre-existing page handler, not something the payload introduced).
+                if baseline_lower:
+                    window = source_lower[max(0, idx - 40):idx + len(marker_lower) + 20]
+                    if window and window in baseline_lower:
+                        continue
+
+                delta = None
+                if baseline_lower:
+                    delta = source_lower.count(marker_lower) - baseline_lower.count(marker_lower)
+                return {
+                    "context": context,
+                    "match": marker,
+                    "snippet": source[max(0, idx - 20):idx + len(marker) + 50],
+                    "confidence": self._confidence_for_context(context),
+                    "raw_payload_present": False,
+                    "baseline_marker_delta": delta,
+                }
 
         return {}
 
@@ -526,18 +550,19 @@ class XSSScanner(BaseScanner):
         field_name: str,
         is_url_param: bool,
         neutral_value: str = _HANDLER_BASELINE_VALUE,
-    ) -> tuple[list, str | None]:
-        """発火トリガ層の baseline 用ダイアログハンドラと着地パスを採取する。
+    ) -> tuple[list, str | None, str]:
+        """発火トリガ層とリフレクション判定の baseline を **中立投入の応答**から採る。
 
-        中立値（``_HANDLER_BASELINE_VALUE``）を **payload と同じ経路**で投入した応答
-        DOM からハンドラを採り、その応答の URL パス（着地パス）も返す。後で payload の
-        着地パスと一致するときだけ発火することで、型付き入力（``type=url`` 等）の HTML5
-        検証で中立値がフォームに留まり payload だけが action 応答へ到達する場合に、
-        baseline が当該ページを表さないまま既存ハンドラを誤発火する事故を防ぐ。
+        中立値（型付きは検証を通る値）を **payload と同じ経路**で投入し、その応答から
+        (1) ダイアログハンドラ一覧、(2) 着地パス、(3) 応答本文（リフレクション baseline）
+        を返す。フォームは pre-submit のフォームページと action 応答でハンドラ/本文が
+        異なるため、応答本文を baseline にしないと action 応答固有の正規 onclick=alert(1)
+        等を「payload が入れた新規」と誤認して発火・リフレクション双方で誤検知する。
 
-        戻り値は ``(handlers, landing_path)``。着地パスが取れない/失敗時は
-        ``landing_path`` を ``None`` にして「baseline 不確実」を表す（呼び出し側は発火を
-        見送る）。中立投入で立ったダイアログは後続 payload に持ち越さないよう reset する。
+        着地パスは payload の着地と一致するときだけ発火するために使う（型検証で中立値が
+        フォームに留まり payload だけ別ページへ到達した場合の誤発火防止）。戻り値は
+        ``(handlers, landing_path, source)``。失敗時は ``([], None, "")``。中立投入で
+        立ったダイアログは後続 payload に持ち越さないよう reset する。
         """
         from urllib.parse import urlparse
 
@@ -546,15 +571,16 @@ class XSSScanner(BaseScanner):
                 field_name, neutral_value, "xss_handler_baseline", url
             )
             self.browser.reset_dialog()
-            await self._apply_payload(
+            src, pair = await self._apply_payload(
                 url, form_index, field_name, neutral_value, is_url_param
             )
             await asyncio.sleep(0.2 * self.sleep_factor)
             handlers = await self.browser.snapshot_dialog_handlers()
             landing_path = urlparse(self.browser.page.url).path
-            return handlers, landing_path
+            body = (pair.get("response", {}) or {}).get("body") or src or ""
+            return handlers, landing_path, body
         except Exception:
-            return [], None
+            return [], None, ""
         finally:
             self.browser.reset_dialog()
 
@@ -603,11 +629,13 @@ class XSSScanner(BaseScanner):
                 baseline_source = body
         except Exception:
             baseline_source = ""
-        # 発火トリガ baseline は payload と同じ経路を中立値で開いた応答から採る
-        # （フォーム action 応答固有の正規ハンドラを誤発火しないため）。
-        baseline_handlers, baseline_path = await self._baseline_handlers(
+        # baseline（ハンドラ＋リフレクション本文）は payload と同じ経路を中立値で開いた
+        # 応答から採る（フォーム action 応答固有の正規ハンドラを誤発火/誤検知しないため）。
+        baseline_handlers, baseline_path, baseline_submit_source = await self._baseline_handlers(
             finding.url, 0, finding.field_name, is_url_param
         )
+        if baseline_submit_source:
+            baseline_source = baseline_submit_source
         self.browser.reset_dialog()
         await self.log_payload_test(
             finding.field_name, finding.payload, "xss_verify", finding.url

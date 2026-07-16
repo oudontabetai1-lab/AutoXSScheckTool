@@ -90,6 +90,10 @@ SAFE_ENDPOINTS = [
      "note": "type=url field submitting to the SAME path; only a type-valid neutral "
              "baseline follows the URL-valid payload into the escaped result branch "
              "(onclick=alert(1)) so the firing layer skips that pre-existing handler"},
+    {"path": "/dashboard", "field": "widget",
+     "note": "widget HTML-escaped; a legit onclick=alert(1) button renders before "
+             "the reflection, so reflection analysis must not attribute the first "
+             "(pre-existing) alert( occurrence to the payload"},
     {"path": "/files/manual", "field": "name",
      "note": "manual id allow-listed, traversal returns 'not found'"},
     {"path": "/account/continue", "field": "next",
@@ -113,6 +117,7 @@ _NAV = [
     ('/notify?msg=hello', 'Notifications'),
     ('/support', 'Support'),
     ('/linkcheck', 'Link checker'),
+    ('/dashboard?widget=clock', 'Dashboard'),
     ('/files/download?doc=catalog.pdf', 'Brochure'),
     ('/files/manual?name=sizing', 'Size guide'),
     ('/redirect?url=/products', 'Partner link'),
@@ -330,6 +335,27 @@ def create_app() -> FastAPI:
             f"""
             <p>No tickets matched: {safe}</p>
             <button type="button" onclick="alert(1)">Notify me on match</button>
+            """,
+        )
+
+    # ── Safe page with a legit alert() handler BEFORE the reflection ──────
+    # `widget` is HTML-escaped, but a pre-existing `onclick="alert(1)"` button
+    # renders *before* the reflected field. _analyze_reflection scans marker
+    # occurrences in document order, so the first `alert(` is the legit handler;
+    # it must not be mis-attributed to the payload (the handler is unchanged from
+    # the baseline). Guards the first-occurrence reflection misclassification.
+    @app.get("/dashboard", response_class=HTMLResponse)
+    async def dashboard(widget: str = Query("clock")):
+        safe = html.escape(widget)
+        return _layout(
+            "Dashboard",
+            f"""
+            <button type="button" onclick="alert(1)">Refresh</button>
+            <form method="get" action="/dashboard">
+              <input name="widget" value="{safe}">
+              <button type="submit">Add widget</button>
+            </form>
+            <p>Active widget: {safe}</p>
             """,
         )
 
