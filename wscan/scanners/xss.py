@@ -94,7 +94,7 @@ class XSSScanner(BaseScanner):
         # 応答」から採る。フォームは pre-submit のフォームページと action 応答で
         # ハンドラ構成が異なりうるため、中立値を実際に投入した応答 DOM を基準にしないと
         # 結果ページ固有の onclick="alert(1)" 等を新規注入と誤認して誤検知する。
-        baseline_handlers = await self._baseline_handlers(
+        baseline_handlers, baseline_path = await self._baseline_handlers(
             url, form_index, field_name, is_url_param
         )
 
@@ -118,14 +118,9 @@ class XSSScanner(BaseScanner):
             # whose handler calls a dialog, then let the existing dialog handler
             # confirm execution. Additive and exception-guarded — on failure the
             # scan falls back to the reflection heuristic unchanged.
-            if not self.browser.dialog_fired:
-                try:
-                    if await self.browser.trigger_injected_handlers(
-                        payload, baseline_handlers
-                    ):
-                        await asyncio.sleep(0.3 * self.sleep_factor)
-                except Exception:
-                    pass
+            await self._fire_if_baseline_matches(
+                payload, baseline_handlers, baseline_path
+            )
 
             # --- Check 1: Alert dialog fired (confirmed XSS) ---
             if self.browser.dialog_fired:
@@ -496,15 +491,21 @@ class XSSScanner(BaseScanner):
 
     async def _baseline_handlers(
         self, url: str, form_index: int, field_name: str, is_url_param: bool
-    ) -> list:
-        """発火トリガ層の baseline 用ダイアログハンドラを採取する。
+    ) -> tuple[list, str | None]:
+        """発火トリガ層の baseline 用ダイアログハンドラと着地パスを採取する。
 
         中立値（``_HANDLER_BASELINE_VALUE``）を **payload と同じ経路**で投入した応答
-        DOM から採るため、URL パラメータでもフォーム action 応答でも「payload を入れる
-        前のそのページ本来のハンドラ」を正しく捉えられる。中立投入で万一ダイアログが
-        立っても後続 payload に持ち越さないよう ``reset_dialog`` する。失敗時は空 list
-        （＝baseline 比較なし、従来の payload 包含フィルタのみ）。
+        DOM からハンドラを採り、その応答の URL パス（着地パス）も返す。後で payload の
+        着地パスと一致するときだけ発火することで、型付き入力（``type=url`` 等）の HTML5
+        検証で中立値がフォームに留まり payload だけが action 応答へ到達する場合に、
+        baseline が当該ページを表さないまま既存ハンドラを誤発火する事故を防ぐ。
+
+        戻り値は ``(handlers, landing_path)``。着地パスが取れない/失敗時は
+        ``landing_path`` を ``None`` にして「baseline 不確実」を表す（呼び出し側は発火を
+        見送る）。中立投入で立ったダイアログは後続 payload に持ち越さないよう reset する。
         """
+        from urllib.parse import urlparse
+
         try:
             await self.log_payload_test(
                 field_name, _HANDLER_BASELINE_VALUE, "xss_handler_baseline", url
@@ -514,11 +515,43 @@ class XSSScanner(BaseScanner):
                 url, form_index, field_name, _HANDLER_BASELINE_VALUE, is_url_param
             )
             await asyncio.sleep(0.2 * self.sleep_factor)
-            return await self.browser.snapshot_dialog_handlers()
+            handlers = await self.browser.snapshot_dialog_handlers()
+            landing_path = urlparse(self.browser.page.url).path
+            return handlers, landing_path
         except Exception:
-            return []
+            return [], None
         finally:
             self.browser.reset_dialog()
+
+    def _current_path(self) -> str | None:
+        """発火判定用に、いま browser がいるページの URL パスを返す（失敗時 None）。"""
+        from urllib.parse import urlparse
+
+        try:
+            return urlparse(self.browser.page.url).path
+        except Exception:
+            return None
+
+    async def _fire_if_baseline_matches(
+        self, payload: str, baseline_handlers: list, baseline_path: str | None
+    ) -> None:
+        """baseline を採れた着地ページと同じ場所にいるときだけ発火トリガを撃つ。
+
+        着地パスが一致しない（＝中立 baseline が payload と別ページに落ちた）場合や
+        baseline 不確実（``baseline_path is None``）の場合は、既存ハンドラの誤発火を
+        避けるため発火を見送り、従来の反射ヒューリスティックに委ねる。加算的・例外保護。
+        """
+        if self.browser.dialog_fired:
+            return
+        try:
+            if baseline_path is None:
+                return
+            if self._current_path() != baseline_path:
+                return
+            if await self.browser.trigger_injected_handlers(payload, baseline_handlers):
+                await asyncio.sleep(0.3 * self.sleep_factor)
+        except Exception:
+            pass
 
     async def verify_finding(self, finding: Finding) -> bool | None:
         from urllib.parse import parse_qs, urlparse
@@ -537,7 +570,7 @@ class XSSScanner(BaseScanner):
             baseline_source = ""
         # 発火トリガ baseline は payload と同じ経路を中立値で開いた応答から採る
         # （フォーム action 応答固有の正規ハンドラを誤発火しないため）。
-        baseline_handlers = await self._baseline_handlers(
+        baseline_handlers, baseline_path = await self._baseline_handlers(
             finding.url, 0, finding.field_name, is_url_param
         )
         self.browser.reset_dialog()
@@ -552,14 +585,9 @@ class XSSScanner(BaseScanner):
             is_url_param,
         )
         await asyncio.sleep(0.5 * self.sleep_factor)
-        if not self.browser.dialog_fired:
-            try:
-                if await self.browser.trigger_injected_handlers(
-                    finding.payload, baseline_handlers
-                ):
-                    await asyncio.sleep(0.3 * self.sleep_factor)
-            except Exception:
-                pass
+        await self._fire_if_baseline_matches(
+            finding.payload, baseline_handlers, baseline_path
+        )
         if self.browser.dialog_fired:
             return True
         if getattr(finding, "evidence_type", "") == "xss_dialog":

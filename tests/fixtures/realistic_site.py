@@ -86,6 +86,12 @@ SAFE_ENDPOINTS = [
              "onclick=alert(1) — baseline must come from the post-submit response"},
     {"path": "/support/result", "field": "q",
      "note": "action response escapes q while carrying a legit onclick=alert(1)"},
+    {"path": "/linkcheck", "field": "dest",
+     "note": "type=url field; non-URL neutral baseline stays on the form while a "
+             "URL-valid payload reaches the escaped result page's onclick=alert(1) "
+             "— firing must be gated on a baseline/payload landing-path match"},
+    {"path": "/linkcheck/result", "field": "dest",
+     "note": "action response escapes dest while carrying a legit onclick=alert(1)"},
     {"path": "/files/manual", "field": "name",
      "note": "manual id allow-listed, traversal returns 'not found'"},
     {"path": "/account/continue", "field": "next",
@@ -108,6 +114,7 @@ _NAV = [
     ('/account/delete?item=draft', 'Delete item'),
     ('/notify?msg=hello', 'Notifications'),
     ('/support', 'Support'),
+    ('/linkcheck', 'Link checker'),
     ('/files/download?doc=catalog.pdf', 'Brochure'),
     ('/files/manual?name=sizing', 'Size guide'),
     ('/redirect?url=/products', 'Partner link'),
@@ -325,6 +332,36 @@ def create_app() -> FastAPI:
             f"""
             <p>No tickets matched: {safe}</p>
             <button type="button" onclick="alert(1)">Notify me on match</button>
+            """,
+        )
+
+    # ── Safe type=url form whose action response ships a legit alert() ────
+    # `dest` is type="url". A fixed non-URL neutral baseline value fails HTML5
+    # validation and stays on the form page, while a URL-valid payload such as
+    # `javascript:alert(1)` passes validation and reaches the escaped result
+    # page, which carries its own `onclick="alert(1)"`. The firing layer must
+    # only fire when the baseline was collected from the SAME landing page
+    # (path match); a form-trapped baseline therefore disables firing here.
+    @app.get("/linkcheck", response_class=HTMLResponse)
+    async def linkcheck_form():
+        return _layout(
+            "Link checker",
+            """
+            <form method="get" action="/linkcheck/result">
+              <input type="url" name="dest" required>
+              <button type="submit">Check link</button>
+            </form>
+            """,
+        )
+
+    @app.get("/linkcheck/result", response_class=HTMLResponse)
+    async def linkcheck_result(dest: str = Query("")):
+        safe = html.escape(dest)
+        return _layout(
+            "Link check result",
+            f"""
+            <p>Checked: {safe}</p>
+            <button type="button" onclick="alert(1)">Re-check</button>
             """,
         )
 
