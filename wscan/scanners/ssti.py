@@ -58,6 +58,7 @@ class SSTIScanner(BaseScanner):
             expected: str,
             engine_name: str,
             check_label: str = "ssti",
+            confidence: str = "confirmed",
         ) -> bool:
             await self.log_payload_test(field_name, payload, check_label, url)
 
@@ -87,6 +88,11 @@ class SSTIScanner(BaseScanner):
                 ),
                 pair=pair,
                 severity="critical",
+                # 算術評価（例: {{2654435761*2654435761}} → 巨大素数積が本文に出現）は
+                # サーバ側でテンプレートが評価された確証シグナルなので "confirmed"。
+                # ただし進化wave の {{7*7}}→"49" は自然出現しうる弱い値のため呼び出し側で
+                # "likely" に落とす（baseline 増分ガード付き）。
+                confidence=confidence,
                 # 進化wave など SSTI_PROBES 外の payload でも verify が再現確認できる
                 # よう、期待出力を finding に持たせる。
                 evidence_details={"expected": expected, "engine": engine_name},
@@ -103,7 +109,9 @@ class SSTIScanner(BaseScanner):
                 url, form_index, field_name, is_url_param
             )
             for payload in extra_payloads:
-                if await _test_payload(payload, "49", "evolved", "ssti_evolved"):
+                if await _test_payload(
+                    payload, "49", "evolved", "ssti_evolved", confidence="likely"
+                ):
                     break
 
         return findings

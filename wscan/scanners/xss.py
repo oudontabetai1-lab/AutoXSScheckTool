@@ -98,6 +98,20 @@ class XSSScanner(BaseScanner):
 
             await asyncio.sleep(0.5 * self.sleep_factor)  # Wait for any JS execution
 
+            # Interaction-required handlers (onmouseover / onclick / onfocus) and
+            # javascript: URLs do not fire on their own, so a genuine attribute-
+            # breakout payload like `" onmouseover=alert(1) x="` reflects but never
+            # triggers a dialog. Actively dispatch the matching events on elements
+            # whose handler calls a dialog, then let the existing dialog handler
+            # confirm execution. Additive and exception-guarded — on failure the
+            # scan falls back to the reflection heuristic unchanged.
+            if not self.browser.dialog_fired:
+                try:
+                    if await self.browser.trigger_injected_handlers():
+                        await asyncio.sleep(0.3 * self.sleep_factor)
+                except Exception:
+                    pass
+
             # --- Check 1: Alert dialog fired (confirmed XSS) ---
             if self.browser.dialog_fired:
                 finding = await self.record_finding(
@@ -164,12 +178,19 @@ class XSSScanner(BaseScanner):
                 break  # Found vulnerability, move to next field
 
         # --- Check 3: deterministic context-aware evolution wave ---
-        if not findings:
+        # 標準掃射が dialog 発火（confirmed）まで到達しなかったときに走らせる。
+        # tentative な反射が既にあっても止めない: 反射ヒューリスティックは「実際に
+        # 発火するか」を判定できず、messy な quote-break payload で弱い tentative が
+        # 立って本当に実行可能な clean breakout（例: `" onmouseover=alert(1) x="`）を
+        # 試さずに終わることがあるため。文脈に合う clean breakout を合成→投入し、
+        # 発火トリガ層で実発火させて confirmed への昇格を狙う。dialog が出るまで試す。
+        if not any(f.dialog_confirmed for f in findings):
             extra_payloads = await self.evolved_payloads(
                 url, form_index, field_name, is_url_param
             )
             for payload in extra_payloads:
-                if await _test_payload(payload, "xss_evolved"):
+                await _test_payload(payload, "xss_evolved")
+                if any(f.dialog_confirmed for f in findings):
                     break
 
         # --- Check 4: String-concatenation / quote-break equivalence probe ---
@@ -470,6 +491,12 @@ class XSSScanner(BaseScanner):
             is_url_param,
         )
         await asyncio.sleep(0.5 * self.sleep_factor)
+        if not self.browser.dialog_fired:
+            try:
+                if await self.browser.trigger_injected_handlers():
+                    await asyncio.sleep(0.3 * self.sleep_factor)
+            except Exception:
+                pass
         if self.browser.dialog_fired:
             return True
         if getattr(finding, "evidence_type", "") == "xss_dialog":

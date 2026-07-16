@@ -292,6 +292,82 @@ class BrowserManager:
         self.dialog_message = ""
         self.dialog_screenshot_b64 = ""
 
+    async def trigger_injected_handlers(self) -> int:
+        """注入済みのイベントハンドラ／``javascript:`` URL を能動的に発火させる。
+
+        ``onmouseover`` / ``onclick`` / ``onfocus`` などインタラクション必須の
+        ハンドラや ``<a href="javascript:...">`` は、反射しても自動では発火しない。
+        そのため本物の XSS でも ``dialog`` が立たず ``confirmed`` に昇格できず、
+        ``_reflection_executable`` の保守的判定で取りこぼす（false negative）。
+
+        ここで DOM を走査し、**ダイアログ呼び出し（alert/confirm/prompt）を含む**
+        ハンドラ属性を持つ要素にだけ、その属性が待ち受けるイベントを dispatch する
+        （focus 系は ``el.focus()`` も呼ぶ）。``javascript:`` URL は ``el.click()`` で
+        既定遷移を起こして実行させる。捕捉は既存の dialog ハンドラに委ねる。
+
+        誤検知抑制のため対象を「ダイアログを呼ぶハンドラ」に限定する（ページ本来の
+        無関係な on* ハンドラを撃たない）。戻り値は発火を試みた要素数。ページ遷移・
+        クローズ済みなど失敗時は 0 を返し、スキャンは一切壊さない。
+        """
+        page = self.page
+        if page is None:
+            return 0
+        try:
+            return await page.evaluate(
+                r"""
+                () => {
+                    const DIALOG = /(?:alert|confirm|prompt)\s*\(/i;
+                    const MOUSE = new Set(['click','dblclick','mousedown','mouseup',
+                        'mouseover','mouseout','mouseenter','mouseleave','mousemove',
+                        'contextmenu']);
+                    const MAX = 60;
+                    let triggered = 0;
+                    const nodes = document.querySelectorAll('*');
+                    for (const el of nodes) {
+                        if (triggered >= MAX) break;
+                        const events = [];
+                        for (const attr of (el.attributes || [])) {
+                            const n = attr.name.toLowerCase();
+                            if (n.startsWith('on') && DIALOG.test(attr.value || '')) {
+                                events.push(n.slice(2));
+                            }
+                        }
+                        let urlAttr = '';
+                        try { urlAttr = el.getAttribute('href') || el.getAttribute('src') || ''; }
+                        catch (e) { urlAttr = ''; }
+                        const jsUrl = /^\s*javascript:/i.test(urlAttr) && DIALOG.test(urlAttr);
+                        if (!events.length && !jsUrl) continue;
+                        triggered++;
+                        for (const type of events) {
+                            try {
+                                if (type === 'focus' || type === 'focusin') {
+                                    try { el.focus(); } catch (e) {}
+                                }
+                                let ev;
+                                if (MOUSE.has(type)) {
+                                    ev = new MouseEvent(type, {bubbles: true, cancelable: true});
+                                } else if (type.startsWith('pointer') && window.PointerEvent) {
+                                    ev = new PointerEvent(type, {bubbles: true, cancelable: true});
+                                } else if (type.startsWith('key') && window.KeyboardEvent) {
+                                    ev = new KeyboardEvent(type, {bubbles: true, cancelable: true});
+                                } else {
+                                    ev = new Event(type, {bubbles: true, cancelable: true});
+                                }
+                                el.dispatchEvent(ev);
+                            } catch (e) {}
+                        }
+                        if (jsUrl) {
+                            try { el.click(); } catch (e) {}
+                        }
+                    }
+                    return triggered;
+                }
+                """
+            )
+        except Exception:
+            # ページ遷移・クローズ・evaluate 失敗。発火層は加算的なので黙って 0。
+            return 0
+
     async def navigate(
         self,
         url: str,

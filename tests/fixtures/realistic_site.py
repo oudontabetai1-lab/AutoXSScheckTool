@@ -43,6 +43,9 @@ from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse
 EXPECTED_FINDINGS = [
     {"check": "xss", "path": "/search", "field": "q",
      "note": "reflected, unescaped query echoed into HTML body"},
+    {"check": "xss", "path": "/track", "field": "ref",
+     "note": "attribute-breakout: angle brackets stripped but quote passes; "
+             "onmouseover handler fires only via the active event-trigger layer"},
     {"check": "sqli", "path": "/products", "field": "category",
      "note": "error-based: raw category interpolated into SQL"},
     {"check": "sqli", "path": "/login", "field": "username",
@@ -69,6 +72,8 @@ SAFE_ENDPOINTS = [
      "note": "sort key validated against an allow-list, parameterised query"},
     {"path": "/welcome", "field": "name",
      "note": "name HTML-escaped, never template-rendered"},
+    {"path": "/track/safe", "field": "ref",
+     "note": "ref HTML-escaped (quotes neutralised), no attribute breakout"},
     {"path": "/files/manual", "field": "name",
      "note": "manual id allow-listed, traversal returns 'not found'"},
     {"path": "/account/continue", "field": "next",
@@ -87,6 +92,7 @@ _NAV = [
     ('/catalog?sort=price', 'Catalog'),
     ('/greeting?name=guest', 'Greeting'),
     ('/welcome?name=guest', 'Welcome'),
+    ('/track?ref=home', 'Tracking'),
     ('/files/download?doc=catalog.pdf', 'Brochure'),
     ('/files/manual?name=sizing', 'Size guide'),
     ('/redirect?url=/products', 'Partner link'),
@@ -205,6 +211,43 @@ def create_app() -> FastAPI:
             </form>
             <p>We found no help articles for "{safe}".</p>
             <ul><li>Shipping &amp; returns</li><li>Order tracking</li></ul>
+            """,
+        )
+
+    # ── Interaction-required reflected XSS (INTENTIONAL) ──────────────────
+    # ref is reflected into a quoted attribute value. Angle brackets are
+    # stripped (so no new <script>/<svg>/<img> tag can form and auto-fire),
+    # but the double quote passes — an attribute breakout such as
+    # `" onmouseover=alert(1) x="` injects a *live* event handler that only
+    # fires on user interaction. Without the scanner's active event-trigger
+    # firing layer this reflects but never fires a dialog, so it is a genuine
+    # attribute-breakout XSS that requires event dispatch to confirm.
+    @app.get("/track", response_class=HTMLResponse)
+    async def track(ref: str = Query("home")):
+        safe = ref.replace("<", "").replace(">", "")  # strip tags, keep quotes
+        return _layout(
+            "Order tracking",
+            f"""
+            <form method="get" action="/track">
+              <input name="ref" value="{safe}" readonly>
+              <button>Track</button>
+            </form>
+            <p>Tracking reference saved.</p>
+            """,
+        )
+
+    # ── Safe tracking twin: ref fully HTML-escaped (quotes neutralised) ───
+    @app.get("/track/safe", response_class=HTMLResponse)
+    async def track_safe(ref: str = Query("home")):
+        safe = html.escape(ref)  # escapes <, >, ", ' — no attribute breakout
+        return _layout(
+            "Order tracking",
+            f"""
+            <form method="get" action="/track/safe">
+              <input name="ref" value="{safe}" readonly>
+              <button>Track</button>
+            </form>
+            <p>Tracking reference saved.</p>
             """,
         )
 
