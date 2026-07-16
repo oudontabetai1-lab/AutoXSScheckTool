@@ -43,6 +43,11 @@ XSS_MARKERS = [
 # dangerous.
 _URL_ATTRS = {"href", "src", "action", "formaction", "xlink:href", "data", "poster"}
 
+# 発火トリガの baseline 用の中立値（英数字のみ・payload とも既存ハンドラ値とも一致
+# しない）。この値を payload と同じ経路（URL パラメータ／フォーム action）で投入した
+# 応答 DOM からダイアログハンドラを採取し、「新規に増えたハンドラ」判定の基準にする。
+_HANDLER_BASELINE_VALUE = "wscanxssbaseline"
+
 
 class XSSScanner(BaseScanner):
     """XSS vulnerability scanner."""
@@ -73,16 +78,9 @@ class XSSScanner(BaseScanner):
         # positives. The DOM (page.content()) is the fallback for DOM-only
         # reflections that never appear in the response body.
         baseline_source = ""
-        # payload 投入前 DOM のダイアログハンドラを控える。発火トリガ層はこれに対して
-        # 新規に増えたハンドラだけを撃つ（ページ本来の onclick="alert(1)" 等の誤発火防止）。
-        baseline_handlers: list = []
         try:
             await self.browser.navigate(url)
             baseline_source = await self.browser.page.content()
-            try:
-                baseline_handlers = await self.browser.snapshot_dialog_handlers()
-            except Exception:
-                baseline_handlers = []
             body = self._response_body_for(url)
             if body:
                 baseline_source = body
@@ -91,6 +89,14 @@ class XSSScanner(BaseScanner):
                 await self.monitor.emit_status(
                     f"[warn] xss: baseline fetch failed on {url}: {exc}"
                 )
+
+        # 発火トリガ層の baseline DOM ハンドラは「payload と同じ経路を中立値で開いた
+        # 応答」から採る。フォームは pre-submit のフォームページと action 応答で
+        # ハンドラ構成が異なりうるため、中立値を実際に投入した応答 DOM を基準にしないと
+        # 結果ページ固有の onclick="alert(1)" 等を新規注入と誤認して誤検知する。
+        baseline_handlers = await self._baseline_handlers(
+            url, form_index, field_name, is_url_param
+        )
 
         async def _test_payload(payload: str, check_label: str = "xss") -> bool:
             await self.log_payload_test(field_name, payload, check_label, url)
@@ -488,26 +494,52 @@ class XSSScanner(BaseScanner):
             return ""
         return pair.get("response", {}).get("body") or ""
 
+    async def _baseline_handlers(
+        self, url: str, form_index: int, field_name: str, is_url_param: bool
+    ) -> list:
+        """発火トリガ層の baseline 用ダイアログハンドラを採取する。
+
+        中立値（``_HANDLER_BASELINE_VALUE``）を **payload と同じ経路**で投入した応答
+        DOM から採るため、URL パラメータでもフォーム action 応答でも「payload を入れる
+        前のそのページ本来のハンドラ」を正しく捉えられる。中立投入で万一ダイアログが
+        立っても後続 payload に持ち越さないよう ``reset_dialog`` する。失敗時は空 list
+        （＝baseline 比較なし、従来の payload 包含フィルタのみ）。
+        """
+        try:
+            await self.log_payload_test(
+                field_name, _HANDLER_BASELINE_VALUE, "xss_handler_baseline", url
+            )
+            self.browser.reset_dialog()
+            await self._apply_payload(
+                url, form_index, field_name, _HANDLER_BASELINE_VALUE, is_url_param
+            )
+            await asyncio.sleep(0.2 * self.sleep_factor)
+            return await self.browser.snapshot_dialog_handlers()
+        except Exception:
+            return []
+        finally:
+            self.browser.reset_dialog()
+
     async def verify_finding(self, finding: Finding) -> bool | None:
         from urllib.parse import parse_qs, urlparse
         is_url_param = finding.field_name in parse_qs(
             urlparse(finding.url).query, keep_blank_values=True
         )
         baseline_source = ""
-        baseline_handlers: list = []
         try:
             self.browser.reset_dialog()
             await self.browser.navigate(finding.url)
             baseline_source = await self.browser.page.content()
-            try:
-                baseline_handlers = await self.browser.snapshot_dialog_handlers()
-            except Exception:
-                baseline_handlers = []
             body = self._response_body_for(finding.url)
             if body:
                 baseline_source = body
         except Exception:
             baseline_source = ""
+        # 発火トリガ baseline は payload と同じ経路を中立値で開いた応答から採る
+        # （フォーム action 応答固有の正規ハンドラを誤発火しないため）。
+        baseline_handlers = await self._baseline_handlers(
+            finding.url, 0, finding.field_name, is_url_param
+        )
         self.browser.reset_dialog()
         await self.log_payload_test(
             finding.field_name, finding.payload, "xss_verify", finding.url

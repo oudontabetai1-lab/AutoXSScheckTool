@@ -81,6 +81,11 @@ SAFE_ENDPOINTS = [
      "note": "msg HTML-escaped; page ships legit onclick=alert(1) / "
              "href=javascript:alert(1) that share code with XSS payloads — the "
              "firing layer must skip them via baseline comparison"},
+    {"path": "/support", "field": "q",
+     "note": "form escapes q; the action response (/support/result) ships its own "
+             "onclick=alert(1) — baseline must come from the post-submit response"},
+    {"path": "/support/result", "field": "q",
+     "note": "action response escapes q while carrying a legit onclick=alert(1)"},
     {"path": "/files/manual", "field": "name",
      "note": "manual id allow-listed, traversal returns 'not found'"},
     {"path": "/account/continue", "field": "next",
@@ -102,6 +107,7 @@ _NAV = [
     ('/track?ref=home', 'Tracking'),
     ('/account/delete?item=draft', 'Delete item'),
     ('/notify?msg=hello', 'Notifications'),
+    ('/support', 'Support'),
     ('/files/download?doc=catalog.pdf', 'Brochure'),
     ('/files/manual?name=sizing', 'Size guide'),
     ('/redirect?url=/products', 'Partner link'),
@@ -289,6 +295,36 @@ def create_app() -> FastAPI:
             <button type="button" onclick="alert(1)">Test alert</button>
             <a href="javascript:alert(1)">Legacy action</a>
             <p>Message: {safe}</p>
+            """,
+        )
+
+    # ── Safe form whose ACTION RESPONSE ships a legit alert() handler ─────
+    # The form page itself carries no dialog handler, but submitting it lands on
+    # a different action response (/support/result) that escapes the input AND
+    # has its own `onclick="alert(1)"` UI. The firing layer's baseline must be
+    # taken from that post-submit response (neutral value), not the pre-submit
+    # form page, or the result-page handler looks "newly injected" → false
+    # positive. Guards the form-action baseline case.
+    @app.get("/support", response_class=HTMLResponse)
+    async def support_form():
+        return _layout(
+            "Support",
+            """
+            <form method="get" action="/support/result">
+              <input name="q">
+              <button type="submit">Search tickets</button>
+            </form>
+            """,
+        )
+
+    @app.get("/support/result", response_class=HTMLResponse)
+    async def support_result(q: str = Query("")):
+        safe = html.escape(q)
+        return _layout(
+            "Support results",
+            f"""
+            <p>No tickets matched: {safe}</p>
+            <button type="button" onclick="alert(1)">Notify me on match</button>
             """,
         )
 
