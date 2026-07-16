@@ -5,6 +5,7 @@ Detects reflected and DOM-based XSS vulnerabilities.
 import asyncio
 import html
 import re
+import uuid
 from typing import TYPE_CHECKING
 
 from .base import BaseScanner, Finding
@@ -65,6 +66,25 @@ _TYPED_BASELINE_VALUES = {
     "week": "2000-W01",
     "color": "#000000",
 }
+
+
+# alert/confirm/prompt 呼び出し（引数は括弧の入れ子を1段許容）を捉える。
+_DIALOG_CALL_RE = re.compile(r"(?:alert|confirm|prompt)\s*\((?:[^()]|\([^()]*\))*\)", re.IGNORECASE)
+
+
+def _tokenize_dialog_calls(payload: str, token: str) -> str:
+    """payload 内の alert/confirm/prompt 呼び出しを ``alert('<token>')`` へ置換する（純粋）。
+
+    発火トリガ層で投入するペイロードに一意トークンを埋めることで、注入したハンドラ値が
+    payload 固有になる。これにより ``trigger_injected_handlers`` の「ハンドラ値が payload に
+    含まれるか」判定が、ページ本来の ``alert(1)`` 等（トークンを含まない）を確実に除外でき、
+    値依存の同一パス分岐で正規ハンドラだけが現れるケースでも誤発火しない。発火の確証は
+    ダイアログ文言に ``token`` が出ることで裏取りする（dom_xss と同じ一意マーカー方式）。
+    ダイアログ呼び出しが無い payload はそのまま返す。
+    """
+    if not token:
+        return payload
+    return _DIALOG_CALL_RE.sub(f"alert('{token}')", payload)
 
 
 def _neutral_baseline_value(field_type: str) -> str:
@@ -130,7 +150,12 @@ class XSSScanner(BaseScanner):
         if baseline_submit_source:
             baseline_source = baseline_submit_source
 
-        async def _test_payload(payload: str, check_label: str = "xss") -> bool:
+        async def _test_payload(
+            payload: str,
+            check_label: str = "xss",
+            fire: bool = False,
+            expect_token: str = "",
+        ) -> bool:
             await self.log_payload_test(field_name, payload, check_label, url)
 
             # Reset dialog detector
@@ -145,17 +170,23 @@ class XSSScanner(BaseScanner):
 
             # Interaction-required handlers (onmouseover / onclick / onfocus) and
             # javascript: URLs do not fire on their own, so a genuine attribute-
-            # breakout payload like `" onmouseover=alert(1) x="` reflects but never
-            # triggers a dialog. Actively dispatch the matching events on elements
-            # whose handler calls a dialog, then let the existing dialog handler
-            # confirm execution. Additive and exception-guarded — on failure the
-            # scan falls back to the reflection heuristic unchanged.
-            await self._fire_if_baseline_matches(
-                payload, baseline_handlers, baseline_path
-            )
+            # breakout payload like `" onmouseover=alert('<token>') x="` reflects but
+            # never triggers a dialog. Actively dispatch the matching events — only
+            # for the evolution wave, whose payloads carry a unique alert token so a
+            # page's own alert(1) handler is never fired or mis-confirmed. Additive
+            # and exception-guarded; on failure the scan falls back to reflection.
+            if fire:
+                await self._fire_if_baseline_matches(
+                    payload, baseline_handlers, baseline_path
+                )
 
             # --- Check 1: Alert dialog fired (confirmed XSS) ---
-            if self.browser.dialog_fired:
+            # When an expect_token is set (evolution wave), only treat the dialog as
+            # ours if the token appears in its message — a pre-existing handler's
+            # dialog (e.g. "1") is then never attributed to the payload.
+            if self.browser.dialog_fired and (
+                not expect_token or expect_token in (self.browser.dialog_message or "")
+            ):
                 finding = await self.record_finding(
                     url=url,
                     field_name=field_name,
@@ -245,8 +276,14 @@ class XSSScanner(BaseScanner):
             extra_payloads = await self.evolved_payloads(
                 url, form_index, field_name, is_url_param
             )
+            # 発火トリガで投入するペイロードには一意トークンを埋め、注入ハンドラ値を
+            # payload 固有にする（ページ本来の alert(1) 等を発火・確証しないため）。
+            fire_token = "wsxf" + uuid.uuid4().hex[:8]
             for payload in extra_payloads:
-                await _test_payload(payload, "xss_evolved")
+                tok_payload = _tokenize_dialog_calls(payload, fire_token)
+                await _test_payload(
+                    tok_payload, "xss_evolved", fire=True, expect_token=fire_token
+                )
                 if any(f.dialog_confirmed for f in findings):
                     break
 
@@ -648,10 +685,19 @@ class XSSScanner(BaseScanner):
             is_url_param,
         )
         await asyncio.sleep(0.5 * self.sleep_factor)
-        await self._fire_if_baseline_matches(
-            finding.payload, baseline_handlers, baseline_path
-        )
-        if self.browser.dialog_fired:
+        # 発火は dialog 由来の finding のみ再現（その payload は一意トークン付きなので
+        # ページ本来の alert(1) 等を発火・誤確証しない）。reflection 由来は下で反射を
+        # 再判定するため、能動発火はしない（無関係な既存ハンドラを撃たないため）。
+        token = ""
+        if getattr(finding, "evidence_type", "") == "xss_dialog":
+            m = re.search(r"wsxf[0-9a-f]{8}", finding.payload or "")
+            token = m.group(0) if m else ""
+            await self._fire_if_baseline_matches(
+                finding.payload, baseline_handlers, baseline_path
+            )
+        if self.browser.dialog_fired and (
+            not token or token in (self.browser.dialog_message or "")
+        ):
             return True
         if getattr(finding, "evidence_type", "") == "xss_dialog":
             return False
