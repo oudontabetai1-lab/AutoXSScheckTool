@@ -72,19 +72,32 @@ _TYPED_BASELINE_VALUES = {
 _DIALOG_CALL_RE = re.compile(r"(?:alert|confirm|prompt)\s*\((?:[^()]|\([^()]*\))*\)", re.IGNORECASE)
 
 
+def _make_fire_token() -> str:
+    """発火確認用の一意 **数値** トークンを返す（10桁）。
+
+    数値なのでクォート不要（``alert(<token>)``）。引用符を除去/エンコードする入力
+    フィルタ下でも実行でき、``alert(1)`` 等ページ本来のハンドラとは一致しない。
+    """
+    return str(1000000000 + uuid.uuid4().int % 9000000000)
+
+
 def _tokenize_dialog_calls(payload: str, token: str) -> str:
-    """payload 内の alert/confirm/prompt 呼び出しを ``alert('<token>')`` へ置換する（純粋）。
+    """payload 内の alert/confirm/prompt 呼び出しを ``alert(<token>)`` へ置換する（純粋）。
 
     発火トリガ層で投入するペイロードに一意トークンを埋めることで、注入したハンドラ値が
     payload 固有になる。これにより ``trigger_injected_handlers`` の「ハンドラ値が payload に
     含まれるか」判定が、ページ本来の ``alert(1)`` 等（トークンを含まない）を確実に除外でき、
     値依存の同一パス分岐で正規ハンドラだけが現れるケースでも誤発火しない。発火の確証は
     ダイアログ文言に ``token`` が出ることで裏取りする（dom_xss と同じ一意マーカー方式）。
-    ダイアログ呼び出しが無い payload はそのまま返す。
+
+    トークンは**数値**にしてクォートを使わない（``alert(<token>)``）。引用符を除去する
+    フィルタ（``" onmouseover=alert(1) x="`` は通すが ``'`` を消す等）でも実行可能な形を
+    保ち、本物の属性ブレイクアウト XSS の confirmed シグナルを失わないため。ダイアログ
+    呼び出しが無い payload はそのまま返す。
     """
     if not token:
         return payload
-    return _DIALOG_CALL_RE.sub(f"alert('{token}')", payload)
+    return _DIALOG_CALL_RE.sub(f"alert({token})", payload)
 
 
 def _neutral_baseline_value(field_type: str) -> str:
@@ -201,6 +214,10 @@ class XSSScanner(BaseScanner):
                     evidence_details={
                         "execution_signal": "browser_dialog",
                         "dialog_message": self.browser.dialog_message,
+                        # verify_finding が type-valid な中立 baseline を再現し、
+                        # トークンでダイアログ帰属を裏取りするために保持する。
+                        "field_type": field.get("type", "text"),
+                        "fire_token": expect_token,
                     },
                     reproduction_steps=[
                         f"Open {url}",
@@ -278,7 +295,7 @@ class XSSScanner(BaseScanner):
             )
             # 発火トリガで投入するペイロードには一意トークンを埋め、注入ハンドラ値を
             # payload 固有にする（ページ本来の alert(1) 等を発火・確証しないため）。
-            fire_token = "wsxf" + uuid.uuid4().hex[:8]
+            fire_token = _make_fire_token()
             for payload in extra_payloads:
                 tok_payload = _tokenize_dialog_calls(payload, fire_token)
                 await _test_payload(
@@ -668,8 +685,13 @@ class XSSScanner(BaseScanner):
             baseline_source = ""
         # baseline（ハンドラ＋リフレクション本文）は payload と同じ経路を中立値で開いた
         # 応答から採る（フォーム action 応答固有の正規ハンドラを誤発火/誤検知しないため）。
+        # 型付きフィールドは検知時と同じ **type-valid な中立値** を使う（そうしないと
+        # type=url 等で中立値が検証に落ち baseline がフォームに留まり、着地パス不一致で
+        # 本物の confirmed XSS を未確証扱いにしてしまう）。
+        _details = finding.evidence_details or {}
         baseline_handlers, baseline_path, baseline_submit_source = await self._baseline_handlers(
-            finding.url, 0, finding.field_name, is_url_param
+            finding.url, 0, finding.field_name, is_url_param,
+            neutral_value=_neutral_baseline_value(_details.get("field_type", "text")),
         )
         if baseline_submit_source:
             baseline_source = baseline_submit_source
@@ -690,8 +712,7 @@ class XSSScanner(BaseScanner):
         # 再判定するため、能動発火はしない（無関係な既存ハンドラを撃たないため）。
         token = ""
         if getattr(finding, "evidence_type", "") == "xss_dialog":
-            m = re.search(r"wsxf[0-9a-f]{8}", finding.payload or "")
-            token = m.group(0) if m else ""
+            token = str(_details.get("fire_token", "") or "")
             await self._fire_if_baseline_matches(
                 finding.payload, baseline_handlers, baseline_path
             )

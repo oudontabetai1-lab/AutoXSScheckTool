@@ -46,6 +46,9 @@ EXPECTED_FINDINGS = [
     {"check": "xss", "path": "/track", "field": "ref",
      "note": "attribute-breakout: angle brackets stripped but quote passes; "
              "onmouseover handler fires only via the active event-trigger layer"},
+    {"check": "xss", "path": "/comment", "field": "text",
+     "note": "attribute-breakout with SINGLE quotes stripped; confirmable only if "
+             "the firing token is quote-free (numeric alert argument)"},
     {"check": "sqli", "path": "/products", "field": "category",
      "note": "error-based: raw category interpolated into SQL"},
     {"check": "sqli", "path": "/login", "field": "username",
@@ -113,6 +116,7 @@ _NAV = [
     ('/greeting?name=guest', 'Greeting'),
     ('/welcome?name=guest', 'Welcome'),
     ('/track?ref=home', 'Tracking'),
+    ('/comment?text=hi', 'Comment'),
     ('/account/delete?item=draft', 'Delete item'),
     ('/notify?msg=hello', 'Notifications'),
     ('/support', 'Support'),
@@ -335,6 +339,26 @@ def create_app() -> FastAPI:
             f"""
             <p>No tickets matched: {safe}</p>
             <button type="button" onclick="alert(1)">Notify me on match</button>
+            """,
+        )
+
+    # ── Attribute-breakout XSS with SINGLE quotes stripped (INTENTIONAL) ──
+    # `text` is reflected into a quoted attribute. Angle brackets AND single
+    # quotes are stripped, but the double quote passes — a breakout like
+    # `" onmouseover=alert(1) x="` injects a live handler. The firing layer can
+    # only confirm it if its alert token is quote-free (numeric); a single-quoted
+    # token would be stripped here and the confirmed signal would be lost.
+    @app.get("/comment", response_class=HTMLResponse)
+    async def comment(text: str = Query("hi")):
+        safe = text.replace("<", "").replace(">", "").replace("'", "")
+        return _layout(
+            "Leave a comment",
+            f"""
+            <form method="get" action="/comment">
+              <input name="text" value="{safe}" readonly>
+              <button type="submit">Post</button>
+            </form>
+            <p>Thanks for your comment.</p>
             """,
         )
 
