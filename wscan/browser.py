@@ -292,7 +292,47 @@ class BrowserManager:
         self.dialog_message = ""
         self.dialog_screenshot_b64 = ""
 
-    async def trigger_injected_handlers(self, payload: str = "") -> int:
+    _DIALOG_HANDLER_JS = r"""
+        (() => {
+            const DIALOG = /(?:alert|confirm|prompt)\s*\(/i;
+            const out = [];
+            for (const el of document.querySelectorAll('*')) {
+                for (const attr of (el.attributes || [])) {
+                    const n = attr.name.toLowerCase();
+                    if (n.startsWith('on') && DIALOG.test(attr.value || '')) {
+                        out.push(attr.value);
+                    }
+                }
+                let urlAttr = '';
+                try { urlAttr = el.getAttribute('href') || el.getAttribute('src') || ''; }
+                catch (e) { urlAttr = ''; }
+                if (/^\s*javascript:/i.test(urlAttr) && DIALOG.test(urlAttr)) {
+                    out.push(urlAttr);
+                }
+            }
+            return out;
+        })()
+    """
+
+    async def snapshot_dialog_handlers(self) -> list:
+        """現在の DOM に存在する「ダイアログを呼ぶハンドラ値／javascript: URL」を返す。
+
+        ``trigger_injected_handlers`` の baseline 比較用。payload 投入前（clean な
+        ページ）に撮っておき、投入後に **新規に増えた**ハンドラだけを発火対象にする
+        ことで、ページ本来の ``onclick="alert(1)"`` 等を誤って撃たないようにする。
+        失敗時は空 list（比較なし＝従来の payload 包含フィルタのみ）。
+        """
+        page = self.page
+        if page is None:
+            return []
+        try:
+            return await page.evaluate(self._DIALOG_HANDLER_JS)
+        except Exception:
+            return []
+
+    async def trigger_injected_handlers(
+        self, payload: str = "", baseline_handlers: list | None = None
+    ) -> int:
         """注入した payload 由来のイベントハンドラ／``javascript:`` URL を発火させる。
 
         ``onmouseover`` / ``onclick`` / ``onfocus`` などインタラクション必須の
@@ -300,18 +340,19 @@ class BrowserManager:
         そのため本物の XSS でも ``dialog`` が立たず ``confirmed`` に昇格できず、
         ``_reflection_executable`` の保守的判定で取りこぼす（false negative）。
 
-        ここで DOM を走査し、**投入した ``payload`` に含まれるハンドラ値**（例:
-        ``alert(1)``）を持つ ``on*`` 属性／``javascript:`` URL を持つ要素にだけ、
-        その属性が待ち受けるイベントを dispatch する（focus 系は ``el.focus()`` も）。
-        ``javascript:`` URL は ``el.click()`` で既定遷移を起こして実行させる。捕捉は
-        既存の dialog ハンドラに委ねる。
+        ここで DOM を走査し、その属性が待ち受けるイベントを dispatch する（focus 系は
+        ``el.focus()`` も）。``javascript:`` URL は ``el.click()`` で既定遷移を起こす。
+        捕捉は既存の dialog ハンドラに委ねる。
 
-        **誤検知抑制のため対象を「今回投入した payload に由来するハンドラ」に厳格に
-        限定する**。ページ本来の ``<button onclick="confirm('Delete?')">`` のような
-        無関係な確認 UI は payload に含まれないため一切撃たない（さもないと通常の
-        ダイアログを xss_dialog と誤って confirmed 化してしまう）。``payload`` が空の
-        ときは何も撃たない。戻り値は発火を試みた要素数。ページ遷移・クローズ済みなど
-        失敗時は 0 を返し、スキャンは一切壊さない。
+        **誤検知抑制のため対象を二重に絞る**:
+        1. ハンドラ値が今回投入した ``payload`` に含まれること（空白正規化して包含比較）、
+        2. ``baseline_handlers``（payload 投入前 DOM のダイアログハンドラ）に対して
+           **新規に増えた**ぶんだけ（多重集合の差分）。
+
+        これにより、入力を安全にエスケープしていても本来 ``onclick="alert(1)"`` 等の
+        正規ハンドラを持つページで、通常の XSS payload（``alert(1)`` を含む）が
+        既存 UI を誤発火させて ``xss_dialog`` の誤検知を出す事故を防ぐ。``payload`` が
+        空なら何も撃たない。戻り値は発火を試みた要素数。失敗時は 0。
         """
         page = self.page
         if page is None or not payload:
@@ -319,21 +360,31 @@ class BrowserManager:
         try:
             return await page.evaluate(
                 r"""
-                (payload) => {
+                ({payload, baseline}) => {
                     if (!payload) return 0;
                     const DIALOG = /(?:alert|confirm|prompt)\s*\(/i;
                     const MOUSE = new Set(['click','dblclick','mousedown','mouseup',
                         'mouseover','mouseout','mouseenter','mouseleave','mousemove',
                         'contextmenu']);
                     const MAX = 60;
-                    // ハンドラ値が payload に由来するかを判定する。反射時の空白差を
-                    // 吸収するため空白を除去して包含比較する（payload 側にハンドラ値が
-                    // 含まれる＝今回の注入で入ったハンドラ、と厳密に絞る）。
+                    // ハンドラ値が payload に由来するか（空白差を吸収して包含比較）。
                     const norm = (s) => (s || '').replace(/\s+/g, '');
                     const injected = norm(payload);
                     const fromPayload = (val) => {
                         const v = norm(val);
                         return v.length > 0 && injected.indexOf(v) !== -1;
+                    };
+                    // baseline に存在したハンドラ値の多重集合。同値のハンドラは baseline
+                    // 個数ぶんを「既存」として消費し、それを超えた出現だけを新規と見なす。
+                    const baseCount = {};
+                    for (const b of (baseline || [])) {
+                        const k = norm(b);
+                        baseCount[k] = (baseCount[k] || 0) + 1;
+                    }
+                    const isNew = (val) => {
+                        const k = norm(val);
+                        if (baseCount[k] > 0) { baseCount[k]--; return false; }
+                        return true;
                     };
                     let triggered = 0;
                     const nodes = document.querySelectorAll('*');
@@ -343,7 +394,7 @@ class BrowserManager:
                         for (const attr of (el.attributes || [])) {
                             const n = attr.name.toLowerCase();
                             if (n.startsWith('on') && DIALOG.test(attr.value || '')
-                                    && fromPayload(attr.value)) {
+                                    && fromPayload(attr.value) && isNew(attr.value)) {
                                 events.push(n.slice(2));
                             }
                         }
@@ -351,7 +402,7 @@ class BrowserManager:
                         try { urlAttr = el.getAttribute('href') || el.getAttribute('src') || ''; }
                         catch (e) { urlAttr = ''; }
                         const jsUrl = /^\s*javascript:/i.test(urlAttr)
-                            && DIALOG.test(urlAttr) && fromPayload(urlAttr);
+                            && DIALOG.test(urlAttr) && fromPayload(urlAttr) && isNew(urlAttr);
                         if (!events.length && !jsUrl) continue;
                         triggered++;
                         for (const type of events) {
@@ -379,7 +430,7 @@ class BrowserManager:
                     return triggered;
                 }
                 """,
-                payload,
+                {"payload": payload, "baseline": list(baseline_handlers or [])},
             )
         except Exception:
             # ページ遷移・クローズ・evaluate 失敗。発火層は加算的なので黙って 0。

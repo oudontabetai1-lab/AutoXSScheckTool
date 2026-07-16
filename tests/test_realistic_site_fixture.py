@@ -75,6 +75,17 @@ class RealisticSiteFixtureTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn('value="" onmouseover=alert(1)', resp.text)
         self.assertIn(html.escape(payload), resp.text)
 
+    async def test_notify_ships_legit_alert_handlers_and_escapes_msg(self):
+        """安全ページ: payload と同じコード（alert(1)/javascript:alert(1)）を持つ
+        正規ハンドラがあり、msg はエスケープ。発火トリガ層が baseline 比較でこれらを
+        撃たないための前提を固定する。"""
+        resp = await self.client.get("/notify", params={"msg": "<b>hi</b>"})
+        self.assertIn('onclick="alert(1)"', resp.text)
+        self.assertIn('href="javascript:alert(1)"', resp.text)
+        # msg はエスケープされ、新規ハンドラは生成されない
+        self.assertNotIn("<b>hi</b>", resp.text)
+        self.assertIn("&lt;b&gt;hi&lt;/b&gt;", resp.text)
+
     async def test_track_safe_escapes_quote_breakout(self):
         """安全ツイン: クォートがエスケープされ、属性ブレイクアウトが成立しない。"""
         payload = '" onmouseover=alert(1) x="'

@@ -73,9 +73,16 @@ class XSSScanner(BaseScanner):
         # positives. The DOM (page.content()) is the fallback for DOM-only
         # reflections that never appear in the response body.
         baseline_source = ""
+        # payload 投入前 DOM のダイアログハンドラを控える。発火トリガ層はこれに対して
+        # 新規に増えたハンドラだけを撃つ（ページ本来の onclick="alert(1)" 等の誤発火防止）。
+        baseline_handlers: list = []
         try:
             await self.browser.navigate(url)
             baseline_source = await self.browser.page.content()
+            try:
+                baseline_handlers = await self.browser.snapshot_dialog_handlers()
+            except Exception:
+                baseline_handlers = []
             body = self._response_body_for(url)
             if body:
                 baseline_source = body
@@ -107,7 +114,9 @@ class XSSScanner(BaseScanner):
             # scan falls back to the reflection heuristic unchanged.
             if not self.browser.dialog_fired:
                 try:
-                    if await self.browser.trigger_injected_handlers(payload):
+                    if await self.browser.trigger_injected_handlers(
+                        payload, baseline_handlers
+                    ):
                         await asyncio.sleep(0.3 * self.sleep_factor)
                 except Exception:
                     pass
@@ -182,13 +191,24 @@ class XSSScanner(BaseScanner):
                 break  # Found vulnerability, move to next field
 
         # --- Check 3: deterministic context-aware evolution wave ---
-        # 標準掃射が dialog 発火（confirmed）まで到達しなかったときに走らせる。
-        # tentative な反射が既にあっても止めない: 反射ヒューリスティックは「実際に
-        # 発火するか」を判定できず、messy な quote-break payload で弱い tentative が
-        # 立って本当に実行可能な clean breakout（例: `" onmouseover=alert(1) x="`）を
-        # 試さずに終わることがあるため。文脈に合う clean breakout を合成→投入し、
-        # 発火トリガ層で実発火させて confirmed への昇格を狙う。dialog が出るまで試す。
-        if not any(f.dialog_confirmed for f in findings):
+        # 走らせる条件は次のいずれか（かつ dialog 未確証のとき）:
+        #   (a) 何も見つかっていない（従来どおりの探索）。
+        #   (b) 既存 finding が属性系文脈の tentative 反射である。反射ヒューリスティック
+        #       は「実際に発火するか」を判定できず、messy な quote-break payload で弱い
+        #       tentative が立って本当に実行可能な clean breakout
+        #       （例: `" onmouseover=alert(1) x="`）を試さずに終わることがあるため、
+        #       clean breakout を合成→投入し発火トリガ層で confirmed 昇格を狙う。
+        # html_text 等の非属性文脈の tentative では追加しない: `<` が生存するなら標準
+        # 掃射の tag 系 payload で既に発火機会があり、`<` がエスケープ済みなら属性
+        # breakout も成立しないため、無駄な wave を避ける（誤検知ゼロ＋実行時間の両立）。
+        _ATTR_CTX = {"html_attribute", "event_handler_attribute", "url_attribute"}
+        have_confirmed = any(f.dialog_confirmed for f in findings)
+        attr_ctx_tentative = any(
+            (not f.dialog_confirmed)
+            and (f.evidence_details or {}).get("context") in _ATTR_CTX
+            for f in findings
+        )
+        if not have_confirmed and (not findings or attr_ctx_tentative):
             extra_payloads = await self.evolved_payloads(
                 url, form_index, field_name, is_url_param
             )
@@ -474,10 +494,15 @@ class XSSScanner(BaseScanner):
             urlparse(finding.url).query, keep_blank_values=True
         )
         baseline_source = ""
+        baseline_handlers: list = []
         try:
             self.browser.reset_dialog()
             await self.browser.navigate(finding.url)
             baseline_source = await self.browser.page.content()
+            try:
+                baseline_handlers = await self.browser.snapshot_dialog_handlers()
+            except Exception:
+                baseline_handlers = []
             body = self._response_body_for(finding.url)
             if body:
                 baseline_source = body
@@ -497,7 +522,9 @@ class XSSScanner(BaseScanner):
         await asyncio.sleep(0.5 * self.sleep_factor)
         if not self.browser.dialog_fired:
             try:
-                if await self.browser.trigger_injected_handlers(finding.payload):
+                if await self.browser.trigger_injected_handlers(
+                    finding.payload, baseline_handlers
+                ):
                     await asyncio.sleep(0.3 * self.sleep_factor)
             except Exception:
                 pass

@@ -77,6 +77,10 @@ SAFE_ENDPOINTS = [
     {"path": "/account/delete", "field": "item",
      "note": "item HTML-escaped; page has its own legitimate confirm() button "
              "that the firing layer must not mis-trigger as XSS"},
+    {"path": "/notify", "field": "msg",
+     "note": "msg HTML-escaped; page ships legit onclick=alert(1) / "
+             "href=javascript:alert(1) that share code with XSS payloads — the "
+             "firing layer must skip them via baseline comparison"},
     {"path": "/files/manual", "field": "name",
      "note": "manual id allow-listed, traversal returns 'not found'"},
     {"path": "/account/continue", "field": "next",
@@ -97,6 +101,7 @@ _NAV = [
     ('/welcome?name=guest', 'Welcome'),
     ('/track?ref=home', 'Tracking'),
     ('/account/delete?item=draft', 'Delete item'),
+    ('/notify?msg=hello', 'Notifications'),
     ('/files/download?doc=catalog.pdf', 'Brochure'),
     ('/files/manual?name=sizing', 'Size guide'),
     ('/redirect?url=/products', 'Partner link'),
@@ -262,6 +267,28 @@ def create_app() -> FastAPI:
             <button type="button"
               onclick="return confirm('Delete this item permanently?')">Delete</button>
             <p>Selected item: {safe}</p>
+            """,
+        )
+
+    # ── Safe page shipping legit alert()/javascript: handlers ────────────
+    # `msg` is HTML-escaped, but the page's own UI carries `onclick="alert(1)"`
+    # and `href="javascript:alert(1)"` — code that ALSO appears verbatim in
+    # ordinary XSS payloads. The firing layer must not fire these pre-existing
+    # handlers (baseline comparison: they are not newly introduced), else it
+    # would record a confirmed xss_dialog false positive on a safe page.
+    @app.get("/notify", response_class=HTMLResponse)
+    async def notify(msg: str = Query("hello")):
+        safe = html.escape(msg)
+        return _layout(
+            "Notifications",
+            f"""
+            <form method="get" action="/notify">
+              <input name="msg" value="{safe}">
+              <button type="submit">Save</button>
+            </form>
+            <button type="button" onclick="alert(1)">Test alert</button>
+            <a href="javascript:alert(1)">Legacy action</a>
+            <p>Message: {safe}</p>
             """,
         )
 
