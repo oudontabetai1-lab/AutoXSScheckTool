@@ -344,10 +344,13 @@ class BrowserManager:
         ``el.focus()`` も）。``javascript:`` URL は ``el.click()`` で既定遷移を起こす。
         捕捉は既存の dialog ハンドラに委ねる。
 
-        **誤検知抑制のため対象を二重に絞る**:
-        1. ハンドラ値が今回投入した ``payload`` に含まれること（空白正規化して包含比較）、
+        **誤検知抑制のため対象を三重に絞る**:
+        1. on* ハンドラは「属性の構造（``name=value``）」が ``payload`` に含まれること
+           （値の一致だけでは、サニタイズ後の値エコーを自前 UI の正規ハンドラに埋めた
+           ページで誤発火する）。``javascript:`` URL はスキーム込みの値が payload に含まれること。
         2. ``baseline_handlers``（payload 投入前 DOM のダイアログハンドラ）に対して
            **新規に増えた**ぶんだけ（多重集合の差分）。
+        3. 呼び出し側で着地パス一致・一意トークンによるダイアログ帰属も併用する。
 
         これにより、入力を安全にエスケープしていても本来 ``onclick="alert(1)"`` 等の
         正規ハンドラを持つページで、通常の XSS payload（``alert(1)`` を含む）が
@@ -374,6 +377,20 @@ class BrowserManager:
                         const v = norm(val);
                         return v.length > 0 && injected.indexOf(v) !== -1;
                     };
+                    // on* ハンドラは「属性の構造そのもの」が payload に含まれることを要求する
+                    // （値の一致だけでは不十分）。例えば payload が
+                    // `" onmouseover=alert(<token>) x="` のとき、`onmouseover=alert(<token>)`
+                    // が payload に在ることを確認する。これにより、入力を数字だけに
+                    // サニタイズして自前 UI の `onclick="alert(<token>)"` に埋め込むような
+                    // ページで、トークン値のエコーを注入ハンドラと誤認して発火するのを防ぐ
+                    // （属性名 onclick は payload に無い＝構造は注入されていない）。
+                    const structurallyInjected = (name, val) => {
+                        const v = norm(val);
+                        if (!v.length) return false;
+                        return injected.indexOf(norm(name) + '=' + v) !== -1
+                            || injected.indexOf(norm(name) + "='" + v) !== -1
+                            || injected.indexOf(norm(name) + '="' + v) !== -1;
+                    };
                     // baseline に存在したハンドラ値の多重集合。同値のハンドラは baseline
                     // 個数ぶんを「既存」として消費し、それを超えた出現だけを新規と見なす。
                     const baseCount = {};
@@ -394,7 +411,8 @@ class BrowserManager:
                         for (const attr of (el.attributes || [])) {
                             const n = attr.name.toLowerCase();
                             if (n.startsWith('on') && DIALOG.test(attr.value || '')
-                                    && fromPayload(attr.value) && isNew(attr.value)) {
+                                    && structurallyInjected(n, attr.value)
+                                    && isNew(attr.value)) {
                                 events.push(n.slice(2));
                             }
                         }
