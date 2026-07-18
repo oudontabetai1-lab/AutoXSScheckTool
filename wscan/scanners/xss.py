@@ -188,10 +188,14 @@ class XSSScanner(BaseScanner):
             # for the evolution wave, whose payloads carry a unique alert token so a
             # page's own alert(1) handler is never fired or mis-confirmed. Additive
             # and exception-guarded; on failure the scan falls back to reflection.
+            # 生反射ガード用に **捕捉した生応答本文のみ**を使う（DOM(page.content)は
+            # 属性を再直列化して onmouseover="…" にするため生 payload が一致せず、
+            # 本文が取れない実ブレイクアウトを誤って抑止してしまう）。本文が無ければ
+            # ガードは適用せず従来フォールバック。
+            _raw_body = (pair.get("response", {}) or {}).get("body") or ""
             if fire:
-                _raw = (pair.get("response", {}) or {}).get("body") or source or ""
                 await self._fire_if_baseline_matches(
-                    payload, baseline_handlers, baseline_path, _raw
+                    payload, baseline_handlers, baseline_path, _raw_body
                 )
 
             # --- Check 1: Alert dialog fired (confirmed XSS) ---
@@ -234,7 +238,15 @@ class XSSScanner(BaseScanner):
                 return True
 
             # --- Check 2: Payload reflected without HTML encoding ---
-            reflect_source = pair.get("response", {}).get("body") or source
+            reflect_source = _raw_body or source
+            # fire=True（evolution）payload は、生反射（本物のブレイクアウト）が生応答本文に
+            # 確認できないなら reflection も採らない。サニタイズ後にアプリ自前テンプレの
+            # 同名ハンドラへトークンをエコーしただけの値を xss_reflection と誤認しないため
+            # （発火の生反射ガードと同じ証拠を要求）。本文が取れないときは従来どおり判定。
+            if fire and _raw_body:
+                _npl = re.sub(r"\s+", "", payload or "")
+                if _npl and _npl not in re.sub(r"\s+", "", _raw_body):
+                    reflect_source = ""
             if reflect_source:
                 reflection = self._analyze_reflection(reflect_source, payload, baseline_source)
                 if reflection:
@@ -731,7 +743,9 @@ class XSSScanner(BaseScanner):
         token = ""
         if getattr(finding, "evidence_type", "") == "xss_dialog":
             token = str(_details.get("fire_token", "") or "")
-            _raw = (pair.get("response", {}) or {}).get("body") or source or ""
+            # 生反射ガードには捕捉した生応答本文のみ渡す（DOM 直列化で生 payload が
+            # 一致せず、本文欠落時に本物の確証 XSS を未確証化しないため）。
+            _raw = (pair.get("response", {}) or {}).get("body") or ""
             await self._fire_if_baseline_matches(
                 finding.payload, baseline_handlers, baseline_path, _raw
             )
