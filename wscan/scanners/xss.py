@@ -189,8 +189,9 @@ class XSSScanner(BaseScanner):
             # page's own alert(1) handler is never fired or mis-confirmed. Additive
             # and exception-guarded; on failure the scan falls back to reflection.
             if fire:
+                _raw = (pair.get("response", {}) or {}).get("body") or source or ""
                 await self._fire_if_baseline_matches(
-                    payload, baseline_handlers, baseline_path
+                    payload, baseline_handlers, baseline_path, _raw
                 )
 
             # --- Check 1: Alert dialog fired (confirmed XSS) ---
@@ -648,13 +649,24 @@ class XSSScanner(BaseScanner):
             return None
 
     async def _fire_if_baseline_matches(
-        self, payload: str, baseline_handlers: list, baseline_path: str | None
+        self,
+        payload: str,
+        baseline_handlers: list,
+        baseline_path: str | None,
+        raw_body: str = "",
     ) -> None:
         """baseline を採れた着地ページと同じ場所にいるときだけ発火トリガを撃つ。
 
-        着地パスが一致しない（＝中立 baseline が payload と別ページに落ちた）場合や
-        baseline 不確実（``baseline_path is None``）の場合は、既存ハンドラの誤発火を
-        避けるため発火を見送り、従来の反射ヒューリスティックに委ねる。加算的・例外保護。
+        発火の前提として **payload の生の構造が応答本文にそのまま反射している**ことを
+        要求する。本物の属性ブレイクアウトは payload を丸ごと生反射する（例:
+        ``value="" onmouseover=alert(<t>) x="">``）が、アプリが入力をサニタイズして
+        自前テンプレの同名ハンドラ（``onmouseover="alert(<echoed>)"``）に埋め込んだ場合は
+        属性が再構築され生 payload は本文に現れない。これにより、値/トークン/DOM 構造が
+        一致してもアプリ生成 UI の値エコーを confirmed 化しない。
+
+        着地パスが一致しない（中立 baseline が別ページに落ちた）／baseline 不確実
+        （``baseline_path is None``）／生反射が確認できない場合は発火を見送り、従来の
+        反射ヒューリスティックに委ねる。加算的・例外保護。
         """
         if self.browser.dialog_fired:
             return
@@ -663,6 +675,12 @@ class XSSScanner(BaseScanner):
                 return
             if self._current_path() != baseline_path:
                 return
+            # 生反射の確認（応答本文が取れているときのみ適用。空白を無視して包含判定）。
+            if raw_body:
+                nb = re.sub(r"\s+", "", raw_body)
+                npl = re.sub(r"\s+", "", payload or "")
+                if npl and npl not in nb:
+                    return
             if await self.browser.trigger_injected_handlers(payload, baseline_handlers):
                 await asyncio.sleep(0.3 * self.sleep_factor)
         except Exception:
@@ -713,8 +731,9 @@ class XSSScanner(BaseScanner):
         token = ""
         if getattr(finding, "evidence_type", "") == "xss_dialog":
             token = str(_details.get("fire_token", "") or "")
+            _raw = (pair.get("response", {}) or {}).get("body") or source or ""
             await self._fire_if_baseline_matches(
-                finding.payload, baseline_handlers, baseline_path
+                finding.payload, baseline_handlers, baseline_path, _raw
             )
         if self.browser.dialog_fired and (
             not token or token in (self.browser.dialog_message or "")
