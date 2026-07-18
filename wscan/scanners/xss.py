@@ -100,6 +100,12 @@ def _tokenize_dialog_calls(payload: str, token: str) -> str:
     return _DIALOG_CALL_RE.sub(f"alert({token})", payload)
 
 
+# NetworkCapture.enrich_response が response.body を 50KB で打ち切る上限。生反射ガードは
+# 本文がこの上限に達している（＝切り詰められている可能性がある）ときは「生 payload 非在」を
+# 否定証拠に使わない（上限超の位置に反射したブレイクアウトを取りこぼさないため）。
+_RESP_BODY_CAP = 50000
+
+
 def _neutral_baseline_value(field_type: str) -> str:
     """フィールド型に対して HTML5 検証を通る中立 baseline 値を返す。
 
@@ -243,7 +249,7 @@ class XSSScanner(BaseScanner):
             # 確認できないなら reflection も採らない。サニタイズ後にアプリ自前テンプレの
             # 同名ハンドラへトークンをエコーしただけの値を xss_reflection と誤認しないため
             # （発火の生反射ガードと同じ証拠を要求）。本文が取れないときは従来どおり判定。
-            if fire and _raw_body:
+            if fire and _raw_body and len(_raw_body) < _RESP_BODY_CAP:
                 _npl = re.sub(r"\s+", "", payload or "")
                 if _npl and _npl not in re.sub(r"\s+", "", _raw_body):
                     reflect_source = ""
@@ -687,8 +693,10 @@ class XSSScanner(BaseScanner):
                 return
             if self._current_path() != baseline_path:
                 return
-            # 生反射の確認（応答本文が取れているときのみ適用。空白を無視して包含判定）。
-            if raw_body:
+            # 生反射の確認（応答本文が **完全に取れている** ときのみ否定証拠に使う。
+            # 50KB 上限に達している本文は切り詰められている可能性があり、上限超に反射した
+            # ブレイクアウトを取りこぼさないよう、非在でも抑止せず従来経路へフォールバック）。
+            if raw_body and len(raw_body) < _RESP_BODY_CAP:
                 nb = re.sub(r"\s+", "", raw_body)
                 npl = re.sub(r"\s+", "", payload or "")
                 if npl and npl not in nb:
