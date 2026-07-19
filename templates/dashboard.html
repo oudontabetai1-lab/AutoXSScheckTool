@@ -1540,8 +1540,11 @@ https://example.com/search?q=test" style="width:100%;font-family:monospace;font-
       <div id="cfgTab-hybrid" class="cfg-panel">
         <div class="cfg-section-title">🔀 ハイブリッドスキャン (Agent偵察 → 通常スキャン)</div>
         <div style="font-size:0.78rem;color:var(--text-muted);margin-bottom:14px;line-height:1.6">
-          <strong>Phase 1:</strong> Agent Browser がサイトを探索し、ページ・フォーム・URLを発見します。<br>
+          <strong>Phase 1:</strong> Agent Browser がサイトを探索し、ページ・フォーム・URLを発見します。
+          探索中に Agent 自身が気づいた脆弱性は <span style="color:#b794f4">🤖 Agent発見（LLM独自解釈・未確証）</span> として報告します。<br>
           <strong>Phase 2:</strong> 発見した全URLをシードにして通常スキャンを実行します。<br>
+          最終レポートには、Phase2 の決定論的Finding（確実性）と Phase1 の Agent発見（独自性）を
+          出自ラベル付きで<strong>併記</strong>します＝確実性と独自性の中間。<br>
           複雑な認証フロー・SPA・動的ページの発見と、網羅的なペイロードテストを組み合わせます。<br>
           <span style="color:var(--accent)">必要:</span> <code>pip install browser-use</code> と LLM API キー
         </div>
