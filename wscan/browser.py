@@ -292,6 +292,168 @@ class BrowserManager:
         self.dialog_message = ""
         self.dialog_screenshot_b64 = ""
 
+    _DIALOG_HANDLER_JS = r"""
+        (() => {
+            const DIALOG = /(?:alert|confirm|prompt)\s*\(/i;
+            const out = [];
+            for (const el of document.querySelectorAll('*')) {
+                for (const attr of (el.attributes || [])) {
+                    const n = attr.name.toLowerCase();
+                    if (n.startsWith('on') && DIALOG.test(attr.value || '')) {
+                        out.push(attr.value);
+                    }
+                }
+                let urlAttr = '';
+                try { urlAttr = el.getAttribute('href') || el.getAttribute('src') || ''; }
+                catch (e) { urlAttr = ''; }
+                if (/^\s*javascript:/i.test(urlAttr) && DIALOG.test(urlAttr)) {
+                    out.push(urlAttr);
+                }
+            }
+            return out;
+        })()
+    """
+
+    async def snapshot_dialog_handlers(self) -> list:
+        """現在の DOM に存在する「ダイアログを呼ぶハンドラ値／javascript: URL」を返す。
+
+        ``trigger_injected_handlers`` の baseline 比較用。payload 投入前（clean な
+        ページ）に撮っておき、投入後に **新規に増えた**ハンドラだけを発火対象にする
+        ことで、ページ本来の ``onclick="alert(1)"`` 等を誤って撃たないようにする。
+        失敗時は空 list（比較なし＝従来の payload 包含フィルタのみ）。
+        """
+        page = self.page
+        if page is None:
+            return []
+        try:
+            return await page.evaluate(self._DIALOG_HANDLER_JS)
+        except Exception:
+            return []
+
+    async def trigger_injected_handlers(
+        self, payload: str = "", baseline_handlers: list | None = None
+    ) -> int:
+        """注入した payload 由来のイベントハンドラ／``javascript:`` URL を発火させる。
+
+        ``onmouseover`` / ``onclick`` / ``onfocus`` などインタラクション必須の
+        ハンドラや ``<a href="javascript:...">`` は、反射しても自動では発火しない。
+        そのため本物の XSS でも ``dialog`` が立たず ``confirmed`` に昇格できず、
+        ``_reflection_executable`` の保守的判定で取りこぼす（false negative）。
+
+        ここで DOM を走査し、その属性が待ち受けるイベントを dispatch する（focus 系は
+        ``el.focus()`` も）。``javascript:`` URL は ``el.click()`` で既定遷移を起こす。
+        捕捉は既存の dialog ハンドラに委ねる。
+
+        **誤検知抑制のため対象を三重に絞る**:
+        1. on* ハンドラは「属性の構造（``name=value``）」が ``payload`` に含まれること
+           （値の一致だけでは、サニタイズ後の値エコーを自前 UI の正規ハンドラに埋めた
+           ページで誤発火する）。``javascript:`` URL はスキーム込みの値が payload に含まれること。
+        2. ``baseline_handlers``（payload 投入前 DOM のダイアログハンドラ）に対して
+           **新規に増えた**ぶんだけ（多重集合の差分）。
+        3. 呼び出し側で着地パス一致・一意トークンによるダイアログ帰属も併用する。
+
+        これにより、入力を安全にエスケープしていても本来 ``onclick="alert(1)"`` 等の
+        正規ハンドラを持つページで、通常の XSS payload（``alert(1)`` を含む）が
+        既存 UI を誤発火させて ``xss_dialog`` の誤検知を出す事故を防ぐ。``payload`` が
+        空なら何も撃たない。戻り値は発火を試みた要素数。失敗時は 0。
+        """
+        page = self.page
+        if page is None or not payload:
+            return 0
+        try:
+            return await page.evaluate(
+                r"""
+                ({payload, baseline}) => {
+                    if (!payload) return 0;
+                    const DIALOG = /(?:alert|confirm|prompt)\s*\(/i;
+                    const MOUSE = new Set(['click','dblclick','mousedown','mouseup',
+                        'mouseover','mouseout','mouseenter','mouseleave','mousemove',
+                        'contextmenu']);
+                    const MAX = 60;
+                    // ハンドラ値が payload に由来するか（空白差を吸収して包含比較）。
+                    const norm = (s) => (s || '').replace(/\s+/g, '');
+                    const injected = norm(payload);
+                    const fromPayload = (val) => {
+                        const v = norm(val);
+                        return v.length > 0 && injected.indexOf(v) !== -1;
+                    };
+                    // on* ハンドラは「属性の構造そのもの」が payload に含まれることを要求する
+                    // （値の一致だけでは不十分）。例えば payload が
+                    // `" onmouseover=alert(<token>) x="` のとき、`onmouseover=alert(<token>)`
+                    // が payload に在ることを確認する。これにより、入力を数字だけに
+                    // サニタイズして自前 UI の `onclick="alert(<token>)"` に埋め込むような
+                    // ページで、トークン値のエコーを注入ハンドラと誤認して発火するのを防ぐ
+                    // （属性名 onclick は payload に無い＝構造は注入されていない）。
+                    const structurallyInjected = (name, val) => {
+                        const v = norm(val);
+                        if (!v.length) return false;
+                        return injected.indexOf(norm(name) + '=' + v) !== -1
+                            || injected.indexOf(norm(name) + "='" + v) !== -1
+                            || injected.indexOf(norm(name) + '="' + v) !== -1;
+                    };
+                    // baseline に存在したハンドラ値の多重集合。同値のハンドラは baseline
+                    // 個数ぶんを「既存」として消費し、それを超えた出現だけを新規と見なす。
+                    const baseCount = {};
+                    for (const b of (baseline || [])) {
+                        const k = norm(b);
+                        baseCount[k] = (baseCount[k] || 0) + 1;
+                    }
+                    const isNew = (val) => {
+                        const k = norm(val);
+                        if (baseCount[k] > 0) { baseCount[k]--; return false; }
+                        return true;
+                    };
+                    let triggered = 0;
+                    const nodes = document.querySelectorAll('*');
+                    for (const el of nodes) {
+                        if (triggered >= MAX) break;
+                        const events = [];
+                        for (const attr of (el.attributes || [])) {
+                            const n = attr.name.toLowerCase();
+                            if (n.startsWith('on') && DIALOG.test(attr.value || '')
+                                    && structurallyInjected(n, attr.value)
+                                    && isNew(attr.value)) {
+                                events.push(n.slice(2));
+                            }
+                        }
+                        let urlAttr = '';
+                        try { urlAttr = el.getAttribute('href') || el.getAttribute('src') || ''; }
+                        catch (e) { urlAttr = ''; }
+                        const jsUrl = /^\s*javascript:/i.test(urlAttr)
+                            && DIALOG.test(urlAttr) && fromPayload(urlAttr) && isNew(urlAttr);
+                        if (!events.length && !jsUrl) continue;
+                        triggered++;
+                        for (const type of events) {
+                            try {
+                                if (type === 'focus' || type === 'focusin') {
+                                    try { el.focus(); } catch (e) {}
+                                }
+                                let ev;
+                                if (MOUSE.has(type)) {
+                                    ev = new MouseEvent(type, {bubbles: true, cancelable: true});
+                                } else if (type.startsWith('pointer') && window.PointerEvent) {
+                                    ev = new PointerEvent(type, {bubbles: true, cancelable: true});
+                                } else if (type.startsWith('key') && window.KeyboardEvent) {
+                                    ev = new KeyboardEvent(type, {bubbles: true, cancelable: true});
+                                } else {
+                                    ev = new Event(type, {bubbles: true, cancelable: true});
+                                }
+                                el.dispatchEvent(ev);
+                            } catch (e) {}
+                        }
+                        if (jsUrl) {
+                            try { el.click(); } catch (e) {}
+                        }
+                    }
+                    return triggered;
+                }
+                """,
+                {"payload": payload, "baseline": list(baseline_handlers or [])},
+            )
+        except Exception:
+            # ページ遷移・クローズ・evaluate 失敗。発火層は加算的なので黙って 0。
+            return 0
+
     async def navigate(
         self,
         url: str,

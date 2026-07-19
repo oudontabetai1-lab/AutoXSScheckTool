@@ -43,6 +43,12 @@ from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse
 EXPECTED_FINDINGS = [
     {"check": "xss", "path": "/search", "field": "q",
      "note": "reflected, unescaped query echoed into HTML body"},
+    {"check": "xss", "path": "/track", "field": "ref",
+     "note": "attribute-breakout: angle brackets stripped but quote passes; "
+             "onmouseover handler fires only via the active event-trigger layer"},
+    {"check": "xss", "path": "/comment", "field": "text",
+     "note": "attribute-breakout with SINGLE quotes stripped; confirmable only if "
+             "the firing token is quote-free (numeric alert argument)"},
     {"check": "sqli", "path": "/products", "field": "category",
      "note": "error-based: raw category interpolated into SQL"},
     {"check": "sqli", "path": "/login", "field": "username",
@@ -69,6 +75,28 @@ SAFE_ENDPOINTS = [
      "note": "sort key validated against an allow-list, parameterised query"},
     {"path": "/welcome", "field": "name",
      "note": "name HTML-escaped, never template-rendered"},
+    {"path": "/track/safe", "field": "ref",
+     "note": "ref HTML-escaped (quotes neutralised), no attribute breakout"},
+    {"path": "/account/delete", "field": "item",
+     "note": "item HTML-escaped; page has its own legitimate confirm() button "
+             "that the firing layer must not mis-trigger as XSS"},
+    {"path": "/notify", "field": "msg",
+     "note": "msg HTML-escaped; page ships legit onclick=alert(1) / "
+             "href=javascript:alert(1) that share code with XSS payloads — the "
+             "firing layer must skip them via baseline comparison"},
+    {"path": "/support", "field": "q",
+     "note": "form escapes q; the action response (/support/result) ships its own "
+             "onclick=alert(1) — baseline must come from the post-submit response"},
+    {"path": "/support/result", "field": "q",
+     "note": "action response escapes q while carrying a legit onclick=alert(1)"},
+    {"path": "/linkcheck", "field": "dest",
+     "note": "type=url field submitting to the SAME path; only a type-valid neutral "
+             "baseline follows the URL-valid payload into the escaped result branch "
+             "(onclick=alert(1)) so the firing layer skips that pre-existing handler"},
+    {"path": "/dashboard", "field": "widget",
+     "note": "widget HTML-escaped; a legit onclick=alert(1) button renders before "
+             "the reflection, so reflection analysis must not attribute the first "
+             "(pre-existing) alert( occurrence to the payload"},
     {"path": "/files/manual", "field": "name",
      "note": "manual id allow-listed, traversal returns 'not found'"},
     {"path": "/account/continue", "field": "next",
@@ -87,6 +115,13 @@ _NAV = [
     ('/catalog?sort=price', 'Catalog'),
     ('/greeting?name=guest', 'Greeting'),
     ('/welcome?name=guest', 'Welcome'),
+    ('/track?ref=home', 'Tracking'),
+    ('/comment?text=hi', 'Comment'),
+    ('/account/delete?item=draft', 'Delete item'),
+    ('/notify?msg=hello', 'Notifications'),
+    ('/support', 'Support'),
+    ('/linkcheck', 'Link checker'),
+    ('/dashboard?widget=clock', 'Dashboard'),
     ('/files/download?doc=catalog.pdf', 'Brochure'),
     ('/files/manual?name=sizing', 'Size guide'),
     ('/redirect?url=/products', 'Partner link'),
@@ -205,6 +240,190 @@ def create_app() -> FastAPI:
             </form>
             <p>We found no help articles for "{safe}".</p>
             <ul><li>Shipping &amp; returns</li><li>Order tracking</li></ul>
+            """,
+        )
+
+    # ── Interaction-required reflected XSS (INTENTIONAL) ──────────────────
+    # ref is reflected into a quoted attribute value. Angle brackets are
+    # stripped (so no new <script>/<svg>/<img> tag can form and auto-fire),
+    # but the double quote passes — an attribute breakout such as
+    # `" onmouseover=alert(1) x="` injects a *live* event handler that only
+    # fires on user interaction. Without the scanner's active event-trigger
+    # firing layer this reflects but never fires a dialog, so it is a genuine
+    # attribute-breakout XSS that requires event dispatch to confirm.
+    @app.get("/track", response_class=HTMLResponse)
+    async def track(ref: str = Query("home")):
+        safe = ref.replace("<", "").replace(">", "")  # strip tags, keep quotes
+        return _layout(
+            "Order tracking",
+            f"""
+            <form method="get" action="/track">
+              <input name="ref" value="{safe}" readonly>
+              <button>Track</button>
+            </form>
+            <p>Tracking reference saved.</p>
+            """,
+        )
+
+    # ── Safe page that ships its OWN legitimate confirm() dialog ──────────
+    # A normal delete button carries an inline `confirm('…')` handler, and
+    # `item` is reflected HTML-escaped. The XSS active event-trigger layer must
+    # NOT dispatch this pre-existing confirm() and mis-record it as xss_dialog:
+    # its handler value never appears in the injected payload. Guards against
+    # false-positive confirmed XSS on ordinary confirmation UI.
+    @app.get("/account/delete", response_class=HTMLResponse)
+    async def account_delete(item: str = Query("draft")):
+        safe = html.escape(item)
+        # The confirm() button sits OUTSIDE the form so form submission never
+        # clicks it (only its own dialog); it stays in the DOM purely so the
+        # firing layer must skip a pre-existing, non-injected dialog handler.
+        return _layout(
+            "Delete item",
+            f"""
+            <form method="get" action="/account/delete">
+              <input name="item" value="{safe}">
+              <button type="submit">Find items</button>
+            </form>
+            <button type="button"
+              onclick="return confirm('Delete this item permanently?')">Delete</button>
+            <p>Selected item: {safe}</p>
+            """,
+        )
+
+    # ── Safe page shipping legit alert()/javascript: handlers ────────────
+    # `msg` is HTML-escaped, but the page's own UI carries `onclick="alert(1)"`
+    # and `href="javascript:alert(1)"` — code that ALSO appears verbatim in
+    # ordinary XSS payloads. The firing layer must not fire these pre-existing
+    # handlers (baseline comparison: they are not newly introduced), else it
+    # would record a confirmed xss_dialog false positive on a safe page.
+    @app.get("/notify", response_class=HTMLResponse)
+    async def notify(msg: str = Query("hello")):
+        safe = html.escape(msg)
+        return _layout(
+            "Notifications",
+            f"""
+            <form method="get" action="/notify">
+              <input name="msg" value="{safe}">
+              <button type="submit">Save</button>
+            </form>
+            <button type="button" onclick="alert(1)">Test alert</button>
+            <a href="javascript:alert(1)">Legacy action</a>
+            <p>Message: {safe}</p>
+            """,
+        )
+
+    # ── Safe form whose ACTION RESPONSE ships a legit alert() handler ─────
+    # The form page itself carries no dialog handler, but submitting it lands on
+    # a different action response (/support/result) that escapes the input AND
+    # has its own `onclick="alert(1)"` UI. The firing layer's baseline must be
+    # taken from that post-submit response (neutral value), not the pre-submit
+    # form page, or the result-page handler looks "newly injected" → false
+    # positive. Guards the form-action baseline case.
+    @app.get("/support", response_class=HTMLResponse)
+    async def support_form():
+        return _layout(
+            "Support",
+            """
+            <form method="get" action="/support/result">
+              <input name="q">
+              <button type="submit">Search tickets</button>
+            </form>
+            """,
+        )
+
+    @app.get("/support/result", response_class=HTMLResponse)
+    async def support_result(q: str = Query("")):
+        safe = html.escape(q)
+        return _layout(
+            "Support results",
+            f"""
+            <p>No tickets matched: {safe}</p>
+            <button type="button" onclick="alert(1)">Notify me on match</button>
+            """,
+        )
+
+    # ── Attribute-breakout XSS with SINGLE quotes stripped (INTENTIONAL) ──
+    # `text` is reflected into a quoted attribute. Angle brackets AND single
+    # quotes are stripped, but the double quote passes — a breakout like
+    # `" onmouseover=alert(1) x="` injects a live handler. The firing layer can
+    # only confirm it if its alert token is quote-free (numeric); a single-quoted
+    # token would be stripped here and the confirmed signal would be lost.
+    @app.get("/comment", response_class=HTMLResponse)
+    async def comment(text: str = Query("hi")):
+        safe = text.replace("<", "").replace(">", "").replace("'", "")
+        return _layout(
+            "Leave a comment",
+            f"""
+            <form method="get" action="/comment">
+              <input name="text" value="{safe}" readonly>
+              <button type="submit">Post</button>
+            </form>
+            <p>Thanks for your comment.</p>
+            """,
+        )
+
+    # ── Safe page with a legit alert() handler BEFORE the reflection ──────
+    # `widget` is HTML-escaped, but a pre-existing `onclick="alert(1)"` button
+    # renders *before* the reflected field. _analyze_reflection scans marker
+    # occurrences in document order, so the first `alert(` is the legit handler;
+    # it must not be mis-attributed to the payload (the handler is unchanged from
+    # the baseline). Guards the first-occurrence reflection misclassification.
+    @app.get("/dashboard", response_class=HTMLResponse)
+    async def dashboard(widget: str = Query("clock")):
+        safe = html.escape(widget)
+        return _layout(
+            "Dashboard",
+            f"""
+            <button type="button" onclick="alert(1)">Refresh</button>
+            <form method="get" action="/dashboard">
+              <input name="widget" value="{safe}">
+              <button type="submit">Add widget</button>
+            </form>
+            <p>Active widget: {safe}</p>
+            """,
+        )
+
+    # ── Safe type=url form that submits back to the SAME path ─────────────
+    # `dest` is type="url" and the form action is /linkcheck itself: the form
+    # branch (no dest) and the escaped result branch (dest present) share the
+    # path. A non-URL neutral baseline fails HTML5 validation and stays on the
+    # form (so a path-only gate would wrongly accept it), while a URL-valid
+    # payload like `javascript:alert(1)` reaches the result branch that ships a
+    # legit `onclick="alert(1)"`. Correctly handled only by a *type-valid*
+    # neutral baseline that follows the same branch and captures that handler.
+    @app.get("/linkcheck", response_class=HTMLResponse)
+    async def linkcheck(dest: str | None = Query(None)):
+        if dest is None:
+            return _layout(
+                "Link checker",
+                """
+                <form method="get" action="/linkcheck">
+                  <input type="url" name="dest" required>
+                  <button type="submit">Check link</button>
+                </form>
+                """,
+            )
+        safe = html.escape(dest)
+        return _layout(
+            "Link check result",
+            f"""
+            <p>Checked: {safe}</p>
+            <button type="button" onclick="alert(1)">Re-check</button>
+            """,
+        )
+
+    # ── Safe tracking twin: ref fully HTML-escaped (quotes neutralised) ───
+    @app.get("/track/safe", response_class=HTMLResponse)
+    async def track_safe(ref: str = Query("home")):
+        safe = html.escape(ref)  # escapes <, >, ", ' — no attribute breakout
+        return _layout(
+            "Order tracking",
+            f"""
+            <form method="get" action="/track/safe">
+              <input name="ref" value="{safe}" readonly>
+              <button>Track</button>
+            </form>
+            <p>Tracking reference saved.</p>
             """,
         )
 

@@ -85,7 +85,7 @@ def _chromium_available() -> bool:
 
 # Upper bound on the whole crawl→attack→verify pipeline. A real hang (e.g. a
 # verifier that never returns) then fails the test instead of wedging the suite.
-SCAN_TIMEOUT_S = 600  # payload mutation wave 追加分の余裕を見て延長
+SCAN_TIMEOUT_S = 900  # payload mutation wave + XSS 発火トリガ層/追加フィクスチャ分の余裕
 
 
 async def _run_scan(port: int, output_dir: str):

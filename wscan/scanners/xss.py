@@ -5,6 +5,7 @@ Detects reflected and DOM-based XSS vulnerabilities.
 import asyncio
 import html
 import re
+import uuid
 from typing import TYPE_CHECKING
 
 from .base import BaseScanner, Finding
@@ -42,6 +43,78 @@ XSS_MARKERS = [
 # without breaking out of the quotes, so a reflection inside them stays
 # dangerous.
 _URL_ATTRS = {"href", "src", "action", "formaction", "xlink:href", "data", "poster"}
+
+# 発火トリガの baseline 用の中立値（英数字のみ・payload とも既存ハンドラ値とも一致
+# しない）。この値を payload と同じ経路（URL パラメータ／フォーム action）で投入した
+# 応答 DOM からダイアログハンドラを採取し、「新規に増えたハンドラ」判定の基準にする。
+_HANDLER_BASELINE_VALUE = "wscanxssbaseline"
+
+# 型付き入力（HTML5 validation）で中立値がフォームに弾かれると、baseline 送信が
+# フォームページに留まり action 応答（payload が到達するページ）のハンドラを採れない。
+# フィールド型ごとに *検証を通る* 中立値を用意し、payload と同じ応答ブランチへ確実に
+# 到達させる（英数字トークン wscanbaseline を各型の妥当な形に埋め込む）。
+_TYPED_BASELINE_VALUES = {
+    "url": "https://wscanbaseline.example/x",
+    "email": "wscanbaseline@example.com",
+    "number": "1",
+    "range": "1",
+    "tel": "0000000000",
+    "date": "2000-01-01",
+    "datetime-local": "2000-01-01T00:00",
+    "time": "12:00",
+    "month": "2000-01",
+    "week": "2000-W01",
+    "color": "#000000",
+}
+
+
+# alert/confirm/prompt 呼び出し（引数は括弧の入れ子を1段許容）を捉える。
+_DIALOG_CALL_RE = re.compile(r"(?:alert|confirm|prompt)\s*\((?:[^()]|\([^()]*\))*\)", re.IGNORECASE)
+
+
+def _make_fire_token() -> str:
+    """発火確認用の一意 **数値** トークンを返す（10桁）。
+
+    数値なのでクォート不要（``alert(<token>)``）。引用符を除去/エンコードする入力
+    フィルタ下でも実行でき、``alert(1)`` 等ページ本来のハンドラとは一致しない。
+    """
+    return str(1000000000 + uuid.uuid4().int % 9000000000)
+
+
+def _tokenize_dialog_calls(payload: str, token: str) -> str:
+    """payload 内の alert/confirm/prompt 呼び出しを ``alert(<token>)`` へ置換する（純粋）。
+
+    発火トリガ層で投入するペイロードに一意トークンを埋めることで、注入したハンドラ値が
+    payload 固有になる。これにより ``trigger_injected_handlers`` の「ハンドラ値が payload に
+    含まれるか」判定が、ページ本来の ``alert(1)`` 等（トークンを含まない）を確実に除外でき、
+    値依存の同一パス分岐で正規ハンドラだけが現れるケースでも誤発火しない。発火の確証は
+    ダイアログ文言に ``token`` が出ることで裏取りする（dom_xss と同じ一意マーカー方式）。
+
+    トークンは**数値**にしてクォートを使わない（``alert(<token>)``）。引用符を除去する
+    フィルタ（``" onmouseover=alert(1) x="`` は通すが ``'`` を消す等）でも実行可能な形を
+    保ち、本物の属性ブレイクアウト XSS の confirmed シグナルを失わないため。ダイアログ
+    呼び出しが無い payload はそのまま返す。
+    """
+    if not token:
+        return payload
+    return _DIALOG_CALL_RE.sub(f"alert({token})", payload)
+
+
+# NetworkCapture.enrich_response が response.body を 50KB で打ち切る上限。生反射ガードは
+# 本文がこの上限に達している（＝切り詰められている可能性がある）ときは「生 payload 非在」を
+# 否定証拠に使わない（上限超の位置に反射したブレイクアウトを取りこぼさないため）。
+_RESP_BODY_CAP = 50000
+
+
+def _neutral_baseline_value(field_type: str) -> str:
+    """フィールド型に対して HTML5 検証を通る中立 baseline 値を返す。
+
+    未知/テキスト系は ``_HANDLER_BASELINE_VALUE``。型付きは検証を通る妥当値を返し、
+    baseline 送信が payload と同じ応答ブランチへ到達できるようにする（さもないと
+    型検証で中立値だけフォームに留まり、action 応答固有の正規ハンドラを baseline に
+    採れず誤発火＝誤検知の原因になる）。純粋関数。
+    """
+    return _TYPED_BASELINE_VALUES.get((field_type or "text").lower(), _HANDLER_BASELINE_VALUE)
 
 
 class XSSScanner(BaseScanner):
@@ -85,7 +158,23 @@ class XSSScanner(BaseScanner):
                     f"[warn] xss: baseline fetch failed on {url}: {exc}"
                 )
 
-        async def _test_payload(payload: str, check_label: str = "xss") -> bool:
+        # baseline（ハンドラ＋リフレクション本文）は「payload と同じ経路を中立値で
+        # 開いた応答」から採る。フォームは pre-submit のフォームページと action 応答で
+        # 構成が異なるため、中立投入の応答本文を baseline にしないと、結果ページ固有の
+        # onclick="alert(1)" 等を新規注入と誤認してリフレクション・発火の双方で誤検知する。
+        baseline_handlers, baseline_path, baseline_submit_source = await self._baseline_handlers(
+            url, form_index, field_name, is_url_param,
+            neutral_value=_neutral_baseline_value(field.get("type", "text")),
+        )
+        if baseline_submit_source:
+            baseline_source = baseline_submit_source
+
+        async def _test_payload(
+            payload: str,
+            check_label: str = "xss",
+            fire: bool = False,
+            expect_token: str = "",
+        ) -> bool:
             await self.log_payload_test(field_name, payload, check_label, url)
 
             # Reset dialog detector
@@ -98,8 +187,30 @@ class XSSScanner(BaseScanner):
 
             await asyncio.sleep(0.5 * self.sleep_factor)  # Wait for any JS execution
 
+            # Interaction-required handlers (onmouseover / onclick / onfocus) and
+            # javascript: URLs do not fire on their own, so a genuine attribute-
+            # breakout payload like `" onmouseover=alert('<token>') x="` reflects but
+            # never triggers a dialog. Actively dispatch the matching events — only
+            # for the evolution wave, whose payloads carry a unique alert token so a
+            # page's own alert(1) handler is never fired or mis-confirmed. Additive
+            # and exception-guarded; on failure the scan falls back to reflection.
+            # 生反射ガード用に **捕捉した生応答本文のみ**を使う（DOM(page.content)は
+            # 属性を再直列化して onmouseover="…" にするため生 payload が一致せず、
+            # 本文が取れない実ブレイクアウトを誤って抑止してしまう）。本文が無ければ
+            # ガードは適用せず従来フォールバック。
+            _raw_body = (pair.get("response", {}) or {}).get("body") or ""
+            if fire:
+                await self._fire_if_baseline_matches(
+                    payload, baseline_handlers, baseline_path, _raw_body
+                )
+
             # --- Check 1: Alert dialog fired (confirmed XSS) ---
-            if self.browser.dialog_fired:
+            # When an expect_token is set (evolution wave), only treat the dialog as
+            # ours if the token appears in its message — a pre-existing handler's
+            # dialog (e.g. "1") is then never attributed to the payload.
+            if self.browser.dialog_fired and (
+                not expect_token or expect_token in (self.browser.dialog_message or "")
+            ):
                 finding = await self.record_finding(
                     url=url,
                     field_name=field_name,
@@ -114,6 +225,10 @@ class XSSScanner(BaseScanner):
                     evidence_details={
                         "execution_signal": "browser_dialog",
                         "dialog_message": self.browser.dialog_message,
+                        # verify_finding が type-valid な中立 baseline を再現し、
+                        # トークンでダイアログ帰属を裏取りするために保持する。
+                        "field_type": field.get("type", "text"),
+                        "fire_token": expect_token,
                     },
                     reproduction_steps=[
                         f"Open {url}",
@@ -121,12 +236,23 @@ class XSSScanner(BaseScanner):
                         "Observe that the browser fires a JavaScript dialog.",
                     ],
                 )
-                findings.append(finding)
+                # record_finding は重複 evidence_type のとき None を返す。None を
+                # findings へ積むと後段の any(f.dialog_confirmed ...) が AttributeError。
+                if finding:
+                    findings.append(finding)
                 self.browser.reset_dialog()
                 return True
 
             # --- Check 2: Payload reflected without HTML encoding ---
-            reflect_source = pair.get("response", {}).get("body") or source
+            reflect_source = _raw_body or source
+            # fire=True（evolution）payload は、生反射（本物のブレイクアウト）が生応答本文に
+            # 確認できないなら reflection も採らない。サニタイズ後にアプリ自前テンプレの
+            # 同名ハンドラへトークンをエコーしただけの値を xss_reflection と誤認しないため
+            # （発火の生反射ガードと同じ証拠を要求）。本文が取れないときは従来どおり判定。
+            if fire and _raw_body and len(_raw_body) < _RESP_BODY_CAP:
+                _npl = re.sub(r"\s+", "", payload or "")
+                if _npl and _npl not in re.sub(r"\s+", "", _raw_body):
+                    reflect_source = ""
             if reflect_source:
                 reflection = self._analyze_reflection(reflect_source, payload, baseline_source)
                 if reflection:
@@ -153,7 +279,8 @@ class XSSScanner(BaseScanner):
                             "Escalate manually with a context-specific event or script payload if no dialog fires.",
                         ],
                     )
-                    findings.append(finding)
+                    if finding:
+                        findings.append(finding)
                     return True
 
             await asyncio.sleep(0.2 * self.sleep_factor)
@@ -164,12 +291,36 @@ class XSSScanner(BaseScanner):
                 break  # Found vulnerability, move to next field
 
         # --- Check 3: deterministic context-aware evolution wave ---
-        if not findings:
+        # 走らせる条件は次のいずれか（かつ dialog 未確証のとき）:
+        #   (a) 何も見つかっていない（従来どおりの探索）。
+        #   (b) 既存 finding が属性系文脈の tentative 反射である。反射ヒューリスティック
+        #       は「実際に発火するか」を判定できず、messy な quote-break payload で弱い
+        #       tentative が立って本当に実行可能な clean breakout
+        #       （例: `" onmouseover=alert(1) x="`）を試さずに終わることがあるため、
+        #       clean breakout を合成→投入し発火トリガ層で confirmed 昇格を狙う。
+        # html_text 等の非属性文脈の tentative では追加しない: `<` が生存するなら標準
+        # 掃射の tag 系 payload で既に発火機会があり、`<` がエスケープ済みなら属性
+        # breakout も成立しないため、無駄な wave を避ける（誤検知ゼロ＋実行時間の両立）。
+        _ATTR_CTX = {"html_attribute", "event_handler_attribute", "url_attribute"}
+        have_confirmed = any(f.dialog_confirmed for f in findings)
+        attr_ctx_tentative = any(
+            (not f.dialog_confirmed)
+            and (f.evidence_details or {}).get("context") in _ATTR_CTX
+            for f in findings
+        )
+        if not have_confirmed and (not findings or attr_ctx_tentative):
             extra_payloads = await self.evolved_payloads(
                 url, form_index, field_name, is_url_param
             )
+            # 発火トリガで投入するペイロードには一意トークンを埋め、注入ハンドラ値を
+            # payload 固有にする（ページ本来の alert(1) 等を発火・確証しないため）。
+            fire_token = _make_fire_token()
             for payload in extra_payloads:
-                if await _test_payload(payload, "xss_evolved"):
+                tok_payload = _tokenize_dialog_calls(payload, fire_token)
+                await _test_payload(
+                    tok_payload, "xss_evolved", fire=True, expect_token=fire_token
+                )
+                if any(f.dialog_confirmed for f in findings):
                     break
 
         # --- Check 4: String-concatenation / quote-break equivalence probe ---
@@ -277,29 +428,51 @@ class XSSScanner(BaseScanner):
             if encoded != marker_lower and encoded in source_lower and marker_lower not in source_lower:
                 continue
 
-            idx = source_lower.find(marker_lower)
-            if idx == -1:
-                continue
+            # Inspect *every* occurrence of the marker, not just the first. The
+            # first one may be an inert escaped reflection (or, on a page whose own
+            # UI carries the same handler code, a pre-existing executable handler),
+            # while a genuinely injected executable occurrence sits later. Report
+            # the first occurrence that is (a) not in a comment, (b) executable in
+            # its context, and (c) NOT pre-existing in the baseline — so a page's
+            # own handler is never mis-attributed to the payload regardless of
+            # where it sits relative to the reflection.
+            start = 0
+            while True:
+                idx = source_lower.find(marker_lower, start)
+                if idx == -1:
+                    break
+                start = idx + 1
 
-            # Skip occurrences inside HTML comments (<!-- ... -->)
-            preceding = source_lower[max(0, idx - 300):idx]
-            if preceding.rfind("<!--") > preceding.rfind("-->"):
-                continue
+                # Skip occurrences inside HTML comments (<!-- ... -->)
+                preceding = source_lower[max(0, idx - 300):idx]
+                if preceding.rfind("<!--") > preceding.rfind("-->"):
+                    continue
 
-            context = self._classify_reflection_context(source, idx)
-            if not self._reflection_executable(source, idx, payload, marker, baseline_source, context):
-                continue
-            delta = None
-            if baseline_lower:
-                delta = source_lower.count(marker_lower) - baseline_lower.count(marker_lower)
-            return {
-                "context": context,
-                "match": marker,
-                "snippet": source[max(0, idx - 20):idx + len(marker) + 50],
-                "confidence": self._confidence_for_context(context),
-                "raw_payload_present": False,
-                "baseline_marker_delta": delta,
-            }
+                context = self._classify_reflection_context(source, idx)
+                if not self._reflection_executable(
+                    source, idx, payload, marker, baseline_source, context
+                ):
+                    continue
+
+                # Per-occurrence baseline newness: skip an occurrence whose
+                # surrounding text already appears verbatim in the baseline (a
+                # pre-existing page handler, not something the payload introduced).
+                if baseline_lower:
+                    window = source_lower[max(0, idx - 40):idx + len(marker_lower) + 20]
+                    if window and window in baseline_lower:
+                        continue
+
+                delta = None
+                if baseline_lower:
+                    delta = source_lower.count(marker_lower) - baseline_lower.count(marker_lower)
+                return {
+                    "context": context,
+                    "match": marker,
+                    "snippet": source[max(0, idx - 20):idx + len(marker) + 50],
+                    "confidence": self._confidence_for_context(context),
+                    "raw_payload_present": False,
+                    "baseline_marker_delta": delta,
+                }
 
         return {}
 
@@ -443,6 +616,96 @@ class XSSScanner(BaseScanner):
             return ""
         return pair.get("response", {}).get("body") or ""
 
+    async def _baseline_handlers(
+        self,
+        url: str,
+        form_index: int,
+        field_name: str,
+        is_url_param: bool,
+        neutral_value: str = _HANDLER_BASELINE_VALUE,
+    ) -> tuple[list, str | None, str]:
+        """発火トリガ層とリフレクション判定の baseline を **中立投入の応答**から採る。
+
+        中立値（型付きは検証を通る値）を **payload と同じ経路**で投入し、その応答から
+        (1) ダイアログハンドラ一覧、(2) 着地パス、(3) 応答本文（リフレクション baseline）
+        を返す。フォームは pre-submit のフォームページと action 応答でハンドラ/本文が
+        異なるため、応答本文を baseline にしないと action 応答固有の正規 onclick=alert(1)
+        等を「payload が入れた新規」と誤認して発火・リフレクション双方で誤検知する。
+
+        着地パスは payload の着地と一致するときだけ発火するために使う（型検証で中立値が
+        フォームに留まり payload だけ別ページへ到達した場合の誤発火防止）。戻り値は
+        ``(handlers, landing_path, source)``。失敗時は ``([], None, "")``。中立投入で
+        立ったダイアログは後続 payload に持ち越さないよう reset する。
+        """
+        from urllib.parse import urlparse
+
+        try:
+            await self.log_payload_test(
+                field_name, neutral_value, "xss_handler_baseline", url
+            )
+            self.browser.reset_dialog()
+            src, pair = await self._apply_payload(
+                url, form_index, field_name, neutral_value, is_url_param
+            )
+            await asyncio.sleep(0.2 * self.sleep_factor)
+            handlers = await self.browser.snapshot_dialog_handlers()
+            landing_path = urlparse(self.browser.page.url).path
+            body = (pair.get("response", {}) or {}).get("body") or src or ""
+            return handlers, landing_path, body
+        except Exception:
+            return [], None, ""
+        finally:
+            self.browser.reset_dialog()
+
+    def _current_path(self) -> str | None:
+        """発火判定用に、いま browser がいるページの URL パスを返す（失敗時 None）。"""
+        from urllib.parse import urlparse
+
+        try:
+            return urlparse(self.browser.page.url).path
+        except Exception:
+            return None
+
+    async def _fire_if_baseline_matches(
+        self,
+        payload: str,
+        baseline_handlers: list,
+        baseline_path: str | None,
+        raw_body: str = "",
+    ) -> None:
+        """baseline を採れた着地ページと同じ場所にいるときだけ発火トリガを撃つ。
+
+        発火の前提として **payload の生の構造が応答本文にそのまま反射している**ことを
+        要求する。本物の属性ブレイクアウトは payload を丸ごと生反射する（例:
+        ``value="" onmouseover=alert(<t>) x="">``）が、アプリが入力をサニタイズして
+        自前テンプレの同名ハンドラ（``onmouseover="alert(<echoed>)"``）に埋め込んだ場合は
+        属性が再構築され生 payload は本文に現れない。これにより、値/トークン/DOM 構造が
+        一致してもアプリ生成 UI の値エコーを confirmed 化しない。
+
+        着地パスが一致しない（中立 baseline が別ページに落ちた）／baseline 不確実
+        （``baseline_path is None``）／生反射が確認できない場合は発火を見送り、従来の
+        反射ヒューリスティックに委ねる。加算的・例外保護。
+        """
+        if self.browser.dialog_fired:
+            return
+        try:
+            if baseline_path is None:
+                return
+            if self._current_path() != baseline_path:
+                return
+            # 生反射の確認（応答本文が **完全に取れている** ときのみ否定証拠に使う。
+            # 50KB 上限に達している本文は切り詰められている可能性があり、上限超に反射した
+            # ブレイクアウトを取りこぼさないよう、非在でも抑止せず従来経路へフォールバック）。
+            if raw_body and len(raw_body) < _RESP_BODY_CAP:
+                nb = re.sub(r"\s+", "", raw_body)
+                npl = re.sub(r"\s+", "", payload or "")
+                if npl and npl not in nb:
+                    return
+            if await self.browser.trigger_injected_handlers(payload, baseline_handlers):
+                await asyncio.sleep(0.3 * self.sleep_factor)
+        except Exception:
+            pass
+
     async def verify_finding(self, finding: Finding) -> bool | None:
         from urllib.parse import parse_qs, urlparse
         is_url_param = finding.field_name in parse_qs(
@@ -458,6 +721,18 @@ class XSSScanner(BaseScanner):
                 baseline_source = body
         except Exception:
             baseline_source = ""
+        # baseline（ハンドラ＋リフレクション本文）は payload と同じ経路を中立値で開いた
+        # 応答から採る（フォーム action 応答固有の正規ハンドラを誤発火/誤検知しないため）。
+        # 型付きフィールドは検知時と同じ **type-valid な中立値** を使う（そうしないと
+        # type=url 等で中立値が検証に落ち baseline がフォームに留まり、着地パス不一致で
+        # 本物の confirmed XSS を未確証扱いにしてしまう）。
+        _details = finding.evidence_details or {}
+        baseline_handlers, baseline_path, baseline_submit_source = await self._baseline_handlers(
+            finding.url, 0, finding.field_name, is_url_param,
+            neutral_value=_neutral_baseline_value(_details.get("field_type", "text")),
+        )
+        if baseline_submit_source:
+            baseline_source = baseline_submit_source
         self.browser.reset_dialog()
         await self.log_payload_test(
             finding.field_name, finding.payload, "xss_verify", finding.url
@@ -470,7 +745,21 @@ class XSSScanner(BaseScanner):
             is_url_param,
         )
         await asyncio.sleep(0.5 * self.sleep_factor)
-        if self.browser.dialog_fired:
+        # 発火は dialog 由来の finding のみ再現（その payload は一意トークン付きなので
+        # ページ本来の alert(1) 等を発火・誤確証しない）。reflection 由来は下で反射を
+        # 再判定するため、能動発火はしない（無関係な既存ハンドラを撃たないため）。
+        token = ""
+        if getattr(finding, "evidence_type", "") == "xss_dialog":
+            token = str(_details.get("fire_token", "") or "")
+            # 生反射ガードには捕捉した生応答本文のみ渡す（DOM 直列化で生 payload が
+            # 一致せず、本文欠落時に本物の確証 XSS を未確証化しないため）。
+            _raw = (pair.get("response", {}) or {}).get("body") or ""
+            await self._fire_if_baseline_matches(
+                finding.payload, baseline_handlers, baseline_path, _raw
+            )
+        if self.browser.dialog_fired and (
+            not token or token in (self.browser.dialog_message or "")
+        ):
             return True
         if getattr(finding, "evidence_type", "") == "xss_dialog":
             return False

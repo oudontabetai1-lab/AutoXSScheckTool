@@ -163,6 +163,15 @@ class DOMXSSScanner(BaseScanner):
 
             await asyncio.sleep(2.0 * self.sleep_factor)  # Allow JS to settle
 
+            # インタラクション必須ハンドラ（onmouseover 等）や javascript: URL は
+            # 自動発火しないため、能動的に発火させてから sink ログ／dialog を読む。
+            if not self.browser.dialog_fired:
+                try:
+                    if await self.browser.trigger_injected_handlers(payload):
+                        await asyncio.sleep(0.3 * self.sleep_factor)
+                except Exception:
+                    pass
+
             # Read what the sink hooks captured
             log = await self.browser.page.evaluate(
                 "() => window.__wscan_domxss_log || []"
