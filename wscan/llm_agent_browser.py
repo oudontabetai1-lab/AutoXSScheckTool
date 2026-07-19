@@ -305,7 +305,7 @@ class AgentBrowserScanner:
     login_url       : ログインページ URL (省略可)
     max_steps       : エージェントの最大ステップ数
     monitor         : ダッシュボード通知用 MonitorServer (省略可)
-    recon_mode      : True にすると脆弱性テストをせず URL 偵察のみ行う
+    recon_mode      : True にすると URL 偵察を優先し、探索中の Finding も報告する
     """
 
     def __init__(
@@ -598,7 +598,7 @@ class AgentBrowserScanner:
         )
 
     def _build_recon_task(self) -> str:
-        """偵察専用タスク文字列を生成する。脆弱性テストは行わず URL 発見に特化。"""
+        """URL 発見を優先しつつ、探索中の脆弱性仮説も報告するタスクを生成する。"""
         auth_section = ""
         if self.login_url and self.auth_user and self.auth_pass:
             auth_section = (
@@ -609,24 +609,34 @@ class AgentBrowserScanner:
                 f"Confirm login succeeded before proceeding.\n"
             )
 
+        checks_section = "\n".join(
+            f"  - {_CHECK_DESCRIPTIONS.get(check, check)}"
+            for check in self.checks
+        )
+
         return (
             f"You are a web crawler performing site reconnaissance on: {self.target_url}\n"
             f"\n"
             f"## Objective\n"
             f"Explore the entire website to discover all reachable pages and URL patterns.\n"
-            f"Do NOT inject payloads or test for vulnerabilities.\n"
+            f"URL discovery is the primary objective. Do not perform an exhaustive payload sweep.\n"
             f"{auth_section}"
             f"\n"
             f"## Instructions\n"
             f"1. Start at {self.target_url}\n"
-            f"2. Click every link, navigate every menu, submit forms with harmless dummy data\n"
+            f"2. Click every link, navigate every menu, and submit forms with harmless dummy data\n"
             f"3. For each unique page you reach, output EXACTLY this line:\n"
             f"   PAGE_FOUND: <full URL>\n"
-            f"4. Continue until you have explored all reachable pages or reached the step limit\n"
-            f"5. After exploring, write a brief summary of the site structure\n"
+            f"4. While exploring, if an input or response suggests one of the checks below, "
+            f"you may use a targeted probe to investigate it:\n"
+            f"{checks_section}\n"
+            f"5. Report every vulnerability you find using the exact VULNERABILITY FOUND "
+            f"format required by the system message. Keep reporting PAGE_FOUND lines too.\n"
+            f"6. Continue until you have explored all reachable pages or reached the step limit\n"
+            f"7. After exploring, write a brief summary of the site structure and findings\n"
             f"\n"
             f"IMPORTANT: Output PAGE_FOUND: <url> for EVERY unique page you visit.\n"
-            f"This is site mapping, not penetration testing."
+            f"Reconnaissance remains the priority; a targeted security check must not stop site mapping."
         )
 
     async def _on_step(self, state, output, step_num: int) -> None:

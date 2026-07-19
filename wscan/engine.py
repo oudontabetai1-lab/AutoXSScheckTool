@@ -425,6 +425,8 @@ class ScanEngine:
         # セッション失効時の自動再ログイン
         relogin_on_expiry: bool = True,
         logged_in_marker: str = "",
+        # Hybrid の Agent Finding。決定論検証の完了後、レポート直前に併記する
+        additional_report_findings: Optional[list[Finding]] = None,
     ):
         # ユーザーが指定した URL は末尾スラッシュも含めてそのまま保持する。
         # 以前は url.rstrip("/") で末尾の "/" を一律に除去していたが、
@@ -475,6 +477,9 @@ class ScanEngine:
         self.spa_crawl = spa_crawl
         # ハイブリッドモード用シード URL (Agent偵察で発見したURL)
         self.seed_urls: list = list(seed_urls or [])
+        self.additional_report_findings: list[Finding] = list(
+            additional_report_findings or []
+        )
         primary_origin = self._origin_for(self.target_url)
         self.additional_target_urls: list[str] = self._normalize_scope_urls(list(target_urls or []))
         self.target_urls: list[str] = self._normalize_scope_urls(
@@ -1630,6 +1635,10 @@ class ScanEngine:
                 except Exception:
                     pass
                 await self._browser.close()
+
+            # Agent Finding は決定論 Finding の生成・検証を変えずに追加する。
+            # source の異なる同一 Finding は意図的に併記し、出自を隠さない。
+            self._merge_additional_report_findings()
 
             # ── Phase 4: Report ──────────────────────────────────────────
             if self.monitor: await self.monitor.emit_phase("report")
@@ -4372,6 +4381,13 @@ class ScanEngine:
     # =========================================================================
     # Phase 4: Report
     # =========================================================================
+
+    def _merge_additional_report_findings(self) -> None:
+        """外部 Finding をレポート集合へ一度だけ追加する（重複も出自別に保持）。"""
+        if not self.additional_report_findings:
+            return
+        self.all_findings.extend(self.additional_report_findings)
+        self.additional_report_findings.clear()
 
     def _phase_report(self):
         console.print(Rule("[bold green] Phase 4 / 4  ·  Report [/bold green]", style="green"))

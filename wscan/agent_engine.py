@@ -34,9 +34,30 @@ class AgentHandoffData:
     auth_pass: str = ""
     login_url: str = ""
     summary: str = ""
+    # 既存の位置引数との互換性を保つため、新規フィールドは末尾に置く。
+    findings: list = field(default_factory=list)
 
 # Base output directory (same convention as ScanEngine)
 OUTPUT_BASE = Path(__file__).parent.parent / "output"
+
+
+def _convert_agent_findings(agent_findings: list) -> list:
+    """Agent 独自形式の Finding を共通レポート形式へ変換する。"""
+    from wscan.scanners.base import Finding
+
+    return [
+        Finding(
+            check_type=af.check_type,
+            severity=af.severity,
+            url=af.url,
+            field_name=af.field_name,
+            payload=af.payload,
+            evidence=af.evidence,
+            source="agent",
+            agent_verified=getattr(af, "agent_verified", False),
+        )
+        for af in agent_findings
+    ]
 
 
 class AgentEngine:
@@ -105,7 +126,6 @@ class AgentEngine:
     async def run(self):
         """Run the agent browser scan end-to-end."""
         from wscan.llm_agent_browser import AgentBrowserScanner, AgentScanResult
-        from wscan.scanners.base import Finding
         from wscan.report import ReportGenerator
 
         console.print(Panel.fit(
@@ -135,19 +155,8 @@ class AgentEngine:
 
         result: AgentScanResult = await scanner.run()
 
-        # Convert AgentFindings → Finding (standard format)
-        findings: list[Finding] = []
-        for af in result.findings:
-            findings.append(Finding(
-                check_type=af.check_type,
-                severity=af.severity,
-                url=af.url,
-                field_name=af.field_name,
-                payload=af.payload,
-                evidence=af.evidence,
-                source="agent",
-                agent_verified=getattr(af, "agent_verified", False),
-            ))
+        # AgentFindings → 共通 Finding 変換は Hybrid 偵察でも同じ経路を使う。
+        findings = _convert_agent_findings(result.findings)
 
         # Save evidence JSON
         evidence_path = self.output_dir / "evidence.json"
@@ -213,8 +222,8 @@ class AgentEngine:
 
     async def run_recon(self) -> AgentHandoffData:
         """
-        偵察モードでエージェントを実行し、発見したURLとサイト情報を返す。
-        脆弱性テストは行わない。ハイブリッドスキャンの Phase 1 として使用。
+        偵察モードでエージェントを実行し、発見したURL・Finding・サイト情報を返す。
+        URL 発見を主目的としつつ、探索中に見つけた脆弱性仮説も Phase 2 へ渡す。
         """
         from wscan.llm_agent_browser import AgentBrowserScanner
 
@@ -238,7 +247,7 @@ class AgentEngine:
             llm_model=self.llm_model,
             ollama_url=self.ollama_url,
             llm_base_url=self.llm_base_url,
-            checks=[],   # 偵察モードでは脆弱性テストなし
+            checks=self.checks,
             headless=self.headless,
             auth_user=self.auth_user,
             auth_pass=self.auth_pass,
@@ -249,6 +258,7 @@ class AgentEngine:
         )
 
         result = await scanner.run()
+        findings = _convert_agent_findings(result.findings)
 
         # URL リストを生成: ターゲット URL を先頭に、重複を除去
         all_urls = [self.url]
@@ -258,11 +268,13 @@ class AgentEngine:
 
         console.print(
             f"\n[bold cyan]Agent偵察完了:[/bold cyan] "
-            f"[cyan]{len(all_urls)}[/cyan] URL 発見"
+            f"[cyan]{len(all_urls)}[/cyan] URL 発見 / "
+            f"[magenta]{len(findings)}[/magenta] Agent Finding"
         )
 
         return AgentHandoffData(
             discovered_urls=all_urls,
+            findings=findings,
             auth_user=self.auth_user,
             auth_pass=self.auth_pass,
             login_url=self.login_url,

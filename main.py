@@ -1948,6 +1948,7 @@ async def run_serve(args):
 
         # ── Hybrid Mode: Agent偵察 (Phase 1) → 通常スキャン (Phase 2) ────
         seed_urls: list = []
+        agent_findings: list = []
         if cfg.get("hybrid_mode"):
             from wscan.agent_engine import AgentEngine
             # 偵察側の base URL は、偵察(hybrid_llm)が openai_compatible のときだけ渡す。
@@ -1962,7 +1963,7 @@ async def run_serve(args):
                     llm_model=cfg.get("hybrid_model", "") or "",
                     ollama_url=cfg.get("hybrid_ollama_url", "http://localhost:11434") or "http://localhost:11434",
                     llm_base_url=_recon_base,
-                    checks=[],
+                    checks=checks,
                     headless=bool(cfg.get("headless", True)),
                     auth_user=cfg.get("auth_user", "") or "",
                     auth_pass=cfg.get("auth_pass", "") or "",
@@ -1974,8 +1975,11 @@ async def run_serve(args):
                 )
                 handoff = await recon_engine.run_recon()
                 seed_urls = handoff.discovered_urls
+                agent_findings = handoff.findings
                 await monitor.emit_status(
-                    f"🔀 Phase 2: {len(seed_urls)} URL 発見済み。通常スキャン開始...", "running"
+                    f"🔀 Phase 2: {len(seed_urls)} URL / "
+                    f"{len(agent_findings)} Agent Finding 発見済み。通常スキャン開始...",
+                    "running",
                 )
             except Exception as exc:
                 console.print(
@@ -1983,6 +1987,7 @@ async def run_serve(args):
                     f"URL シードなしで通常スキャンを続行します。[/yellow]"
                 )
                 seed_urls = []
+                agent_findings = []
 
         await monitor.emit_status(f"Starting scan of {url}", "running")
 
@@ -2079,6 +2084,7 @@ async def run_serve(args):
                     )
                 ),
                 seed_urls=seed_urls or None,
+                additional_report_findings=agent_findings or None,
                 manual_crawl_path=cfg.get("manual_crawl_file", "") or "",
                 headers=cfg.get("headers", {}) or {},
                 header_refresh_cmd=cfg.get("header_refresh_cmd", "") or "",
