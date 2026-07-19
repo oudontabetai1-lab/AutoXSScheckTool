@@ -127,6 +127,8 @@ class AgentFinding:
     field_name: str
     payload: str
     evidence: str
+    source: str = "agent"
+    agent_verified: bool = False
 
     def to_dict(self) -> dict:
         return {
@@ -136,6 +138,8 @@ class AgentFinding:
             "field_name": self.field_name,
             "payload": self.payload,
             "evidence": self.evidence,
+            "source": self.source,
+            "agent_verified": self.agent_verified,
         }
 
 
@@ -277,6 +281,7 @@ def _parse_findings_from_text(text: str, nonce: str = "") -> list[AgentFinding]:
             field_name=field_name,
             payload=m.group("payload").strip(),
             evidence=m.group("evidence").strip(),
+            source="agent",
         ))
     return findings
 

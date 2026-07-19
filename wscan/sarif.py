@@ -193,6 +193,8 @@ class SarifExporter:
                 "field_name":       field_name,
                 "payload":          payload,
                 "verified":         f.get("verified", True),
+                "source":           f.get("source", "scanner"),
+                "agent_verified":   f.get("agent_verified", False),
                 "compliance_refs":  f.get("compliance_refs", {}),
             },
         }

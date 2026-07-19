@@ -145,6 +145,8 @@ class AgentEngine:
                 field_name=af.field_name,
                 payload=af.payload,
                 evidence=af.evidence,
+                source="agent",
+                agent_verified=getattr(af, "agent_verified", False),
             ))
 
         # Save evidence JSON
