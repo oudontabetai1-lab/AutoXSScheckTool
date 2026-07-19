@@ -328,6 +328,8 @@ class ScanEngine:
         claude_model: str = "claude-haiku-4-5-20251001",
         openai_base_url: str = "",
         role_models: Optional[dict] = None,
+        llm_timeout_seconds: float = 30.0,
+        llm_max_retries: int = 2,
         checks: Optional[list] = None,
         output_dir: Optional[str] = None,
         timeout: int = 30,
@@ -704,6 +706,8 @@ class ScanEngine:
             claude_model=claude_model,
             openai_base_url=openai_base_url,
             role_models=role_models,
+            llm_timeout_seconds=llm_timeout_seconds,
+            llm_max_retries=llm_max_retries,
             default_payloads=payloads_data,
             prompt_templates=prompt_templates,
             enable_web_browsing=enable_llm_web_browsing,
@@ -3871,11 +3875,19 @@ class ScanEngine:
             and not adaptive_done
             and (checks_executed > 0 or checks_skipped_done > 0)
         ):
-            await self._adaptive_attack_field(
+            adaptive_payloads = await self._adaptive_attack_field(
                 url, form_index, field, is_url_param, ordered_checks, field_plan
             )
-            # adaptive 完了を記録（この後の abort/クラッシュでも resume が再実行しない）。
-            self._checkpoint_mark_done(url, field_name, form_index, "(adaptive)", is_url_param)
+            # LLM 障害時 (None) は未完のまま残し、resume で再試行する。正常応答が
+            # 0 件 ([]) の場合だけは完了扱いにして、無限再試行を防ぐ。
+            if adaptive_payloads is not None:
+                self._checkpoint_mark_done(
+                    url, field_name, form_index, "(adaptive)", is_url_param
+                )
+                if self.monitor:
+                    await self.monitor.emit_status(
+                        f"adaptive payloads generated: {len(adaptive_payloads)}件"
+                    )
 
         self.completed_fields += 1
         # フィールド完了ごとに進捗を永続化（中断しても次回ここから再開できる）
@@ -3895,7 +3907,7 @@ class ScanEngine:
         is_url_param: bool,
         check_names: list,
         field_plan: Optional[FieldAttackPlan],
-    ):
+    ) -> Optional[list[str]]:
         """
         Phase 3b: Adaptive AI round.
         For each check type, get current page HTML, ask LLM to generate
@@ -3907,8 +3919,10 @@ class ScanEngine:
         try:
             page_html = await self.browser.page.content()
         except Exception:
-            return
+            return None
 
+        generated_payloads: list[str] = []
+        generation_failed = False
         for check_name in check_names:
             scanner = self.scanners.get(check_name)
             if scanner is None:
@@ -3933,6 +3947,11 @@ class ScanEngine:
                 waf_name=self.waf_detector._detected,
             )
 
+            if adaptive_payloads is None:
+                generation_failed = True
+                continue
+
+            generated_payloads.extend(adaptive_payloads)
             if not adaptive_payloads:
                 continue
 
@@ -3962,6 +3981,9 @@ class ScanEngine:
                     self._check_page_for_flags(post_html, url)
                 except Exception:
                     pass
+
+        # 一部のチェックだけ成功した場合も、失敗分を resume で回収できるよう未完とする。
+        return None if generation_failed else generated_payloads
 
     def _generate_heuristic_plans_for_pages(self, pages: list) -> dict:
         """
@@ -4913,61 +4935,13 @@ class ScanEngine:
 
     async def _call_llm_text(self, prompt: str) -> str:
         """Call the configured LLM and return raw text response."""
-        provider = self.payload_gen.provider
+        from . import llm_client
+
         with self.payload_gen.use_role("report"):
-            if provider == "claude":
-                client = self.payload_gen._get_anthropic_client()
-                if client:
-                    import asyncio as _aio
-                    loop = _aio.get_event_loop()
-                    response = await loop.run_in_executor(
-                        None,
-                        lambda: client.messages.create(
-                            model=self.payload_gen.claude_model,
-                            max_tokens=1500,
-                            messages=[{"role": "user", "content": prompt}],
-                        ),
-                    )
-                    return response.content[0].text
-            elif provider == "openai":
-                import httpx
-                from . import llm_endpoint
-                api_key = getattr(self.payload_gen, "openai_api_key", None)
-                if api_key:
-                    async with httpx.AsyncClient(timeout=60.0) as client:
-                        resp = await client.post(
-                            llm_endpoint.chat_completions_url(getattr(self.payload_gen, "openai_base_url", "")),
-                            headers={"Authorization": f"Bearer {api_key}"},
-                            json={"model": self.payload_gen.openai_model,
-                                  "messages": [{"role": "user", "content": prompt}],
-                                  "max_tokens": 1500},
-                        )
-                        if resp.status_code == 200:
-                            return resp.json()["choices"][0]["message"]["content"]
-            elif provider == "gemini":
-                import httpx, os
-                api_key = os.environ.get("GEMINI_API_KEY", "")
-                if api_key:
-                    url = (
-                        f"https://generativelanguage.googleapis.com/v1beta/models/"
-                        f"{self.payload_gen.gemini_model}:generateContent?key={api_key}"
-                    )
-                    async with httpx.AsyncClient(timeout=60.0) as client:
-                        resp = await client.post(url, json={"contents": [{"parts": [{"text": prompt}]}]})
-                        if resp.status_code == 200:
-                            return resp.json()["candidates"][0]["content"]["parts"][0]["text"]
-            else:
-                # Ollama
-                import httpx
-                async with httpx.AsyncClient(timeout=60.0) as client:
-                    resp = await client.post(
-                        f"{self.payload_gen.ollama_url}/api/generate",
-                        json={"model": self.payload_gen.ollama_model, "prompt": prompt,
-                              "stream": False, "options": {"num_predict": 1500}},
-                    )
-                    if resp.status_code == 200:
-                        return resp.json().get("response", "")
-        return ""
+            text = await llm_client.complete_text(
+                self.payload_gen, prompt, max_tokens=1500, timeout=60
+            )
+        return text or ""
 
     def _print_summary(self):
         console.print()

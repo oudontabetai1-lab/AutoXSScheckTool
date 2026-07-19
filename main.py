@@ -86,6 +86,8 @@ def _load_config(path: Path = _CONFIG_PATH) -> dict:
     cfg["openai_model"]            = str(l.get("openai_model", "gpt-4o-mini"))
     cfg["gemini_model"]            = str(l.get("gemini_model", "gemini-2.0-flash"))
     cfg["claude_model"]            = str(l.get("claude_model", "claude-haiku-4-5-20251001"))
+    cfg["llm_timeout_seconds"]     = float(l.get("timeout_seconds", 30))
+    cfg["llm_max_retries"]         = int(l.get("max_retries", 2))
     # 外部 OpenAI 互換 LLM（tsuzumi2 等）のベース URL。config ファイルの値のみを
     # CLI/ダッシュボードの既定にする。env(WSCAN_LLM_BASE_URL/OPENAI_BASE_URL)は
     # ここで畳み込まない — 畳み込むと --llm openai(公式) 実行時に env 値が「明示指定」
@@ -1347,6 +1349,8 @@ async def run_scan(args):
             claude_model=getattr(args, "claude_model", "claude-haiku-4-5-20251001"),
             openai_base_url=_effective_llm_base_url(args),
             role_models=getattr(args, "role_models", {}),
+            llm_timeout_seconds=_CFG.get("llm_timeout_seconds", 30),
+            llm_max_retries=_CFG.get("llm_max_retries", 2),
         )
         _wizard_result = await run_wizard(_pg)
         if _wizard_result is not None:
@@ -1496,6 +1500,8 @@ async def run_scan(args):
             claude_model=args.claude_model,
             openai_base_url=_effective_llm_base_url(args),
             role_models=getattr(args, "role_models", {}),
+            llm_timeout_seconds=_CFG.get("llm_timeout_seconds", 30),
+            llm_max_retries=_CFG.get("llm_max_retries", 2),
             checks=checks_list,
             output_dir=args.output,
             timeout=args.timeout,
@@ -1821,6 +1827,8 @@ async def run_serve(args):
         "claude_model": _CFG.get("claude_model", "claude-haiku-4-5-20251001"),
         "openai_base_url": _CFG.get("openai_base_url", ""),
         "role_models": _CFG.get("role_models", {}),
+        "llm_timeout_seconds": _CFG.get("llm_timeout_seconds", 30),
+        "llm_max_retries": _CFG.get("llm_max_retries", 2),
         "auth_user": _CFG.get("auth_user", ""),
         "auth_pass": _CFG.get("auth_pass", ""),
         "login_url": _CFG.get("login_url", ""),
@@ -1995,6 +2003,12 @@ async def run_serve(args):
                 claude_model=cfg.get("claude_model", "claude-haiku-4-5-20251001") or "claude-haiku-4-5-20251001",
                 openai_base_url=_scan_base,
                 role_models=cfg.get("role_models", {}) or {},
+                llm_timeout_seconds=float(
+                    cfg.get("llm_timeout_seconds", _CFG.get("llm_timeout_seconds", 30))
+                ),
+                llm_max_retries=int(
+                    cfg.get("llm_max_retries", _CFG.get("llm_max_retries", 2))
+                ),
                 auth_user=cfg.get("auth_user", "") or "",
                 auth_pass=cfg.get("auth_pass", "") or "",
                 cookies=cfg.get("cookies", "") or "",

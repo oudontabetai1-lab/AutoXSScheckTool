@@ -95,6 +95,10 @@ llm:
   #    指定し、API キーは WSCAN_LLM_API_KEY（無ければ OPENAI_API_KEY）で渡す。
   provider: ollama
 
+  # LLM API 1回あたりのタイムアウト秒数と、一時失敗時の最大リトライ回数
+  timeout_seconds: 30
+  max_retries: 2
+
   # Ollama
   ollama_model: llama3
   ollama_url: "http://localhost:11434"

@@ -24,6 +24,8 @@ from typing import Optional, TYPE_CHECKING
 from rich.console import Console
 from rich.rule import Rule
 
+from . import llm_client
+
 if TYPE_CHECKING:
     from wscan.payload_gen import PayloadGenerator
 
@@ -438,14 +440,12 @@ class AdaptivePayloadEngine:
         payloads_tried: list[str],
         page_html: str,
         waf_name: Optional[str] = None,
-    ) -> list[str]:
+    ) -> Optional[list[str]]:
         """
         Analyse the page HTML and generate adaptive bypass payloads.
-        Returns an empty list if LLM is unavailable.
+        LLM 呼び出し失敗時は ``None``、正常応答から生成対象が無い場合は空 list を返す。
         """
         if self.pg.provider == "none":
-            return []
-        if not await self.pg._check_llm_available():
             return []
 
         cheatsheet = _get_cheatsheet(check_type)
@@ -482,21 +482,18 @@ class AdaptivePayloadEngine:
         provider = self.pg.provider
         _adaptive_header(check_type, field_name, provider)
 
-        raw: Optional[str] = None
         with self.pg.use_role("adaptive"):
-            if provider == "claude":
-                raw = await self._stream_claude(prompt)
-            elif provider == "openai":
-                raw = await self._stream_openai(prompt)
-            elif provider == "gemini":
-                raw = await self._call_gemini(prompt)
-            else:
-                raw = await self._stream_ollama(prompt)
+            raw = await llm_client.complete_text(
+                self.pg,
+                prompt,
+                max_tokens=1000,
+                temperature=0.8,
+            )
 
         _adaptive_footer()
 
-        if not raw:
-            return []
+        if raw is None:
+            return None
 
         payloads = _parse_payload_lines(raw, payloads_tried)
         if payloads:

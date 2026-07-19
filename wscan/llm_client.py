@@ -1,0 +1,157 @@
+"""生テキストを返す LLM 呼び出しの共通クライアント。"""
+from __future__ import annotations
+
+import asyncio
+import os
+from typing import Any
+
+import httpx
+
+from . import llm_endpoint
+
+
+_RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
+
+
+def is_retryable(status_or_exc: Any) -> bool:
+    """HTTP ステータスまたは例外が一時的な失敗を示すか判定する。"""
+    if isinstance(status_or_exc, int):
+        return status_or_exc in _RETRYABLE_STATUS_CODES
+
+    status_code = getattr(status_or_exc, "status_code", None)
+    if isinstance(status_code, int):
+        return status_code in _RETRYABLE_STATUS_CODES
+
+    if isinstance(status_or_exc, (
+        httpx.TimeoutException,
+        httpx.ConnectError,
+        httpx.ReadError,
+        httpx.WriteError,
+        httpx.RemoteProtocolError,
+    )):
+        return True
+
+    # Anthropic SDK は httpx の接続・タイムアウト例外を専用例外で包む。
+    return status_or_exc.__class__.__name__ in {"APIConnectionError", "APITimeoutError"}
+
+
+def backoff_seconds(attempt: int, base: float = 0.5, cap: float = 8.0) -> float:
+    """0 始まりの再試行番号から指数バックオフ秒数を計算する。"""
+    return min(cap, base * (2 ** max(0, attempt)))
+
+
+async def complete_text(
+    pg,
+    prompt,
+    *,
+    max_tokens=400,
+    temperature=0.3,
+    timeout=None,
+    retries=None,
+) -> str | None:
+    """設定済みプロバイダへ問い合わせ、生テキストまたは ``None`` を返す。"""
+    provider = getattr(pg, "provider", "none")
+    if provider == "none":
+        return None
+
+    request_timeout = (
+        timeout if timeout is not None else getattr(pg, "llm_timeout_seconds", 30)
+    )
+    max_retries = retries if retries is not None else getattr(pg, "llm_max_retries", 2)
+    try:
+        request_timeout = float(request_timeout)
+        max_retries = max(0, int(max_retries))
+    except (TypeError, ValueError):
+        return None
+
+    api_key = None
+    anthropic_client = None
+    try:
+        if provider == "claude":
+            anthropic_client = pg._get_anthropic_client()
+            if not anthropic_client:
+                return None
+        elif provider == "openai":
+            api_key = getattr(pg, "openai_api_key", None)
+            if not api_key:
+                return None
+        elif provider == "gemini":
+            api_key = os.environ.get("GEMINI_API_KEY")
+            if not api_key:
+                return None
+        elif provider != "ollama":
+            return None
+    except Exception:
+        return None
+
+    for attempt in range(max_retries + 1):
+        try:
+            if provider == "claude":
+                response = await asyncio.to_thread(
+                    anthropic_client.messages.create,
+                    model=pg.claude_model,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                    timeout=request_timeout,
+                    messages=[{"role": "user", "content": prompt}],
+                )
+                return response.content[0].text if response.content else None
+
+            async with httpx.AsyncClient(timeout=request_timeout) as client:
+                if provider == "openai":
+                    response = await client.post(
+                        llm_endpoint.chat_completions_url(pg.openai_base_url),
+                        headers={"Authorization": f"Bearer {api_key}"},
+                        json={
+                            "model": pg.openai_model,
+                            "messages": [{"role": "user", "content": prompt}],
+                            "max_tokens": max_tokens,
+                            "temperature": temperature,
+                        },
+                    )
+                elif provider == "gemini":
+                    url = (
+                        "https://generativelanguage.googleapis.com/v1beta/models/"
+                        f"{pg.gemini_model}:generateContent?key={api_key}"
+                    )
+                    response = await client.post(
+                        url,
+                        json={
+                            "contents": [{"parts": [{"text": prompt}]}],
+                            "generationConfig": {
+                                "maxOutputTokens": max_tokens,
+                                "temperature": temperature,
+                            },
+                        },
+                    )
+                else:
+                    response = await client.post(
+                        f"{pg.ollama_url}/api/generate",
+                        json={
+                            "model": pg.ollama_model,
+                            "prompt": prompt,
+                            "stream": False,
+                            "options": {
+                                "temperature": temperature,
+                                "num_predict": max_tokens,
+                            },
+                        },
+                    )
+
+            if response.status_code == 200:
+                data = response.json()
+                if provider == "openai":
+                    return data["choices"][0]["message"]["content"]
+                if provider == "gemini":
+                    return data["candidates"][0]["content"]["parts"][0]["text"]
+                return data.get("response", "")
+
+            failure: Any = response.status_code
+        except Exception as exc:
+            failure = exc
+
+        if attempt >= max_retries or not is_retryable(failure):
+            return None
+        await asyncio.sleep(backoff_seconds(attempt))
+
+    return None
