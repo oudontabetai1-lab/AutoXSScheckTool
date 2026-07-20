@@ -451,13 +451,18 @@ class AdaptivePayloadEngine:
         payloads_tried: list[str],
         page_html: str,
         waf_name: Optional[str] = None,
-    ) -> Optional[list[str]]:
+        *,
+        return_status: bool = False,
+    ) -> Optional[list[str]] | tuple[Optional[list[str]], llm_client.CompletionStatus]:
         """
         Analyse the page HTML and generate adaptive bypass payloads.
         一時的な LLM 失敗時は ``None``、恒久失敗または生成対象なしは空 list を返す。
+        ``return_status=True`` のときだけ、engine の可用性キャッシュ更新用に
+        ``(payloads, status)`` を返す。既定の戻り値は従来どおり。
         """
         if self.pg.provider == "none":
-            return []
+            result: Optional[list[str]] = []
+            return (result, "unavailable") if return_status else result
 
         cheatsheet = _get_cheatsheet(check_type)
         observations = _build_observations(page_html, payloads_tried)
@@ -507,20 +512,20 @@ class AdaptivePayloadEngine:
         # 一時障害と空応答は resume で回収し、設定・認証等の恒久障害は完了扱いで
         # 収束させる。非空テキストを解析できた結果が 0 件の場合も [] とする。
         if status in {"empty", "transient"}:
-            return None
-        if status in {"unavailable", "permanent"}:
-            return []
-        if raw is None:  # status と本文の不整合に対する防御
-            return None
-
-        payloads = _parse_payload_lines(raw, payloads_tried)
+            payloads = None
+        elif status in {"unavailable", "permanent"}:
+            payloads = []
+        elif raw is None:  # status と本文の不整合に対する防御
+            payloads = None
+        else:
+            payloads = _parse_payload_lines(raw, payloads_tried)
         if payloads:
             console.print(
                 f"  [bold magenta][AdaptiveAI][/bold magenta] "
                 f"Generated [cyan]{len(payloads)}[/cyan] bypass payload(s) for "
                 f"[green]{field_name}[/green] ({check_type})"
             )
-        return payloads
+        return (payloads, status) if return_status else payloads
 
     # ------------------------------------------------------------------
     # Seed mutation (LLM payload variation)

@@ -26,6 +26,13 @@ if TYPE_CHECKING:
 console = Console()
 
 
+def _scope_list(values) -> list[str]:
+    """API/UI の list または改行・カンマ区切り文字列を list に揃える。"""
+    if isinstance(values, str):
+        values = values.replace(",", "\n").splitlines()
+    return [str(value).strip() for value in (values or []) if str(value).strip()]
+
+
 @dataclass
 class AgentHandoffData:
     """偵察フェーズで収集したデータ（通常スキャンへの引き渡しデータ）。"""
@@ -81,6 +88,10 @@ class AgentEngine:
     open_report     : Auto-open HTML report in browser on completion
     monitor         : Optional MonitorServer for real-time updates
     port            : Dashboard port (used when started with dashboard)
+    target_urls     : Agent の security probe を許可する追加攻撃対象 URL
+    access_urls     : 訪問・認証のみ許可する URL
+    exclude_urls    : security probe を禁止する URL パターン
+    exclude_fields  : security probe を禁止するフィールド名
     """
 
     def __init__(
@@ -100,6 +111,10 @@ class AgentEngine:
         monitor: Optional["MonitorServer"] = None,
         port: int = 8765,
         llm_base_url: str = "",
+        target_urls: Optional[list[str]] = None,
+        access_urls: Optional[list[str]] = None,
+        exclude_urls: Optional[list[str]] = None,
+        exclude_fields: Optional[list[str]] = None,
     ):
         self.url = url.rstrip("/")
         self.llm_provider = llm_provider
@@ -115,6 +130,10 @@ class AgentEngine:
         self.open_report = open_report
         self.monitor = monitor
         self.port = port
+        self.target_urls = _scope_list(target_urls)
+        self.access_urls = _scope_list(access_urls)
+        self.exclude_urls = _scope_list(exclude_urls)
+        self.exclude_fields = _scope_list(exclude_fields)
 
         ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         self.output_dir = Path(output_dir) if output_dir else OUTPUT_BASE / f"agent_{ts}"
@@ -152,6 +171,10 @@ class AgentEngine:
             login_url=self.login_url,
             max_steps=self.max_steps,
             monitor=self.monitor,
+            target_urls=self.target_urls,
+            access_urls=self.access_urls,
+            exclude_urls=self.exclude_urls,
+            exclude_fields=self.exclude_fields,
         )
 
         result: AgentScanResult = await scanner.run()
@@ -256,6 +279,10 @@ class AgentEngine:
             max_steps=self.max_steps,
             monitor=self.monitor,
             recon_mode=True,
+            target_urls=self.target_urls,
+            access_urls=self.access_urls,
+            exclude_urls=self.exclude_urls,
+            exclude_fields=self.exclude_fields,
         )
 
         result = await scanner.run()

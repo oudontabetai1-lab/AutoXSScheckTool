@@ -137,6 +137,28 @@ class AdaptiveGenerationRetryTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result, [])
 
+    async def test_generate_can_return_status_without_changing_default_contract(self):
+        engine = AdaptivePayloadEngine(_RetryPG())
+        with patch(
+            "wscan.adaptive_payload.llm_client.complete_text",
+            new_callable=AsyncMock,
+            return_value=(None, "permanent"),
+        ):
+            legacy_result = await engine.generate(
+                "xss", "q", "https://example.test", [], "<html></html>"
+            )
+            status_result = await engine.generate(
+                "xss",
+                "q",
+                "https://example.test",
+                [],
+                "<html></html>",
+                return_status=True,
+            )
+
+        self.assertEqual(legacy_result, [])
+        self.assertEqual(status_result, ([], "permanent"))
+
     async def test_complete_text_retries_read_error_then_returns_payloads(self):
         calls = 0
 

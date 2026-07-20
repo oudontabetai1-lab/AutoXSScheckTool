@@ -8,7 +8,13 @@ from wscan.engine import ScanEngine
 
 
 class AdaptiveCheckpointRetryTests(unittest.IsolatedAsyncioTestCase):
-    def _engine(self, generation_result, *, scan_side_effect=None):
+    def _engine(
+        self,
+        generation_result,
+        *,
+        generation_status=None,
+        scan_side_effect=None,
+    ):
         scan_field = AsyncMock(return_value=[])
         if scan_side_effect is not None:
             scan_field.side_effect = scan_side_effect
@@ -26,7 +32,13 @@ class AdaptiveCheckpointRetryTests(unittest.IsolatedAsyncioTestCase):
             _adaptive_llm_available=None,
             _adaptive_llm_availability_lock=asyncio.Lock(),
             adaptive_engine=types.SimpleNamespace(
-                generate=AsyncMock(return_value=generation_result)
+                generate=AsyncMock(
+                    return_value=(
+                        generation_result,
+                        generation_status
+                        or ("transient" if generation_result is None else "ok"),
+                    )
+                )
             ),
             browser=types.SimpleNamespace(
                 page=types.SimpleNamespace(content=AsyncMock(return_value="<html></html>"))
@@ -162,6 +174,40 @@ class AdaptiveCheckpointRetryTests(unittest.IsolatedAsyncioTestCase):
         )
         engine.adaptive_engine.generate.assert_not_awaited()
 
+    async def test_permanent_or_unavailable_generation_disables_later_calls(self):
+        for status in ("permanent", "unavailable"):
+            with self.subTest(status=status):
+                engine = self._engine([], generation_status=status)
+
+                first = await engine._adaptive_attack_field(
+                    "https://example.test", 0, {"name": "q"}, False, ["xss"], None
+                )
+                second = await engine._adaptive_attack_field(
+                    "https://example.test", 0, {"name": "other"}, False, ["xss"], None
+                )
+
+                self.assertEqual(first, [])
+                self.assertEqual(second, [])
+                self.assertFalse(engine._adaptive_llm_available)
+                engine.adaptive_engine.generate.assert_awaited_once()
+
+    async def test_transient_or_empty_generation_keeps_availability_for_retry(self):
+        for status in ("transient", "empty"):
+            with self.subTest(status=status):
+                engine = self._engine(None, generation_status=status)
+
+                first = await engine._adaptive_attack_field(
+                    "https://example.test", 0, {"name": "q"}, False, ["xss"], None
+                )
+                second = await engine._adaptive_attack_field(
+                    "https://example.test", 0, {"name": "other"}, False, ["xss"], None
+                )
+
+                self.assertIsNone(first)
+                self.assertIsNone(second)
+                self.assertTrue(engine._adaptive_llm_available)
+                self.assertEqual(engine.adaptive_engine.generate.await_count, 2)
+
 
 class AdaptivePartialResumeTests(unittest.IsolatedAsyncioTestCase):
     async def test_resume_retries_only_failed_check(self):
@@ -178,8 +224,8 @@ class AdaptivePartialResumeTests(unittest.IsolatedAsyncioTestCase):
         async def generate(*, check_type, **_kwargs):
             generation_attempts[check_type] = generation_attempts.get(check_type, 0) + 1
             if check_type == "sqli" and generation_attempts[check_type] == 1:
-                return None
-            return [f"adaptive-{check_type}"]
+                return None, "transient"
+            return [f"adaptive-{check_type}"], "ok"
 
         xss_scan = AsyncMock(side_effect=[[], []])
         sqli_scan = AsyncMock(side_effect=[[], []])

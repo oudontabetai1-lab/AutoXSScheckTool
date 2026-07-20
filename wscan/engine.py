@@ -4010,20 +4010,40 @@ class ScanEngine:
             ):
                 continue
 
+            # 別 field/check の恒久失敗で可用性キャッシュが倒れた場合も、以降は
+            # LLM を呼ばずフォールバック完了として収束させる。
+            if self._adaptive_llm_available is False:
+                self._checkpoint_mark_done(
+                    url,
+                    field_name,
+                    form_index,
+                    adaptive_checkpoint_check,
+                    is_url_param,
+                )
+                self._save_checkpoint()
+                continue
+
             # Standard payloads that were tried in the first pass
             plan_payloads = field_plan.custom_payloads.get(check_name, []) if field_plan else []
             defaults = self.payload_gen.default_payloads.get(check_name, [])
             tried = plan_payloads + [p for p in defaults if p not in plan_payloads]
 
             # Ask LLM for bypass payloads (include detected WAF for targeted evasion)
-            adaptive_payloads = await self.adaptive_engine.generate(
+            adaptive_payloads, generation_status = await self.adaptive_engine.generate(
                 check_type=check_name,
                 field_name=field_name,
                 url=url,
                 payloads_tried=tried,
                 page_html=page_html,
                 waf_name=self.waf_detector._detected,
+                return_status=True,
             )
+
+            # API キー・モデル・URL 等の恒久不備が判明したら scan 内キャッシュを倒す。
+            # 後続 field/check は上の可用性ゲートで収束し、同じ失敗呼び出しを繰り返さない。
+            # empty/transient は resume での再試行と recall を維持するため倒さない。
+            if generation_status in {"permanent", "unavailable"}:
+                self._adaptive_llm_available = False
 
             if adaptive_payloads is None:
                 generation_failed = True
@@ -4481,7 +4501,7 @@ class ScanEngine:
         excluded_count = 0
         for finding in self.additional_report_findings:
             url = str(getattr(finding, "url", "") or "").strip()
-            if self._is_access_allowed_url(url) and not self._is_url_excluded(url):
+            if self._is_attack_target_url(url) and not self._is_url_excluded(url):
                 allowed_findings.append(finding)
             else:
                 excluded_count += 1

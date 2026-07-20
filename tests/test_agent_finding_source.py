@@ -12,6 +12,7 @@ from wscan.llm_agent_browser import (
     AgentFinding,
     AgentMemory,
     _parse_findings_from_text,
+    security_probe_allowed,
 )
 from wscan.sarif import SarifExporter
 from wscan.scanners.base import Finding
@@ -100,6 +101,8 @@ Evidence: alert dialog was observed
             target_url="http://fixture.test",
             checks=["xss"],
             recon_mode=True,
+            access_urls=["http://idp.test"],
+            exclude_urls=["/private/*"],
         )
 
         task = scanner._build_recon_task()
@@ -107,9 +110,71 @@ Evidence: alert dialog was observed
         self.assertIn("URL discovery is the primary objective", task)
         self.assertIn("Cross-Site Scripting", task)
         self.assertIn("VULNERABILITY FOUND", task)
+        self.assertIn("configured login form is the only access-only exception", task)
+        policy = scanner._build_security_scope_policy()
+        self.assertIn("http://idp.test", policy)
+        self.assertIn("/private/*", policy)
+
+    def test_security_probe_scope_rejects_access_only_offsite_and_excluded(self):
+        target_urls = ["http://fixture.test", "http://admin.test/panel"]
+        exclude_urls = ["/private/*"]
+
+        self.assertTrue(
+            security_probe_allowed(
+                "http://fixture.test/search", target_urls, exclude_urls
+            )
+        )
+        self.assertTrue(
+            security_probe_allowed(
+                "http://admin.test/panel/users", target_urls, exclude_urls
+            )
+        )
+        self.assertFalse(
+            security_probe_allowed("http://idp.test/login", target_urls, exclude_urls)
+        )
+        self.assertFalse(
+            security_probe_allowed("http://offsite.test/form", target_urls, exclude_urls)
+        )
+        self.assertFalse(
+            security_probe_allowed(
+                "http://fixture.test/private/edit", target_urls, exclude_urls
+            )
+        )
+        self.assertFalse(
+            security_probe_allowed(
+                "http://fixture.test/search",
+                target_urls,
+                exclude_urls,
+                field_name="csrf_token",
+                exclude_fields=["csrf_token"],
+            )
+        )
 
 
 class AgentReconHandoffTests(unittest.IsolatedAsyncioTestCase):
+    async def test_recon_step_blocks_probe_actions_on_access_only_page(self):
+        class Action:
+            def __init__(self, name):
+                self.name = name
+
+            def model_dump(self, **_kwargs):
+                return {self.name: {}}
+
+        scanner = AgentBrowserScanner(
+            target_url="http://fixture.test",
+            access_urls=["http://idp.test"],
+            recon_mode=True,
+        )
+        output = SimpleNamespace(
+            action=[Action("input"), Action("evaluate"), Action("click")]
+        )
+
+        await scanner._on_step(
+            SimpleNamespace(url="http://idp.test/help"), output, 1
+        )
+
+        self.assertEqual([action.name for action in output.action], ["click"])
+
     async def test_run_recon_returns_agent_finding_in_standard_format(self):
         agent_finding = AgentFinding(
             check_type="xss",
@@ -131,6 +196,10 @@ class AgentReconHandoffTests(unittest.IsolatedAsyncioTestCase):
                 engine = AgentEngine(
                     url="http://fixture.test",
                     checks=["xss"],
+                    target_urls=["http://admin.test"],
+                    access_urls=["http://idp.test"],
+                    exclude_urls=["/private/*"],
+                    exclude_fields=["csrf_token"],
                     output_dir=output_dir,
                     open_report=False,
                 )
@@ -140,6 +209,10 @@ class AgentReconHandoffTests(unittest.IsolatedAsyncioTestCase):
         scanner_kwargs = scanner_cls.call_args.kwargs
         self.assertEqual(scanner_kwargs["checks"], ["xss"])
         self.assertTrue(scanner_kwargs["recon_mode"])
+        self.assertEqual(scanner_kwargs["target_urls"], ["http://admin.test"])
+        self.assertEqual(scanner_kwargs["access_urls"], ["http://idp.test"])
+        self.assertEqual(scanner_kwargs["exclude_urls"], ["/private/*"])
+        self.assertEqual(scanner_kwargs["exclude_fields"], ["csrf_token"])
         self.assertEqual(
             handoff.discovered_urls,
             ["http://fixture.test", "http://fixture.test/search"],
@@ -246,13 +319,19 @@ class HybridFindingMergeTests(unittest.TestCase):
             )
 
         in_scope = finding("http://fixture.test/search")
+        access_only = finding("http://idp.test/login")
         excluded = finding("http://fixture.test/private/result")
         offsite = finding("http://offsite.test/search")
         engine = object.__new__(ScanEngine)
         engine.all_findings = []
-        engine.additional_report_findings = [in_scope, excluded, offsite]
+        engine.additional_report_findings = [
+            in_scope,
+            access_only,
+            excluded,
+            offsite,
+        ]
         engine.target_urls = ["http://fixture.test"]
-        engine.access_urls = []
+        engine.access_urls = ["http://idp.test"]
         engine.exclude_urls = {"/private/*"}
 
         with patch("wscan.engine.console.print") as print_mock:
@@ -261,7 +340,7 @@ class HybridFindingMergeTests(unittest.TestCase):
         self.assertEqual(engine.all_findings, [in_scope])
         self.assertEqual(engine.additional_report_findings, [])
         print_mock.assert_called_once()
-        self.assertIn("2", print_mock.call_args.args[0])
+        self.assertIn("3", print_mock.call_args.args[0])
 
 
 if __name__ == "__main__":
