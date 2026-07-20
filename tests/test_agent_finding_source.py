@@ -427,6 +427,35 @@ class HybridFindingMergeTests(unittest.TestCase):
         print_mock.assert_called_once()
         self.assertIn("1", print_mock.call_args.args[0])
 
+    def test_agent_auto_enabled_check_type_excluded_when_not_requested(self):
+        # privesc/cms は Cookie 認証や CMS 検出で自動有効化され、_check_type_in_scope では
+        # in-scope 扱いになる。しかし Agent Finding は演算子が明示的に要求した checks のみに
+        # 絞るべき（--checks xss で Agent 由来 privesc をレポートへ混入させない）。
+        privesc = Finding(
+            check_type="privesc",
+            severity="high",
+            url="http://fixture.test/admin",
+            field_name="",
+            payload="",
+            evidence="agent evidence",
+            source="agent",
+        )
+        engine = object.__new__(ScanEngine)
+        engine.all_findings = []
+        engine.additional_report_findings = [privesc]
+        engine.target_urls = ["http://fixture.test"]
+        engine.access_urls = []
+        engine.exclude_urls = set()
+        engine.checks = ["xss"]
+        # 自動有効化スキャナが動いていても Agent の privesc は除外される。
+        engine.scanners = {"xss": object(), "privesc": object()}
+
+        with patch("wscan.engine.console.print"):
+            engine._merge_additional_report_findings()
+
+        self.assertEqual(engine.all_findings, [])
+        self.assertEqual(engine.additional_report_findings, [])
+
 
 if __name__ == "__main__":
     unittest.main()

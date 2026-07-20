@@ -1193,6 +1193,24 @@ class ScanEngine:
                 return True
         return False
 
+    def _check_type_requested(self, check_type: str) -> bool:
+        """Agent Finding 用の**厳格**な check_type 判定。
+
+        ``_check_type_in_scope`` は resume 用で、Cookie 認証/CMS 検出で自動有効化される
+        ``privesc``/``cms`` 等（``_AUTO_ENABLED_CHECKS``）や実行中スキャナも in-scope 扱い
+        する。しかし Agent は任意の ``Type:`` を出力できるため、それを流用すると
+        ``--checks xss`` でも Agent 由来の ``privesc_*``/``cms_*`` がレポートに混入する。
+        ここでは**演算子が明示的に要求した ``self.checks`` のみ**（サブタイプ前置・
+        エイリアスは許可）で判定し、自動有効化ぶんは含めない。
+        """
+        ct = check_type or ""
+        for check in self.checks:
+            if ct == check or ct.startswith(check + "_"):
+                return True
+            if ct in _CHECK_EXTRA_TYPES.get(check, ()):
+                return True
+        return False
+
     def _checkpoint_is_done(
         self, url: str, field_name: str, form_index: int, check: str,
         is_url_param: bool = False,
@@ -4504,7 +4522,7 @@ class ScanEngine:
             if (
                 self._is_attack_target_url(url)
                 and not self._is_url_excluded(url)
-                and self._check_type_in_scope(finding.check_type)
+                and self._check_type_requested(finding.check_type)
             ):
                 allowed_findings.append(finding)
             else:
