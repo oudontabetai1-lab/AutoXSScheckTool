@@ -758,6 +758,10 @@ class ScanEngine:
         # using LLM analysis of the page's filtering behavior
         self.adaptive_engine = AdaptivePayloadEngine(self.payload_gen)
         self.adaptive_enabled = enable_adaptive_payloads and llm_provider != "none"
+        # provider の恒久的な不達は scan 中に一度だけ判定する。並列 field が
+        # 同時に初回 adaptive へ到達しても probe を重複させない。
+        self._adaptive_llm_available: Optional[bool] = None
+        self._adaptive_llm_availability_lock = asyncio.Lock()
 
         # OOB（帯域外）メール受信シンク。環境変数（WSCAN_OOB_*）から構築し、
         # 設定が揃っているときだけ EmailSink を有効化する（未設定なら None）。
@@ -3935,6 +3939,49 @@ class ScanEngine:
         context-aware bypass payloads, then run the scanner again with those payloads.
         """
         field_name = field.get("name", "unknown")
+
+        # provider 自体が使えない場合はフォールバック完了として収束させる。
+        # 個別 generate() の一時失敗とは分離し、可用性 probe は scan 中に一度だけ行う。
+        if self._adaptive_llm_available is None:
+            async with self._adaptive_llm_availability_lock:
+                if self._adaptive_llm_available is None:
+                    self._adaptive_llm_available = (
+                        await self.payload_gen._check_llm_available()
+                    )
+                    if self.monitor:
+                        availability = "利用可能" if self._adaptive_llm_available else "利用不可"
+                        await self.monitor.emit_status(
+                            f"Adaptive LLM 可用性: {availability}"
+                        )
+
+        if not self._adaptive_llm_available:
+            checkpoint_updated = False
+            for check_name in check_names:
+                if (
+                    check_name not in self.scanners
+                    or check_name in _ADAPTIVE_PAGE_LEVEL_CHECKS
+                ):
+                    continue
+                adaptive_checkpoint_check = _adaptive_checkpoint_check(check_name)
+                if self._checkpoint_is_done(
+                    url,
+                    field_name,
+                    form_index,
+                    adaptive_checkpoint_check,
+                    is_url_param,
+                ):
+                    continue
+                self._checkpoint_mark_done(
+                    url,
+                    field_name,
+                    form_index,
+                    adaptive_checkpoint_check,
+                    is_url_param,
+                )
+                checkpoint_updated = True
+            if checkpoint_updated:
+                self._save_checkpoint()
+            return []
 
         # Get current page HTML as probe context
         try:

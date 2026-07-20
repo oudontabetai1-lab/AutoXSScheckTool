@@ -1,4 +1,5 @@
 """adaptive LLM 障害時の checkpoint 完了判定を検証する。"""
+import asyncio
 import types
 import unittest
 from unittest.mock import AsyncMock, MagicMock, call
@@ -12,12 +13,18 @@ class AdaptiveCheckpointRetryTests(unittest.IsolatedAsyncioTestCase):
         if scan_side_effect is not None:
             scan_field.side_effect = scan_side_effect
         scanner = types.SimpleNamespace(scan_field=scan_field)
+        check_llm_available = AsyncMock(return_value=True)
         engine = types.SimpleNamespace(
             scanners={"xss": scanner},
-            payload_gen=types.SimpleNamespace(default_payloads={"xss": []}),
+            payload_gen=types.SimpleNamespace(
+                default_payloads={"xss": []},
+                _check_llm_available=check_llm_available,
+            ),
             all_findings=[],
             flag_finder=None,
             adaptive_enabled=True,
+            _adaptive_llm_available=None,
+            _adaptive_llm_availability_lock=asyncio.Lock(),
             adaptive_engine=types.SimpleNamespace(
                 generate=AsyncMock(return_value=generation_result)
             ),
@@ -108,6 +115,53 @@ class AdaptiveCheckpointRetryTests(unittest.IsolatedAsyncioTestCase):
         engine.adaptive_engine.generate.assert_not_awaited()
         self.assertEqual(engine.scanners["xss"].scan_field.await_count, 1)
 
+    async def test_unavailable_llm_marks_adaptive_done_and_converges(self):
+        completed: set[tuple[str, str]] = set()
+
+        def is_done(_url, field, _form, check, _is_url_param=False):
+            return (field, check) in completed
+
+        def mark_done(_url, field, _form, check, _is_url_param=False):
+            completed.add((field, check))
+
+        engine = self._engine(None)
+        engine.payload_gen._check_llm_available.return_value = False
+        engine._checkpoint_is_done.side_effect = is_done
+        engine._checkpoint_mark_done.side_effect = mark_done
+
+        await ScanEngine._scan_field(
+            engine, "https://example.test", 0, {"name": "q"}
+        )
+        await ScanEngine._scan_field(
+            engine, "https://example.test", 0, {"name": "other"}
+        )
+        # resume では標準・adaptive とも完了済みの field を再試行しない。
+        await ScanEngine._scan_field(
+            engine, "https://example.test", 0, {"name": "q"}
+        )
+
+        self.assertIn(("q", "(adaptive:xss)"), completed)
+        self.assertIn(("other", "(adaptive:xss)"), completed)
+        self.assertEqual(engine.scanners["xss"].scan_field.await_count, 2)
+        engine.payload_gen._check_llm_available.assert_awaited_once()
+        engine.adaptive_engine.generate.assert_not_awaited()
+        engine.browser.page.content.assert_not_awaited()
+
+    async def test_unavailable_llm_returns_empty_success(self):
+        engine = self._engine(None)
+        engine.payload_gen._check_llm_available.return_value = False
+
+        result = await engine._adaptive_attack_field(
+            "https://example.test", 0, {"name": "q"}, False, ["xss"], None
+        )
+
+        self.assertEqual(result, [])
+        self.assertIn(
+            call("https://example.test", "q", 0, "(adaptive:xss)", False),
+            engine._checkpoint_mark_done.call_args_list,
+        )
+        engine.adaptive_engine.generate.assert_not_awaited()
+
 
 class AdaptivePartialResumeTests(unittest.IsolatedAsyncioTestCase):
     async def test_resume_retries_only_failed_check(self):
@@ -134,10 +188,15 @@ class AdaptivePartialResumeTests(unittest.IsolatedAsyncioTestCase):
                 "xss": types.SimpleNamespace(scan_field=xss_scan),
                 "sqli": types.SimpleNamespace(scan_field=sqli_scan),
             },
-            payload_gen=types.SimpleNamespace(default_payloads={"xss": [], "sqli": []}),
+            payload_gen=types.SimpleNamespace(
+                default_payloads={"xss": [], "sqli": []},
+                _check_llm_available=AsyncMock(return_value=True),
+            ),
             all_findings=[],
             flag_finder=None,
             adaptive_enabled=True,
+            _adaptive_llm_available=None,
+            _adaptive_llm_availability_lock=asyncio.Lock(),
             adaptive_engine=types.SimpleNamespace(generate=AsyncMock(side_effect=generate)),
             browser=types.SimpleNamespace(
                 page=types.SimpleNamespace(content=AsyncMock(return_value="<html></html>"))
