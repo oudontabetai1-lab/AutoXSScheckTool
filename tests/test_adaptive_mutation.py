@@ -78,13 +78,19 @@ class MutationPromptParseTests(unittest.TestCase):
             "<analysis>\n"
             "<script>alert(1)</script>\n"
             "</analysis>\n"
-            "<img src=x onerror=alert(1)>"
+            "<img src=x onerror=alert(1)>\n"
+            "</textarea><script>alert(1)</script>\n"
+            "</script><svg/onload=alert(1)>"
         )
         out = _parse_payload_lines(raw, already_tried=[])
         self.assertIn("<script>alert(1)</script>", out)
         self.assertIn("<img src=x onerror=alert(1)>", out)
+        # メタタグは除外
         self.assertNotIn("<analysis>", out)
         self.assertNotIn("</analysis>", out)
+        # 閉じタグで始まる文脈 breakout ペイロードは残す（recall 回帰の防止）
+        self.assertIn("</textarea><script>alert(1)</script>", out)
+        self.assertIn("</script><svg/onload=alert(1)>", out)
 
 
 class AdaptiveGenerationRetryTests(unittest.IsolatedAsyncioTestCase):
