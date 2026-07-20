@@ -70,6 +70,22 @@ class MutationPromptParseTests(unittest.TestCase):
         self.assertIn("%2527", out)
         self.assertIn("1/**/AND/**/1=1", out)
 
+    def test_parser_skips_structural_tags_but_keeps_payloads(self):
+        # <payloads> ブロックが無く LLM が散文＋タグを返したケース。
+        # 構造タグ（<analysis>/</analysis> 等）を payload として誤採用せず、
+        # <script>/<img ...> 等の実ペイロードは残す。
+        raw = (
+            "<analysis>\n"
+            "<script>alert(1)</script>\n"
+            "</analysis>\n"
+            "<img src=x onerror=alert(1)>"
+        )
+        out = _parse_payload_lines(raw, already_tried=[])
+        self.assertIn("<script>alert(1)</script>", out)
+        self.assertIn("<img src=x onerror=alert(1)>", out)
+        self.assertNotIn("<analysis>", out)
+        self.assertNotIn("</analysis>", out)
+
 
 class AdaptiveGenerationRetryTests(unittest.IsolatedAsyncioTestCase):
     async def test_none_empty_and_whitespace_responses_are_failures(self):

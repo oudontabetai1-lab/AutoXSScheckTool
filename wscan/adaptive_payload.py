@@ -407,6 +407,18 @@ def _parse_payload_lines(text: str, already_tried: list[str]) -> list[str]:
         # Skip pure prose lines (only letters and spaces, no injection chars)
         if re.match(r"^[A-Za-z][a-z ]+:?\s*$", line) and len(line) > 20:
             continue
+        # 構造タグ（LLM が <payloads> の外に書く <analysis> や閉じタグ等）を
+        # payload と誤採用しない。閉じタグは payload になり得ず、既知のメタタグ名も
+        # 除外する。<script>/<img ...> 等の実ペイロードは残す。
+        if re.match(r"^</[A-Za-z]", line):
+            continue
+        if re.match(
+            r"^<(analysis|payloads?|reasoning|thinking|notes?|explanation|"
+            r"output|response|result)\b[^>]*>?$",
+            line,
+            re.IGNORECASE,
+        ):
+            continue
         # Remove leading numbering like "1. " "2) " or bullet "- " "* "
         line = re.sub(r"^[\d]+[\.\)]\s+", "", line)
         line = re.sub(r"^[-*]\s+", "", line)
