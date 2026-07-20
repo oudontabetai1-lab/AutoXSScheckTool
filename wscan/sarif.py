@@ -200,11 +200,12 @@ class SarifExporter:
             },
         }
 
-        # SARIF fingerprint for deduplication
+        # scanner は従来 fingerprint を維持し、Agent 由来だけ名前空間を分ける。
+        fingerprint = f"{ct}:{url}:{field_name}"
+        if source == "agent":
+            fingerprint = f"agent:{fingerprint}"
         result["partialFingerprints"] = {
-            "primaryLocationLineHash": (
-                f"{source}:{ct}:{url}:{field_name}"
-            )
+            "primaryLocationLineHash": fingerprint
         }
 
         return result

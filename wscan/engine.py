@@ -1648,8 +1648,8 @@ class ScanEngine:
                     pass
                 await self._browser.close()
 
-            # Agent Finding は決定論 Finding の生成・検証を変えずに追加する。
-            # source の異なる同一 Finding は意図的に併記し、出自を隠さない。
+            # Agent Finding は認可済みスコープ内だけ、決定論 Finding の生成・検証を
+            # 変えずに追加する。source の異なる同一 Finding は意図的に併記する。
             self._merge_additional_report_findings()
 
             # ── Phase 4: Report ──────────────────────────────────────────
@@ -4473,11 +4473,26 @@ class ScanEngine:
     # =========================================================================
 
     def _merge_additional_report_findings(self) -> None:
-        """外部 Finding をレポート集合へ一度だけ追加する（重複も出自別に保持）。"""
+        """スコープ内の外部 Finding を一度だけ追加する（重複も出自別に保持）。"""
         if not self.additional_report_findings:
             return
-        self.all_findings.extend(self.additional_report_findings)
+
+        allowed_findings: list[Finding] = []
+        excluded_count = 0
+        for finding in self.additional_report_findings:
+            url = str(getattr(finding, "url", "") or "").strip()
+            if self._is_access_allowed_url(url) and not self._is_url_excluded(url):
+                allowed_findings.append(finding)
+            else:
+                excluded_count += 1
+
+        self.all_findings.extend(allowed_findings)
         self.additional_report_findings.clear()
+        if excluded_count:
+            console.print(
+                f"  [yellow]Agent Finding をスコープ/除外設定により "
+                f"{excluded_count} 件除外しました。[/yellow]"
+            )
 
     def _phase_report(self):
         console.print(Rule("[bold green] Phase 4 / 4  ·  Report [/bold green]", style="green"))

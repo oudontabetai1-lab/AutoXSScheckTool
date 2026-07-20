@@ -87,7 +87,13 @@ Evidence: alert dialog was observed
             result["partialFingerprints"]["primaryLocationLineHash"]
             for result in results
         ]
-        self.assertNotEqual(fingerprints[0], fingerprints[1])
+        self.assertEqual(
+            fingerprints,
+            [
+                "xss:http://fixture.test/search:q",
+                "agent:xss:http://fixture.test/search:q",
+            ],
+        )
 
     def test_recon_task_keeps_url_discovery_primary_and_surfaces_findings(self):
         scanner = AgentBrowserScanner(
@@ -207,6 +213,9 @@ class HybridFindingMergeTests(unittest.TestCase):
         engine = object.__new__(ScanEngine)
         engine.all_findings = [scanner_finding]
         engine.additional_report_findings = [agent_finding]
+        engine.target_urls = ["http://fixture.test"]
+        engine.access_urls = []
+        engine.exclude_urls = set()
         engine._save_evidence = Mock()
         engine._generate_report = Mock()
         engine._print_summary = Mock()
@@ -223,6 +232,36 @@ class HybridFindingMergeTests(unittest.TestCase):
         )
         self.assertEqual(engine.additional_report_findings, [])
         engine._generate_report.assert_called_once_with()
+
+    def test_agent_findings_outside_scope_or_excluded_are_not_merged(self):
+        def finding(url: str) -> Finding:
+            return Finding(
+                check_type="xss",
+                severity="high",
+                url=url,
+                field_name="q",
+                payload="agent-payload",
+                evidence="agent evidence",
+                source="agent",
+            )
+
+        in_scope = finding("http://fixture.test/search")
+        excluded = finding("http://fixture.test/private/result")
+        offsite = finding("http://offsite.test/search")
+        engine = object.__new__(ScanEngine)
+        engine.all_findings = []
+        engine.additional_report_findings = [in_scope, excluded, offsite]
+        engine.target_urls = ["http://fixture.test"]
+        engine.access_urls = []
+        engine.exclude_urls = {"/private/*"}
+
+        with patch("wscan.engine.console.print") as print_mock:
+            engine._merge_additional_report_findings()
+
+        self.assertEqual(engine.all_findings, [in_scope])
+        self.assertEqual(engine.additional_report_findings, [])
+        print_mock.assert_called_once()
+        self.assertIn("2", print_mock.call_args.args[0])
 
 
 if __name__ == "__main__":
