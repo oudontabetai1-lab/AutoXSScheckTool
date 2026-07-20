@@ -12,7 +12,36 @@ from . import llm_endpoint
 
 _RETRYABLE_STATUS_CODES = {408, 429, 500, 502, 503, 504, 529}
 
-CompletionStatus = Literal["ok", "empty", "unavailable", "transient", "permanent"]
+CompletionStatus = Literal[
+    "ok", "empty", "unavailable", "transient", "permanent", "blocked"
+]
+
+
+def _gemini_block_reason(data: dict) -> str | None:
+    """Gemini の安全フィルタ等によるブロック応答（本文なし）を検出する。
+
+    Gemini は安全ブロック時も HTTP 200 を返し、``promptFeedback.blockReason`` や
+    ``finishReason: SAFETY`` 等で本文を返さないことがある。同じ prompt を再試行しても
+    無駄なので、これを検出して呼び出し側が収束できるようにする。ブロック理由文字列を
+    返す（通常応答なら ``None``）。
+    """
+    if not isinstance(data, dict):
+        return None
+    feedback = data.get("promptFeedback") or {}
+    if feedback.get("blockReason"):
+        return str(feedback["blockReason"])
+    candidates = data.get("candidates") or []
+    if not candidates:
+        return "NO_CANDIDATES"
+    first = candidates[0] or {}
+    finish = first.get("finishReason")
+    # STOP / MAX_TOKENS 以外の終了理由で、かつ本文(parts.text)が無いものはブロック扱い。
+    if finish and finish not in ("STOP", "MAX_TOKENS"):
+        parts = (first.get("content") or {}).get("parts") or []
+        has_text = any(isinstance(p, dict) and p.get("text") for p in parts)
+        if not has_text:
+            return str(finish)
+    return None
 
 
 class _RetryableResponseError(Exception):
@@ -191,6 +220,11 @@ async def complete_text(
                     if provider == "openai":
                         text = data["choices"][0]["message"]["content"]
                     elif provider == "gemini":
+                        block = _gemini_block_reason(data)
+                        if block is not None:
+                            # 安全ブロック等。再試行しても無駄なので blocked(収束)扱い。
+                            # LLM 全体は生きているため availability は倒さない。
+                            return _completion_result(None, "blocked", return_status)
                         text = data["candidates"][0]["content"]["parts"][0]["text"]
                     else:
                         text = data["response"]

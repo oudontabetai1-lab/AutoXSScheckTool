@@ -509,11 +509,13 @@ class AdaptivePayloadEngine:
 
         _adaptive_footer()
 
-        # 一時障害と空応答は resume で回収し、設定・認証等の恒久障害は完了扱いで
-        # 収束させる。非空テキストを解析できた結果が 0 件の場合も [] とする。
+        # 一時障害と空応答は resume で回収し、設定・認証等の恒久障害や安全ブロック
+        # (blocked)は完了扱いで収束させる。非空テキストを解析できた結果が 0 件の場合も []。
+        # 注: blocked は「この prompt が無駄」なだけで LLM 全体は生きているため、
+        # engine 側の可用性フリップ対象(permanent/unavailable)には含めない。
         if status in {"empty", "transient"}:
             payloads = None
-        elif status in {"unavailable", "permanent"}:
+        elif status in {"unavailable", "permanent", "blocked"}:
             payloads = []
         elif raw is None:  # status と本文の不整合に対する防御
             payloads = None

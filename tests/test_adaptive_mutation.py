@@ -102,6 +102,7 @@ class AdaptiveGenerationRetryTests(unittest.IsolatedAsyncioTestCase):
             side_effect=[
                 (None, "permanent"),
                 (None, "unavailable"),
+                (None, "blocked"),
                 (None, "transient"),
                 (None, "empty"),
                 ("<payloads>\n%2527\n</payloads>", "ok"),
@@ -111,11 +112,12 @@ class AdaptiveGenerationRetryTests(unittest.IsolatedAsyncioTestCase):
                 await engine.generate(
                     "xss", "q", "https://example.test", [], "<html></html>"
                 )
-                for _ in range(5)
+                for _ in range(6)
             ]
 
-        self.assertEqual(results, [[], [], None, None, ["%2527"]])
-        self.assertEqual(complete.await_count, 5)
+        # blocked も恒久障害と同じく [] で収束（可用性は engine 側で倒さない）。
+        self.assertEqual(results, [[], [], [], None, None, ["%2527"]])
+        self.assertEqual(complete.await_count, 6)
         self.assertEqual(complete.await_args.kwargs["max_tokens"], 1000)
         self.assertTrue(complete.await_args.kwargs["return_status"])
         self.assertNotIn("timeout", complete.await_args.kwargs)

@@ -109,6 +109,25 @@ class CompleteTextTests(unittest.TestCase):
         generation = client.post.await_args.kwargs["json"]["generationConfig"]
         self.assertEqual(generation, {"maxOutputTokens": 400, "temperature": 0.1})
 
+    def test_gemini_safety_block_is_blocked_not_transient(self):
+        # 安全ブロック時は HTTP 200 だが本文が無い。再試行せず blocked(収束)を返す。
+        for payload in (
+            {"promptFeedback": {"blockReason": "SAFETY"}},
+            {"candidates": [{"finishReason": "SAFETY", "content": {"parts": []}}]},
+            {"candidates": []},
+        ):
+            client, context = _mock_async_client([_Response(200, payload)])
+            pg = _payload_generator("gemini")
+            with patch.dict(os.environ, {"GEMINI_API_KEY": "k"}, clear=False), \
+                 patch("wscan.llm_client.httpx.AsyncClient", return_value=context):
+                text, status = asyncio.run(
+                    complete_text(pg, "prompt", return_status=True)
+                )
+            self.assertIsNone(text)
+            self.assertEqual(status, "blocked")
+            # 1回で確定し、再試行しない。
+            self.assertEqual(client.post.await_count, 1)
+
     def test_ollama_success(self):
         client, context = _mock_async_client([
             _Response(200, {"response": "ollama text"}),
