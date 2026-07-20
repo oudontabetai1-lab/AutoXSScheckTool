@@ -4501,7 +4501,11 @@ class ScanEngine:
         excluded_count = 0
         for finding in self.additional_report_findings:
             url = str(getattr(finding, "url", "") or "").strip()
-            if self._is_attack_target_url(url) and not self._is_url_excluded(url):
+            if (
+                self._is_attack_target_url(url)
+                and not self._is_url_excluded(url)
+                and self._check_type_in_scope(finding.check_type)
+            ):
                 allowed_findings.append(finding)
             else:
                 excluded_count += 1

@@ -129,12 +129,45 @@ _PROBE_MUTATING_ACTIONS = frozenset({
     "type",
     "upload_file",
 })
+_AUTH_INPUT_ACTIONS = frozenset({"input", "input_text", "type"})
+_AUTH_INPUT_VALUE_KEYS = ("text", "value")
 
 
-def filter_probe_actions(actions: list, *, allow_mutation: bool) -> tuple[list, int]:
-    """対象外ページで payload 投入に使える操作を実行前 action 列から除く。"""
+def _is_allowed_auth_input(
+    action_name: str,
+    action_value,
+    allowed_auth_values: frozenset[str],
+) -> bool:
+    """入力 action が設定済み認証値だけを投入するか判定する。"""
+    if action_name not in _AUTH_INPUT_ACTIONS or not allowed_auth_values:
+        return False
+    if isinstance(action_value, str):
+        input_value = action_value
+    elif isinstance(action_value, dict):
+        values = [
+            action_value[key]
+            for key in _AUTH_INPUT_VALUE_KEYS
+            if key in action_value
+        ]
+        # 想定外の複数値や値キー欠落は、安全側で mutation を許可しない。
+        if len(values) != 1:
+            return False
+        input_value = values[0]
+    else:
+        return False
+    return isinstance(input_value, str) and input_value in allowed_auth_values
+
+
+def filter_probe_actions(
+    actions: list,
+    *,
+    allow_mutation: bool,
+    allowed_auth_values: tuple[str, ...] = (),
+) -> tuple[list, int]:
+    """対象外ページでは mutation を除き、login の認証値入力だけ例外許可する。"""
     if allow_mutation:
         return list(actions), 0
+    auth_values = frozenset(value for value in allowed_auth_values if value)
     allowed: list = []
     blocked = 0
     for action in actions:
@@ -142,11 +175,23 @@ def filter_probe_actions(actions: list, *, allow_mutation: bool) -> tuple[list, 
             action_data = action.model_dump(exclude_unset=True)
         except Exception:
             action_data = {}
-        action_name = next(iter(action_data), "") if action_data else ""
-        if action_name in _PROBE_MUTATING_ACTIONS:
+        # browser-use の action は一度に1種類だけを持つ。形式不明や複数 action は
+        # mutation の判別不能なので、安全側で実行しない。
+        if not isinstance(action_data, dict) or len(action_data) != 1:
             blocked += 1
-        else:
-            allowed.append(action)
+            continue
+        action_name = next(iter(action_data))
+        if action_name in _PROBE_MUTATING_ACTIONS:
+            if _is_allowed_auth_input(
+                action_name,
+                action_data[action_name],
+                auth_values,
+            ):
+                allowed.append(action)
+                continue
+            blocked += 1
+            continue
+        allowed.append(action)
     return allowed, blocked
 
 # ── 検出する脆弱性の説明 ────────────────────────────────────────────────────
@@ -841,13 +886,16 @@ class AgentBrowserScanner:
             planned_actions = (
                 output.action if isinstance(output.action, list) else [output.action]
             ) if getattr(output, "action", None) else []
-            allow_mutation = (
-                self.is_security_probe_allowed(current_url)
-                or self._is_configured_login_page(current_url)
+            allow_mutation = self.is_security_probe_allowed(current_url)
+            allowed_auth_values = (
+                (self.auth_user, self.auth_pass)
+                if not allow_mutation and self._is_configured_login_page(current_url)
+                else ()
             )
             filtered_actions, blocked_count = filter_probe_actions(
                 planned_actions,
                 allow_mutation=allow_mutation,
+                allowed_auth_values=allowed_auth_values,
             )
             if blocked_count:
                 output.action = filtered_actions

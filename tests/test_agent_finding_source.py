@@ -12,6 +12,7 @@ from wscan.llm_agent_browser import (
     AgentFinding,
     AgentMemory,
     _parse_findings_from_text,
+    filter_probe_actions,
     security_probe_allowed,
 )
 from wscan.sarif import SarifExporter
@@ -152,6 +153,58 @@ Evidence: alert dialog was observed
 
 
 class AgentReconHandoffTests(unittest.IsolatedAsyncioTestCase):
+    @staticmethod
+    def _action(name, value):
+        class Action:
+            def __init__(self, action_name, action_value):
+                self.name = action_name
+                self.value = action_value
+
+            def model_dump(self, **_kwargs):
+                return {self.name: self.value}
+
+        return Action(name, value)
+
+    def test_login_filter_allows_only_exact_auth_value_inputs(self):
+        actions = [
+            self._action("input_text", {"index": 1, "text": "login-user"}),
+            self._action("type", {"index": 2, "value": "login-pass"}),
+            self._action("input", {"index": 1, "text": "' OR 1=1--"}),
+            self._action("input_text", {"index": 1, "content": "login-user"}),
+            self._action("evaluate", {"code": "alert(1)"}),
+            self._action("upload_file", {"path": "/tmp/payload.svg"}),
+            self._action("send_keys", {"keys": "login-pass"}),
+            self._action("click", {"index": 3}),
+        ]
+
+        filtered, blocked_count = filter_probe_actions(
+            actions,
+            allow_mutation=False,
+            allowed_auth_values=("login-user", "login-pass"),
+        )
+
+        self.assertEqual(
+            [action.name for action in filtered],
+            ["input_text", "type", "click"],
+        )
+        self.assertEqual(blocked_count, 5)
+
+    def test_attack_scope_login_keeps_all_mutations(self):
+        actions = [
+            self._action("input_text", {"index": 1, "text": "' OR 1=1--"}),
+            self._action("evaluate", {"code": "alert(1)"}),
+            self._action("upload_file", {"path": "/tmp/payload.svg"}),
+        ]
+
+        filtered, blocked_count = filter_probe_actions(
+            actions,
+            allow_mutation=True,
+            allowed_auth_values=("login-user", "login-pass"),
+        )
+
+        self.assertEqual(filtered, actions)
+        self.assertEqual(blocked_count, 0)
+
     async def test_recon_step_blocks_probe_actions_on_access_only_page(self):
         class Action:
             def __init__(self, name):
@@ -289,6 +342,7 @@ class HybridFindingMergeTests(unittest.TestCase):
         engine.target_urls = ["http://fixture.test"]
         engine.access_urls = []
         engine.exclude_urls = set()
+        engine.checks = ["xss"]
         engine._save_evidence = Mock()
         engine._generate_report = Mock()
         engine._print_summary = Mock()
@@ -333,6 +387,7 @@ class HybridFindingMergeTests(unittest.TestCase):
         engine.target_urls = ["http://fixture.test"]
         engine.access_urls = ["http://idp.test"]
         engine.exclude_urls = {"/private/*"}
+        engine.checks = ["xss"]
 
         with patch("wscan.engine.console.print") as print_mock:
             engine._merge_additional_report_findings()
@@ -341,6 +396,36 @@ class HybridFindingMergeTests(unittest.TestCase):
         self.assertEqual(engine.additional_report_findings, [])
         print_mock.assert_called_once()
         self.assertIn("3", print_mock.call_args.args[0])
+
+    def test_agent_findings_outside_requested_check_types_are_not_merged(self):
+        def finding(check_type: str) -> Finding:
+            return Finding(
+                check_type=check_type,
+                severity="high",
+                url="http://fixture.test/search",
+                field_name="q",
+                payload="agent-payload",
+                evidence="agent evidence",
+                source="agent",
+            )
+
+        requested = finding("xss")
+        unrequested = finding("sqli")
+        engine = object.__new__(ScanEngine)
+        engine.all_findings = []
+        engine.additional_report_findings = [requested, unrequested]
+        engine.target_urls = ["http://fixture.test"]
+        engine.access_urls = []
+        engine.exclude_urls = set()
+        engine.checks = ["xss"]
+
+        with patch("wscan.engine.console.print") as print_mock:
+            engine._merge_additional_report_findings()
+
+        self.assertEqual(engine.all_findings, [requested])
+        self.assertEqual(engine.additional_report_findings, [])
+        print_mock.assert_called_once()
+        self.assertIn("1", print_mock.call_args.args[0])
 
 
 if __name__ == "__main__":
