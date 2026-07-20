@@ -10,7 +10,11 @@ import httpx
 from . import llm_endpoint
 
 
-_RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
+_RETRYABLE_STATUS_CODES = {408, 429, 500, 502, 503, 504, 529}
+
+
+class _RetryableResponseError(Exception):
+    """成功ステータスだが応答形式が一時的に壊れていることを表す。"""
 
 
 def is_retryable(status_or_exc: Any) -> bool:
@@ -27,7 +31,9 @@ def is_retryable(status_or_exc: Any) -> bool:
         httpx.ConnectError,
         httpx.ReadError,
         httpx.WriteError,
+        httpx.CloseError,
         httpx.RemoteProtocolError,
+        _RetryableResponseError,
     )):
         return True
 
@@ -38,6 +44,23 @@ def is_retryable(status_or_exc: Any) -> bool:
 def backoff_seconds(attempt: int, base: float = 0.5, cap: float = 8.0) -> float:
     """0 始まりの再試行番号から指数バックオフ秒数を計算する。"""
     return min(cap, base * (2 ** max(0, attempt)))
+
+
+def _retry_after_seconds(response: Any, cap: float = 8.0) -> float | None:
+    """Retry-After の秒指定を cap 内で返す。日付形式・不正値は無視する。"""
+    headers = getattr(response, "headers", None)
+    if not headers:
+        return None
+    value = headers.get("Retry-After")
+    if value is None:
+        return None
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError):
+        return None
+    if seconds < 0:
+        return None
+    return min(cap, seconds)
 
 
 async def complete_text(
@@ -85,6 +108,7 @@ async def complete_text(
         return None
 
     for attempt in range(max_retries + 1):
+        retry_after = None
         try:
             if provider == "claude":
                 response = await asyncio.to_thread(
@@ -139,19 +163,28 @@ async def complete_text(
                     )
 
             if response.status_code == 200:
-                data = response.json()
-                if provider == "openai":
-                    return data["choices"][0]["message"]["content"]
-                if provider == "gemini":
-                    return data["candidates"][0]["content"]["parts"][0]["text"]
-                return data.get("response", "")
+                try:
+                    data = response.json()
+                    if provider == "openai":
+                        text = data["choices"][0]["message"]["content"]
+                    elif provider == "gemini":
+                        text = data["candidates"][0]["content"]["parts"][0]["text"]
+                    else:
+                        text = data["response"]
+                    if not isinstance(text, str):
+                        raise TypeError("LLM response text is not a string")
+                    return text
+                except (ValueError, TypeError, KeyError, IndexError) as exc:
+                    raise _RetryableResponseError(str(exc)) from exc
 
             failure: Any = response.status_code
+            retry_after = _retry_after_seconds(response)
         except Exception as exc:
             failure = exc
 
         if attempt >= max_retries or not is_retryable(failure):
             return None
-        await asyncio.sleep(backoff_seconds(attempt))
+        delay = retry_after if retry_after is not None else backoff_seconds(attempt)
+        await asyncio.sleep(delay)
 
     return None

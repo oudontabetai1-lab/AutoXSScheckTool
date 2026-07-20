@@ -492,7 +492,10 @@ class AdaptivePayloadEngine:
 
         _adaptive_footer()
 
-        if raw is None:
+        # 通信成功でも空/空白応答は有効な解析結果ではない。失敗として None を返し、
+        # checkpoint resume の再試行対象にする。非空テキストを解析できた結果が 0 件の
+        # 場合だけ [] とし、無限再試行を防ぐ。
+        if raw is None or not raw.strip():
             return None
 
         payloads = _parse_payload_lines(raw, payloads_tried)

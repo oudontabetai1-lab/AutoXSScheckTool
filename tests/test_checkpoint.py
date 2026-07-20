@@ -155,11 +155,12 @@ class AdaptiveUnitTests(unittest.TestCase):
         s.mark_done("http://h/a", "q", 0, "(adaptive)")
         self.assertTrue(s.is_done("http://h/a", "q", 0, "(adaptive)"))
 
-    def test_adaptive_unit_survives_roundtrip(self):
+    def test_adaptive_check_units_are_independent_and_survive_roundtrip(self):
         s = CheckpointState(target_url="http://h", checks=["xss"])
-        s.mark_done("http://h/a", "q", 0, "(adaptive)")
+        s.mark_done("http://h/a", "q", 0, "(adaptive:xss)")
         restored = CheckpointState.from_dict(s.to_dict())
-        self.assertTrue(restored.is_done("http://h/a", "q", 0, "(adaptive)"))
+        self.assertTrue(restored.is_done("http://h/a", "q", 0, "(adaptive:xss)"))
+        self.assertFalse(restored.is_done("http://h/a", "q", 0, "(adaptive:sqli)"))
 
     def test_fresh_state_is_current_version(self):
         from wscan.checkpoint import CHECKPOINT_VERSION
@@ -196,8 +197,8 @@ class AdaptiveUnitTests(unittest.TestCase):
         })
         self.assertFalse(legacy.is_done("http://h/a", "q", 0, "(adaptive)"))
 
-    def test_legacy_migrated_saved_as_v2(self):
-        # マイグレーション済み（marker 補完済み）は v2 として保存してよい。
+    def test_legacy_migrated_saved_as_current_version(self):
+        # マイグレーション済み（marker 補完済み）は現行版として保存してよい。
         legacy = CheckpointState.from_dict({
             "version": 1,
             "target_url": "http://h",
@@ -217,6 +218,18 @@ class AdaptiveUnitTests(unittest.TestCase):
         s.mark_done("http://h/a", "q", 0, "xss")  # adaptive 未完のまま
         restored = CheckpointState.from_dict(s.to_dict())
         self.assertFalse(restored.is_done("http://h/a", "q", 0, "(adaptive)"))
+
+    def test_v2_field_level_adaptive_marker_remains_readable(self):
+        restored = CheckpointState.from_dict({
+            "version": 2,
+            "target_url": "http://h",
+            "checks": ["xss", "sqli"],
+            "completed_units": [unit_key("http://h/a", "q", 0, "(adaptive)")],
+            "findings": [],
+        })
+
+        self.assertEqual(restored.source_version, 2)
+        self.assertTrue(restored.is_done("http://h/a", "q", 0, "(adaptive)"))
 
 
 class SaveCheckpointFindingsTests(unittest.TestCase):

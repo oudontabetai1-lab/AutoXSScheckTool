@@ -307,6 +307,14 @@ def _crawl_review_wants_recrawl(command: str) -> bool:
     return (command or "").strip().lower() == "recrawl"
 
 
+_ADAPTIVE_PAGE_LEVEL_CHECKS = frozenset({"csrf", "session", "clickjacking"})
+
+
+def _adaptive_checkpoint_check(check_name: str) -> str:
+    """adaptive の完了単位を check_type ごとに生成する。"""
+    return f"(adaptive:{check_name})"
+
+
 # ---------------------------------------------------------------------------
 # Scan Engine
 # ---------------------------------------------------------------------------
@@ -3861,38 +3869,42 @@ class ScanEngine:
         # 以前は critical finding があると adaptive パスをスキップしていたが、過検知で
         # ある可能性を踏まえ「見つかったからスキップ」はしない。
         #
-        # adaptive は per-field の独立単位として「(adaptive) 完了マーカー」で管理する。
-        # first-pass の各チェックは adaptive の前に done 化されるため、`checks_executed>0`
-        # だけを条件にすると「first-pass 完了後・adaptive 実行中に abort→resume」で
-        # 全チェックが skip されて checks_executed==0 となり adaptive が二度と走らない
-        # （＝adaptive payload を恒久的に取りこぼす）。完了マーカーを別途持つことで、
-        # adaptive 未完のフィールドだけ resume で adaptive を再試行できる。
-        # 実行条件: adaptive 有効 かつ 当該フィールドに in-scope チェックがある
-        # （今回実行 or 前回完了）かつ adaptive 未完。マーカーで一度だけ実行を保証し、
-        # 完了済みフィールドを新規 payload で再攻撃しない約束も守る。
-        adaptive_done = self._checkpoint_is_done(
+        # adaptive は field×check_type の独立単位として管理する。一部 check が失敗しても
+        # 成功済み check の完了記録を残し、resume では失敗分だけを再試行する。
+        # 旧 checkpoint の field 単位 "(adaptive)" marker は「全 check 完了」として尊重し、
+        # 読み込み互換と完了済みフィールドへの再送防止を維持する。
+        legacy_adaptive_done = self._checkpoint_is_done(
             url, field_name, form_index, "(adaptive)", is_url_param
         )
-        # 完了フィールドは "(adaptive)" marker で一意に判定する。v1(legacy) から resume
-        # した場合も、CheckpointState.from_dict の load 時マイグレーションが v1 era の
-        # 完了フィールドへ marker を補完済みなので、marker 欠落＝未実行として扱ってよい
-        # （完了済みフィールドへの adaptive 再送は起きない）。checks_skipped_done>0 は
-        # 「first-pass 完了後・adaptive 実行前に abort→resume」で全 check が skip された
-        # フィールドを拾い、adaptive を確実に再試行するため。
+        adaptive_checks = [
+            check_name for check_name in ordered_checks
+            if check_name in self.scanners
+            and check_name not in _ADAPTIVE_PAGE_LEVEL_CHECKS
+        ]
+        adaptive_pending = any(
+            not self._checkpoint_is_done(
+                url,
+                field_name,
+                form_index,
+                _adaptive_checkpoint_check(check_name),
+                is_url_param,
+            )
+            for check_name in adaptive_checks
+        )
+        # checks_skipped_done>0 は first-pass 完了後・adaptive 実行前に中断した resume を
+        # 拾う。個々の済み判定は _adaptive_attack_field 側でも行い、再攻撃を防ぐ。
         if (
             self.adaptive_enabled
-            and not adaptive_done
+            and not legacy_adaptive_done
+            and adaptive_pending
             and (checks_executed > 0 or checks_skipped_done > 0)
         ):
             adaptive_payloads = await self._adaptive_attack_field(
                 url, form_index, field, is_url_param, ordered_checks, field_plan
             )
-            # LLM 障害時 (None) は未完のまま残し、resume で再試行する。正常応答が
-            # 0 件 ([]) の場合だけは完了扱いにして、無限再試行を防ぐ。
+            # None はいずれかの check が未完、list は今回対象がすべて完了。
+            # 完了記録自体は check_type ごとに _adaptive_attack_field が行う。
             if adaptive_payloads is not None:
-                self._checkpoint_mark_done(
-                    url, field_name, form_index, "(adaptive)", is_url_param
-                )
                 if self.monitor:
                     await self.monitor.emit_status(
                         f"adaptive payloads generated: {len(adaptive_payloads)}件"
@@ -3938,7 +3950,17 @@ class ScanEngine:
                 continue
 
             # Don't bother adaptive pass on page-level-only scanners
-            if check_name in ("csrf", "session", "clickjacking"):
+            if check_name in _ADAPTIVE_PAGE_LEVEL_CHECKS:
+                continue
+
+            adaptive_checkpoint_check = _adaptive_checkpoint_check(check_name)
+            if self._checkpoint_is_done(
+                url,
+                field_name,
+                form_index,
+                adaptive_checkpoint_check,
+                is_url_param,
+            ):
                 continue
 
             # Standard payloads that were tried in the first pass
@@ -3962,6 +3984,14 @@ class ScanEngine:
 
             generated_payloads.extend(adaptive_payloads)
             if not adaptive_payloads:
+                self._checkpoint_mark_done(
+                    url,
+                    field_name,
+                    form_index,
+                    adaptive_checkpoint_check,
+                    is_url_param,
+                )
+                self._save_checkpoint()
                 continue
 
             # Run scanner again with adaptive payloads — isolated via ContextVar
@@ -3979,7 +4009,20 @@ class ScanEngine:
                 # 過検知の可能性があるため、critical が出ても残りのチェック種別の
                 # adaptive パスを打ち切らない（見つかったからスキップしない）。
             except Exception as e:
+                # payload 生成だけでなく実スキャンも adaptive 作業単位の一部。
+                # 一時的なブラウザ/スキャン障害を完了扱いにせず resume で回収する。
+                generation_failed = True
                 console.print(f"    [yellow]Adaptive scanner error ({check_name}): {e}[/yellow]")
+            else:
+                self._checkpoint_mark_done(
+                    url,
+                    field_name,
+                    form_index,
+                    adaptive_checkpoint_check,
+                    is_url_param,
+                )
+                # 後続 check の失敗やプロセス中断でも部分成功を保持する。
+                self._save_checkpoint()
             finally:
                 _FIELD_PAYLOAD_OVERRIDES.reset(_adaptive_token)
 

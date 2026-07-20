@@ -1,5 +1,7 @@
+import json
 import tempfile
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
@@ -66,6 +68,27 @@ Evidence: alert dialog was observed
         self.assertEqual(properties["source"], "agent")
         self.assertTrue(properties["agent_verified"])
 
+    def test_sarif_fingerprint_separates_agent_and_scanner_findings(self):
+        common = {
+            "check_type": "xss",
+            "severity": "high",
+            "url": "http://fixture.test/search",
+            "field_name": "q",
+            "payload": "<svg/onload=alert(1)>",
+            "evidence": "alert dialog was observed",
+        }
+
+        results = SarifExporter().export([
+            {**common, "source": "scanner"},
+            {**common, "source": "agent"},
+        ])["runs"][0]["results"]
+
+        fingerprints = [
+            result["partialFingerprints"]["primaryLocationLineHash"]
+            for result in results
+        ]
+        self.assertNotEqual(fingerprints[0], fingerprints[1])
+
     def test_recon_task_keeps_url_discovery_primary_and_surfaces_findings(self):
         scanner = AgentBrowserScanner(
             target_url="http://fixture.test",
@@ -118,7 +141,47 @@ class AgentReconHandoffTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(handoff.findings), 1)
         self.assertIsInstance(handoff.findings[0], Finding)
         self.assertEqual(handoff.findings[0].source, "agent")
+        self.assertFalse(handoff.findings[0].verified)
         self.assertFalse(handoff.findings[0].agent_verified)
+
+    async def test_run_writes_agent_finding_as_unverified_evidence(self):
+        agent_finding = AgentFinding(
+            check_type="xss",
+            severity="high",
+            url="http://fixture.test/search",
+            field_name="q",
+            payload="<svg/onload=alert(1)>",
+            evidence="alert dialog was observed",
+        )
+        result = SimpleNamespace(
+            findings=[agent_finding],
+            steps_taken=3,
+            success=True,
+            error="",
+            final_summary="",
+        )
+
+        with patch("wscan.llm_agent_browser.AgentBrowserScanner") as scanner_cls:
+            scanner_cls.return_value.run = AsyncMock(return_value=result)
+            with tempfile.TemporaryDirectory() as output_dir, patch(
+                "wscan.report.ReportGenerator.generate",
+                return_value=Path(output_dir) / "report.html",
+            ):
+                engine = AgentEngine(
+                    url="http://fixture.test",
+                    checks=["xss"],
+                    output_dir=output_dir,
+                    open_report=False,
+                )
+                await engine.run()
+                evidence = json.loads(
+                    (Path(output_dir) / "evidence.json").read_text(encoding="utf-8")
+                )
+
+        finding = evidence["findings"][0]
+        self.assertEqual(finding["source"], "agent")
+        self.assertFalse(finding["verified"])
+        self.assertFalse(finding["agent_verified"])
 
 
 class HybridFindingMergeTests(unittest.TestCase):

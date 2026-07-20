@@ -72,26 +72,38 @@ class MutationPromptParseTests(unittest.TestCase):
 
 
 class AdaptiveGenerationRetryTests(unittest.IsolatedAsyncioTestCase):
-    async def test_failure_none_and_successful_empty_response_are_distinct(self):
+    async def test_none_empty_and_whitespace_responses_are_failures(self):
         engine = AdaptivePayloadEngine(_RetryPG())
         with patch(
             "wscan.adaptive_payload.llm_client.complete_text",
             new_callable=AsyncMock,
-            side_effect=[None, ""],
+            side_effect=[None, "", "   \n\t"],
         ) as complete:
-            failed = await engine.generate(
-                "xss", "q", "https://example.test", [], "<html></html>"
-            )
-            empty = await engine.generate(
-                "xss", "q", "https://example.test", [], "<html></html>"
-            )
+            results = [
+                await engine.generate(
+                    "xss", "q", "https://example.test", [], "<html></html>"
+                )
+                for _ in range(3)
+            ]
 
-        self.assertIsNone(failed)
-        self.assertEqual(empty, [])
-        self.assertEqual(complete.await_count, 2)
+        self.assertEqual(results, [None, None, None])
+        self.assertEqual(complete.await_count, 3)
         self.assertEqual(complete.await_args.kwargs["max_tokens"], 1000)
         self.assertNotIn("timeout", complete.await_args.kwargs)
         self.assertNotIn("retries", complete.await_args.kwargs)
+
+    async def test_nonempty_response_with_no_extractable_payload_is_successful_empty(self):
+        engine = AdaptivePayloadEngine(_RetryPG())
+        with patch(
+            "wscan.adaptive_payload.llm_client.complete_text",
+            new_callable=AsyncMock,
+            return_value="This response contains no usable injection payload explanation",
+        ):
+            result = await engine.generate(
+                "xss", "q", "https://example.test", [], "<html></html>"
+            )
+
+        self.assertEqual(result, [])
 
     async def test_complete_text_retries_read_error_then_returns_payloads(self):
         calls = 0

@@ -12,11 +12,15 @@ from wscan.remediation import generate_fix
 
 
 class _Response:
-    def __init__(self, status_code, data=None):
+    def __init__(self, status_code, data=None, *, headers=None, json_error=None):
         self.status_code = status_code
         self._data = data or {}
+        self.headers = headers or {}
+        self._json_error = json_error
 
     def json(self):
+        if self._json_error:
+            raise self._json_error
         return self._data
 
 
@@ -49,7 +53,7 @@ def _mock_async_client(responses):
 
 class RetryPolicyTests(unittest.TestCase):
     def test_retryable_status_and_httpx_exceptions(self):
-        for status in (429, 500, 502, 503, 504):
+        for status in (408, 429, 500, 502, 503, 504, 529):
             self.assertTrue(is_retryable(status), status)
         for status in (200, 400, 401, 403, 404):
             self.assertFalse(is_retryable(status), status)
@@ -59,6 +63,7 @@ class RetryPolicyTests(unittest.TestCase):
         self.assertTrue(is_retryable(httpx.ConnectError("connect", request=request)))
         self.assertTrue(is_retryable(httpx.ReadError("read", request=request)))
         self.assertTrue(is_retryable(httpx.WriteError("write", request=request)))
+        self.assertTrue(is_retryable(httpx.CloseError("close", request=request)))
         self.assertTrue(is_retryable(httpx.RemoteProtocolError("protocol", request=request)))
         self.assertFalse(is_retryable(ValueError("permanent")))
 
@@ -132,17 +137,87 @@ class CompleteTextTests(unittest.TestCase):
         self.assertEqual(client.post.await_count, 2)
         sleep.assert_awaited_once_with(0.5)
 
-    def test_400_returns_none_without_retry(self):
-        client, context = _mock_async_client([_Response(400)])
+    def test_408_and_529_retry_then_succeed(self):
+        for status in (408, 529):
+            with self.subTest(status=status):
+                client, context = _mock_async_client([
+                    _Response(status),
+                    _Response(200, {"choices": [{"message": {"content": "recovered"}}]}),
+                ])
+                pg = _payload_generator("openai")
+
+                with patch("wscan.llm_client.httpx.AsyncClient", return_value=context), \
+                     patch("wscan.llm_client.asyncio.sleep", new_callable=AsyncMock) as sleep:
+                    result = asyncio.run(complete_text(pg, "prompt"))
+
+                self.assertEqual(result, "recovered")
+                self.assertEqual(client.post.await_count, 2)
+                sleep.assert_awaited_once_with(0.5)
+
+    def test_close_error_retries_then_succeeds(self):
+        request = httpx.Request("POST", "https://example.test")
+        client, context = _mock_async_client([
+            httpx.CloseError("temporary close failure", request=request),
+            _Response(200, {"choices": [{"message": {"content": "recovered"}}]}),
+        ])
         pg = _payload_generator("openai")
 
         with patch("wscan.llm_client.httpx.AsyncClient", return_value=context), \
              patch("wscan.llm_client.asyncio.sleep", new_callable=AsyncMock) as sleep:
             result = asyncio.run(complete_text(pg, "prompt"))
 
-        self.assertIsNone(result)
-        self.assertEqual(client.post.await_count, 1)
-        sleep.assert_not_awaited()
+        self.assertEqual(result, "recovered")
+        self.assertEqual(client.post.await_count, 2)
+        sleep.assert_awaited_once_with(0.5)
+
+    def test_broken_200_json_and_missing_key_retry_then_succeed(self):
+        broken_responses = [
+            _Response(200, json_error=ValueError("broken json")),
+            _Response(200, {}),
+        ]
+        for broken in broken_responses:
+            with self.subTest(broken=broken._json_error or broken._data):
+                client, context = _mock_async_client([
+                    broken,
+                    _Response(200, {"choices": [{"message": {"content": "recovered"}}]}),
+                ])
+                pg = _payload_generator("openai")
+
+                with patch("wscan.llm_client.httpx.AsyncClient", return_value=context), \
+                     patch("wscan.llm_client.asyncio.sleep", new_callable=AsyncMock) as sleep:
+                    result = asyncio.run(complete_text(pg, "prompt"))
+
+                self.assertEqual(result, "recovered")
+                self.assertEqual(client.post.await_count, 2)
+                sleep.assert_awaited_once_with(0.5)
+
+    def test_retry_after_seconds_is_preferred_and_capped(self):
+        client, context = _mock_async_client([
+            _Response(429, headers={"Retry-After": "30"}),
+            _Response(200, {"choices": [{"message": {"content": "recovered"}}]}),
+        ])
+        pg = _payload_generator("openai")
+
+        with patch("wscan.llm_client.httpx.AsyncClient", return_value=context), \
+             patch("wscan.llm_client.asyncio.sleep", new_callable=AsyncMock) as sleep:
+            result = asyncio.run(complete_text(pg, "prompt"))
+
+        self.assertEqual(result, "recovered")
+        sleep.assert_awaited_once_with(8.0)
+
+    def test_permanent_statuses_return_none_without_retry(self):
+        for status in (400, 401, 403):
+            with self.subTest(status=status):
+                client, context = _mock_async_client([_Response(status)])
+                pg = _payload_generator("openai")
+
+                with patch("wscan.llm_client.httpx.AsyncClient", return_value=context), \
+                     patch("wscan.llm_client.asyncio.sleep", new_callable=AsyncMock) as sleep:
+                    result = asyncio.run(complete_text(pg, "prompt"))
+
+                self.assertIsNone(result)
+                self.assertEqual(client.post.await_count, 1)
+                sleep.assert_not_awaited()
 
     def test_claude_sdk_success(self):
         messages = MagicMock()

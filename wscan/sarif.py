@@ -161,6 +161,7 @@ class SarifExporter:
         payload = f.get("payload", "")
         cvss = f.get("cvss_score", 0.0)
         confidence = f.get("confidence", "tentative")
+        source = f.get("source", "scanner")
 
         message = evidence
         if field_name:
@@ -193,7 +194,7 @@ class SarifExporter:
                 "field_name":       field_name,
                 "payload":          payload,
                 "verified":         f.get("verified", True),
-                "source":           f.get("source", "scanner"),
+                "source":           source,
                 "agent_verified":   f.get("agent_verified", False),
                 "compliance_refs":  f.get("compliance_refs", {}),
             },
@@ -202,7 +203,7 @@ class SarifExporter:
         # SARIF fingerprint for deduplication
         result["partialFingerprints"] = {
             "primaryLocationLineHash": (
-                f"{ct}:{url}:{field_name}"
+                f"{source}:{ct}:{url}:{field_name}"
             )
         }
 
