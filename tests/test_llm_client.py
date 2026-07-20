@@ -248,6 +248,56 @@ class CompleteTextTests(unittest.TestCase):
             )))
         factory.assert_not_called()
 
+    def test_return_status_classifies_openai_results(self):
+        cases = [
+            (
+                "permanent",
+                [_Response(401)],
+                (None, "permanent"),
+                1,
+            ),
+            (
+                "transient",
+                [_Response(500), _Response(500), _Response(500)],
+                (None, "transient"),
+                3,
+            ),
+            (
+                "empty",
+                [_Response(200, {"choices": [{"message": {"content": "  \n"}}]})],
+                (None, "empty"),
+                1,
+            ),
+            (
+                "ok",
+                [_Response(200, {"choices": [{"message": {"content": "text"}}]})],
+                ("text", "ok"),
+                1,
+            ),
+        ]
+        for name, responses, expected, post_count in cases:
+            with self.subTest(name=name):
+                client, context = _mock_async_client(responses)
+                with patch("wscan.llm_client.httpx.AsyncClient", return_value=context), \
+                     patch("wscan.llm_client.asyncio.sleep", new_callable=AsyncMock):
+                    result = asyncio.run(complete_text(
+                        _payload_generator("openai"),
+                        "prompt",
+                        return_status=True,
+                    ))
+
+                self.assertEqual(result, expected)
+                self.assertEqual(client.post.await_count, post_count)
+
+    def test_return_status_reports_unavailable_without_http(self):
+        with patch("wscan.llm_client.httpx.AsyncClient") as factory:
+            result = asyncio.run(complete_text(
+                _payload_generator("none"), "prompt", return_status=True
+            ))
+
+        self.assertEqual(result, (None, "unavailable"))
+        factory.assert_not_called()
+
 
 class GeminiRemediationRegressionTests(unittest.TestCase):
     def test_generate_fix_uses_gemini_response(self):

@@ -454,7 +454,7 @@ class AdaptivePayloadEngine:
     ) -> Optional[list[str]]:
         """
         Analyse the page HTML and generate adaptive bypass payloads.
-        LLM 呼び出し失敗時は ``None``、正常応答から生成対象が無い場合は空 list を返す。
+        一時的な LLM 失敗時は ``None``、恒久失敗または生成対象なしは空 list を返す。
         """
         if self.pg.provider == "none":
             return []
@@ -494,19 +494,23 @@ class AdaptivePayloadEngine:
         _adaptive_header(check_type, field_name, provider)
 
         with self.pg.use_role("adaptive"):
-            raw = await llm_client.complete_text(
+            raw, status = await llm_client.complete_text(
                 self.pg,
                 prompt,
                 max_tokens=1000,
                 temperature=0.8,
+                return_status=True,
             )
 
         _adaptive_footer()
 
-        # 通信成功でも空/空白応答は有効な解析結果ではない。失敗として None を返し、
-        # checkpoint resume の再試行対象にする。非空テキストを解析できた結果が 0 件の
-        # 場合だけ [] とし、無限再試行を防ぐ。
-        if raw is None or not raw.strip():
+        # 一時障害と空応答は resume で回収し、設定・認証等の恒久障害は完了扱いで
+        # 収束させる。非空テキストを解析できた結果が 0 件の場合も [] とする。
+        if status in {"empty", "transient"}:
+            return None
+        if status in {"unavailable", "permanent"}:
+            return []
+        if raw is None:  # status と本文の不整合に対する防御
             return None
 
         payloads = _parse_payload_lines(raw, payloads_tried)

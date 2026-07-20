@@ -94,23 +94,30 @@ class MutationPromptParseTests(unittest.TestCase):
 
 
 class AdaptiveGenerationRetryTests(unittest.IsolatedAsyncioTestCase):
-    async def test_none_empty_and_whitespace_responses_are_failures(self):
+    async def test_status_controls_completion_semantics(self):
         engine = AdaptivePayloadEngine(_RetryPG())
         with patch(
             "wscan.adaptive_payload.llm_client.complete_text",
             new_callable=AsyncMock,
-            side_effect=[None, "", "   \n\t"],
+            side_effect=[
+                (None, "permanent"),
+                (None, "unavailable"),
+                (None, "transient"),
+                (None, "empty"),
+                ("<payloads>\n%2527\n</payloads>", "ok"),
+            ],
         ) as complete:
             results = [
                 await engine.generate(
                     "xss", "q", "https://example.test", [], "<html></html>"
                 )
-                for _ in range(3)
+                for _ in range(5)
             ]
 
-        self.assertEqual(results, [None, None, None])
-        self.assertEqual(complete.await_count, 3)
+        self.assertEqual(results, [[], [], None, None, ["%2527"]])
+        self.assertEqual(complete.await_count, 5)
         self.assertEqual(complete.await_args.kwargs["max_tokens"], 1000)
+        self.assertTrue(complete.await_args.kwargs["return_status"])
         self.assertNotIn("timeout", complete.await_args.kwargs)
         self.assertNotIn("retries", complete.await_args.kwargs)
 
@@ -119,7 +126,10 @@ class AdaptiveGenerationRetryTests(unittest.IsolatedAsyncioTestCase):
         with patch(
             "wscan.adaptive_payload.llm_client.complete_text",
             new_callable=AsyncMock,
-            return_value="This response contains no usable injection payload explanation",
+            return_value=(
+                "This response contains no usable injection payload explanation",
+                "ok",
+            ),
         ):
             result = await engine.generate(
                 "xss", "q", "https://example.test", [], "<html></html>"

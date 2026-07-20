@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import os
-from typing import Any
+from typing import Any, Literal
 
 import httpx
 
@@ -11,6 +11,8 @@ from . import llm_endpoint
 
 
 _RETRYABLE_STATUS_CODES = {408, 429, 500, 502, 503, 504, 529}
+
+CompletionStatus = Literal["ok", "empty", "unavailable", "transient", "permanent"]
 
 
 class _RetryableResponseError(Exception):
@@ -63,6 +65,18 @@ def _retry_after_seconds(response: Any, cap: float = 8.0) -> float | None:
     return min(cap, seconds)
 
 
+def _completion_result(
+    text: str | None,
+    status: CompletionStatus,
+    return_status: bool,
+) -> str | None | tuple[str | None, CompletionStatus]:
+    """既定の戻り値を保ち、要求時だけ失敗種別を付与する。"""
+    if return_status:
+        # empty は呼び出し側が空文字の表現差を意識せず判定できるよう None に正規化する。
+        return (text if status == "ok" else None, status)
+    return text
+
+
 async def complete_text(
     pg,
     prompt,
@@ -71,11 +85,12 @@ async def complete_text(
     temperature=0.3,
     timeout=None,
     retries=None,
-) -> str | None:
-    """設定済みプロバイダへ問い合わせ、生テキストまたは ``None`` を返す。"""
+    return_status=False,
+) -> str | None | tuple[str | None, CompletionStatus]:
+    """設定済みプロバイダへ問い合わせ、生テキストと任意の失敗種別を返す。"""
     provider = getattr(pg, "provider", "none")
     if provider == "none":
-        return None
+        return _completion_result(None, "unavailable", return_status)
 
     request_timeout = (
         timeout if timeout is not None else getattr(pg, "llm_timeout_seconds", 30)
@@ -85,7 +100,7 @@ async def complete_text(
         request_timeout = float(request_timeout)
         max_retries = max(0, int(max_retries))
     except (TypeError, ValueError):
-        return None
+        return _completion_result(None, "unavailable", return_status)
 
     api_key = None
     anthropic_client = None
@@ -93,19 +108,19 @@ async def complete_text(
         if provider == "claude":
             anthropic_client = pg._get_anthropic_client()
             if not anthropic_client:
-                return None
+                return _completion_result(None, "unavailable", return_status)
         elif provider == "openai":
             api_key = getattr(pg, "openai_api_key", None)
             if not api_key:
-                return None
+                return _completion_result(None, "unavailable", return_status)
         elif provider == "gemini":
             api_key = os.environ.get("GEMINI_API_KEY")
             if not api_key:
-                return None
+                return _completion_result(None, "unavailable", return_status)
         elif provider != "ollama":
-            return None
+            return _completion_result(None, "unavailable", return_status)
     except Exception:
-        return None
+        return _completion_result(None, "unavailable", return_status)
 
     for attempt in range(max_retries + 1):
         retry_after = None
@@ -119,7 +134,15 @@ async def complete_text(
                     timeout=request_timeout,
                     messages=[{"role": "user", "content": prompt}],
                 )
-                return response.content[0].text if response.content else None
+                try:
+                    text = response.content[0].text if response.content else None
+                    if text is not None and not isinstance(text, str):
+                        raise TypeError("LLM response text is not a string")
+                except (TypeError, AttributeError, IndexError) as exc:
+                    raise _RetryableResponseError(str(exc)) from exc
+                if text is None or not text.strip():
+                    return _completion_result(text, "empty", return_status)
+                return _completion_result(text, "ok", return_status)
 
             async with httpx.AsyncClient(timeout=request_timeout) as client:
                 if provider == "openai":
@@ -173,7 +196,9 @@ async def complete_text(
                         text = data["response"]
                     if not isinstance(text, str):
                         raise TypeError("LLM response text is not a string")
-                    return text
+                    if not text.strip():
+                        return _completion_result(text, "empty", return_status)
+                    return _completion_result(text, "ok", return_status)
                 except (ValueError, TypeError, KeyError, IndexError) as exc:
                     raise _RetryableResponseError(str(exc)) from exc
 
@@ -182,9 +207,11 @@ async def complete_text(
         except Exception as exc:
             failure = exc
 
-        if attempt >= max_retries or not is_retryable(failure):
-            return None
+        retryable = is_retryable(failure)
+        if attempt >= max_retries or not retryable:
+            status: CompletionStatus = "transient" if retryable else "permanent"
+            return _completion_result(None, status, return_status)
         delay = retry_after if retry_after is not None else backoff_seconds(attempt)
         await asyncio.sleep(delay)
 
-    return None
+    return _completion_result(None, "transient", return_status)
