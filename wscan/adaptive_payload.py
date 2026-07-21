@@ -24,6 +24,8 @@ from typing import Optional, TYPE_CHECKING
 from rich.console import Console
 from rich.rule import Rule
 
+from . import llm_client
+
 if TYPE_CHECKING:
     from wscan.payload_gen import PayloadGenerator
 
@@ -405,6 +407,17 @@ def _parse_payload_lines(text: str, already_tried: list[str]) -> list[str]:
         # Skip pure prose lines (only letters and spaces, no injection chars)
         if re.match(r"^[A-Za-z][a-z ]+:?\s*$", line) and len(line) > 20:
             continue
+        # 構造タグ（LLM が <payloads> の外に書く <analysis> や </payloads> 等の
+        # メタタグ）を payload と誤採用しない。**既知メタタグ名の開き/閉じタグだけ**を
+        # 除外し、`</textarea><script>…` や `</script><svg/onload=…>` のような文脈
+        # breakout ペイロード（閉じタグで始まるが実ペイロード）は残す。
+        if re.match(
+            r"^</?(analysis|payloads?|reasoning|thinking|notes?|explanation|"
+            r"output|response|result)\b[^>]*>?$",
+            line,
+            re.IGNORECASE,
+        ):
+            continue
         # Remove leading numbering like "1. " "2) " or bullet "- " "* "
         line = re.sub(r"^[\d]+[\.\)]\s+", "", line)
         line = re.sub(r"^[-*]\s+", "", line)
@@ -438,15 +451,18 @@ class AdaptivePayloadEngine:
         payloads_tried: list[str],
         page_html: str,
         waf_name: Optional[str] = None,
-    ) -> list[str]:
+        *,
+        return_status: bool = False,
+    ) -> Optional[list[str]] | tuple[Optional[list[str]], llm_client.CompletionStatus]:
         """
         Analyse the page HTML and generate adaptive bypass payloads.
-        Returns an empty list if LLM is unavailable.
+        一時的な LLM 失敗時は ``None``、恒久失敗または生成対象なしは空 list を返す。
+        ``return_status=True`` のときだけ、engine の可用性キャッシュ更新用に
+        ``(payloads, status)`` を返す。既定の戻り値は従来どおり。
         """
         if self.pg.provider == "none":
-            return []
-        if not await self.pg._check_llm_available():
-            return []
+            result: Optional[list[str]] = []
+            return (result, "unavailable") if return_status else result
 
         cheatsheet = _get_cheatsheet(check_type)
         observations = _build_observations(page_html, payloads_tried)
@@ -482,30 +498,36 @@ class AdaptivePayloadEngine:
         provider = self.pg.provider
         _adaptive_header(check_type, field_name, provider)
 
-        raw: Optional[str] = None
         with self.pg.use_role("adaptive"):
-            if provider == "claude":
-                raw = await self._stream_claude(prompt)
-            elif provider == "openai":
-                raw = await self._stream_openai(prompt)
-            elif provider == "gemini":
-                raw = await self._call_gemini(prompt)
-            else:
-                raw = await self._stream_ollama(prompt)
+            raw, status = await llm_client.complete_text(
+                self.pg,
+                prompt,
+                max_tokens=1000,
+                temperature=0.8,
+                return_status=True,
+            )
 
         _adaptive_footer()
 
-        if not raw:
-            return []
-
-        payloads = _parse_payload_lines(raw, payloads_tried)
+        # 一時障害と空応答は resume で回収し、設定・認証等の恒久障害や安全ブロック
+        # (blocked)は完了扱いで収束させる。非空テキストを解析できた結果が 0 件の場合も []。
+        # 注: blocked は「この prompt が無駄」なだけで LLM 全体は生きているため、
+        # engine 側の可用性フリップ対象(permanent/unavailable)には含めない。
+        if status in {"empty", "transient"}:
+            payloads = None
+        elif status in {"unavailable", "permanent", "blocked"}:
+            payloads = []
+        elif raw is None:  # status と本文の不整合に対する防御
+            payloads = None
+        else:
+            payloads = _parse_payload_lines(raw, payloads_tried)
         if payloads:
             console.print(
                 f"  [bold magenta][AdaptiveAI][/bold magenta] "
                 f"Generated [cyan]{len(payloads)}[/cyan] bypass payload(s) for "
                 f"[green]{field_name}[/green] ({check_type})"
             )
-        return payloads
+        return (payloads, status) if return_status else payloads
 
     # ------------------------------------------------------------------
     # Seed mutation (LLM payload variation)

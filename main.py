@@ -86,6 +86,8 @@ def _load_config(path: Path = _CONFIG_PATH) -> dict:
     cfg["openai_model"]            = str(l.get("openai_model", "gpt-4o-mini"))
     cfg["gemini_model"]            = str(l.get("gemini_model", "gemini-2.0-flash"))
     cfg["claude_model"]            = str(l.get("claude_model", "claude-haiku-4-5-20251001"))
+    cfg["llm_timeout_seconds"]     = float(l.get("timeout_seconds", 30))
+    cfg["llm_max_retries"]         = int(l.get("max_retries", 2))
     # 外部 OpenAI 互換 LLM（tsuzumi2 等）のベース URL。config ファイルの値のみを
     # CLI/ダッシュボードの既定にする。env(WSCAN_LLM_BASE_URL/OPENAI_BASE_URL)は
     # ここで畳み込まない — 畳み込むと --llm openai(公式) 実行時に env 値が「明示指定」
@@ -1347,6 +1349,8 @@ async def run_scan(args):
             claude_model=getattr(args, "claude_model", "claude-haiku-4-5-20251001"),
             openai_base_url=_effective_llm_base_url(args),
             role_models=getattr(args, "role_models", {}),
+            llm_timeout_seconds=_CFG.get("llm_timeout_seconds", 30),
+            llm_max_retries=_CFG.get("llm_max_retries", 2),
         )
         _wizard_result = await run_wizard(_pg)
         if _wizard_result is not None:
@@ -1496,6 +1500,8 @@ async def run_scan(args):
             claude_model=args.claude_model,
             openai_base_url=_effective_llm_base_url(args),
             role_models=getattr(args, "role_models", {}),
+            llm_timeout_seconds=_CFG.get("llm_timeout_seconds", 30),
+            llm_max_retries=_CFG.get("llm_max_retries", 2),
             checks=checks_list,
             output_dir=args.output,
             timeout=args.timeout,
@@ -1821,6 +1827,8 @@ async def run_serve(args):
         "claude_model": _CFG.get("claude_model", "claude-haiku-4-5-20251001"),
         "openai_base_url": _CFG.get("openai_base_url", ""),
         "role_models": _CFG.get("role_models", {}),
+        "llm_timeout_seconds": _CFG.get("llm_timeout_seconds", 30),
+        "llm_max_retries": _CFG.get("llm_max_retries", 2),
         "auth_user": _CFG.get("auth_user", ""),
         "auth_pass": _CFG.get("auth_pass", ""),
         "login_url": _CFG.get("login_url", ""),
@@ -1940,6 +1948,7 @@ async def run_serve(args):
 
         # ── Hybrid Mode: Agent偵察 (Phase 1) → 通常スキャン (Phase 2) ────
         seed_urls: list = []
+        agent_findings: list = []
         if cfg.get("hybrid_mode"):
             from wscan.agent_engine import AgentEngine
             # 偵察側の base URL は、偵察(hybrid_llm)が openai_compatible のときだけ渡す。
@@ -1954,11 +1963,15 @@ async def run_serve(args):
                     llm_model=cfg.get("hybrid_model", "") or "",
                     ollama_url=cfg.get("hybrid_ollama_url", "http://localhost:11434") or "http://localhost:11434",
                     llm_base_url=_recon_base,
-                    checks=[],
+                    checks=checks,
                     headless=bool(cfg.get("headless", True)),
                     auth_user=cfg.get("auth_user", "") or "",
                     auth_pass=cfg.get("auth_pass", "") or "",
                     login_url=cfg.get("login_url", "") or "",
+                    target_urls=cfg.get("target_urls", []) or [],
+                    access_urls=cfg.get("access_urls", []) or [],
+                    exclude_urls=cfg.get("exclude_urls", []) or [],
+                    exclude_fields=cfg.get("exclude_fields", []) or [],
                     max_steps=int(cfg.get("hybrid_max_steps", 30)),
                     open_report=False,
                     monitor=monitor,
@@ -1966,8 +1979,11 @@ async def run_serve(args):
                 )
                 handoff = await recon_engine.run_recon()
                 seed_urls = handoff.discovered_urls
+                agent_findings = handoff.findings
                 await monitor.emit_status(
-                    f"🔀 Phase 2: {len(seed_urls)} URL 発見済み。通常スキャン開始...", "running"
+                    f"🔀 Phase 2: {len(seed_urls)} URL / "
+                    f"{len(agent_findings)} Agent Finding 発見済み。通常スキャン開始...",
+                    "running",
                 )
             except Exception as exc:
                 console.print(
@@ -1975,6 +1991,7 @@ async def run_serve(args):
                     f"URL シードなしで通常スキャンを続行します。[/yellow]"
                 )
                 seed_urls = []
+                agent_findings = []
 
         await monitor.emit_status(f"Starting scan of {url}", "running")
 
@@ -1995,6 +2012,12 @@ async def run_serve(args):
                 claude_model=cfg.get("claude_model", "claude-haiku-4-5-20251001") or "claude-haiku-4-5-20251001",
                 openai_base_url=_scan_base,
                 role_models=cfg.get("role_models", {}) or {},
+                llm_timeout_seconds=float(
+                    cfg.get("llm_timeout_seconds", _CFG.get("llm_timeout_seconds", 30))
+                ),
+                llm_max_retries=int(
+                    cfg.get("llm_max_retries", _CFG.get("llm_max_retries", 2))
+                ),
                 auth_user=cfg.get("auth_user", "") or "",
                 auth_pass=cfg.get("auth_pass", "") or "",
                 cookies=cfg.get("cookies", "") or "",
@@ -2065,6 +2088,7 @@ async def run_serve(args):
                     )
                 ),
                 seed_urls=seed_urls or None,
+                additional_report_findings=agent_findings or None,
                 manual_crawl_path=cfg.get("manual_crawl_file", "") or "",
                 headers=cfg.get("headers", {}) or {},
                 header_refresh_cmd=cfg.get("header_refresh_cmd", "") or "",

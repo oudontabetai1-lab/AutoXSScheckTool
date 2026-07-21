@@ -26,6 +26,13 @@ if TYPE_CHECKING:
 console = Console()
 
 
+def _scope_list(values) -> list[str]:
+    """API/UI の list または改行・カンマ区切り文字列を list に揃える。"""
+    if isinstance(values, str):
+        values = values.replace(",", "\n").splitlines()
+    return [str(value).strip() for value in (values or []) if str(value).strip()]
+
+
 @dataclass
 class AgentHandoffData:
     """偵察フェーズで収集したデータ（通常スキャンへの引き渡しデータ）。"""
@@ -34,9 +41,31 @@ class AgentHandoffData:
     auth_pass: str = ""
     login_url: str = ""
     summary: str = ""
+    # 既存の位置引数との互換性を保つため、新規フィールドは末尾に置く。
+    findings: list = field(default_factory=list)
 
 # Base output directory (same convention as ScanEngine)
 OUTPUT_BASE = Path(__file__).parent.parent / "output"
+
+
+def _convert_agent_findings(agent_findings: list) -> list:
+    """Agent 独自形式の Finding を共通レポート形式へ変換する。"""
+    from wscan.scanners.base import Finding
+
+    return [
+        Finding(
+            check_type=af.check_type,
+            severity=af.severity,
+            url=af.url,
+            field_name=af.field_name,
+            payload=af.payload,
+            evidence=af.evidence,
+            verified=False,
+            source="agent",
+            agent_verified=getattr(af, "agent_verified", False),
+        )
+        for af in agent_findings
+    ]
 
 
 class AgentEngine:
@@ -59,6 +88,10 @@ class AgentEngine:
     open_report     : Auto-open HTML report in browser on completion
     monitor         : Optional MonitorServer for real-time updates
     port            : Dashboard port (used when started with dashboard)
+    target_urls     : Agent の security probe を許可する追加攻撃対象 URL
+    access_urls     : 訪問・認証のみ許可する URL
+    exclude_urls    : security probe を禁止する URL パターン
+    exclude_fields  : security probe を禁止するフィールド名
     """
 
     def __init__(
@@ -78,6 +111,10 @@ class AgentEngine:
         monitor: Optional["MonitorServer"] = None,
         port: int = 8765,
         llm_base_url: str = "",
+        target_urls: Optional[list[str]] = None,
+        access_urls: Optional[list[str]] = None,
+        exclude_urls: Optional[list[str]] = None,
+        exclude_fields: Optional[list[str]] = None,
     ):
         self.url = url.rstrip("/")
         self.llm_provider = llm_provider
@@ -93,6 +130,10 @@ class AgentEngine:
         self.open_report = open_report
         self.monitor = monitor
         self.port = port
+        self.target_urls = _scope_list(target_urls)
+        self.access_urls = _scope_list(access_urls)
+        self.exclude_urls = _scope_list(exclude_urls)
+        self.exclude_fields = _scope_list(exclude_fields)
 
         ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         self.output_dir = Path(output_dir) if output_dir else OUTPUT_BASE / f"agent_{ts}"
@@ -105,7 +146,6 @@ class AgentEngine:
     async def run(self):
         """Run the agent browser scan end-to-end."""
         from wscan.llm_agent_browser import AgentBrowserScanner, AgentScanResult
-        from wscan.scanners.base import Finding
         from wscan.report import ReportGenerator
 
         console.print(Panel.fit(
@@ -131,21 +171,16 @@ class AgentEngine:
             login_url=self.login_url,
             max_steps=self.max_steps,
             monitor=self.monitor,
+            target_urls=self.target_urls,
+            access_urls=self.access_urls,
+            exclude_urls=self.exclude_urls,
+            exclude_fields=self.exclude_fields,
         )
 
         result: AgentScanResult = await scanner.run()
 
-        # Convert AgentFindings → Finding (standard format)
-        findings: list[Finding] = []
-        for af in result.findings:
-            findings.append(Finding(
-                check_type=af.check_type,
-                severity=af.severity,
-                url=af.url,
-                field_name=af.field_name,
-                payload=af.payload,
-                evidence=af.evidence,
-            ))
+        # AgentFindings → 共通 Finding 変換は Hybrid 偵察でも同じ経路を使う。
+        findings = _convert_agent_findings(result.findings)
 
         # Save evidence JSON
         evidence_path = self.output_dir / "evidence.json"
@@ -211,8 +246,8 @@ class AgentEngine:
 
     async def run_recon(self) -> AgentHandoffData:
         """
-        偵察モードでエージェントを実行し、発見したURLとサイト情報を返す。
-        脆弱性テストは行わない。ハイブリッドスキャンの Phase 1 として使用。
+        偵察モードでエージェントを実行し、発見したURL・Finding・サイト情報を返す。
+        URL 発見を主目的としつつ、探索中に見つけた脆弱性仮説も Phase 2 へ渡す。
         """
         from wscan.llm_agent_browser import AgentBrowserScanner
 
@@ -236,7 +271,7 @@ class AgentEngine:
             llm_model=self.llm_model,
             ollama_url=self.ollama_url,
             llm_base_url=self.llm_base_url,
-            checks=[],   # 偵察モードでは脆弱性テストなし
+            checks=self.checks,
             headless=self.headless,
             auth_user=self.auth_user,
             auth_pass=self.auth_pass,
@@ -244,9 +279,14 @@ class AgentEngine:
             max_steps=self.max_steps,
             monitor=self.monitor,
             recon_mode=True,
+            target_urls=self.target_urls,
+            access_urls=self.access_urls,
+            exclude_urls=self.exclude_urls,
+            exclude_fields=self.exclude_fields,
         )
 
         result = await scanner.run()
+        findings = _convert_agent_findings(result.findings)
 
         # URL リストを生成: ターゲット URL を先頭に、重複を除去
         all_urls = [self.url]
@@ -256,11 +296,13 @@ class AgentEngine:
 
         console.print(
             f"\n[bold cyan]Agent偵察完了:[/bold cyan] "
-            f"[cyan]{len(all_urls)}[/cyan] URL 発見"
+            f"[cyan]{len(all_urls)}[/cyan] URL 発見 / "
+            f"[magenta]{len(findings)}[/magenta] Agent Finding"
         )
 
         return AgentHandoffData(
             discovered_urls=all_urls,
+            findings=findings,
             auth_user=self.auth_user,
             auth_pass=self.auth_pass,
             login_url=self.login_url,

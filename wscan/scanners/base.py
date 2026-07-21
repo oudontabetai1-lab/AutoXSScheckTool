@@ -157,6 +157,8 @@ class Finding:
     evidence_type: str = ""          # Structured signal, e.g. xss_dialog, sqli_error
     evidence_details: dict = field(default_factory=dict)
     reproduction_steps: list[str] = field(default_factory=list)
+    source: str = "scanner"          # "scanner" | "agent"
+    agent_verified: bool = False      # Agent 発見を決定論スキャナでも再現できたか
 
     @classmethod
     def from_dict(cls, data: dict) -> "Finding":
@@ -187,6 +189,8 @@ class Finding:
             evidence_type=data.get("evidence_type", ""),
             evidence_details=dict(data.get("evidence_details", {}) or {}),
             reproduction_steps=list(data.get("reproduction_steps", []) or []),
+            source=data.get("source", "scanner"),
+            agent_verified=bool(data.get("agent_verified", False)),
         )
 
     @property
@@ -221,6 +225,8 @@ class Finding:
             "evidence_type": self.evidence_type,
             "evidence_details": self.evidence_details,
             "reproduction_steps": self.reproduction_steps,
+            "source": self.source,
+            "agent_verified": self.agent_verified,
             "compliance_refs": get_refs(self.check_type),
         }
 

@@ -23,10 +23,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-# v2: per-field の "(adaptive)" 完了単位を導入（abort→resume で adaptive を
-# 取りこぼさないため）。v1（legacy）由来の checkpoint は "(adaptive)" 単位を
-# 持たないので、engine の adaptive ゲートは source_version でこれを判別する。
-CHECKPOINT_VERSION = 2
+# v2: per-field の "(adaptive)" 完了単位を導入。
+# v3: adaptive を "(adaptive:<check_type>)" 単位へ細分化。旧 "(adaptive)" は
+# engine が「全 adaptive check 完了」として尊重するため、旧 checkpoint も読める。
+CHECKPOINT_VERSION = 3
 CHECKPOINT_FILENAME = "checkpoint.json"
 
 
@@ -84,9 +84,8 @@ class CheckpointState:
 
     # ── シリアライズ（純粋） ────────────────────────────────────────
     def to_dict(self) -> dict:
-        # 現行版で書き出す。v1 由来でも from_dict の load 時マイグレーションで
-        # per-field "(adaptive)" 単位を補完済み（＝実質 v2）なので、v2 として保存して
-        # 問題ない。次回 resume は追加マイグレーション不要で marker をそのまま使える。
+        # 現行版で書き出す。v1 由来は旧 "(adaptive)" 単位を補完済みで、engine が
+        # 全 adaptive check 完了として尊重する。v2 由来の旧 marker もそのまま保持する。
         return {
             "version": CHECKPOINT_VERSION,
             "target_url": self.target_url,

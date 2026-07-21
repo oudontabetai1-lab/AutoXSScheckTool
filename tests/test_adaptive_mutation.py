@@ -4,7 +4,11 @@ LLM プロバイダが ``none`` のとき、または LLM 不在のときは空 
 呼び出し側（BaseScanner.mutated_payloads）が LLM 非依存の変異へフォールバックできる
 ことを保証する。実 API 呼び出しはここでは行わない（キー不要）。
 """
+from contextlib import contextmanager
 import unittest
+from unittest.mock import AsyncMock, patch
+
+import httpx
 
 from wscan.adaptive_payload import AdaptivePayloadEngine, _MUTATION_PROMPT, _parse_payload_lines
 
@@ -16,6 +20,21 @@ class _FakePG:
 
     async def _check_llm_available(self):  # pragma: no cover - 呼ばれない想定
         return False
+
+
+class _RetryPG:
+    """adaptive の共通 LLM クライアント経路を通す最小スタブ。"""
+
+    provider = "openai"
+    openai_api_key = "test-key"
+    openai_base_url = "https://openai.example/v1"
+    openai_model = "test-model"
+    llm_timeout_seconds = 3
+    llm_max_retries = 1
+
+    @contextmanager
+    def use_role(self, role):
+        yield
 
 
 class MutatePayloadGatingTests(unittest.IsolatedAsyncioTestCase):
@@ -50,6 +69,134 @@ class MutationPromptParseTests(unittest.TestCase):
         out = _parse_payload_lines(raw, already_tried=["1 AND 1=1"])
         self.assertIn("%2527", out)
         self.assertIn("1/**/AND/**/1=1", out)
+
+    def test_parser_skips_structural_tags_but_keeps_payloads(self):
+        # <payloads> ブロックが無く LLM が散文＋タグを返したケース。
+        # 構造タグ（<analysis>/</analysis> 等）を payload として誤採用せず、
+        # <script>/<img ...> 等の実ペイロードは残す。
+        raw = (
+            "<analysis>\n"
+            "<script>alert(1)</script>\n"
+            "</analysis>\n"
+            "<img src=x onerror=alert(1)>\n"
+            "</textarea><script>alert(1)</script>\n"
+            "</script><svg/onload=alert(1)>"
+        )
+        out = _parse_payload_lines(raw, already_tried=[])
+        self.assertIn("<script>alert(1)</script>", out)
+        self.assertIn("<img src=x onerror=alert(1)>", out)
+        # メタタグは除外
+        self.assertNotIn("<analysis>", out)
+        self.assertNotIn("</analysis>", out)
+        # 閉じタグで始まる文脈 breakout ペイロードは残す（recall 回帰の防止）
+        self.assertIn("</textarea><script>alert(1)</script>", out)
+        self.assertIn("</script><svg/onload=alert(1)>", out)
+
+
+class AdaptiveGenerationRetryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_status_controls_completion_semantics(self):
+        engine = AdaptivePayloadEngine(_RetryPG())
+        with patch(
+            "wscan.adaptive_payload.llm_client.complete_text",
+            new_callable=AsyncMock,
+            side_effect=[
+                (None, "permanent"),
+                (None, "unavailable"),
+                (None, "blocked"),
+                (None, "transient"),
+                (None, "empty"),
+                ("<payloads>\n%2527\n</payloads>", "ok"),
+            ],
+        ) as complete:
+            results = [
+                await engine.generate(
+                    "xss", "q", "https://example.test", [], "<html></html>"
+                )
+                for _ in range(6)
+            ]
+
+        # blocked も恒久障害と同じく [] で収束（可用性は engine 側で倒さない）。
+        self.assertEqual(results, [[], [], [], None, None, ["%2527"]])
+        self.assertEqual(complete.await_count, 6)
+        self.assertEqual(complete.await_args.kwargs["max_tokens"], 1000)
+        self.assertTrue(complete.await_args.kwargs["return_status"])
+        self.assertNotIn("timeout", complete.await_args.kwargs)
+        self.assertNotIn("retries", complete.await_args.kwargs)
+
+    async def test_nonempty_response_with_no_extractable_payload_is_successful_empty(self):
+        engine = AdaptivePayloadEngine(_RetryPG())
+        with patch(
+            "wscan.adaptive_payload.llm_client.complete_text",
+            new_callable=AsyncMock,
+            return_value=(
+                "This response contains no usable injection payload explanation",
+                "ok",
+            ),
+        ):
+            result = await engine.generate(
+                "xss", "q", "https://example.test", [], "<html></html>"
+            )
+
+        self.assertEqual(result, [])
+
+    async def test_generate_can_return_status_without_changing_default_contract(self):
+        engine = AdaptivePayloadEngine(_RetryPG())
+        with patch(
+            "wscan.adaptive_payload.llm_client.complete_text",
+            new_callable=AsyncMock,
+            return_value=(None, "permanent"),
+        ):
+            legacy_result = await engine.generate(
+                "xss", "q", "https://example.test", [], "<html></html>"
+            )
+            status_result = await engine.generate(
+                "xss",
+                "q",
+                "https://example.test",
+                [],
+                "<html></html>",
+                return_status=True,
+            )
+
+        self.assertEqual(legacy_result, [])
+        self.assertEqual(status_result, ([], "permanent"))
+
+    async def test_complete_text_retries_read_error_then_returns_payloads(self):
+        calls = 0
+
+        async def handler(request):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise httpx.ReadError("temporary read failure", request=request)
+            return httpx.Response(
+                200,
+                json={
+                    "choices": [{
+                        "message": {"content": "<payloads>\n%2527\n</payloads>"}
+                    }]
+                },
+            )
+
+        transport = httpx.MockTransport(handler)
+        real_async_client = httpx.AsyncClient
+
+        def client_factory(*, timeout):
+            return real_async_client(timeout=timeout, transport=transport)
+
+        engine = AdaptivePayloadEngine(_RetryPG())
+        with patch("wscan.llm_client.httpx.AsyncClient", side_effect=client_factory), \
+             patch("wscan.llm_client.asyncio.sleep", new_callable=AsyncMock):
+            payloads = await engine.generate(
+                check_type="sqli",
+                field_name="q",
+                url="https://example.test/search",
+                payloads_tried=["' OR 1=1--"],
+                page_html="<html><input name='q'></html>",
+            )
+
+        self.assertEqual(payloads, ["%2527"])
+        self.assertEqual(calls, 2)
 
 
 if __name__ == "__main__":

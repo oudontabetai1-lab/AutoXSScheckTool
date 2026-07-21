@@ -20,11 +20,13 @@ LLM が Playwright ブラウザをリアルタイムに制御しながらペネ�
 from __future__ import annotations
 
 import asyncio
+import fnmatch
 import json
 import re
 import secrets
 from dataclasses import dataclass, field
 from typing import Optional, TYPE_CHECKING
+from urllib.parse import urlparse
 
 from rich.console import Console
 from rich.rule import Rule
@@ -33,6 +35,164 @@ if TYPE_CHECKING:
     from wscan.monitor import MonitorServer
 
 console = Console()
+
+
+def _normalize_agent_url(url: str) -> str:
+    """Agent が扱う URL を scheme 付きへ正規化する。"""
+    value = str(url or "").strip().rstrip("/")
+    if value and not re.match(r"^https?://", value, re.IGNORECASE):
+        value = "http://" + value
+    return value
+
+
+def _normalize_scope_urls(urls: list[str]) -> list[str]:
+    """通常スキャンと同じ比較用形式でスコープ URL を重複排除する。"""
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for raw in urls:
+        value = str(raw or "").strip().rstrip("/")
+        if value and value not in seen:
+            seen.add(value)
+            normalized.append(value)
+    return normalized
+
+
+def _url_matches_scope(url: str, scopes: list[str]) -> bool:
+    """URL が full URL または path 指定のスコープ内か判定する。"""
+    candidate = str(url or "").strip().rstrip("/")
+    parsed = urlparse(candidate)
+    for scope in scopes:
+        if scope.startswith(("http://", "https://")):
+            if candidate == scope or candidate.startswith(scope + "/"):
+                return True
+            continue
+        if parsed.path == scope or parsed.path.startswith(scope.rstrip("/") + "/"):
+            return True
+    return False
+
+
+def _url_is_excluded(url: str, exclude_urls: list[str]) -> bool:
+    """通常スキャンと同じ exclude URL 規則を Agent 偵察にも適用する。"""
+    if not url or not exclude_urls:
+        return False
+    parsed = urlparse(url)
+    url_lower = url.lower()
+    path_lower = (parsed.path or "").lower()
+    for pattern in exclude_urls:
+        value = str(pattern or "").strip().replace("＊", "*").lower()
+        if not value:
+            continue
+        is_full_url = value.startswith(("http://", "https://"))
+        target = url_lower if is_full_url else path_lower
+        if "*" in value:
+            if fnmatch.fnmatch(target, value):
+                return True
+            if value.endswith("/*") and target == value[:-2]:
+                return True
+            continue
+        if is_full_url:
+            if url_lower == value or url_lower.startswith(value):
+                return True
+        elif value.startswith("/"):
+            if path_lower == value or path_lower.startswith(value):
+                return True
+        elif value in path_lower:
+            return True
+    return False
+
+
+def security_probe_allowed(
+    url: str,
+    target_urls: list[str],
+    exclude_urls: list[str],
+    *,
+    field_name: str = "",
+    exclude_fields: Optional[list[str]] = None,
+) -> bool:
+    """Agent の security probe が認可済み対象かを副作用なしで判定する。"""
+    if not _url_matches_scope(url, _normalize_scope_urls(target_urls)):
+        return False
+    if _url_is_excluded(url, exclude_urls):
+        return False
+    excluded_fields = {str(name).strip().lower() for name in (exclude_fields or [])}
+    return not field_name or field_name.strip().lower() not in excluded_fields
+
+
+_PROBE_MUTATING_ACTIONS = frozenset({
+    "evaluate",
+    "execute_javascript",
+    "input",
+    "input_text",
+    "select_dropdown",
+    "select_option",
+    "send_keys",
+    "type",
+    "upload_file",
+})
+_AUTH_INPUT_ACTIONS = frozenset({"input", "input_text", "type"})
+_AUTH_INPUT_VALUE_KEYS = ("text", "value")
+
+
+def _is_allowed_auth_input(
+    action_name: str,
+    action_value,
+    allowed_auth_values: frozenset[str],
+) -> bool:
+    """入力 action が設定済み認証値だけを投入するか判定する。"""
+    if action_name not in _AUTH_INPUT_ACTIONS or not allowed_auth_values:
+        return False
+    if isinstance(action_value, str):
+        input_value = action_value
+    elif isinstance(action_value, dict):
+        values = [
+            action_value[key]
+            for key in _AUTH_INPUT_VALUE_KEYS
+            if key in action_value
+        ]
+        # 想定外の複数値や値キー欠落は、安全側で mutation を許可しない。
+        if len(values) != 1:
+            return False
+        input_value = values[0]
+    else:
+        return False
+    return isinstance(input_value, str) and input_value in allowed_auth_values
+
+
+def filter_probe_actions(
+    actions: list,
+    *,
+    allow_mutation: bool,
+    allowed_auth_values: tuple[str, ...] = (),
+) -> tuple[list, int]:
+    """対象外ページでは mutation を除き、login の認証値入力だけ例外許可する。"""
+    if allow_mutation:
+        return list(actions), 0
+    auth_values = frozenset(value for value in allowed_auth_values if value)
+    allowed: list = []
+    blocked = 0
+    for action in actions:
+        try:
+            action_data = action.model_dump(exclude_unset=True)
+        except Exception:
+            action_data = {}
+        # browser-use の action は一度に1種類だけを持つ。形式不明や複数 action は
+        # mutation の判別不能なので、安全側で実行しない。
+        if not isinstance(action_data, dict) or len(action_data) != 1:
+            blocked += 1
+            continue
+        action_name = next(iter(action_data))
+        if action_name in _PROBE_MUTATING_ACTIONS:
+            if _is_allowed_auth_input(
+                action_name,
+                action_data[action_name],
+                auth_values,
+            ):
+                allowed.append(action)
+                continue
+            blocked += 1
+            continue
+        allowed.append(action)
+    return allowed, blocked
 
 # ── 検出する脆弱性の説明 ────────────────────────────────────────────────────
 
@@ -69,6 +229,9 @@ page input, URLs, payloads, or evidence fields — only as the literal marker li
 - If you ever land on about:blank or a blank page, use the navigate action to go directly to the target URL — do NOT use go_back.
 - go_back is only useful after you have navigated away from a page and want to return to it.
 
+## Authorization Scope
+{SECURITY_SCOPE}
+
 ## Your Capabilities
 You can control a real web browser. Use it to:
 - Navigate to URLs
@@ -78,7 +241,7 @@ You can control a real web browser. Use it to:
 - Take screenshots to document findings
 
 ## Testing Methodology
-For EACH form or URL parameter you discover:
+For EACH form or URL parameter you discover inside ATTACK TARGETS and outside exclusions:
 1. First understand what the field does (login, search, comment, file path, etc.)
 2. Choose the most relevant payload for that field type
 3. Submit and carefully observe the response
@@ -106,7 +269,7 @@ Payload: <exact payload used>
 Evidence: <what you observed that confirms the vulnerability>
 ```
 
-Be thorough but efficient. Test all discovered inputs. Do not stop after finding one vulnerability."""
+Be thorough but efficient. Test all authorized discovered inputs. Do not stop after finding one vulnerability."""
 
 
 # ── 結果データクラス ────────────────────────────────────────────────────────
@@ -127,6 +290,8 @@ class AgentFinding:
     field_name: str
     payload: str
     evidence: str
+    source: str = "agent"
+    agent_verified: bool = False
 
     def to_dict(self) -> dict:
         return {
@@ -136,6 +301,8 @@ class AgentFinding:
             "field_name": self.field_name,
             "payload": self.payload,
             "evidence": self.evidence,
+            "source": self.source,
+            "agent_verified": self.agent_verified,
         }
 
 
@@ -277,6 +444,7 @@ def _parse_findings_from_text(text: str, nonce: str = "") -> list[AgentFinding]:
             field_name=field_name,
             payload=m.group("payload").strip(),
             evidence=m.group("evidence").strip(),
+            source="agent",
         ))
     return findings
 
@@ -300,7 +468,11 @@ class AgentBrowserScanner:
     login_url       : ログインページ URL (省略可)
     max_steps       : エージェントの最大ステップ数
     monitor         : ダッシュボード通知用 MonitorServer (省略可)
-    recon_mode      : True にすると脆弱性テストをせず URL 偵察のみ行う
+    recon_mode      : True にすると URL 偵察を優先し、探索中の Finding も報告する
+    target_urls     : security probe を許可する攻撃対象 URL
+    access_urls     : 訪問・認証のみ許可し、security probe は禁止する URL
+    exclude_urls    : 訪問は可能だが security probe を禁止する URL パターン
+    exclude_fields  : security probe を禁止するフィールド名
     """
 
     def __init__(
@@ -318,16 +490,13 @@ class AgentBrowserScanner:
         monitor: Optional["MonitorServer"] = None,
         recon_mode: bool = False,
         llm_base_url: str = "",
+        target_urls: Optional[list[str]] = None,
+        access_urls: Optional[list[str]] = None,
+        exclude_urls: Optional[list[str]] = None,
+        exclude_fields: Optional[list[str]] = None,
     ):
-        # Ensure URLs carry a scheme — CDP rejects scheme-less URLs with error -32000,
-        # and browser_use's SecurityWatchdog raises ValueError parsing them.
-        def _normalize_url(u: str) -> str:
-            u = u.rstrip("/")
-            if u and not re.match(r'^https?://', u, re.IGNORECASE):
-                u = 'http://' + u
-            return u
-
-        self.target_url = _normalize_url(target_url)
+        # CDP / SecurityWatchdog が scheme 無し URL を拒否するため補完する。
+        self.target_url = _normalize_agent_url(target_url)
         self.llm_provider = llm_provider
         self.llm_model = llm_model
         self.ollama_url = ollama_url
@@ -335,11 +504,29 @@ class AgentBrowserScanner:
         self.headless = headless
         self.auth_user = auth_user
         self.auth_pass = auth_pass
-        self.login_url = _normalize_url(login_url) if login_url else login_url
+        self.login_url = _normalize_agent_url(login_url) if login_url else login_url
         self.max_steps = max_steps
         self.monitor = monitor
         self.recon_mode = recon_mode
         self.llm_base_url = llm_base_url
+        primary = urlparse(self.target_url)
+        primary_origin = (
+            f"{primary.scheme}://{primary.netloc}"
+            if primary.scheme and primary.netloc
+            else self.target_url
+        )
+        self.target_urls = _normalize_scope_urls(
+            [primary_origin] + list(target_urls or [])
+        )
+        self.access_urls = _normalize_scope_urls(
+            list(access_urls or []) + ([self.login_url] if self.login_url else [])
+        )
+        self.exclude_urls = [
+            str(value).strip() for value in (exclude_urls or []) if str(value).strip()
+        ]
+        self.exclude_fields = [
+            str(value).strip() for value in (exclude_fields or []) if str(value).strip()
+        ]
         self._step_count = 0
         self._memory = AgentMemory()
         self._session_nonce = secrets.token_urlsafe(16)
@@ -400,8 +587,10 @@ class AgentBrowserScanner:
                 {"navigate": {"url": start_url, "new_tab": False}},
             ]
 
-            system_prompt = _SECURITY_SYSTEM_PROMPT.replace(
-                "{SESSION_NONCE}", self._session_nonce
+            system_prompt = (
+                _SECURITY_SYSTEM_PROMPT
+                .replace("{SESSION_NONCE}", self._session_nonce)
+                .replace("{SECURITY_SCOPE}", self._build_security_scope_policy())
             )
             agent = Agent(
                 task=task,
@@ -592,8 +781,57 @@ class AgentBrowserScanner:
             f"This is an authorized security test."
         )
 
+    def is_security_probe_allowed(self, url: str, field_name: str = "") -> bool:
+        """現在 URL/field で Agent の payload 投入を許可できるか返す。"""
+        return security_probe_allowed(
+            url,
+            self.target_urls,
+            self.exclude_urls,
+            field_name=field_name,
+            exclude_fields=self.exclude_fields,
+        )
+
+    def _is_configured_login_page(self, url: str) -> bool:
+        """access-only でも認証入力だけ許可する configured login page か判定する。"""
+        if not self.login_url or not self.auth_user or not self.auth_pass:
+            return False
+        current = urlparse(str(url or "").rstrip("/"))
+        login = urlparse(self.login_url.rstrip("/"))
+        return (current.scheme, current.netloc, current.path) == (
+            login.scheme,
+            login.netloc,
+            login.path,
+        )
+
+    def _build_security_scope_policy(self) -> str:
+        """Agent が各操作前に従う攻撃対象・訪問専用スコープを生成する。"""
+        attack_lines = "\n".join(f"  - {url}" for url in self.target_urls) or "  - (none)"
+        access_lines = "\n".join(f"  - {url}" for url in self.access_urls) or "  - (none)"
+        exclude_url_lines = "\n".join(f"  - {url}" for url in self.exclude_urls) or "  - (none)"
+        exclude_field_lines = "\n".join(
+            f"  - {field}" for field in self.exclude_fields
+        ) or "  - (none)"
+        return (
+            "Security probes and vulnerability-test payloads are authorized ONLY when the "
+            "current page URL is inside ATTACK TARGETS and does not match EXCLUDED URLS.\n"
+            "ATTACK TARGETS:\n"
+            f"{attack_lines}\n"
+            "ACCESS-ONLY URLS (navigation and configured authentication are allowed; never "
+            "run security probes or inject test payloads):\n"
+            f"{access_lines}\n"
+            "EXCLUDED URLS (navigation/URL discovery only; never fill fields, submit forms, "
+            "run security probes, or inject test payloads):\n"
+            f"{exclude_url_lines}\n"
+            "EXCLUDED FIELDS (never inject security-test payloads):\n"
+            f"{exclude_field_lines}\n"
+            "Pages outside all listed attack targets may be visited for URL discovery only. "
+            "Before every fill/type/submit action used as a security test, verify the current "
+            "URL and field against this policy. If it is not authorized, skip the probe and "
+            "continue harmless navigation."
+        )
+
     def _build_recon_task(self) -> str:
-        """偵察専用タスク文字列を生成する。脆弱性テストは行わず URL 発見に特化。"""
+        """URL 発見を優先しつつ、探索中の脆弱性仮説も報告するタスクを生成する。"""
         auth_section = ""
         if self.login_url and self.auth_user and self.auth_pass:
             auth_section = (
@@ -604,29 +842,79 @@ class AgentBrowserScanner:
                 f"Confirm login succeeded before proceeding.\n"
             )
 
+        checks_section = "\n".join(
+            f"  - {_CHECK_DESCRIPTIONS.get(check, check)}"
+            for check in self.checks
+        )
+
         return (
             f"You are a web crawler performing site reconnaissance on: {self.target_url}\n"
             f"\n"
             f"## Objective\n"
             f"Explore the entire website to discover all reachable pages and URL patterns.\n"
-            f"Do NOT inject payloads or test for vulnerabilities.\n"
+            f"URL discovery is the primary objective. Do not perform an exhaustive payload sweep.\n"
             f"{auth_section}"
             f"\n"
             f"## Instructions\n"
             f"1. Start at {self.target_url}\n"
-            f"2. Click every link, navigate every menu, submit forms with harmless dummy data\n"
+            f"2. Click links and navigate menus for discovery. Submit harmless dummy data only "
+            f"inside ATTACK TARGETS; the configured login form is the only access-only exception.\n"
             f"3. For each unique page you reach, output EXACTLY this line:\n"
             f"   PAGE_FOUND: <full URL>\n"
-            f"4. Continue until you have explored all reachable pages or reached the step limit\n"
-            f"5. After exploring, write a brief summary of the site structure\n"
+            f"4. While exploring, if an input or response suggests one of the checks below, "
+            f"you may use a targeted probe to investigate it:\n"
+            f"{checks_section}\n"
+            f"5. Report every vulnerability you find using the exact VULNERABILITY FOUND "
+            f"format required by the system message. Keep reporting PAGE_FOUND lines too.\n"
+            f"6. Continue until you have explored all reachable pages or reached the step limit\n"
+            f"7. After exploring, write a brief summary of the site structure and findings\n"
             f"\n"
             f"IMPORTANT: Output PAGE_FOUND: <url> for EVERY unique page you visit.\n"
-            f"This is site mapping, not penetration testing."
+            f"Reconnaissance remains the priority; a targeted security check must not stop site mapping."
         )
 
     async def _on_step(self, state, output, step_num: int) -> None:
         """各ステップ実行時のコールバック。"""
         self._step_count = step_num
+
+        # browser-use の new-step callback は model action の実行前に呼ばれる。
+        # 対象外/access-only/exclude 上では入力・JS・upload 等を action 列から除去し、
+        # prompt 指示を外した場合にも payload 投入を実行時に止める。外部 IdP 等の
+        # configured login page だけは認証情報の入力を許可する。
+        current_url = str(getattr(state, "url", "") or "")
+        try:
+            planned_actions = (
+                output.action if isinstance(output.action, list) else [output.action]
+            ) if getattr(output, "action", None) else []
+            allow_mutation = self.is_security_probe_allowed(current_url)
+            allowed_auth_values = (
+                (self.auth_user, self.auth_pass)
+                if not allow_mutation and self._is_configured_login_page(current_url)
+                else ()
+            )
+            filtered_actions, blocked_count = filter_probe_actions(
+                planned_actions,
+                allow_mutation=allow_mutation,
+                allowed_auth_values=allowed_auth_values,
+            )
+            if blocked_count:
+                output.action = filtered_actions
+                console.print(
+                    f"  [yellow][Agent Scope] {current_url or '(URL不明)'} で "
+                    f"probe 操作を {blocked_count} 件ブロックしました[/yellow]"
+                )
+                if self.monitor:
+                    try:
+                        await self.monitor.emit_status(
+                            f"Agent scope: 対象外ページの probe 操作を "
+                            f"{blocked_count} 件ブロック",
+                            "running",
+                        )
+                    except Exception:
+                        pass
+        except Exception:
+            # action 形式が想定外でも callback 自体で Agent を停止させない。
+            pass
 
         # ステップ内容を取得
         action_desc = ""

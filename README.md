@@ -1,996 +1,848 @@
 # WScan — Web Security Scanner
 
-WScan は、IPA「**安全なウェブサイトの作り方**」の全脆弱性カテゴリに準拠した、Playwright ブラウザ自動化 × LLM 動的ペイロード生成による Web 脆弱性スキャナーです。
+WScan は、IPA「安全なウェブサイトの作り方」の脆弱性カテゴリを中心に、Playwright による実ブラウザ操作、決定論スキャナ、LLM を組み合わせた Web 脆弱性検査ツールです。用途に応じて、再現性と確証を重視する **通常モード (`scan`)**、LLM の独自解釈と探索力を重視する **Agent モード (`agent`)**、Agent の発見範囲と通常スキャンの確実性を両立する **Hybrid モード（ダッシュボード）**を使い分けます。Hybrid は Agent を URL 偵察だけに使うのではなく、Agent が見つけた脆弱性仮説も最終レポートへラベル付きで併記します。
 
-通常利用では、まずダッシュボードを起動し、ブラウザ上で検査対象 URL、認証情報、検査範囲、チェック種別を確認してからスキャンを開始する方法を推奨します。
+> WScan は、自分が管理している環境、または明示的な検査許可を得た環境だけに使用してください。
 
-```bash
-python3 main.py serve --port 8765
-```
+## 目次
 
-ブラウザで `http://localhost:8765` を開き、Target URL を入力して `Scan Start` を押します。
+1. [概要 — 3モードの使い分け](#1-概要--3モードの使い分け)
+2. [主要スクリーンショット](#2-主要スクリーンショット)
+3. [クイックスタート](#3-クイックスタート)
+4. [インストール](#4-インストール)
+5. [ダッシュボード](#5-ダッシュボード)
+6. [CLI リファレンス](#6-cli-リファレンス)
+7. [設定リファレンス](#7-設定リファレンス)
+8. [LLM アーキテクチャ](#8-llm-アーキテクチャ)
+9. [Finding の読み方](#9-finding-の読み方)
+10. [Hybrid フロー](#10-hybrid-フロー)
+11. [長時間スキャン・見逃し防止](#11-長時間スキャン見逃し防止)
+12. [出力・連携](#12-出力連携)
+13. [認証・MFA・スコープ・TLS](#13-認証mfaスコープtls)
+14. [高度機能](#14-高度機能)
+15. [トラブルシューティング](#15-トラブルシューティング)
+16. [免責・ライセンス](#16-免責ライセンス)
 
-![WScan dashboard setup](docs/images/dashboard-configured.png)
-
-検査が進むと、ダッシュボード上でクロール、攻撃計画、攻撃実行、レポート生成の進捗と Findings を確認できます。
-
-![WScan dashboard findings](docs/images/dashboard-results.png)
-
-詳しい画面操作は [docs/dashboard_usage_ja.md](docs/dashboard_usage_ja.md) を参照してください。
-
----
-
-## ドキュメント
+関連ドキュメント:
 
 | ドキュメント | 内容 |
 | --- | --- |
-| [docs/dashboard_usage_ja.md](docs/dashboard_usage_ja.md) | ダッシュボードを先に起動し、画面から検査を開始する手順。疑似検査のスクリーンショット付き |
-| [docs/server_deployment_ja.md](docs/server_deployment_ja.md) | サーバー常駐・イントラネット公開（トークン認証 / Docker / リバースプロキシ）の手順 |
-| [docs/operation_guide_ja.md](docs/operation_guide_ja.md) | 実検査前の準備、認証、スコープ設計、検査強度、出力物、再検査の運用ガイド |
-| [docs/troubleshooting_ja.md](docs/troubleshooting_ja.md) | アクセスできない、検査が途切れる、検出できない、UIに反映されない場合の切り分け |
-| [docs/advanced_features.md](docs/advanced_features.md) | 高度診断支援機能の詳細 |
-| [docs/oob_email_ja.md](docs/oob_email_ja.md) | OOB（帯域外）メール受信ボックスと MCP サーバの設定（blind XSS/SSRF・メールヘッダ注入の確証用） |
-| [CLAUDE.md](CLAUDE.md) | 開発者・コントリビューター向け。コード構成・拡張ポイント・規約（本 README は利用者向け、CLAUDE.md は開発者向け） |
+| [ダッシュボード利用ガイド](docs/dashboard_usage_ja.md) | 画面操作をスクリーンショット付きで説明 |
+| [実検査運用ガイド](docs/operation_guide_ja.md) | 認証、スコープ、検査強度、証跡、再検査 |
+| [サーバー導入ガイド](docs/server_deployment_ja.md) | 常駐、イントラネット公開、トークン認証、Docker |
+| [高度機能](docs/advanced_features.md) | batch、flow、HAR などの詳細 |
+| [OOB メール設定](docs/oob_email_ja.md) | blind XSS/SSRF、メールヘッダ注入の確証 |
+| [トラブルシューティング](docs/troubleshooting_ja.md) | アクセス失敗、認証、検出漏れの切り分け |
 
-初めて使う場合は、この README の「クイックスタート」から始め、実際の操作は `dashboard_usage_ja.md`、現場投入前の確認は `operation_guide_ja.md`、問題発生時は `troubleshooting_ja.md` の順に確認してください。
+## 1. 概要 — 3モードの使い分け
 
----
+| モード | 入口 | 狙い | Finding の扱い | 向いている場面 |
+| --- | --- | --- | --- | --- |
+| 通常 | `python3 main.py scan URL` またはダッシュボードの「スキャン開始」 | 確実性 | 決定論スキャナが証拠を判定。LLM は主に計画・ペイロード生成・分析を補助 | 定期診断、再検査、CI/CD、根拠を重視する確認 |
+| Agent | `python3 main.py agent URL` または「Agent Browser」タブ | 独自性 | LLM がブラウザを自律操作して発見。`source=agent` として未確証を明示 | 複雑な操作、未知の導線、探索的な仮説発見 |
+| Hybrid | ダッシュボードの「ハイブリッド」タブ | 確実性と独自性の中間 | Agent Finding と決定論 Finding を出自ラベル付きで併記 | SPA、複雑な認証導線、探索範囲と再現性を両方取りたい場合 |
 
-## クイックスタート
+通常モードでは、LLM が利用できなくても既定・コミュニティ・決定論的変異ペイロードと静的修正テンプレートへフォールバックできます。Agent モードは LLM 自体が操作主体なので、対応プロバイダーと `browser-use` が必要です。
 
-### 1. インストール
+### 対応チェック種別
 
-```bash
-git clone https://github.com/oudontabetai1-lab/AutoXSScheckTool.git
-cd AutoXSScheckTool
-
-pip install -r requirements.txt
-playwright install chromium
-```
-
-**動作要件**: Python 3.11+、Playwright、FastAPI、Uvicorn、httpx、Rich、PyYAML、anthropic (Claude 使用時)
-
-### 2. ダッシュボード起動
-
-```bash
-python3 main.py serve --port 8765
-```
-
-起動後、ブラウザで次を開きます。
+`wscan.scanners.SCANNERS` に登録されている 36 種類です。
 
 ```text
-http://localhost:8765
+sqli xss dom_xss os ssti path_traversal csrf header_injection mail_header
+open_redirect clickjacking session privesc stored_xss cors info_disclosure
+host_header security_headers nosql deserialization request_smuggling ssrf
+graphql jwt cms xxe ldap file_upload race_condition websocket secret_leak sri
+js_static prototype_pollution cache_poisoning mass_assignment
 ```
 
-ポートが競合する場合は、`--port 8766` のように別ポートを指定します。
+Agent モードの CLI で選べる検査種別は `xss sqli ssti os path_traversal ssrf open_redirect csrf header_injection` です。
 
-#### サーバーに常駐させてイントラネットから使う場合
+### IPA 準拠カバレッジ
 
-`serve` は常駐型のため、1 度起動すれば何度でもスキャンできます。社内ネットワークに
-公開する場合は **アクセストークンを必ず設定**してください（未設定だと到達できる全員が
-スキャナーを操作できます）。
+| IPA 章番号 | 脆弱性 | チェック名 | 主な手法 |
+| --- | --- | --- | --- |
+| 1.1 | SQL インジェクション | `sqli` | エラー・ブール・時間ベース |
+| 1.2 | OS コマンドインジェクション | `os` | 出力パターン・時間ベース |
+| 1.3 | ディレクトリトラバーサル | `path_traversal` | ファイル内容パターン |
+| 1.4 | セッション管理の不備 | `session` | Cookie 属性確認 |
+| 1.5 | 反射型 XSS | `xss` | ダイアログ確認・反射検出 |
+| 1.5 | DOM-based XSS | `dom_xss` | DOM シンクフック |
+| 1.5 | 格納型 XSS | `stored_xss` | マーカー注入後の横断検出 |
+| 1.5 | 危険な JavaScript 静的評価 | `js_static` | source-to-sink 静的解析 |
+| 1.6 | CSRF | `csrf` | POST フォームのトークン有無 |
+| 1.7 | HTTP ヘッダインジェクション | `header_injection` | CRLF 注入とレスポンスヘッダ確認 |
+| 1.8 | メールヘッダインジェクション | `mail_header` | 反射・エラー漏えい。OOB 設定時は注入 Bcc の到達を確証 |
+| 1.9 | クリックジャッキング | `clickjacking` | X-Frame-Options / CSP `frame-ancestors` |
+| 1.11 | オープンリダイレクト | `open_redirect` | リダイレクト先検証 |
 
-```bash
-export WSCAN_AUTH_TOKEN="$(openssl rand -hex 16)"   # トークンを生成・共有
-python3 main.py serve --host 0.0.0.0 --port 8765 --no-open-browser
-```
+このほか、権限昇格/IDOR、CORS、情報漏洩、Host ヘッダ、セキュリティヘッダ、NoSQL、デシリアライズ、リクエストスマグリング、SSRF、GraphQL、JWT、CMS、XXE、LDAP、ファイルアップロード、Race Condition、WebSocket、シークレット漏洩、SRI、Prototype Pollution、Cache Poisoning/Deception、Mass Assignment を検査できます。
 
-社内端末から `http://<サーバーのLAN IP>:8765` を開き、トークンでログインします。
-Docker での配布やリバースプロキシ(HTTPS)構成は
-[docs/server_deployment_ja.md](docs/server_deployment_ja.md) を参照してください。
+## 2. 主要スクリーンショット
 
-```bash
-# Docker でまとめて起動
-export WSCAN_AUTH_TOKEN="$(openssl rand -hex 16)"
-docker compose up -d --build
-```
+ダッシュボードで検査条件を入力し、実行前にスコープ・認証・チェック種別を確認できます。
 
-### 3. 画面から検査開始
+![設定入力済みのダッシュボード](docs/images/dashboard-configured.png)
 
-1. `Target URL` に検査対象を入力する。
-2. 目的に合うスキャンプロファイルを選ぶ。
-3. 必要に応じて認証情報、Cookie、除外 URL、プロキシを設定する。
-4. `Scan Start` を押す。
-5. 攻撃プラン確認画面で対象フィールドとチェック種別を確認する。
-6. `攻撃開始` を押す。
-7. Findings、Event Log、Request / Response、`output/<timestamp>/report.html` を確認する。
+実行中の通信、進捗、スクリーンショット、Finding を同じ画面で確認できます。
 
-疑似脆弱アプリでの実行例は [docs/dashboard_usage_ja.md](docs/dashboard_usage_ja.md) に画像付きでまとめています。
+![検査結果を表示したダッシュボード](docs/images/dashboard-results.png)
 
-### 4. CLI で直接実行したい場合
+## 3. クイックスタート
 
-ダッシュボードを経由せずに CLI から直接スキャンすることもできます。
-
-```bash
-python3 main.py scan https://example.com --checks xss sqli csrf --depth 2
-```
-
-高速確認では `--fast`、認証あり検査では `--cookie` / `--cookie-file` / `--login-url`、通信確認では `--proxy` を組み合わせます。
-
-クライアント証明書が必要な mTLS 環境や、社内CA/自己署名証明書を使う環境では、証明書オプションを指定します。
-
-```bash
-python3 main.py scan https://secure.example.com \
-  --tls-client-cert /path/to/client.crt \
-  --tls-client-key /path/to/client.key \
-  --tls-ca-cert /path/to/ca.pem \
-  --tls-verify
-```
-
-PFX/PKCS#12 をブラウザアクセスに使う場合:
-
-```bash
-python3 main.py scan https://secure.example.com \
-  --tls-client-pfx /path/to/client.p12 \
-  --tls-client-cert-password 'password'
-```
-
-PEM の cert/key は Playwright と httpx の両方で使われます。PFX は Playwright ブラウザ向けです。`--tls-ca-cert` と `--tls-verify` は httpx の直接リクエストでサーバ証明書を検証するために使われ、ブラウザクロールは互換性維持のため HTTPS エラーを許容します。
-
-## IPA 準拠カバレッジ
-
-| IPA 章番号 | 脆弱性 | チェック名 | 手法 |
-|-----------|--------|-----------|------|
-| 1.1 | SQLインジェクション | `sqli` | エラーベース・ブールベース・時間ベース |
-| 1.2 | OSコマンドインジェクション | `os` | 出力パターン検出・時間ベース |
-| 1.3 | パス名パラメータ未チェック/ディレクトリトラバーサル | `path_traversal` | ファイル内容パターン検出 |
-| 1.4 | セッション管理の不備 | `session` | Cookie 属性チェック (Secure/HttpOnly/SameSite) |
-| 1.5 | クロスサイト・スクリプティング（反射型） | `xss` | ダイアログ確認・反射検出 |
-| 1.5 | クロスサイト・スクリプティング（DOM型） | `dom_xss` | Playwright DOM シンクフック |
-| 1.5 | 危険な JavaScript 静的評価（DOM型の前段階） | `js_static` | インライン/外部 JS を静的解析し source→sink フローを検出（注入なし） |
-| 1.5 | クロスサイト・スクリプティング（格納型） | `stored_xss` | マーカー注入 → 全ページ横断検出 |
-| 1.6 | CSRF | `csrf` | POST フォームの CSRF トークン有無 |
-| 1.7 | HTTPヘッダ・インジェクション | `header_injection` | CRLF 注入 → レスポンスヘッダ確認 |
-| 1.8 | メールヘッダ・インジェクション | `mail_header` | CRLF 注入 → 反射/メールエラー漏えい検知。OOB メール受信（`WSCAN_OOB_*`）設定時は注入 Bcc の到達を確証。CR/LF 除去対策に多様な改行表現でバイパスを試行 |
-| 1.9 | クリックジャッキング | `clickjacking` | X-Frame-Options / CSP frame-ancestors 確認 |
-| 1.11 | オープンリダイレクト | `open_redirect` | リダイレクト先未検証の検出 |
-| — | アクセス制御・権限昇格 | `privesc` | 未認証アクセス・垂直/水平権限昇格 (IDOR)・401/403 バイパス |
-| — | CORS 設定ミス | `cors` | ワイルドカード ACAO・任意 Origin 反射 |
-| — | 機密ファイル露出・情報漏洩 | `info_disclosure` | `.env`・`.git`・phpinfo 等へのアクセス確認 |
-| — | Host ヘッダインジェクション | `host_header` | パスワードリセット汚染 |
-| — | セキュリティヘッダ監査 | `security_headers` | HSTS・CSP・X-Content-Type-Options 等 |
-| — | ファイルアップロード脆弱性 | `file_upload` | Webシェル・二重拡張子・Content-Type 偽装・代替拡張子・大小混在/末尾ドット空白・画像マジックバイト polyglot 等の WAF/フィルタ回避 |
-| — | NoSQL インジェクション | `nosql` | MongoDB オペレータ注入 (`$ne`, `$gt`, `$regex`) |
-| — | 安全でないデシリアライズ | `deserialization` | PHP/Java/Python pickle プローブ |
-| — | HTTP リクエストスマグリング | `request_smuggling` | CL.TE / TE.CL / TE.TE タイミング検出 |
-| — | SSTI (オプション) | `ssti` | テンプレートエンジン数式評価確認 |
-| — | GraphQL 脆弱性（イントロスペクション / インジェクション） | `graphql` | スキーマ列挙・フィールドインジェクション・バッチクエリ |
-| — | JWT 脆弱性（署名なし / 弱シークレット / kid インジェクション） | `jwt` | alg:none 攻撃・HMAC ブルートフォース・ペイロード改ざん |
-| — | シークレット / API キー漏洩 | `secret_leak` | レスポンスボディ内のクラウド/SaaS トークン・秘密鍵を高精度パターン + エントロピー検査で検出 |
-| — | Subresource Integrity (SRI) 不備 | `sri` | サードパーティ `<script>` / `<link>` の `integrity` 属性欠如を検出（サプライチェーン保護） |
-| — | Prototype Pollution | `prototype_pollution` | クライアント DOM（`__proto__[x]=v` → `Object.prototype` 確認）＋サーバ JSON 反射 |
-| — | Web Cache Poisoning / Deception | `cache_poisoning` | unkeyed ヘッダ反射×キャッシュ可能性／静的拡張子での動的コンテンツキャッシュ |
-| — | Mass Assignment（過剰割り当て） | `mass_assignment` | API スペック由来の JSON 操作に特権フィールド（role/isAdmin 等）を注入し反映を検出 |
-| — | GraphQL DoS（複雑度/量制限の欠如） | `graphql` | エイリアス増幅で複雑度/深度/量制限の欠如を検出 |
-
----
-
-## 主な機能
-
-### スキャン精度・カバレッジ
-
-- **AI 攻撃計画（AttackPlanner）** — スキャン前にページを分析し、フィールドごとに優先チェックとターゲット特化ペイロードを計画
-- **多層ペイロード強化パイプライン** — 誤検知ゼロを保ったまま検出力を段階的に上げる 4 層構成（各層とも既存の検知判定を共有）。①**既定 + community**（手キュレーション + 公開集を成功率で並べ替え）→ ②**文脈適応 evolution wave**（標準掃射で未検出のとき、反射文脈と生存文字を観測し breakout を **LLM 不要**で合成）→ ③**変異 mutation wave**（シードを二重エンコード/NULL バイト/バックスラッシュ/コメント挿入などの**バイパス変種**へ変化。`max_payloads` で埋もれがちな blind/time 系も確実に投入）→ ④**適応（LLM）**（`--llm none` 以外で creative bypass を生成）。②③は LLM 非依存・決定論的で、無効時や失敗時は従来挙動にフォールバック
-- **DOM-based XSS 検出** — `innerHTML` / `document.write` / `eval` / `location.href` 等の危険シンクを Playwright でフック、クライアントサイド実行を検出
-- **危険な JavaScript 静的評価（`js_static`）** — DOM XSS をペイロードで確証する前段階として、ページのインライン JS と読み込まれた外部 `.js` を**注入なしで静的解析**。`eval` / `Function` / `innerHTML` / `document.write` / `setTimeout(文字列)` 等の危険シンクと、`location.hash` / `document.cookie` / `postMessage` 等のユーザ制御ソースの **source→sink フロー**（簡易な変数汚染追跡つき）を洗い出す。汚染フローが辿れたものを高確度（`likely`）、単独の危険シンクを参考情報（`tentative`）として報告し、誤検知を抑制。`--checks js_static` で有効化
-- **格納型 XSS 検出** — ユニークマーカーを注入し、全クロールページを横断してペイロードの出現を確認
-- **アクセス制御検査** — 未認証アクセス・垂直権限昇格（低権限セッション）・水平権限昇格 (IDOR) に加え、**401/403 アクセス制御バイパス**（パス正規化・信頼 IP ヘッダ偽装・URL リライトヘッダ・HTTP メソッド改ざん）を検出
-- **CORS 検出** — ワイルドカード ACAO・任意 Origin 反射・クレデンシャル付き CORS を自動判定
-- **機密ファイル露出** — `.env`・`.git`・phpinfo・actuator 等 35 種以上のパスをプローブ
-- **セキュリティヘッダ監査** — HSTS・CSP・X-Content-Type-Options・Referrer-Policy・Permissions-Policy の欠如/設定ミスを検出
-- **ファイルアップロード検査** — PHP/JSP/ASPX Webシェル・二重拡張子・Content-Type 偽装を試行
-- **NoSQL インジェクション** — MongoDB `$ne`/`$gt`/`$regex` オペレータ注入・JSON ボディ注入
-- **安全でないデシリアライズ検出** — PHP/Java/Python pickle/YAML プローブでエラーパターンを検出
-- **HTTP リクエストスマグリング** — CL.TE / TE.CL / TE.TE(難読化) をタイミング差で検出
-- **Host ヘッダインジェクション** — パスワードリセット汚染シナリオを自動テスト
-- **GraphQL セキュリティテスト** — `/graphql` 等 8 種のエンドポイントを自動探索。イントロスペクション公開・バッチクエリによるレート制限回避・フィールドへの XSS/SQLi/SSTI インジェクション・スキーマ内機密情報（パスワード・トークン等フィールド名）を検出
-- **JWT 脆弱性スキャン** — Cookie・Authorization ヘッダ・URL パラメータから JWT を自動検出。`alg:none` 攻撃・弱シークレット（60+ 種ブルートフォース）・`kid` パラメータ SQLi/パストラバーサル・ペイロード改ざん・期限なし JWT・JWT 内 PII 漏洩を検出
-- **パラメータ IDOR 検出** — クエリパラメータ/POST ボディの `user_id`・`order_id`・`id` 等の数値を ±1 変化、UUID 末尾変更でアクセス試行し、他ユーザーのリソース露出を検出
-- **複数アカウント権限昇格** — `--accounts` で複数アカウントを一括指定、または `--auto-register` で登録フォームを自動検出してテストアカウントを作成。アカウント間でのリソース横断アクセス（IDOR）・垂直権限昇格を自動検証
-- **フィールドレベル検査**と**ページレベル検査**の 2 層構造
-
-### AI / 自動化強化
-
-- **Agent モード（LLM 自律ブラウザ操作）** — `agent` サブコマンドで、LLM が実ブラウザを直接操作して脆弱性を自律的に発見・実証する（`browser-use` ベース。`pip install -r requirements-agent.txt` が必要）。フォーム探索・ログイン・複数手順の攻撃を LLM が判断しながら進め、ステップ数の上限（`--max-steps`）で制御。通常の `scan` がルールベースの掃射なのに対し、こちらは探索的・対話的な検査に向く
-- **コミュニティペイロード取り込み** — `import-payloads` サブコマンドで公開集（[PayloadsAllTheThings](https://github.com/swisskyrepo/PayloadsAllTheThings)）から `config/community_payloads.yaml` を生成。**スキャン実行時はネット非依存**（生成済み YAML を読むだけ）。既定(curated)に未収録の community のみを重複排除し、`payload_gen` の件数上限内にも行き渡るよう curated:community = 2:1 でインターリーブしてマージする
-- **WAF 自動検出** — スキャン前にプローブを送り Cloudflare / AWS WAF / ModSecurity 等を判定。LLM がバイパス戦略を提案
-- **ペイロード継続学習（ドメイン別）** — 成功・失敗ペイロードをグローバル + ドメイン別に JSON 記録し、同一ターゲットへの再スキャン時にドメイン固有の成功ペイロードを 2 倍の重みで優先使用
-- **脆弱性チェーン推論** — 全 Finding を LLM に渡し、多段攻撃シナリオ（最大 3 チェーン）を推論。各チェーンにステップ・使用脆弱性・最終的なビジネス影響を含む
-- **Finding 別 AI 修正提案** — Critical/High の各 Finding に対し LLM がビジネス影響（非技術者向け）・修正コード例・OWASP/CWE 参照を生成し HTML レポートに組み込む
-- **スキャン後 AI 総合分析** — 全 Finding を LLM に渡し、攻撃シナリオ・優先修正順位・推奨 WAF ルールを自然言語レポートとして生成
-- **自動設定ウィザード** (`--auto-config`) — ターゲットの説明・禁止事項・必須チェックを入力すると LLM が最適なスキャン設定を生成しレビュー後に適用
-
-### API ファースト検査・長時間スキャン運用
-
-- **API ファースト検査** — `--api-spec FILE` で **OpenAPI 2.0(Swagger)/3.x・Postman Collection** を取り込み、エンドポイント URL・共通ヘッダ（Authorization 等）・JSON 操作を直接攻撃面にする。パスパラメータ（`/users/{id}`）はサンプル値で具体化し、クエリはスキーマ既定値で補完。フォームを辿らない API/SPA バックエンドでも網羅的に検査でき、`mass_assignment`（過剰割り当て）検査の駆動源にもなる
-- **セッション失効の自動再ログイン** — 長時間スキャン中にセッションが切れても、攻撃対象ページの状態（401・ログインフォーム残存など）から失効を検知し自動で再ログイン。誤った連続再ログインを避けるため強いシグナルが揃った時だけ実行。`--no-relogin` で無効化、`--logged-in-marker` で検知精度を補強
-- **再開可能スキャン（チェックポイント）** — 攻撃の `(URL × フィールド × チェック)` 単位の進捗と既出 Finding を `output/<timestamp>/checkpoint.json` に保存。中断（時間帯ゲート停止・ネットワーク断・Abort・クラッシュ）後、`--resume <前回出力ディレクトリ>` で完了済み単位を飛ばして再開する。`--no-checkpoint` で保存を無効化
-- **検査時間帯ゲート（禁止/許可時間帯）** — `--allowed-hours`（この時間帯だけ検査）/ `--forbidden-hours`（この時間帯は停止）で攻撃可能な時間帯を制御。許可時間外は自動的に待機し、許可時間になると再開する。`"09:00-18:00"`・`"Mon-Fri 22:00-06:00"`（日跨ぎ対応）・`"Sat,Sun 00:00-24:00"` のように曜日付き・複数指定が可能
-
-### クロール・対象拡大
-
-- **SPA クロール強化** — `--spa-crawl` で React/Vue/Angular SPA の動的ルートを収集。`history.pushState` フック + クリック操作で通常クローラーが見逃すページを発見
-- **BFS クローラー** — 設定可能な深さで同一ドメインリンクを自動収集
-- **sitemap.xml / robots.txt 活用** — クロール時に自動取得して未リンクページを発見
-- **ログイン自動化** — `--login-url` でログインフォームを自動入力してセッションを取得。成否判定は URL の変化だけに頼らず、**ログインフォームの残存・失敗メッセージ（日本語含む）・MFA 画面の残留**を併せて評価し、`/login?error=` のような「遷移はしたが失敗」を成功と誤認しないよう厳格化（任意で `--login-success` の文字列一致も併用可能）
-- **MFA(2FA) 自動化** — `--mfa-type totp|email` でワンタイムコードを外部 MCP 経由で取得・投入
-
-### レポート・出力
-
-- **CVSS 3.1 スコア自動計算** — Finding ごとにベクタ文字列とスコアを付与、優先度ソートに利用
-- **自己完結型 HTML レポート** — 証拠スクリーンショット・HTTP リクエスト/レスポンスつき
-
-### UI / 操作性
-
-- **リアルタイム監視ダッシュボード** — WebSocket 経由でペイロード・検出結果・スクリーンショットをライブ表示
-- **Finding フィルタ・検索** — 重要度・スキャナ種別・URL・フィールド名でリアルタイムフィルタリング
-- **手動ペイロード実行** — ダッシュボードから任意のフィールドにペイロードを即座に送信
-- **手動巡回（3 方式）** — 「手動巡回」タブから巡回シードを作成できる。
-  - *可視ブラウザ記録*：別 Chromium を開いて実操作し、訪問 URL・フォーム・Cookie を記録（操作端末にブラウザ画面が出せる環境向け）。
-  - *遠隔ブラウザ操作*：**サーバ上のヘッドレス Chromium の画面を CDP スクリーンキャストでダッシュボードに配信**し、クリック・テキスト/キー入力・スクロール・URL 移動でブラウザを遠隔操作。追加パッケージ（VNC 等）不要で、サーバ/リモート環境でも「画面を見ながら手で巡回」できる。操作で訪れた URL・フォーム・Cookie は可視ブラウザ記録と同様にシード化される
-  - *URL リスト取り込み*：手元のブラウザで控えた URL を貼り付けるだけで同形式の巡回シード JSON を生成（改行・カンマ・空白区切り）。生成した JSON はそのままスキャンの巡回シードに使える
-
-### CI/CD・運用
-
-- **プロキシ対応** (`--proxy`) — Burp Suite / mitmproxy 経由でのスキャン
-- **設定ファイル** (`config/wscan.yaml`) — 全デフォルト値を YAML で管理。CLI フラグで上書き可能
-
----
-
-## インストール
-
-基本手順は「クイックスタート」と同じです。
+### 通常モード — 最短手順
 
 ```bash
 git clone https://github.com/oudontabetai1-lab/AutoXSScheckTool.git
 cd AutoXSScheckTool
-pip install -r requirements.txt
+python3 -m pip install -r requirements.txt
+playwright install chromium
+
+python3 main.py scan https://example.com --headless --llm none
+```
+
+ダッシュボードから開始する場合:
+
+```bash
+python3 main.py serve --host 127.0.0.1 --port 8765
+```
+
+ブラウザで `http://localhost:8765/` を開き、「新規スキャン」から設定します。
+
+### Agent モード — 最短手順
+
+```bash
+python3 -m pip install -r requirements-agent.txt
+export ANTHROPIC_API_KEY="<api-key>"
+python3 main.py agent https://example.com --llm claude --headless
+```
+
+Agent が申告する Finding は、決定論 Finding と同じ確証を意味しません。HTML レポートの「🤖 Agent発見」バッジと証拠を確認してください。
+
+### Hybrid モード — 最短手順
+
+Hybrid は現在ダッシュボードから開始します。
+
+```bash
+python3 -m pip install -r requirements-agent.txt
+export ANTHROPIC_API_KEY="<api-key>"
+python3 main.py serve --host 127.0.0.1 --port 8765
+```
+
+1. `http://localhost:8765/monitor` を開く。
+2. 「基本設定」「検査項目」「認証・Cookie」を設定する。
+3. 「ハイブリッド」タブで偵察用 LLM とステップ数を設定する。
+4. 「ハイブリッドスキャン開始」を押す。
+
+![ハイブリッド設定タブ](docs/images/dashboard-hybrid.png)
+
+## 4. インストール
+
+### 本体
+
+Python 3.11 以上を推奨します。
+
+```bash
+git clone https://github.com/oudontabetai1-lab/AutoXSScheckTool.git
+cd AutoXSScheckTool
+python3 -m pip install -r requirements.txt
 playwright install chromium
 ```
 
-機能ごとに追加の依存があります（必要なときだけ入れれば動きます）。
-
-| 追加依存 | 用途 |
-| --- | --- |
-| `pip install -r requirements-agent.txt` | Agent モード（LLM がブラウザを自律操作。`browser-use` が必要） |
-| `pip install -r requirements-mcp.txt` | OOB メール受信 MCP（blind XSS/SSRF・メールヘッダ注入の確証） |
-
-LLM を使う場合は、利用するプロバイダーに応じて API キーやローカルモデルを準備します。LLM を使わずに固定ペイロード中心で確認する場合は、`--llm none` またはダッシュボードの LLM 設定で無効化して実行できます。
-
-#### 外部 OpenAI 互換 LLM（NTT tsuzumi 2 など）
-
-`ollama` / `claude` / `openai` / `gemini` に加えて、**OpenAI 互換の chat/completions API** を
-提供する任意のエンドポイントを `--llm openai_compatible` で利用できます。NTT **tsuzumi 2**、
-Azure AI Foundry、vLLM、LiteLLM、LM Studio などが該当します。
-
-設定は次のいずれからも渡せます（**環境変数が推奨**。API キーは env のみ）。
-
-| 設定 | 環境変数 | CLI | config (`config/wscan.yaml`) | ダッシュボード |
-|---|---|---|---|---|
-| ベース URL | `WSCAN_LLM_BASE_URL`（`OPENAI_BASE_URL` でも可） | `--llm-base-url` | `llm.openai_base_url` | LLM 設定 → ベースURL |
-| API キー | `WSCAN_LLM_API_KEY`（`OPENAI_API_KEY` でも可） | —（秘匿情報は env のみ） | —（env） | —（env） |
-| モデル名 | — | `--openai-model` | `llm.openai_model` | OpenAIモデル名 |
+### Agent / Hybrid の追加依存
 
 ```bash
-# 例: tsuzumi 2（OpenAI 互換エンドポイント）で検査
-export WSCAN_LLM_BASE_URL="https://<your-tsuzumi-endpoint>/v1"
+python3 -m pip install -r requirements-agent.txt
+```
+
+`browser-use` と、Claude/OpenAI/OpenAI 互換/Ollama のいずれかを準備します。ダッシュボードの Agent/Hybrid タブで選択できるプロバイダーは Claude、OpenAI、Ollama です。CLI の `agent` は `openai_compatible` も選択できます。
+
+### MCP / OOB メール
+
+MFA コード取得や blind XSS/SSRF・メールヘッダ注入の OOB 確証を使う場合:
+
+```bash
+python3 -m pip install -r requirements-mcp.txt
+```
+
+MFA は外部の `mcp-totp-authenticator` または `mcp-email-server` を起動します。OOB メールの環境変数と受信ボックスは [OOB メール設定](docs/oob_email_ja.md) を参照してください。API キー、TOTP シークレット、メールパスワードはリポジトリや YAML に保存せず環境変数で渡してください。
+
+## 5. ダッシュボード
+
+### ポータル
+
+```bash
+python3 main.py serve --host 127.0.0.1 --port 8765
+```
+
+- `/` は Server Portal です。現在のスキャン、履歴、保存済みレポート、定期スキャン、監査ログ、通知設定を扱います。
+- `/monitor` は設定画面兼ライブモニターです。
+- `--auth-token` または `WSCAN_AUTH_TOKEN` を設定すると、Web UI はログインを要求し、API は `Authorization: Bearer <token>` を要求します。
+- `0.0.0.0` はイントラネットから到達できる既定値です。ローカル限定なら `--host 127.0.0.1` を指定してください。
+
+### 通常設定
+
+| タブ | 主な内容 |
+| --- | --- |
+| 基本設定 | Depth、Timeout、Max Forms、並列数、ペイロード上限、遅延、遷移リトライ、プロキシ、TLS、Headless |
+| 検査項目 | 実行する決定論スキャナ |
+| 認証・Cookie | Cookie、自動ログイン、低権限 Cookie、MFA、複数アカウント |
+| LLM設定 | provider、モデル、互換ベース URL、役割別モデル |
+| 機能フラグ | Planner、AI 分析、WAF、学習、sitemap、SPA、巡回レビューなど |
+| スコープ・除外 | 攻撃対象、アクセスのみ許可、除外 URL、除外フィールド |
+| 手動巡回 | 可視ブラウザ、遠隔ブラウザ、URL リストから巡回シードを作成 |
+| 攻撃フロー | navigate / fill / click / wait 等の複数手順 |
+
+「スキャン開始」は通常モードです。`planner.interactive=true` または画面の攻撃プラン確認を有効にした場合、巡回後にフィールド、チェック、カスタムペイロードを確認してから攻撃へ進みます。
+
+### Agent タブ
+
+Agent は LLM がページを観察し、操作、ペイロード選択、結果判断を行います。プロバイダー、モデル、最大ステップ数、検査種別、ログイン情報を設定して「Agent Browser スキャン開始」を押します。通常モードの決定論判定とは品質基準が異なり、独自性を優先します。
+
+### Hybrid タブ
+
+偵察用 LLM、モデル、Ollama URL、最大ステップ数を設定します。認証情報と検査項目は通常設定のタブから引き継ぎます。Phase 1 の URL と Agent Finding を Phase 2 に渡し、通常スキャンの Finding と一緒に最終レポートへ出します。
+
+![通常・Agent・Hybrid を切り替える設定画面](docs/images/dashboard-hybrid.png)
+
+### 実行中・結果
+
+実行中は Crawl / Plan / Attack / Report のフェーズ、巡回マップ、ブラウザ画面、チェック進捗、現在の URL/Field/Check/Payload、Findings、Request/Response、Event Log を確認できます。一時停止、再開、フィールド/ページのスキップ、中断、手動ペイロード実行も利用できます。中断時はその時点までの部分レポートを保存します。
+
+詳しい画面操作は [ダッシュボード利用ガイド](docs/dashboard_usage_ja.md) を参照してください。
+
+## 6. CLI リファレンス
+
+現在のサブコマンドは次の 9 個です。
+
+```text
+scan agent triage serve setup batch record manual-crawl import-payloads
+```
+
+正確なローカル既定値は `config/wscan.yaml` の影響を受けます。実行環境では次も確認してください。
+
+```bash
+python3 main.py --help
+python3 main.py scan --help
+```
+
+### `scan` — 通常スキャン
+
+```bash
+python3 main.py scan URL [options]
+```
+
+基本・LLM:
+
+| オプション | 既定 | 内容 |
+| --- | --- | --- |
+| `URL` | 必須 | 検査対象 URL |
+| `-p, --payloads FILE` | `output.payloads_file` / なし | カスタムペイロード YAML |
+| `--checks CHECK...` | `sqli xss os` | 実行するチェック。選択肢は「対応チェック種別」参照 |
+| `-d, --depth N` | `2` | クロール深度 |
+| `--headless` | `browser.headless` (`false`) | ブラウザ非表示 |
+| `--no-monitor` | monitor 有効 | ライブモニターを無効化 |
+| `--llm PROVIDER` | `ollama` | `ollama/claude/openai/openai_compatible/gemini/none` |
+| `--ollama-model MODEL` | `llama3` | Ollama モデル |
+| `--openai-model MODEL` | `gpt-4o-mini` | OpenAI / OpenAI 互換モデル |
+| `--llm-base-url URL` | 空 | OpenAI 互換 API のベース URL |
+| `--gemini-model MODEL` | `gemini-2.0-flash` | Gemini モデル |
+| `--claude-model MODEL` | `claude-haiku-4-5-20251001` | Claude モデル |
+| `--planner-model MODEL` | provider モデル | 計画用モデル上書き |
+| `--payload-model MODEL` | provider モデル | ペイロード生成用モデル上書き |
+| `--adaptive-model MODEL` | provider モデル | 適応ペイロード用モデル上書き |
+| `--triage-model MODEL` | provider モデル | トリアージ用モデル上書き |
+| `--report-model MODEL` | provider モデル | 分析・修正提案用モデル上書き |
+| `-o, --output DIR` | `output/<timestamp>/` | 証跡・レポート出力先 |
+| `--port PORT` | `8765` | モニターポート |
+| `--timeout SECS` | `30` | リクエストタイムアウト |
+| `--max-forms N` | `50` | 1ページの最大フォーム数 |
+
+スコープ・認証・通信:
+
+| オプション | 既定 | 内容 |
+| --- | --- | --- |
+| `-e, --exclude PARAM...` | `[]` | 除外フィールド名 |
+| `--exclude-file FILE` | なし | 除外フィールドを1行1件で読む |
+| `--exclude-urls-file FILE` | なし | 除外 URL/プレフィックスを1行1件で読む |
+| `--target-url URL_OR_PREFIX` | なし | 巡回・攻撃対象を追加。複数指定可 |
+| `--target-urls-file FILE` | なし | 追加攻撃対象をファイルで指定 |
+| `--access-url URL_OR_PREFIX` | なし | 到達は許可するが攻撃しない範囲。複数指定可 |
+| `--access-urls-file FILE` | なし | アクセスのみ許可する範囲をファイルで指定 |
+| `--cookie COOKIES` | 空 | `name=value; ...` 形式の Cookie |
+| `--cookie-file FILE` | 空 | ブラウザエクスポート形式の Cookie JSON |
+| `--low-priv-cookies COOKIES` | 空 | 垂直権限昇格検査用の低権限 Cookie |
+| `--low-priv-cookie-file FILE` | 空 | 低権限 Cookie JSON |
+| `-H, --header "Name: Value"` | `[]` | 全リクエストに追加。複数指定可 |
+| `--header-file FILE` | 空 | JSON/YAML/1行1ヘッダ形式 |
+| `--header-refresh-cmd CMD` | 空 | stdout からヘッダを更新するコマンド |
+| `--header-refresh-interval SECONDS` | `0` | ヘッダ更新間隔。0 は無効 |
+| `--auth-user USER` / `--auth-pass PASS` | config / 空 | ログインフォーム用資格情報 |
+| `--login-url URL` | 空 | 自動ログイン URL |
+| `--login-user-field NAME` | `username` | ユーザー名入力欄 |
+| `--login-pass-field NAME` | `password` | パスワード入力欄 |
+| `--login-success TEXT` | 空 | 成功確認用の URL/ページ内文字列 |
+| `--mfa-type totp\|email` | 未指定 | 外部 MCP で MFA コード取得 |
+| `--mfa-field NAME` | 空（実行時既定 `otp`） | MFA 入力欄の name/id |
+| `--mfa-email-account EMAIL` | 空 | 登録済み `account_name` |
+| `--mfa-email-address EMAIL` | 空 | 動的 IMAP のメールアドレス |
+| `--mfa-email-imap-host HOST` | 空 | 動的 IMAP の受信ホスト |
+| `--mfa-email-imap-port PORT` | 空（実行時既定 `993`） | IMAP ポート |
+| `--mfa-email-imap-user USER` | 空（実行時はアドレス） | IMAP ユーザー |
+| `--mfa-email-imap-password PASS` | 空 | IMAP パスワード。環境変数推奨 |
+| `--mfa-email-imap-ssl true\|false` | 未指定（実行時 `true`） | IMAP SSL |
+| `--include-registration` | 登録フォームを除外 | 登録/サインアップも検査 |
+| `--allow-state-changing-probes` | 無効 | 状態変更し得る権限昇格プローブを許可 |
+| `--accounts USER:PASS,...` | 空 | 複数アカウント権限昇格検査 |
+| `--accounts-file FILE` | 空 | `accounts:` 配列を持つ YAML |
+| `--auto-register` | 無効 | テストアカウント自動登録 |
+| `--auto-register-count N` | `2` | 自動登録数 |
+| `--proxy URL` | 空 | Browser/httpx の HTTP プロキシ |
+| `--tls-client-cert FILE` / `--tls-client-key FILE` | 空 | mTLS 用 PEM 証明書/秘密鍵 |
+| `--tls-client-pfx FILE` | 空 | Playwright 用 PFX/PKCS#12 |
+| `--tls-client-cert-password TEXT` | 空 | 証明書/PFX パスフレーズ |
+| `--tls-ca-cert FILE` | 空 | httpx の CA バンドル |
+| `--tls-verify` | `false` | httpx のサーバ証明書検証を有効化 |
+
+検査制御・出力:
+
+| オプション | 既定 | 内容 |
+| --- | --- | --- |
+| `--ctf` | `false` | SSTI を追加し待機を短縮 |
+| `--ctf-flag-format REGEX` | 自動検出 | Flag 正規表現 |
+| `--no-planner` | planner 有効 | AI 攻撃計画を無効化 |
+| `--interactive-plan` | `false` | 攻撃前に計画を編集 |
+| `--no-open-report` | 自動表示有効 | 完了時の HTML 自動表示を無効化 |
+| `--learning-file FILE` | `config/payload_learning.json` | 学習データファイル |
+| `--dom-xss` | `false` | DOM-based XSS を追加 |
+| `--no-ai-analysis` | 有効 | スキャン後 AI 分析を無効化 |
+| `--no-waf-detection` | 有効 | WAF 検出を無効化 |
+| `--no-payload-learning` | 有効 | 成功率学習を無効化 |
+| `--community-payloads / --no-community-payloads` | `true` | 生成済み公開ペイロードを使用/不使用 |
+| `--no-adaptive-payloads` | adaptive 有効 | LLM 適応ラウンドを無効化 |
+| `--no-sitemap-crawl` | 有効 | sitemap/robots シードを無効化 |
+| `-j, --concurrency N` | `1` | 攻撃フェーズの並列ブラウザ数。推奨 2〜4 |
+| `-F, --fast` | `false` | 深さ1、上限12、遅延0等の高速プリセット |
+| `--max-payloads N` | `0`（無制限） | フィールド×チェックの標準ペイロード上限 |
+| `--delay SECS` | `0.5` | リクエスト間隔 |
+| `--navigation-retries N` | `2` | ページ遷移の再試行回数 |
+| `--no-sarif` | SARIF 有効 | `report.sarif` を出力しない |
+| `--notify-webhook URL` | 空 | Finding 通知の Slack/汎用 Webhook |
+| `--notify-severity LEVEL` | `high` | `critical/high/medium/low` の通知閾値 |
+| `--har FILE` | 空 | HAR の URL/Cookie をシード化 |
+| `--manual-crawl FILE` | config / 空 | 手動巡回 JSON をシード化 |
+| `--api-spec FILE` | 空 | OpenAPI/Swagger/Postman を直接検査 |
+| `--resume DIR` | 空 | 前回の `checkpoint.json` から再開 |
+| `--no-checkpoint` | 保存有効 | チェックポイントを無効化 |
+| `--allowed-hours WINDOW` | なし | 許可時間帯。複数指定可 |
+| `--forbidden-hours WINDOW` | なし | 禁止時間帯。複数指定可 |
+| `--no-relogin` | 自動再ログイン有効 | セッション失効時の再ログインを無効化 |
+| `--logged-in-marker TEXT` | `--login-success` を流用 | 認証済み判定文字列 |
+| `--spa-crawl` | `false` | SPA の動的ルートを探索 |
+| `--previous-scan DIR` | なし | 前回 `evidence.json` と差分比較 |
+| `--auto-config / --no-auto-config` | `false` | 起動時の設定ウィザード |
+
+### `agent` — Agent Browser
+
+```bash
+python3 main.py agent URL [options]
+```
+
+| オプション | 既定 | 内容 |
+| --- | --- | --- |
+| `--llm` | `claude` | `claude/openai/openai_compatible/ollama` |
+| `--llm-base-url URL` | 空 | OpenAI 互換ベース URL |
+| `--model MODEL` | provider 既定 | Agent 用モデル |
+| `--ollama-url URL` | `http://localhost:11434` | Ollama API |
+| `--checks CHECK...` | `xss sqli ssti os path_traversal ssrf` | Agent の検査種別 |
+| `--max-steps N` | `100` | 最大操作ステップ |
+| `--headless / --no-headless` | headless | 非表示/表示ブラウザ |
+| `--auth-user`, `--auth-pass`, `--login-url` | config / 空 | 事前ログイン |
+| `-o, --output DIR` | `output/agent_<timestamp>/` | 出力先 |
+| `--port PORT` | `8765` | モニターポート |
+| `--no-monitor`, `--no-open-report` | 無効 | モニター/自動表示を無効化 |
+
+### `triage` — ペイロード非投入の高速評価
+
+```bash
+python3 main.py triage URL [options]
+```
+
+| オプション | 既定 | 内容 |
+| --- | --- | --- |
+| `-d, --depth N` | `2` | クロール深度 |
+| `--headless` | `true` | ヘッドレス実行 |
+| `--proxy URL` | 空 | HTTP プロキシ |
+| `--timeout SECS` | config の `30` | ページタイムアウト |
+| `--llm` | `llm.provider` (`ollama`) | 戦略インサイト用 provider。`none` 可 |
+| 各 `--*-model` / `--llm-base-url` | config / provider 既定 | モデルと互換 URL |
+| `-o, --output FILE` | なし | JSON 保存先 |
+
+### `serve` — ダッシュボード常駐
+
+| オプション | 既定 | 内容 |
+| --- | --- | --- |
+| `--port PORT` | `8765` | HTTP/WebSocket ポート |
+| `--host ADDR` | `0.0.0.0` | バインド先。`WSCAN_HOST` が優先 |
+| `--auth-token TOKEN` | 空 | 共有トークン。`WSCAN_AUTH_TOKEN` が優先 |
+| `--insecure` | 無効 | 公開 IP への無認証バインドを明示許可。非推奨 |
+| `--open-browser / --no-open-browser` | localhost 時のみ自動 | ホスト側ブラウザの起動制御 |
+
+### `setup` — 自然言語設定支援
+
+```bash
+python3 main.py setup "ECサイト。管理画面とREST APIあり"
+```
+
+`description` は省略時に対話入力します。`--llm`、`--ollama-model`、`--ollama-url`、`--openai-model`、`--llm-base-url` を指定できます。説明からチェック、深さ、追加フラグを選んだ推奨 `scan` コマンドを表示します。
+
+### `batch` — 複数ターゲット
+
+```bash
+python3 main.py batch TARGETS_YAML [-o DIR]
+```
+
+ターゲット YAML を順番に実行し、統合サマリーを生成します。出力先の既定は `output/batch_<timestamp>/` です。
+
+### `record` — 操作フロー記録
+
+```bash
+python3 main.py record URL [--output flows/recording.json] [--headless]
+```
+
+ブラウザ操作を再生可能な JSON フローとして記録します。画面を操作する場合は `--headless` を付けません。
+
+### `manual-crawl` — 手動巡回シード
+
+```bash
+python3 main.py manual-crawl URL [--output flows/manual_crawl.json] [--headless] [--proxy URL]
+```
+
+訪問 URL、フォーム、Cookie をスキャン用シード JSON に保存します。
+
+### `import-payloads` — 公開ペイロード取り込み
+
+```bash
+python3 main.py import-payloads [options]
+```
+
+| オプション | 既定 | 内容 |
+| --- | --- | --- |
+| `--output FILE` | `config/community_payloads.yaml` | 保存先 |
+| `--allow-destructive` | 無効 | 既定で除外する破壊的パターンも保持 |
+| `--per-type-cap N` | なし | チェック種別ごとの上限 |
+| `--check xss,sqli` | 全対応ソース | 取り込む種別を限定 |
+
+取り込み時だけネットワークを使用し、スキャン時は生成済み YAML を読みます。
+
+## 7. 設定リファレンス
+
+`config/wscan.yaml` は CLI とダッシュボードの既定値です。明示した CLI/UI 値が優先します。型は YAML 上の型、既定値は現行ファイルの値です。`accounts:` と `notifications:` は設定ローダーへ接続されていないため、この表には載せません。複数アカウントは CLI/UI、通知は CLI またはポータルの通知設定を使用してください。
+
+対応欄の「UI」はダッシュボード、「serve」はサーバー起動オプション、「—」は直接対応する CLI/UI がないことを示します。
+
+### `scan`
+
+| キー | 型 | 既定値 | 対応 CLI / UI |
+| --- | --- | --- | --- |
+| `scan.checks` | list[str] | `[sqli, xss, os]` | `--checks` / 検査項目 |
+| `scan.depth` | int | `2` | `--depth` / 基本設定 |
+| `scan.max_forms` | int | `50` | `--max-forms` / 基本設定 |
+| `scan.timeout` | int | `30` | `--timeout` / 基本設定 |
+| `scan.exclude_fields` | list[str] | `[]` | `--exclude`, `--exclude-file` / スコープ・除外 |
+| `scan.exclude_urls` | list[str] | `[]` | `--exclude-urls-file` / スコープ・除外 |
+| `scan.target_urls` | list[str] | `[]` | `--target-url`, `--target-urls-file` / スコープ・除外 |
+| `scan.access_urls` | list[str] | `[]` | `--access-url`, `--access-urls-file` / スコープ・除外 |
+| `scan.manual_crawl_file` | str | `""` | `--manual-crawl` / 手動巡回 |
+| `scan.request_delay` | float | `0.5` | `--delay` / 基本設定 |
+| `scan.navigation_retries` | int | `2` | `--navigation-retries` / 基本設定 |
+
+状態変更し得る権限昇格プローブは YAML の有効キーではなく、`--allow-state-changing-probes` またはダッシュボードで明示的に許可します。
+
+### `browser`
+
+| キー | 型 | 既定値 | 対応 CLI / UI |
+| --- | --- | --- | --- |
+| `browser.headless` | bool | `false` | `--headless` / 基本設定 |
+| `browser.proxy` | str | `""` | `--proxy` / 基本設定 |
+| `browser.tls_client_cert` | str | `""` | `--tls-client-cert` / 基本設定 |
+| `browser.tls_client_key` | str | `""` | `--tls-client-key` / 基本設定 |
+| `browser.tls_client_pfx` | str | `""` | `--tls-client-pfx` / 基本設定 |
+| `browser.tls_client_cert_password` | str | `""` | `--tls-client-cert-password` / 基本設定 |
+| `browser.tls_ca_cert` | str | `""` | `--tls-ca-cert` / 基本設定 |
+| `browser.tls_verify` | bool | `false` | `--tls-verify` / 基本設定 |
+
+### `llm`
+
+| キー | 型 | 既定値 | 対応 CLI / UI |
+| --- | --- | --- | --- |
+| `llm.provider` | str | `ollama` | `--llm` / LLM設定 |
+| `llm.timeout_seconds` | int | `30` | — |
+| `llm.max_retries` | int | `2` | — |
+| `llm.ollama_model` | str | `llama3` | `--ollama-model` / LLM設定 |
+| `llm.ollama_url` | str | `http://localhost:11434` | Agent/Setup の `--ollama-url` / Agent・Hybrid設定 |
+| `llm.openai_model` | str | `gpt-4o-mini` | `--openai-model` / LLM設定 |
+| `llm.openai_base_url` | str | `""` | `--llm-base-url` / LLM設定（OpenAI互換時） |
+| `llm.gemini_model` | str | `gemini-2.0-flash` | `--gemini-model` / LLM設定 |
+| `llm.models` | map[str,str] | `{}` | `--planner-model`, `--payload-model`, `--adaptive-model`, `--triage-model`, `--report-model` / LLM設定 |
+
+`llm.models` のキーは `planner`、`payload`、`adaptive`、`triage`、`report` です。未指定なら provider のモデルを使います。
+
+### `monitor`
+
+| キー | 型 | 既定値 | 対応 CLI / UI |
+| --- | --- | --- | --- |
+| `monitor.enabled` | bool | `true` | `scan --no-monitor` |
+| `monitor.port` | int | `8765` | `--port` / 表示のみ |
+| `monitor.host` | str | `0.0.0.0` | `serve --host` |
+| `monitor.auth_token` | str | `""` | `serve --auth-token` |
+| `monitor.retention_days` | number | `0` | ポータル保持ポリシー / `WSCAN_RETENTION_DAYS` |
+| `monitor.retention_max_scans` | int | `0` | ポータル保持ポリシー / `WSCAN_RETENTION_MAX_SCANS` |
+| `monitor.allowed_target_hosts` | list[str] | `[]` | serve の対象制限 / `WSCAN_ALLOWED_HOSTS` |
+| `monitor.denied_target_hosts` | list[str] | `[]` | serve の拒否対象 / `WSCAN_DENIED_HOSTS` |
+| `monitor.scan_timeout_minutes` | number | `0` | watchdog / `WSCAN_SCAN_TIMEOUT_MIN` |
+| `monitor.trust_proxy` | bool | `false` | `WSCAN_TRUST_PROXY=1` |
+
+`0` は保持日数・件数・watchdog の制限なしです。`denied_target_hosts` は `allowed_target_hosts` より優先します。`trust_proxy=true` は信頼できるリバースプロキシ配下でのみ使用してください。
+
+### `planner` / `auth`
+
+| キー | 型 | 既定値 | 対応 CLI / UI |
+| --- | --- | --- | --- |
+| `planner.enabled` | bool | `true` | `--no-planner` / 機能フラグ |
+| `planner.interactive` | bool | `false` | `--interactive-plan` / 機能フラグ |
+| `auth.login_url` | str | `""` | `--login-url` / 認証・Cookie |
+| `auth.login_user_field` | str | `username` | `--login-user-field` / 認証・Cookie |
+| `auth.login_pass_field` | str | `password` | `--login-pass-field` / 認証・Cookie |
+| `auth.login_success_indicator` | str | `""` | `--login-success` / 認証・Cookie |
+| `auth.auth_user` | str | `""` | `--auth-user` / 認証・Cookie |
+| `auth.auth_pass` | str | `""` | `--auth-pass` / 認証・Cookie |
+| `auth.mfa_type` | str | `""` | `--mfa-type` / 認証・Cookie |
+| `auth.mfa_field` | str | `""` | `--mfa-field` / 認証・Cookie |
+
+平文パスワードを YAML に保存しないでください。ダッシュボードから送った秘匿フィールドは `scan_config.json` で伏字化されます。
+
+### `features`
+
+| キー | 型 | 既定値 | 対応 CLI / UI |
+| --- | --- | --- | --- |
+| `features.dom_xss` | bool | `false` | `--dom-xss` / 検査項目・機能フラグ |
+| `features.ai_analysis` | bool | `true` | `--no-ai-analysis` / 機能フラグ |
+| `features.waf_detection` | bool | `true` | `--no-waf-detection` / 機能フラグ |
+| `features.payload_learning` | bool | `true` | `--no-payload-learning` / 機能フラグ |
+| `features.payload_evolution` | bool | `true` | YAML（LLM不要の文脈適応 wave） |
+| `features.payload_mutation` | bool | `true` | YAML（LLM不要の変異 wave） |
+| `features.community_payloads` | bool | `true` | `--community-payloads/--no-community-payloads` |
+| `features.sitemap_crawl` | bool | `true` | `--no-sitemap-crawl` / 機能フラグ |
+| `features.cvss_scores` | bool | `true` | YAML（レポート表示） |
+| `features.skip_registration` | bool | `true` | `--include-registration` / 機能フラグ |
+| `features.open_report` | bool | `true` | `--no-open-report` / 機能フラグ |
+| `features.auto_config` | bool | `false` | `--auto-config/--no-auto-config` |
+| `features.spa_crawl` | bool | `false` | `--spa-crawl` / 機能フラグ |
+| `features.interactive_crawl_review` | bool | `false` | ダッシュボードの巡回レビュー |
+
+### `learning` / `ctf` / `output`
+
+| キー | 型 | 既定値 | 対応 CLI / UI |
+| --- | --- | --- | --- |
+| `learning.file` | str | `""` | `--learning-file` |
+| `ctf.enabled` | bool | `false` | `--ctf` / 機能フラグ |
+| `ctf.flag_pattern` | str | `""` | `--ctf-flag-format` |
+| `output.dir` | str | `""` | `--output` |
+| `output.payloads_file` | str | `""` | `--payloads` |
+
+## 8. LLM アーキテクチャ
+
+### provider と必要な設定
+
+| provider | 用途・接続 | 認証 |
+| --- | --- | --- |
+| `ollama` | ローカル `/api/generate` | 通常不要 |
+| `claude` | Anthropic API | `ANTHROPIC_API_KEY` |
+| `openai` | 公式 OpenAI chat completions | `OPENAI_API_KEY` |
+| `openai_compatible` | tsuzumi 2、Azure AI Foundry、vLLM、LiteLLM、LM Studio 等 | `WSCAN_LLM_API_KEY`、なければ `OPENAI_API_KEY` |
+| `gemini` | Google `generateContent` | `GEMINI_API_KEY` |
+| `none` | LLM を呼ばない | 不要 |
+
+OpenAI 互換のベース URL は `--llm-base-url`、`llm.openai_base_url`、ダッシュボード、`WSCAN_LLM_BASE_URL`（または `OPENAI_BASE_URL`）で指定します。公式 `openai` と互換 provider を分離し、長時間の `serve` プロセスで互換 URL が別スキャンの公式 OpenAI 呼び出しへ漏れないよう、エンジンごとに明示的に保持します。
+
+```bash
+export WSCAN_LLM_BASE_URL="https://your-host/v1"
 export WSCAN_LLM_API_KEY="<api-key>"
-python main.py scan https://example.com \
+python3 main.py scan https://example.com \
   --llm openai_compatible --openai-model tsuzumi-2 --headless
 ```
 
-ベース URL が `/chat/completions` で終わる場合はそのまま使用し、`/v1` 等で終わる場合は
-自動で `/chat/completions` を付加します。
+### `llm_client` による一元化
 
----
+ペイロード、adaptive、レポート分析、修正提案などの生テキスト LLM 呼び出しは共通クライアントを使います。`llm.timeout_seconds` は1回のタイムアウト、`llm.max_retries` は初回の後に行う最大リトライ回数です。役割別モデルは呼び出し前に切り替えます。
 
-## 使い方
+一時失敗として再試行するのは、HTTP `408/429/500/502/503/504/529`、接続・読み書き・タイムアウト・プロトコルエラー、Anthropic の接続/タイムアウトラッパー、成功ステータスでも一時的に壊れたレスポンス形式です。`Retry-After` を尊重し、なければ指数バックオフします。認証失敗などの恒久エラーは繰り返しません。
 
-### 推奨: ダッシュボードから開始
+### fallback
+
+- payload: 手キュレーションの `default_payloads.yaml`、生成済み community、LLM 不要の evolution/mutation を継続します。
+- planner: LLM 応答が利用できなければヒューリスティック計画へ戻ります。
+- remediation: LLM 生成に失敗した場合は脆弱性種別ごとの静的修正テンプレートを使います。
+- Gemini: 共通クライアントから remediation を生成でき、利用不可時は同じ静的 fallback へ戻ります。
+- adaptive: 一時失敗と恒久的な provider 不達を区別します。詳細は次の「長時間スキャン・見逃し防止」を参照してください。
+
+## 9. Finding の読み方
+
+Finding は「検出した」という一点だけでなく、出自、再現状態、確信度、証拠種別を分けて読みます。
+
+| フィールド | 値 | 読み方 |
+| --- | --- | --- |
+| `source` | `scanner` / `agent` | 決定論スキャナ由来か Agent の独自解釈か |
+| `verified` | bool | 2回目の再現に成功したか。`false` なら `verification_note` も確認 |
+| `confidence` | `confirmed` / `likely` / `tentative` | 証拠の強さ。重要度 `severity` とは別軸 |
+| `evidence_type` | 例: `xss_dialog`, `sqli_error` | どの構造化シグナルで判定したか |
+| `agent_verified` | bool | Agent Finding を決定論的にも再現確認できたか |
+
+HTML レポートでは、`source=agent` の Finding を次のバッジで区別します。
+
+- `🤖 Agent発見（LLM独自解釈・未確証）`: Agent の仮説。未確証でも独自性を保つためレポートから消しません。
+- `🤖 Agent発見（LLM独自解釈）` + `✅ 決定論的にも再現確認済み`: `agent_verified=true` の Agent Finding。
+- バッジなし: 通常の決定論スキャナ由来。
+
+Agent Finding は変換時に `source=agent`、`verified=false` となります。`severity` が高くても、Agent 未確証バッジがあれば証拠、Request/Response、再現手順を人手で確認してください。逆に通常 Finding でも `confidence=tentative` や `verified=false` なら確証済みとは扱いません。
+
+SARIF の `result.properties` にも `source`、`agent_verified`、`verified`、`confidence` を保存し、fingerprint に `source` を含めます。
+
+## 10. Hybrid フロー
+
+![Hybrid モード設定](docs/images/dashboard-hybrid.png)
+
+```text
+Phase 1: Agent recon
+  ├─ discovered_urls
+  └─ Agent Finding (source=agent)
+             │ handoff
+             ▼
+Phase 2: deterministic scan
+  ├─ 発見 URL を seed_urls として巡回・攻撃
+  └─ scanner Finding (source=scanner)
+             │ merge
+             ▼
+最終 HTML / JSON / SARIF
+  └─ Agent Finding と scanner Finding をラベル付きで併記
+```
+
+1. Agent Browser が対象を探索し、ターゲット URL を先頭に訪問 URL の重複を除いて収集します。
+2. 探索中に Agent が脆弱性仮説を申告した場合、標準 `Finding` へ変換して URL と一緒に引き渡します。
+3. 通常エンジンは発見 URL を巡回シードとして、選択された決定論スキャナを実行します。
+4. レポート生成前に Agent Finding を通常 Finding へ追加し、出自ラベル付きで併記します。
+
+Phase 1 が失敗した場合、ダッシュボードは警告を出し、URL シードと Agent Finding なしで通常スキャンを続行します。Hybrid は「Agent は偵察のみ」ではありませんが、Agent Finding 自体が自動的に決定論的確証へ変わるわけでもありません。
+
+## 11. 長時間スキャン・見逃し防止
+
+### checkpoint / resume
+
+通常スキャンは既定で `output/<timestamp>/checkpoint.json` に進捗と既出 Finding を保存します。通常攻撃は `(URL × フィールド × フォーム位置 × チェック種別)` の単位で完了を記録し、例外で終わった単位は未完了のまま残します。
 
 ```bash
-python3 main.py serve --port 8765
+python3 main.py scan https://example.com \
+  --allowed-hours "Mon-Fri 22:00-06:00" \
+  --forbidden-hours "Mon-Fri 09:00-18:00"
+
+python3 main.py scan https://example.com \
+  --resume output/20260721_010203
 ```
 
-`http://localhost:8765` を開き、画面から Target URL、プロファイル、認証、スコープ、チェック種別を設定します。操作手順は [docs/dashboard_usage_ja.md](docs/dashboard_usage_ja.md) を参照してください。
+`--resume` はターゲットとチェック構成の互換性を確認し、完了単位を飛ばして残りだけを実行します。`--no-checkpoint` で保存を無効化できます。
 
-ダッシュボード起点の運用では、検査前に対象範囲を確認し、攻撃プラン確認画面で実行内容を見てから攻撃フェーズに進めるため、実検査での誤爆や過剰なリクエストを抑えやすくなります。
+### adaptive のチェック種別単位回収
 
-### トリアージモード（ペイロード送信なし・高速リスク評価）
+adaptive LLM ラウンドはフィールド全体を一括完了にせず、`field × check_type` ごとに checkpoint を記録します。一部のチェックで payload 生成、ブラウザ操作、スキャナ実行が一時失敗しても、成功済みチェックは保持し、失敗したチェックだけを `--resume` で再試行します。空/空白の LLM 応答も一時失敗として未完了にします。
+
+一方、スキャン中に一度行う可用性確認で provider 自体が恒久的に利用できないと判断した場合は、adaptive を fallback 完了として記録します。これにより、決定論ペイロードでスキャンを完了させつつ、到達不能な LLM を resume のたびに無限再試行しません。
+
+### セッションと時間帯
+
+長時間スキャンでは認証切れを 401、ログインフォーム残存などの強いシグナルから検出し、既定で再ログインします。`--logged-in-marker` で精度を補強し、不要なら `--no-relogin` を指定します。許可/禁止時間帯では攻撃を待機し、再開可能な checkpoint を維持します。
+
+## 12. 出力・連携
+
+代表的な出力:
+
+```text
+output/<timestamp>/
+├── report.html
+├── report_executive.html
+├── report_developer.html
+├── report.sarif
+├── evidence.json
+├── reproduction.json
+├── reproduce.sh
+├── scan_config.json
+├── checkpoint.json
+├── remediation_plan.md
+├── remediation_tasks.json
+├── ai_analysis.md
+├── ai_finding_fixes.json
+├── http_requests.jsonl
+├── payloads.jsonl
+└── screenshots/
+```
+
+| 出力 | 用途 |
+| --- | --- |
+| `report.html` | 自己完結型 HTML。Finding、証拠、Agent バッジ、実行条件 |
+| `report_executive.html` | 管理層向けサマリー |
+| `report_developer.html` | 開発者向け詳細・修正観点 |
+| `evidence.json` | Finding と証跡の機械可読 JSON |
+| `reproduction.json`, `reproduce.sh` | 再現情報とコマンド |
+| `report.sarif` | SARIF 2.1.0。`properties.source` 等を含む |
+| `remediation_plan.md`, `remediation_tasks.json` | 修正計画とタスク |
+| `http_requests.jsonl`, `payloads.jsonl` | 通信・投入ペイロード監査ログ。秘匿ヘッダ等はマスク |
+| `scan_config.json` | 実行設定スナップショット。秘匿値は伏字 |
+
+### Webhook
 
 ```bash
-# ペイロードを一切送らずにページ構造・ヘッダを解析し、リスクと推奨ペイロードを表示
-python main.py triage https://example.com
-
-# LLM を使った AI 攻撃戦略アドバイスつき
-python main.py triage https://example.com --llm ollama --depth 2
-
-# JSON ファイルに保存
-python main.py triage https://example.com --output triage.json
+python3 main.py scan https://example.com \
+  --notify-webhook https://hooks.example.invalid/... \
+  --notify-severity high
 ```
 
-出力例:
-```
-╭─ WScan Triage Report ─────────────────────────╮
-│ Target: https://example.com                    │
-│ Fields analysed: 12   Pages visited: 5         │
-╰────────────────────────────────────────────────╯
-┌──────────┬──────────┬──────┬───────┬──────────────────────────────────────┐
-│ URL      │ Field    │ Type │ Risk  │ Recommended Payloads (top 2)         │
-├──────────┼──────────┼──────┼───────┼──────────────────────────────────────┤
-│ /login   │ username │ text │ ●HIGH │ [sqli] ' OR '1'='1'--               │
-│          │          │      │       │ [xss] <script>alert(document.domain) │
-│ /search  │ q        │ text │ ●HIGH │ [xss] <img src=x onerror=alert(1)>  │
-│ /        │ (header) │  —   │ ●MED  │ Clickjacking: X-Frame-Options missing│
-└──────────┴──────────┴──────┴───────┴──────────────────────────────────────┘
-Suggested full scan command:
-  python main.py scan https://example.com --checks sqli xss ssti os nosql cors
-```
+Finding 検出時に Slack Incoming Webhook または汎用 JSON POST エンドポイントへ通知します。通知失敗でスキャン本体は停止しません。serve の通知設定はポータルから管理します。
 
-### 基本スキャン
+### REST / WebSocket
+
+`serve` は `/api/v1/scan`、`/api/v1/scan/status`、`/api/v1/scan/findings`、`/api/v1/scan/results`、`/api/v1/scans`、スケジュール・履歴・手動巡回 API と `/ws` を提供します。トークン設定時は Bearer 認証が必要です。`/health` は稼働確認に使えます。
+
+### batch
+
+`batch` は YAML に定義した複数 URL を順次実行し、個別成果物と統合サマリーを `output/batch_<timestamp>/` に保存します。
+
+## 13. 認証・MFA・スコープ・TLS
+
+### Cookie / ログイン / 権限昇格
 
 ```bash
-python main.py scan https://example.com
-```
-
-### チェック種類を絞る
-
-```bash
-python main.py scan https://example.com --checks xss sqli csrf clickjacking
-```
-
-### ヘッドレス + Claude LLM + プロキシ
-
-```bash
-python main.py scan https://example.com --headless --llm claude --proxy http://127.0.0.1:8080
-```
-
-### 自動設定ウィザード（LLM がスキャン設定を提案・適用）
-
-```bash
-python main.py scan https://example.com --auto-config --llm ollama
-```
-
-### ログイン自動化 + 権限昇格テスト
-
-```bash
-# ログインフォームを自動入力してセッションを取得
-python main.py scan https://example.com \
+python3 main.py scan https://example.com \
   --login-url https://example.com/login \
-  --auth-user admin --auth-pass p@ssw0rd
-
-# 低権限セッションも渡して垂直権限昇格テスト
-python main.py scan https://example.com \
-  --cookie "session=highpriv_token" \
-  --low-priv-cookies "session=lowpriv_token"
+  --auth-user ops --auth-pass 'p@ss' \
+  --login-user-field username --login-pass-field password \
+  --login-success dashboard
 ```
 
-### MFA（2段階認証）付きログインの自動化
+ログイン成否は URL 変化だけでなく、ログインフォーム残存、失敗メッセージ、MFA 画面残留も確認します。Cookie を直接渡す場合は `--cookie` / `--cookie-file`、垂直権限昇格は `--low-priv-cookies` / `--low-priv-cookie-file`、複数アカウントは `--accounts` / `--accounts-file` を使用します。
 
-ログイン後にワンタイムコードを要求される対象では、コード取得を**外部 MCP サーバ**へ
-委譲して自動入力します（パスワード送信後に MFA 画面を検出 → コード取得 → 投入・送信）。
-**自身が管理する／検査許可を得た対象**にのみ使用してください。秘匿情報（TOTP シークレット・
-メール認証情報）はコードや設定ファイルに書かず、すべて環境変数で渡します。
+`--allow-state-changing-probes` は POST/PUT/PATCH 等の状態変更を伴う可能性があります。変更してよい検証環境に限って有効にしてください。
 
-事前に外部 MCP サーバを用意します（本リポジトリの Python 依存ではありません）。
+### MFA
 
-- TOTP: [mcp-totp-authenticator](https://github.com/gosusnkr/mcp-totp-authenticator)（Node）
-- メール: [mcp-email-server](https://github.com/ai-zerolab/mcp-email-server)（uvx/pip）
+TOTP とメールコードを外部 MCP から取得し、パスワード送信後の MFA 入力欄へ投入できます。
 
 ```bash
-# 例1: 認証アプリ方式（TOTP）。シークレットは TOTP サーバ側の env で設定する。
+# TOTP
 export WSCAN_MFA_TOTP_COMMAND="node"
 export WSCAN_MFA_TOTP_ARGS="/opt/mcp-totp-authenticator/dist/index.js"
-export WSCAN_MFA_TOTP_LABEL="ops@example.com"   # 任意（複数アカウント時）
-export TOTP_SECRET_1="JBSWY3DPEHPK3PXP"          # ← TOTP サーバが読む（base32）
+export WSCAN_MFA_TOTP_LABEL="ops@example.com"
+export TOTP_SECRET_1="<base32-secret>"
 export TOTP_LABEL_1="ops@example.com"
-python main.py scan https://example.com \
+
+python3 main.py scan https://example.com \
   --login-url https://example.com/login --auth-user ops --auth-pass 'p@ss' \
   --mfa-type totp --mfa-field otp
+```
 
-# 例2: メール送付コード方式。受信は mcp-email-server（IMAP）に委譲。
-# 一覧(list_emails_metadata)→本文(get_emails_content)の2段で読む。account_name 必須。
-# 重要: WSCAN_MFA_EMAIL_ACCOUNT と mcp-email-server 側の登録名
-# (MCP_EMAIL_SERVER_ACCOUNT_NAME)は必ず一致させること。不一致だと unknown account で失敗する。
+登録済みメールアカウントを使う場合、`WSCAN_MFA_EMAIL_ACCOUNT` と `mcp-email-server` 側の `account_name` を一致させます。
+
+```bash
 export WSCAN_MFA_EMAIL_COMMAND="uvx"
 export WSCAN_MFA_EMAIL_ARGS="mcp-email-server@latest stdio"
-export WSCAN_MFA_EMAIL_ACCOUNT="ops"                     # ← 下の ACCOUNT_NAME と一致させる
-export WSCAN_MFA_EMAIL_LIST_ARGS='{"subject": "code"}'   # 任意の絞り込み(JSON)
-export MCP_EMAIL_SERVER_ACCOUNT_NAME="ops"               # ← email サーバ側の account 登録名
-export MCP_EMAIL_SERVER_EMAIL_ADDRESS="otp@example.com"  # ← email サーバが読む
-export MCP_EMAIL_SERVER_PASSWORD="app-password"
+export WSCAN_MFA_EMAIL_ACCOUNT="ops"
+export MCP_EMAIL_SERVER_ACCOUNT_NAME="ops"
+export MCP_EMAIL_SERVER_EMAIL_ADDRESS="otp@example.com"
+export MCP_EMAIL_SERVER_PASSWORD="<app-password>"
 export MCP_EMAIL_SERVER_IMAP_HOST="imap.example.com"
-python main.py scan https://example.com \
+
+python3 main.py scan https://example.com \
   --login-url https://example.com/login --auth-user ops --auth-pass 'p@ss' \
   --mfa-type email
-
-# 受信アカウント(=メールアドレス)はコマンドラインからも自由に指定できる。
-# 指定した値が WSCAN_MFA_EMAIL_ACCOUNT より優先される。空欄なら env を使う
-# ため、既存のメールアドレス設定もそのまま利用できる。
-python main.py scan https://example.com \
-  --login-url https://example.com/login --auth-user ops --auth-pass 'p@ss' \
-  --mfa-type email --mfa-email-account "ops@example.com"
 ```
 
-> メールアドレス（`account_name`）は **CLI `--mfa-email-account` / ダッシュボードの
-> 「MFA メールアドレス / アカウント名」欄 / `config` のいずれからでも自由に設定**できる。
-> いずれも mcp-email-server 側に登録済みの `account_name`（＝受信箱）を指す。値を空に
-> すると `WSCAN_MFA_EMAIL_ACCOUNT` env にフォールバックするため、既存設定を壊さない。
+動的 IMAP は `--mfa-email-address`、`--mfa-email-imap-host`、`--mfa-email-imap-port`、`--mfa-email-imap-user` で指定し、パスワードは `WSCAN_MFA_EMAIL_IMAP_PASSWORD` を推奨します。メールは一覧取得後に本文を取得し、ポーリング開始後の新着からコードを抽出します。
 
-主な環境変数（`WSCAN_MFA_*`）:
+### スコープ
 
-| 変数 | 既定 | 説明 |
-|---|---|---|
-| `WSCAN_MFA_TYPE` | `none` | `totp` / `email` / `none`。UI/CLI(`--mfa-type`)で明示指定するとこの env より優先（UI の「無効」で確実に切れる） |
-| `WSCAN_MFA_FIELD` | `otp` | コード入力欄の name/id（`--mfa-field` で上書き） |
-| `WSCAN_MFA_CODE_LENGTH` | `6` | 抽出するコード桁数 |
-| `WSCAN_MFA_CODE_REGEX` | — | コード抽出の正規表現（指定時はこちらを優先） |
-| `WSCAN_MFA_TOTP_COMMAND` / `_ARGS` | `node` / — | TOTP MCP の起動コマンド・引数 |
-| `WSCAN_MFA_TOTP_TOOL` / `_LABEL` | `get_totp_code` / — | 呼ぶツール名・アカウントラベル |
-| `WSCAN_MFA_EMAIL_COMMAND` / `_ARGS` | `uvx` / `mcp-email-server@latest stdio` | メール MCP の起動 |
-| `WSCAN_MFA_EMAIL_ACCOUNT` | — | mcp-email-server の `account_name`（サーバ側登録済みの場合に使用。CLI `--mfa-email-account` / ダッシュボードで上書き可） |
-| `WSCAN_MFA_EMAIL_LIST_TOOL` / `_CONTENT_TOOL` | `list_emails_metadata` / `get_emails_content` | 一覧・本文取得ツール名 |
-| `WSCAN_MFA_EMAIL_PAGE_SIZE` | `5` | 一覧で取得する直近メール件数 |
-| `WSCAN_MFA_EMAIL_LIST_ARGS` / `_CONTENT_ARGS` | `{}` / `{}` | 各ツールへの追加引数(JSON, 例 `{"subject":"code"}`) |
-| `WSCAN_MFA_EMAIL_TIMEOUT` / `_INTERVAL` | `60` / `5` | メール到着待ちの最大秒・ポーリング間隔 |
-| `WSCAN_MFA_EMAIL_ADDRESS` | — | **動的 IMAP**: メールアドレス（account 未指定時は account_name に流用） |
-| `WSCAN_MFA_EMAIL_IMAP_HOST` / `_PORT` | — / `993` | **動的 IMAP**: 受信ホスト・ポート（host 指定で動的設定モードが有効に） |
-| `WSCAN_MFA_EMAIL_USER` | — | **動的 IMAP**: ログインユーザー名（既定はアドレス） |
-| `WSCAN_MFA_EMAIL_IMAP_PASSWORD` | — | **動的 IMAP**: パスワード（旧名 `WSCAN_MFA_EMAIL_PASSWORD` も可。env 推奨） |
-| `WSCAN_MFA_EMAIL_IMAP_SSL` | `true` | **動的 IMAP**: SSL を使うか |
-| `WSCAN_MFA_EMAIL_SERVER_ENV` | `{}` | **動的 IMAP**: 生の `MCP_EMAIL_SERVER_*` を JSON で直接上書き（SMTP 等の微調整用） |
+- `target`: 巡回・攻撃してよい URL/オリジン/プレフィックス。
+- `access`: ログインや外部 IdP のため到達してよいが攻撃してはいけない範囲。
+- `exclude`: 削除、送信、決済、ログアウトなど避ける URL とフィールド。
+- serve: `monitor.allowed_target_hosts` / `denied_target_hosts` でダッシュボード利用者が指定できるホスト自体を制限。
 
-#### 任意のメールアドレスを動的に使う（サーバ側に未登録でも可）
+### TLS
 
-`account_name` の事前登録に頼らず、**ツール側から IMAP 認証情報を直接渡して**任意の
-アドレスを受信できます。受信ホストを指定すると「動的設定モード」になり、内部で起動する
-`mcp-email-server` サブプロセスへ `MCP_EMAIL_SERVER_*` を注入します（事前の env 設定不要）。
-CLI・ダッシュボード（MFA セクションの「IMAP 認証情報を直接指定」）・`config` のいずれからでも設定できます。
+PEM の cert/key は Playwright と httpx に使います。PFX/PKCS#12 は Playwright ブラウザアクセス用です。`--tls-ca-cert` と `--tls-verify` は httpx の直接リクエストでサーバ証明書を検証します。ブラウザ側は互換性維持のため HTTPS エラーを許容しながらクライアント証明書を提示します。
+
+## 14. 高度機能
+
+### API ファースト
 
 ```bash
-# パスワードはプロセス一覧への露出を避けるため env 推奨
-export WSCAN_MFA_EMAIL_IMAP_PASSWORD="app-password"
-python main.py scan https://example.com \
-  --login-url https://example.com/login --auth-user ops --auth-pass 'p@ss' \
-  --mfa-type email \
-  --mfa-email-address "otp@example.com" \
-  --mfa-email-imap-host imap.example.com --mfa-email-imap-port 993
+python3 main.py scan https://api.example.com \
+  --api-spec openapi.yaml \
+  -H "Authorization: Bearer <token>" \
+  --checks sqli xss mass_assignment graphql
 ```
 
-> メールは「一覧（`list_emails_metadata`）→ 本文（`get_emails_content`）」の2段で読み、
-> まず件名、無ければ本文から `WSCAN_MFA_CODE_LENGTH`（既定 6 桁）または
-> `WSCAN_MFA_CODE_REGEX` に基づいてコードを抽出します。ツール名は利用する MCP
-> サーバの API に合わせて `*_LIST_TOOL` / `*_CONTENT_TOOL` で調整してください。
-> ポーリング開始時点で既に受信箱にあるメールは除外し、**その後に届いた新着メール
-> のみ**を対象にします（前回ログインの期限切れコードを誤投入しないため）。
+OpenAPI 2.0/3.x、Swagger JSON/YAML、Postman Collection から URL、共通ヘッダ、JSON 操作を読み、フォームを辿れない API/SPA バックエンドを直接検査します。パスパラメータはサンプル値で具体化し、クエリはスキーマの既定値で補います。利用者が `-H` で渡した Authorization 等は spec の例示値より優先します。
 
-### DOM-based XSS 検出を有効化
+### CMS / sitemap / SPA / JS
 
-```bash
-python main.py scan https://example.com --dom-xss
-```
+- `cms`: CMS の種類、バージョン、既知露出、危険な設定を確認します。
+- sitemap/robots: 既定で未リンク URL のシードにします。`--no-sitemap-crawl` で無効化します。
+- SPA: `--spa-crawl` で `history.pushState` フックとクリック探索を使い、React/Vue/Angular の動的ルートを収集します。
+- `js_static`: インライン/外部 JavaScript の危険な source-to-sink フローを静的確認します。
 
-### CTF モード（高速スキャン + SSTI 追加）
+### flow / 手動巡回 / HAR
 
-```bash
-python main.py scan https://example.com --ctf --headless --no-monitor
-```
+- `record`: navigate、fill、click、wait 等を JSON フローへ記録します。
+- `manual-crawl`: 可視ブラウザで訪問 URL、フォーム、Cookie を JSON に保存します。
+- ダッシュボード手動巡回: 可視ブラウザ、CDP スクリーンキャストによる遠隔操作、URL リスト取り込みの3方式です。
+- `--har`: HAR のエンドポイントと Cookie をスキャンシードへ加えます。
 
-### 特定パラメーターを除外
+### ペイロード・WAF・レート制御
 
-```bash
-python main.py scan https://example.com --exclude csrf_token __RequestVerificationToken
-```
+通常スキャンの注入系は、既定+community、LLM 不要の文脈適応 evolution、LLM 不要の mutation、LLM adaptive を加算的に使います。WAF 名を検出すると adaptive の回避ヒントへ反映します。`--max-payloads` は標準掃射を制限し、`--delay`、`--concurrency`、`--navigation-retries` で負荷と速度を調整します。
 
-### GraphQL + JWT スキャン
+`--fast` はベストエフォートの高速プリセットです。初回の負荷確認には便利ですが、網羅性を優先する最終診断ではチェック、深さ、ペイロード上限を明示してください。
 
-```bash
-python main.py scan https://example.com --checks graphql jwt
-```
+## 15. トラブルシューティング
 
-### API ファースト検査（OpenAPI/Swagger/Postman 取り込み）
+### 対象へ接続できない
 
-```bash
-# OpenAPI/Swagger(JSON/YAML) からエンドポイント・ヘッダ・JSON 操作を取り込む
-python main.py scan https://api.example.com \
-  --api-spec ./openapi.yaml \
-  --checks sqli xss nosql mass_assignment prototype_pollution
+対象 URL、VPN、DNS、プロキシ、クライアント証明書、CA を確認します。社内 CA を検証する場合は `--tls-ca-cert` と `--tls-verify`、通信を観察する場合は `--proxy http://127.0.0.1:8080` を使います。
 
-# Postman Collection も同じフラグで取り込める
-python main.py scan https://api.example.com --api-spec ./collection.json
-```
+### ログイン後の画面を検査できない
 
-### 新クラス（Prototype Pollution / Cache Poisoning / Mass Assignment / GraphQL DoS）
+`--login-success` / `--logged-in-marker`、フィールド名、Cookie の domain/path/expiry を確認します。ダッシュボードの Event Log でログインフォーム残存、MFA、`Session expired` を確認してください。
 
-```bash
-python main.py scan https://example.com \
-  --checks prototype_pollution cache_poisoning mass_assignment graphql
-```
+### Agent / Hybrid が開始できない
 
-### 長時間スキャンの運用（時間帯ゲート・再開・自動再ログイン）
+`requirements-agent.txt`、API キー、provider とモデル、Ollama の疎通を確認します。Gemini は通常スキャン・triage・remediation では使えますが、現行の Agent CLI provider 選択肢には含まれません。
 
-```bash
-# 業務時間外（平日夜間＋週末終日）だけ検査し、ピーク時は停止
-python main.py scan https://example.com \
-  --allowed-hours "Mon-Fri 22:00-06:00" --allowed-hours "Sat,Sun 00:00-24:00" \
-  --forbidden-hours "Mon-Fri 12:00-13:00"
+### LLM が不安定
 
-# 認証付き長時間スキャン。セッションが切れたら自動再ログイン（既定で有効）
-python main.py scan https://example.com \
-  --login-url https://example.com/login --auth-user ops --auth-pass 'p@ss' \
-  --logged-in-marker "Logout"
+`llm.timeout_seconds` と `llm.max_retries` を調整します。通常スキャンは fallback で完了できます。adaptive の一時失敗は checkpoint に未完として残るため、同じターゲット/チェック構成で `--resume` します。
 
-# 中断したスキャンを前回の出力ディレクトリから再開（完了済み単位はスキップ）
-python main.py scan https://example.com --resume output/20240101_120000
-```
+### 検出が少ない
 
-### 複数アカウント権限昇格テスト（手動指定）
+`--checks`、Depth、Max Forms、`--max-payloads`、SPA、sitemap、手動巡回、HAR、API spec、認証スコープを確認します。`--fast` や除外指定、低すぎる時間制限が原因でないか確認してください。
 
-```bash
-python main.py scan https://example.com \
-  --checks privesc \
-  --accounts "admin:admin123,user1:pass1" \
-  --login-url https://example.com/login
-```
+### 負荷を抑えたい
 
-### 自動アカウント登録 + 権限昇格テスト
+Depth、Max Forms、Max Payloads、Concurrency を下げ、Delay を増やします。状態変更プローブを有効にせず、ステージングで小さいスコープから開始してください。
 
-```bash
-# 登録フォームを自動検出し、テストアカウントを 2 つ自動作成して権限昇格テストを実行
-python main.py scan https://example.com \
-  --checks privesc \
-  --auto-register --auto-register-count 2 \
-  --login-url https://example.com/login
-```
+### 詳細ログと切り分け
 
-### SPA クロール（React/Vue/Angular 対応）
+`output/<timestamp>/http_requests.jsonl`、`payloads.jsonl`、`checkpoint.json`、Event Log を確認します。追加の症状別手順は [トラブルシューティング](docs/troubleshooting_ja.md) を参照してください。
 
-```bash
-# history.pushState フック + クリック操作で動的ルートを収集
-python main.py scan https://example.com --spa-crawl --depth 3
-```
+## 16. 免責・ライセンス
 
-### 全機能込みスキャン
+本ツールはセキュリティ検証と教育を目的とします。許可のないシステムへの使用、対象データの破損、サービス停止、法令・契約違反につながる使用は禁止します。自動検出には誤検知と見逃しがあり、特に Agent 未確証 Finding は人手で証拠と再現性を確認してください。
 
-```bash
-python main.py scan https://example.com \
-  --checks sqli xss privesc graphql jwt \
-  --accounts "admin:pass1,user:pass2" \
-  --spa-crawl --llm claude --headless
-```
-
-### 自然言語でスキャン設定を確認（setupコマンド）
-
-```bash
-python main.py setup "ECサイトで管理画面あり、RESTful APIも使用"
-```
-
-### Agent モード（LLM がブラウザを自律操作）
-
-```bash
-# 事前に: pip install -r requirements-agent.txt
-# LLM が実ブラウザを操作して脆弱性を自律探索（API キーが必要）
-python main.py agent https://example.com --llm claude --max-steps 100
-
-# 認証つき・チェック種別と表示ブラウザを指定
-python main.py agent https://example.com \
-  --llm claude --no-headless \
-  --login-url https://example.com/login --auth-user admin --auth-pass 'pass' \
-  --checks xss sqli ssti os
-```
-
-通常の `scan`（ルールベースの掃射）に対し、`agent` は LLM が手順を判断しながら進める探索的検査です。`--max-steps` でステップ上限を制御します。
-
-### コミュニティペイロードの取り込み（import-payloads）
-
-```bash
-# 公開集(PayloadsAllTheThings)から config/community_payloads.yaml を生成（取得時のみネット使用）
-python main.py import-payloads
-
-# 取り込む検査種別を限定 / 1 種別あたりの上限を指定
-python main.py import-payloads --check xss,sqli --per-type-cap 200
-```
-
-生成後の**スキャン実行はネット非依存**で、既定(curated)と 2:1 でインターリーブしてマージされます（未収録分のみ・重複排除）。
-
-### サブコマンド早見表
-
-| サブコマンド | 用途 |
-| --- | --- |
-| `serve` | ダッシュボード常駐（推奨の起点） |
-| `scan` | CLI から直接スキャン |
-| `agent` | LLM がブラウザを自律操作して探索的に検査 |
-| `triage` | ペイロード非投入の高速リスク評価 |
-| `setup` | 自然言語からスキャン設定を生成 |
-| `batch` | 複数ターゲットを YAML で一括スキャン（→ [advanced_features.md](docs/advanced_features.md)） |
-| `record` | ブラウザ操作を再生可能な JSON フローに記録（→ [advanced_features.md](docs/advanced_features.md)） |
-| `manual-crawl` | 可視/遠隔ブラウザで手動巡回し巡回シードを保存 |
-| `import-payloads` | 公開集からコミュニティペイロードを生成 |
-
----
-
-## コマンドラインオプション一覧
-
-```
-usage: main.py scan [オプション] URL
-
-位置引数:
-  url                      スキャン対象 URL
-
-主要オプション:
-  --checks CHECK ...       実行するチェック (デフォルト: config/wscan.yaml)
-                           選択肢: sqli xss dom_xss stored_xss os path_traversal
-                                   session csrf header_injection mail_header
-                                   clickjacking open_redirect ssti privesc
-                                   cors info_disclosure host_header security_headers
-                                   file_upload nosql deserialization request_smuggling
-                                   ssrf graphql jwt cms xxe ldap race_condition
-                                   websocket secret_leak sri js_static
-                                   prototype_pollution cache_poisoning mass_assignment
-  --depth N                クロール深度 (デフォルト: 2)
-  --headless               ブラウザをヘッドレスモードで起動
-  --no-monitor             リアルタイム監視ダッシュボードを無効化
-  --llm PROVIDER           LLM プロバイダー: ollama|claude|openai|openai_compatible|gemini|none
-  --ollama-model MODEL     Ollama モデル名 (デフォルト: llama3)
-  --openai-model MODEL     OpenAI(互換) モデル名 (デフォルト: gpt-4o-mini。
-                           openai_compatible では tsuzumi-2 等を指定)
-  --llm-base-url URL       外部 OpenAI 互換エンドポイントのベース URL
-                           (tsuzumi2 等。例: https://host/v1)
-  --gemini-model MODEL     Google Gemini モデル名 (デフォルト: gemini-2.0-flash)
-  --payloads FILE          カスタムペイロード YAML ファイル
-  --output DIR             出力ディレクトリ (デフォルト: output/<タイムスタンプ>)
-  --port PORT              監視ダッシュボードポート (デフォルト: 8765)
-  --timeout SECS           リクエストタイムアウト秒数 (デフォルト: 30)
-  --max-forms N            1 ページあたり最大フォーム数 (デフォルト: 50)
-  --exclude PARAM ...      スキップするパラメーター名
-  --exclude-file FILE      除外パラメーター一覧ファイル
-  --exclude-urls-file FILE スキップする URL プレフィックス一覧ファイル
-  --ctf                    CTF モード: SSTI 追加・遅延半減
-  --ctf-flag-format REGEX  フラグ検出の正規表現パターン
-
-認証・セッション:
-  --cookie COOKIES         スキャン前にセットする Cookie 文字列
-  --cookie-file FILE       ブラウザエクスポートの Cookie JSON ファイル
-  --auth-user USER         ログインフォーム自動入力ユーザー名
-  --auth-pass PASS         ログインフォーム自動入力パスワード
-  --login-url URL          自動ログイン対象のログインページ URL
-  --login-user-field NAME  ユーザー名フィールド名 (デフォルト: username)
-  --login-pass-field NAME  パスワードフィールド名 (デフォルト: password)
-  --login-success TEXT     ログイン成功判定のURL/ページ内文字列
-  --mfa-type KIND          MFA(2FA) 自動入力: totp / email（外部 MCP 経由）
-  --mfa-field NAME         ワンタイムコード入力欄の name/id (デフォルト: otp)
-  --mfa-email-account EMAIL  MFA メール受信アカウント(=メールアドレス)。空なら
-                           WSCAN_MFA_EMAIL_ACCOUNT env を使用（既存設定も利用可）
-  --mfa-email-address EMAIL  動的 IMAP: メールアドレス（account 未指定時に流用）
-  --mfa-email-imap-host HOST 動的 IMAP: 受信ホスト（指定で動的設定モード）
-  --mfa-email-imap-port PORT 動的 IMAP: ポート (既定 993)
-  --mfa-email-imap-user USER 動的 IMAP: ログインユーザー名 (既定: アドレス)
-  --mfa-email-imap-password PASS  動的 IMAP: パスワード(env 推奨)
-  --mfa-email-imap-ssl BOOL  動的 IMAP: SSL 使用 (true/false, 既定 true)
-  --low-priv-cookies STR   垂直権限昇格テスト用の低権限セッション Cookie
-  --low-priv-cookie-file F 低権限セッション Cookie JSON ファイル
-  --include-registration   登録/サインアップフォームもテスト対象に含める
-  --accounts USER:PASS,... 複数アカウントをカンマ区切りで指定（権限昇格テスト用）
-                           例: "admin:admin123,user1:pass1"
-  --accounts-file FILE     アカウント一覧 YAML ファイル
-  --auto-register          登録フォームを自動検出してテストアカウントを作成
-  --auto-register-count N  自動作成するアカウント数 (デフォルト: 2)
-
-機能 On/Off:
-  --dom-xss                DOM-based XSS 検出を有効化
-  --spa-crawl              SPA の動的ルートをクリック操作で収集（React/Vue/Angular 対応）
-  --auto-config            LLM 設定ウィザードを起動してスキャン設定を自動生成
-  --no-auto-config         設定ウィザードを無効化 (デフォルト)
-  --no-ai-analysis         スキャン後 AI 総合分析レポートを無効化
-  --no-waf-detection       WAF 自動検出を無効化
-  --no-payload-learning    ペイロード継続学習を無効化
-  --no-sitemap-crawl       sitemap.xml / robots.txt クロールを無効化
-  --no-planner             AI 攻撃計画機能を無効化
-  --no-open-report         スキャン完了後のレポート自動表示を無効化
-
-プロキシ・通信:
-  --proxy URL              HTTP プロキシ URL (例: http://127.0.0.1:8080)
-  --tls-client-cert FILE   mTLS 用 PEM クライアント証明書
-  --tls-client-key FILE    --tls-client-cert に対応する PEM 秘密鍵
-  --tls-client-pfx FILE    Playwright ブラウザアクセス用 PFX/PKCS#12 証明書
-  --tls-client-cert-password TEXT
-                           クライアント証明書キーまたは PFX のパスフレーズ
-  --tls-ca-cert FILE       サーバ証明書検証に使う CA バンドル
-  --tls-verify             サーバ証明書を検証する
-  -H "Name: Value"         全リクエストに付与するカスタムヘッダ。複数指定可
-  --header-file FILE       JSON / YAML / Name: Value 形式のヘッダファイル
-  --har FILE               HAR から URL と Cookie を取り込む
-  --manual-crawl FILE      手動巡回 JSON から URL と Cookie を取り込む
-  --api-spec FILE          OpenAPI/Swagger/Postman を取り込み API を攻撃面にする
-  --resume DIR             前回出力の checkpoint.json から完了単位を飛ばして再開
-  --no-checkpoint          checkpoint.json の保存を無効化
-  --allowed-hours WINDOW   検査を許可する時間帯（複数可, 例 "Mon-Fri 22:00-06:00"）
-  --forbidden-hours WINDOW 検査を禁止する時間帯（複数可, ピーク保護等）
-  --no-relogin             セッション失効時の自動再ログインを無効化
-  --logged-in-marker TEXT  認証済みページに必ず現れる文字列（失効検知の精度向上）
-  --previous-scan DIR      前回 evidence.json と比較して新規/修正/継続 Finding を表示
-  --concurrency N          攻撃フェーズの並列ブラウザワーカー数
-  --fast                   高速スキャンモード
-  --max-payloads N         フィールド・チェックタイプごとのペイロード上限
-  --delay SECS             リクエスト間隔
-  --navigation-retries N   ページ遷移失敗時の再試行回数
-
-学習データ:
-  --learning-file FILE     ペイロード学習データ JSON ファイル
-                           (デフォルト: config/payload_learning.json)
-```
-
----
-
-## 設定ファイル (`config/wscan.yaml`)
-
-CLI フラグを毎回指定せずにデフォルト値を管理できます。
-
-```yaml
-scan:
-  checks: [sqli, xss, os]
-  depth: 2
-  max_forms: 50
-  timeout: 30
-
-browser:
-  headless: false
-  proxy: ""
-
-llm:
-  provider: ollama
-  ollama_model: llama3
-
-features:
-  dom_xss: false
-  ai_analysis: true
-  waf_detection: true
-  payload_learning: true
-  payload_evolution: true  # 文脈適応 evolution wave（LLM 不要）
-  payload_mutation: true   # 変異 mutation wave（LLM 不要）
-  community_payloads: true # community_payloads.yaml を 2:1 インターリーブでマージ
-  sitemap_crawl: true
-  spa_crawl: false         # --spa-crawl のデフォルト
-  auto_config: false       # --auto-config のデフォルト
-  open_report: true
-
-accounts:
-  auto_register: false     # --auto-register のデフォルト
-  auto_register_count: 2   # 自動作成アカウント数
-  list: []                 # 事前定義アカウントリスト
-```
-
----
-
-## 出力ファイル
-
-```
-output/
-└── 20240101_120000/
-    ├── report.html             # 自己完結型 HTML レポート（ブラウザで開く）
-    ├── report_executive.html   # 経営・管理層向けサマリーレポート
-    ├── report_developer.html   # 開発者向け修正観点レポート
-    ├── report.sarif            # SARIF 2.1.0 レポート
-    ├── evidence.json           # 全検出結果 JSON
-    ├── reproduction.json       # 再現に必要なリクエスト/条件
-    ├── reproduce.sh            # 再現用シェルスクリプト
-    ├── scan_config.json        # 実行時設定のスナップショット
-    ├── remediation_plan.md     # 修正方針・対応タスク
-    ├── remediation_tasks.json  # 機械処理しやすい修正タスク
-    ├── ai_analysis.md          # AI 攻撃チェーン分析・総合レポート（Markdown）
-    ├── ai_finding_fixes.json   # Finding 別 AI 修正提案（ビジネス影響・修正コード・CWE 参照）
-    ├── http_requests.jsonl     # 送信した全 HTTP リクエスト/レスポンスの監査ログ（Cookie/Authorization/パスワード等はマスク。1行1JSON）
-    ├── payloads.jsonl          # 投入したペイロードのログ（--no-monitor/バッチでも常時。1行1JSON）
-    └── screenshots/            # スキャン中スクリーンショット
-
-config/
-└── payload_learning.json    # ペイロード学習データ（グローバル + ドメイン別、累積）
-```
-
-出力物の読み方、Evidence の確認順、再検査時の比較方法は [docs/operation_guide_ja.md](docs/operation_guide_ja.md) を参照してください。
-
-### 深刻度と CVSS スコアの目安
-
-| 深刻度 | CVSS スコア | 主な例 |
-|--------|------------|-------|
-| **Critical** | 9.0+ | JS ダイアログ発火 XSS・SSTI・SQLi・垂直権限昇格 |
-| **High** | 7.0–8.9 | 反射 XSS・ブールベース SQLi・ディレクトリトラバーサル・水平権限昇格 (IDOR) |
-| **Medium** | 4.0–6.9 | CSRF・クリックジャッキング・セッション Cookie 属性不備・オープンリダイレクト |
-| **Low/Info** | < 4.0 | その他軽微な設定ミス |
-
----
-
-## 自動設定ウィザード (`--auto-config`)
-
-`--auto-config` を付けて起動すると、スキャン開始前に 3 ステップのインタビューが実行されます。
-
-```
-[ステップ 1] ターゲットの説明
-  例: 「ECサイト。管理画面あり。Vue.js 製 SPA で REST API を使用」
-
-[ステップ 2] 禁止事項
-  例: 「ログアウト・パスワード変更・購入フォームへの実送信は禁止」
-
-[ステップ 3] 必須チェック
-  例: 「SQLインジェクションとXSSは必ず確認。認証系も優先して」
-
-         ↓ LLM が JSON 設定を生成
-
-[設定レビュー] リッチテーブルで表示 → 承認 / 編集 / キャンセル
-
-         ↓ 承認すると args に自動適用してスキャン開始
-```
-
----
-
-## カスタムペイロード
-
-`config/default_payloads.yaml` をコピーして編集し、`--payloads` で指定します。
-
-```yaml
-xss:
-  - "<script>alert('custom')</script>"
-
-path_traversal:
-  - "../../../../etc/shadow"
-```
-
----
-
-## ペイロード継続学習 (A-3 / ⑩)
-
-スキャンを重ねるごとに成功ペイロードが `config/payload_learning.json` に記録され、
-次回スキャン時に成功率の高いペイロードが優先使用されます。
-
-バージョン 2 からはドメイン別学習をサポート。同一ターゲットへの再スキャン時は
-`domains[hostname]` の成功率を 2 倍の重みで優先します。
-
-```json
-{
-  "global": {
-    "xss": {
-      "<img src=x onerror=alert(1)>": {"hits": 4, "tries": 5},
-      "<script>alert(1)</script>":    {"hits": 1, "tries": 5}
-    }
-  },
-  "domains": {
-    "example.com": {
-      "xss": {
-        "<svg onload=alert(1)>": {"hits": 3, "tries": 3}
-      }
-    }
-  }
-}
-```
-
----
-
-## アーキテクチャ
-
-```
-main.py
-    ├── run_scan()    → ScanEngine
-    ├── run_triage()  → TriageEngine  ← NEW
-    └── run_setup()   → 自然言語設定アシスタント
-
-wscan/
-    ├── engine.py              # スキャン全体の制御・フェーズ管理
-    ├── triage.py              # トリアージモード (ペイロードなし高速評価) ← NEW
-    ├── browser.py             # Playwright 操作・ログイン自動化
-    ├── attack_planner.py      # AI 攻撃計画 (AttackPlanner)
-    ├── payload_gen.py         # LLM / デフォルトペイロード生成
-    ├── payload_learning.py    # ペイロード継続学習 (A-3)
-    ├── waf_detector.py        # WAF 検出・バイパス提案 (A-2)
-    ├── auto_config.py         # 自動設定ウィザード
-    ├── monitor.py             # WebSocket リアルタイムダッシュボード
-    ├── report.py              # HTML レポート生成 (CVSS バッジ・フィルター)
-    └── scanners/
-            ├── base.py                    # Finding・CVSS テーブル・基底クラス
-            ├── xss.py                     # IPA 1.5 反射型 XSS
-            ├── dom_xss.py                 # IPA 1.5 DOM-based XSS
-            ├── stored_xss.py              # IPA 1.5 格納型 XSS ← NEW
-            ├── sqli.py                    # IPA 1.1 SQLi
-            ├── os_injection.py            # IPA 1.2 OSコマンドインジェクション
-            ├── path_traversal.py          # IPA 1.3 ディレクトリトラバーサル
-            ├── session.py                 # IPA 1.4 セッション管理
-            ├── csrf.py                    # IPA 1.6 CSRF
-            ├── header_injection.py        # IPA 1.7 HTTPヘッダインジェクション
-            ├── mail_header.py             # IPA 1.8 メールヘッダインジェクション
-            ├── clickjacking.py            # IPA 1.9 クリックジャッキング
-            ├── open_redirect.py           # IPA 1.11 オープンリダイレクト
-            ├── ssti.py                    # SSTI (オプション)
-            ├── privesc.py                 # 認証・権限昇格
-            ├── cors.py                    # CORS 設定ミス ← NEW
-            ├── info_disclosure.py         # 機密ファイル露出・情報漏洩 ← NEW
-            ├── host_header.py             # Hostヘッダインジェクション ← NEW
-            ├── security_headers.py        # セキュリティヘッダ監査 ← NEW
-            ├── file_upload.py             # ファイルアップロード脆弱性 ← NEW
-            ├── nosql_injection.py         # NoSQLインジェクション ← NEW
-            ├── deserialization.py         # 安全でないデシリアライズ ← NEW
-            ├── request_smuggling.py       # HTTPリクエストスマグリング ← NEW
-            ├── graphql.py                 # GraphQL イントロスペクション・インジェクション ← NEW
-            └── jwt_scanner.py             # JWT 脆弱性 (alg:none/弱シークレット/kid injection) ← NEW
-```
-
----
-
-## 検知ロジック詳細
-
-### XSS — 反射型 (IPA 1.5)
-1. **ダイアログ確認 (Critical)**: `alert()` ダイアログ発火を Playwright で確認
-2. **反射確認 (High)**: レスポンス HTML 内の未エンコードマーカーを検出
-
-### XSS — DOM-based (IPA 1.5)
-- ページロード時に `innerHTML`・`outerHTML`・`document.write`・`eval`・`setTimeout`・`location.href`・`insertAdjacentHTML` をフック
-- ペイロード固有マーカーが DOM シンクを経由した場合のみ Critical で報告
-
-### SQLi (IPA 1.1)
-1. **エラーベース (Critical)**: DB エラーメッセージのパターン照合
-2. **ブールベース (High)**: 真条件 vs 偽条件のレスポンス長差異で判定
-3. **時間ベース (High)**: `SLEEP(3)` 投入後 ≥2.5 秒の遅延
-
-### アクセス制御・権限昇格 (`privesc`)
-1. **未認証アクセス (High/Medium)**: Cookie なしで管理系パスが HTTP 200 を返す場合
-2. **垂直権限昇格 (Critical)**: 低権限セッションで高権限リソースにアクセス可能
-3. **水平権限昇格 / IDOR (High)**: URL パスの数値 ID を ±1/±5 変化させ他ユーザーのリソースが取得できるか確認
-4. **パラメータ IDOR (High)**: クエリパラメータ/POST ボディ内の `user_id`・`order_id`・`id` 等を ±1 変化、UUID 末尾変更でテスト
-5. **複数アカウント間 IDOR (High)**: アカウント A のリソース URL にアカウント B のセッションでアクセスし、コンテンツ差異を検出
-6. **状態変更操作の認可欠落 (High)**: 管理系の非 GET フォームを低権限セッションで送信し、サーバー側認可が無いか確認
-7. **401/403 アクセス制御バイパス (High)**: 保護パスが 401/403 を返す場合に、以下のバイパス手法を試行
-   - **パス正規化**: `/admin/`・`/admin/.`・`/admin//`・`/admin/..;/`・`/admin%20`・大文字化・`.json`/`.html` 付与 など
-   - **信頼 IP ヘッダ偽装**: `X-Forwarded-For: 127.0.0.1`・`X-Custom-IP-Authorization`・`X-Originating-IP`・`X-Real-IP` など
-   - **URL リライトヘッダ**: ルートへのリクエストに `X-Original-URL`/`X-Rewrite-URL` で保護パスを指定
-   - **HTTP メソッド改ざん**: GET が拒否される場合に `POST`/`PUT`/`PATCH`/`OPTIONS` で到達できるか確認
-
-### GraphQL セキュリティ検査 (`graphql`)
-1. **イントロスペクション公開 (Medium)**: `__schema` クエリで完全なスキーマが取得できるか確認
-2. **バッチクエリ (Low)**: 配列形式のバッチリクエストが受け入れられてレート制限を回避できるか確認
-3. **フィールドインジェクション (Critical)**: 文字列型引数に XSS・SQLi・SSTI ペイロードを注入してエコーバックを検出
-4. **スキーマ内機密情報 (Low)**: フィールド・型名に `password`・`token`・`secret`・`credit_card` 等を含む場合に報告
-
-エンドポイントは `/graphql`・`/api/graphql`・`/v1/graphql` 等 8 種のパスを自動探索し、
-`{ __typename }` クエリで GraphQL サーバーを確認してから各テストを実施します。
-
-### JWT 脆弱性検査 (`jwt`)
-1. **alg:none 攻撃 (Critical)**: アルゴリズムを `none` に書き換えた署名なし JWT を送信し、受け入れられるか確認
-2. **弱シークレット (Critical)**: HMAC 署名を 60+ 種の一般的なパスワードでブルートフォース
-3. **kid インジェクション (Critical)**: `kid` ヘッダに SQLi (`' OR 1=1--`) / パストラバーサル (`../../dev/null`) を設定
-4. **ペイロード改ざん (Critical)**: `role: "user"` → `"admin"` / `sub` 変更後に再エンコードして送信
-5. **期限なし JWT (Medium)**: `exp` クレームが存在しない JWT を検出
-6. **PII 漏洩 (Medium)**: ペイロード内に `email`・`password`・`ssn`・`credit_card` 等を含む場合に報告
-
-JWT は Cookie・Authorization ヘッダ・URL パラメータ・レスポンスボディから自動検出します。
-
-### WAF 検出 (A-2)
-- スキャン前プローブで Cloudflare・AWS WAF・ModSecurity・Akamai・Imperva 等を判定
-- LLM が WAF 種別に応じた二重エンコード・Unicode 正規化・コメント挿入等のバイパス戦略を提案
-
-### 深刻度・CVSS スコア早見表（全スキャナ）
-
-| チェック名 | CVSS スコア | 深刻度 |
-|-----------|------------|--------|
-| `sqli`, `os`, `ssti`, `deserialization`, `file_upload`, `graphql_injection` | 10.0 | Critical |
-| `jwt_alg_none`, `jwt_weak_secret`, `jwt_payload_tamper`, `stored_xss` | 9.6 | Critical |
-| `jwt_kid_injection` | 10.0 | Critical |
-| `nosql`, `privesc_unauth` | 9.1 | High |
-| `request_smuggling` | 8.7 | High |
-| `xss`, `dom_xss`, `privesc_vertical`, `privesc_cross_acct`, `privesc_action`, `privesc_bypass` | 8.1–8.8 | High |
-| `path_traversal`, `info_disclosure`, `cors` | 7.4–7.5 | High |
-| `session`, `privesc_horizontal`, `privesc_param_idor` | 6.5–7.4 | High/Medium |
-| `csrf`, `open_redirect`, `host_header` | 5.4–6.5 | Medium |
-| `header_injection`, `mail_header`, `graphql_introspection`, `graphql_batch`, `graphql_sensitive`, `jwt_no_expiry`, `jwt_sensitive_data` | 5.3 | Medium |
-| `clickjacking`, `security_headers` | 3.1–4.3 | Low/Medium |
-
----
-
-## 注意事項 / 免責事項
-
-> **本ツールは、自分が管理するシステムまたは明示的なテスト許可を得たシステムに対してのみ使用してください。**
-> 許可なく第三者のシステムをスキャンすることは、不正アクセス禁止法などの法律に違反する可能性があります。
-> 開発者は本ツールの不正使用に対して一切の責任を負いません。
-
----
-
-## ライセンス
-
-MIT License
+本ソフトウェアは MIT License の下で提供されます。

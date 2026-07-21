@@ -162,6 +162,32 @@ class DetectionEvidenceTests(unittest.TestCase):
         self.assertEqual(data["evidence_details"]["context"], "script")
         self.assertEqual(data["reproduction_steps"], ["Open page", "Submit payload"])
 
+    def test_finding_source_defaults_and_round_trips_backwards_compatibly(self):
+        legacy = Finding.from_dict({
+            "check_type": "xss",
+            "severity": "high",
+            "url": "http://example.test/",
+            "field_name": "q",
+            "payload": "<svg/onload=alert(1)>",
+            "evidence": "legacy finding",
+        })
+        self.assertEqual(legacy.source, "scanner")
+        self.assertFalse(legacy.agent_verified)
+
+        agent = Finding(
+            check_type="xss",
+            severity="high",
+            url="http://example.test/",
+            field_name="q",
+            payload="<svg/onload=alert(1)>",
+            evidence="agent finding",
+            source="agent",
+            agent_verified=True,
+        )
+        restored = Finding.from_dict(agent.to_dict())
+        self.assertEqual(restored.source, "agent")
+        self.assertTrue(restored.agent_verified)
+
     def test_dedup_key_preserves_distinct_evidence_types_on_same_input(self):
         finding = Finding(
             check_type="sqli",

@@ -226,7 +226,7 @@ async def generate_fix(finding: "Finding", payload_gen: "PayloadGenerator") -> t
     """
     Finding の脆弱性に対する修正ガイダンスを生成する。
 
-    LLM が利用可能な場合: Claude / OpenAI / Ollama で動的生成。
+    LLM が利用可能な場合: Claude / OpenAI / Ollama / Gemini で動的生成。
     利用不可の場合: 静的テンプレートを返す。
 
     Parameters
@@ -279,69 +279,9 @@ async def generate_fix(finding: "Finding", payload_gen: "PayloadGenerator") -> t
 
 async def _call_llm_raw(payload_gen: "PayloadGenerator", prompt: str) -> str | None:
     """LLM を呼び出して生テキストを返す (JSON パース不要)。"""
-    provider = payload_gen.provider
+    from . import llm_client
 
-    if provider == "claude":
-        client = payload_gen._get_anthropic_client()
-        if not client:
-            return None
-        try:
-            import asyncio
-            loop = asyncio.get_event_loop()
-            response = await loop.run_in_executor(
-                None,
-                lambda: client.messages.create(
-                    model=payload_gen.claude_model,
-                    max_tokens=400,
-                    messages=[{"role": "user", "content": prompt}],
-                ),
-            )
-            return response.content[0].text if response.content else None
-        except Exception:
-            return None
-
-    if provider == "openai":
-        import httpx
-        from . import llm_endpoint
-        api_key = getattr(payload_gen, "openai_api_key", None)
-        if not api_key:
-            return None
-        try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                resp = await client.post(
-                    llm_endpoint.chat_completions_url(getattr(payload_gen, "openai_base_url", "")),
-                    headers={"Authorization": f"Bearer {api_key}"},
-                    json={
-                        "model": payload_gen.openai_model,
-                        "messages": [{"role": "user", "content": prompt}],
-                        "max_tokens": 400,
-                        "temperature": 0.3,
-                    },
-                )
-                if resp.status_code == 200:
-                    return resp.json()["choices"][0]["message"]["content"]
-        except Exception:
-            return None
-
-    if provider == "ollama":
-        import httpx
-        try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                resp = await client.post(
-                    f"{payload_gen.ollama_url}/api/generate",
-                    json={
-                        "model": payload_gen.ollama_model,
-                        "prompt": prompt,
-                        "stream": False,
-                        "options": {"temperature": 0.3, "num_predict": 400},
-                    },
-                )
-                if resp.status_code == 200:
-                    return resp.json().get("response", "")
-        except Exception:
-            return None
-
-    return None
+    return await llm_client.complete_text(payload_gen, prompt, max_tokens=400)
 
 
 def _get_static(check_type: str) -> str:

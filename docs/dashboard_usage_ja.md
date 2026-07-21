@@ -1,220 +1,321 @@
 # WScan ダッシュボード利用ガイド
 
-このガイドでは、WScan をコマンドラインから直接実行するのではなく、先にダッシュボードを起動して、ブラウザ上の入力フォームから検査を開始する手順を説明します。
+このガイドでは、WScan の Server Portal から設定画面を開き、通常・Agent・Hybrid の各モードで検査を開始し、実行状況と結果を確認する手順を説明します。
 
-スクリーンショットは、ローカルの疑似脆弱アプリ（`tests/fixtures/realistic_site.py`）に対して実際に疑似検査を実行したものです。検査例では、セキュリティヘッダ欠如・CORS 設定ミス・反射型 XSS・SQLi などが検出されています。
+スクリーンショットはローカルの疑似脆弱アプリに対する実行例です。実際の画面では対象や検出内容が異なります。
 
-> 注意: WScan は脆弱性検査ツールです。自分が管理している環境、または検査許可を得た環境だけを対象にしてください。
+> WScan は脆弱性検査ツールです。自分が管理している環境、または検査許可を得た環境だけを対象にしてください。最初はステージング環境と小さいスコープで負荷・副作用を確認してください。
 
-実検査前のスコープ設計、認証、負荷調整、再検査の流れは [operation_guide_ja.md](operation_guide_ja.md) を参照してください。アクセス失敗や検出漏れの切り分けは [troubleshooting_ja.md](troubleshooting_ja.md) にまとめています。
+## 1. 3モードを選ぶ
 
-## 1. 事前準備
+WScan は、モードごとに優先する品質が異なります。
 
-リポジトリを取得し、Python 依存関係と Playwright ブラウザをインストールします。
+| モード | 画面の入口 | 優先するもの | 結果の読み方 |
+| --- | --- | --- | --- |
+| 通常 | 設定画面下部の「スキャン開始」 | 確実性 | 決定論スキャナの Finding。`verified`、`confidence`、Evidence を確認 |
+| Agent | 「Agent Browser」タブ | 独自性 | LLM の独自解釈。HTML レポートで `🤖 Agent発見` バッジを確認 |
+| Hybrid | 「ハイブリッド」タブ | 確実性と独自性の中間 | 通常 Finding と Agent Finding を出自ラベル付きで併記 |
+
+通常モードは定期診断や再検査、Agent は複雑な導線の探索、Hybrid は SPA や認証後画面を広く探しながら決定論スキャンも実施したい場合に向いています。
+
+## 2. 事前準備
+
+本体と Playwright Chromium をインストールします。
 
 ```bash
 git clone https://github.com/oudontabetai1-lab/AutoXSScheckTool.git
 cd AutoXSScheckTool
-
-pip install -r requirements.txt
+python3 -m pip install -r requirements.txt
 playwright install chromium
+```
+
+Agent または Hybrid を使う場合は追加依存を入れます。
+
+```bash
+python3 -m pip install -r requirements-agent.txt
+```
+
+利用する LLM に合わせて API キーまたは Ollama を準備します。ダッシュボードの Agent/Hybrid タブで選択できる provider は Claude、OpenAI、Ollama です。
+
+```bash
+# Claude の例
+export ANTHROPIC_API_KEY="<api-key>"
 ```
 
 Python 3.11 以上を推奨します。
 
-## 2. ダッシュボードを起動する
+## 3. ダッシュボードを起動する
 
-まず、検査対象 URL を指定せずにダッシュボードだけを起動します。
+ローカル限定で起動する例:
 
 ```bash
-python3 main.py serve --port 8765
+python3 main.py serve --host 127.0.0.1 --port 8765
 ```
 
-起動後、ブラウザで次の URL を開きます。
+ブラウザで次を開きます。
 
 ```text
-http://localhost:8765
+http://localhost:8765/
 ```
 
-ポート `8765` が使用中の場合は、別のポートを指定してください。
+`/` はスキャン履歴、現在の実行、定期スキャンを扱う Server Portal です。「新規スキャン」を押すと `/monitor` の設定画面へ移動します。直接 `http://localhost:8765/monitor` を開いても構いません。
+
+イントラネットから利用する場合は、認証トークンを設定してください。
 
 ```bash
-python3 main.py serve --port 8766
+export WSCAN_AUTH_TOKEN="<long-random-token>"
+python3 main.py serve --host 0.0.0.0 --port 8765
 ```
 
-![ダッシュボード初期画面](images/dashboard-start.png)
+ポートが使用中なら `--port 8766` のように変更します。
 
-この画面が表示されたら、ダッシュボードから検査設定を入力できます。
+## 4. 初期設定画面を確認する
 
-## 3. 検査対象を入力する
+![ダッシュボード初期設定画面](images/dashboard-start.png)
 
-「Target URL」に検査対象の URL を入力します。
+画面上部には Target URL、スキャンプロファイル、設定タブがあります。通常スキャンを始める前に、少なくとも次を確認します。
 
-今回の疑似検査では、ローカルの疑似脆弱アプリを対象にしています（例: `http://127.0.0.1:9100/`）。
+1. Target URL が許可済みの検査対象である。
+2. 削除、決済、送信、ログアウトなど副作用のある URL を除外した。
+3. 認証や外部 IdP の範囲を「攻撃対象」と「アクセスのみ許可」に分けた。
+4. リクエスト間隔と並列数が対象の許容負荷に収まる。
+
+## 5. 通常スキャンの設定を入力する
+
+Target URL を入力し、目的に近いプロファイルを選びます。
+
+| プロファイル | 用途 |
+| --- | --- |
+| 高速トリアージ | 深さ1・少数ペイロードで XSS/SQLi/OS を短時間確認 |
+| 標準Web診断 | IPA 主要カテゴリを中心に巡回・検査 |
+| 認証あり診断 | ログイン後画面、権限昇格、IDOR を重視 |
+| 精度重視診断 | 深い巡回、DOM/Stored XSS、JWT/GraphQL、証跡を重視 |
+| CTF/演習 | SSTI、OS、SSRF、Flag 探索を重視 |
 
 ![検査設定の入力例](images/dashboard-configured.png)
 
-基本的な確認では、まず次の項目だけ設定すれば十分です。
+### 基本設定
 
-| 項目 | 説明 | 初回の目安 |
+| 項目 | 内容 | 初回の目安 |
 | --- | --- | --- |
-| Target URL | 検査対象のトップページ、ログイン後ページ、検索ページなど | 必須 |
-| Scan Depth | クロールする深さ | `1` から開始 |
-| Timeout | 1 ページやリクエストの待機時間 | 既定値で開始 |
-| Max Forms | 1 ページ内で検査するフォーム数 | 既定値で開始 |
-| Request Delay | リクエスト間隔 | 負荷を抑えるなら長め |
-| Max Payloads | 1 フィールドに投入する最大ペイロード数 | まず少なめ |
-| Navigation Retries | 画面遷移失敗時の再試行回数 | `1` 以上推奨 |
-| クライアント証明書 | mTLS が必要な対象へ提示する証明書 | 必要な場合のみ |
-| CA証明書バンドル | 社内CA/自己署名証明書を検証するCA | TLS検証時 |
+| クロール深度 | 同一スコープ内を辿る深さ | `1` から開始 |
+| タイムアウト | リクエスト/ページ待機秒 | 既定 `30` |
+| 最大フォーム数/ページ | 1ページで検査するフォーム数 | 既定 `50`。対象に応じて縮小 |
+| 並列ワーカー数 | 同時に攻撃するブラウザ数 | `1`。確認後に `2〜4` |
+| ペイロード上限/フィールド | フィールド×チェックの標準投入上限 | `0` は無制限。初回は小さくしてもよい |
+| リクエスト間隔 | リクエスト間の待機秒 | 既定 `0.5`。負荷を下げるなら増やす |
+| ページ遷移リトライ | 一時的な遷移失敗の再試行回数 | 既定 `2` |
+| Proxy | Burp Suite / mitmproxy 等 | 必要な場合のみ |
+| TLS | mTLS、PFX、CA、検証 | 必要な場合のみ |
 
-最初は小さい範囲で試し、検査対象に問題がないことを確認してから深さやペイロード数を増やしてください。
-
-## 4. スキャンプロファイルを選ぶ
-
-画面上部のプリセットから、目的に近いプロファイルを選べます。
-
-| プロファイル | 向いている用途 |
-| --- | --- |
-| 高速トリアージ | まず短時間でリスクを把握したい場合 |
-| 標準Web診断 | 一般的な Web アプリ検査 |
-| 認証あり診断 | ログインが必要な画面を検査する場合 |
-| 精度重視診断 | SPA クロールや攻撃計画確認も含めて丁寧に見る場合 |
-| CTF | CTF / 演習環境で SSTI、OS コマンド、SSRF、Flag 探索を重視する場合 |
-
-通常の初回確認では「高速トリアージ」または「標準Web診断」から始めると扱いやすいです。
-
-## 5. 必要に応じて詳細設定を行う
-
-ダッシュボードには複数の設定タブがあります。
+### 設定タブ
 
 | タブ | 主な用途 |
 | --- | --- |
-| 基本設定 | 深さ、タイムアウト、ペイロード数、プロキシ、TLS 証明書などを設定 |
-| 検査項目 | XSS、SQLi、CSRF、CORS など検査種別を選択 |
-| 認証・Cookie | ログイン URL、ユーザー名、パスワード、Cookie、MFA を設定 |
-| LLM設定 | LLM プロバイダー（claude/openai/gemini/ollama/none）とモデルを選択 |
-| 機能フラグ | AI 分析・WAF 検出・ペイロード学習・SPA クロール等の ON/OFF |
-| スコープ・除外 | 検査対象外 URL、許可 URL、除外パラメータを設定 |
-| 手動巡回 | 事前に操作したページや URL を検査対象に追加（可視/遠隔ブラウザ・URL リスト） |
-| 攻撃フロー | ログイン、カート投入、確認画面遷移など複数手順を定義 |
-| Agent Browser | LLM がブラウザを自律操作する Agent モードの設定 |
-| ハイブリッド | 通常スキャンと Agent を組み合わせて実行 |
+| 基本設定 | Depth、Timeout、Forms、並列、負荷、Proxy、TLS、Headless |
+| 検査項目 | XSS、SQLi、CSRF、CORS、SSRF、JWT、CMS などを選択 |
+| 認証・Cookie | Cookie、自動ログイン、低権限 Cookie、MFA、複数アカウント |
+| LLM設定 | provider、モデル、OpenAI互換 URL、役割別モデル |
+| 機能フラグ | Planner、AI 分析、WAF、学習、sitemap、SPA、巡回レビュー |
+| スコープ・除外 | 攻撃対象、アクセスのみ、除外 URL、除外フィールド |
+| 手動巡回 | 可視/遠隔ブラウザ、URL リストからシードを作成 |
+| 攻撃フロー | ログイン、入力、クリック、待機など複数手順を定義 |
+| Agent Browser | LLM 自律操作モード |
+| ハイブリッド | Agent 偵察から通常スキャンへ引き渡すモード |
 
-認証が必要なサイトでは、「認証・Cookie」タブでログイン情報または Cookie を設定します。ログアウト、削除、送信、決済など副作用の大きい URL は「スコープ」タブで除外してください。
+### 認証とスコープ
 
-ログイン後にワンタイムコード（2段階認証）を要求するサイトでは、同タブの「MFA (2段階認証) 自動入力」で MFA タイプ（TOTP / メール）を選ぶと、パスワード送信後のコード入力を自動化できます。コード取得は外部 MCP サーバ（mcp-totp-authenticator / mcp-email-server）に委譲し、シークレットやメール認証情報は環境変数（`TOTP_SECRET_*` / `MCP_EMAIL_SERVER_*` / `WSCAN_MFA_*`）で渡します。詳細は README の「MFA（2段階認証）付きログインの自動化」を参照してください。
+認証が必要なら「認証・Cookie」で Cookie、ログイン URL、入力欄名、ユーザー名、パスワード、成功判定文字列を設定します。ログイン成否は URL 変化だけでなく、ログインフォームの残存、失敗メッセージ、MFA 画面の残留も使って判定します。
 
-Burp Suite や ZAP で通信を見たい場合は、基本設定の Proxy に次のようなプロキシを指定します。
+- 「攻撃対象」: 巡回もペイロード投入も許可する範囲。
+- 「アクセスのみ許可」: 外部 IdP やログイン補助など、到達は必要だが攻撃しない範囲。
+- 「除外」: ログアウト、削除、決済、通知送信などを避ける範囲。
+
+MFA は TOTP またはメールを選び、外部 MCP からコードを取得します。シークレットやメールパスワードは画面や YAML へ恒久保存せず、環境変数を使ってください。詳しくは [README の MFA](../README.md#13-認証mfaスコープtls) を参照してください。
+
+### Proxy と TLS
+
+Burp Suite 等で通信を見る場合:
 
 ```text
 http://127.0.0.1:8080
 ```
 
-mTLS が必要なサイトでは、基本設定にある「クライアント証明書 (PEM)」「クライアント秘密鍵 (PEM)」を指定します。PFX/PKCS#12 形式しかない場合は「クライアント証明書 (PFX/PKCS#12)」とパスフレーズを指定します。
+mTLS では PEM のクライアント証明書/秘密鍵、または Playwright 用 PFX/PKCS#12 を指定します。CA バンドルと「TLS証明書を検証」は httpx の直接リクエストに使われます。Playwright 側は HTTPS エラーを許容しながらクライアント証明書を提示します。
 
-社内CAや自己署名証明書を検証したい場合は「CA証明書バンドル」を指定し、「TLS証明書を検証」をオンにします。この設定は httpx による直接リクエストの検証に使われます。Playwright ブラウザ側は任意CAを直接指定できないため、従来通り HTTPS エラーを許容しながらクライアント証明書を提示します。
+## 6. Agent / Hybrid タブを設定する
 
-## 6. Scan Start を押す
+![Agent Browser とハイブリッドの設定タブ](images/dashboard-hybrid.png)
 
-設定を入力したら、画面下部の `Scan Start` を押します。
+### Agent Browser
 
-攻撃計画の確認が有効な場合は、すぐに攻撃は始まらず、検査対象フィールドと実行予定チェックを確認する画面が表示されます。
+「Agent Browser」タブでは次を設定します。
 
-![攻撃プラン確認画面](images/dashboard-running.png)
+- LLM provider: Claude / OpenAI / Ollama
+- モデル名: 空なら provider 既定
+- 最大ステップ数: 既定 `100`
+- 検査項目: Agent 対応種別から選択
+- ログイン URL、ユーザー名、パスワード
 
-この画面では、フィールドごとの検査内容やペイロードを確認できます。不要な検査を外したり、対象外にしたいフィールドを除外してから、`攻撃開始` を押します。
+「Agent Browser スキャン開始」を押すと、LLM がブラウザを観察し、ページ遷移、入力、ペイロード選択、結果判断を自律的に行います。Agent の独自性を残す設計のため、Finding は未確証でもレポートへ残ります。
 
-## 7. 実行中の状態を確認する
+### Hybrid
 
-検査中は、ダッシュボード上で進捗、現在のフェーズ、イベントログ、リクエスト、レスポンス、スクリーンショット、検出結果を確認できます。
+「ハイブリッド」タブでは、偵察用 provider、モデル、最大ステップ数（既定 `30`）、Ollama URL を設定します。認証情報とチェック種別は「認証・Cookie」「検査項目」の設定を引き継ぎます。
 
-主なフェーズは次の流れです。
+Hybrid の処理:
+
+```text
+Phase 1: Agent が探索
+  ├─ 発見した URL
+  └─ Agent Finding（脆弱性仮説）
+              ↓
+Phase 2: 発見 URL をシードに通常スキャン
+              ↓
+最終レポート: 決定論 Finding + Agent Finding をラベル付きで併記
+```
+
+Agent Finding は `🤖 Agent発見（LLM独自解釈・未確証）` として表示されます。決定論的な再現確認が付いた Agent Finding は、さらに `✅ 決定論的にも再現確認済み` と表示されます。Hybrid は Agent を偵察だけに使うモードではありません。
+
+## 7. スキャンを開始する
+
+### 通常モード
+
+画面下部の「スキャン開始」を押します。Planner の対話確認を有効にしている場合は、巡回後に検査対象フィールド、チェック、カスタムペイロードを確認し、「攻撃開始」を押します。
+
+巡回レビューを有効にしている場合は、画面遷移図を確認し、そのまま検査、再巡回、URL追加、手動巡回追加、シナリオ作成を選べます。
+
+### Agent / Hybrid
+
+各タブ内の専用開始ボタンを押します。通常設定画面下部の「スキャン開始」は通常モードの入口なので、モードを間違えないよう注意してください。
+
+## 8. 実行中の状態を確認する
+
+![スキャン実行中](images/dashboard-running.png)
+
+通常スキャンの主なフェーズは次のとおりです。
 
 ```text
 Crawl -> Plan -> Attack -> Report
 ```
 
-`Attack` フェーズでは、フォームや URL パラメータに対して選択した検査が実行されます。アクセス失敗、タイムアウト、認証切れなどが起きた場合は、イベントログに表示されます。
+画面では次を確認できます。
 
-## 8. 検出結果を見る
+| 場所 | 内容 |
+| --- | --- |
+| ヘッダー | フェーズ、進捗率、残り推定、完了予定 |
+| 巡回マップ | 発見ページ、巡回中/完了/検出状態 |
+| ブラウザ | 実行中のスクリーンショット |
+| 進捗 | チェック種別ごとの進行状況 |
+| Current Test | URL、Field、Check、Payload |
+| Findings | 重要度、種別、URL、Evidence |
+| Request / Response | 直近の通信 |
+| Event Log | 認証、再試行、LLM、エラー、フェーズ変更 |
 
-検査が進むと、右側の Findings や Event Log に検出結果が表示されます。
+上部の介入バーから、一時停止、再開、現在フィールドのスキップ、現在ページのスキップ、中断、手動ペイロード実行を行えます。中断すると、その時点までの Finding で部分レポートを保存します。
+
+Hybrid では Event Log に Phase 1 の URL 数と Agent Finding 数、Phase 2 の開始が表示されます。Phase 1 が失敗した場合は警告を出し、URL シードと Agent Finding なしで通常スキャンを続行します。
+
+## 9. 結果と Finding を読む
 
 ![検出結果の表示](images/dashboard-results.png)
 
-疑似検査では、ページ単位の検査（セキュリティヘッダ欠如・CORS 設定ミス等）や、入力フィールドへのペイロード投入による反射型 XSS・SQLi などが検出され、Findings パネルに重要度順に一覧表示されます。XSS では JavaScript の `alert()` 発火を確認できたものを `XSS CONFIRMED` として扱います。
+Finding では、重要度だけでなく確証と出自を確認します。
 
-検出結果では、少なくとも次を確認してください。
-
-| 確認ポイント | 見る内容 |
+| 項目 | 確認内容 |
 | --- | --- |
-| Severity | 重要度。Critical / High は優先確認 |
-| Type | XSS、SQLi、CSRF などの脆弱性種別 |
-| URL | どのページで検出されたか |
-| Field | どの入力欄、パラメータ、ヘッダで検出されたか |
-| Evidence | alert 発火、レスポンス差分、ヘッダ変化などの証拠 |
-| Request / Response | 実際に送信したリクエストと応答 |
+| Severity | Critical / High / Medium / Low / Info。対応優先度の目安 |
+| Type | XSS、SQLi、CSRF などの検査種別 |
+| URL / Field | どのページ、パラメータ、入力欄、ヘッダか |
+| Evidence | alert 発火、レスポンス差分、エラー、ヘッダ等 |
+| Request / Response | 実際の投入と応答 |
+| `verified` | 再現確認できたか |
+| `confidence` | `confirmed` / `likely` / `tentative` |
+| `evidence_type` | 判定に使った構造化シグナル |
+| `source` | `scanner`（通常）/ `agent`（Agent） |
+| `agent_verified` | Agent Finding を決定論的にも再現したか |
 
-ダッシュボード上だけで判断せず、証拠、再現手順、レポートも合わせて確認してください。
+HTML レポートのバッジ:
 
-## 9. レポートと証跡を確認する
+- `🤖 Agent発見（LLM独自解釈・未確証）`: Agent の仮説。人手で証拠と再現手順を確認する。
+- `✅ 決定論的にも再現確認済み`: Agent Finding に決定論的確認が付いている。
+- バッジなし: 通常の決定論スキャナ由来。
 
-検査が完了すると、`output/<日時>/` 配下に結果が保存されます。
+`severity=critical` でも Agent 未確証なら確証済みとは扱いません。通常 Finding でも `confidence=tentative` や `verified=false` の場合は追加確認が必要です。
 
-代表的な出力は次のとおりです。
+## 10. レポートと証跡を確認する
+
+完了後、ポータルの履歴から HTML、JSON、ダウンロードを開けます。ファイルは `output/<日時>/` に保存されます。
 
 | ファイル | 内容 |
 | --- | --- |
-| `report.html` | ブラウザで確認できる HTML レポート |
-| `evidence.json` | Finding、リクエスト、レスポンスなどの証跡 |
-| `reproduction.json` | 再現に必要な情報 |
-| `reproduce.sh` | 再現用コマンド |
-| `remediation_plan.md` | 修正方針や対応タスク |
-| `report.sarif` | CI/CD やコードスキャン連携向け SARIF |
+| `report.html` | Finding、Evidence、Agent バッジを含む HTML |
+| `report_executive.html` | 管理層向けサマリー |
+| `report_developer.html` | 開発者向け詳細 |
+| `evidence.json` | Finding と証跡 JSON |
+| `reproduction.json`, `reproduce.sh` | 再現情報 |
+| `report.sarif` | CI/CD 用 SARIF。`source` 等を保持 |
+| `remediation_plan.md`, `remediation_tasks.json` | 修正計画とタスク |
+| `http_requests.jsonl`, `payloads.jsonl` | 通信と投入ペイロードの監査ログ |
+| `scan_config.json` | 実行設定。秘匿値は伏字 |
+| `checkpoint.json` | 再開用の完了単位と Finding |
 
-今回の疑似検査では、次のような出力ディレクトリが生成されました。
+HTML レポートと Evidence を確認し、必要なら再現物で人手検証してから修正タスク化します。
 
-```text
-output/20260519_030611/
+## 11. 長時間スキャンと再開
+
+通常スキャンはチェックポイントを既定で保存します。ブラウザ停止、ネットワーク断、時間帯待機、中断後は CLI で再開できます。
+
+```bash
+python3 main.py scan https://example.com \
+  --resume output/20260721_010203
 ```
 
-HTML レポートは、検出結果を第三者に共有する場合や、修正後の再検査で差分を見る場合に使います。
+通常攻撃の例外終了単位と、adaptive LLM の一時失敗は未完了として残ります。adaptive はチェック種別単位で完了を記録するため、成功済みチェックを繰り返さず、失敗分だけを回収します。provider 自体が恒久的に不達の場合は決定論 fallback で完了し、resume の無限再試行を避けます。
 
-## 10. よくあるつまずき
+ダッシュボードから開始したスキャンの `checkpoint.json` も同じ出力ディレクトリに保存されます。再開は現時点では CLI の `--resume` を使用します。
+
+## 12. よくあるつまずき
 
 ### 対象にアクセスできない
 
-Target URL がブラウザから開けるか確認してください。社内環境、VPN、認証、IP 制限、自己署名証明書、プロキシ設定が原因になることがあります。
+ブラウザから Target URL を開けるか、VPN、DNS、IP 制限、Proxy、mTLS、CA を確認します。Event Log と `http_requests.jsonl` も確認してください。
 
 ### ログイン後の画面を検査できない
 
-「認証・Cookie」タブで Cookie を直接渡すか、ログイン URL、ユーザー名、パスワードを設定します。セッションが短時間で切れるサイトでは、Navigation Retries を増やし、ログに `Session expired` が出ていないか確認してください。
+Cookie、ログイン URL、入力欄名、成功判定文字列、MFA を確認します。セッションが短い場合は Event Log の `Session expired` と再ログイン結果を確認し、認証済みページに必ず出る文字列を CLI の `--logged-in-marker` で補強できます。
 
-### SPA の画面が十分にクロールされない
+### SPA のページが足りない
 
-「精度重視診断」または `SPA Crawl` を有効にします。クリック操作が必要な画面は、手動クロールや HAR インポートで対象 URL を補うと検査しやすくなります。
+「精度重視診断」または SPA Crawl を有効にし、手動巡回、遠隔ブラウザ、URL リスト、HAR、OpenAPI/Postman でシードを補います。
 
-### 検出が少ない、または見逃しが疑われる
+### 検出が少ない
 
-Max Payloads、Scan Depth、チェック種別、Attack Flow を増やして再検査します。WAF やレート制限がある環境では Request Delay を長くし、プロキシで通信内容を確認してください。
+チェック種別、Depth、Max Forms、ペイロード上限、除外、認証スコープを確認します。高速プロファイルは網羅性より時間を優先します。
 
-### 対象サイトに負荷をかけたくない
+### Agent / Hybrid が動かない
 
-Scan Depth、Max Forms、Max Payloads、並列度を小さくし、Request Delay を長めに設定します。初回は検証環境やステージング環境で実行してください。
+`requirements-agent.txt`、API キー、モデル名、Ollama URL を確認します。ダッシュボードの Agent/Hybrid provider は Claude、OpenAI、Ollama です。Gemini を使う場合は通常スキャンの LLM 設定を使用してください。
 
-## 11. 最小手順まとめ
+### LLM の一時失敗がある
 
-ダッシュボードから検査する最短手順は次のとおりです。
+`config/wscan.yaml` の `llm.timeout_seconds` と `llm.max_retries` を調整します。通常スキャンは fallback で継続します。adaptive の未完了分は `--resume` で回収します。
+
+### 対象への負荷を下げたい
+
+Depth、Max Forms、ペイロード上限、並列数を下げ、リクエスト間隔を増やします。状態変更プローブは有効にしないでください。
+
+詳細な切り分けは [トラブルシューティング](troubleshooting_ja.md)、実検査前の準備は [運用ガイド](operation_guide_ja.md) を参照してください。
+
+## 13. 最短手順まとめ
 
 ```bash
-python3 main.py serve --port 8765
+python3 main.py serve --host 127.0.0.1 --port 8765
 ```
 
-1. ブラウザで `http://localhost:8765` を開く。
-2. `Target URL` に検査対象を入力する。
-3. プロファイルを選ぶ。
-4. 必要なら認証情報、Cookie、除外 URL を設定する。
-5. `Scan Start` を押す。
-6. 攻撃プランを確認して `攻撃開始` を押す。
-7. Findings と `output/<日時>/report.html` を確認する。
+1. `http://localhost:8765/` を開き、「新規スキャン」を押す。
+2. Target URL とプロファイルを指定する。
+3. 認証、スコープ、検査項目、負荷を確認する。
+4. 通常は画面下部、Agent/Hybrid は各タブ内の開始ボタンを押す。
+5. 実行中は Event Log、Current Test、Request/Response、Findings を確認する。
+6. 完了後は Agent バッジ、Evidence、再現物、HTML/JSON/SARIF を確認する。

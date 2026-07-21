@@ -383,6 +383,8 @@ class ReportGenerator:
         findings_html = ""
         for i, f in enumerate(findings):
             color = SEVERITY_COLORS.get(f.severity, "#718096")
+            is_agent = getattr(f, "source", "scanner") == "agent"
+            source_class = " finding-card-agent" if is_agent else ""
             screenshot_html = ""
             if f.screenshot_b64:
                 screenshot_html = f"""
@@ -397,7 +399,7 @@ class ReportGenerator:
             resp_html = self._format_response(resp, f)
             structured_evidence_html = self._format_structured_evidence(f)
 
-            extra_badges = ""
+            extra_badges = self._agent_badges_html(f)
             if "[ChainDetect]" in f.evidence:
                 extra_badges += '<span class="badge-chain">🔗 Chain</span>'
             if "[MultiParam]" in f.evidence:
@@ -449,8 +451,9 @@ class ReportGenerator:
                     </div>"""
 
             findings_html += f"""
-            <div class="finding-card" id="finding-{i}"
+            <div class="finding-card{source_class}" id="finding-{i}"
                  data-severity="{f.severity}" data-check="{f.check_type}"
+                 data-source="{self._escape(getattr(f, 'source', 'scanner'))}"
                  data-url="{self._escape(f.url)}" data-field="{self._escape(f.field_name)}">
                 <div class="finding-header" style="border-left: 4px solid {color}">
                     <div class="finding-title">
@@ -563,12 +566,16 @@ body {{ font-family: 'Segoe UI', system-ui, -apple-system, sans-serif; backgroun
 .section {{ background: white; border-radius: 12px; padding: 24px; margin-bottom: 24px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }}
 .section h2 {{ font-size: 1.25rem; font-weight: 700; margin-bottom: 20px; padding-bottom: 12px; border-bottom: 2px solid #e2e8f0; }}
 .finding-card {{ border: 1px solid #e2e8f0; border-radius: 10px; margin-bottom: 20px; overflow: hidden; }}
+.finding-card-agent {{ border-color:#b794f4; box-shadow:0 0 0 2px rgba(107,70,193,.12); }}
+.finding-card-agent .finding-header {{ background:#faf5ff; }}
 .finding-header {{ padding: 16px 20px; background: #f8fafc; display: flex; flex-direction: column; gap: 8px; }}
 .finding-title {{ display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }}
 .badge {{ color: white; padding: 3px 10px; border-radius: 20px; font-size: 0.75rem; font-weight: 700; letter-spacing: 0.05em; }}
 .badge-chain {{ background:#744210; color:#fefcbf; padding:2px 8px; border-radius:10px; font-size:0.72rem; font-weight:700; }}
 .badge-multi {{ background:#1a365d; color:#bee3f8; padding:2px 8px; border-radius:10px; font-size:0.72rem; font-weight:700; }}
 .badge-ai {{ background:#44337a; color:#e9d8fd; padding:2px 8px; border-radius:10px; font-size:0.72rem; font-weight:700; }}
+.badge-agent {{ background:#6b46c1; color:#faf5ff; padding:2px 8px; border-radius:10px; font-size:0.72rem; font-weight:700; }}
+.badge-agent-verified {{ background:#276749; color:#f0fff4; padding:2px 8px; border-radius:10px; font-size:0.72rem; font-weight:700; }}
 .badge-unconfirmed {{ background:#d97706; color:#fff; padding:2px 8px; border-radius:10px; font-size:0.72rem; font-weight:700; cursor:help; }}
 .badge-confidence {{ color:#fff; padding:2px 8px; border-radius:10px; font-size:0.72rem; font-weight:700; }}
 .badge-diff-new {{ background:#276749; color:#f0fff4; padding:2px 8px; border-radius:10px; font-size:0.72rem; font-weight:700; }}
@@ -1484,6 +1491,18 @@ document.querySelectorAll('.plan-payloads-toggle').forEach(btn => {{
             .replace("'", "&#39;")
         )
 
+    @staticmethod
+    def _agent_badges_html(finding: Finding) -> str:
+        """Agent由来の解釈と、任意の決定論再現結果を明示する。"""
+        if getattr(finding, "source", "scanner") != "agent":
+            return ""
+        if getattr(finding, "agent_verified", False):
+            return (
+                '<span class="badge-agent">🤖 Agent発見（LLM独自解釈）</span>'
+                '<span class="badge-agent-verified">✅ 決定論的にも再現確認済み</span>'
+            )
+        return '<span class="badge-agent">🤖 Agent発見（LLM独自解釈・未確証）</span>'
+
     # =========================================================================
     # F: Executive Report
     # =========================================================================
@@ -1497,6 +1516,24 @@ document.querySelectorAll('.plan-payloads-toggle').forEach(btn => {{
         counts = {sev: sum(1 for f in findings if f.severity == sev)
                   for sev in ["critical", "high", "medium", "low", "info"]}
         total = len(findings)
+        agent_total = sum(
+            1 for f in findings if getattr(f, "source", "scanner") == "agent"
+        )
+        agent_verified_total = sum(
+            1 for f in findings
+            if getattr(f, "source", "scanner") == "agent"
+            and getattr(f, "agent_verified", False)
+        )
+        agent_summary_html = ""
+        if agent_total:
+            agent_summary_html = f"""
+            <div class="exec-card" style="border-left:4px solid #6b46c1">
+              <div class="exec-count" style="color:#6b46c1">{agent_total}</div>
+              <div class="exec-label">🤖 Agent発見（LLM独自解釈）</div>
+              <div style="font-size:.75rem;color:#718096;margin-top:6px">
+                決定論的にも再現確認済み: {agent_verified_total} / 未確証: {agent_total - agent_verified_total}
+              </div>
+            </div>"""
 
         # リスクスコア (CVSS重み付き平均)
         cvss_scores = [getattr(f, "cvss_score", 0.0) for f in findings]
@@ -1593,6 +1630,7 @@ ul li{{margin:4px 0;font-size:.9rem}} .footer{{text-align:center;color:#a0aec0;f
       <div class="exec-count" style="color:#805ad5">{avg_cvss:.1f}</div>
       <div class="exec-label">Avg CVSS Score</div>
     </div>
+    {agent_summary_html}
     {diff_html}
   </div>
   <div class="section">
@@ -1629,6 +1667,9 @@ ul li{{margin:4px 0;font-size:.9rem}} .footer{{text-align:center;color:#a0aec0;f
         items_html = ""
         for i, f in enumerate(findings):
             color = SEVERITY_COLORS.get(f.severity, "#718096")
+            is_agent = getattr(f, "source", "scanner") == "agent"
+            source_class = " finding-item-agent" if is_agent else ""
+            source_badges = self._agent_badges_html(f)
             ai_fix = getattr(f, "ai_fix", "") or ""
             ai_fix_html = ""
             if ai_fix:
@@ -1652,12 +1693,13 @@ ul li{{margin:4px 0;font-size:.9rem}} .footer{{text-align:center;color:#a0aec0;f
                 status_badge = '<span class="fixed-badge">FIXED</span>'
 
             items_html += f"""
-            <div class="finding-item" style="border-left:4px solid {color}">
+            <div class="finding-item{source_class}" style="border-left:4px solid {color}">
                 <div class="fi-header">
                     <input type="checkbox" class="fi-check" id="fix-{i}">
                     <label for="fix-{i}">
                         <span class="sev-tag" style="background:{color}">{f.severity.upper()}</span>
                         <b>{self._escape(f.check_type.upper())}</b>
+                        {source_badges}
                         {status_badge}
                         — <code>{self._escape(f.field_name)}</code>
                     </label>
@@ -1688,6 +1730,8 @@ body{{font-family:'Segoe UI',system-ui,sans-serif;background:#f7f8fa;color:#1a20
 .hdr .sub{{color:#a0aec0;font-size:.85rem;margin-top:4px}}
 .container{{max-width:960px;margin:0 auto;padding:24px}}
 .finding-item{{background:#fff;border-radius:8px;margin-bottom:12px;box-shadow:0 1px 2px rgba(0,0,0,.08);overflow:hidden}}
+.finding-item-agent{{box-shadow:0 0 0 2px rgba(107,70,193,.16)}}
+.finding-item-agent .fi-header{{background:#faf5ff}}
 .fi-header{{padding:12px 16px;display:flex;align-items:center;gap:10px;flex-wrap:wrap;background:#f8fafc}}
 .fi-header label{{display:flex;align-items:center;gap:8px;cursor:pointer;flex:1}}
 .fi-body{{padding:12px 16px;display:none}}
@@ -1702,6 +1746,8 @@ body{{font-family:'Segoe UI',system-ui,sans-serif;background:#f7f8fa;color:#1a20
 .refs{{font-size:.75rem;color:#4a5568;margin-top:4px}}
 .new-badge{{background:#276749;color:#f0fff4;padding:2px 6px;border-radius:8px;font-size:.7rem;font-weight:700}}
 .fixed-badge{{background:#2b6cb0;color:#ebf8ff;padding:2px 6px;border-radius:8px;font-size:.7rem;font-weight:700}}
+.badge-agent{{background:#6b46c1;color:#faf5ff;padding:2px 8px;border-radius:10px;font-size:.72rem;font-weight:700}}
+.badge-agent-verified{{background:#276749;color:#f0fff4;padding:2px 8px;border-radius:10px;font-size:.72rem;font-weight:700}}
 .diff-bar{{background:#ebf8ff;border:1px solid #bee3f8;border-radius:8px;padding:10px 16px;margin-bottom:16px;font-size:.9rem}}
 .footer{{text-align:center;color:#a0aec0;font-size:.75rem;padding:20px}}
 </style></head><body>

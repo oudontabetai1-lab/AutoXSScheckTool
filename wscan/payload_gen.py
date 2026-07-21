@@ -12,6 +12,8 @@ from typing import Optional
 
 from rich.console import Console
 
+from .llm_client import complete_text
+
 console = Console()
 
 
@@ -40,6 +42,8 @@ class PayloadGenerator:
         role_models: Optional[dict] = None,
         enable_web_browsing: bool = False,
         openai_base_url: str = "",
+        llm_timeout_seconds: float = 30.0,
+        llm_max_retries: int = 2,
     ):
         from . import llm_endpoint
         # このインスタンスが使うベース URL を **構築時にスナップショット** する。
@@ -60,6 +64,8 @@ class PayloadGenerator:
         self.openai_model = openai_model
         self.gemini_model = gemini_model
         self.claude_model = claude_model
+        self.llm_timeout_seconds = float(llm_timeout_seconds)
+        self.llm_max_retries = max(0, int(llm_max_retries))
         self.default_payloads = default_payloads or {}
         self.prompt_templates = prompt_templates or {}
         self.role_models = {
@@ -163,102 +169,6 @@ class PayloadGenerator:
         return self._llm_available
 
     # ------------------------------------------------------------------
-    # Generation backends
-    # ------------------------------------------------------------------
-
-    async def _generate_with_ollama(self, prompt: str) -> Optional[list[str]]:
-        """Generate payloads using Ollama."""
-        try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                resp = await client.post(
-                    f"{self.ollama_url}/api/generate",
-                    json={
-                        "model": self.ollama_model,
-                        "prompt": prompt,
-                        "stream": False,
-                        "options": {"temperature": 0.7, "num_predict": 500},
-                    },
-                )
-                if resp.status_code == 200:
-                    text = resp.json().get("response", "")
-                    return self._extract_json_list(text)
-        except Exception as e:
-            console.print(f"[yellow]Ollama error: {e}[/yellow]")
-        return None
-
-    async def _generate_with_claude(self, prompt: str) -> Optional[list[str]]:
-        """Generate payloads using Anthropic Claude API."""
-        client = self._get_anthropic_client()
-        if not client:
-            return None
-        try:
-            import asyncio
-            loop = asyncio.get_event_loop()
-            response = await loop.run_in_executor(
-                None,
-                lambda: client.messages.create(
-                    model=self.claude_model,
-                    max_tokens=500,
-                    messages=[{"role": "user", "content": prompt}],
-                ),
-            )
-            text = response.content[0].text
-            return self._extract_json_list(text)
-        except Exception as e:
-            console.print(f"[yellow]Claude API error: {e}[/yellow]")
-        return None
-
-    async def _generate_with_openai(self, prompt: str) -> Optional[list[str]]:
-        """Generate payloads using OpenAI (互換) API."""
-        from . import llm_endpoint
-        api_key = self.openai_api_key
-        if not api_key:
-            return None
-        try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                resp = await client.post(
-                    llm_endpoint.chat_completions_url(self.openai_base_url),
-                    headers={"Authorization": f"Bearer {api_key}"},
-                    json={
-                        "model": self.openai_model,
-                        "messages": [{"role": "user", "content": prompt}],
-                        "max_tokens": 500,
-                        "temperature": 0.7,
-                    },
-                )
-                if resp.status_code == 200:
-                    text = resp.json()["choices"][0]["message"]["content"]
-                    return self._extract_json_list(text)
-                console.print(f"[yellow]OpenAI API error {resp.status_code}: {resp.text[:200]}[/yellow]")
-        except Exception as e:
-            console.print(f"[yellow]OpenAI error: {e}[/yellow]")
-        return None
-
-    async def _generate_with_gemini(self, prompt: str) -> Optional[list[str]]:
-        """Generate payloads using Google Gemini API."""
-        api_key = os.environ.get("GEMINI_API_KEY")
-        if not api_key:
-            return None
-        try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                url = (
-                    f"https://generativelanguage.googleapis.com/v1beta/models/"
-                    f"{self.gemini_model}:generateContent?key={api_key}"
-                )
-                resp = await client.post(
-                    url,
-                    json={"contents": [{"parts": [{"text": prompt}]}]},
-                )
-                if resp.status_code == 200:
-                    data = resp.json()
-                    text = data["candidates"][0]["content"]["parts"][0]["text"]
-                    return self._extract_json_list(text)
-                console.print(f"[yellow]Gemini API error {resp.status_code}: {resp.text[:200]}[/yellow]")
-        except Exception as e:
-            console.print(f"[yellow]Gemini error: {e}[/yellow]")
-        return None
-
-    # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
 
@@ -344,14 +254,16 @@ class PayloadGenerator:
         return expand_payloads(defaults, check_type, max_variants_per_payload=1, max_total=40)
 
     async def _call_llm(self, prompt: str) -> Optional[list[str]]:
-        """Route to the appropriate LLM backend."""
-        if self.provider == "claude":
-            return await self._generate_with_claude(prompt)
-        if self.provider == "openai":
-            return await self._generate_with_openai(prompt)
-        if self.provider == "gemini":
-            return await self._generate_with_gemini(prompt)
-        return await self._generate_with_ollama(prompt)
+        """LLM の生テキストからペイロード配列を抽出する。"""
+        text = await complete_text(
+            self,
+            prompt,
+            max_tokens=500,
+            temperature=0.7,
+        )
+        if text is None:
+            return None
+        return self._extract_json_list(text)
 
     # ------------------------------------------------------------------
     # Screenshot vision analysis

@@ -307,6 +307,14 @@ def _crawl_review_wants_recrawl(command: str) -> bool:
     return (command or "").strip().lower() == "recrawl"
 
 
+_ADAPTIVE_PAGE_LEVEL_CHECKS = frozenset({"csrf", "session", "clickjacking"})
+
+
+def _adaptive_checkpoint_check(check_name: str) -> str:
+    """adaptive の完了単位を check_type ごとに生成する。"""
+    return f"(adaptive:{check_name})"
+
+
 # ---------------------------------------------------------------------------
 # Scan Engine
 # ---------------------------------------------------------------------------
@@ -328,6 +336,8 @@ class ScanEngine:
         claude_model: str = "claude-haiku-4-5-20251001",
         openai_base_url: str = "",
         role_models: Optional[dict] = None,
+        llm_timeout_seconds: float = 30.0,
+        llm_max_retries: int = 2,
         checks: Optional[list] = None,
         output_dir: Optional[str] = None,
         timeout: int = 30,
@@ -423,6 +433,8 @@ class ScanEngine:
         # セッション失効時の自動再ログイン
         relogin_on_expiry: bool = True,
         logged_in_marker: str = "",
+        # Hybrid の Agent Finding。決定論検証の完了後、レポート直前に併記する
+        additional_report_findings: Optional[list[Finding]] = None,
     ):
         # ユーザーが指定した URL は末尾スラッシュも含めてそのまま保持する。
         # 以前は url.rstrip("/") で末尾の "/" を一律に除去していたが、
@@ -473,6 +485,9 @@ class ScanEngine:
         self.spa_crawl = spa_crawl
         # ハイブリッドモード用シード URL (Agent偵察で発見したURL)
         self.seed_urls: list = list(seed_urls or [])
+        self.additional_report_findings: list[Finding] = list(
+            additional_report_findings or []
+        )
         primary_origin = self._origin_for(self.target_url)
         self.additional_target_urls: list[str] = self._normalize_scope_urls(list(target_urls or []))
         self.target_urls: list[str] = self._normalize_scope_urls(
@@ -704,6 +719,8 @@ class ScanEngine:
             claude_model=claude_model,
             openai_base_url=openai_base_url,
             role_models=role_models,
+            llm_timeout_seconds=llm_timeout_seconds,
+            llm_max_retries=llm_max_retries,
             default_payloads=payloads_data,
             prompt_templates=prompt_templates,
             enable_web_browsing=enable_llm_web_browsing,
@@ -741,6 +758,10 @@ class ScanEngine:
         # using LLM analysis of the page's filtering behavior
         self.adaptive_engine = AdaptivePayloadEngine(self.payload_gen)
         self.adaptive_enabled = enable_adaptive_payloads and llm_provider != "none"
+        # provider の恒久的な不達は scan 中に一度だけ判定する。並列 field が
+        # 同時に初回 adaptive へ到達しても probe を重複させない。
+        self._adaptive_llm_available: Optional[bool] = None
+        self._adaptive_llm_availability_lock = asyncio.Lock()
 
         # OOB（帯域外）メール受信シンク。環境変数（WSCAN_OOB_*）から構築し、
         # 設定が揃っているときだけ EmailSink を有効化する（未設定なら None）。
@@ -1166,6 +1187,24 @@ class ScanEngine:
         # まだ scanners に無いことがあるため常に in-scope 扱いで既出 Finding を保つ。
         effective |= _AUTO_ENABLED_CHECKS
         for check in effective:
+            if ct == check or ct.startswith(check + "_"):
+                return True
+            if ct in _CHECK_EXTRA_TYPES.get(check, ()):
+                return True
+        return False
+
+    def _check_type_requested(self, check_type: str) -> bool:
+        """Agent Finding 用の**厳格**な check_type 判定。
+
+        ``_check_type_in_scope`` は resume 用で、Cookie 認証/CMS 検出で自動有効化される
+        ``privesc``/``cms`` 等（``_AUTO_ENABLED_CHECKS``）や実行中スキャナも in-scope 扱い
+        する。しかし Agent は任意の ``Type:`` を出力できるため、それを流用すると
+        ``--checks xss`` でも Agent 由来の ``privesc_*``/``cms_*`` がレポートに混入する。
+        ここでは**演算子が明示的に要求した ``self.checks`` のみ**（サブタイプ前置・
+        エイリアスは許可）で判定し、自動有効化ぶんは含めない。
+        """
+        ct = check_type or ""
+        for check in self.checks:
             if ct == check or ct.startswith(check + "_"):
                 return True
             if ct in _CHECK_EXTRA_TYPES.get(check, ()):
@@ -1626,6 +1665,10 @@ class ScanEngine:
                 except Exception:
                     pass
                 await self._browser.close()
+
+            # Agent Finding は認可済みスコープ内だけ、決定論 Finding の生成・検証を
+            # 変えずに追加する。source の異なる同一 Finding は意図的に併記する。
+            self._merge_additional_report_findings()
 
             # ── Phase 4: Report ──────────────────────────────────────────
             if self.monitor: await self.monitor.emit_phase("report")
@@ -3848,34 +3891,46 @@ class ScanEngine:
         # 以前は critical finding があると adaptive パスをスキップしていたが、過検知で
         # ある可能性を踏まえ「見つかったからスキップ」はしない。
         #
-        # adaptive は per-field の独立単位として「(adaptive) 完了マーカー」で管理する。
-        # first-pass の各チェックは adaptive の前に done 化されるため、`checks_executed>0`
-        # だけを条件にすると「first-pass 完了後・adaptive 実行中に abort→resume」で
-        # 全チェックが skip されて checks_executed==0 となり adaptive が二度と走らない
-        # （＝adaptive payload を恒久的に取りこぼす）。完了マーカーを別途持つことで、
-        # adaptive 未完のフィールドだけ resume で adaptive を再試行できる。
-        # 実行条件: adaptive 有効 かつ 当該フィールドに in-scope チェックがある
-        # （今回実行 or 前回完了）かつ adaptive 未完。マーカーで一度だけ実行を保証し、
-        # 完了済みフィールドを新規 payload で再攻撃しない約束も守る。
-        adaptive_done = self._checkpoint_is_done(
+        # adaptive は field×check_type の独立単位として管理する。一部 check が失敗しても
+        # 成功済み check の完了記録を残し、resume では失敗分だけを再試行する。
+        # 旧 checkpoint の field 単位 "(adaptive)" marker は「全 check 完了」として尊重し、
+        # 読み込み互換と完了済みフィールドへの再送防止を維持する。
+        legacy_adaptive_done = self._checkpoint_is_done(
             url, field_name, form_index, "(adaptive)", is_url_param
         )
-        # 完了フィールドは "(adaptive)" marker で一意に判定する。v1(legacy) から resume
-        # した場合も、CheckpointState.from_dict の load 時マイグレーションが v1 era の
-        # 完了フィールドへ marker を補完済みなので、marker 欠落＝未実行として扱ってよい
-        # （完了済みフィールドへの adaptive 再送は起きない）。checks_skipped_done>0 は
-        # 「first-pass 完了後・adaptive 実行前に abort→resume」で全 check が skip された
-        # フィールドを拾い、adaptive を確実に再試行するため。
+        adaptive_checks = [
+            check_name for check_name in ordered_checks
+            if check_name in self.scanners
+            and check_name not in _ADAPTIVE_PAGE_LEVEL_CHECKS
+        ]
+        adaptive_pending = any(
+            not self._checkpoint_is_done(
+                url,
+                field_name,
+                form_index,
+                _adaptive_checkpoint_check(check_name),
+                is_url_param,
+            )
+            for check_name in adaptive_checks
+        )
+        # checks_skipped_done>0 は first-pass 完了後・adaptive 実行前に中断した resume を
+        # 拾う。個々の済み判定は _adaptive_attack_field 側でも行い、再攻撃を防ぐ。
         if (
             self.adaptive_enabled
-            and not adaptive_done
+            and not legacy_adaptive_done
+            and adaptive_pending
             and (checks_executed > 0 or checks_skipped_done > 0)
         ):
-            await self._adaptive_attack_field(
+            adaptive_payloads = await self._adaptive_attack_field(
                 url, form_index, field, is_url_param, ordered_checks, field_plan
             )
-            # adaptive 完了を記録（この後の abort/クラッシュでも resume が再実行しない）。
-            self._checkpoint_mark_done(url, field_name, form_index, "(adaptive)", is_url_param)
+            # None はいずれかの check が未完、list は今回対象がすべて完了。
+            # 完了記録自体は check_type ごとに _adaptive_attack_field が行う。
+            if adaptive_payloads is not None:
+                if self.monitor:
+                    await self.monitor.emit_status(
+                        f"adaptive payloads generated: {len(adaptive_payloads)}件"
+                    )
 
         self.completed_fields += 1
         # フィールド完了ごとに進捗を永続化（中断しても次回ここから再開できる）
@@ -3895,7 +3950,7 @@ class ScanEngine:
         is_url_param: bool,
         check_names: list,
         field_plan: Optional[FieldAttackPlan],
-    ):
+    ) -> Optional[list[str]]:
         """
         Phase 3b: Adaptive AI round.
         For each check type, get current page HTML, ask LLM to generate
@@ -3903,19 +3958,87 @@ class ScanEngine:
         """
         field_name = field.get("name", "unknown")
 
+        # provider 自体が使えない場合はフォールバック完了として収束させる。
+        # 個別 generate() の一時失敗とは分離し、可用性 probe は scan 中に一度だけ行う。
+        if self._adaptive_llm_available is None:
+            async with self._adaptive_llm_availability_lock:
+                if self._adaptive_llm_available is None:
+                    self._adaptive_llm_available = (
+                        await self.payload_gen._check_llm_available()
+                    )
+                    if self.monitor:
+                        availability = "利用可能" if self._adaptive_llm_available else "利用不可"
+                        await self.monitor.emit_status(
+                            f"Adaptive LLM 可用性: {availability}"
+                        )
+
+        if not self._adaptive_llm_available:
+            checkpoint_updated = False
+            for check_name in check_names:
+                if (
+                    check_name not in self.scanners
+                    or check_name in _ADAPTIVE_PAGE_LEVEL_CHECKS
+                ):
+                    continue
+                adaptive_checkpoint_check = _adaptive_checkpoint_check(check_name)
+                if self._checkpoint_is_done(
+                    url,
+                    field_name,
+                    form_index,
+                    adaptive_checkpoint_check,
+                    is_url_param,
+                ):
+                    continue
+                self._checkpoint_mark_done(
+                    url,
+                    field_name,
+                    form_index,
+                    adaptive_checkpoint_check,
+                    is_url_param,
+                )
+                checkpoint_updated = True
+            if checkpoint_updated:
+                self._save_checkpoint()
+            return []
+
         # Get current page HTML as probe context
         try:
             page_html = await self.browser.page.content()
         except Exception:
-            return
+            return None
 
+        generated_payloads: list[str] = []
+        generation_failed = False
         for check_name in check_names:
             scanner = self.scanners.get(check_name)
             if scanner is None:
                 continue
 
             # Don't bother adaptive pass on page-level-only scanners
-            if check_name in ("csrf", "session", "clickjacking"):
+            if check_name in _ADAPTIVE_PAGE_LEVEL_CHECKS:
+                continue
+
+            adaptive_checkpoint_check = _adaptive_checkpoint_check(check_name)
+            if self._checkpoint_is_done(
+                url,
+                field_name,
+                form_index,
+                adaptive_checkpoint_check,
+                is_url_param,
+            ):
+                continue
+
+            # 別 field/check の恒久失敗で可用性キャッシュが倒れた場合も、以降は
+            # LLM を呼ばずフォールバック完了として収束させる。
+            if self._adaptive_llm_available is False:
+                self._checkpoint_mark_done(
+                    url,
+                    field_name,
+                    form_index,
+                    adaptive_checkpoint_check,
+                    is_url_param,
+                )
+                self._save_checkpoint()
                 continue
 
             # Standard payloads that were tried in the first pass
@@ -3924,16 +4047,36 @@ class ScanEngine:
             tried = plan_payloads + [p for p in defaults if p not in plan_payloads]
 
             # Ask LLM for bypass payloads (include detected WAF for targeted evasion)
-            adaptive_payloads = await self.adaptive_engine.generate(
+            adaptive_payloads, generation_status = await self.adaptive_engine.generate(
                 check_type=check_name,
                 field_name=field_name,
                 url=url,
                 payloads_tried=tried,
                 page_html=page_html,
                 waf_name=self.waf_detector._detected,
+                return_status=True,
             )
 
+            # API キー・モデル・URL 等の恒久不備が判明したら scan 内キャッシュを倒す。
+            # 後続 field/check は上の可用性ゲートで収束し、同じ失敗呼び出しを繰り返さない。
+            # empty/transient は resume での再試行と recall を維持するため倒さない。
+            if generation_status in {"permanent", "unavailable"}:
+                self._adaptive_llm_available = False
+
+            if adaptive_payloads is None:
+                generation_failed = True
+                continue
+
+            generated_payloads.extend(adaptive_payloads)
             if not adaptive_payloads:
+                self._checkpoint_mark_done(
+                    url,
+                    field_name,
+                    form_index,
+                    adaptive_checkpoint_check,
+                    is_url_param,
+                )
+                self._save_checkpoint()
                 continue
 
             # Run scanner again with adaptive payloads — isolated via ContextVar
@@ -3951,7 +4094,20 @@ class ScanEngine:
                 # 過検知の可能性があるため、critical が出ても残りのチェック種別の
                 # adaptive パスを打ち切らない（見つかったからスキップしない）。
             except Exception as e:
+                # payload 生成だけでなく実スキャンも adaptive 作業単位の一部。
+                # 一時的なブラウザ/スキャン障害を完了扱いにせず resume で回収する。
+                generation_failed = True
                 console.print(f"    [yellow]Adaptive scanner error ({check_name}): {e}[/yellow]")
+            else:
+                self._checkpoint_mark_done(
+                    url,
+                    field_name,
+                    form_index,
+                    adaptive_checkpoint_check,
+                    is_url_param,
+                )
+                # 後続 check の失敗やプロセス中断でも部分成功を保持する。
+                self._save_checkpoint()
             finally:
                 _FIELD_PAYLOAD_OVERRIDES.reset(_adaptive_token)
 
@@ -3962,6 +4118,9 @@ class ScanEngine:
                     self._check_page_for_flags(post_html, url)
                 except Exception:
                     pass
+
+        # 一部のチェックだけ成功した場合も、失敗分を resume で回収できるよう未完とする。
+        return None if generation_failed else generated_payloads
 
     def _generate_heuristic_plans_for_pages(self, pages: list) -> dict:
         """
@@ -4350,6 +4509,32 @@ class ScanEngine:
     # =========================================================================
     # Phase 4: Report
     # =========================================================================
+
+    def _merge_additional_report_findings(self) -> None:
+        """スコープ内の外部 Finding を一度だけ追加する（重複も出自別に保持）。"""
+        if not self.additional_report_findings:
+            return
+
+        allowed_findings: list[Finding] = []
+        excluded_count = 0
+        for finding in self.additional_report_findings:
+            url = str(getattr(finding, "url", "") or "").strip()
+            if (
+                self._is_attack_target_url(url)
+                and not self._is_url_excluded(url)
+                and self._check_type_requested(finding.check_type)
+            ):
+                allowed_findings.append(finding)
+            else:
+                excluded_count += 1
+
+        self.all_findings.extend(allowed_findings)
+        self.additional_report_findings.clear()
+        if excluded_count:
+            console.print(
+                f"  [yellow]Agent Finding をスコープ/除外設定により "
+                f"{excluded_count} 件除外しました。[/yellow]"
+            )
 
     def _phase_report(self):
         console.print(Rule("[bold green] Phase 4 / 4  ·  Report [/bold green]", style="green"))
@@ -4913,61 +5098,13 @@ class ScanEngine:
 
     async def _call_llm_text(self, prompt: str) -> str:
         """Call the configured LLM and return raw text response."""
-        provider = self.payload_gen.provider
+        from . import llm_client
+
         with self.payload_gen.use_role("report"):
-            if provider == "claude":
-                client = self.payload_gen._get_anthropic_client()
-                if client:
-                    import asyncio as _aio
-                    loop = _aio.get_event_loop()
-                    response = await loop.run_in_executor(
-                        None,
-                        lambda: client.messages.create(
-                            model=self.payload_gen.claude_model,
-                            max_tokens=1500,
-                            messages=[{"role": "user", "content": prompt}],
-                        ),
-                    )
-                    return response.content[0].text
-            elif provider == "openai":
-                import httpx
-                from . import llm_endpoint
-                api_key = getattr(self.payload_gen, "openai_api_key", None)
-                if api_key:
-                    async with httpx.AsyncClient(timeout=60.0) as client:
-                        resp = await client.post(
-                            llm_endpoint.chat_completions_url(getattr(self.payload_gen, "openai_base_url", "")),
-                            headers={"Authorization": f"Bearer {api_key}"},
-                            json={"model": self.payload_gen.openai_model,
-                                  "messages": [{"role": "user", "content": prompt}],
-                                  "max_tokens": 1500},
-                        )
-                        if resp.status_code == 200:
-                            return resp.json()["choices"][0]["message"]["content"]
-            elif provider == "gemini":
-                import httpx, os
-                api_key = os.environ.get("GEMINI_API_KEY", "")
-                if api_key:
-                    url = (
-                        f"https://generativelanguage.googleapis.com/v1beta/models/"
-                        f"{self.payload_gen.gemini_model}:generateContent?key={api_key}"
-                    )
-                    async with httpx.AsyncClient(timeout=60.0) as client:
-                        resp = await client.post(url, json={"contents": [{"parts": [{"text": prompt}]}]})
-                        if resp.status_code == 200:
-                            return resp.json()["candidates"][0]["content"]["parts"][0]["text"]
-            else:
-                # Ollama
-                import httpx
-                async with httpx.AsyncClient(timeout=60.0) as client:
-                    resp = await client.post(
-                        f"{self.payload_gen.ollama_url}/api/generate",
-                        json={"model": self.payload_gen.ollama_model, "prompt": prompt,
-                              "stream": False, "options": {"num_predict": 1500}},
-                    )
-                    if resp.status_code == 200:
-                        return resp.json().get("response", "")
-        return ""
+            text = await llm_client.complete_text(
+                self.payload_gen, prompt, max_tokens=1500, timeout=60
+            )
+        return text or ""
 
     def _print_summary(self):
         console.print()

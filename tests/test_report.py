@@ -7,6 +7,52 @@ from wscan.scanners.base import Finding
 
 
 class ReportGeneratorTests(unittest.TestCase):
+    def test_agent_findings_have_origin_and_verification_badges(self):
+        findings = [
+            Finding(
+                check_type="xss",
+                severity="high",
+                url="http://fixture.test/unverified",
+                field_name="q",
+                payload="<svg/onload=alert(1)>",
+                evidence="Agent observed a script execution signal",
+                source="agent",
+            ),
+            Finding(
+                check_type="sqli",
+                severity="critical",
+                url="http://fixture.test/verified",
+                field_name="id",
+                payload="' OR 1=1--",
+                evidence="Agent observed an authentication bypass",
+                source="agent",
+                agent_verified=True,
+            ),
+            Finding(
+                check_type="csrf",
+                severity="medium",
+                url="http://fixture.test/scanner",
+                field_name="form",
+                payload="",
+                evidence="Scanner finding",
+            ),
+        ]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            report_path = ReportGenerator(Path(tmp)).generate(
+                target="http://fixture.test",
+                findings=findings,
+                visited_urls=["http://fixture.test/"],
+                checks=["xss", "sqli", "csrf"],
+            )
+            html = report_path.read_text(encoding="utf-8")
+
+        self.assertIn("🤖 Agent発見（LLM独自解釈・未確証）", html)
+        self.assertIn("🤖 Agent発見（LLM独自解釈）", html)
+        self.assertIn("✅ 決定論的にも再現確認済み", html)
+        self.assertEqual(html.count('class="finding-card finding-card-agent"'), 2)
+        self.assertIn('data-source="scanner"', html)
+
     def test_audit_report_includes_remediation_summary_and_review_signals(self):
         findings = [
             Finding(
