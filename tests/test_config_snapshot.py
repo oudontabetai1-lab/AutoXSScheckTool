@@ -79,6 +79,15 @@ class RedactSecretsTests(unittest.TestCase):
         self.assertEqual(out["mfa_totp_algorithm"], "SHA256")
         self.assertEqual(out["url"], "http://x.test/")
 
+    def test_redacts_string_form_headers(self):
+        # headers_text（config 由来）は "Name: Value" の文字列。dict と同様に
+        # 認証情報が入り得るため、defaults/snapshot 双方で丸ごと伏字化する。
+        cfg = {"headers": "Authorization: Bearer leak\nX-Api-Key: k"}
+        self.assertEqual(main._redact_secrets(cfg)["headers"], "***REDACTED***")
+        self.assertEqual(main._redact_secrets(cfg, placeholder="")["headers"], "")
+        # 空文字列はそのまま（送信なしと区別不要）。
+        self.assertEqual(main._redact_secrets({"headers": ""})["headers"], "")
+
     def test_redacts_login_credentials_and_cookies_exact_keys(self):
         # 部分一致では拾えない明示キー。scan_started の再生・snapshot 経由で
         # ログイン PW / セッション Cookie が別クライアントへ漏れないようにする。

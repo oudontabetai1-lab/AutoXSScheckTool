@@ -194,6 +194,10 @@ def _redact_secrets(cfg: dict, placeholder: str = "***REDACTED***") -> dict:
         if lname == "headers" and isinstance(value, dict):
             # ヘッダ名は診断に有用だが、値にはトークンや証明情報が含まれ得るため保存しない。
             redacted[key] = {str(name): placeholder for name in value}
+        elif lname == "headers" and isinstance(value, str) and value.strip():
+            # headers_text 形式（"Name: Value" 複数行の文字列。config 由来）。
+            # dict と同様に値へ認証情報が入り得るため丸ごと伏字化する。
+            redacted[key] = placeholder
         elif lname == "mfa_totp_uri" and value not in ("", None):
             # otpauth URI はクエリに Base32 シークレットを含むため値全体を伏字にする。
             redacted[key] = placeholder

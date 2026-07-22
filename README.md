@@ -805,6 +805,8 @@ python3 main.py scan https://api.example.com --bearer "$WSCAN_BEARER"
 
 > ⚠️ serve の保護トークン `WSCAN_AUTH_TOKEN` は**ダッシュボード/API を守る control-plane 用**で、スキャン対象へ送る Bearer とは別物です。`--bearer` はこれを参照しません（管理トークンが検査対象へ漏れるのを防ぐため）。対象用トークンは必ず `WSCAN_BEARER` か `--bearer` で渡してください。
 
+> ℹ️ **既知の制約（Hybrid/Agent モード）**: 通常ツール層（`scan`）の crawl・攻撃は Bearer/カスタムヘッダを全リクエストへ付与しますが、**Agent 偵察（`agent` / `scan --hybrid` の Phase 1）は現状 Bearer/カスタムヘッダを未サポート**です（Cookie/フォームログインは可）。Bearer のみで認証する対象を Hybrid で回すと、Phase 1 の URL 発見が未認証範囲に限られ、認証後ページの発見漏れが起き得ます（Phase 2 の決定論スキャン自体はヘッダを honor します）。Agent ブラウザ（browser-use）へのヘッダ配線は別途対応予定です。
+
 ### スコープ
 
 - `target`: 巡回・攻撃してよい URL/オリジン/プレフィックス。
