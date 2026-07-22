@@ -2769,6 +2769,9 @@ function submitScanConfig() {
   if (state.ws && state.ws.readyState === WebSocket.OPEN) {
     // 設定スナップショットはサーバ側でアウトプットフォルダに自動保存される。
     // ブラウザへのダウンロードは「📤 設定をエクスポート」ボタン押下時のみ。
+    // 開始したクライアントはフル config をローカル保持し「再実行」で認証情報を保つ
+    // （配信される scan_started は伏字版なので、そこからは復元できないため）。
+    state.lastScanConfig = JSON.parse(JSON.stringify(config));
     state.ws.send(JSON.stringify({ action: 'start_scan', config }));
     document.getElementById('scanConfigOverlay').classList.remove('active');
     setStatus('スキャン開始リクエスト送信中...', 'running');
@@ -3020,6 +3023,8 @@ function submitAgentScan() {
   };
 
   if (state.ws && state.ws.readyState === WebSocket.OPEN) {
+    // 再実行のためフル config をローカル保持（配信は伏字版のため）。
+    state.lastScanConfig = JSON.parse(JSON.stringify(config));
     state.ws.send(JSON.stringify({ action: 'start_scan', config }));
     document.getElementById('scanConfigOverlay').classList.remove('active');
     setStatus('Agent Browser スキャン開始リクエスト送信中...', 'running');
@@ -3992,7 +3997,12 @@ function handleEvent(event) {
       document.getElementById('scanConfigOverlay').classList.remove('active');
       // 新スキャン開始時は前スキャンのレビュー待ちモーダルを破棄。
       closeInteractiveModals();
-      state.lastScanConfig = JSON.parse(JSON.stringify(data || {}));
+      // 開始したクライアントは送信時にフル config を保持済み。ここで上書きすると
+      // 伏字版(認証情報なし)で潰れ「再実行」が壊れるため、未保持のとき(=このスキャンを
+      // 開始していない観測クライアント/リロード後)だけ配信データを採用する。
+      if (!state.lastScanConfig) {
+        state.lastScanConfig = JSON.parse(JSON.stringify(data || {}));
+      }
       showPostScanActions(false);
       resetLiveScanState();
       state.eventCount = 1;
@@ -4799,6 +4809,8 @@ function submitHybridScan() {
     enable_community_payloads: cfgToggles.community_payloads,
     max_payloads: parseInt(document.getElementById('cfgMaxPayloads')?.value) || 0,
   };
+  // 再実行のためフル config をローカル保持（配信は伏字版のため）。
+  state.lastScanConfig = JSON.parse(JSON.stringify(config));
   state.ws.send(JSON.stringify({ action: 'start_scan', config }));
   document.getElementById('scanConfigOverlay').classList.remove('active');
   setStatus('🔀 ハイブリッドスキャン開始リクエスト送信中...', 'running');
