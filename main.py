@@ -173,6 +173,9 @@ _CFG = _load_config()
 # 設定スナップショット等で永続化してはいけない秘匿フィールド。キー名に以下の
 # 語を含む値（パスワード/シークレット/トークン/APIキー）は伏字にする。
 _SECRET_KEY_TOKENS = ("password", "secret", "token", "bearer", "api_key", "apikey")
+# 部分一致では拾えない明示キー（"auth_pass" は "password" を含まない、Cookie 系など）。
+# login_pass_field 等の「フィールド名」は秘匿でないため対象にしない。
+_SECRET_EXACT_KEYS = ("auth_pass", "cookies", "low_priv_cookies")
 
 
 def _redact_secrets(cfg: dict) -> dict:
@@ -189,6 +192,10 @@ def _redact_secrets(cfg: dict) -> dict:
             redacted[key] = {str(name): "***REDACTED***" for name in value}
         elif lname == "mfa_totp_uri" and value not in ("", None):
             # otpauth URI はクエリに Base32 シークレットを含むため値全体を伏字にする。
+            redacted[key] = "***REDACTED***"
+        elif lname in _SECRET_EXACT_KEYS and value not in ("", None):
+            # 部分一致では拾えない明示キー（ログインPW・Cookie 等）を伏字にする。
+            # scan_started の再生や snapshot でクレデンシャルが漏れないようにするため。
             redacted[key] = "***REDACTED***"
         elif value not in ("", None) and any(tok in lname for tok in _SECRET_KEY_TOKENS):
             redacted[key] = "***REDACTED***"
@@ -422,15 +429,15 @@ Examples:
         ),
     )
     scan.add_argument(
+        # 注意: serve の保護トークン WSCAN_AUTH_TOKEN は control-plane 用であり、
+        # スキャン対象へ Bearer として送る認証情報ではない。両者を取り違えると
+        # ダッシュボードの管理トークンが検査対象へ漏れるため、ここでは参照しない。
         "--bearer", metavar="TOKEN",
-        default=os.environ.get(
-            "WSCAN_BEARER",
-            os.environ.get("WSCAN_AUTH_TOKEN", _CFG.get("bearer_token", "")),
-        ),
+        default=os.environ.get("WSCAN_BEARER", _CFG.get("bearer_token", "")),
         help=(
             "Bearerトークンの近道。'Authorization: Bearer <TOKEN>' を全リクエスト"
-            "(crawl+httpx)へ付与。Cognito等のBearer認証向け。env WSCAN_BEARER / "
-            "WSCAN_AUTH_TOKEN。--header の Authorization を明示指定した場合はそちらが優先。"
+            "(crawl+httpx)へ付与。Cognito等のBearer認証向け。env WSCAN_BEARER。"
+            "--header の Authorization を明示指定した場合はそちらが優先。"
         ),
     )
     scan.add_argument(
@@ -1991,7 +1998,10 @@ async def run_serve(args):
                 "openai_base_url": cfg.get("openai_base_url", "") or "",
                 "role_models":  cfg.get("role_models", {}) or {},
             })
-        await monitor.emit_scan_started(cfg)
+        # scan_started は event_history に積まれ再接続クライアントへ再生されるため、
+        # Bearer/TOTP/ヘッダ等の秘匿値を伏字化して配信する（エンジンへはフルの cfg を
+        # 別経路で渡すので機能には影響しない）。
+        await monitor.emit_scan_started(_redact_secrets(cfg))
 
         # 外部 OpenAI 互換（tsuzumi2 等）のベース URL は各エンジン/PayloadGenerator に
         # 明示的に渡す。グローバル env は書き換えない（serve での operator 設定

@@ -801,7 +801,9 @@ export WSCAN_BEARER='<token>'
 python3 main.py scan https://api.example.com --bearer "$WSCAN_BEARER"
 ```
 
-`WSCAN_BEARER` のほか `WSCAN_AUTH_TOKEN` も利用できます。従来どおり `--header "Authorization: Bearer <token>"` でも指定でき、`--header` または `--header-file` に Authorization がある場合は明示値を優先します。トークンはローカルへ保存されないため、毎回 CLI または環境変数で渡してください。
+環境変数は `WSCAN_BEARER` を使います（`--header "Authorization: Bearer <token>"` でも指定可、`--header`/`--header-file` の Authorization を優先）。トークンはローカルへ保存されないため、毎回 CLI または環境変数で渡してください。
+
+> ⚠️ serve の保護トークン `WSCAN_AUTH_TOKEN` は**ダッシュボード/API を守る control-plane 用**で、スキャン対象へ送る Bearer とは別物です。`--bearer` はこれを参照しません（管理トークンが検査対象へ漏れるのを防ぐため）。対象用トークンは必ず `WSCAN_BEARER` か `--bearer` で渡してください。
 
 ### スコープ
 

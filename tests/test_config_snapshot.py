@@ -51,6 +51,24 @@ class RedactSecretsTests(unittest.TestCase):
             {"Authorization": "***REDACTED***", "X-Tenant": "***REDACTED***"},
         )
 
+    def test_redacts_login_credentials_and_cookies_exact_keys(self):
+        # 部分一致では拾えない明示キー。scan_started の再生・snapshot 経由で
+        # ログイン PW / セッション Cookie が別クライアントへ漏れないようにする。
+        cfg = {
+            "auth_pass": "hunter2",
+            "cookies": "session=abc; token=xyz",
+            "low_priv_cookies": "session=low",
+            # フィールド名は秘匿値ではないため伏字にしない
+            "login_pass_field": "password",
+            "login_user_field": "username",
+        }
+        out = main._redact_secrets(cfg)
+        self.assertEqual(out["auth_pass"], "***REDACTED***")
+        self.assertEqual(out["cookies"], "***REDACTED***")
+        self.assertEqual(out["low_priv_cookies"], "***REDACTED***")
+        self.assertEqual(out["login_pass_field"], "password")
+        self.assertEqual(out["login_user_field"], "username")
+
 
 if __name__ == "__main__":
     unittest.main()

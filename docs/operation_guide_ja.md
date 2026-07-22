@@ -119,7 +119,7 @@ export WSCAN_BEARER='<token>'
 python3 main.py scan https://api.example.com --bearer "$WSCAN_BEARER"
 ```
 
-環境変数は `WSCAN_BEARER` / `WSCAN_AUTH_TOKEN` に対応します。従来のヘッダ指定も利用でき、明示した Authorization を優先します。
+環境変数は `WSCAN_BEARER` に対応します（従来のヘッダ指定も利用でき、明示した Authorization を優先）。serve の保護トークン `WSCAN_AUTH_TOKEN` は control-plane 用のため `--bearer` は参照しません（管理トークンの検査対象への漏洩防止）。
 
 ```bash
 python3 main.py scan https://api.example.com \
