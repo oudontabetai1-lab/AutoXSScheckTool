@@ -1031,15 +1031,21 @@ body {
           </div>
           <div class="cfg-field">
             <label>クライアント証明書 (PEM)</label>
-            <input type="text" id="cfgTlsClientCert" placeholder="/path/to/client.crt">
+            <input type="text" id="cfgTlsClientCert" placeholder="アップロードするか、サーバ側パスを入力">
+            <input type="file" id="upTlsClientCert" accept=".crt,.pem,.cer" style="font-size:0.75rem">
+            <span id="upTlsClientCertStatus" style="font-size:0.72rem;color:var(--text-muted)"></span>
           </div>
           <div class="cfg-field">
             <label>クライアント秘密鍵 (PEM)</label>
-            <input type="text" id="cfgTlsClientKey" placeholder="/path/to/client.key">
+            <input type="text" id="cfgTlsClientKey" placeholder="アップロードするか、サーバ側パスを入力">
+            <input type="file" id="upTlsClientKey" accept=".key,.pem" style="font-size:0.75rem">
+            <span id="upTlsClientKeyStatus" style="font-size:0.72rem;color:var(--text-muted)"></span>
           </div>
           <div class="cfg-field">
             <label>クライアント証明書 (PFX/PKCS#12)</label>
-            <input type="text" id="cfgTlsClientPfx" placeholder="/path/to/client.p12">
+            <input type="text" id="cfgTlsClientPfx" placeholder="アップロードするか、サーバ側パスを入力">
+            <input type="file" id="upTlsClientPfx" accept=".p12,.pfx" style="font-size:0.75rem">
+            <span id="upTlsClientPfxStatus" style="font-size:0.72rem;color:var(--text-muted)"></span>
           </div>
           <div class="cfg-field">
             <label>証明書パスフレーズ</label>
@@ -1047,11 +1053,14 @@ body {
           </div>
           <div class="cfg-field">
             <label>CA証明書バンドル</label>
-            <input type="text" id="cfgTlsCaCert" placeholder="/path/to/ca.pem">
+            <input type="text" id="cfgTlsCaCert" placeholder="アップロードするか、サーバ側パスを入力">
+            <input type="file" id="upTlsCaCert" accept=".pem,.crt,.cer" style="font-size:0.75rem">
+            <span id="upTlsCaCertStatus" style="font-size:0.72rem;color:var(--text-muted)"></span>
           </div>
           <div class="cfg-field">
-            <label>出力ディレクトリ (空=自動)</label>
-            <input type="text" id="cfgOutputDir" placeholder="/path/to/reports">
+            <label>サーバ側の保存先パス (空=自動)</label>
+            <input type="text" id="cfgOutputDir" placeholder="リモート配備では空欄を推奨">
+            <div style="font-size:0.72rem;color:var(--text-muted);margin-top:4px">出力先のためアップロード対象ではありません。</div>
           </div>
         </div>
         <div class="cfg-toggle-row" style="margin-top:14px">
@@ -1128,15 +1137,15 @@ body {
         </div>
         <div class="cfg-section-title" style="margin-top:16px">MFA (2段階認証) 自動入力</div>
         <div style="font-size:0.78rem;color:var(--text-muted);margin-bottom:10px">
-          ログイン後のワンタイムコードを外部 MCP サーバ経由で取得・投入します。
-          シークレット等は環境変数 (TOTP_SECRET_* / MCP_EMAIL_SERVER_* / WSCAN_MFA_*) で設定。
+          TOTPは otpauth URI / QR / Base32シークレット からローカル生成（外部MCP不要）。
+          メールや従来のMCP方式も引き続き利用可。シークレットは保存されず実行時のみ使用。
         </div>
         <div class="cfg-grid">
           <div class="cfg-field">
             <label>MFA タイプ</label>
             <select id="cfgMfaType">
               <option value="">無効</option>
-              <option value="totp">TOTP (mcp-totp-authenticator)</option>
+              <option value="totp">TOTP (otpauth URI / QR / Base32)</option>
               <option value="email">メール (mcp-email-server)</option>
             </select>
           </div>
@@ -1152,6 +1161,49 @@ body {
             </div>
           </div>
         </div>
+        <details id="cfgTotpDetails" style="margin-top:10px" open>
+          <summary style="cursor:pointer;font-size:0.8rem;color:var(--accent)">
+            TOTP設定（Authenticatorの登録情報。URI / QR / シークレットのいずれか）
+          </summary>
+          <div style="font-size:0.72rem;color:var(--text-muted);margin:8px 0;line-height:1.6">
+            Authenticator登録画面の「セットアップキー/URI」を貼るのが最も確実です。
+            QRはブラウザからアップロードするか<strong>サーバ側のファイルパス</strong>で指定します（opencvが必要）。
+            digits/period/algorithm は otpauth URI 指定時はURIの値が優先されます。
+          </div>
+          <div class="cfg-field" style="grid-column:1/-1">
+            <label>otpauth URI</label>
+            <input type="text" id="cfgMfaTotpUri" placeholder="otpauth://totp/Issuer:acct?secret=...&issuer=..." autocomplete="off">
+          </div>
+          <div class="cfg-grid">
+            <div class="cfg-field">
+              <label>Base32シークレット</label>
+              <input type="password" id="cfgMfaTotpSecret" placeholder="JBSWY3DPEHPK3PXP" autocomplete="off">
+            </div>
+            <div class="cfg-field">
+              <label>QR画像（アップロード / サーバ側パス）</label>
+              <input type="text" id="cfgMfaTotpQr" placeholder="アップロードするか、サーバ側パスを入力">
+              <input type="file" id="upMfaTotpQr" accept=".png,.jpg,.jpeg,.webp,.bmp,.gif" style="font-size:0.75rem">
+              <span id="upMfaTotpQrStatus" style="font-size:0.72rem;color:var(--text-muted)"></span>
+            </div>
+            <div class="cfg-field">
+              <label>桁数</label>
+              <input type="text" id="cfgMfaTotpDigits" placeholder="6">
+            </div>
+            <div class="cfg-field">
+              <label>周期(秒)</label>
+              <input type="text" id="cfgMfaTotpPeriod" placeholder="30">
+            </div>
+            <div class="cfg-field">
+              <label>アルゴリズム</label>
+              <select id="cfgMfaTotpAlgorithm">
+                <option value="">既定(SHA1)</option>
+                <option value="SHA1">SHA1</option>
+                <option value="SHA256">SHA256</option>
+                <option value="SHA512">SHA512</option>
+              </select>
+            </div>
+          </div>
+        </details>
         <details style="margin-top:10px">
           <summary style="cursor:pointer;font-size:0.8rem;color:var(--accent)">IMAP 認証情報を直接指定（サーバ側に未登録のアドレスを動的に使う）</summary>
           <div style="font-size:0.72rem;color:var(--text-muted);margin:8px 0;line-height:1.6">
@@ -1190,6 +1242,23 @@ body {
             </div>
           </div>
         </details>
+        <div class="cfg-section-title" style="margin-top:16px">認証ヘッダ（Bearer / カスタムヘッダ）</div>
+        <div style="font-size:0.78rem;color:var(--text-muted);margin-bottom:10px">
+          Cognito等のBearer認証向け。指定した Authorization / カスタムヘッダは
+          crawl と全HTTPリクエストに付与されます。トークンは保存されず実行時のみ使用。
+        </div>
+        <div class="cfg-field">
+          <label>Bearerトークン</label>
+          <input type="password" id="cfgBearer" placeholder="eyJraWQiO...（Authorization: Bearer に展開）" autocomplete="off">
+        </div>
+        <div class="cfg-field">
+          <label>カスタムヘッダ（1行1件 &quot;Name: Value&quot;）</label>
+          <textarea id="cfgHeaders" rows="3" placeholder="X-Api-Key: abc123&#10;X-Tenant: acme"></textarea>
+          <div style="font-size:0.72rem;color:var(--text-muted);margin-top:4px">
+            ここで Authorization を明示した場合は Bearerトークンより優先されます。
+          </div>
+        </div>
+        <!-- header_refresh_cmd はサーバ配備時のRCE面になるためUIへ露出せず、静的ヘッダで代替する。 -->
         <div class="cfg-section-title" style="margin-top:16px">Cookie</div>
         <div class="cfg-field">
           <label>Cookie文字列 (session=xxx; token=yyy)</label>
@@ -1298,6 +1367,7 @@ body {
           <div class="cfg-toggle on" id="tog-enable_ai_analysis" onclick="toggleCfg('enable_ai_analysis')">AI総合分析レポート</div>
           <div class="cfg-toggle on" id="tog-enable_waf_detection" onclick="toggleCfg('enable_waf_detection')">WAF自動検出</div>
           <div class="cfg-toggle on" id="tog-enable_payload_learning" onclick="toggleCfg('enable_payload_learning')">ペイロード学習</div>
+          <div class="cfg-toggle on" id="tog-community_payloads" onclick="toggleCfg('community_payloads')">community ペイロード</div>
           <div class="cfg-toggle on" id="tog-enable_sitemap_crawl" onclick="toggleCfg('enable_sitemap_crawl')">サイトマップ/robots.txtクロール</div>
           <div class="cfg-toggle off" id="tog-spa_crawl" onclick="toggleCfg('spa_crawl')">SPA クロール (React/Vue/Angular)</div>
           <div class="cfg-toggle off" id="tog-interactive_crawl_review" onclick="toggleCfg('interactive_crawl_review')" title="巡回完了後に画面一覧を確認し、再巡回・手動巡回追加を選べる">🔍 巡回レビュー (検査前に画面確認)</div>
@@ -1384,8 +1454,10 @@ body {
           <div class="cfg-grid">
             <div class="cfg-field" style="grid-column:1/-1">
               <label>カスタムペイロードファイル</label>
-              <input type="text" id="cfgPayloadsFile" placeholder="/path/to/my_payloads.yaml">
-              <div class="cfg-field-hint">YAMLパスを指定。空欄＝デフォルトのペイロード辞書を使用。</div>
+              <input type="text" id="cfgPayloadsFile" placeholder="アップロードするか、サーバ側パスを入力">
+              <input type="file" id="upPayloadsFile" accept=".yaml,.yml,.json,.txt" style="font-size:0.75rem">
+              <span id="upPayloadsFileStatus" style="font-size:0.72rem;color:var(--text-muted)"></span>
+              <div class="cfg-field-hint">空欄＝デフォルトのペイロード辞書を使用。</div>
             </div>
           </div>
         </div>
@@ -1414,15 +1486,18 @@ body {
         <div class="cfg-grid">
           <div class="cfg-field" style="grid-column:1/-1">
             <label>手動巡回JSON (スキャン取り込み用)</label>
-            <input type="text" id="cfgManualCrawlFile" placeholder="flows/manual_crawl.json">
+            <input type="text" id="cfgManualCrawlFile" placeholder="アップロードするか、サーバ側パスを入力">
+            <input type="file" id="upManualCrawlFile" accept=".json" style="font-size:0.75rem">
+            <span id="upManualCrawlFileStatus" style="font-size:0.72rem;color:var(--text-muted)"></span>
           </div>
           <div class="cfg-field" style="grid-column:1/-1">
             <label>開始URL (空欄の場合は Basic タブの Target URL を使用)</label>
             <input type="text" id="manualCrawlStartUrl" placeholder="https://example.com/login">
           </div>
           <div class="cfg-field">
-            <label>保存先</label>
+            <label>サーバ側の保存先パス</label>
             <input type="text" id="manualCrawlOutput" value="flows/manual_crawl.json">
+            <div style="font-size:0.72rem;color:var(--text-muted);margin-top:4px">リモート配備では空欄（自動）を推奨します。</div>
           </div>
           <div class="cfg-field">
             <label>状態</label>
@@ -1928,8 +2003,10 @@ https://example.com/search?q=test" style="width:100%;font-family:monospace;font-
 
       <div class="cfg-section-title" style="margin-top:14px">手動巡回JSONの追加（任意）</div>
       <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-        <input type="text" id="crawlReviewManualFile" placeholder="flows/manual_crawl.json"
+        <input type="text" id="crawlReviewManualFile" placeholder="アップロードするか、サーバ側パスを入力"
           style="flex:1;padding:7px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:4px;min-width:240px;font-size:.82rem">
+        <input type="file" id="upCrawlReviewManualFile" accept=".json" style="font-size:0.75rem">
+        <span id="upCrawlReviewManualFileStatus" style="font-size:0.72rem;color:var(--text-muted)"></span>
         <button onclick="openManualCrawlFromReview()" style="padding:6px 12px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:4px;cursor:pointer;font-size:.78rem">
           手動巡回タブを開く
         </button>
@@ -2073,6 +2150,7 @@ const cfgToggles = {
   enable_ai_analysis: true,
   enable_waf_detection: true,
   enable_payload_learning: true,
+  community_payloads: true,
   enable_sitemap_crawl: true,
   enable_llm_web_browsing: false,
   ctf_mode: false,
@@ -2295,6 +2373,104 @@ function applyMfaImap(cfg) {
   set('cfgMfaEmailImapUser',  cfg.mfa_email_imap_user);
   set('cfgMfaEmailImapSsl',   cfg.mfa_email_imap_ssl);
   // パスワードはサーバから返さないため復元しない。
+}
+
+// ネイティブTOTP設定をまとめて収集する。URI/シークレットは保存直前に除外する。
+function mfaTotpFields() {
+  const g = id => (document.getElementById(id)?.value || '').trim();
+  return {
+    mfa_totp_uri:       g('cfgMfaTotpUri'),
+    mfa_totp_secret:    g('cfgMfaTotpSecret'),
+    mfa_totp_qr:        g('cfgMfaTotpQr'),
+    mfa_totp_digits:    g('cfgMfaTotpDigits'),
+    mfa_totp_period:    g('cfgMfaTotpPeriod'),
+    mfa_totp_algorithm: g('cfgMfaTotpAlgorithm'),
+  };
+}
+
+// "Name: Value" 複数行テキストをヘッダオブジェクトへ変換する。
+function parseHeaderText(text) {
+  const out = {};
+  (text || '').split('\n').forEach(line => {
+    const i = line.indexOf(':');
+    if (i > 0) {
+      const k = line.slice(0, i).trim();
+      const v = line.slice(i + 1).trim();
+      if (k) out[k] = v;
+    }
+  });
+  return out;
+}
+
+// Bearerとカスタムヘッダをまとめて収集する。Bearerは保存直前に除外する。
+function authHeaderFields() {
+  const bearer = (document.getElementById('cfgBearer')?.value || '').trim();
+  const headers = parseHeaderText(document.getElementById('cfgHeaders')?.value || '');
+  const out = {};
+  if (bearer) out.bearer = bearer;
+  if (Object.keys(headers).length) out.headers = headers;
+  return out;
+}
+
+function applyMfaTotp(cfg) {
+  if (!cfg) return;
+  const setVal = (id, v) => {
+    const el = document.getElementById(id);
+    if (el != null && v != null) el.value = v;
+  };
+  setVal('cfgMfaTotpUri', cfg.mfa_totp_uri);
+  setVal('cfgMfaTotpSecret', cfg.mfa_totp_secret);
+  setVal('cfgMfaTotpQr', cfg.mfa_totp_qr);
+  setVal('cfgMfaTotpDigits', cfg.mfa_totp_digits);
+  setVal('cfgMfaTotpPeriod', cfg.mfa_totp_period);
+  setVal('cfgMfaTotpAlgorithm', cfg.mfa_totp_algorithm);
+}
+
+function applyAuthHeaders(cfg) {
+  if (!cfg) return;
+  const setVal = (id, v) => {
+    const el = document.getElementById(id);
+    if (el != null && v != null) el.value = v;
+  };
+  if (cfg.bearer != null) setVal('cfgBearer', cfg.bearer);
+  if (cfg.headers && typeof cfg.headers === 'object') {
+    setVal('cfgHeaders', Object.entries(cfg.headers).map(([k, v]) => `${k}: ${v}`).join('\n'));
+  } else if (typeof cfg.headers === 'string') {
+    setVal('cfgHeaders', cfg.headers);
+  }
+}
+
+async function uploadFile(file) {
+  const fd = new FormData();
+  fd.append('file', file);
+  const res = await fetch('/api/v1/upload', {method: 'POST', body: fd});
+  if (!res.ok) {
+    let msg = 'アップロード失敗';
+    try { msg = (await res.json()).error || msg; } catch (e) {}
+    throw new Error(msg);
+  }
+  return (await res.json()).path;
+}
+
+// 選択ファイルをアップロードし、engineへ渡すサーバ側パスをテキスト欄へ反映する。
+function wireUpload(fileInputId, targetTextId, statusId) {
+  const fi = document.getElementById(fileInputId);
+  if (!fi) return;
+  fi.addEventListener('change', async () => {
+    const f = fi.files && fi.files[0];
+    if (!f) return;
+    const st = statusId ? document.getElementById(statusId) : null;
+    if (st) st.textContent = 'アップロード中…';
+    try {
+      const path = await uploadFile(f);
+      const target = document.getElementById(targetTextId);
+      if (target) target.value = path;
+      if (st) st.textContent = '✓ ' + f.name;
+    } catch (e) {
+      if (st) st.textContent = '✗ ' + e.message;
+      else alert(e.message);
+    }
+  });
 }
 
 function renderManualCrawlStatus(status) {
@@ -2534,6 +2710,7 @@ function submitScanConfig() {
     enable_ai_analysis:    cfgToggles.enable_ai_analysis,
     enable_waf_detection:  cfgToggles.enable_waf_detection,
     enable_payload_learning: cfgToggles.enable_payload_learning,
+    enable_community_payloads: cfgToggles.community_payloads,
     enable_sitemap_crawl:  cfgToggles.enable_sitemap_crawl,
     enable_llm_web_browsing: cfgToggles.enable_llm_web_browsing,
     ctf_mode:    cfgToggles.ctf_mode,
@@ -2560,6 +2737,8 @@ function submitScanConfig() {
     mfa_field:   document.getElementById('cfgMfaField').value.trim(),
     mfa_email_account: document.getElementById('cfgMfaEmailAccount').value.trim(),
     ...mfaImapFields(),
+    ...mfaTotpFields(),
+    ...authHeaderFields(),
     ...mfaImapPassword(),
     cookies:     document.getElementById('cfgCookies').value.trim(),
     low_priv_cookies: document.getElementById('cfgLowPrivCookies').value.trim(),
@@ -2601,7 +2780,7 @@ function submitScanConfig() {
 // ─── Config Export / Import ─────────────────────────────────────
 function _collectFullConfigForExport() {
   const collect = id => (document.getElementById(id)?.value ?? '');
-  return {
+  const cfg = {
     _meta: {
       tool: 'WScan',
       kind: 'wscan-scan-config',
@@ -2641,6 +2820,8 @@ function _collectFullConfigForExport() {
     mfa_field: collect('cfgMfaField'),
     mfa_email_account: collect('cfgMfaEmailAccount'),
     ...mfaImapFields(),
+    ...mfaTotpFields(),
+    ...authHeaderFields(),
     cookies: collect('cfgCookies'),
     low_priv_cookies: collect('cfgLowPrivCookies'),
     auto_register_count: collect('cfgAutoRegisterCount'),
@@ -2654,6 +2835,11 @@ function _collectFullConfigForExport() {
     flows: collectFlows(),
     accounts: (typeof collectAccounts === 'function') ? collectAccounts() : [],
   };
+  // 長期保存するJSONにはTOTP登録情報とBearerを含めない。
+  delete cfg.mfa_totp_uri;
+  delete cfg.mfa_totp_secret;
+  delete cfg.bearer;
+  return cfg;
 }
 
 function _downloadJson(obj, filename) {
@@ -2736,6 +2922,8 @@ function applyImportedConfig(cfg) {
   setVal('cfgMfaField', cfg.mfa_field);
   setVal('cfgMfaEmailAccount', cfg.mfa_email_account);
   applyMfaImap(cfg);
+  applyMfaTotp(cfg);
+  applyAuthHeaders(cfg);
   setVal('cfgCookies', cfg.cookies);
   setVal('cfgLowPrivCookies', cfg.low_priv_cookies);
   setVal('cfgAutoRegisterCount', cfg.auto_register_count);
@@ -2774,6 +2962,14 @@ function applyImportedConfig(cfg) {
 
 function initConfigOverlay() {
   initCheckGroups();
+  wireUpload('upTlsClientCert', 'cfgTlsClientCert', 'upTlsClientCertStatus');
+  wireUpload('upTlsClientKey', 'cfgTlsClientKey', 'upTlsClientKeyStatus');
+  wireUpload('upTlsClientPfx', 'cfgTlsClientPfx', 'upTlsClientPfxStatus');
+  wireUpload('upTlsCaCert', 'cfgTlsCaCert', 'upTlsCaCertStatus');
+  wireUpload('upPayloadsFile', 'cfgPayloadsFile', 'upPayloadsFileStatus');
+  wireUpload('upManualCrawlFile', 'cfgManualCrawlFile', 'upManualCrawlFileStatus');
+  wireUpload('upCrawlReviewManualFile', 'crawlReviewManualFile', 'upCrawlReviewManualFileStatus');
+  wireUpload('upMfaTotpQr', 'cfgMfaTotpQr', 'upMfaTotpQrStatus');
   // Read current port from URL
   const port = location.port || '8765';
   const portEl = document.getElementById('cfgPortDisp');
@@ -2866,6 +3062,8 @@ function saveConfigToStorage() {
       mfa_field: document.getElementById('cfgMfaField').value,
       mfa_email_account: document.getElementById('cfgMfaEmailAccount').value,
       ...mfaImapFields(),
+      ...mfaTotpFields(),
+      ...authHeaderFields(),
       cookies: document.getElementById('cfgCookies').value,
       exclude_fields: document.getElementById('cfgExcludeFields').value,
       exclude_urls: document.getElementById('cfgExcludeUrls').value,
@@ -2877,6 +3075,10 @@ function saveConfigToStorage() {
       checks: getSelectedChecks(),
       flows: collectFlows(),
     };
+    // localStorageにもTOTP登録情報とBearerを残さない。
+    delete cfg.mfa_totp_uri;
+    delete cfg.mfa_totp_secret;
+    delete cfg.bearer;
     localStorage.setItem('wscan_config', JSON.stringify(cfg));
   } catch(e) {}
 }
@@ -2918,6 +3120,8 @@ function loadConfigFromStorage() {
     if (cfg.mfa_field) document.getElementById('cfgMfaField').value = cfg.mfa_field;
     if (cfg.mfa_email_account !== undefined) document.getElementById('cfgMfaEmailAccount').value = cfg.mfa_email_account || '';
     applyMfaImap(cfg);
+    applyMfaTotp(cfg);
+    applyAuthHeaders(cfg);
     if (cfg.cookies) document.getElementById('cfgCookies').value = cfg.cookies;
     if (cfg.exclude_fields) document.getElementById('cfgExcludeFields').value = cfg.exclude_fields;
     if (cfg.exclude_urls) document.getElementById('cfgExcludeUrls').value = cfg.exclude_urls;
@@ -2978,6 +3182,8 @@ async function loadDefaultConfigFromServer() {
     if (cfg.mfa_field) document.getElementById('cfgMfaField').value = cfg.mfa_field;
     if (cfg.mfa_email_account !== undefined) document.getElementById('cfgMfaEmailAccount').value = cfg.mfa_email_account || '';
     applyMfaImap(cfg);
+    applyMfaTotp(cfg);
+    applyAuthHeaders(cfg);
     if (cfg.exclude_fields) document.getElementById('cfgExcludeFields').value = cfg.exclude_fields;
     if (cfg.exclude_urls) document.getElementById('cfgExcludeUrls').value = cfg.exclude_urls;
     if (cfg.manual_crawl_file) document.getElementById('cfgManualCrawlFile').value = cfg.manual_crawl_file;
@@ -4570,6 +4776,8 @@ function submitHybridScan() {
     mfa_field:    (document.getElementById('cfgMfaField')?.value || '').trim(),
     mfa_email_account: (document.getElementById('cfgMfaEmailAccount')?.value || '').trim(),
     ...mfaImapFields(),
+    ...mfaTotpFields(),
+    ...authHeaderFields(),
     ...mfaImapPassword(),
     cookies:      (document.getElementById('cfgCookies')?.value || '').trim(),
     llm:          document.getElementById('cfgLlm')?.value || 'none',
@@ -4585,6 +4793,7 @@ function submitHybridScan() {
     target_urls:  (document.getElementById('cfgTargetUrls')?.value || '').split('\n').map(s=>s.trim()).filter(Boolean),
     access_urls:  (document.getElementById('cfgAccessUrls')?.value || '').split('\n').map(s=>s.trim()).filter(Boolean),
     fast_mode:    cfgToggles.fast_mode,
+    enable_community_payloads: cfgToggles.community_payloads,
     max_payloads: parseInt(document.getElementById('cfgMaxPayloads')?.value) || 0,
   };
   state.ws.send(JSON.stringify({ action: 'start_scan', config }));

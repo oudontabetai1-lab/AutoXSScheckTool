@@ -1,18 +1,18 @@
-"""MFA（多要素認証）コード取得 — 外部 MCP サーバ経由。
+"""MFA（多要素認証）コード取得 — ネイティブ TOTP / 外部 MCP 対応。
 
 認可済みターゲットへの「認証付きスキャン」で、ログイン時に要求される
 ワンタイムコード（TOTP / メール送付のコード）を自動入力するための補助。
-コード取得は外部 MCP サーバへ委譲する:
+TOTP は RFC 6238 によるネイティブ生成を優先し、外部 MCP にも対応する:
 
-- TOTP: ``mcp-totp-authenticator`` (Node) … ``get_totp_code`` でコード生成。
+- TOTP: otpauth URI / QR / 生 Base32、または ``mcp-totp-authenticator``。
 - メール: ``mcp-email-server`` (Python) … 受信メールを取得しコードを抽出。
 
 設計方針（CLAUDE.md の不変条件に準拠）:
 - 反射文脈の検出やコード抽出など **判定ロジックは純粋関数**に分離し、
   ネットワーク／MCP 非依存で単体テストできる（``extract_otp`` /
   ``looks_like_mfa_page`` / ``collect_tool_text`` / ``parse_command``）。
-- TOTP シークレットやメール認証情報など **秘匿情報は環境変数**で外部 MCP に
-  渡す（このコード／設定ファイルに埋め込まない）。``MFAConfig.from_env``。
+- TOTP シークレットやメール認証情報など **秘匿情報は環境変数または都度指定**で
+  渡し、設定ファイルへ保存しない。``MFAConfig.from_env``。
 - MCP 接続（stdio クライアント）は失敗しても例外を握りつぶし ``None`` を返す。
   ログインの従来挙動（MFA 無し）を壊さない。
 """
@@ -311,6 +311,14 @@ class MFAConfig:
     totp_label: str = ""
     totp_label_arg: str = "account_label"   # gosusnkr/mcp-totp-authenticator の get_totp_code
 
+    # ネイティブ TOTP（RFC 6238, 外部 MCP 不要）。URI/secret/QR のいずれかで有効。
+    totp_secret: str = ""                    # 生 Base32
+    totp_uri: str = ""                       # otpauth://totp/...
+    totp_qr: str = ""                        # QR 画像パス
+    totp_digits: int = 6
+    totp_period: int = 30
+    totp_algorithm: str = "SHA1"
+
     # メール (mcp-email-server / ai-zerolab)
     # 受信箱はメタデータ一覧 → 本文取得の 2 段で読む（list-then-fetch）。
     # 実在ツール: list_emails_metadata / get_emails_content（いずれも account_name 必須）。
@@ -347,9 +355,14 @@ class MFAConfig:
         return self.email_account or self.email_address
 
     @property
+    def has_native_totp(self) -> bool:
+        """ネイティブ TOTP の入力が一つ以上設定されているかを返す。"""
+        return bool(self.totp_uri or self.totp_secret or self.totp_qr)
+
+    @property
     def enabled(self) -> bool:
         if self.type == "totp":
-            return bool(self.totp_command and self.totp_args)
+            return self.has_native_totp or bool(self.totp_command and self.totp_args)
         if self.type == "email":
             # account_name（またはアドレス）が無いと list/get が必ず失敗するため必須扱い。
             return bool(self.email_command and self.email_args and self.resolved_email_account)
@@ -371,6 +384,14 @@ class MFAConfig:
         def _f(key: str, default: float) -> float:
             try:
                 return float(e.get(key, default))
+            except (TypeError, ValueError):
+                return default
+
+        def _i(key: str, default: int) -> int:
+            """整数設定を override、env、既定値の順に安全に解決する。"""
+            value = ov.get(_short(key)) if _short(key) in ov else e.get(key, default)
+            try:
+                return int(value)
             except (TypeError, ValueError):
                 return default
 
@@ -408,6 +429,12 @@ class MFAConfig:
             totp_label=_s("WSCAN_MFA_TOTP_LABEL", ""),
             totp_label_arg=_s("WSCAN_MFA_TOTP_LABEL_ARG", "account_label")
             or "account_label",
+            totp_secret=_s("WSCAN_MFA_TOTP_SECRET", ""),
+            totp_uri=_s("WSCAN_MFA_TOTP_URI", ""),
+            totp_qr=_s("WSCAN_MFA_TOTP_QR", ""),
+            totp_digits=_i("WSCAN_MFA_TOTP_DIGITS", 6),
+            totp_period=_i("WSCAN_MFA_TOTP_PERIOD", 30),
+            totp_algorithm=(_s("WSCAN_MFA_TOTP_ALGORITHM", "SHA1") or "SHA1").upper(),
             email_command=_s("WSCAN_MFA_EMAIL_COMMAND", "uvx") or "uvx",
             email_args=parse_command(
                 e.get("WSCAN_MFA_EMAIL_ARGS", "mcp-email-server@latest stdio")
@@ -437,6 +464,11 @@ class MFAConfig:
             email_timeout=_f("WSCAN_MFA_EMAIL_TIMEOUT", 60.0),
             email_interval=_f("WSCAN_MFA_EMAIL_INTERVAL", 5.0),
         )
+        if cfg.totp_algorithm not in ("SHA1", "SHA256", "SHA512"):
+            cfg.totp_algorithm = "SHA1"
+        # TOTP 入力だけを指定した場合は自動で有効化する。明示 type は尊重する。
+        if "type" not in ov and "WSCAN_MFA_TYPE" not in e and cfg.has_native_totp:
+            cfg.type = "totp"
         return cfg
 
 
@@ -491,7 +523,7 @@ async def _call_mcp_tool(
 
 
 class MFASolver:
-    """設定済みの外部 MCP からワンタイムコードを取得する。"""
+    """ネイティブ TOTP または外部 MCP からワンタイムコードを取得する。"""
 
     def __init__(self, config: MFAConfig):
         self.config = config
@@ -563,6 +595,32 @@ class MFASolver:
 
     async def _solve_totp(self) -> Optional[str]:
         cfg = self.config
+        if cfg.has_native_totp:
+            try:
+                from .totp import generate_totp, resolve_totp_secret
+
+                resolved = resolve_totp_secret(
+                    uri=cfg.totp_uri,
+                    secret=cfg.totp_secret,
+                    qr=cfg.totp_qr,
+                    digits=cfg.totp_digits,
+                    period=cfg.totp_period,
+                    algorithm=cfg.totp_algorithm,
+                )
+                if resolved:
+                    code = generate_totp(
+                        resolved["secret"],
+                        digits=resolved["digits"],
+                        period=resolved["period"],
+                        algorithm=resolved["algorithm"],
+                    )
+                    if code:
+                        return code
+            except Exception:
+                pass
+            # ネイティブ入力を解決できなければ、設定済み MCP のみ試す。
+            if not (cfg.totp_command and cfg.totp_args):
+                return None
         arguments: dict = {}
         if cfg.totp_label:
             arguments[cfg.totp_label_arg] = cfg.totp_label

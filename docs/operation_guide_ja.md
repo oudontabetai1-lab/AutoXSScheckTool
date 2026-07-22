@@ -112,6 +112,15 @@ python3 main.py scan https://app.example.com \
 
 ### Authorization ヘッダを使う
 
+この節は確実性を重視する通常ツール層（`scan`）の認証付きスキャン補助です。Cognito などの Bearer 認証は、静的トークンをブラウザ巡回と httpx の全リクエストへ付ける `--bearer` で簡潔に指定できます。
+
+```bash
+export WSCAN_BEARER='<token>'
+python3 main.py scan https://api.example.com --bearer "$WSCAN_BEARER"
+```
+
+環境変数は `WSCAN_BEARER` / `WSCAN_AUTH_TOKEN` に対応します。従来のヘッダ指定も利用でき、明示した Authorization を優先します。
+
 ```bash
 python3 main.py scan https://api.example.com \
   -H "Authorization: Bearer eyJ..." \
@@ -125,6 +134,20 @@ python3 main.py scan https://api.example.com --header-file headers.yaml
 ```
 
 トークンが短時間で切れる場合は、`--header-refresh-cmd` と `--header-refresh-interval` を使って更新できます。
+
+### ネイティブ TOTP を使う
+
+通常ツール層（`scan`）のログイン補助として、`otpauth://` URI、生 Base32、QR 画像から TOTP を生成できます。URI だけを渡した場合も TOTP 方式へ自動昇格します。
+
+```bash
+export WSCAN_MFA_TOTP_URI='otpauth://totp/Example:ops?secret=<base32-secret>&issuer=Example'
+python3 main.py scan https://app.example.com \
+  --login-url https://app.example.com/login \
+  --auth-user ops --auth-pass 'p@ss' \
+  --mfa-type totp --mfa-totp-uri "$WSCAN_MFA_TOTP_URI"
+```
+
+`--mfa-totp-secret BASE32` または `--mfa-totp-qr code.png` でも指定できます。QR 読み取りには任意依存の opencv（`pip install opencv-python-headless`）が必要です。シークレット、URI、Bearer トークンは保存されないため、毎回 CLI または環境変数で渡してください。
 
 ## 5. 検査強度の決め方
 

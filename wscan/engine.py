@@ -364,6 +364,12 @@ class ScanEngine:
         login_success_indicator: str = "",
         mfa_type: Optional[str] = None,
         mfa_field: str = "",
+        mfa_totp_secret: str = "",
+        mfa_totp_uri: str = "",
+        mfa_totp_qr: str = "",
+        mfa_totp_digits: int = 0,
+        mfa_totp_period: int = 0,
+        mfa_totp_algorithm: str = "",
         mfa_email_account: str = "",
         mfa_email_imap: Optional[dict] = None,
         learning_file: Optional[str] = None,
@@ -642,7 +648,7 @@ class ScanEngine:
             refresh_cmd=header_refresh_cmd or "",
             refresh_interval=float(header_refresh_interval or 0.0),
         )
-        # MFA（2FA）ソルバ: ログイン時のワンタイムコードを外部 MCP から取得。
+        # MFA（2FA）ソルバ: ネイティブ TOTP または外部 MCP からコードを取得。
         # 種別/欄は env（WSCAN_MFA_*）が既定。UI/CLI/config が明示的に値を渡した
         # ときはそれを優先する。mfa_type=None は「未指定→env に委ねる」、空文字 ""
         # は「明示的に無効」を意味し、env に WSCAN_MFA_TYPE があっても上書き無効化する。
@@ -652,6 +658,18 @@ class ScanEngine:
             _mfa_overrides["type"] = mfa_type or "none"
         if mfa_field:
             _mfa_overrides["field"] = mfa_field
+        if mfa_totp_secret:
+            _mfa_overrides["totp_secret"] = mfa_totp_secret
+        if mfa_totp_uri:
+            _mfa_overrides["totp_uri"] = mfa_totp_uri
+        if mfa_totp_qr:
+            _mfa_overrides["totp_qr"] = mfa_totp_qr
+        if mfa_totp_digits:
+            _mfa_overrides["totp_digits"] = mfa_totp_digits
+        if mfa_totp_period:
+            _mfa_overrides["totp_period"] = mfa_totp_period
+        if mfa_totp_algorithm:
+            _mfa_overrides["totp_algorithm"] = mfa_totp_algorithm
         # MFA メールのアカウント名（通常はメールアドレス）。CLI/UI/config で
         # 自由に指定でき、空なら WSCAN_MFA_EMAIL_ACCOUNT env にフォールバック
         # （既存設定をそのまま利用可能）。

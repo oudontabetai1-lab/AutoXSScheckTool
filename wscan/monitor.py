@@ -8,16 +8,18 @@ import datetime
 import hashlib
 import json
 import os
+import re
 import secrets
 import shutil
 import tempfile
 import time
+import uuid
 import zipfile
 from pathlib import Path
 from typing import Set, Any, Optional
 from urllib.parse import urlparse
 
-from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, File, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import (
     HTMLResponse,
     JSONResponse,
@@ -34,10 +36,34 @@ TEMPLATES_DIR = Path(__file__).parent.parent / "templates"
 # Defined here to avoid importing the heavy engine module (pulls in Playwright).
 OUTPUT_BASE = Path(__file__).parent.parent / "output"
 
+_UPLOAD_MAX_BYTES = 8 * 1024 * 1024
+_UPLOAD_ALLOWED_EXT = {
+    ".crt", ".pem", ".cer", ".key", ".p12", ".pfx", ".yaml", ".yml",
+    ".json", ".txt", ".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif",
+}
+
 # Name of the session cookie set after a successful token login.
 SESSION_COOKIE = "wscan_session"
 # Paths that never require authentication (health checks, the login page itself).
 _PUBLIC_PATHS = {"/health", "/login", "/favicon.ico"}
+
+
+def _upload_destination(filename: str) -> tuple[str, Path, Path]:
+    """アップロード名を安全化し、uploads 配下の保存先を返す。"""
+    # ブラウザが Windows 形式のフルパスを送る場合も basename だけを使う。
+    name = os.path.basename((filename or "upload").replace("\\", "/"))
+    ext = os.path.splitext(name)[1].lower()
+    if ext not in _UPLOAD_ALLOWED_EXT:
+        raise ValueError(f"許可されない拡張子: {ext}")
+    safe = re.sub(r"[^A-Za-z0-9._-]", "_", name)[:80] or "upload"
+    updir = (OUTPUT_BASE / "uploads").resolve()
+    dest = (updir / f"{uuid.uuid4().hex}_{safe}").resolve()
+    # _scan_dir と同じ resolve + relative_to で保存先トラバーサルを拒否する。
+    try:
+        dest.relative_to(updir)
+    except ValueError as exc:
+        raise ValueError("invalid path") from exc
+    return safe, updir, dest
 
 
 def _session_value(token: str) -> str:
@@ -484,6 +510,34 @@ class MonitorServer:
         @app.get("/health")
         async def health():
             return {"status": "ok", "clients": len(self.clients)}
+
+        @app.post("/api/v1/upload")
+        async def api_upload(request: Request, file: UploadFile = File(...)):
+            """UIで選択した入力ファイルを認証済みサーバーへ保存する。"""
+            try:
+                safe, updir, dest = _upload_destination(file.filename or "upload")
+            except ValueError as exc:
+                await file.close()
+                return JSONResponse({"error": str(exc)}, status_code=400)
+
+            try:
+                raw = await file.read(_UPLOAD_MAX_BYTES + 1)
+                if len(raw) > _UPLOAD_MAX_BYTES:
+                    return JSONResponse(
+                        {"error": "ファイルが大きすぎます（最大8MB）"},
+                        status_code=413,
+                    )
+                updir.mkdir(parents=True, exist_ok=True)
+                dest.write_bytes(raw)
+            except Exception:
+                # ファイル内容や証明書情報を例外メッセージ経由で返さない。
+                return JSONResponse({"error": "アップロードの保存に失敗しました"}, status_code=500)
+            finally:
+                await file.close()
+
+            # 監査にはファイル名だけを記録し、内容・保存パス・秘匿値は残さない。
+            self._audit("upload", self._client_ip(request), safe)
+            return JSONResponse({"path": str(dest), "name": safe, "size": len(raw)})
 
         @app.get("/api/v1/settings")
         async def api_get_settings():
@@ -1043,6 +1097,9 @@ class MonitorServer:
             return scans
         for d in OUTPUT_BASE.iterdir():
             if not d.is_dir():
+                continue
+            # UI入力ファイルの保管領域はスキャン履歴・保持期限の対象にしない。
+            if d.name == "uploads":
                 continue
             info: dict[str, Any] = {
                 "id": d.name,

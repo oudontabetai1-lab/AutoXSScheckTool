@@ -189,6 +189,51 @@ def test_mfaconfig_totp_without_args_disabled():
     assert cfg.enabled is False
 
 
+def test_mfaconfig_native_totp_uri_auto_enables():
+    cfg = mfa.MFAConfig.from_env(
+        env={},
+        overrides={"totp_uri": "otpauth://totp/x?secret=GEZDGNBVGY3TQOJQ"},
+    )
+    assert cfg.type == "totp"
+    assert cfg.has_native_totp is True
+    assert cfg.enabled is True
+
+
+def test_mfaconfig_native_totp_secret_enabled_with_explicit_type():
+    cfg = mfa.MFAConfig.from_env(
+        env={},
+        overrides={
+            "type": "totp",
+            "totp_secret": "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ",
+        },
+    )
+    assert cfg.has_native_totp is True
+    assert cfg.enabled is True
+
+
+def test_mfaconfig_native_totp_numeric_overrides_and_algorithm():
+    cfg = mfa.MFAConfig.from_env(
+        env={"WSCAN_MFA_TOTP_DIGITS": "6", "WSCAN_MFA_TOTP_PERIOD": "30"},
+        overrides={
+            "totp_secret": "GEZDGNBVGY3TQOJQ",
+            "totp_digits": "8",
+            "totp_period": 45,
+            "totp_algorithm": "sha256",
+        },
+    )
+    assert cfg.totp_digits == 8
+    assert cfg.totp_period == 45
+    assert cfg.totp_algorithm == "SHA256"
+
+
+def test_mfaconfig_native_totp_respects_explicit_type():
+    cfg = mfa.MFAConfig.from_env(
+        env={},
+        overrides={"type": "email", "totp_secret": "GEZDGNBVGY3TQOJQ"},
+    )
+    assert cfg.type == "email"
+
+
 def test_mfaconfig_email_requires_account():
     # account_name が無いと list/get が必ず失敗するため無効扱い
     cfg = mfa.MFAConfig.from_env(env={"WSCAN_MFA_TYPE": "email"})
@@ -505,3 +550,55 @@ def test_solver_prime_noop_for_totp():
     # TOTP では prime は何もしない（例外も出さない）。
     asyncio.run(solver.prime())
     assert solver._email_baseline is None
+
+
+def test_solver_native_totp_is_deterministic_without_mcp(monkeypatch):
+    import asyncio
+
+    from wscan import totp
+
+    cfg = mfa.MFAConfig.from_env(
+        env={},
+        overrides={
+            "type": "totp",
+            "totp_secret": "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ",
+            "totp_digits": 8,
+        },
+    )
+
+    async def _unexpected_mcp(*_args, **_kwargs):
+        raise AssertionError("ネイティブ成功時に MCP を呼んではならない")
+
+    monkeypatch.setattr(totp.time, "time", lambda: 59)
+    monkeypatch.setattr(mfa, "_call_mcp_tool", _unexpected_mcp)
+    assert asyncio.run(mfa.MFASolver(cfg)._solve_totp()) == "94287082"
+
+
+def test_mfaconfig_legacy_totp_mcp_remains_enabled():
+    cfg = mfa.MFAConfig.from_env(
+        env={
+            "WSCAN_MFA_TYPE": "totp",
+            "WSCAN_MFA_TOTP_COMMAND": "node",
+            "WSCAN_MFA_TOTP_ARGS": "/srv/dist/index.js",
+        }
+    )
+    assert cfg.has_native_totp is False
+    assert cfg.enabled is True
+
+
+def test_engine_passes_native_totp_overrides():
+    from wscan.engine import ScanEngine
+
+    engine = ScanEngine(
+        url="http://example.test",
+        mfa_totp_secret="GEZDGNBVGY3TQOJQ",
+        mfa_totp_digits=8,
+        mfa_totp_period=45,
+        mfa_totp_algorithm="SHA256",
+    )
+    assert engine._mfa_config.type == "totp"
+    assert engine._mfa_config.totp_secret == "GEZDGNBVGY3TQOJQ"
+    assert engine._mfa_config.totp_digits == 8
+    assert engine._mfa_config.totp_period == 45
+    assert engine._mfa_config.totp_algorithm == "SHA256"
+    assert engine._mfa_solver is not None

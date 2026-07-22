@@ -172,5 +172,59 @@ class ServerGuardEndpointTests(unittest.TestCase):
         self.assertTrue(all(x == 401 for x in codes[:-1]))
 
 
+class UploadEndpointTests(unittest.TestCase):
+    """認証済みアップロードの拡張子・容量・保存先ガードを検証する。"""
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmpdir.name)
+        self._orig = monitor_mod.OUTPUT_BASE
+        monitor_mod.OUTPUT_BASE = self.tmp
+        self.srv = MonitorServer(port=0, auth_token="upload-test-token")
+        self.client = TestClient(self.srv.app)
+        self.auth = {"Authorization": "Bearer upload-test-token"}
+
+    def tearDown(self):
+        monitor_mod.OUTPUT_BASE = self._orig
+        self._tmpdir.cleanup()
+
+    def test_upload_requires_auth_and_rejects_extension(self):
+        files = {"file": ("payload.exe", b"not executable", "application/octet-stream")}
+        self.assertEqual(self.client.post("/api/v1/upload", files=files).status_code, 401)
+        response = self.client.post("/api/v1/upload", files=files, headers=self.auth)
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("許可されない拡張子", response.json()["error"])
+        self.assertFalse((self.tmp / "uploads").exists())
+
+    def test_upload_rejects_over_8mb(self):
+        files = {
+            "file": (
+                "too-large.json",
+                b"x" * (monitor_mod._UPLOAD_MAX_BYTES + 1),
+                "application/json",
+            )
+        }
+        response = self.client.post("/api/v1/upload", files=files, headers=self.auth)
+        self.assertEqual(response.status_code, 413)
+        self.assertIn("最大8MB", response.json()["error"])
+
+    def test_upload_sanitizes_name_and_stays_under_uploads(self):
+        response = self.client.post(
+            "/api/v1/upload",
+            files={"file": ("../認証 cert.pem", b"certificate", "application/x-pem-file")},
+            headers=self.auth,
+        )
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["name"], "___cert.pem")
+        dest = Path(body["path"]).resolve()
+        dest.relative_to((self.tmp / "uploads").resolve())
+        self.assertEqual(dest.read_bytes(), b"certificate")
+        self.assertNotIn("uploads", [scan["id"] for scan in self.srv._list_scans()])
+        audit = self.srv.read_audit(1)[0]
+        self.assertEqual(audit["detail"], body["name"])
+        self.assertNotIn(str(dest), audit["detail"])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -133,6 +133,14 @@ def _load_config(path: Path = _CONFIG_PATH) -> dict:
     cfg["mfa_email_imap_user"]     = str(a.get("mfa_email_imap_user", "") or "")
     cfg["mfa_email_imap_password"] = str(a.get("mfa_email_imap_password", "") or "")
     cfg["mfa_email_imap_ssl"]      = a.get("mfa_email_imap_ssl", None)
+    cfg["mfa_totp_uri"]            = str(a.get("mfa_totp_uri", "") or "")
+    cfg["mfa_totp_secret"]         = str(a.get("mfa_totp_secret", "") or "")
+    cfg["mfa_totp_qr"]             = str(a.get("mfa_totp_qr", "") or "")
+    cfg["mfa_totp_digits"]         = str(a.get("mfa_totp_digits", "") or "")
+    cfg["mfa_totp_period"]         = str(a.get("mfa_totp_period", "") or "")
+    cfg["mfa_totp_algorithm"]      = str(a.get("mfa_totp_algorithm", "") or "")
+    cfg["bearer_token"]            = str(a.get("bearer_token", "") or "")
+    cfg["headers_text"]            = str(a.get("headers_text", "") or "")
 
     cfg["dom_xss"]                 = bool(f.get("dom_xss",          False))
     cfg["ai_analysis"]             = bool(f.get("ai_analysis",      True))
@@ -164,7 +172,7 @@ _CFG = _load_config()
 
 # 設定スナップショット等で永続化してはいけない秘匿フィールド。キー名に以下の
 # 語を含む値（パスワード/シークレット/トークン/APIキー）は伏字にする。
-_SECRET_KEY_TOKENS = ("password", "secret", "token", "api_key", "apikey")
+_SECRET_KEY_TOKENS = ("password", "secret", "token", "bearer", "api_key", "apikey")
 
 
 def _redact_secrets(cfg: dict) -> dict:
@@ -176,7 +184,13 @@ def _redact_secrets(cfg: dict) -> dict:
     redacted: dict = {}
     for key, value in (cfg or {}).items():
         lname = str(key).lower()
-        if value not in ("", None) and any(tok in lname for tok in _SECRET_KEY_TOKENS):
+        if lname == "headers" and isinstance(value, dict):
+            # ヘッダ名は診断に有用だが、値にはトークンや証明情報が含まれ得るため保存しない。
+            redacted[key] = {str(name): "***REDACTED***" for name in value}
+        elif lname == "mfa_totp_uri" and value not in ("", None):
+            # otpauth URI はクエリに Base32 シークレットを含むため値全体を伏字にする。
+            redacted[key] = "***REDACTED***"
+        elif value not in ("", None) and any(tok in lname for tok in _SECRET_KEY_TOKENS):
             redacted[key] = "***REDACTED***"
         else:
             redacted[key] = value
@@ -408,6 +422,18 @@ Examples:
         ),
     )
     scan.add_argument(
+        "--bearer", metavar="TOKEN",
+        default=os.environ.get(
+            "WSCAN_BEARER",
+            os.environ.get("WSCAN_AUTH_TOKEN", _CFG.get("bearer_token", "")),
+        ),
+        help=(
+            "Bearerトークンの近道。'Authorization: Bearer <TOKEN>' を全リクエスト"
+            "(crawl+httpx)へ付与。Cognito等のBearer認証向け。env WSCAN_BEARER / "
+            "WSCAN_AUTH_TOKEN。--header の Authorization を明示指定した場合はそちらが優先。"
+        ),
+    )
+    scan.add_argument(
         "--auth-user", metavar="USER", default=_CFG.get("auth_user", ""),
         help="Username/email for login form auto-fill",
     )
@@ -485,18 +511,50 @@ Examples:
         "--login-success", metavar="TEXT", default=_CFG.get("login_success_indicator", ""),
         help="Substring expected in the post-login URL or page to confirm success.",
     )
-    # MFA (2FA) automation via external MCP servers. Secrets live in env
-    # (TOTP_SECRET_* / MCP_EMAIL_SERVER_*); see README.
+    # MFA (2FA) automation. TOTP はネイティブ生成または外部 MCP、メールは外部 MCP。
+    # 秘匿情報は WSCAN_MFA_* 等の env または都度 CLI で渡す。
     scan.add_argument(
         "--mfa-type", metavar="KIND", choices=["totp", "email"],
         default=(_CFG.get("mfa_type") or None),
-        help="Solve login MFA via external MCP: 'totp' (mcp-totp-authenticator) "
-             "or 'email' (mcp-email-server). Configure via WSCAN_MFA_* env. "
-             "Unset → falls back to WSCAN_MFA_TYPE env.",
+        help="ログインMFA方式。'totp'（ネイティブまたはmcp-totp-authenticator）/ "
+             "'email'（mcp-email-server）。WSCAN_MFA_* envでも設定可能。"
+             "未指定時はWSCAN_MFA_TYPEへフォールバック。",
     )
     scan.add_argument(
         "--mfa-field", metavar="NAME", default=_CFG.get("mfa_field", ""),
         help="One-time-code input field name/id on the login form (default: otp).",
+    )
+    scan.add_argument(
+        "--mfa-totp-uri", metavar="URI",
+        default=os.environ.get("WSCAN_MFA_TOTP_URI", _CFG.get("mfa_totp_uri", "")),
+        help="TOTPの otpauth:// URI（Authenticator登録画面の「セットアップキー/URI」）。"
+             "env WSCAN_MFA_TOTP_URI。",
+    )
+    scan.add_argument(
+        "--mfa-totp-secret", metavar="BASE32",
+        default=os.environ.get(
+            "WSCAN_MFA_TOTP_SECRET", _CFG.get("mfa_totp_secret", "")
+        ),
+        help="TOTPの生Base32シークレット。env WSCAN_MFA_TOTP_SECRET。",
+    )
+    scan.add_argument(
+        "--mfa-totp-qr", metavar="FILE",
+        default=os.environ.get("WSCAN_MFA_TOTP_QR", _CFG.get("mfa_totp_qr", "")),
+        help="TOTPのQRコード画像ファイル（PNG等）。opencvが必要"
+             "（pip install opencv-python-headless）。env WSCAN_MFA_TOTP_QR。",
+    )
+    scan.add_argument(
+        "--mfa-totp-digits", metavar="N", type=int, default=0,
+        help="TOTP桁数（既定6, otpauth URI指定時はURI優先）。",
+    )
+    scan.add_argument(
+        "--mfa-totp-period", metavar="SEC", type=int, default=0,
+        help="TOTP周期秒（既定30, URI優先）。",
+    )
+    scan.add_argument(
+        "--mfa-totp-algorithm", metavar="ALG",
+        choices=["SHA1", "SHA256", "SHA512"], default="",
+        help="TOTPハッシュ（既定SHA1, URI優先）。",
     )
     scan.add_argument(
         "--mfa-email-account", metavar="EMAIL", default=_CFG.get("mfa_email_account", ""),
@@ -1462,8 +1520,8 @@ async def run_scan(args):
             f"privilege escalation testing[/cyan]"
         )
 
-    # Build custom HTTP header set: --header-file underneath, CLI -H values on top.
-    from wscan.header_manager import parse_header_args, load_header_file
+    # カスタムヘッダは header-file、Bearer、CLI -H の順に重ねる。
+    from wscan.header_manager import apply_bearer, load_header_file, parse_header_args
     _resolved_headers: dict = {}
     _hdr_file = getattr(args, "header_file", "") or ""
     if _hdr_file:
@@ -1471,7 +1529,17 @@ async def run_scan(args):
             _resolved_headers.update(load_header_file(_hdr_file))
         except Exception as _hex:
             console.print(f"[yellow]Warning: could not load header file: {_hex}[/yellow]")
+    _resolved_headers = apply_bearer(
+        _resolved_headers, getattr(args, "bearer", "") or ""
+    )
     _cli_headers = parse_header_args(getattr(args, "header", []) or [])
+    # CLI で明示した Authorization は大文字小文字にかかわらず最優先にする。
+    if any(str(key).lower() == "authorization" for key in _cli_headers):
+        _resolved_headers = {
+            key: value
+            for key, value in _resolved_headers.items()
+            if str(key).lower() != "authorization"
+        }
     _resolved_headers.update(_cli_headers)
     if _resolved_headers:
         console.print(
@@ -1530,6 +1598,12 @@ async def run_scan(args):
             # None=未指定(env に委ねる) / ""=明示無効 / "totp"|"email"=明示有効
             mfa_type=getattr(args, "mfa_type", None),
             mfa_field=getattr(args, "mfa_field", "") or "",
+            mfa_totp_secret=getattr(args, "mfa_totp_secret", "") or "",
+            mfa_totp_uri=getattr(args, "mfa_totp_uri", "") or "",
+            mfa_totp_qr=getattr(args, "mfa_totp_qr", "") or "",
+            mfa_totp_digits=getattr(args, "mfa_totp_digits", 0) or 0,
+            mfa_totp_period=getattr(args, "mfa_totp_period", 0) or 0,
+            mfa_totp_algorithm=getattr(args, "mfa_totp_algorithm", "") or "",
             mfa_email_account=getattr(args, "mfa_email_account", "") or "",
             mfa_email_imap={
                 "address": getattr(args, "mfa_email_address", "") or "",
@@ -1698,6 +1772,7 @@ async def run_serve(args):
     from rich.panel import Panel
     from wscan.monitor import MonitorServer
     from wscan.engine import ScanEngine
+    from wscan.header_manager import apply_bearer as _apply_bearer_to
 
     console = Console()
     port = args.port
@@ -1843,6 +1918,14 @@ async def run_serve(args):
         "mfa_email_imap_port": _CFG.get("mfa_email_imap_port", ""),
         "mfa_email_imap_user": _CFG.get("mfa_email_imap_user", ""),
         "mfa_email_imap_ssl": _CFG.get("mfa_email_imap_ssl", ""),
+        "mfa_totp_uri": _CFG.get("mfa_totp_uri", ""),
+        "mfa_totp_secret": _CFG.get("mfa_totp_secret", ""),
+        "mfa_totp_qr": _CFG.get("mfa_totp_qr", ""),
+        "mfa_totp_digits": _CFG.get("mfa_totp_digits", ""),
+        "mfa_totp_period": _CFG.get("mfa_totp_period", ""),
+        "mfa_totp_algorithm": _CFG.get("mfa_totp_algorithm", ""),
+        "bearer": _CFG.get("bearer_token", ""),
+        "headers": _CFG.get("headers_text", ""),
         "exclude_fields": ", ".join(_CFG.get("exclude_fields", []) or []),
         "exclude_urls": "\n".join(_CFG.get("exclude_urls", []) or []),
         "target_urls": "\n".join(_CFG.get("target_urls", []) or []),
@@ -1857,7 +1940,7 @@ async def run_serve(args):
             "enable_ai_analysis": _CFG.get("ai_analysis", True),
             "enable_waf_detection": _CFG.get("waf_detection", True),
             "enable_payload_learning": _CFG.get("payload_learning", True),
-            "enable_community_payloads": _CFG.get("community_payloads", True),
+            "community_payloads": _CFG.get("community_payloads", True),
             "enable_sitemap_crawl": _CFG.get("sitemap_crawl", True),
             "spa_crawl": _CFG.get("spa_crawl", False),
             "interactive_crawl_review": _CFG.get("interactive_crawl_review", False),
@@ -2049,6 +2132,12 @@ async def run_serve(args):
                         str(cfg.get("mfa_email_imap_ssl") or "").lower()
                     ),
                 },
+                mfa_totp_uri=cfg.get("mfa_totp_uri", "") or "",
+                mfa_totp_secret=cfg.get("mfa_totp_secret", "") or "",
+                mfa_totp_qr=cfg.get("mfa_totp_qr", "") or "",
+                mfa_totp_digits=int(cfg.get("mfa_totp_digits") or 0),
+                mfa_totp_period=int(cfg.get("mfa_totp_period") or 0),
+                mfa_totp_algorithm=cfg.get("mfa_totp_algorithm", "") or "",
                 payloads_file=cfg.get("payloads_file") or None,
                 learning_file=cfg.get("learning_file") or None,
                 output_dir=cfg.get("output_dir") or None,
@@ -2090,7 +2179,9 @@ async def run_serve(args):
                 seed_urls=seed_urls or None,
                 additional_report_findings=agent_findings or None,
                 manual_crawl_path=cfg.get("manual_crawl_file", "") or "",
-                headers=cfg.get("headers", {}) or {},
+                headers=_apply_bearer_to(
+                    cfg.get("headers", {}) or {}, cfg.get("bearer", "")
+                ),
                 header_refresh_cmd=cfg.get("header_refresh_cmd", "") or "",
                 header_refresh_interval=float(cfg.get("header_refresh_interval", 0.0) or 0.0),
             )

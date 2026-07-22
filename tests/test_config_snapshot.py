@@ -35,6 +35,22 @@ class RedactSecretsTests(unittest.TestCase):
         main._redact_secrets(cfg)
         self.assertEqual(cfg["mfa_email_imap_password"], "s3cret")
 
+    def test_redacts_dashboard_totp_bearer_and_header_values(self):
+        cfg = {
+            "mfa_totp_uri": "otpauth://totp/x?secret=BASE32",
+            "mfa_totp_secret": "BASE32",
+            "bearer": "access-token",
+            "headers": {"Authorization": "Bearer access-token", "X-Tenant": "acme"},
+        }
+        out = main._redact_secrets(cfg)
+        self.assertEqual(out["mfa_totp_uri"], "***REDACTED***")
+        self.assertEqual(out["mfa_totp_secret"], "***REDACTED***")
+        self.assertEqual(out["bearer"], "***REDACTED***")
+        self.assertEqual(
+            out["headers"],
+            {"Authorization": "***REDACTED***", "X-Tenant": "***REDACTED***"},
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

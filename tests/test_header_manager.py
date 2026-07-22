@@ -4,6 +4,7 @@ import unittest
 
 from wscan.header_manager import (
     HeaderManager,
+    apply_bearer,
     load_header_file,
     parse_header_args,
     parse_header_lines,
@@ -11,6 +12,18 @@ from wscan.header_manager import (
 
 
 class ParseTests(unittest.TestCase):
+    def test_apply_bearer_only_when_authorization_is_absent(self):
+        original = {"X-Tenant": "acme"}
+        self.assertEqual(
+            apply_bearer(original, " token "),
+            {"X-Tenant": "acme", "Authorization": "Bearer token"},
+        )
+        self.assertEqual(original, {"X-Tenant": "acme"})
+
+    def test_apply_bearer_preserves_existing_authorization_case_insensitively(self):
+        headers = {"authorization": "Basic existing"}
+        self.assertEqual(apply_bearer(headers, "new-token"), headers)
+
     def test_parse_header_args_basic(self):
         self.assertEqual(
             parse_header_args(["Authorization: Bearer abc", "X-Foo: bar"]),
