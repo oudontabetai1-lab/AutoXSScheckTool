@@ -51,6 +51,34 @@ class RedactSecretsTests(unittest.TestCase):
             {"Authorization": "***REDACTED***", "X-Tenant": "***REDACTED***"},
         )
 
+    def test_placeholder_blank_for_served_defaults(self):
+        # /api/config/defaults 用: 秘匿値は空文字にし、非秘匿フィールドは残す。
+        # （"***REDACTED***" だとフォーム欄にその文字列が入ってしまうため空にする）
+        cfg = {
+            "mfa_totp_secret": "BASE32",
+            "mfa_totp_uri": "otpauth://totp/x?secret=BASE32",
+            "bearer": "tok",
+            "auth_pass": "pw",
+            "cookies": "session=abc",
+            "headers": {"Authorization": "Bearer x"},
+            # 非秘匿は保持
+            "mfa_totp_digits": 8,
+            "mfa_totp_period": 45,
+            "mfa_totp_algorithm": "SHA256",
+            "url": "http://x.test/",
+        }
+        out = main._redact_secrets(cfg, placeholder="")
+        self.assertEqual(out["mfa_totp_secret"], "")
+        self.assertEqual(out["mfa_totp_uri"], "")
+        self.assertEqual(out["bearer"], "")
+        self.assertEqual(out["auth_pass"], "")
+        self.assertEqual(out["cookies"], "")
+        self.assertEqual(out["headers"], {"Authorization": ""})
+        self.assertEqual(out["mfa_totp_digits"], 8)
+        self.assertEqual(out["mfa_totp_period"], 45)
+        self.assertEqual(out["mfa_totp_algorithm"], "SHA256")
+        self.assertEqual(out["url"], "http://x.test/")
+
     def test_redacts_login_credentials_and_cookies_exact_keys(self):
         # 部分一致では拾えない明示キー。scan_started の再生・snapshot 経由で
         # ログイン PW / セッション Cookie が別クライアントへ漏れないようにする。

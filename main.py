@@ -178,27 +178,31 @@ _SECRET_KEY_TOKENS = ("password", "secret", "token", "bearer", "api_key", "apike
 _SECRET_EXACT_KEYS = ("auth_pass", "cookies", "low_priv_cookies")
 
 
-def _redact_secrets(cfg: dict) -> dict:
-    """秘匿値を伏字にした設定の浅いコピーを返す（ディスク保存・共有用）。
+def _redact_secrets(cfg: dict, placeholder: str = "***REDACTED***") -> dict:
+    """秘匿値を伏字にした設定の浅いコピーを返す（ディスク保存・共有・配信用）。
 
     ダッシュボードは IMAP アプリパスワード等を「送信のみ・非保存」として扱うため、
-    成果物（``scan_config.json``）へ平文で書き出さない。
+    成果物（``scan_config.json``）や再接続クライアントへ平文で書き出さない。
+
+    *placeholder* を ``""`` にすると値を空にできる。フォーム初期値
+    （``/api/config/defaults``。未認証 serve では誰でも読める）へ秘匿値を
+    載せないために使う（``"***REDACTED***"`` を入れると欄に文字列が入ってしまう）。
     """
     redacted: dict = {}
     for key, value in (cfg or {}).items():
         lname = str(key).lower()
         if lname == "headers" and isinstance(value, dict):
             # ヘッダ名は診断に有用だが、値にはトークンや証明情報が含まれ得るため保存しない。
-            redacted[key] = {str(name): "***REDACTED***" for name in value}
+            redacted[key] = {str(name): placeholder for name in value}
         elif lname == "mfa_totp_uri" and value not in ("", None):
             # otpauth URI はクエリに Base32 シークレットを含むため値全体を伏字にする。
-            redacted[key] = "***REDACTED***"
+            redacted[key] = placeholder
         elif lname in _SECRET_EXACT_KEYS and value not in ("", None):
             # 部分一致では拾えない明示キー（ログインPW・Cookie 等）を伏字にする。
             # scan_started の再生や snapshot でクレデンシャルが漏れないようにするため。
-            redacted[key] = "***REDACTED***"
+            redacted[key] = placeholder
         elif value not in ("", None) and any(tok in lname for tok in _SECRET_KEY_TOKENS):
-            redacted[key] = "***REDACTED***"
+            redacted[key] = placeholder
         else:
             redacted[key] = value
     return redacted
@@ -1962,6 +1966,11 @@ async def run_serve(args):
             "allow_state_changing_probes": _CFG.get("allow_state_changing_probes", False),
         },
     }
+    # /api/config/defaults はフォーム初期値として dashboard へ返るが、未認証 serve では
+    # 誰でも読める。config(wscan.yaml)に置かれた秘匿値（TOTP secret/URI・Bearer・
+    # ログインPW・Cookie 等）を空にして配信し、エンドポイント経由の漏洩を防ぐ
+    # （digits/period/algorithm 等の非秘匿フィールドは保持）。
+    monitor.default_scan_cfg = _redact_secrets(monitor.default_scan_cfg, placeholder="")
     # /api/auto-config エンドポイント用に LLM 設定をキャッシュ
     _llm_section = _CFG.get("llm", {}) if isinstance(_CFG.get("llm"), dict) else {}
     monitor.llm_cfg = {
