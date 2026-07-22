@@ -41,6 +41,9 @@ _UPLOAD_ALLOWED_EXT = {
     ".crt", ".pem", ".cer", ".key", ".p12", ".pfx", ".yaml", ".yml",
     ".json", ".txt", ".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif",
 }
+# OUTPUT_BASE 直下だが「スキャン成果物」ではない予約ディレクトリ。scan_id として
+# 解決させず、artifact 配信/削除ルートから隔離する（アップロードした秘匿ファイル保護）。
+_RESERVED_OUTPUT_NAMES = {"uploads"}
 
 # Name of the session cookie set after a successful token login.
 SESSION_COOKIE = "wscan_session"
@@ -1082,6 +1085,12 @@ class MonitorServer:
     def _scan_dir(self, scan_id: str) -> Optional[Path]:
         """Resolve a scan id to its output folder, rejecting path traversal."""
         if not scan_id or "/" in scan_id or "\\" in scan_id or scan_id in (".", ".."):
+            return None
+        # OUTPUT_BASE 配下の非スキャン予約ディレクトリ（アップロード済み TLS 秘密鍵や
+        # TOTP QR 等の秘匿入力）は scan_id として解決させない。一覧から隠すだけでは
+        # /api/v1/scans/<id>/download や /reports/<id>/<file> 経由で取得/削除され得るため、
+        # 唯一の解決口である本メソッドで拒否して全 artifact ルートを一括で塞ぐ。
+        if scan_id.strip().lower() in _RESERVED_OUTPUT_NAMES:
             return None
         d = (OUTPUT_BASE / scan_id).resolve()
         try:

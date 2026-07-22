@@ -225,6 +225,45 @@ class UploadEndpointTests(unittest.TestCase):
         self.assertEqual(audit["detail"], body["name"])
         self.assertNotIn(str(dest), audit["detail"])
 
+    def test_uploaded_secrets_not_reachable_via_scan_routes(self):
+        # アップロードした秘匿ファイル(TLS秘密鍵/TOTP QR)は uploads/ に保存されるが、
+        # scan_id=uploads として artifact ルート(download/reports/delete)から
+        # 取得・削除できてはならない。一覧から隠すだけでなく解決口 _scan_dir で拒否する。
+        up = self.client.post(
+            "/api/v1/upload",
+            files={
+                "file": (
+                    "client.key",
+                    b"-----BEGIN PRIVATE KEY-----",
+                    "application/octet-stream",
+                )
+            },
+            headers=self.auth,
+        )
+        self.assertEqual(up.status_code, 200)
+        fname = Path(up.json()["path"]).name
+
+        # 中央リゾルバが予約名を拒否（大文字・前後空白のゆらぎも）。
+        self.assertIsNone(self.srv._scan_dir("uploads"))
+        self.assertIsNone(self.srv._scan_dir("UPLOADS"))
+        self.assertIsNone(self.srv._scan_dir(" uploads "))
+
+        # zip 一括DL・個別レポート取得・削除がいずれも 404。
+        self.assertEqual(
+            self.client.get("/api/v1/scans/uploads/download", headers=self.auth).status_code,
+            404,
+        )
+        self.assertEqual(
+            self.client.get(f"/reports/uploads/{fname}", headers=self.auth).status_code,
+            404,
+        )
+        self.assertEqual(
+            self.client.delete("/api/v1/scans/uploads", headers=self.auth).status_code,
+            404,
+        )
+        # サーバ側の実体はエンジンが読むため残っている（アクセス経路だけを塞ぐ）。
+        self.assertTrue((self.tmp / "uploads" / fname).exists())
+
 
 if __name__ == "__main__":
     unittest.main()
