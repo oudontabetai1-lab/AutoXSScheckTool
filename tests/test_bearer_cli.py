@@ -45,5 +45,39 @@ class BearerCliDefaultTests(unittest.TestCase):
         )
 
 
+class TotpConfigDefaultsTests(unittest.TestCase):
+    """config(wscan.yaml)の TOTP パラメータが CLI 既定に反映されることの検証。
+
+    digits/period が 0・algorithm が空だと ScanEngine が override を送らず 6/30/SHA1 に
+    落ちるため、raw Base32 / QR 運用で config の非標準値が無視されてはいけない。
+    """
+
+    def _parse_args(self, cfg_overrides: dict):
+        with mock.patch.dict(main._CFG, cfg_overrides, clear=False):
+            with mock.patch.dict(os.environ, {}, clear=False):
+                for k in ("WSCAN_MFA_TOTP_DIGITS", "WSCAN_MFA_TOTP_PERIOD",
+                          "WSCAN_MFA_TOTP_ALGORITHM"):
+                    os.environ.pop(k, None)
+                with mock.patch.object(
+                    sys, "argv", ["main.py", "scan", "http://example.com"]
+                ):
+                    return main.parse_args()
+
+    def test_config_totp_params_become_cli_defaults(self):
+        args = self._parse_args(
+            {"mfa_totp_digits": 8, "mfa_totp_period": 45, "mfa_totp_algorithm": "SHA256"}
+        )
+        self.assertEqual(args.mfa_totp_digits, 8)
+        self.assertEqual(args.mfa_totp_period, 45)
+        self.assertEqual(args.mfa_totp_algorithm, "SHA256")
+
+    def test_absent_config_keeps_zero_empty_defaults(self):
+        # 未設定なら 0/空（=ScanEngine が override を送らず内部既定 6/30/SHA1）。
+        args = self._parse_args({})
+        self.assertEqual(args.mfa_totp_digits, 0)
+        self.assertEqual(args.mfa_totp_period, 0)
+        self.assertEqual(args.mfa_totp_algorithm, "")
+
+
 if __name__ == "__main__":
     unittest.main()

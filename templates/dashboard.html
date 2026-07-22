@@ -2835,10 +2835,12 @@ function _collectFullConfigForExport() {
     flows: collectFlows(),
     accounts: (typeof collectAccounts === 'function') ? collectAccounts() : [],
   };
-  // 長期保存するJSONにはTOTP登録情報とBearerを含めない。
+  // 長期保存するJSONにはTOTP登録情報・Bearer・カスタムヘッダ値を含めない。
+  // （カスタムヘッダには Authorization / X-Api-Key 等の認証情報が入り得る）
   delete cfg.mfa_totp_uri;
   delete cfg.mfa_totp_secret;
   delete cfg.bearer;
+  delete cfg.headers;
   return cfg;
 }
 
@@ -3075,10 +3077,11 @@ function saveConfigToStorage() {
       checks: getSelectedChecks(),
       flows: collectFlows(),
     };
-    // localStorageにもTOTP登録情報とBearerを残さない。
+    // localStorageにもTOTP登録情報・Bearer・カスタムヘッダ値を残さない。
     delete cfg.mfa_totp_uri;
     delete cfg.mfa_totp_secret;
     delete cfg.bearer;
+    delete cfg.headers;
     localStorage.setItem('wscan_config', JSON.stringify(cfg));
   } catch(e) {}
 }
