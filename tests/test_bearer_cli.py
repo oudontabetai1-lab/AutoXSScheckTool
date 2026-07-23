@@ -7,8 +7,43 @@ serve の保護トークン `WSCAN_AUTH_TOKEN` はダッシュボード/API を�
 """
 import os
 import sys
+import types
 import unittest
 from unittest import mock
+
+import main
+
+
+class EffectiveMfaTypeTests(unittest.TestCase):
+    """config の mfa_type を「既定」として扱い、per-scan の TOTP 入力を優先する。"""
+
+    @staticmethod
+    def _args(mfa_type=None, secret="", uri="", qr=""):
+        return types.SimpleNamespace(
+            mfa_type=mfa_type, mfa_totp_secret=secret,
+            mfa_totp_uri=uri, mfa_totp_qr=qr,
+        )
+
+    def test_explicit_type_wins(self):
+        with mock.patch.dict(main._CFG, {"mfa_type": "email"}, clear=False):
+            self.assertEqual(main._effective_mfa_type(self._args("totp")), "totp")
+            self.assertEqual(main._effective_mfa_type(self._args("email")), "email")
+
+    def test_per_scan_totp_overrides_config_type(self):
+        # config mfa_type=email でも --mfa-totp-secret を渡せば TOTP 昇格に委ねる(None)。
+        with mock.patch.dict(main._CFG, {"mfa_type": "email"}, clear=False):
+            self.assertIsNone(main._effective_mfa_type(self._args(secret="BASE32")))
+            self.assertIsNone(main._effective_mfa_type(self._args(uri="otpauth://x")))
+            self.assertIsNone(main._effective_mfa_type(self._args(qr="/q.png")))
+
+    def test_config_type_used_when_no_totp(self):
+        with mock.patch.dict(main._CFG, {"mfa_type": "email"}, clear=False):
+            self.assertEqual(main._effective_mfa_type(self._args()), "email")
+
+    def test_none_when_no_type_and_no_totp_and_no_config(self):
+        cfg = {k: v for k, v in main._CFG.items() if k != "mfa_type"}
+        with mock.patch.object(main, "_CFG", cfg):
+            self.assertIsNone(main._effective_mfa_type(self._args()))
 
 import main
 

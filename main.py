@@ -213,6 +213,28 @@ def _redact_secrets(cfg: dict, placeholder: str = "***REDACTED***") -> dict:
     return redacted
 
 
+def _effective_mfa_type(args):
+    """ScanEngine へ渡す mfa_type を決める。
+
+    - `--mfa-type` を明示した場合はそれを使う（最優先）。
+    - 未指定でも `--mfa-totp-*`（native TOTP）を渡した場合は、config の mfa_type
+      （例: email）を「明示 type」として扱わず None を返し、TOTP 自動昇格に委ねる。
+      config type を焼き込むと per-scan の TOTP 入力が無視されるため。
+    - それ以外は config(wscan.yaml) の mfa_type を既定として使う（無ければ None）。
+    """
+    explicit = getattr(args, "mfa_type", None)
+    if explicit is not None:
+        return explicit
+    native_totp = bool(
+        (getattr(args, "mfa_totp_secret", "") or "")
+        or (getattr(args, "mfa_totp_uri", "") or "")
+        or (getattr(args, "mfa_totp_qr", "") or "")
+    )
+    if native_totp:
+        return None
+    return _CFG.get("mfa_type") or None
+
+
 def parse_args():
     parser = argparse.ArgumentParser(
         description="WScan - Web Security Scanner",
@@ -530,11 +552,16 @@ Examples:
     # MFA (2FA) automation. TOTP はネイティブ生成または外部 MCP、メールは外部 MCP。
     # 秘匿情報は WSCAN_MFA_* 等の env または都度 CLI で渡す。
     scan.add_argument(
+        # 既定は None（＝CLI 未指定）。config(wscan.yaml)の mfa_type は「明示指定」ではなく
+        # 既定として扱いたいため、ここには焼き込まず後段(_effective_mfa_type)で適用する。
+        # config を焼き込むと、per-scan の --mfa-totp-* を渡しても config の type=email が
+        # 明示 override 扱いになり TOTP 自動昇格を塞いでしまう。
         "--mfa-type", metavar="KIND", choices=["totp", "email"],
-        default=(_CFG.get("mfa_type") or None),
+        default=None,
         help="ログインMFA方式。'totp'（ネイティブまたはmcp-totp-authenticator）/ "
              "'email'（mcp-email-server）。WSCAN_MFA_* envでも設定可能。"
-             "未指定時はWSCAN_MFA_TYPEへフォールバック。",
+             "未指定時は config の mfa_type / WSCAN_MFA_TYPE へフォールバック"
+             "（ただし --mfa-totp-* を明示した場合は TOTP を優先）。",
     )
     scan.add_argument(
         "--mfa-field", metavar="NAME", default=_CFG.get("mfa_field", ""),
@@ -1618,8 +1645,10 @@ async def run_scan(args):
             login_user_field=getattr(args, "login_user_field", "username") or "username",
             login_pass_field=getattr(args, "login_pass_field", "password") or "password",
             login_success_indicator=getattr(args, "login_success", "") or "",
-            # None=未指定(env に委ねる) / ""=明示無効 / "totp"|"email"=明示有効
-            mfa_type=getattr(args, "mfa_type", None),
+            # None=未指定(config/env に委ねる) / "totp"|"email"=明示有効。
+            # --mfa-type 未指定でも config mfa_type を既定に使うが、per-scan の
+            # --mfa-totp-* を明示した場合は config type を無視し TOTP 自動昇格に委ねる。
+            mfa_type=_effective_mfa_type(args),
             mfa_field=getattr(args, "mfa_field", "") or "",
             mfa_totp_secret=getattr(args, "mfa_totp_secret", "") or "",
             mfa_totp_uri=getattr(args, "mfa_totp_uri", "") or "",
