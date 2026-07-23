@@ -131,7 +131,7 @@ Target URL を入力し、目的に近いプロファイルを選びます。
 - 「アクセスのみ許可」: 外部 IdP やログイン補助など、到達は必要だが攻撃しない範囲。
 - 「除外」: ログアウト、削除、決済、通知送信などを避ける範囲。
 
-通常ツール層（`scan`）の TOTP は、`otpauth://` URI、Base32 シークレット、QR 画像からローカル生成できます。メールや従来の MCP 方式も利用できます。Bearer トークンまたは1行1件のカスタムヘッダは crawl と全 HTTP リクエストに付き、`Authorization` をカスタムヘッダで明示した場合は Bearer 欄より優先されます。TOTP URI/シークレットと Bearer は実行時だけ使われ、設定 export やブラウザ保存には含まれません。詳しくは [README の MFA](../README.md#13-認証mfaスコープtls) を参照してください。
+通常ツール層（`scan`）の TOTP は、`otpauth://` URI、Base32 シークレット、QR 画像からローカル生成できます。メールや従来の MCP 方式も利用できます。Bearer トークンまたは1行1件のカスタムヘッダは通常スキャンの crawl と全 HTTP リクエストに加え、Agent と Hybrid Phase 1 の Agent 偵察にも付きます。Hybrid Phase 2 も同じ実効ヘッダを使います。`Authorization` をカスタムヘッダで明示した場合は Bearer 欄より優先されます。TOTP URI/シークレットと Bearer は実行時だけ使われ、設定 export やブラウザ保存には含まれません。詳しくは [README の MFA](../README.md#13-認証mfaスコープtls) を参照してください。
 
 ![認証タブ: ネイティブ TOTP と Bearer/カスタムヘッダ](images/dashboard-auth.png)
 
@@ -170,11 +170,11 @@ mTLS では PEM のクライアント証明書/秘密鍵、または Playwright 
 - 検査項目: Agent 対応種別から選択
 - ログイン URL、ユーザー名、パスワード
 
-「Agent Browser スキャン開始」を押すと、LLM がブラウザを観察し、ページ遷移、入力、ペイロード選択、結果判断を自律的に行います。Agent の独自性を残す設計のため、Finding は未確証でもレポートへ残ります。
+Bearer/カスタムヘッダは「認証・Cookie」の設定を引き継ぎます。「Agent Browser スキャン開始」を押すと、LLM がブラウザを観察し、ページ遷移、入力、ペイロード選択、結果判断を自律的に行います。Agent の独自性を残す設計のため、Finding は未確証でもレポートへ残ります。
 
 ### Hybrid
 
-「ハイブリッド」タブでは、偵察用 provider、モデル、最大ステップ数（既定 `30`）、Ollama URL を設定します。認証情報とチェック種別は「認証・Cookie」「検査項目」の設定を引き継ぎます。
+「ハイブリッド」タブでは、偵察用 provider、モデル、最大ステップ数（既定 `30`）、Ollama URL を設定します。ログイン情報、Bearer/カスタムヘッダとチェック種別は「認証・Cookie」「検査項目」の設定を引き継ぎます。
 
 Hybrid の処理:
 

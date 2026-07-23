@@ -494,6 +494,7 @@ class AgentBrowserScanner:
         access_urls: Optional[list[str]] = None,
         exclude_urls: Optional[list[str]] = None,
         exclude_fields: Optional[list[str]] = None,
+        extra_headers: Optional[dict] = None,
     ):
         # CDP / SecurityWatchdog が scheme 無し URL を拒否するため補完する。
         self.target_url = _normalize_agent_url(target_url)
@@ -527,6 +528,7 @@ class AgentBrowserScanner:
         self.exclude_fields = [
             str(value).strip() for value in (exclude_fields or []) if str(value).strip()
         ]
+        self.extra_headers = dict(extra_headers or {})
         self._step_count = 0
         self._memory = AgentMemory()
         self._session_nonce = secrets.token_urlsafe(16)
@@ -558,20 +560,22 @@ class AgentBrowserScanner:
         try:
             from browser_use import Agent, Browser
 
-            # browser_use ≥ 0.2 uses BrowserConfig; older versions accept direct kwargs.
-            # BrowserConfig's disable_security properly disables SecurityWatchdog,
-            # while the legacy Browser(disable_security=True) only affects Playwright flags.
-            try:
-                from browser_use import BrowserConfig
-                browser = Browser(config=BrowserConfig(
-                    headless=self.headless,
-                    disable_security=True,
-                ))
-            except (ImportError, TypeError):
-                browser = Browser(
-                    headless=self.headless,
-                    disable_security=True,
-                )
+            def _build_legacy_browser():
+                """ヘッダ無しの従来ブラウザ構築（API差異時のフォールバック兼用）。"""
+                # browser_use ≥ 0.2 uses BrowserConfig; older versions accept direct kwargs.
+                # BrowserConfig's disable_security properly disables SecurityWatchdog,
+                # while the legacy Browser(disable_security=True) only affects Playwright flags.
+                try:
+                    from browser_use import BrowserConfig
+                    return Browser(config=BrowserConfig(
+                        headless=self.headless,
+                        disable_security=True,
+                    ))
+                except (ImportError, TypeError):
+                    return Browser(
+                        headless=self.headless,
+                        disable_security=True,
+                    )
 
             # タスク文字列には SSRF/redirect ペイロードとして複数の URL が含まれる。
             # directly_open_url=True (デフォルト) は「複数 URL 検出 → スキップ」する仕様のため、
@@ -592,10 +596,9 @@ class AgentBrowserScanner:
                 .replace("{SESSION_NONCE}", self._session_nonce)
                 .replace("{SECURITY_SCOPE}", self._build_security_scope_policy())
             )
-            agent = Agent(
+            agent_kwargs = dict(
                 task=task,
                 llm=llm,
-                browser=browser,
                 override_system_message=system_prompt,
                 max_failures=5,
                 use_vision=True,
@@ -605,6 +608,34 @@ class AgentBrowserScanner:
                 initial_actions=initial_actions,   # 最初のページへ確実に遷移
                 register_new_step_callback=self._on_step,
             )
+
+            if self.extra_headers:
+                # browser-use 0.12.6 の実 API:
+                # BrowserProfile(headers=...) → BrowserSession(browser_profile=...)
+                # → Agent(browser_session=...)。値はログやタスク文字列へ出さない。
+                # バージョン差異や構築失敗時は従来経路へ戻し、Agent 自体は継続する。
+                try:
+                    from browser_use import BrowserSession
+                    from browser_use.browser.profile import BrowserProfile
+
+                    browser_profile = BrowserProfile(
+                        headers=self.extra_headers,
+                        headless=self.headless,
+                        disable_security=True,
+                    )
+                    browser = BrowserSession(browser_profile=browser_profile)
+                    agent = Agent(browser_session=browser, **agent_kwargs)
+                except Exception:
+                    console.print(
+                        "[yellow]追加HTTPヘッダをブラウザへ設定できなかったため、"
+                        "従来構成で続行します。[/yellow]"
+                    )
+                    browser = _build_legacy_browser()
+                    agent = Agent(browser=browser, **agent_kwargs)
+            else:
+                # ヘッダ未指定時は完全に従来どおりの構築経路を使う。
+                browser = _build_legacy_browser()
+                agent = Agent(browser=browser, **agent_kwargs)
 
             console.print("[dim]エージェント起動中...[/dim]")
             if self.monitor:

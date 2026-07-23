@@ -112,7 +112,7 @@ python3 main.py scan https://app.example.com \
 
 ### Authorization ヘッダを使う
 
-この節は確実性を重視する通常ツール層（`scan`）の認証付きスキャン補助です。Cognito などの Bearer 認証は、静的トークンをブラウザ巡回と httpx の全リクエストへ付ける `--bearer` で簡潔に指定できます。
+通常ツール層（`scan`）では、Cognito などの Bearer 認証をブラウザ巡回と httpx の全リクエストへ付ける `--bearer` で簡潔に指定できます。Agent モードと Hybrid Phase 1 の Agent 偵察も Bearer/カスタムヘッダに対応しています。
 
 ```bash
 export WSCAN_BEARER='<token>'
@@ -120,6 +120,16 @@ python3 main.py scan https://api.example.com --bearer "$WSCAN_BEARER"
 ```
 
 環境変数は `WSCAN_BEARER` に対応します（従来のヘッダ指定も利用でき、明示した Authorization を優先）。serve の保護トークン `WSCAN_AUTH_TOKEN` は control-plane 用のため `--bearer` は参照しません（管理トークンの検査対象への漏洩防止）。
+
+Agent CLI では同じトークンとカスタムヘッダを Agent ブラウザへ渡せます。
+
+```bash
+python3 main.py agent https://api.example.com \
+  --bearer "$WSCAN_BEARER" \
+  -H "X-Tenant: test"
+```
+
+`agent` は `--header-file` にも対応します。ダッシュボードの Agent/Hybrid は「認証・Cookie」で指定した Bearer/カスタムヘッダを引き継ぎ、Hybrid では Phase 1 偵察と Phase 2 通常スキャンの両方へ同じ実効ヘッダを渡します。動的な `--header-refresh-cmd` は通常ツール層専用です。
 
 ```bash
 python3 main.py scan https://api.example.com \
