@@ -10,6 +10,7 @@ import json
 import shlex
 from pathlib import Path
 
+from .request_logger import _redact_headers
 from .scanners.base import Finding
 
 
@@ -46,8 +47,13 @@ def write_reproduction_package(findings: list[Finding], output_dir: Path) -> dic
 
 
 def _finding_to_repro_item(finding: Finding, item_id: int) -> dict:
-    request = finding.request or {}
-    response = finding.response or {}
+    request = dict(finding.request or {})
+    if "headers" in request:
+        request["headers"] = _redact_headers(request["headers"])
+    response = {k: v for k, v in (finding.response or {}).items() if k != "body"}
+    if "headers" in response:
+        response["headers"] = _redact_headers(response["headers"])
+
     return {
         "id": item_id,
         "check_type": finding.check_type,
@@ -62,8 +68,8 @@ def _finding_to_repro_item(finding: Finding, item_id: int) -> dict:
         "evidence_details": finding.evidence_details,
         "reproduction_steps": finding.reproduction_steps,
         "request": request,
-        "response": {k: v for k, v in response.items() if k != "body"},
-        "curl_command": _curl_from_request(request),
+        "response": response,
+        "curl_command": _curl_from_request(finding.request or {}),
     }
 
 
