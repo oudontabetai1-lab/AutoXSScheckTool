@@ -4090,7 +4090,11 @@ function handleEvent(event) {
     case 'scan_rejected':
       // 自分の拒否なら pending だけを破棄する。最後に受理済みの設定は変えない。
       _discardRejectedPendingScan(data);
-      setStatus(`スキャン開始が拒否されました: ${data.message || ''}`, 'error');
+      // 拒否表示は要求元タブにだけ出す。scan_rejected は全クライアントへ配信されるため、
+      // 別タブ/ユーザーの拒否で観測中タブのステータスを error にしない（自分のスキャンは継続中）。
+      if (data && data._client_nonce && data._client_nonce === state.myScanNonce) {
+        setStatus(`スキャン開始が拒否されました: ${data.message || ''}`, 'error');
+      }
       break;
 
     case 'scan_started':
