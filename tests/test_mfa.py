@@ -236,6 +236,35 @@ def test_env_uri_preserved_without_explicit_secret_or_qr():
     assert cfg.totp_uri == "otpauth://totp/env?secret=ENVBASE32"
 
 
+def test_per_scan_totp_override_promotes_over_env_type():
+    # env に WSCAN_MFA_TYPE=email が残っていても、per-scan の native TOTP override は
+    # 明示的な TOTP 選択として totp に昇格する。
+    cfg = mfa.MFAConfig.from_env(
+        env={"WSCAN_MFA_TYPE": "email"},
+        overrides={"totp_secret": "GEZDGNBVGY3TQOJQ"},
+    )
+    assert cfg.type == "totp"
+    assert cfg.enabled is True
+
+
+def test_explicit_type_override_beats_native_totp_override():
+    # scan が明示的に type を指定した場合は per-scan TOTP override でも昇格しない。
+    cfg = mfa.MFAConfig.from_env(
+        env={"WSCAN_MFA_TYPE": "email"},
+        overrides={"type": "email", "totp_secret": "GEZDGNBVGY3TQOJQ"},
+    )
+    assert cfg.type == "email"
+
+
+def test_env_type_respected_without_per_scan_totp_override():
+    # per-scan override が無く env に native TOTP しか無い場合、env の type を尊重する
+    # （env WSCAN_MFA_TYPE=email が残っていれば totp へ昇格しない＝従来挙動）。
+    cfg = mfa.MFAConfig.from_env(
+        env={"WSCAN_MFA_TYPE": "email", "WSCAN_MFA_TOTP_SECRET": "GEZDGNBVGY3TQOJQ"},
+    )
+    assert cfg.type == "email"
+
+
 def test_mfaconfig_native_totp_secret_enabled_with_explicit_type():
     cfg = mfa.MFAConfig.from_env(
         env={},
