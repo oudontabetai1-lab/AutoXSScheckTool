@@ -13,6 +13,20 @@ from unittest.mock import AsyncMock, patch
 import main
 from wscan.agent_engine import AgentEngine
 from wscan.header_manager import apply_bearer, parse_header_args
+from wscan.llm_agent_browser import AgentBrowserScanner
+
+
+class _RecordingHeaderSession:
+    def __init__(self):
+        self.calls = []
+
+    async def set_extra_headers(self, headers):
+        self.calls.append(headers)
+
+
+class _FailingHeaderSession:
+    async def set_extra_headers(self, _headers):
+        raise RuntimeError("header application failed")
 
 
 class AgentHeaderCompositionTests(unittest.TestCase):
@@ -143,6 +157,46 @@ class AgentHeaderWiringTests(unittest.IsolatedAsyncioTestCase):
             scanner_cls.call_args.kwargs["extra_headers"],
             {"X-Tenant": "example"},
         )
+
+
+class AgentBrowserHeaderApplicationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_apply_extra_headers_calls_session_once(self):
+        scanner = AgentBrowserScanner(
+            "http://fixture.test",
+            extra_headers={"Authorization": "Bearer test-token"},
+        )
+        session = _RecordingHeaderSession()
+
+        await scanner._apply_extra_headers(session)
+
+        self.assertEqual(
+            session.calls,
+            [{"Authorization": "Bearer test-token"}],
+        )
+
+    async def test_apply_extra_headers_skips_empty_headers(self):
+        scanner = AgentBrowserScanner("http://fixture.test")
+        session = _RecordingHeaderSession()
+
+        await scanner._apply_extra_headers(session)
+
+        self.assertEqual(session.calls, [])
+
+    async def test_apply_extra_headers_ignores_session_without_api(self):
+        scanner = AgentBrowserScanner(
+            "http://fixture.test",
+            extra_headers={"X-Tenant": "example"},
+        )
+
+        await scanner._apply_extra_headers(object())
+
+    async def test_apply_extra_headers_swallows_session_errors(self):
+        scanner = AgentBrowserScanner(
+            "http://fixture.test",
+            extra_headers={"X-Tenant": "example"},
+        )
+
+        await scanner._apply_extra_headers(_FailingHeaderSession())
 
 
 if __name__ == "__main__":

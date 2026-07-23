@@ -533,6 +533,16 @@ class AgentBrowserScanner:
         self._memory = AgentMemory()
         self._session_nonce = secrets.token_urlsafe(16)
 
+    async def _apply_extra_headers(self, session) -> None:
+        """現在の Agent 対象ページへ追加ヘッダを適用する。"""
+        if not self.extra_headers or not hasattr(session, "set_extra_headers"):
+            return
+        try:
+            await session.set_extra_headers(self.extra_headers)
+        except Exception:
+            # ヘッダ値をログや例外へ出さず、Agent の探索を継続する。
+            pass
+
     # ------------------------------------------------------------------
     # Public entry point
     # ------------------------------------------------------------------
@@ -613,6 +623,8 @@ class AgentBrowserScanner:
                 # browser-use 0.12.6 の実 API:
                 # BrowserProfile(headers=...) → BrowserSession(browser_profile=...)
                 # → Agent(browser_session=...)。値はログやタスク文字列へ出さない。
+                # BrowserProfile.headers はリモート接続用。ローカルページの
+                # HTTP リクエストには各ステップの set_extra_headers (CDP) が本命。
                 # バージョン差異や構築失敗時は従来経路へ戻し、Agent 自体は継続する。
                 try:
                     from browser_use import BrowserSession
@@ -643,7 +655,16 @@ class AgentBrowserScanner:
                     f"Agent Browser: {self.target_url} をスキャン中", "running"
                 )
 
-            history = await agent.run(max_steps=self.max_steps)
+            if self.extra_headers and hasattr(browser, "set_extra_headers"):
+                async def _apply_headers_on_step(_agent):
+                    await self._apply_extra_headers(browser)
+
+                history = await agent.run(
+                    max_steps=self.max_steps,
+                    on_step_start=_apply_headers_on_step,
+                )
+            else:
+                history = await agent.run(max_steps=self.max_steps)
 
             result.steps_taken = self._step_count
             result.success = history.is_successful()

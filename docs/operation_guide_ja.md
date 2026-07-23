@@ -129,7 +129,7 @@ python3 main.py agent https://api.example.com \
   -H "X-Tenant: test"
 ```
 
-`agent` は `--header-file` にも対応します。ダッシュボードの Agent/Hybrid は「認証・Cookie」で指定した Bearer/カスタムヘッダを引き継ぎ、Hybrid では Phase 1 偵察と Phase 2 通常スキャンの両方へ同じ実効ヘッダを渡します。動的な `--header-refresh-cmd` は通常ツール層専用です。
+`agent` は `--header-file` にも対応します。ダッシュボードの Agent/Hybrid は「認証・Cookie」で指定した Bearer/カスタムヘッダを引き継ぎ、Hybrid では Phase 1 偵察と Phase 2 通常スキャンの両方へ同じ実効ヘッダを渡します。Agent/Hybrid Phase 1 のページリクエストには CDP の `set_extra_headers` で各ステップ開始時に適用するため、最初の初期ナビゲーションだけは適用前になる場合があります。動的な `--header-refresh-cmd` は通常ツール層専用です。
 
 ```bash
 python3 main.py scan https://api.example.com \

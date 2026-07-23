@@ -119,7 +119,7 @@ python3 main.py agent https://example.com --llm claude --headless \
   --bearer "$WSCAN_BEARER"
 ```
 
-`agent` は `--bearer`、`-H/--header`、`--header-file` を Agent ブラウザへ適用します。Agent が申告する Finding は、決定論 Finding と同じ確証を意味しません。HTML レポートの「🤖 Agent発見」バッジと証拠を確認してください。
+`agent` は `--bearer`、`-H/--header`、`--header-file` を Agent ブラウザへ適用します。Agent/Hybrid Phase 1 のページリクエストには CDP の `set_extra_headers` で各ステップ開始時に適用するため、最初の初期ナビゲーションだけは適用前になる場合があります。Agent が申告する Finding は、決定論 Finding と同じ確証を意味しません。HTML レポートの「🤖 Agent発見」バッジと証拠を確認してください。
 
 ### Hybrid モード — 最短手順
 
