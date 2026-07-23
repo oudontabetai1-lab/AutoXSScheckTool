@@ -79,6 +79,14 @@ class RedactSecretsTests(unittest.TestCase):
         self.assertEqual(out["mfa_totp_algorithm"], "SHA256")
         self.assertEqual(out["url"], "http://x.test/")
 
+    def test_redacts_totp_qr_path(self):
+        # QR 画像パスはシークレットを符号化した画像の所在を示すため、defaults/snapshot
+        # 双方で伏字化する（/api/config/defaults は未認証 serve で読まれ得る）。
+        cfg = {"mfa_totp_qr": "/srv/output/uploads/abc_totp.png"}
+        self.assertEqual(main._redact_secrets(cfg)["mfa_totp_qr"], "***REDACTED***")
+        self.assertEqual(main._redact_secrets(cfg, placeholder="")["mfa_totp_qr"], "")
+        self.assertEqual(main._redact_secrets({"mfa_totp_qr": ""})["mfa_totp_qr"], "")
+
     def test_redacts_string_form_headers(self):
         # headers_text（config 由来）は "Name: Value" の文字列。dict と同様に
         # 認証情報が入り得るため、defaults/snapshot 双方で丸ごと伏字化する。

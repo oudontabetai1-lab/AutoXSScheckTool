@@ -173,9 +173,10 @@ _CFG = _load_config()
 # 設定スナップショット等で永続化してはいけない秘匿フィールド。キー名に以下の
 # 語を含む値（パスワード/シークレット/トークン/APIキー）は伏字にする。
 _SECRET_KEY_TOKENS = ("password", "secret", "token", "bearer", "api_key", "apikey")
-# 部分一致では拾えない明示キー（"auth_pass" は "password" を含まない、Cookie 系など）。
-# login_pass_field 等の「フィールド名」は秘匿でないため対象にしない。
-_SECRET_EXACT_KEYS = ("auth_pass", "cookies", "low_priv_cookies")
+# 部分一致では拾えない明示キー（"auth_pass" は "password" を含まない、Cookie 系、
+# TOTP QR の画像パスなど）。login_pass_field 等の「フィールド名」は秘匿でないため対象にしない。
+# mfa_totp_qr はパス自体がシークレットを符号化した画像の所在を示すため伏せる。
+_SECRET_EXACT_KEYS = ("auth_pass", "cookies", "low_priv_cookies", "mfa_totp_qr")
 
 
 def _redact_secrets(cfg: dict, placeholder: str = "***REDACTED***") -> dict:
