@@ -545,11 +545,18 @@ class AgentBrowserScanner:
 
     async def _prepare_extra_headers_before_run(self, session) -> None:
         """初期ナビゲーション前に対象ページを確立し、追加ヘッダを適用する。"""
+        if not self.extra_headers:
+            return
         required_apis = ("start", "get_current_page", "set_extra_headers")
-        if (
-            not self.extra_headers
-            or not all(hasattr(session, name) for name in required_apis)
-        ):
+        if not all(hasattr(session, name) for name in required_apis):
+            # requirements-agent.txt が固定する browser-use 0.12.6 の BrowserSession は
+            # set_extra_headers(CDP)を公開しているが、想定外の版では適用できない。
+            # その場合に「未認証のまま静かに偵察する」のを避け、値は伏せて警告する。
+            console.print(
+                "[yellow]警告: この browser-use では追加リクエストヘッダを設定できず、"
+                "Agent 偵察は指定した認証ヘッダなしで実行されます"
+                "（requirements-agent.txt の browser-use 0.12.6 では対応）。[/yellow]"
+            )
             return
         try:
             # BrowserSession.start() は冪等。先に target を確立しないと

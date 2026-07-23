@@ -226,6 +226,20 @@ class AgentBrowserHeaderApplicationTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(session.calls, [])
 
+    async def test_prepare_headers_warns_when_apis_missing(self):
+        # ヘッダ指定があるのにセッションが必要 API を欠く版では、未認証のまま静かに
+        # 偵察するのを避けて警告する（ただしヘッダ値は出さない）。
+        scanner = AgentBrowserScanner(
+            "http://fixture.test",
+            extra_headers={"Authorization": "Bearer test-token"},
+        )
+        session = _SessionWithoutCurrentPage()
+        with patch("wscan.llm_agent_browser.console") as mock_console:
+            await scanner._prepare_extra_headers_before_run(session)
+        self.assertTrue(mock_console.print.called)
+        printed = " ".join(str(c) for c in mock_console.print.call_args_list)
+        self.assertNotIn("Bearer test-token", printed)
+
     async def test_apply_extra_headers_calls_session_once(self):
         scanner = AgentBrowserScanner(
             "http://fixture.test",
