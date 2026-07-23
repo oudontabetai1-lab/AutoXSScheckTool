@@ -1063,6 +1063,21 @@ body {
             <div style="font-size:0.72rem;color:var(--text-muted);margin-top:4px">出力先のためアップロード対象ではありません。</div>
           </div>
         </div>
+        <div class="cfg-section-title" style="margin-top:16px">検査時間帯（任意・1行1件）</div>
+        <div style="font-size:0.78rem;color:var(--text-muted);margin-bottom:10px">
+          指定した時間帯だけ/以外で攻撃を待機します。形式: <code>Mon-Fri 22:00-06:00</code>,
+          <code>Sat,Sun 00:00-24:00</code>（日跨ぎ可）。時間帯外は自動的に待機し、Abort で中断できます。
+        </div>
+        <div class="cfg-grid">
+          <div class="cfg-field">
+            <label>検査可能時間帯 (allowed)</label>
+            <textarea id="cfgAllowedHours" rows="2" placeholder="Sat,Sun 00:00-24:00"></textarea>
+          </div>
+          <div class="cfg-field">
+            <label>検査停止時間帯 (forbidden)</label>
+            <textarea id="cfgForbiddenHours" rows="2" placeholder="Mon-Fri 09:00-18:00"></textarea>
+          </div>
+        </div>
         <div class="cfg-toggle-row" style="margin-top:14px">
           <div class="cfg-toggle off" id="tog-fast_mode" onclick="toggleCfg('fast_mode')" title="深さ1・ペイロード12・遅延0の高速スキャン">⚡ 高速モード</div>
           <div class="cfg-toggle off" id="tog-headless" onclick="toggleCfg('headless')">ヘッドレスモード</div>
@@ -2453,6 +2468,33 @@ function authHeaderFields() {
   return out;
 }
 
+// 検査可能/停止時間帯を1行ずつ収集する。空欄はキー自体を送らず従来動作を保つ。
+function timeWindowFields() {
+  const toList = id => (document.getElementById(id)?.value || '')
+    .split('\n').map(s => s.trim()).filter(Boolean);
+  const out = {};
+  const a = toList('cfgAllowedHours'); if (a.length) out.allowed_hours = a;
+  const f = toList('cfgForbiddenHours'); if (f.length) out.forbidden_hours = f;
+  return out;
+}
+
+function applyTimeWindows(cfg) {
+  const setVal = (id, v) => {
+    const el = document.getElementById(id);
+    if (el && v != null) el.value = v;
+  };
+  if (Array.isArray(cfg.allowed_hours)) {
+    setVal('cfgAllowedHours', cfg.allowed_hours.join('\n'));
+  } else if (typeof cfg.allowed_hours === 'string') {
+    setVal('cfgAllowedHours', cfg.allowed_hours);
+  }
+  if (Array.isArray(cfg.forbidden_hours)) {
+    setVal('cfgForbiddenHours', cfg.forbidden_hours.join('\n'));
+  } else if (typeof cfg.forbidden_hours === 'string') {
+    setVal('cfgForbiddenHours', cfg.forbidden_hours);
+  }
+}
+
 function applyMfaTotp(cfg) {
   if (!cfg) return;
   const setVal = (id, v) => {
@@ -2783,6 +2825,7 @@ function submitScanConfig() {
     ...mfaImapFields(),
     ...mfaTotpFields(),
     ...authHeaderFields(),
+    ...timeWindowFields(),
     ...mfaImapPassword(),
     cookies:     document.getElementById('cfgCookies').value.trim(),
     low_priv_cookies: document.getElementById('cfgLowPrivCookies').value.trim(),
@@ -2869,6 +2912,7 @@ function _collectFullConfigForExport() {
     ...mfaImapFields(),
     ...mfaTotpFields(),
     ...authHeaderFields(),
+    ...timeWindowFields(),
     cookies: collect('cfgCookies'),
     low_priv_cookies: collect('cfgLowPrivCookies'),
     auto_register_count: collect('cfgAutoRegisterCount'),
@@ -2975,6 +3019,7 @@ function applyImportedConfig(cfg) {
   applyMfaImap(cfg);
   applyMfaTotp(cfg);
   applyAuthHeaders(cfg);
+  applyTimeWindows(cfg);
   setVal('cfgCookies', cfg.cookies);
   setVal('cfgLowPrivCookies', cfg.low_priv_cookies);
   setVal('cfgAutoRegisterCount', cfg.auto_register_count);
@@ -3117,6 +3162,7 @@ function saveConfigToStorage() {
       ...mfaImapFields(),
       ...mfaTotpFields(),
       ...authHeaderFields(),
+      ...timeWindowFields(),
       cookies: document.getElementById('cfgCookies').value,
       exclude_fields: document.getElementById('cfgExcludeFields').value,
       exclude_urls: document.getElementById('cfgExcludeUrls').value,
@@ -3177,6 +3223,7 @@ function loadConfigFromStorage() {
     applyMfaImap(cfg);
     applyMfaTotp(cfg);
     applyAuthHeaders(cfg);
+    applyTimeWindows(cfg);
     if (cfg.cookies) document.getElementById('cfgCookies').value = cfg.cookies;
     if (cfg.exclude_fields) document.getElementById('cfgExcludeFields').value = cfg.exclude_fields;
     if (cfg.exclude_urls) document.getElementById('cfgExcludeUrls').value = cfg.exclude_urls;
@@ -3239,6 +3286,7 @@ async function loadDefaultConfigFromServer() {
     applyMfaImap(cfg);
     applyMfaTotp(cfg);
     applyAuthHeaders(cfg);
+    applyTimeWindows(cfg);
     if (cfg.exclude_fields) document.getElementById('cfgExcludeFields').value = cfg.exclude_fields;
     if (cfg.exclude_urls) document.getElementById('cfgExcludeUrls').value = cfg.exclude_urls;
     if (cfg.manual_crawl_file) document.getElementById('cfgManualCrawlFile').value = cfg.manual_crawl_file;
@@ -4843,6 +4891,7 @@ function submitHybridScan() {
     ...mfaImapFields(),
     ...mfaTotpFields(),
     ...authHeaderFields(),
+    ...timeWindowFields(),
     ...mfaImapPassword(),
     cookies:      (document.getElementById('cfgCookies')?.value || '').trim(),
     llm:          document.getElementById('cfgLlm')?.value || 'none',

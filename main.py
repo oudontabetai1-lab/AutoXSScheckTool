@@ -1911,6 +1911,8 @@ async def run_serve(args):
         "max_forms": _CFG.get("max_forms", 50),
         "request_delay": _CFG.get("request_delay", 0.5),
         "navigation_retries": _CFG.get("navigation_retries", 2),
+        "allowed_hours": _CFG.get("allowed_hours", []) or [],
+        "forbidden_hours": _CFG.get("forbidden_hours", []) or [],
         "proxy": _CFG.get("proxy", ""),
         "tls_client_cert": _CFG.get("tls_client_cert", ""),
         "tls_client_key": _CFG.get("tls_client_key", ""),
@@ -2198,6 +2200,9 @@ async def run_serve(args):
                 max_payloads=int(cfg.get("max_payloads", 0)),
                 request_delay=float(cfg.get("request_delay", 0.5) or 0.0),
                 navigation_retries=int(cfg.get("navigation_retries", 2)),
+                # 空/未指定は None にそろえ、従来どおり時間帯ゲートを無効にする。
+                allowed_hours=cfg.get("allowed_hours") or None,
+                forbidden_hours=cfg.get("forbidden_hours") or None,
                 accounts=cfg.get("accounts", []) or [],
                 auto_register=bool(cfg.get("auto_register", False)),
                 auto_register_count=int(cfg.get("auto_register_count", 2)),
