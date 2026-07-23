@@ -646,17 +646,17 @@ class AgentBrowserScanner:
 
             if self.extra_headers:
                 # browser-use 0.12.6 の実 API:
-                # BrowserProfile(headers=...) → BrowserSession(browser_profile=...)
-                # → Agent(browser_session=...)。値はログやタスク文字列へ出さない。
-                # BrowserProfile.headers はリモート接続用。ローカルページの
-                # HTTP リクエストには各ステップの set_extra_headers (CDP) が本命。
-                # バージョン差異や構築失敗時は従来経路へ戻し、Agent 自体は継続する。
+                # BrowserSession(browser_profile=...) → Agent(browser_session=...)。
+                # 注意: BrowserProfile.headers は「ブラウザ/CDP エンドポイントへの接続時
+                # ヘッダ」であり、リモート/クラウド CDP ブラウザだと対象の Bearer が
+                # ブラウザ提供者へ送られて漏れる。よって対象の認証ヘッダはここに載せず、
+                # ページの HTTP リクエストには CDP set_extra_headers(下記)だけを使う。
+                # 値はログやタスク文字列へ出さない。構築失敗時は従来経路へ戻す。
                 try:
                     from browser_use import BrowserSession
                     from browser_use.browser.profile import BrowserProfile
 
                     browser_profile = BrowserProfile(
-                        headers=self.extra_headers,
                         headless=self.headless,
                         disable_security=True,
                     )
