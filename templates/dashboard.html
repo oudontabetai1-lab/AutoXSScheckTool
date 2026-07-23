@@ -2128,17 +2128,19 @@ const state = {
   _smPanWired: false,
   checkStats: {},
   lastScanConfig: null,
+  // 送信済みだが scan_started で受理確認されていないフル config。
+  // 拒否時は破棄し、最後に実際に開始した lastScanConfig は維持する。
+  pendingScanConfig: null,
   // このタブが開始したスキャンを識別する nonce。start_scan の config に載せ、
   // scan_started の配信データ(非秘匿フィールドは保持される)に echo される値と照合する。
-  // 一致＝自分の開始→フル config を保持、不一致＝観測→配信データを採用(stale回避)。
-  // ブロードキャストされる他タブの scan_rejected 等では誤クリアされない。
+  // 一致＝自分の開始→pending を昇格、不一致＝観測→配信データを採用(stale回避)。
   myScanNonce: null,
   // WS 再接続時にサーバが直近イベント履歴を再送するため、同一 finding が
   // 重複してカードに積まれるのを防ぐ。安定キー(url|field|check|payload|type)で抑止。
   findingKeys: new Set(),
 };
 
-// スキャン開始時に呼ぶ: config に一意な nonce を刻み、フル config をローカル保持する。
+// スキャン開始時に呼ぶ: config に一意な nonce を刻み、受理確認までは pending に置く。
 // scan_started は config の非秘匿フィールドを echo するため、この nonce で「自分の開始」を
 // 識別でき、ブロードキャストされる他タブのイベントに惑わされずに済む。
 function _markOwnScan(config) {
@@ -2147,9 +2149,29 @@ function _markOwnScan(config) {
     : (Date.now() + '-' + Math.random().toString(16).slice(2));
   state.myScanNonce = nonce;
   config._client_nonce = nonce;
-  // フル config(認証情報込み)をローカル保持し「再実行」で使う（配信は伏字版のため）。
-  state.lastScanConfig = JSON.parse(JSON.stringify(config));
+  // フル config(認証情報込み)は、受理後にだけ lastScanConfig へ昇格する。
+  state.pendingScanConfig = JSON.parse(JSON.stringify(config));
   return config;
+}
+
+function _discardRejectedPendingScan(data) {
+  // scan_rejected は全タブへ配信されるため、nonce が一致する自分の要求だけを破棄する。
+  if (data && data._client_nonce && data._client_nonce === state.myScanNonce) {
+    state.pendingScanConfig = null;
+  }
+}
+
+function _promotePendingScan(data) {
+  if (data && data._client_nonce && data._client_nonce === state.myScanNonce) {
+    // 再接続時に同じ scan_started が再生されても、昇格済みの設定を null で潰さない。
+    if (state.pendingScanConfig !== null) {
+      state.lastScanConfig = state.pendingScanConfig;
+      state.pendingScanConfig = null;
+    }
+  } else {
+    // 他タブ/REST が開始したスキャンの観測では、従来どおり配信データを採用する。
+    state.lastScanConfig = JSON.parse(JSON.stringify(data || {}));
+  }
 }
 
 // finding の安定キー。再送・再接続時の重複カードを抑止するために使う。
@@ -4018,8 +4040,8 @@ function handleEvent(event) {
       break;
 
     case 'scan_rejected':
-      // 拒否理由の表示のみ。nonce 方式のため、ブロードキャストされる他タブの拒否で
-      // 自タブの状態を触る必要はない（自分の scan_started は nonce で識別する）。
+      // 自分の拒否なら pending だけを破棄する。最後に受理済みの設定は変えない。
+      _discardRejectedPendingScan(data);
       setStatus(`スキャン開始が拒否されました: ${data.message || ''}`, 'error');
       break;
 
@@ -4030,13 +4052,9 @@ function handleEvent(event) {
       closeInteractiveModals();
       // 自分が開始したスキャンかを nonce で識別する。config に載せた _client_nonce は
       // scan_started の配信データ(非秘匿フィールドは保持)に echo される。一致すれば
-      // ローカルのフル config を維持し「再実行」で認証情報を保つ。不一致(他タブ/REST が
-      // 開始したスキャンの観測)なら最新の(伏字)config を採用して stale を避ける。
-      if (data && data._client_nonce && data._client_nonce === state.myScanNonce) {
-        // 自分の開始 → ローカルのフル config を維持
-      } else {
-        state.lastScanConfig = JSON.parse(JSON.stringify(data || {}));
-      }
+      // pending のフル config を lastScanConfig へ昇格して認証情報を保つ。不一致
+      // (他タブ/REST の観測)なら最新の(伏字)config を採用して stale を避ける。
+      _promotePendingScan(data);
       showPostScanActions(false);
       resetLiveScanState();
       state.eventCount = 1;

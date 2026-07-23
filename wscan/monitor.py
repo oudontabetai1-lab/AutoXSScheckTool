@@ -531,7 +531,17 @@ class MonitorServer:
                         status_code=413,
                     )
                 updir.mkdir(parents=True, exist_ok=True)
+                try:
+                    os.chmod(updir, 0o700)
+                except OSError:
+                    # Windows 等、POSIX パーミッションを適用できない環境では継続する。
+                    pass
                 dest.write_bytes(raw)
+                try:
+                    os.chmod(dest, 0o600)
+                except OSError:
+                    # 保存先を読むエンジンとの互換性を優先し、chmod 非対応環境では継続する。
+                    pass
             except Exception:
                 # ファイル内容や証明書情報を例外メッセージ経由で返さない。
                 return JSONResponse({"error": "アップロードの保存に失敗しました"}, status_code=500)
@@ -1561,24 +1571,37 @@ class MonitorServer:
             # Serve mode: dashboard submits full scan config. Ignore the request
             # if a scan is already running so it is not silently dropped when the
             # persistent loop next clears the event.
+            cfg = msg.get("config", {}) or {}
+            client_nonce = cfg.get("_client_nonce")
+
+            def rejection_data(message: str) -> dict:
+                # nonce だけを echo し、ブラウザが自分の拒否を識別できるようにする。
+                # config の認証情報などは拒否イベントへ載せない。
+                data = {"message": message}
+                if isinstance(client_nonce, str):
+                    data["_client_nonce"] = client_nonce
+                return data
+
             if self.scan_in_progress or self.scan_request_event.is_set():
                 # Notify the client without disturbing the in-progress scan's status.
                 try:
                     asyncio.get_running_loop().create_task(
-                        self.emit("scan_rejected", {
-                            "message": "スキャンが既に実行中です。完了後に再試行してください。",
-                        })
+                        self.emit(
+                            "scan_rejected",
+                            rejection_data(
+                                "スキャンが既に実行中です。完了後に再試行してください。"
+                            ),
+                        )
                     )
                 except RuntimeError:
                     pass
                 return
-            cfg = msg.get("config", {}) or {}
             # HTTP API と同様に対象スコープを検査（WS 経由でのスコープ回避を防ぐ）。
             scope_err = self._config_scope_error(cfg)
             if scope_err:
                 try:
                     asyncio.get_running_loop().create_task(
-                        self.emit("scan_rejected", {"message": scope_err})
+                        self.emit("scan_rejected", rejection_data(scope_err))
                     )
                 except RuntimeError:
                     pass

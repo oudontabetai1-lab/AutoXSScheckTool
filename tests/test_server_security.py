@@ -3,6 +3,7 @@
 - 対象スコープ(allow/deny)による誤爆・悪用防止。
 - ログイン総当たりのレート制限(ロックアウト)。
 """
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -224,6 +225,18 @@ class UploadEndpointTests(unittest.TestCase):
         audit = self.srv.read_audit(1)[0]
         self.assertEqual(audit["detail"], body["name"])
         self.assertNotIn(str(dest), audit["detail"])
+
+    @unittest.skipUnless(os.name == "posix", "POSIX permissions are required")
+    def test_uploaded_pem_is_owner_readable_only(self):
+        response = self.client.post(
+            "/api/v1/upload",
+            files={"file": ("client.pem", b"private material", "application/x-pem-file")},
+            headers=self.auth,
+        )
+        self.assertEqual(response.status_code, 200)
+        dest = Path(response.json()["path"])
+        self.assertEqual(dest.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(dest.parent.stat().st_mode & 0o777, 0o700)
 
     def test_uploaded_secrets_not_reachable_via_scan_routes(self):
         # アップロードした秘匿ファイル(TLS秘密鍵/TOTP QR)は uploads/ に保存されるが、
