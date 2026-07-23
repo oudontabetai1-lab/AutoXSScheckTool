@@ -2667,6 +2667,9 @@ function rerunLastScan() {
     return;
   }
   showPostScanActions(false);
+  // 再実行も「自分の開始」。フラグを立てないと、直後に届く伏字版 scan_started で
+  // lastScanConfig が上書きされ、次回以降の再実行が認証情報を失う。
+  state.pendingOwnStart = true;
   state.ws.send(JSON.stringify({ action: 'start_scan', config: state.lastScanConfig }));
   setStatus('再巡回を開始しています...', 'running');
   addEventLog('status', '前回設定で再巡回を開始');

@@ -418,6 +418,14 @@ class MFAConfig:
         if mtype not in ("totp", "email", "none"):
             mtype = "none"
 
+        # per-scan で明示的に secret / QR override が与えられ、uri override が無い場合、
+        # 環境変数由来の stale な WSCAN_MFA_TOTP_URI を無効化して明示入力を優先する。
+        # （resolve_totp_secret は uri > qr > secret の優先順のため、残った env URI が
+        #   別アカウント向けの per-scan secret/QR を握り潰してしまうのを防ぐ）
+        _totp_uri = _s("WSCAN_MFA_TOTP_URI", "")
+        if (ov.get("totp_secret") or ov.get("totp_qr")) and not ov.get("totp_uri"):
+            _totp_uri = ""
+
         cfg = cls(
             type=mtype,
             field=_s("WSCAN_MFA_FIELD", "otp") or "otp",
@@ -430,7 +438,7 @@ class MFAConfig:
             totp_label_arg=_s("WSCAN_MFA_TOTP_LABEL_ARG", "account_label")
             or "account_label",
             totp_secret=_s("WSCAN_MFA_TOTP_SECRET", ""),
-            totp_uri=_s("WSCAN_MFA_TOTP_URI", ""),
+            totp_uri=_totp_uri,
             totp_qr=_s("WSCAN_MFA_TOTP_QR", ""),
             totp_digits=_i("WSCAN_MFA_TOTP_DIGITS", 6),
             totp_period=_i("WSCAN_MFA_TOTP_PERIOD", 30),

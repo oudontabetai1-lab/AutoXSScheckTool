@@ -199,6 +199,43 @@ def test_mfaconfig_native_totp_uri_auto_enables():
     assert cfg.enabled is True
 
 
+def test_explicit_secret_override_suppresses_stale_env_uri():
+    # env に古い WSCAN_MFA_TOTP_URI が残っていても、per-scan で secret override を
+    # 渡したら env URI を無効化し、明示入力(secret)を優先する。
+    cfg = mfa.MFAConfig.from_env(
+        env={"WSCAN_MFA_TOTP_URI": "otpauth://totp/old?secret=OLDBASE32"},
+        overrides={"totp_secret": "GEZDGNBVGY3TQOJQ"},
+    )
+    assert cfg.totp_uri == ""
+    assert cfg.totp_secret == "GEZDGNBVGY3TQOJQ"
+
+
+def test_explicit_qr_override_suppresses_stale_env_uri():
+    cfg = mfa.MFAConfig.from_env(
+        env={"WSCAN_MFA_TOTP_URI": "otpauth://totp/old?secret=OLDBASE32"},
+        overrides={"totp_qr": "/uploads/new.png"},
+    )
+    assert cfg.totp_uri == ""
+    assert cfg.totp_qr == "/uploads/new.png"
+
+
+def test_explicit_uri_override_is_kept():
+    # uri override を明示した場合は抑制しない（明示 URI が最優先）。
+    cfg = mfa.MFAConfig.from_env(
+        env={"WSCAN_MFA_TOTP_URI": "otpauth://totp/env?secret=ENV"},
+        overrides={"totp_uri": "otpauth://totp/explicit?secret=EXP", "totp_secret": "S"},
+    )
+    assert cfg.totp_uri == "otpauth://totp/explicit?secret=EXP"
+
+
+def test_env_uri_preserved_without_explicit_secret_or_qr():
+    # override が無ければ env の URI をそのまま採用する（従来挙動を壊さない）。
+    cfg = mfa.MFAConfig.from_env(
+        env={"WSCAN_MFA_TOTP_URI": "otpauth://totp/env?secret=ENVBASE32"},
+    )
+    assert cfg.totp_uri == "otpauth://totp/env?secret=ENVBASE32"
+
+
 def test_mfaconfig_native_totp_secret_enabled_with_explicit_type():
     cfg = mfa.MFAConfig.from_env(
         env={},

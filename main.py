@@ -540,24 +540,25 @@ Examples:
         "--mfa-field", metavar="NAME", default=_CFG.get("mfa_field", ""),
         help="One-time-code input field name/id on the login form (default: otp).",
     )
+    # uri/secret/qr の既定は config のみを見る（env は MFAConfig.from_env が一元的に
+    # 解決する）。env をここで CLI 既定に焼き込むと、明示的な --mfa-totp-secret/-qr を
+    # 渡しても env 由来の URI が override 扱いで優先され、明示入力が握り潰されるため。
     scan.add_argument(
         "--mfa-totp-uri", metavar="URI",
-        default=os.environ.get("WSCAN_MFA_TOTP_URI", _CFG.get("mfa_totp_uri", "")),
+        default=_CFG.get("mfa_totp_uri", ""),
         help="TOTPの otpauth:// URI（Authenticator登録画面の「セットアップキー/URI」）。"
-             "env WSCAN_MFA_TOTP_URI。",
+             "未指定時は env WSCAN_MFA_TOTP_URI。",
     )
     scan.add_argument(
         "--mfa-totp-secret", metavar="BASE32",
-        default=os.environ.get(
-            "WSCAN_MFA_TOTP_SECRET", _CFG.get("mfa_totp_secret", "")
-        ),
-        help="TOTPの生Base32シークレット。env WSCAN_MFA_TOTP_SECRET。",
+        default=_CFG.get("mfa_totp_secret", ""),
+        help="TOTPの生Base32シークレット。未指定時は env WSCAN_MFA_TOTP_SECRET。",
     )
     scan.add_argument(
         "--mfa-totp-qr", metavar="FILE",
-        default=os.environ.get("WSCAN_MFA_TOTP_QR", _CFG.get("mfa_totp_qr", "")),
+        default=_CFG.get("mfa_totp_qr", ""),
         help="TOTPのQRコード画像ファイル（PNG等）。opencvが必要"
-             "（pip install opencv-python-headless）。env WSCAN_MFA_TOTP_QR。",
+             "（pip install opencv-python-headless）。未指定時は env WSCAN_MFA_TOTP_QR。",
     )
     # digits/period/algorithm は config(wscan.yaml)の値を既定として尊重する
     # （0/空だと ScanEngine が override を送らず 6/30/SHA1 に落ちるため。他の
