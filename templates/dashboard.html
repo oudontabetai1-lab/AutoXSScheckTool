@@ -2844,9 +2844,11 @@ function _collectFullConfigForExport() {
     accounts: (typeof collectAccounts === 'function') ? collectAccounts() : [],
   };
   // 長期保存するJSONにはTOTP登録情報・Bearer・カスタムヘッダ値を含めない。
-  // （カスタムヘッダには Authorization / X-Api-Key 等の認証情報が入り得る）
+  // （カスタムヘッダには Authorization / X-Api-Key 等の認証情報が入り得る。
+  //   QRパスはシークレットを符号化した画像の所在を示すため同様に除外する）
   delete cfg.mfa_totp_uri;
   delete cfg.mfa_totp_secret;
+  delete cfg.mfa_totp_qr;
   delete cfg.bearer;
   delete cfg.headers;
   return cfg;
@@ -3088,9 +3090,10 @@ function saveConfigToStorage() {
       checks: getSelectedChecks(),
       flows: collectFlows(),
     };
-    // localStorageにもTOTP登録情報・Bearer・カスタムヘッダ値を残さない。
+    // localStorageにもTOTP登録情報・Bearer・カスタムヘッダ値・QRパスを残さない。
     delete cfg.mfa_totp_uri;
     delete cfg.mfa_totp_secret;
+    delete cfg.mfa_totp_qr;
     delete cfg.bearer;
     delete cfg.headers;
     localStorage.setItem('wscan_config', JSON.stringify(cfg));
