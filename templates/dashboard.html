@@ -2128,14 +2128,29 @@ const state = {
   _smPanWired: false,
   checkStats: {},
   lastScanConfig: null,
-  // このタブが開始したスキャンか（＝次の scan_started は自分の開始）を示すフラグ。
-  // true の間はローカルのフル config を保持し、false のとき(観測/他クライアント開始)は
-  // 配信された最新 config を採用して stale を避ける。
-  pendingOwnStart: false,
+  // このタブが開始したスキャンを識別する nonce。start_scan の config に載せ、
+  // scan_started の配信データ(非秘匿フィールドは保持される)に echo される値と照合する。
+  // 一致＝自分の開始→フル config を保持、不一致＝観測→配信データを採用(stale回避)。
+  // ブロードキャストされる他タブの scan_rejected 等では誤クリアされない。
+  myScanNonce: null,
   // WS 再接続時にサーバが直近イベント履歴を再送するため、同一 finding が
   // 重複してカードに積まれるのを防ぐ。安定キー(url|field|check|payload|type)で抑止。
   findingKeys: new Set(),
 };
+
+// スキャン開始時に呼ぶ: config に一意な nonce を刻み、フル config をローカル保持する。
+// scan_started は config の非秘匿フィールドを echo するため、この nonce で「自分の開始」を
+// 識別でき、ブロードキャストされる他タブのイベントに惑わされずに済む。
+function _markOwnScan(config) {
+  const nonce = (self.crypto && crypto.randomUUID)
+    ? crypto.randomUUID()
+    : (Date.now() + '-' + Math.random().toString(16).slice(2));
+  state.myScanNonce = nonce;
+  config._client_nonce = nonce;
+  // フル config(認証情報込み)をローカル保持し「再実行」で使う（配信は伏字版のため）。
+  state.lastScanConfig = JSON.parse(JSON.stringify(config));
+  return config;
+}
 
 // finding の安定キー。再送・再接続時の重複カードを抑止するために使う。
 function findingKey(d) {
@@ -2667,9 +2682,9 @@ function rerunLastScan() {
     return;
   }
   showPostScanActions(false);
-  // 再実行も「自分の開始」。フラグを立てないと、直後に届く伏字版 scan_started で
-  // lastScanConfig が上書きされ、次回以降の再実行が認証情報を失う。
-  state.pendingOwnStart = true;
+  // 再実行も「自分の開始」。新しい nonce を刻んで自分の scan_started を識別する
+  // （さもないと直後の伏字 scan_started で lastScanConfig が上書きされ認証情報を失う）。
+  _markOwnScan(state.lastScanConfig);
   state.ws.send(JSON.stringify({ action: 'start_scan', config: state.lastScanConfig }));
   setStatus('再巡回を開始しています...', 'running');
   addEventLog('status', '前回設定で再巡回を開始');
@@ -2778,8 +2793,7 @@ function submitScanConfig() {
     // ブラウザへのダウンロードは「📤 設定をエクスポート」ボタン押下時のみ。
     // 開始したクライアントはフル config をローカル保持し「再実行」で認証情報を保つ
     // （配信される scan_started は伏字版なので、そこからは復元できないため）。
-    state.lastScanConfig = JSON.parse(JSON.stringify(config));
-    state.pendingOwnStart = true;
+    _markOwnScan(config);
     state.ws.send(JSON.stringify({ action: 'start_scan', config }));
     document.getElementById('scanConfigOverlay').classList.remove('active');
     setStatus('スキャン開始リクエスト送信中...', 'running');
@@ -3034,8 +3048,7 @@ function submitAgentScan() {
 
   if (state.ws && state.ws.readyState === WebSocket.OPEN) {
     // 再実行のためフル config をローカル保持（配信は伏字版のため）。
-    state.lastScanConfig = JSON.parse(JSON.stringify(config));
-    state.pendingOwnStart = true;
+    _markOwnScan(config);
     state.ws.send(JSON.stringify({ action: 'start_scan', config }));
     document.getElementById('scanConfigOverlay').classList.remove('active');
     setStatus('Agent Browser スキャン開始リクエスト送信中...', 'running');
@@ -4000,17 +4013,13 @@ function handleEvent(event) {
       // Serve mode: show the scan config form. アイドル復帰なので、前スキャンの
       // レビュー待ちモーダルが残っていれば閉じる（亡霊モーダル防止）。
       closeInteractiveModals();
-      // アイドル＝自分の開始待ちは無い。フラグが残っていると後続の観測スキャンを
-      // 誤って自分の開始と見なすためリセットする。
-      state.pendingOwnStart = false;
       document.getElementById('scanConfigOverlay').classList.add('active');
       setStatus('設定フォームに入力してスキャンを開始してください', '');
       break;
 
     case 'scan_rejected':
-      // 自分の開始が拒否された（スコープ外/実行中など）。pendingOwnStart を残すと
-      // 後続の観測スキャンで stale config を保持してしまうためリセットする。
-      state.pendingOwnStart = false;
+      // 拒否理由の表示のみ。nonce 方式のため、ブロードキャストされる他タブの拒否で
+      // 自タブの状態を触る必要はない（自分の scan_started は nonce で識別する）。
       setStatus(`スキャン開始が拒否されました: ${data.message || ''}`, 'error');
       break;
 
@@ -4019,13 +4028,12 @@ function handleEvent(event) {
       document.getElementById('scanConfigOverlay').classList.remove('active');
       // 新スキャン開始時は前スキャンのレビュー待ちモーダルを破棄。
       closeInteractiveModals();
-      // 開始したクライアントは送信時にフル config を保持済み。ここで上書きすると
-      // 伏字版(認証情報なし)で潰れ「再実行」が壊れる。一方、他クライアント/REST が
-      // 開始したスキャンを観測している場合は、ここで最新の(伏字)config に更新しないと
-      // 前スキャンの target/auth が残って再実行が別対象を叩く(stale)。pendingOwnStart で
-      // 「自分の開始か」を判別し、自分の開始はフル保持、観測時は配信データを採用する。
-      if (state.pendingOwnStart) {
-        state.pendingOwnStart = false;   // 自分の開始 → ローカルのフル config を維持
+      // 自分が開始したスキャンかを nonce で識別する。config に載せた _client_nonce は
+      // scan_started の配信データ(非秘匿フィールドは保持)に echo される。一致すれば
+      // ローカルのフル config を維持し「再実行」で認証情報を保つ。不一致(他タブ/REST が
+      // 開始したスキャンの観測)なら最新の(伏字)config を採用して stale を避ける。
+      if (data && data._client_nonce && data._client_nonce === state.myScanNonce) {
+        // 自分の開始 → ローカルのフル config を維持
       } else {
         state.lastScanConfig = JSON.parse(JSON.stringify(data || {}));
       }
@@ -4835,9 +4843,8 @@ function submitHybridScan() {
     enable_community_payloads: cfgToggles.community_payloads,
     max_payloads: parseInt(document.getElementById('cfgMaxPayloads')?.value) || 0,
   };
-  // 再実行のためフル config をローカル保持（配信は伏字版のため）。
-  state.lastScanConfig = JSON.parse(JSON.stringify(config));
-  state.pendingOwnStart = true;
+  // nonce を刻んで自分の scan_started を識別し、フル config をローカル保持する。
+  _markOwnScan(config);
   state.ws.send(JSON.stringify({ action: 'start_scan', config }));
   document.getElementById('scanConfigOverlay').classList.remove('active');
   setStatus('🔀 ハイブリッドスキャン開始リクエスト送信中...', 'running');

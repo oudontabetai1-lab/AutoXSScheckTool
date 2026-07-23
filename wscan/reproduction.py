@@ -77,11 +77,16 @@ def _curl_from_request(request: dict) -> str:
 
     parts = ["curl", "-i", "-sS", "-X", shlex.quote(method)]
     skip_headers = {"host", "content-length", "connection", "accept-encoding"}
+    # 認証ヘッダの値は成果物へ平文で残さない（curl はテンプレートとして提示し、
+    # 実行時にトークンを差し替える前提）。ヘッダ名は再現の手掛かりとして残す。
+    from .request_logger import _SENSITIVE_HEADERS
     for key, value in headers.items():
         if key.lower() in skip_headers:
             continue
         if key.lower().startswith(":"):
             continue
+        if key.lower() in _SENSITIVE_HEADERS:
+            value = "<REDACTED: トークンを差し替えて実行>"
         parts.extend(["-H", shlex.quote(f"{key}: {value}")])
     if body:
         parts.extend(["--data-raw", shlex.quote(body)])
