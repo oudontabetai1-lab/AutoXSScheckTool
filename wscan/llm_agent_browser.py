@@ -543,6 +543,24 @@ class AgentBrowserScanner:
             # ヘッダ値をログや例外へ出さず、Agent の探索を継続する。
             pass
 
+    async def _prepare_extra_headers_before_run(self, session) -> None:
+        """初期ナビゲーション前に対象ページを確立し、追加ヘッダを適用する。"""
+        required_apis = ("start", "get_current_page", "set_extra_headers")
+        if (
+            not self.extra_headers
+            or not all(hasattr(session, name) for name in required_apis)
+        ):
+            return
+        try:
+            # BrowserSession.start() は冪等。先に target を確立しないと
+            # set_extra_headers() が no-op になるため、この順序を維持する。
+            await session.start()
+            await session.get_current_page()
+            await self._apply_extra_headers(session)
+        except Exception:
+            # バージョン差異や起動失敗時も秘匿値を出さず Agent を継続する。
+            pass
+
     # ------------------------------------------------------------------
     # Public entry point
     # ------------------------------------------------------------------
@@ -654,6 +672,8 @@ class AgentBrowserScanner:
                 await self.monitor.emit_status(
                     f"Agent Browser: {self.target_url} をスキャン中", "running"
                 )
+
+            await self._prepare_extra_headers_before_run(browser)
 
             if self.extra_headers and hasattr(browser, "set_extra_headers"):
                 async def _apply_headers_on_step(_agent):

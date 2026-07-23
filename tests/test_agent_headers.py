@@ -29,6 +29,32 @@ class _FailingHeaderSession:
         raise RuntimeError("header application failed")
 
 
+class _RecordingInitialHeaderSession:
+    def __init__(self):
+        self.calls = []
+
+    async def start(self):
+        self.calls.append("start")
+
+    async def get_current_page(self):
+        self.calls.append("get_current_page")
+        return object()
+
+    async def set_extra_headers(self, headers):
+        self.calls.append(("set_extra_headers", headers))
+
+
+class _SessionWithoutCurrentPage:
+    def __init__(self):
+        self.calls = []
+
+    async def start(self):
+        self.calls.append("start")
+
+    async def set_extra_headers(self, headers):
+        self.calls.append(("set_extra_headers", headers))
+
+
 class AgentHeaderCompositionTests(unittest.TestCase):
     def test_cli_headers_and_bearer_are_combined(self):
         headers = apply_bearer(
@@ -160,6 +186,46 @@ class AgentHeaderWiringTests(unittest.IsolatedAsyncioTestCase):
 
 
 class AgentBrowserHeaderApplicationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_prepare_headers_before_run_uses_required_lifecycle_order(self):
+        scanner = AgentBrowserScanner(
+            "http://fixture.test",
+            extra_headers={"Authorization": "Bearer test-token"},
+        )
+        session = _RecordingInitialHeaderSession()
+
+        await scanner._prepare_extra_headers_before_run(session)
+
+        self.assertEqual(
+            session.calls,
+            [
+                "start",
+                "get_current_page",
+                (
+                    "set_extra_headers",
+                    {"Authorization": "Bearer test-token"},
+                ),
+            ],
+        )
+
+    async def test_prepare_headers_before_run_skips_empty_headers(self):
+        scanner = AgentBrowserScanner("http://fixture.test")
+        session = _RecordingInitialHeaderSession()
+
+        await scanner._prepare_extra_headers_before_run(session)
+
+        self.assertEqual(session.calls, [])
+
+    async def test_prepare_headers_before_run_skips_session_without_current_page(self):
+        scanner = AgentBrowserScanner(
+            "http://fixture.test",
+            extra_headers={"X-Tenant": "example"},
+        )
+        session = _SessionWithoutCurrentPage()
+
+        await scanner._prepare_extra_headers_before_run(session)
+
+        self.assertEqual(session.calls, [])
+
     async def test_apply_extra_headers_calls_session_once(self):
         scanner = AgentBrowserScanner(
             "http://fixture.test",
