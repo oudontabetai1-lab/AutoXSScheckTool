@@ -71,6 +71,44 @@ def _url_matches_scope(url: str, scopes: list[str]) -> bool:
     return False
 
 
+def _url_origin(url: str) -> str:
+    """URL から比較用の scheme://host[:port] を抽出する。"""
+    try:
+        parsed = urlparse(str(url or "").strip())
+        hostname = parsed.hostname
+        port = parsed.port
+    except (TypeError, ValueError):
+        return ""
+    if not parsed.scheme or not parsed.netloc or not hostname:
+        return ""
+    normalized_host = hostname.lower()
+    if ":" in normalized_host:
+        normalized_host = f"[{normalized_host}]"
+    port_suffix = f":{port}" if port is not None else ""
+    return f"{parsed.scheme.lower()}://{normalized_host}{port_suffix}"
+
+
+def allowed_header_origins(
+    target_url: str,
+    target_urls: list[str],
+    access_urls: list[str],
+    login_url: str = "",
+) -> set[str]:
+    """認証ヘッダを送ってよいオリジン集合(scheme://host[:port])を返す（純粋関数）。"""
+    origins: set[str] = set()
+    for url in [target_url, *target_urls, *access_urls, login_url]:
+        origin = _url_origin(url)
+        if origin:
+            origins.add(origin)
+    return origins
+
+
+def headers_allowed_for_url(url: str, allowed_origins: set[str]) -> bool:
+    """現在ページ URL が許可オリジンなら True（純粋関数）。"""
+    origin = _url_origin(url)
+    return bool(origin and origin in allowed_origins)
+
+
 def _url_is_excluded(url: str, exclude_urls: list[str]) -> bool:
     """通常スキャンと同じ exclude URL 規則を Agent 偵察にも適用する。"""
     if not url or not exclude_urls:
@@ -529,19 +567,64 @@ class AgentBrowserScanner:
             str(value).strip() for value in (exclude_fields or []) if str(value).strip()
         ]
         self.extra_headers = dict(extra_headers or {})
+        self._header_origins = allowed_header_origins(
+            self.target_url,
+            self.target_urls,
+            self.access_urls,
+            self.login_url,
+        )
+        self._headers_applied = False
+        self._missing_header_url_api_warned = False
         self._step_count = 0
         self._memory = AgentMemory()
         self._session_nonce = secrets.token_urlsafe(16)
 
+    def _warn_missing_header_url_api(self) -> None:
+        """現在 URL を安全に判定できない browser-use 版を一度だけ警告する。"""
+        if self._missing_header_url_api_warned:
+            return
+        self._missing_header_url_api_warned = True
+        console.print(
+            "[yellow]警告: この browser-use では現在ページのオリジンを確認できないため、"
+            "Agent 偵察は指定した認証ヘッダなしで実行されます"
+            "（requirements-agent.txt の browser-use 0.12.6 では対応）。[/yellow]"
+        )
+
+    async def _clear_extra_headers(self, session) -> None:
+        """直前に適用した追加ヘッダを、値を露出せず解除する。"""
+        if not self._headers_applied:
+            return
+        try:
+            await session.set_extra_headers({})
+        except Exception:
+            # ヘッダ値をログや例外へ出さず、Agent の探索を継続する。
+            pass
+        else:
+            self._headers_applied = False
+
     async def _apply_extra_headers(self, session) -> None:
-        """現在の Agent 対象ページへ追加ヘッダを適用する。"""
+        """許可オリジンの Agent 対象ページにだけ追加ヘッダを適用する。"""
         if not self.extra_headers or not hasattr(session, "set_extra_headers"):
+            return
+        if not hasattr(session, "get_current_page_url"):
+            self._warn_missing_header_url_api()
+            await self._clear_extra_headers(session)
+            return
+        try:
+            current_url = await session.get_current_page_url()
+        except Exception:
+            await self._clear_extra_headers(session)
+            return
+        if not headers_allowed_for_url(current_url, self._header_origins):
+            await self._clear_extra_headers(session)
             return
         try:
             await session.set_extra_headers(self.extra_headers)
         except Exception:
             # ヘッダ値をログや例外へ出さず、Agent の探索を継続する。
             pass
+        else:
+            self._headers_applied = True
 
     async def _prepare_extra_headers_before_run(self, session) -> None:
         """初期ナビゲーション前に対象ページを確立し、追加ヘッダを適用する。"""

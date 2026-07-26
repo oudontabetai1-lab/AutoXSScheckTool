@@ -13,18 +13,29 @@ from unittest.mock import AsyncMock, patch
 import main
 from wscan.agent_engine import AgentEngine
 from wscan.header_manager import apply_bearer, parse_header_args
-from wscan.llm_agent_browser import AgentBrowserScanner
+from wscan.llm_agent_browser import (
+    AgentBrowserScanner,
+    allowed_header_origins,
+    headers_allowed_for_url,
+)
 
 
 class _RecordingHeaderSession:
-    def __init__(self):
+    def __init__(self, current_url="http://fixture.test"):
         self.calls = []
+        self.current_url = current_url
+
+    async def get_current_page_url(self):
+        return self.current_url
 
     async def set_extra_headers(self, headers):
         self.calls.append(headers)
 
 
 class _FailingHeaderSession:
+    async def get_current_page_url(self):
+        return "http://fixture.test"
+
     async def set_extra_headers(self, _headers):
         raise RuntimeError("header application failed")
 
@@ -39,6 +50,9 @@ class _RecordingInitialHeaderSession:
     async def get_current_page(self):
         self.calls.append("get_current_page")
         return object()
+
+    async def get_current_page_url(self):
+        return "http://fixture.test"
 
     async def set_extra_headers(self, headers):
         self.calls.append(("set_extra_headers", headers))
@@ -120,6 +134,66 @@ class AgentHeaderCompositionTests(unittest.TestCase):
         self.assertEqual(args.bearer, "agent-token")
         self.assertEqual(args.header, ["X-Tenant: example"])
         self.assertEqual(args.header_file, "headers.yaml")
+
+
+class AgentHeaderOriginTests(unittest.TestCase):
+    def test_allowed_header_origins_collects_all_explicit_scopes(self):
+        origins = allowed_header_origins(
+            "https://primary.example/start",
+            [
+                "https://primary.example/app",
+                "https://api.example:8443/v1",
+            ],
+            ["https://login.example/session"],
+            "https://identity.example/sign-in",
+        )
+
+        self.assertEqual(
+            origins,
+            {
+                "https://primary.example",
+                "https://api.example:8443",
+                "https://login.example",
+                "https://identity.example",
+            },
+        )
+
+    def test_allowed_header_origins_ignores_empty_and_invalid_urls(self):
+        origins = allowed_header_origins(
+            "",
+            ["not-a-url", "http://[invalid"],
+            ["/relative-only", "://missing-scheme"],
+        )
+
+        self.assertEqual(origins, set())
+
+    def test_allowed_header_origins_treats_ports_as_distinct_origins(self):
+        origins = allowed_header_origins(
+            "https://api.example/resource",
+            ["https://api.example:8443/resource"],
+            [],
+        )
+
+        self.assertEqual(
+            origins,
+            {"https://api.example", "https://api.example:8443"},
+        )
+
+    def test_headers_allowed_for_url_matches_only_allowed_origin(self):
+        allowed = {"https://api.example:8443"}
+
+        self.assertTrue(
+            headers_allowed_for_url("https://api.example:8443/v1", allowed)
+        )
+        self.assertFalse(
+            headers_allowed_for_url("https://api.example/v1", allowed)
+        )
+        self.assertFalse(
+            headers_allowed_for_url("https://evil.example/v1", allowed)
+        )
+        self.assertFalse(headers_allowed_for_url("", allowed))
+        self.assertFalse(headers_allowed_for_url("not-a-url", allowed))
+        self.assertFalse(headers_allowed_for_url("http://[invalid", allowed))
 
 
 class AgentHeaderWiringTests(unittest.IsolatedAsyncioTestCase):
@@ -253,6 +327,52 @@ class AgentBrowserHeaderApplicationTests(unittest.IsolatedAsyncioTestCase):
             session.calls,
             [{"Authorization": "Bearer test-token"}],
         )
+
+    async def test_apply_extra_headers_skips_disallowed_origin(self):
+        scanner = AgentBrowserScanner(
+            "http://fixture.test",
+            extra_headers={"Authorization": "Bearer test-token"},
+        )
+        session = _RecordingHeaderSession("https://evil.example/page")
+
+        await scanner._apply_extra_headers(session)
+
+        self.assertEqual(session.calls, [])
+        self.assertFalse(scanner._headers_applied)
+
+    async def test_apply_extra_headers_clears_headers_after_leaving_allowed_origin(self):
+        scanner = AgentBrowserScanner(
+            "http://fixture.test",
+            extra_headers={"Authorization": "Bearer test-token"},
+        )
+        session = _RecordingHeaderSession()
+
+        await scanner._apply_extra_headers(session)
+        session.current_url = "https://evil.example/page"
+        await scanner._apply_extra_headers(session)
+
+        self.assertEqual(
+            session.calls,
+            [
+                {"Authorization": "Bearer test-token"},
+                {},
+            ],
+        )
+        self.assertFalse(scanner._headers_applied)
+
+    async def test_apply_extra_headers_without_current_url_api_fails_closed(self):
+        scanner = AgentBrowserScanner(
+            "http://fixture.test",
+            extra_headers={"X-Tenant": "example"},
+        )
+        session = _SessionWithoutCurrentPage()
+
+        with patch("wscan.llm_agent_browser.console") as mock_console:
+            await scanner._apply_extra_headers(session)
+            await scanner._apply_extra_headers(session)
+
+        self.assertEqual(session.calls, [])
+        self.assertEqual(mock_console.print.call_count, 1)
 
     async def test_apply_extra_headers_skips_empty_headers(self):
         scanner = AgentBrowserScanner("http://fixture.test")
