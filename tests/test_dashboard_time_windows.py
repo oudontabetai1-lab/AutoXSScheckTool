@@ -49,14 +49,54 @@ class ServeTimeWindowWiringTests(unittest.TestCase):
             self.assertIsInstance(value.values[-1], ast.Constant)
             self.assertIsNone(value.values[-1].value)
 
+    def test_agent_and_hybrid_serve_paths_use_time_window_helpers(self):
+        tree = ast.parse(Path("main.py").read_text(encoding="utf-8"))
+        run_serve = next(
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.AsyncFunctionDef) and node.name == "run_serve"
+        )
+
+        def config_branch(name):
+            return next(
+                node
+                for node in ast.walk(run_serve)
+                if isinstance(node, ast.If)
+                and isinstance(node.test, ast.Call)
+                and isinstance(node.test.func, ast.Attribute)
+                and node.test.func.attr == "get"
+                and node.test.args
+                and isinstance(node.test.args[0], ast.Constant)
+                and node.test.args[0].value == name
+            )
+
+        def called_helpers(node):
+            return {
+                call.func.id
+                for call in ast.walk(node)
+                if isinstance(call, ast.Call)
+                and isinstance(call.func, ast.Name)
+            }
+
+        self.assertIn(
+            "_wait_for_scan_window", called_helpers(config_branch("agent_mode"))
+        )
+        hybrid_helpers = called_helpers(config_branch("hybrid_mode"))
+        self.assertIn("_wait_for_hybrid_recon_window", hybrid_helpers)
+        self.assertIn("_run_with_time_window_monitor", hybrid_helpers)
+        self.assertIn("_wait_for_scan_window", hybrid_helpers)
+
 
 class DashboardTimeWindowJsTests(unittest.TestCase):
-    def test_time_window_controls_cover_normal_hybrid_and_persistence(self):
+    def test_time_window_controls_cover_normal_agent_hybrid_and_persistence(self):
         html = Path("templates/dashboard.html").read_text(encoding="utf-8")
 
         self.assertIn('id="cfgAllowedHours"', html)
         self.assertIn('id="cfgForbiddenHours"', html)
-        self.assertEqual(html.count("...timeWindowFields(),"), 4)
+        self.assertEqual(html.count("...timeWindowFields(),"), 5)
+        agent_start = html.index("function submitAgentScan()")
+        agent_end = html.index("// ─── Restore saved config", agent_start)
+        self.assertIn("...timeWindowFields(),", html[agent_start:agent_end])
         self.assertGreaterEqual(html.count("applyTimeWindows(cfg);"), 3)
 
     @unittest.skipUnless(shutil.which("node"), "Node.js is required for dashboard JS test")

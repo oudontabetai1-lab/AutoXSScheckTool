@@ -118,3 +118,98 @@ def test_hybrid_recon_wait_can_be_aborted_from_monitor_command_queue():
     assert sleeps == [0.5]
     assert monitor.statuses[0][1] == "paused"
     assert monitor.statuses[-1][1] == "done"
+
+
+def test_agent_mode_waits_outside_window_without_real_sleep():
+    monitor = _Monitor()
+    current = [datetime(2024, 1, 1, 9, 59, 59)]
+    sleeps = []
+
+    async def fake_sleep(delay):
+        sleeps.append(delay)
+        current[0] = datetime(2024, 1, 1, 10, 0)
+
+    result = asyncio.run(
+        main._wait_for_scan_window(
+            monitor,
+            ["Mon 10:00-12:00"],
+            None,
+            phase_label="Agent Browser スキャン",
+            now_fn=lambda: current[0],
+            sleep_fn=fake_sleep,
+        )
+    )
+
+    assert result is True
+    assert sleeps == [0.5]
+    assert "Agent Browser スキャン" in monitor.statuses[0][0]
+    assert [state for _message, state in monitor.statuses] == ["paused", "running"]
+
+
+def test_hybrid_recon_is_cancelled_when_window_closes_without_real_sleep():
+    monitor = _Monitor()
+    current = [datetime(2024, 1, 1, 11, 59, 59)]
+    operation_started = asyncio.Event()
+    operation_stopped = []
+    sleeps = []
+
+    async def fake_sleep(delay):
+        sleeps.append(delay)
+        current[0] = datetime(2024, 1, 1, 12, 0)
+
+    async def recon_operation():
+        operation_started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            operation_stopped.append(True)
+
+    async def run_test():
+        result = await main._run_with_time_window_monitor(
+            recon_operation,
+            monitor,
+            ["Mon 10:00-12:00"],
+            None,
+            phase_label="ハイブリッド Phase 1",
+            now_fn=lambda: current[0],
+            sleep_fn=fake_sleep,
+        )
+        assert operation_started.is_set()
+        return result
+
+    result, interrupted = asyncio.run(run_test())
+
+    assert result is None
+    assert interrupted is True
+    assert sleeps == [0.5]
+    assert operation_stopped == [True]
+    assert monitor.statuses == [
+        ("検査可能時間外へ移行したため ハイブリッド Phase 1 を停止しました。", "paused")
+    ]
+
+
+def test_window_monitor_is_disabled_when_unconfigured():
+    monitor = _Monitor()
+    sleeps = []
+
+    async def unexpected_sleep(delay):
+        sleeps.append(delay)
+        raise AssertionError("時間帯未設定では監視 sleep してはならない")
+
+    async def completed_operation():
+        return "completed"
+
+    result, interrupted = asyncio.run(
+        main._run_with_time_window_monitor(
+            completed_operation,
+            monitor,
+            None,
+            None,
+            phase_label="ハイブリッド Phase 1",
+            sleep_fn=unexpected_sleep,
+        )
+    )
+
+    assert result == "completed"
+    assert interrupted is False
+    assert sleeps == []

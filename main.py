@@ -318,12 +318,12 @@ def _coerce_serve_ints(cfg: dict) -> tuple[dict, dict]:
     return values, invalid
 
 
-def _hybrid_recon_wait_seconds(
+def _scan_window_wait_seconds(
     now: datetime,
     allowed_hours=None,
     forbidden_hours=None,
 ):
-    """Hybrid 偵察を開始できるまでの秒数を返す純粋関数。
+    """Agent 系処理を開始できるまでの秒数を返す純粋関数。
 
     時間帯設定が無ければ ``None``、現在許可中なら ``0.0`` を返す。
     指定済みルールが全て不正、または探索範囲内に許可時間が無い場合は
@@ -346,18 +346,28 @@ def _hybrid_recon_wait_seconds(
     return time_window.seconds_until_allowed(now, allowed, forbidden)
 
 
-async def _wait_for_hybrid_recon_window(
+def _hybrid_recon_wait_seconds(
+    now: datetime,
+    allowed_hours=None,
+    forbidden_hours=None,
+):
+    """後方互換用: Hybrid 偵察の時間帯判定。"""
+    return _scan_window_wait_seconds(now, allowed_hours, forbidden_hours)
+
+
+async def _wait_for_scan_window(
     monitor,
     allowed_hours=None,
     forbidden_hours=None,
     *,
+    phase_label: str,
     now_fn=None,
     sleep_fn=None,
 ) -> bool:
-    """serve Hybrid の Phase 1 前で時間帯ゲートを待つ。
+    """serve の Agent 系フェーズ前で時間帯ゲートを待つ。
 
     待機中は dashboard の既存 command queue を短い間隔で確認し、abort を
-    受けたら ``False`` を返す。Phase 2 向けのその他のコマンドは、ゲート通過時に
+    受けたら ``False`` を返す。後続フェーズ向けのその他のコマンドは、ゲート通過時に
     元の queue へ戻す。
     """
     if not allowed_hours and not forbidden_hours:
@@ -382,11 +392,11 @@ async def _wait_for_hybrid_recon_window(
 
         if abort_requested:
             await monitor.emit_status(
-                "ハイブリッド Phase 1 の時間帯待機を中断しました。", "done"
+                f"{phase_label} の時間帯待機を中断しました。", "done"
             )
             return False
 
-        wait = _hybrid_recon_wait_seconds(
+        wait = _scan_window_wait_seconds(
             now_fn(), allowed_hours, forbidden_hours
         )
         if wait is None or wait <= 0:
@@ -394,7 +404,7 @@ async def _wait_for_hybrid_recon_window(
                 monitor.command_queue.put_nowait(command)
             if announced:
                 await monitor.emit_status(
-                    "検査可能時間帯になりました。ハイブリッド Phase 1 を再開します。",
+                    f"検査可能時間帯になりました。{phase_label} を開始します。",
                     "running",
                 )
             return True
@@ -402,20 +412,97 @@ async def _wait_for_hybrid_recon_window(
         if wait == float("inf"):
             await monitor.emit_status(
                 "検査可能時間帯に到達できない設定のため、"
-                "ハイブリッド Phase 1 を中断しました。",
+                f"{phase_label} を中断しました。",
                 "error",
             )
             return False
 
         if not announced:
             await monitor.emit_status(
-                f"検査可能時間外 — ハイブリッド Phase 1 を約 {int(wait)} 秒待機",
+                f"検査可能時間外 — {phase_label} を約 {int(wait)} 秒待機",
                 "paused",
             )
             announced = True
 
         # dashboard の abort に素早く反応できるよう、長い待機を細かく刻む。
         await sleep_fn(min(0.5, max(0.05, wait)))
+
+
+async def _wait_for_hybrid_recon_window(
+    monitor,
+    allowed_hours=None,
+    forbidden_hours=None,
+    *,
+    now_fn=None,
+    sleep_fn=None,
+) -> bool:
+    """後方互換用: serve Hybrid の Phase 1 前で時間帯ゲートを待つ。"""
+    return await _wait_for_scan_window(
+        monitor,
+        allowed_hours,
+        forbidden_hours,
+        phase_label="ハイブリッド Phase 1",
+        now_fn=now_fn,
+        sleep_fn=sleep_fn,
+    )
+
+
+async def _run_with_time_window_monitor(
+    operation,
+    monitor,
+    allowed_hours=None,
+    forbidden_hours=None,
+    *,
+    phase_label: str,
+    now_fn=None,
+    sleep_fn=None,
+):
+    """Agent 系処理を実行し、許可時間外へ変わったら task cancel で停止する。
+
+    戻り値は ``(result, interrupted)``。時間帯未設定時は監視タスクを作らず、
+    従来どおり operation をそのまま実行する。
+    """
+    if not allowed_hours and not forbidden_hours:
+        return await operation(), False
+
+    now_fn = now_fn or datetime.now
+    sleep_fn = sleep_fn or asyncio.sleep
+
+    async def watch_window():
+        while True:
+            wait = _scan_window_wait_seconds(
+                now_fn(), allowed_hours, forbidden_hours
+            )
+            if wait is not None and wait > 0:
+                return
+            await sleep_fn(0.5)
+
+    operation_task = asyncio.create_task(operation())
+    watcher_task = asyncio.create_task(watch_window())
+    try:
+        done, _pending = await asyncio.wait(
+            {operation_task, watcher_task},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if operation_task in done:
+            watcher_task.cancel()
+            await asyncio.gather(watcher_task, return_exceptions=True)
+            return operation_task.result(), False
+
+        operation_task.cancel()
+        await asyncio.gather(operation_task, return_exceptions=True)
+        await monitor.emit_status(
+            f"検査可能時間外へ移行したため {phase_label} を停止しました。",
+            "paused",
+        )
+        return None, True
+    finally:
+        for task in (operation_task, watcher_task):
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(
+            operation_task, watcher_task, return_exceptions=True
+        )
 
 
 def _effective_totp_sources(args) -> tuple[str, str, str]:
@@ -2307,6 +2394,13 @@ async def run_serve(args):
         # ── Agent Browser mode ─────────────────────────────────────
         if cfg.get("agent_mode"):
             from wscan.agent_engine import AgentEngine
+            if not await _wait_for_scan_window(
+                monitor,
+                cfg.get("allowed_hours") or None,
+                cfg.get("forbidden_hours") or None,
+                phase_label="Agent Browser スキャン",
+            ):
+                return
             await monitor.emit_status(f"Agent Browser: {url} をスキャン中", "running")
             try:
                 agent_engine = AgentEngine(
@@ -2371,14 +2465,16 @@ async def run_serve(args):
                     monitor=monitor,
                     port=port,
                 )
-                handoff = await recon_engine.run_recon()
-                seed_urls = handoff.discovered_urls
-                agent_findings = handoff.findings
-                await monitor.emit_status(
-                    f"🔀 Phase 2: {len(seed_urls)} URL / "
-                    f"{len(agent_findings)} Agent Finding 発見済み。通常スキャン開始...",
-                    "running",
+                handoff, recon_interrupted = await _run_with_time_window_monitor(
+                    recon_engine.run_recon,
+                    monitor,
+                    cfg.get("allowed_hours") or None,
+                    cfg.get("forbidden_hours") or None,
+                    phase_label="ハイブリッド Phase 1",
                 )
+                if not recon_interrupted:
+                    seed_urls = handoff.discovered_urls
+                    agent_findings = handoff.findings
             except Exception as exc:
                 console.print(
                     f"[yellow]⚠ 偵察フェーズ失敗 ({exc})。"
@@ -2386,6 +2482,21 @@ async def run_serve(args):
                 )
                 seed_urls = []
                 agent_findings = []
+
+            # Phase 1 完了と時間枠終了が競合した場合も、Phase 2 を枠外で
+            # 開始しないよう必ず直前に同じゲートを再確認する。
+            if not await _wait_for_scan_window(
+                monitor,
+                cfg.get("allowed_hours") or None,
+                cfg.get("forbidden_hours") or None,
+                phase_label="ハイブリッド Phase 2",
+            ):
+                return
+            await monitor.emit_status(
+                f"🔀 Phase 2: {len(seed_urls)} URL / "
+                f"{len(agent_findings)} Agent Finding 発見済み。通常スキャン開始...",
+                "running",
+            )
 
         await monitor.emit_status(f"Starting scan of {url}", "running")
 

@@ -3138,6 +3138,7 @@ function submitAgentScan() {
     login_url:  document.getElementById('agentLoginUrl').value.trim(),
     auth_user:  document.getElementById('agentAuthUser').value.trim(),
     auth_pass:  document.getElementById('agentAuthPass').value,
+    ...timeWindowFields(),
     headless: true,
     open_report: true,
   };
