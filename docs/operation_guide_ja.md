@@ -133,7 +133,7 @@ python3 main.py agent https://api.example.com \
 
 通常ツール層で認証ヘッダをオリジン単位にスコープ制御する場合は、全リクエストを Playwright `route` に通すため Service Worker を無効化します。
 
-> ⚠️ **残存リスク**: Agent 層でブラウザ/CDP target の確立、イベント購読、または `Fetch.enable` ができない場合は、探索を停止せず従来の CDP `Network.setExtraHTTPHeaders` 方式へフォールバックします。この方式ではブラウザターゲットの全リクエストにヘッダが適用されるため、第三者サブリソースや1ステップ内の外部リダイレクト／遷移へ送信される可能性が残ります。通常ツール層（`scan`）も Playwright `route` によりリクエスト単位でオリジンを判定し、route 登録に失敗した環境ではコンテキスト全体適用へフォールバックします。フォールバック環境や外部リソースを多く読み込む対象では、権限を絞ったトークンの利用を推奨します。動的な `--header-refresh-cmd` は通常ツール層専用です。
+> ⚠️ **残存リスク**: Agent 層は対応する browser-use / cdp_use では新 target を停止状態で検知し、`Fetch.enable` 後に再開します。イベント購読 API が利用できない場合は各ステップ開始時の未設定 target 検出を継続しますが、新 target の初回リクエストには間に合わず、追加認証ヘッダなしで送信される可能性があります（フェイルクローズ）。初期 target で `Fetch.enable` 自体ができない場合は、探索を停止せず従来の CDP `Network.setExtraHTTPHeaders` 方式へフォールバックします。この方式ではブラウザターゲットの全リクエストにヘッダが適用されるため、第三者サブリソースや1ステップ内の外部リダイレクト／遷移へ送信される可能性が残ります。通常ツール層（`scan`）も Playwright `route` によりリクエスト単位でオリジンを判定し、route 登録に失敗した環境ではコンテキスト全体適用へフォールバックします。フォールバック環境や外部リソースを多く読み込む対象では、権限を絞ったトークンの利用を推奨します。動的な `--header-refresh-cmd` は通常ツール層専用です。
 
 ```bash
 python3 main.py scan https://api.example.com \

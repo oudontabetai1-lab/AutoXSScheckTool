@@ -6,14 +6,18 @@ import asyncio
 import base64
 import re
 import time
-import warnings
 from urllib.parse import urlparse as _urlparse
 from typing import Optional, Callable, Any
 from urllib.parse import urljoin, urlparse
 
 from playwright.async_api import async_playwright, Browser, BrowserContext, Page, Request, Response
+from rich.console import Console
+
 from .header_scope import headers_allowed_for_url
 from .tls_config import TLSConfig
+
+
+console = Console()
 
 
 class NetworkCapture:
@@ -196,6 +200,8 @@ class BrowserManager:
         self.header_scope_origins = set(header_scope_origins or ())
         self._header_route_active: bool = False
         self._header_route_fallback_warned: bool = False
+        self._header_request_fallback_warned: bool = False
+        self._context_wide_headers_active: bool = False
         self._service_worker_block_fallback_warned: bool = False
         self._playwright = None
         self._browser: Optional[Browser] = None
@@ -246,15 +252,18 @@ class BrowserManager:
             # 古い Playwright は service_workers を受け付けない。この場合も scan を
             # 中断せず、該当オプションだけ外して既存の route 方式を試す。
             ctx_kwargs.pop("service_workers", None)
-            self._warn_service_worker_block_fallback()
+            await self._warn_service_worker_block_fallback()
             self._context = await self._browser.new_context(**ctx_kwargs)
+        self._context_wide_headers_active = bool(
+            self.extra_headers and not use_header_route
+        )
         if use_header_route:
             try:
                 await self._context.route("**/*", self._auth_header_route)
                 self._header_route_active = True
             except Exception:
                 self._header_route_active = False
-                self._warn_header_route_fallback()
+                await self._warn_header_route_fallback()
                 try:
                     await self._context.set_extra_http_headers(
                         {k: str(v) for k, v in self.extra_headers.items()}
@@ -263,6 +272,8 @@ class BrowserManager:
                     # Route registration failed, but inability to apply the
                     # fallback must not abort the scan.
                     pass
+                else:
+                    self._context_wide_headers_active = True
         self.page = await self._context.new_page()
         self.page.set_default_timeout(self.timeout)
 
@@ -282,29 +293,46 @@ class BrowserManager:
                 await self.monitor.emit_request(req.get("request", {}))
                 await self.monitor.emit_response(req.get("response", {}))
 
-    def _warn_header_route_fallback(self) -> None:
-        """ルート登録失敗の警告を、ヘッダ値を含めず一度だけ出す。"""
+    async def _emit_header_notice(self, message: str) -> None:
+        """ヘッダ関連の重要通知を monitor または CLI へ出す。"""
+        if self.monitor:
+            try:
+                await self.monitor.emit_status(message, "running")
+                return
+            except Exception:
+                # 通知障害でスキャンを中断せず、CLI へ表示して見落としを防ぐ。
+                pass
+        console.print(f"[yellow]{message}[/yellow]")
+
+    async def _warn_header_route_fallback(self) -> None:
+        """ルート登録失敗の通知を、ヘッダ値を含めず一度だけ出す。"""
         if self._header_route_fallback_warned:
             return
         self._header_route_fallback_warned = True
-        warnings.warn(
-            "Per-request header routing could not be enabled; "
-            "falling back to context-wide extra HTTP headers.",
-            RuntimeWarning,
-            stacklevel=2,
+        await self._emit_header_notice(
+            "リクエスト単位のヘッダ付与を有効化できず、"
+            "コンテキスト全体へ適用します"
+            "（第三者サブリソースにも送信され得ます）"
         )
 
-    def _warn_service_worker_block_fallback(self) -> None:
-        """Service Worker 無効化不可の警告を、値を含めず一度だけ出す。"""
+    async def _warn_service_worker_block_fallback(self) -> None:
+        """Service Worker 無効化不可の通知を、値を含めず一度だけ出す。"""
         if self._service_worker_block_fallback_warned:
             return
         self._service_worker_block_fallback_warned = True
-        warnings.warn(
-            "This Playwright version cannot block Service Workers; "
-            "requests handled by a Service Worker may bypass per-request "
-            "header routing.",
-            RuntimeWarning,
-            stacklevel=2,
+        await self._emit_header_notice(
+            "Service Worker を無効化できないため、一部のリクエストでは"
+            "リクエスト単位のヘッダ付与が適用されない可能性があります"
+        )
+
+    async def _warn_header_request_fallback(self) -> None:
+        """リクエスト単位の付与失敗を、ヘッダ値を含めず一度だけ通知する。"""
+        if self._header_request_fallback_warned:
+            return
+        self._header_request_fallback_warned = True
+        await self._emit_header_notice(
+            "リクエスト単位のヘッダ付与に失敗したため、"
+            "該当リクエストは認証ヘッダなしで実行しました"
         )
 
     async def _auth_header_route(self, route, request):
@@ -329,16 +357,16 @@ class BrowserManager:
             await route.fulfill(response=response)
             return
         except Exception:
-            pass
+            await self._warn_header_request_fallback()
 
         try:
-            if headers is not None:
-                await route.continue_(headers=headers)
-            else:
-                await route.continue_()
+            # continue_ に headers を渡すと Chromium がリダイレクト先にも
+            # 引き継ぎ、外部オリジンへ漏洩し得るため、失敗時は必ずヘッダ無しで
+            # 継続する（認証よりフェイルクローズを優先）。
+            await route.continue_()
         except Exception:
             try:
-                # ヘッダ付き継続も失敗した場合は、ハング防止を最優先して素通しする。
+                # 継続自体の一時的な失敗でもハングさせないよう、素通しを再試行する。
                 await route.continue_()
             except Exception:
                 # A route that was already continued, closed, or failed again
@@ -379,12 +407,34 @@ class BrowserManager:
         self.extra_headers = dict(headers or {})
         if self._context is None or self._header_route_active:
             return
+        if self.extra_headers and self.header_scope_origins:
+            try:
+                # Service Worker の block はコンテキスト生成時オプションであり、
+                # 後付け route では変更できない。そのため SW 経由のリクエストは
+                # routing を通らない可能性があるが、ここでは既存挙動を変更しない。
+                await self._context.route("**/*", self._auth_header_route)
+                self._header_route_active = True
+            except Exception:
+                await self._warn_header_route_fallback()
+            else:
+                if self._context_wide_headers_active:
+                    try:
+                        await self._context.set_extra_http_headers({})
+                    except Exception:
+                        # 既存の context-wide 設定を安全に解除できない場合でも、
+                        # refresh タスク自体は中断しない。
+                        pass
+                    else:
+                        self._context_wide_headers_active = False
+                return
         try:
             await self._context.set_extra_http_headers(self.extra_headers)
         except Exception:
             # Older Playwright builds or already-closed contexts — swallow so a
             # rotating-token failure never aborts an in-progress scan.
             pass
+        else:
+            self._context_wide_headers_active = bool(self.extra_headers)
 
     def reset_dialog(self):
         self.dialog_fired = False

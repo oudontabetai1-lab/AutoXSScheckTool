@@ -2,6 +2,7 @@
 
 browser-use は optional 依存のため、実ブラウザや browser_use 自体は起動しない。
 """
+import asyncio
 import tempfile
 import unittest
 import sys
@@ -102,6 +103,42 @@ class _FetchRegistration:
         self.callback = callback
 
 
+class _TargetCommands:
+    def __init__(self):
+        self.calls = []
+
+    async def setAutoAttach(self, params=None, session_id=None):
+        self.calls.append(("setAutoAttach", params, session_id))
+
+
+class _RuntimeCommands:
+    def __init__(self):
+        self.calls = []
+
+    async def runIfWaitingForDebugger(self, params=None, session_id=None):
+        self.calls.append(
+            ("runIfWaitingForDebugger", params, session_id)
+        )
+
+
+class _TargetRegistration:
+    def __init__(self, registry):
+        self.registry = registry
+        self.callback = None
+
+    def attachedToTarget(self, callback):
+        self.callback = callback
+        self.registry._handlers["Target.attachedToTarget"] = callback
+
+
+class _EventRegistry:
+    def __init__(self, attached_handler):
+        self._handlers = {"Target.attachedToTarget": attached_handler}
+
+    def unregister(self, method):
+        self._handlers.pop(method, None)
+
+
 class _RequestScopedHeaderSession:
     def __init__(
         self,
@@ -109,6 +146,7 @@ class _RequestScopedHeaderSession:
         fail_enable=False,
         fail_registration=False,
         fail_header_continue=False,
+        target_events=False,
     ):
         self.calls = []
         self.agent_focus_target_id = "target-1"
@@ -127,6 +165,29 @@ class _RequestScopedHeaderSession:
             cdp_client=cdp_client,
             session_id="target-session",
         )
+        if target_events:
+            self.attached_events = []
+
+            def _existing_attached_handler(event, session_id=None):
+                self.attached_events.append((event, session_id))
+
+            event_registry = _EventRegistry(_existing_attached_handler)
+            target_registration = _TargetRegistration(event_registry)
+            self.target_commands = _TargetCommands()
+            self.runtime_commands = _RuntimeCommands()
+            self._cdp_client_root = SimpleNamespace(
+                _event_registry=event_registry,
+                send=SimpleNamespace(
+                    Fetch=self.fetch_commands,
+                    Target=self.target_commands,
+                    Runtime=self.runtime_commands,
+                ),
+                register=SimpleNamespace(
+                    Fetch=self.fetch_registration,
+                    Target=target_registration,
+                ),
+            )
+            self.target_registration = target_registration
 
     async def start(self):
         self.calls.append("start")
@@ -587,6 +648,106 @@ class AgentBrowserHeaderApplicationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             scanner._fetch_enabled_targets,
             {"target-1", "target-2"},
+        )
+
+    async def test_request_scoped_headers_enable_fetch_on_target_event(self):
+        scanner = AgentBrowserScanner(
+            "http://fixture.test",
+            extra_headers={"Authorization": "Bearer test-token"},
+        )
+        session = _RequestScopedHeaderSession(target_events=True)
+
+        enabled = await scanner._enable_request_scoped_headers(session)
+
+        self.assertTrue(enabled)
+        self.assertIs(scanner._target_event_client, session._cdp_client_root)
+        self.assertEqual(
+            session.target_commands.calls,
+            [(
+                "setAutoAttach",
+                {
+                    "autoAttach": True,
+                    "waitForDebuggerOnStart": True,
+                    "flatten": True,
+                },
+                None,
+            )],
+        )
+
+        event = {
+            "sessionId": "popup-session",
+            "waitingForDebugger": True,
+            "targetInfo": {
+                "targetId": "popup-target",
+                "type": "page",
+            },
+        }
+        session.target_registration.callback(event, "root-session")
+        await asyncio.gather(*tuple(scanner._target_event_tasks))
+
+        self.assertIn(
+            ("enable", {"patterns": [{"urlPattern": "*"}]}, "popup-session"),
+            session.fetch_commands.calls,
+        )
+        self.assertEqual(
+            session.runtime_commands.calls,
+            [("runIfWaitingForDebugger", None, "popup-session")],
+        )
+        self.assertEqual(
+            session.attached_events,
+            [(event, "root-session")],
+        )
+        self.assertIn("popup-target", scanner._fetch_enabled_targets)
+
+    async def test_target_event_fetch_failure_still_resumes_target(self):
+        scanner = AgentBrowserScanner(
+            "http://fixture.test",
+            extra_headers={"Authorization": "Bearer test-token"},
+        )
+        session = _RequestScopedHeaderSession(target_events=True)
+        await scanner._enable_request_scoped_headers(session)
+        session.fetch_commands.fail_enable = True
+
+        session.target_registration.callback(
+            {
+                "sessionId": "popup-session",
+                "waitingForDebugger": True,
+                "targetInfo": {
+                    "targetId": "popup-target",
+                    "type": "page",
+                },
+            },
+            "root-session",
+        )
+        await asyncio.gather(*tuple(scanner._target_event_tasks))
+
+        self.assertNotIn("popup-target", scanner._fetch_enabled_targets)
+        self.assertEqual(
+            session.fetch_commands.calls[-1],
+            ("disable", None, "popup-session"),
+        )
+        self.assertEqual(
+            session.runtime_commands.calls,
+            [("runIfWaitingForDebugger", None, "popup-session")],
+        )
+
+    async def test_request_scoped_headers_keep_step_path_without_target_events(self):
+        scanner = AgentBrowserScanner(
+            "http://fixture.test",
+            extra_headers={"Authorization": "Bearer test-token"},
+        )
+        session = _RequestScopedHeaderSession()
+
+        enabled = await scanner._enable_request_scoped_headers(session)
+        session.agent_focus_target_id = "target-2"
+        step_enabled = await scanner._enable_fetch_for_current_target(session)
+
+        self.assertTrue(enabled)
+        self.assertIsNone(scanner._target_event_client)
+        self.assertTrue(step_enabled)
+        self.assertEqual(
+            [call[0] for call in session.fetch_commands.calls].count("enable"),
+            2,
         )
 
     async def test_request_scoped_headers_do_not_enable_same_target_twice(self):

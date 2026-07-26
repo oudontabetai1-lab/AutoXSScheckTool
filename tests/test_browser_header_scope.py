@@ -1,7 +1,6 @@
 """通常スキャンのリクエスト単位ヘッダ付与と共有オリジン判定のテスト。"""
 import tempfile
 import unittest
-import warnings
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -108,14 +107,15 @@ class BrowserHeaderRouteTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(route.fetch_calls, [])
         self.assertEqual(route.fulfill_calls, [])
 
-    async def test_fetch_failure_falls_back_to_continue_with_headers(self):
+    async def test_fetch_failure_falls_back_to_continue_without_headers(self):
         browser = self._browser()
         route = _Route(fetch_failure=TypeError("max_redirects unsupported"))
 
-        await browser._auth_header_route(
-            route,
-            _Request("https://app.example/private"),
-        )
+        with patch("wscan.browser.console") as mock_console:
+            await browser._auth_header_route(
+                route,
+                _Request("https://app.example/private"),
+            )
 
         self.assertEqual(
             route.fetch_calls,
@@ -128,17 +128,14 @@ class BrowserHeaderRouteTests(unittest.IsolatedAsyncioTestCase):
             }],
         )
         self.assertEqual(route.fulfill_calls, [])
-        self.assertEqual(
-            route.continue_calls,
-            [{
-                "headers": {
-                    "authorization": "Bearer secret",
-                    "x-tenant": "42",
-                }
-            }],
-        )
+        self.assertEqual(route.continue_calls, [{}])
+        mock_console.print.assert_called_once()
+        notice = mock_console.print.call_args.args[0]
+        self.assertIn("認証ヘッダなし", notice)
+        self.assertNotIn("Authorization", notice)
+        self.assertNotIn("secret", notice)
 
-    async def test_fulfill_failure_falls_back_to_continue_with_headers(self):
+    async def test_fulfill_failure_falls_back_to_continue_without_headers(self):
         browser = self._browser()
         route = _Route(fulfill_failure=RuntimeError("fulfill failed"))
 
@@ -149,17 +146,9 @@ class BrowserHeaderRouteTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(route.fetch_calls), 1)
         self.assertEqual(route.fulfill_calls, [{"response": route.response}])
-        self.assertEqual(
-            route.continue_calls,
-            [{
-                "headers": {
-                    "authorization": "Bearer secret",
-                    "x-tenant": "42",
-                }
-            }],
-        )
+        self.assertEqual(route.continue_calls, [{}])
 
-    async def test_header_fallback_failure_retries_continue_without_headers(self):
+    async def test_headerless_fallback_failure_retries_without_headers(self):
         browser = self._browser()
         route = _Route(
             fetch_failure=AttributeError("route.fetch unavailable"),
@@ -173,15 +162,23 @@ class BrowserHeaderRouteTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(
             route.continue_calls,
-            [
-                {
-                    "headers": {
-                        "authorization": "Bearer secret",
-                        "x-tenant": "42",
-                    }
-                },
-                {},
-            ],
+            [{}, {}],
+        )
+
+    async def test_request_fallback_notice_is_emitted_only_once(self):
+        browser = self._browser()
+        browser.monitor = SimpleNamespace(emit_status=AsyncMock())
+
+        for _ in range(2):
+            await browser._auth_header_route(
+                _Route(fetch_failure=RuntimeError("fetch failed")),
+                _Request("https://app.example/private"),
+            )
+
+        browser.monitor.emit_status.assert_awaited_once_with(
+            "リクエスト単位のヘッダ付与に失敗したため、"
+            "該当リクエストは認証ヘッダなしで実行しました",
+            "running",
         )
 
     async def test_origin_check_failure_still_attempts_continue(self):
@@ -215,6 +212,69 @@ class BrowserHeaderRouteTests(unittest.IsolatedAsyncioTestCase):
             {"Authorization": "Bearer fresh"},
         )
         browser._context.set_extra_http_headers.assert_not_awaited()
+
+    async def test_header_refresh_enables_route_when_scoped_headers_appear(self):
+        browser = BrowserManager(
+            header_scope_origins={"https://app.example"},
+        )
+        browser._context = SimpleNamespace(
+            route=AsyncMock(),
+            set_extra_http_headers=AsyncMock(),
+        )
+
+        await browser.update_extra_headers(
+            {"Authorization": "Bearer fresh"}
+        )
+
+        browser._context.route.assert_awaited_once_with(
+            "**/*",
+            browser._auth_header_route,
+        )
+        browser._context.set_extra_http_headers.assert_not_awaited()
+        self.assertTrue(browser._header_route_active)
+
+    async def test_header_refresh_unknown_scope_remains_context_wide(self):
+        browser = BrowserManager()
+        browser._context = SimpleNamespace(
+            route=AsyncMock(),
+            set_extra_http_headers=AsyncMock(),
+        )
+
+        await browser.update_extra_headers(
+            {"Authorization": "Bearer fresh"}
+        )
+
+        browser._context.route.assert_not_awaited()
+        browser._context.set_extra_http_headers.assert_awaited_once_with(
+            {"Authorization": "Bearer fresh"}
+        )
+        self.assertFalse(browser._header_route_active)
+
+    async def test_header_refresh_route_failure_uses_context_wide_fallback(self):
+        browser = BrowserManager(
+            header_scope_origins={"https://app.example"},
+        )
+        browser._context = SimpleNamespace(
+            route=AsyncMock(side_effect=RuntimeError("route unavailable")),
+            set_extra_http_headers=AsyncMock(),
+        )
+        browser.monitor = SimpleNamespace(emit_status=AsyncMock())
+
+        await browser.update_extra_headers(
+            {"Authorization": "Bearer fresh"}
+        )
+
+        browser._context.route.assert_awaited_once()
+        browser._context.set_extra_http_headers.assert_awaited_once_with(
+            {"Authorization": "Bearer fresh"}
+        )
+        self.assertFalse(browser._header_route_active)
+        browser.monitor.emit_status.assert_awaited_once_with(
+            "リクエスト単位のヘッダ付与を有効化できず、"
+            "コンテキスト全体へ適用します"
+            "（第三者サブリソースにも送信され得ます）",
+            "running",
+        )
 
 
 class BrowserHeaderModeTests(unittest.IsolatedAsyncioTestCase):
@@ -265,11 +325,10 @@ class BrowserHeaderModeTests(unittest.IsolatedAsyncioTestCase):
             extra_headers={"Authorization": "Bearer secret"},
             header_scope_origins={"https://app.example"},
         )
+        browser.monitor = SimpleNamespace(emit_status=AsyncMock())
 
         with patch("wscan.browser.async_playwright", return_value=starter):
-            with warnings.catch_warnings(record=True) as caught:
-                warnings.simplefilter("always")
-                await browser.init()
+            await browser.init()
 
         self.assertNotIn(
             "extra_http_headers",
@@ -279,8 +338,12 @@ class BrowserHeaderModeTests(unittest.IsolatedAsyncioTestCase):
             {"Authorization": "Bearer secret"}
         )
         self.assertFalse(browser._header_route_active)
-        self.assertEqual(len(caught), 1)
-        self.assertNotIn("secret", str(caught[0].message))
+        browser.monitor.emit_status.assert_awaited_once_with(
+            "リクエスト単位のヘッダ付与を有効化できず、"
+            "コンテキスト全体へ適用します"
+            "（第三者サブリソースにも送信され得ます）",
+            "running",
+        )
 
     async def test_unsupported_service_worker_option_retries_without_it(self):
         starter, fake_browser, context = self._playwright_fakes()
@@ -294,8 +357,7 @@ class BrowserHeaderModeTests(unittest.IsolatedAsyncioTestCase):
         )
 
         with patch("wscan.browser.async_playwright", return_value=starter):
-            with warnings.catch_warnings(record=True) as caught:
-                warnings.simplefilter("always")
+            with patch("wscan.browser.console") as mock_console:
                 await browser.init()
 
         first_kwargs = fake_browser.new_context.await_args_list[0].kwargs
@@ -303,8 +365,11 @@ class BrowserHeaderModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(first_kwargs["service_workers"], "block")
         self.assertNotIn("service_workers", second_kwargs)
         context.route.assert_awaited_once()
-        self.assertEqual(len(caught), 1)
-        self.assertNotIn("secret", str(caught[0].message))
+        mock_console.print.assert_called_once()
+        notice = mock_console.print.call_args.args[0]
+        self.assertIn("Service Worker", notice)
+        self.assertNotIn("Authorization", notice)
+        self.assertNotIn("secret", notice)
 
     async def test_unknown_scope_preserves_context_wide_behavior(self):
         starter, fake_browser, context = self._playwright_fakes()
