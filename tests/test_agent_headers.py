@@ -568,6 +568,59 @@ class AgentBrowserHeaderApplicationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(session.calls, [])
         self.assertEqual(session.fetch_commands.calls, [])
 
+    async def test_request_scoped_headers_enable_fetch_for_new_target(self):
+        scanner = AgentBrowserScanner(
+            "http://fixture.test",
+            extra_headers={"Authorization": "Bearer test-token"},
+        )
+        session = _RequestScopedHeaderSession()
+        await scanner._enable_request_scoped_headers(session)
+
+        session.agent_focus_target_id = "target-2"
+        enabled = await scanner._enable_fetch_for_current_target(session)
+
+        self.assertTrue(enabled)
+        self.assertEqual(
+            [call[0] for call in session.fetch_commands.calls].count("enable"),
+            2,
+        )
+        self.assertEqual(
+            scanner._fetch_enabled_targets,
+            {"target-1", "target-2"},
+        )
+
+    async def test_request_scoped_headers_do_not_enable_same_target_twice(self):
+        scanner = AgentBrowserScanner(
+            "http://fixture.test",
+            extra_headers={"Authorization": "Bearer test-token"},
+        )
+        session = _RequestScopedHeaderSession()
+        await scanner._enable_request_scoped_headers(session)
+
+        enabled = await scanner._enable_fetch_for_current_target(session)
+
+        self.assertTrue(enabled)
+        self.assertEqual(
+            [call[0] for call in session.fetch_commands.calls].count("enable"),
+            1,
+        )
+
+    async def test_request_scoped_headers_new_target_failure_is_swallowed(self):
+        scanner = AgentBrowserScanner(
+            "http://fixture.test",
+            extra_headers={"Authorization": "Bearer test-token"},
+        )
+        session = _RequestScopedHeaderSession()
+        await scanner._enable_request_scoped_headers(session)
+        session.agent_focus_target_id = "target-2"
+        session.fetch_commands.fail_enable = True
+
+        enabled = await scanner._enable_fetch_for_current_target(session)
+
+        self.assertFalse(enabled)
+        self.assertNotIn("target-2", scanner._fetch_enabled_targets)
+        self.assertEqual(session.fetch_commands.calls[-1][0], "disable")
+
     async def test_prepare_headers_before_run_uses_required_lifecycle_order(self):
         scanner = AgentBrowserScanner(
             "http://fixture.test",

@@ -544,6 +544,7 @@ class AgentBrowserScanner:
             self.login_url,
         )
         self._request_scoped_headers = False
+        self._fetch_enabled_targets: set[str] = set()
         self._headers_applied = False
         self._missing_header_url_api_warned = False
         self._step_count = 0
@@ -598,33 +599,17 @@ class AgentBrowserScanner:
         else:
             self._headers_applied = True
 
-    async def _enable_request_scoped_headers(self, session) -> bool:
-        """CDP Fetch でリクエスト単位のヘッダ付与を有効化する。
-
-        失敗時は Fetch を無効化して False を返す。呼び出し側は従来の
-        set_extra_headers 方式へフォールバックする。
-        """
-        if not self.extra_headers:
-            return False
-
-        required_apis = (
-            "start",
-            "get_current_page",
-            "get_or_create_cdp_session",
-            "agent_focus_target_id",
-        )
-        if not all(hasattr(session, name) for name in required_apis):
-            return False
-
+    async def _enable_fetch_for_current_target(self, session) -> bool:
+        """現在の browser target が未設定なら CDP Fetch を有効化する。"""
         fetch_commands = None
         cdp_session_id = None
+        target_id = None
         try:
-            # BrowserSession.start() は冪等。Fetch を有効化する target を先に確立する。
-            await session.start()
-            await session.get_current_page()
             target_id = session.agent_focus_target_id
             if not target_id:
                 return False
+            if target_id in self._fetch_enabled_targets:
+                return True
 
             cdp_session = await session.get_or_create_cdp_session(
                 target_id,
@@ -698,6 +683,38 @@ class AgentBrowserScanner:
                     await fetch_commands.disable(session_id=cdp_session_id)
                 except Exception:
                     pass
+            return False
+
+        self._fetch_enabled_targets.add(target_id)
+        return True
+
+    async def _enable_request_scoped_headers(self, session) -> bool:
+        """CDP Fetch でリクエスト単位のヘッダ付与を有効化する。
+
+        失敗時は Fetch を無効化して False を返す。呼び出し側は従来の
+        set_extra_headers 方式へフォールバックする。
+        """
+        if not self.extra_headers:
+            return False
+
+        required_apis = (
+            "start",
+            "get_current_page",
+            "get_or_create_cdp_session",
+            "agent_focus_target_id",
+        )
+        if not all(hasattr(session, name) for name in required_apis):
+            return False
+
+        try:
+            # BrowserSession.start() は冪等。Fetch を有効化する target を先に確立する。
+            await session.start()
+            await session.get_current_page()
+            enabled = await self._enable_fetch_for_current_target(session)
+        except Exception:
+            enabled = False
+
+        if not enabled:
             self._request_scoped_headers = False
             return False
 
@@ -849,11 +866,17 @@ class AgentBrowserScanner:
             if not self._request_scoped_headers:
                 await self._prepare_extra_headers_before_run(browser, start_url)
 
-            if (
-                self.extra_headers
-                and not self._request_scoped_headers
-                and hasattr(browser, "set_extra_headers")
-            ):
+            if self.extra_headers and self._request_scoped_headers:
+                async def _enable_fetch_on_step(_agent):
+                    # ポップアップや新規タブへ focus が移った場合、その target にも
+                    # Fetch を有効化する。失敗は内部で吸収し Agent を継続する。
+                    await self._enable_fetch_for_current_target(browser)
+
+                history = await agent.run(
+                    max_steps=self.max_steps,
+                    on_step_start=_enable_fetch_on_step,
+                )
+            elif self.extra_headers and hasattr(browser, "set_extra_headers"):
                 async def _apply_headers_on_step(_agent):
                     await self._apply_extra_headers(browser)
 

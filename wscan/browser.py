@@ -196,6 +196,7 @@ class BrowserManager:
         self.header_scope_origins = set(header_scope_origins or ())
         self._header_route_active: bool = False
         self._header_route_fallback_warned: bool = False
+        self._service_worker_block_fallback_warned: bool = False
         self._playwright = None
         self._browser: Optional[Browser] = None
         self._context: Optional[BrowserContext] = None
@@ -233,7 +234,20 @@ class BrowserManager:
             for k, v in self.extra_headers.items():
                 seen[k.lower()] = v
                 ctx_kwargs.setdefault("extra_http_headers", {})[k] = str(v)
-        self._context = await self._browser.new_context(**ctx_kwargs)
+        if use_header_route:
+            # Service Worker が処理するリクエストは context.route() で傍受できないため、
+            # リクエスト単位でスコープ制御する場合だけ無効化する。
+            ctx_kwargs["service_workers"] = "block"
+        try:
+            self._context = await self._browser.new_context(**ctx_kwargs)
+        except TypeError:
+            if not use_header_route or "service_workers" not in ctx_kwargs:
+                raise
+            # 古い Playwright は service_workers を受け付けない。この場合も scan を
+            # 中断せず、該当オプションだけ外して既存の route 方式を試す。
+            ctx_kwargs.pop("service_workers", None)
+            self._warn_service_worker_block_fallback()
+            self._context = await self._browser.new_context(**ctx_kwargs)
         if use_header_route:
             try:
                 await self._context.route("**/*", self._auth_header_route)
@@ -280,23 +294,51 @@ class BrowserManager:
             stacklevel=2,
         )
 
-    async def _auth_header_route(self, route, request):
-        """許可オリジンのリクエストにだけ認証ヘッダを足して継続する。
+    def _warn_service_worker_block_fallback(self) -> None:
+        """Service Worker 無効化不可の警告を、値を含めず一度だけ出す。"""
+        if self._service_worker_block_fallback_warned:
+            return
+        self._service_worker_block_fallback_warned = True
+        warnings.warn(
+            "This Playwright version cannot block Service Workers; "
+            "requests handled by a Service Worker may bypass per-request "
+            "header routing.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
 
-        Playwright は route を必ず continue/fulfill/abort しないとリクエストが停止するため、
-        いかなる例外でも最後に continue する。
+    async def _auth_header_route(self, route, request):
+        """許可オリジンのリクエストにだけ認証ヘッダを付けて継続する。
+
+        許可オリジンでは max_redirects=0 で自前取得し fulfill する。ブラウザに 30x を
+        そのまま返すことで、リダイレクト先は新規リクエストとして再度この判定を通り、
+        スコープ外オリジンへ認証ヘッダが引き継がれない（Chromium はリダイレクトを内部で
+        追うため、continue_ で注入したヘッダがそのまま外部へ送られてしまう）。
         """
+        headers = None
         try:
-            if headers_allowed_for_url(request.url, self.header_scope_origins):
-                headers = dict(request.headers)
-                headers.update(
-                    {key.lower(): str(value) for key, value in self.extra_headers.items()}
-                )
+            if not headers_allowed_for_url(request.url, self.header_scope_origins):
+                await route.continue_()
+                return
+
+            headers = dict(request.headers)
+            headers.update(
+                {key.lower(): str(value) for key, value in self.extra_headers.items()}
+            )
+            response = await route.fetch(headers=headers, max_redirects=0)
+            await route.fulfill(response=response)
+            return
+        except Exception:
+            pass
+
+        try:
+            if headers is not None:
                 await route.continue_(headers=headers)
             else:
                 await route.continue_()
         except Exception:
             try:
+                # ヘッダ付き継続も失敗した場合は、ハング防止を最優先して素通しする。
                 await route.continue_()
             except Exception:
                 # A route that was already continued, closed, or failed again

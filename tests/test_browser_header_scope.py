@@ -24,14 +24,36 @@ class _Request:
 
 
 class _Route:
-    def __init__(self, failures=0):
-        self.calls = []
-        self.failures = failures
+    def __init__(
+        self,
+        *,
+        fetch_failure=None,
+        fulfill_failure=None,
+        continue_failures=0,
+    ):
+        self.response = object()
+        self.fetch_failure = fetch_failure
+        self.fulfill_failure = fulfill_failure
+        self.continue_failures = continue_failures
+        self.fetch_calls = []
+        self.fulfill_calls = []
+        self.continue_calls = []
+
+    async def fetch(self, **kwargs):
+        self.fetch_calls.append(kwargs)
+        if self.fetch_failure is not None:
+            raise self.fetch_failure
+        return self.response
+
+    async def fulfill(self, **kwargs):
+        self.fulfill_calls.append(kwargs)
+        if self.fulfill_failure is not None:
+            raise self.fulfill_failure
 
     async def continue_(self, **kwargs):
-        self.calls.append(kwargs)
-        if self.failures:
-            self.failures -= 1
+        self.continue_calls.append(kwargs)
+        if self.continue_failures:
+            self.continue_failures -= 1
             raise RuntimeError("continue failed")
 
 
@@ -45,7 +67,7 @@ class BrowserHeaderRouteTests(unittest.IsolatedAsyncioTestCase):
             header_scope_origins={"https://app.example"},
         )
 
-    async def test_allowed_origin_continues_with_normalized_auth_headers(self):
+    async def test_allowed_origin_fetches_without_following_redirects_and_fulfills(self):
         browser = self._browser()
         route = _Route()
         request = _Request(
@@ -59,17 +81,20 @@ class BrowserHeaderRouteTests(unittest.IsolatedAsyncioTestCase):
         await browser._auth_header_route(route, request)
 
         self.assertEqual(
-            route.calls,
+            route.fetch_calls,
             [{
                 "headers": {
                     "authorization": "Bearer secret",
                     "accept": "application/javascript",
                     "x-tenant": "42",
-                }
+                },
+                "max_redirects": 0,
             }],
         )
+        self.assertEqual(route.fulfill_calls, [{"response": route.response}])
+        self.assertEqual(route.continue_calls, [])
 
-    async def test_disallowed_origin_continues_without_extra_headers(self):
+    async def test_disallowed_origin_continues_without_headers_or_fetch(self):
         browser = self._browser()
         route = _Route()
         request = _Request(
@@ -79,18 +104,85 @@ class BrowserHeaderRouteTests(unittest.IsolatedAsyncioTestCase):
 
         await browser._auth_header_route(route, request)
 
-        self.assertEqual(route.calls, [{}])
+        self.assertEqual(route.continue_calls, [{}])
+        self.assertEqual(route.fetch_calls, [])
+        self.assertEqual(route.fulfill_calls, [])
 
-    async def test_continue_failure_does_not_escape_and_retries_continue(self):
+    async def test_fetch_failure_falls_back_to_continue_with_headers(self):
         browser = self._browser()
-        route = _Route(failures=2)
+        route = _Route(fetch_failure=TypeError("max_redirects unsupported"))
 
         await browser._auth_header_route(
             route,
             _Request("https://app.example/private"),
         )
 
-        self.assertEqual(len(route.calls), 2)
+        self.assertEqual(
+            route.fetch_calls,
+            [{
+                "headers": {
+                    "authorization": "Bearer secret",
+                    "x-tenant": "42",
+                },
+                "max_redirects": 0,
+            }],
+        )
+        self.assertEqual(route.fulfill_calls, [])
+        self.assertEqual(
+            route.continue_calls,
+            [{
+                "headers": {
+                    "authorization": "Bearer secret",
+                    "x-tenant": "42",
+                }
+            }],
+        )
+
+    async def test_fulfill_failure_falls_back_to_continue_with_headers(self):
+        browser = self._browser()
+        route = _Route(fulfill_failure=RuntimeError("fulfill failed"))
+
+        await browser._auth_header_route(
+            route,
+            _Request("https://app.example/private"),
+        )
+
+        self.assertEqual(len(route.fetch_calls), 1)
+        self.assertEqual(route.fulfill_calls, [{"response": route.response}])
+        self.assertEqual(
+            route.continue_calls,
+            [{
+                "headers": {
+                    "authorization": "Bearer secret",
+                    "x-tenant": "42",
+                }
+            }],
+        )
+
+    async def test_header_fallback_failure_retries_continue_without_headers(self):
+        browser = self._browser()
+        route = _Route(
+            fetch_failure=AttributeError("route.fetch unavailable"),
+            continue_failures=1,
+        )
+
+        await browser._auth_header_route(
+            route,
+            _Request("https://app.example/private"),
+        )
+
+        self.assertEqual(
+            route.continue_calls,
+            [
+                {
+                    "headers": {
+                        "authorization": "Bearer secret",
+                        "x-tenant": "42",
+                    }
+                },
+                {},
+            ],
+        )
 
     async def test_origin_check_failure_still_attempts_continue(self):
         browser = self._browser()
@@ -105,7 +197,9 @@ class BrowserHeaderRouteTests(unittest.IsolatedAsyncioTestCase):
                 _Request("https://app.example/private"),
             )
 
-        self.assertEqual(route.calls, [{}])
+        self.assertEqual(route.continue_calls, [{}])
+        self.assertEqual(route.fetch_calls, [])
+        self.assertEqual(route.fulfill_calls, [])
 
     async def test_header_refresh_only_replaces_route_handler_state(self):
         browser = self._browser()
@@ -155,6 +249,7 @@ class BrowserHeaderModeTests(unittest.IsolatedAsyncioTestCase):
 
         kwargs = fake_browser.new_context.await_args.kwargs
         self.assertNotIn("extra_http_headers", kwargs)
+        self.assertEqual(kwargs["service_workers"], "block")
         context.route.assert_awaited_once_with(
             "**/*",
             browser._auth_header_route,
@@ -187,6 +282,30 @@ class BrowserHeaderModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(caught), 1)
         self.assertNotIn("secret", str(caught[0].message))
 
+    async def test_unsupported_service_worker_option_retries_without_it(self):
+        starter, fake_browser, context = self._playwright_fakes()
+        fake_browser.new_context.side_effect = [
+            TypeError("unsupported service_workers option"),
+            context,
+        ]
+        browser = BrowserManager(
+            extra_headers={"Authorization": "Bearer secret"},
+            header_scope_origins={"https://app.example"},
+        )
+
+        with patch("wscan.browser.async_playwright", return_value=starter):
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                await browser.init()
+
+        first_kwargs = fake_browser.new_context.await_args_list[0].kwargs
+        second_kwargs = fake_browser.new_context.await_args_list[1].kwargs
+        self.assertEqual(first_kwargs["service_workers"], "block")
+        self.assertNotIn("service_workers", second_kwargs)
+        context.route.assert_awaited_once()
+        self.assertEqual(len(caught), 1)
+        self.assertNotIn("secret", str(caught[0].message))
+
     async def test_unknown_scope_preserves_context_wide_behavior(self):
         starter, fake_browser, context = self._playwright_fakes()
         browser = BrowserManager(
@@ -199,6 +318,10 @@ class BrowserHeaderModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             fake_browser.new_context.await_args.kwargs["extra_http_headers"],
             {"Authorization": "Bearer secret"},
+        )
+        self.assertNotIn(
+            "service_workers",
+            fake_browser.new_context.await_args.kwargs,
         )
         context.route.assert_not_awaited()
         self.assertFalse(browser._header_route_active)
@@ -214,6 +337,10 @@ class BrowserHeaderModeTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertNotIn(
             "extra_http_headers",
+            fake_browser.new_context.await_args.kwargs,
+        )
+        self.assertNotIn(
+            "service_workers",
             fake_browser.new_context.await_args.kwargs,
         )
         context.route.assert_not_awaited()
@@ -243,6 +370,24 @@ class HeaderScopeSharedHelperTests(unittest.TestCase):
                     [],
                 ),
             )
+        )
+
+    def test_unicode_and_punycode_hosts_have_the_same_origin(self):
+        self.assertEqual(
+            _url_origin("https://例え.test/path"),
+            _url_origin("https://xn--r8jz45g.test/other"),
+        )
+
+    def test_ascii_host_origin_is_unchanged(self):
+        self.assertEqual(
+            _url_origin("HTTPS://APP.Example:443/path"),
+            "https://app.example",
+        )
+
+    def test_invalid_idna_host_does_not_raise(self):
+        self.assertEqual(
+            _url_origin("https://\udcff.test/path"),
+            "https://\udcff.test",
         )
 
     def test_engine_passes_all_normalized_scopes_to_browser(self):

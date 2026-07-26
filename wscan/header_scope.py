@@ -18,6 +18,11 @@ def _url_origin(url: str) -> str:
     if not parsed.scheme or not parsed.netloc or not hostname:
         return ""
     normalized_host = hostname.lower()
+    try:
+        normalized_host = normalized_host.encode("idna").decode("ascii")
+    except UnicodeError:
+        # 壊れたホスト名でもスコープ判定自体は例外にせず、従来の小文字表現へ戻す。
+        pass
     if ":" in normalized_host:
         normalized_host = f"[{normalized_host}]"
     scheme = parsed.scheme.lower()
