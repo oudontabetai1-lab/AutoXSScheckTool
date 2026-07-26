@@ -115,5 +115,64 @@ class RedactSecretsTests(unittest.TestCase):
         self.assertEqual(out["login_user_field"], "username")
 
 
+class ConfigSecretFallbackTests(unittest.TestCase):
+    def test_empty_values_fall_back_to_config_keys(self):
+        cfg = {
+            "auth_pass": "",
+            "bearer": "",
+            "mfa_totp_secret": "",
+            "headers": {},
+        }
+        defaults = {
+            "auth_pass": "config-password",
+            "bearer_token": "config-bearer",
+            "mfa_totp_secret": "config-totp",
+            "headers_text": "Authorization: config-header",
+        }
+
+        out = main.apply_config_secret_fallback(cfg, defaults)
+
+        self.assertEqual(out["auth_pass"], "config-password")
+        self.assertEqual(out["bearer"], "config-bearer")
+        self.assertEqual(out["mfa_totp_secret"], "config-totp")
+        self.assertEqual(out["headers"], "Authorization: config-header")
+
+    def test_non_empty_dashboard_values_win(self):
+        cfg = {
+            "auth_pass": "dashboard-password",
+            "bearer": "dashboard-bearer",
+            "headers": {"Authorization": "dashboard-header"},
+        }
+        defaults = {
+            "auth_pass": "config-password",
+            "bearer_token": "config-bearer",
+            "headers_text": "Authorization: config-header",
+        }
+
+        out = main.apply_config_secret_fallback(cfg, defaults)
+
+        self.assertEqual(out, cfg)
+
+    def test_missing_config_value_keeps_dashboard_value_empty(self):
+        cfg = {"auth_pass": "", "headers": ""}
+
+        out = main.apply_config_secret_fallback(cfg, {})
+
+        self.assertEqual(out["auth_pass"], "")
+        self.assertEqual(out["headers"], "")
+
+    def test_does_not_mutate_input(self):
+        cfg = {"auth_pass": "", "headers": {}}
+        original = {"auth_pass": "", "headers": {}}
+
+        out = main.apply_config_secret_fallback(
+            cfg,
+            {"auth_pass": "config-password", "headers_text": "X-Test: config"},
+        )
+
+        self.assertEqual(cfg, original)
+        self.assertIsNot(out, cfg)
+
+
 if __name__ == "__main__":
     unittest.main()

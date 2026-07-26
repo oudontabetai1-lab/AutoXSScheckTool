@@ -178,6 +178,26 @@ _SECRET_KEY_TOKENS = ("password", "secret", "token", "bearer", "api_key", "apike
 # mfa_totp_qr はパス自体がシークレットを符号化した画像の所在を示すため伏せる。
 _SECRET_EXACT_KEYS = ("auth_pass", "cookies", "low_priv_cookies", "mfa_totp_qr")
 
+# ダッシュボードへは空で配信する秘匿フィールド。空で戻ってきたら config へ
+# フォールバックする。headers は値に認証情報を含み得るため同様に扱う。
+_SERVE_SECRET_FALLBACK_KEYS = (
+    "auth_pass",
+    "cookies",
+    "low_priv_cookies",
+    "bearer",
+    "mfa_totp_secret",
+    "mfa_totp_uri",
+    "mfa_totp_qr",
+    "mfa_email_imap_password",
+    "tls_client_cert_password",
+    "headers",
+)
+
+_SERVE_SECRET_CONFIG_KEYS = {
+    "bearer": "bearer_token",
+    "headers": "headers_text",
+}
+
 
 def _redact_secrets(cfg: dict, placeholder: str = "***REDACTED***") -> dict:
     """秘匿値を伏字にした設定の浅いコピーを返す（ディスク保存・共有・配信用）。
@@ -211,6 +231,46 @@ def _redact_secrets(cfg: dict, placeholder: str = "***REDACTED***") -> dict:
         else:
             redacted[key] = value
     return redacted
+
+
+def apply_config_secret_fallback(cfg: dict, config_defaults: dict) -> dict:
+    """空で届いた秘匿フィールドを config の値で補う（浅いコピーを返す。純粋関数）。
+
+    ブラウザへ秘密を配信しない代償として、画面から空で戻る値は「未入力」とみなし
+    サーバ側の設定値へフォールバックする。非空なら画面の入力値を優先する。
+    """
+    resolved = dict(cfg or {})
+    defaults = config_defaults or {}
+    for key in _SERVE_SECRET_FALLBACK_KEYS:
+        value = resolved.get(key)
+        is_empty = value in ("", None) or (key == "headers" and value == {})
+        if not is_empty:
+            continue
+        config_key = _SERVE_SECRET_CONFIG_KEYS.get(key, key)
+        config_value = defaults.get(config_key)
+        if config_value not in ("", None):
+            resolved[key] = config_value
+    return resolved
+
+
+def _effective_totp_sources(args) -> tuple[str, str, str]:
+    """(uri, secret, qr) の実効値を返す。
+
+    CLI で1つでも明示された場合は CLI で明示されたものだけを使い、config 由来の
+    他ソースは無視する。CLI 未指定なら config の値をそのまま使う。
+    """
+    cli_sources = (
+        getattr(args, "mfa_totp_uri", "") or "",
+        getattr(args, "mfa_totp_secret", "") or "",
+        getattr(args, "mfa_totp_qr", "") or "",
+    )
+    if any(cli_sources):
+        return cli_sources
+    return (
+        _CFG.get("mfa_totp_uri", "") or "",
+        _CFG.get("mfa_totp_secret", "") or "",
+        _CFG.get("mfa_totp_qr", "") or "",
+    )
 
 
 def _effective_mfa_type(args):
@@ -567,25 +627,25 @@ Examples:
         "--mfa-field", metavar="NAME", default=_CFG.get("mfa_field", ""),
         help="One-time-code input field name/id on the login form (default: otp).",
     )
-    # uri/secret/qr の既定は config のみを見る（env は MFAConfig.from_env が一元的に
-    # 解決する）。env をここで CLI 既定に焼き込むと、明示的な --mfa-totp-secret/-qr を
-    # 渡しても env 由来の URI が override 扱いで優先され、明示入力が握り潰されるため。
+    # uri/secret/qr は CLI の明示有無を保持し、後段(_effective_totp_sources)で config
+    # 既定を解決する。config/env の URI をここへ焼き込むと、明示 secret/qr より URI が
+    # 優先され、別アカウントの TOTP を生成し得るため。
     scan.add_argument(
         "--mfa-totp-uri", metavar="URI",
-        default=_CFG.get("mfa_totp_uri", ""),
+        default="",
         help="TOTPの otpauth:// URI（Authenticator登録画面の「セットアップキー/URI」）。"
-             "未指定時は env WSCAN_MFA_TOTP_URI。",
+             "未指定時は config / env WSCAN_MFA_TOTP_URI。",
     )
     scan.add_argument(
         "--mfa-totp-secret", metavar="BASE32",
-        default=_CFG.get("mfa_totp_secret", ""),
-        help="TOTPの生Base32シークレット。未指定時は env WSCAN_MFA_TOTP_SECRET。",
+        default="",
+        help="TOTPの生Base32シークレット。未指定時は config / env WSCAN_MFA_TOTP_SECRET。",
     )
     scan.add_argument(
         "--mfa-totp-qr", metavar="FILE",
-        default=_CFG.get("mfa_totp_qr", ""),
+        default="",
         help="TOTPのQRコード画像ファイル（PNG等）。opencvが必要"
-             "（pip install opencv-python-headless）。未指定時は env WSCAN_MFA_TOTP_QR。",
+             "（pip install opencv-python-headless）。未指定時は config / env WSCAN_MFA_TOTP_QR。",
     )
     # digits/period/algorithm は config(wscan.yaml)の値を既定として尊重する
     # （0/空だと ScanEngine が override を送らず 6/30/SHA1 に落ちるため。他の
@@ -1605,6 +1665,7 @@ async def run_scan(args):
         )
 
     def _engine_kwargs(monitor_obj):
+        mfa_totp_uri, mfa_totp_secret, mfa_totp_qr = _effective_totp_sources(args)
         return dict(
             url=args.url,
             monitor=monitor_obj,
@@ -1650,9 +1711,9 @@ async def run_scan(args):
             # --mfa-totp-* を明示した場合は config type を無視し TOTP 自動昇格に委ねる。
             mfa_type=_effective_mfa_type(args),
             mfa_field=getattr(args, "mfa_field", "") or "",
-            mfa_totp_secret=getattr(args, "mfa_totp_secret", "") or "",
-            mfa_totp_uri=getattr(args, "mfa_totp_uri", "") or "",
-            mfa_totp_qr=getattr(args, "mfa_totp_qr", "") or "",
+            mfa_totp_secret=mfa_totp_secret,
+            mfa_totp_uri=mfa_totp_uri,
+            mfa_totp_qr=mfa_totp_qr,
             mfa_totp_digits=getattr(args, "mfa_totp_digits", 0) or 0,
             mfa_totp_period=getattr(args, "mfa_totp_period", 0) or 0,
             mfa_totp_algorithm=getattr(args, "mfa_totp_algorithm", "") or "",
@@ -2346,6 +2407,7 @@ async def run_serve(args):
             monitor.event_history.clear()
             monitor.pending_interactive = None
             cfg = monitor.scan_request_data or {}
+            cfg = apply_config_secret_fallback(cfg, _CFG)
             try:
                 if monitor.scan_max_seconds:
                     # watchdog はまず graceful な abort を要求する(scheduler_task)。

@@ -45,7 +45,47 @@ class EffectiveMfaTypeTests(unittest.TestCase):
         with mock.patch.object(main, "_CFG", cfg):
             self.assertIsNone(main._effective_mfa_type(self._args()))
 
-import main
+
+class EffectiveTotpSourcesTests(unittest.TestCase):
+    @staticmethod
+    def _effective(cfg: dict, *cli_args: str) -> tuple[str, str, str]:
+        argv = ["main.py", "scan", "http://example.com", *cli_args]
+        with mock.patch.object(main, "_CFG", cfg):
+            with mock.patch.object(sys, "argv", argv):
+                args = main.parse_args()
+            return main._effective_totp_sources(args)
+
+    def test_explicit_cli_secret_suppresses_config_uri(self):
+        cfg = {
+            "mfa_totp_uri": "config-uri",
+            "mfa_totp_secret": "config-secret",
+            "mfa_totp_qr": "config-qr",
+        }
+        self.assertEqual(
+            self._effective(cfg, "--mfa-totp-secret", "cli-secret"),
+            ("", "cli-secret", ""),
+        )
+
+    def test_explicit_cli_uri_is_used(self):
+        self.assertEqual(
+            self._effective(
+                {"mfa_totp_secret": "config-secret"},
+                "--mfa-totp-uri",
+                "cli-uri",
+            ),
+            ("cli-uri", "", ""),
+        )
+
+    def test_config_sources_are_used_when_cli_is_unspecified(self):
+        cfg = {
+            "mfa_totp_uri": "config-uri",
+            "mfa_totp_secret": "config-secret",
+            "mfa_totp_qr": "config-qr",
+        }
+        self.assertEqual(
+            self._effective(cfg),
+            ("config-uri", "config-secret", "config-qr"),
+        )
 
 
 class BearerCliDefaultTests(unittest.TestCase):
