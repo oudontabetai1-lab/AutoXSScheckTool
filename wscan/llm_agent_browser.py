@@ -31,12 +31,18 @@ from urllib.parse import urlparse
 from rich.console import Console
 from rich.rule import Rule
 
+from .header_scope import (
+    _BLANK_URLS,
+    _url_origin,
+    allowed_header_origins,
+    effective_origin_url,
+    headers_allowed_for_url,
+)
+
 if TYPE_CHECKING:
     from wscan.monitor import MonitorServer
 
 console = Console()
-
-_BLANK_URLS = frozenset({"", "about:blank", "chrome://newtab/", "about:newtab"})
 
 
 def _normalize_agent_url(url: str) -> str:
@@ -71,61 +77,6 @@ def _url_matches_scope(url: str, scopes: list[str]) -> bool:
         if parsed.path == scope or parsed.path.startswith(scope.rstrip("/") + "/"):
             return True
     return False
-
-
-def _url_origin(url: str) -> str:
-    """URL から比較用の scheme://host[:port] を抽出する。"""
-    try:
-        parsed = urlparse(str(url or "").strip())
-        hostname = parsed.hostname
-        port = parsed.port
-    except (TypeError, ValueError):
-        return ""
-    if not parsed.scheme or not parsed.netloc or not hostname:
-        return ""
-    normalized_host = hostname.lower()
-    if ":" in normalized_host:
-        normalized_host = f"[{normalized_host}]"
-    scheme = parsed.scheme.lower()
-    default_ports = {"http": 80, "https": 443}
-    port_suffix = (
-        f":{port}"
-        if port is not None and port != default_ports.get(scheme)
-        else ""
-    )
-    return f"{scheme}://{normalized_host}{port_suffix}"
-
-
-def effective_origin_url(current_url: str, intended_url: str) -> str:
-    """オリジン判定に使う URL を返す（純粋関数）。
-
-    current_url が未確定（about:blank 等）なら intended_url を使う。
-    """
-    normalized_current = str(current_url or "").strip()
-    if normalized_current in _BLANK_URLS:
-        return str(intended_url or "").strip()
-    return normalized_current
-
-
-def allowed_header_origins(
-    target_url: str,
-    target_urls: list[str],
-    access_urls: list[str],
-    login_url: str = "",
-) -> set[str]:
-    """認証ヘッダを送ってよいオリジン集合(scheme://host[:port])を返す（純粋関数）。"""
-    origins: set[str] = set()
-    for url in [target_url, *target_urls, *access_urls, login_url]:
-        origin = _url_origin(url)
-        if origin:
-            origins.add(origin)
-    return origins
-
-
-def headers_allowed_for_url(url: str, allowed_origins: set[str]) -> bool:
-    """現在ページ URL が許可オリジンなら True（純粋関数）。"""
-    origin = _url_origin(url)
-    return bool(origin and origin in allowed_origins)
 
 
 def _url_is_excluded(url: str, exclude_urls: list[str]) -> bool:

@@ -121,6 +121,7 @@ from rich import box as rbox
 from .attack_planner import AttackPlanner, FieldAttackPlan, PageAttackPlan
 from .adaptive_payload import AdaptivePayloadEngine
 from .browser import BrowserManager
+from .header_scope import allowed_header_origins
 from .tls_config import TLSConfig
 from .chain_scanner import ChainScanner, ChainFinding
 from .ctf_flag_finder import FlagFinder
@@ -704,6 +705,12 @@ class ScanEngine:
             extra_headers=self.header_manager.current(),
             tls_config=self.tls_config,
             target_url=self.target_url,
+            header_scope_origins=allowed_header_origins(
+                self.target_url,
+                self.target_urls,
+                self.access_urls,
+                self.login_url,
+            ),
             request_logger=self.request_logger,
             mfa_solver=self._mfa_solver,
         )

@@ -6,11 +6,13 @@ import asyncio
 import base64
 import re
 import time
+import warnings
 from urllib.parse import urlparse as _urlparse
 from typing import Optional, Callable, Any
 from urllib.parse import urljoin, urlparse
 
 from playwright.async_api import async_playwright, Browser, BrowserContext, Page, Request, Response
+from .header_scope import headers_allowed_for_url
 from .tls_config import TLSConfig
 
 
@@ -171,6 +173,7 @@ class BrowserManager:
         extra_headers: Optional[dict] = None,
         tls_config: Optional[TLSConfig] = None,
         target_url: str = "",
+        header_scope_origins: Optional[set] = None,
         request_logger=None,
         mfa_solver=None,
     ):
@@ -186,10 +189,13 @@ class BrowserManager:
         self.sleep_factor = sleep_factor
         self.tls_config = tls_config or TLSConfig()
         self.target_url = target_url
-        # Custom HTTP headers (Authorization, X-API-Key, …) applied to every
-        # request through the Playwright context. Updated live by HeaderManager
-        # when ``--header-refresh-cmd`` rotates the token.
+        # Custom HTTP headers (Authorization, X-API-Key, …). When explicit
+        # origins are known they are added per request; otherwise the legacy
+        # context-wide behavior is preserved.
         self.extra_headers: dict[str, str] = dict(extra_headers or {})
+        self.header_scope_origins = set(header_scope_origins or ())
+        self._header_route_active: bool = False
+        self._header_route_fallback_warned: bool = False
         self._playwright = None
         self._browser: Optional[Browser] = None
         self._context: Optional[BrowserContext] = None
@@ -219,7 +225,8 @@ class BrowserManager:
         ctx_kwargs.update(self.tls_config.playwright_context_options(self.target_url))
         if self.proxy:
             ctx_kwargs["proxy"] = {"server": self.proxy}
-        if self.extra_headers:
+        use_header_route = bool(self.extra_headers and self.header_scope_origins)
+        if self.extra_headers and not use_header_route:
             # Keep header names case-preserving but de-dupe case-insensitive collisions
             # so Playwright doesn't reject duplicates.
             seen: dict[str, str] = {}
@@ -227,6 +234,21 @@ class BrowserManager:
                 seen[k.lower()] = v
                 ctx_kwargs.setdefault("extra_http_headers", {})[k] = str(v)
         self._context = await self._browser.new_context(**ctx_kwargs)
+        if use_header_route:
+            try:
+                await self._context.route("**/*", self._auth_header_route)
+                self._header_route_active = True
+            except Exception:
+                self._header_route_active = False
+                self._warn_header_route_fallback()
+                try:
+                    await self._context.set_extra_http_headers(
+                        {k: str(v) for k, v in self.extra_headers.items()}
+                    )
+                except Exception:
+                    # Route registration failed, but inability to apply the
+                    # fallback must not abort the scan.
+                    pass
         self.page = await self._context.new_page()
         self.page.set_default_timeout(self.timeout)
 
@@ -245,6 +267,41 @@ class BrowserManager:
             if req:
                 await self.monitor.emit_request(req.get("request", {}))
                 await self.monitor.emit_response(req.get("response", {}))
+
+    def _warn_header_route_fallback(self) -> None:
+        """ルート登録失敗の警告を、ヘッダ値を含めず一度だけ出す。"""
+        if self._header_route_fallback_warned:
+            return
+        self._header_route_fallback_warned = True
+        warnings.warn(
+            "Per-request header routing could not be enabled; "
+            "falling back to context-wide extra HTTP headers.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+
+    async def _auth_header_route(self, route, request):
+        """許可オリジンのリクエストにだけ認証ヘッダを足して継続する。
+
+        Playwright は route を必ず continue/fulfill/abort しないとリクエストが停止するため、
+        いかなる例外でも最後に continue する。
+        """
+        try:
+            if headers_allowed_for_url(request.url, self.header_scope_origins):
+                headers = dict(request.headers)
+                headers.update(
+                    {key.lower(): str(value) for key, value in self.extra_headers.items()}
+                )
+                await route.continue_(headers=headers)
+            else:
+                await route.continue_()
+        except Exception:
+            try:
+                await route.continue_()
+            except Exception:
+                # A route that was already continued, closed, or failed again
+                # still must not propagate an exception into Playwright.
+                pass
 
     async def _on_dialog(self, dialog):
         """Capture alert dialogs (XSS indicator)."""
@@ -276,9 +333,9 @@ class BrowserManager:
             pass
 
     async def update_extra_headers(self, headers: dict) -> None:
-        """Replace the context-wide extra HTTP headers (used by the refresh task)."""
+        """Replace extra HTTP headers used by the refresh task."""
         self.extra_headers = dict(headers or {})
-        if self._context is None:
+        if self._context is None or self._header_route_active:
             return
         try:
             await self._context.set_extra_http_headers(self.extra_headers)
