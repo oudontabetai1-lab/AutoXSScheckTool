@@ -253,6 +253,70 @@ def apply_config_secret_fallback(cfg: dict, config_defaults: dict) -> dict:
     return resolved
 
 
+def _coerce_headers(value) -> dict:
+    """config/ダッシュボード由来の headers を dict へ正規化する（純粋関数）。
+
+    文字列（headers_text 形式）は parse_header_lines で解釈し、dict はコピーを返す。
+    None/空/解釈不能は空 dict。
+    """
+    if isinstance(value, dict):
+        return dict(value)
+    if not isinstance(value, str) or not value.strip():
+        return {}
+    try:
+        from wscan.header_manager import parse_header_lines
+
+        return parse_header_lines(value)
+    except Exception:
+        return {}
+
+
+def _safe_int(value, default: int = 0) -> int:
+    """数値に解釈できない入力を default に落とす（純粋関数）。"""
+    if value in ("", None):
+        return default
+    try:
+        if isinstance(value, str) and not value.strip().isascii():
+            return default
+        parsed = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return default
+    return parsed if parsed >= 0 else default
+
+
+_SERVE_INT_DEFAULTS = {
+    "agent_max_steps": 50,
+    "hybrid_max_steps": 30,
+    "depth": 2,
+    "timeout": 30,
+    "max_forms": 50,
+    "concurrency": 1,
+    "llm_max_retries": 2,
+    "mfa_totp_digits": 0,
+    "mfa_totp_period": 0,
+    "max_payloads": 0,
+    "navigation_retries": 2,
+    "auto_register_count": 2,
+}
+
+
+def _coerce_serve_ints(cfg: dict) -> tuple[dict, dict]:
+    """serve の整数設定を正規化し、実際の誤入力を返す（純粋関数）。"""
+    values: dict = {}
+    invalid: dict = {}
+    source = cfg or {}
+    for key, default in _SERVE_INT_DEFAULTS.items():
+        raw = source.get(key, default)
+        parsed = _safe_int(raw, -1)
+        if parsed < 0:
+            parsed = default
+            # 空欄/None はダッシュボード上の「未指定」なので警告対象にしない。
+            if raw not in ("", None):
+                invalid[key] = raw
+        values[key] = parsed
+    return values, invalid
+
+
 def _effective_totp_sources(args) -> tuple[str, str, str]:
     """(uri, secret, qr) の実効値を返す。
 
@@ -2116,6 +2180,23 @@ async def run_serve(args):
         # 別経路で渡すので機能には影響しない）。
         await monitor.emit_scan_started(_redact_secrets(cfg))
 
+        _int_cfg = dict(cfg)
+        _int_cfg.setdefault(
+            "llm_max_retries", _CFG.get("llm_max_retries", 2)
+        )
+        _serve_ints, _invalid_ints = _coerce_serve_ints(_int_cfg)
+        if _invalid_ints:
+            details = ", ".join(
+                f"{key}={value!r}" for key, value in _invalid_ints.items()
+            )
+            warning = (
+                f"数値設定が不正なため既定値で続行します: {details}"
+            )
+            if monitor is not None:
+                await monitor.emit_status(warning, "warning")
+            else:
+                console.print(f"[yellow]Warning: {warning}[/yellow]")
+
         # 外部 OpenAI 互換（tsuzumi2 等）のベース URL は各エンジン/PayloadGenerator に
         # 明示的に渡す。グローバル env は書き換えない（serve での operator 設定
         # WSCAN_LLM_BASE_URL を、公式 openai を使う別スキャンが消してしまうのを防ぐ）。
@@ -2138,7 +2219,7 @@ async def run_serve(args):
                     auth_user=cfg.get("auth_user", "") or "",
                     auth_pass=cfg.get("auth_pass", "") or "",
                     login_url=cfg.get("login_url", "") or "",
-                    max_steps=int(cfg.get("agent_max_steps", 50)),
+                    max_steps=_serve_ints["agent_max_steps"],
                     open_report=bool(cfg.get("open_report", True)),
                     monitor=monitor,
                     port=port,
@@ -2178,7 +2259,7 @@ async def run_serve(args):
                     access_urls=cfg.get("access_urls", []) or [],
                     exclude_urls=cfg.get("exclude_urls", []) or [],
                     exclude_fields=cfg.get("exclude_fields", []) or [],
-                    max_steps=int(cfg.get("hybrid_max_steps", 30)),
+                    max_steps=_serve_ints["hybrid_max_steps"],
                     open_report=False,
                     monitor=monitor,
                     port=port,
@@ -2202,14 +2283,15 @@ async def run_serve(args):
         await monitor.emit_status(f"Starting scan of {url}", "running")
 
         try:
+            _hdrs = _coerce_headers(cfg.get("headers"))
             engine = ScanEngine(
                 url=url,
                 monitor=monitor,
-                depth=int(cfg.get("depth", 2)),
-                timeout=int(cfg.get("timeout", 30)),
-                max_forms=int(cfg.get("max_forms", 50)),
+                depth=_serve_ints["depth"],
+                timeout=_serve_ints["timeout"],
+                max_forms=_serve_ints["max_forms"],
                 headless=bool(cfg.get("headless", True)),
-                concurrency=int(cfg.get("concurrency", 1)),
+                concurrency=_serve_ints["concurrency"],
                 checks=checks,
                 llm_provider=cfg.get("llm", "none") or "none",
                 ollama_model=cfg.get("ollama_model", "llama3") or "llama3",
@@ -2221,9 +2303,7 @@ async def run_serve(args):
                 llm_timeout_seconds=float(
                     cfg.get("llm_timeout_seconds", _CFG.get("llm_timeout_seconds", 30))
                 ),
-                llm_max_retries=int(
-                    cfg.get("llm_max_retries", _CFG.get("llm_max_retries", 2))
-                ),
+                llm_max_retries=_serve_ints["llm_max_retries"],
                 auth_user=cfg.get("auth_user", "") or "",
                 auth_pass=cfg.get("auth_pass", "") or "",
                 cookies=cfg.get("cookies", "") or "",
@@ -2258,8 +2338,8 @@ async def run_serve(args):
                 mfa_totp_uri=cfg.get("mfa_totp_uri", "") or "",
                 mfa_totp_secret=cfg.get("mfa_totp_secret", "") or "",
                 mfa_totp_qr=cfg.get("mfa_totp_qr", "") or "",
-                mfa_totp_digits=int(cfg.get("mfa_totp_digits") or 0),
-                mfa_totp_period=int(cfg.get("mfa_totp_period") or 0),
+                mfa_totp_digits=_serve_ints["mfa_totp_digits"],
+                mfa_totp_period=_serve_ints["mfa_totp_period"],
                 mfa_totp_algorithm=cfg.get("mfa_totp_algorithm", "") or "",
                 payloads_file=cfg.get("payloads_file") or None,
                 learning_file=cfg.get("learning_file") or None,
@@ -2287,15 +2367,15 @@ async def run_serve(args):
                 flows=cfg.get("flows", []) or [],
                 spa_crawl=bool(cfg.get("spa_crawl", False)),
                 fast_mode=bool(cfg.get("fast_mode", False)),
-                max_payloads=int(cfg.get("max_payloads", 0)),
+                max_payloads=_serve_ints["max_payloads"],
                 request_delay=float(cfg.get("request_delay", 0.5) or 0.0),
-                navigation_retries=int(cfg.get("navigation_retries", 2)),
+                navigation_retries=_serve_ints["navigation_retries"],
                 # 空/未指定は None にそろえ、従来どおり時間帯ゲートを無効にする。
                 allowed_hours=cfg.get("allowed_hours") or None,
                 forbidden_hours=cfg.get("forbidden_hours") or None,
                 accounts=cfg.get("accounts", []) or [],
                 auto_register=bool(cfg.get("auto_register", False)),
-                auto_register_count=int(cfg.get("auto_register_count", 2)),
+                auto_register_count=_serve_ints["auto_register_count"],
                 allow_state_changing_probes=bool(
                     cfg.get(
                         "allow_state_changing_probes",
@@ -2305,9 +2385,7 @@ async def run_serve(args):
                 seed_urls=seed_urls or None,
                 additional_report_findings=agent_findings or None,
                 manual_crawl_path=cfg.get("manual_crawl_file", "") or "",
-                headers=_apply_bearer_to(
-                    cfg.get("headers", {}) or {}, cfg.get("bearer", "")
-                ),
+                headers=_apply_bearer_to(_hdrs, cfg.get("bearer", "") or ""),
                 header_refresh_cmd=cfg.get("header_refresh_cmd", "") or "",
                 header_refresh_interval=float(cfg.get("header_refresh_interval", 0.0) or 0.0),
             )
