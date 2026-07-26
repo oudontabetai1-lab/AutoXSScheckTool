@@ -71,6 +71,75 @@ class _SessionWithoutCurrentPage:
         self.calls.append(("set_extra_headers", headers))
 
 
+class _FetchCommands:
+    def __init__(self, fail_enable=False, fail_header_continue=False):
+        self.calls = []
+        self.fail_enable = fail_enable
+        self.fail_header_continue = fail_header_continue
+
+    async def enable(self, params=None, session_id=None):
+        self.calls.append(("enable", params, session_id))
+        if self.fail_enable:
+            raise RuntimeError("Fetch enable failed")
+
+    async def disable(self, params=None, session_id=None):
+        self.calls.append(("disable", params, session_id))
+
+    async def continueRequest(self, params, session_id=None):
+        self.calls.append(("continueRequest", params, session_id))
+        if self.fail_header_continue and "headers" in params:
+            raise RuntimeError("Fetch continue failed")
+
+
+class _FetchRegistration:
+    def __init__(self, fail_registration=False):
+        self.callback = None
+        self.fail_registration = fail_registration
+
+    def requestPaused(self, callback):
+        if self.fail_registration:
+            raise RuntimeError("Fetch handler registration failed")
+        self.callback = callback
+
+
+class _RequestScopedHeaderSession:
+    def __init__(
+        self,
+        *,
+        fail_enable=False,
+        fail_registration=False,
+        fail_header_continue=False,
+    ):
+        self.calls = []
+        self.agent_focus_target_id = "target-1"
+        self.fetch_commands = _FetchCommands(
+            fail_enable=fail_enable,
+            fail_header_continue=fail_header_continue,
+        )
+        self.fetch_registration = _FetchRegistration(
+            fail_registration=fail_registration
+        )
+        cdp_client = SimpleNamespace(
+            send=SimpleNamespace(Fetch=self.fetch_commands),
+            register=SimpleNamespace(Fetch=self.fetch_registration),
+        )
+        self.cdp_session = SimpleNamespace(
+            cdp_client=cdp_client,
+            session_id="target-session",
+        )
+
+    async def start(self):
+        self.calls.append("start")
+
+    async def get_current_page(self):
+        self.calls.append("get_current_page")
+        return object()
+
+    async def get_or_create_cdp_session(self, target_id, focus=False):
+        self.calls.append(("get_or_create_cdp_session", target_id, focus))
+        return self.cdp_session
+
+
 class AgentHeaderCompositionTests(unittest.TestCase):
     def test_cli_headers_and_bearer_are_combined(self):
         headers = apply_bearer(
@@ -321,6 +390,184 @@ class AgentHeaderWiringTests(unittest.IsolatedAsyncioTestCase):
 
 
 class AgentBrowserHeaderApplicationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_request_scoped_headers_adds_headers_for_allowed_origin(self):
+        scanner = AgentBrowserScanner(
+            "http://fixture.test",
+            extra_headers={"Authorization": "Bearer test-token"},
+        )
+        session = _RequestScopedHeaderSession()
+
+        enabled = await scanner._enable_request_scoped_headers(session)
+        await session.fetch_registration.callback(
+            {
+                "requestId": "allowed-request",
+                "request": {
+                    "url": "http://fixture.test/page",
+                    "headers": {
+                        "Accept": "text/html",
+                        "authorization": "stale-value",
+                    },
+                },
+            },
+            "event-session",
+        )
+
+        self.assertTrue(enabled)
+        self.assertTrue(scanner._request_scoped_headers)
+        self.assertEqual(
+            session.fetch_commands.calls[-1],
+            (
+                "continueRequest",
+                {
+                    "requestId": "allowed-request",
+                    "headers": [
+                        {"name": "Accept", "value": "text/html"},
+                        {
+                            "name": "Authorization",
+                            "value": "Bearer test-token",
+                        },
+                    ],
+                },
+                "event-session",
+            ),
+        )
+
+    async def test_request_scoped_headers_omits_headers_for_disallowed_origin(self):
+        scanner = AgentBrowserScanner(
+            "http://fixture.test",
+            extra_headers={"Authorization": "Bearer test-token"},
+        )
+        session = _RequestScopedHeaderSession()
+
+        enabled = await scanner._enable_request_scoped_headers(session)
+        await session.fetch_registration.callback(
+            {
+                "requestId": "disallowed-request",
+                "request": {
+                    "url": "https://third-party.example/script.js",
+                    "headers": {"Accept": "*/*"},
+                },
+            },
+            None,
+        )
+
+        self.assertTrue(enabled)
+        self.assertEqual(
+            session.fetch_commands.calls[-1],
+            (
+                "continueRequest",
+                {"requestId": "disallowed-request"},
+                "target-session",
+            ),
+        )
+
+    async def test_request_scoped_handler_exception_still_continues_request(self):
+        scanner = AgentBrowserScanner(
+            "http://fixture.test",
+            extra_headers={"Authorization": "Bearer test-token"},
+        )
+        session = _RequestScopedHeaderSession()
+        await scanner._enable_request_scoped_headers(session)
+
+        with patch(
+            "wscan.llm_agent_browser.headers_allowed_for_url",
+            side_effect=RuntimeError("origin check failed"),
+        ):
+            await session.fetch_registration.callback(
+                {
+                    "requestId": "fallback-request",
+                    "request": {"url": "http://fixture.test/page", "headers": {}},
+                },
+                None,
+            )
+
+        self.assertEqual(
+            session.fetch_commands.calls[-1],
+            (
+                "continueRequest",
+                {"requestId": "fallback-request"},
+                "target-session",
+            ),
+        )
+
+    async def test_request_scoped_continue_failure_retries_without_headers(self):
+        scanner = AgentBrowserScanner(
+            "http://fixture.test",
+            extra_headers={"Authorization": "Bearer test-token"},
+        )
+        session = _RequestScopedHeaderSession(fail_header_continue=True)
+        await scanner._enable_request_scoped_headers(session)
+
+        await session.fetch_registration.callback(
+            {
+                "requestId": "retry-request",
+                "request": {"url": "http://fixture.test/page", "headers": {}},
+            },
+            None,
+        )
+
+        continue_calls = [
+            call
+            for call in session.fetch_commands.calls
+            if call[0] == "continueRequest"
+        ]
+        self.assertEqual(len(continue_calls), 2)
+        self.assertIn("headers", continue_calls[0][1])
+        self.assertEqual(
+            continue_calls[1],
+            (
+                "continueRequest",
+                {"requestId": "retry-request"},
+                "target-session",
+            ),
+        )
+
+    async def test_request_scoped_enable_failure_disables_and_returns_false(self):
+        scanner = AgentBrowserScanner(
+            "http://fixture.test",
+            extra_headers={"Authorization": "Bearer test-token"},
+        )
+        session = _RequestScopedHeaderSession(fail_enable=True)
+
+        enabled = await scanner._enable_request_scoped_headers(session)
+
+        self.assertFalse(enabled)
+        self.assertFalse(scanner._request_scoped_headers)
+        self.assertEqual(
+            session.fetch_commands.calls[-1],
+            ("disable", None, "target-session"),
+        )
+
+    async def test_request_scoped_registration_failure_never_enables_fetch(self):
+        scanner = AgentBrowserScanner(
+            "http://fixture.test",
+            extra_headers={"Authorization": "Bearer test-token"},
+        )
+        session = _RequestScopedHeaderSession(fail_registration=True)
+
+        enabled = await scanner._enable_request_scoped_headers(session)
+
+        self.assertFalse(enabled)
+        self.assertFalse(scanner._request_scoped_headers)
+        self.assertNotIn(
+            "enable",
+            [call[0] for call in session.fetch_commands.calls],
+        )
+        self.assertEqual(
+            session.fetch_commands.calls[-1],
+            ("disable", None, "target-session"),
+        )
+
+    async def test_request_scoped_headers_skips_empty_headers(self):
+        scanner = AgentBrowserScanner("http://fixture.test")
+        session = _RequestScopedHeaderSession()
+
+        enabled = await scanner._enable_request_scoped_headers(session)
+
+        self.assertFalse(enabled)
+        self.assertEqual(session.calls, [])
+        self.assertEqual(session.fetch_commands.calls, [])
+
     async def test_prepare_headers_before_run_uses_required_lifecycle_order(self):
         scanner = AgentBrowserScanner(
             "http://fixture.test",

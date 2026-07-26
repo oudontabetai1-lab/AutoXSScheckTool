@@ -129,9 +129,9 @@ python3 main.py agent https://api.example.com \
   -H "X-Tenant: test"
 ```
 
-`agent` は `--header-file` にも対応します。ダッシュボードの Agent/Hybrid は「認証・Cookie」で指定した Bearer/カスタムヘッダを引き継ぎ、Hybrid では Phase 1 偵察と Phase 2 通常スキャンの両方へ同じ実効ヘッダを渡します。認証ヘッダは、Agent が明示された target/access スコープのオリジンを開いている間だけ適用され、スコープ外へ遷移すると解除されます。Agent/Hybrid Phase 1 では、対応する browser-use 環境なら初期ナビゲーション前に `start` → `get_current_page` → CDP の `set_extra_headers` を best-effort で実行し、各ステップ開始時にも現在のオリジンを確認して適用または解除します。
+`agent` は `--header-file` にも対応します。ダッシュボードの Agent/Hybrid は「認証・Cookie」で指定した Bearer/カスタムヘッダを引き継ぎ、Hybrid では Phase 1 偵察と Phase 2 通常スキャンの両方へ同じ実効ヘッダを渡します。Agent/Hybrid Phase 1 では、対応する browser-use 環境なら CDP `Fetch` で全リクエストを傍受し、各リクエスト URL が明示された target/access スコープのオリジンに属する場合だけ認証ヘッダを付与します。このため、第三者オリジンのサブリソースや外部へのリダイレクト／遷移には認証ヘッダを付与しません。
 
-> ⚠️ **残存リスク**: CDP `Network.setExtraHTTPHeaders` はブラウザターゲットの全リクエストに適用されるため、スコープ内ページが読み込む第三者サブリソースや、1ステップ内の外部リダイレクト／遷移には、次のオリジン判定より前にヘッダが付く可能性があります。通常ツール層で Playwright の `extra_http_headers` をコンテキスト全体へ設定しているのと同じ範囲です。リクエスト単位の制御は別途対応予定のため、外部リソースを多く読み込む対象では権限を絞ったトークンの利用を推奨します。環境の API 差異やブラウザ起動・target 確立の失敗によっては、最初の landing 読み込みに間に合わない可能性が残ります。その場合も recon は後続ナビゲーションで回復を試みます。動的な `--header-refresh-cmd` は通常ツール層専用です。
+> ⚠️ **残存リスク**: Agent 層でブラウザ/CDP target の確立、イベント購読、または `Fetch.enable` ができない場合は、探索を停止せず従来の CDP `Network.setExtraHTTPHeaders` 方式へフォールバックします。この方式ではブラウザターゲットの全リクエストにヘッダが適用されるため、第三者サブリソースや1ステップ内の外部リダイレクト／遷移へ送信される可能性が残ります。通常ツール層（`scan`）も Playwright `route` によりリクエスト単位でオリジンを判定し、route 登録に失敗した環境ではコンテキスト全体適用へフォールバックします。フォールバック環境や外部リソースを多く読み込む対象では、権限を絞ったトークンの利用を推奨します。動的な `--header-refresh-cmd` は通常ツール層専用です。
 
 ```bash
 python3 main.py scan https://api.example.com \

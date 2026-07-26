@@ -543,6 +543,7 @@ class AgentBrowserScanner:
             self.access_urls,
             self.login_url,
         )
+        self._request_scoped_headers = False
         self._headers_applied = False
         self._missing_header_url_api_warned = False
         self._step_count = 0
@@ -596,6 +597,112 @@ class AgentBrowserScanner:
             pass
         else:
             self._headers_applied = True
+
+    async def _enable_request_scoped_headers(self, session) -> bool:
+        """CDP Fetch でリクエスト単位のヘッダ付与を有効化する。
+
+        失敗時は Fetch を無効化して False を返す。呼び出し側は従来の
+        set_extra_headers 方式へフォールバックする。
+        """
+        if not self.extra_headers:
+            return False
+
+        required_apis = (
+            "start",
+            "get_current_page",
+            "get_or_create_cdp_session",
+            "agent_focus_target_id",
+        )
+        if not all(hasattr(session, name) for name in required_apis):
+            return False
+
+        fetch_commands = None
+        cdp_session_id = None
+        try:
+            # BrowserSession.start() は冪等。Fetch を有効化する target を先に確立する。
+            await session.start()
+            await session.get_current_page()
+            target_id = session.agent_focus_target_id
+            if not target_id:
+                return False
+
+            cdp_session = await session.get_or_create_cdp_session(
+                target_id,
+                focus=False,
+            )
+            cdp_client = cdp_session.cdp_client
+            cdp_session_id = cdp_session.session_id
+            fetch_commands = cdp_client.send.Fetch
+            fetch_registration = cdp_client.register.Fetch
+
+            # cdp_use 0.7.1 / browser-use 0.12.6 の EventRegistry は async
+            # callback を await する。Fetch.enable より先に登録し、有効化直後の
+            # requestPaused に未処理区間が生じないようにする。
+            async def _continue_paused_request(event, event_session_id=None):
+                request_id = None
+                continued = False
+                continue_session_id = event_session_id or cdp_session_id
+                try:
+                    request_id = event.get("requestId") or event.get("request_id")
+                    if not request_id:
+                        return
+
+                    request = event.get("request") or {}
+                    request_url = request.get("url") or ""
+                    params = {"requestId": request_id}
+                    if headers_allowed_for_url(request_url, self._header_origins):
+                        existing_headers = request.get("headers") or {}
+                        overridden_names = {
+                            str(name).lower() for name in self.extra_headers
+                        }
+                        headers = [
+                            {"name": str(name), "value": str(value)}
+                            for name, value in existing_headers.items()
+                            if str(name).lower() not in overridden_names
+                        ]
+                        headers.extend(
+                            {"name": str(name), "value": str(value)}
+                            for name, value in self.extra_headers.items()
+                        )
+                        params["headers"] = headers
+
+                    await fetch_commands.continueRequest(
+                        params=params,
+                        session_id=continue_session_id,
+                    )
+                    continued = True
+                except Exception:
+                    # 判定・ヘッダ生成・CDP 送信のどこで失敗しても値は出力しない。
+                    pass
+                finally:
+                    if request_id and not continued:
+                        try:
+                            await fetch_commands.continueRequest(
+                                params={"requestId": request_id},
+                                session_id=continue_session_id,
+                            )
+                        except Exception:
+                            # 最後の素通しも失敗した場合は Agent 全体を止めない。
+                            pass
+
+            # 登録を先に行うことで、登録失敗時には Fetch を有効化しない。
+            fetch_registration.requestPaused(_continue_paused_request)
+            await fetch_commands.enable(
+                params={"patterns": [{"urlPattern": "*"}]},
+                session_id=cdp_session_id,
+            )
+        except Exception:
+            # 登録または有効化が部分的に成功していても paused request を残さない。
+            if fetch_commands is not None:
+                try:
+                    await fetch_commands.disable(session_id=cdp_session_id)
+                except Exception:
+                    pass
+            self._request_scoped_headers = False
+            return False
+
+        self._request_scoped_headers = True
+        return True
 
     async def _prepare_extra_headers_before_run(
         self, session, intended_url: str = ""
@@ -736,9 +843,17 @@ class AgentBrowserScanner:
                     f"Agent Browser: {self.target_url} をスキャン中", "running"
                 )
 
-            await self._prepare_extra_headers_before_run(browser, start_url)
+            self._request_scoped_headers = (
+                await self._enable_request_scoped_headers(browser)
+            )
+            if not self._request_scoped_headers:
+                await self._prepare_extra_headers_before_run(browser, start_url)
 
-            if self.extra_headers and hasattr(browser, "set_extra_headers"):
+            if (
+                self.extra_headers
+                and not self._request_scoped_headers
+                and hasattr(browser, "set_extra_headers")
+            ):
                 async def _apply_headers_on_step(_agent):
                     await self._apply_extra_headers(browser)
 
