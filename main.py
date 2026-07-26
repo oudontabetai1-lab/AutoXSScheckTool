@@ -170,6 +170,20 @@ def _load_config(path: Path = _CONFIG_PATH) -> dict:
 _CFG = _load_config()
 
 
+def _coerce_headers(value) -> dict:
+    """config/ダッシュボード由来の headers を dict へ正規化する（純粋関数）。"""
+    if isinstance(value, dict):
+        return dict(value)
+    if isinstance(value, str):
+        try:
+            from wscan.header_manager import parse_header_lines
+
+            return parse_header_lines(value)
+        except Exception:
+            return {}
+    return {}
+
+
 # 設定スナップショット等で永続化してはいけない秘匿フィールド。キー名に以下の
 # 語を含む値（パスワード/シークレット/トークン/APIキー）は伏字にする。
 _SECRET_KEY_TOKENS = ("password", "secret", "token", "bearer", "api_key", "apikey")
@@ -2076,7 +2090,7 @@ async def run_serve(args):
         # WSCAN_LLM_BASE_URL を、公式 openai を使う別スキャンが消してしまうのを防ぐ）。
         # 公式 openai へ互換 URL を誤適用しないよう、openai_compatible のときだけ渡す。
         _scan_base = (cfg.get("openai_base_url", "") or "") if cfg.get("llm") == "openai_compatible" else ""
-        _hdrs = dict(cfg.get("headers") or {})
+        _hdrs = _coerce_headers(cfg.get("headers"))
         _hdrs = _apply_bearer_to(_hdrs, cfg.get("bearer", "") or "")
 
         # ── Agent Browser mode ─────────────────────────────────────
@@ -2261,9 +2275,7 @@ async def run_serve(args):
                 seed_urls=seed_urls or None,
                 additional_report_findings=agent_findings or None,
                 manual_crawl_path=cfg.get("manual_crawl_file", "") or "",
-                headers=_apply_bearer_to(
-                    cfg.get("headers", {}) or {}, cfg.get("bearer", "")
-                ),
+                headers=_hdrs,
                 header_refresh_cmd=cfg.get("header_refresh_cmd", "") or "",
                 header_refresh_interval=float(cfg.get("header_refresh_interval", 0.0) or 0.0),
             )

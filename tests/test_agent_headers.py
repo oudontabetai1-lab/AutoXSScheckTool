@@ -72,6 +72,37 @@ class _SessionWithoutCurrentPage:
 
 
 class AgentHeaderCompositionTests(unittest.TestCase):
+    def test_multiline_config_headers_are_coerced_before_scan_setup(self):
+        cfg = {"headers": "X-Tenant: example\nX-Trace: enabled"}
+
+        headers = apply_bearer(main._coerce_headers(cfg.get("headers")), "")
+
+        self.assertEqual(
+            headers,
+            {
+                "X-Tenant": "example",
+                "X-Trace": "enabled",
+            },
+        )
+        self.assertIsInstance(headers, dict)
+
+    def test_config_header_dict_is_copied(self):
+        config_headers = {"X-Tenant": "example"}
+
+        headers = main._coerce_headers(config_headers)
+        headers["X-Trace"] = "enabled"
+
+        self.assertEqual(config_headers, {"X-Tenant": "example"})
+        self.assertIsNot(headers, config_headers)
+
+    def test_empty_or_none_config_headers_become_empty_dict(self):
+        for value in ("", "   \n", None):
+            with self.subTest(value=value):
+                self.assertEqual(main._coerce_headers(value), {})
+
+    def test_unparseable_config_headers_do_not_raise(self):
+        self.assertEqual(main._coerce_headers("not a header\nalso invalid"), {})
+
     def test_cli_headers_and_bearer_are_combined(self):
         headers = apply_bearer(
             parse_header_args(["X-Tenant: example", "X-Trace: enabled"]),
