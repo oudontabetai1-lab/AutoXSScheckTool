@@ -1,6 +1,7 @@
 import unittest
 
 from wscan.reproduction import _finding_to_repro_item
+from wscan.request_logger import clear_sensitive_headers, register_sensitive_headers
 from wscan.scanners.base import Finding
 
 
@@ -32,6 +33,12 @@ def _finding_with_sensitive_headers() -> Finding:
 
 
 class JsonHeaderRedactionTests(unittest.TestCase):
+    def setUp(self):
+        clear_sensitive_headers()
+
+    def tearDown(self):
+        clear_sensitive_headers()
+
     def test_finding_to_dict_redacts_headers_without_mutating_finding(self):
         finding = _finding_with_sensitive_headers()
 
@@ -57,6 +64,37 @@ class JsonHeaderRedactionTests(unittest.TestCase):
         self.assertNotIn("body", item["response"])
         self.assertEqual(finding.request["headers"]["Authorization"], "Bearer X")
         self.assertEqual(finding.response["headers"]["Set-Cookie"], "session=secret")
+
+    def test_runtime_sensitive_header_redacts_finding_to_dict(self):
+        register_sensitive_headers(["X-Company-Auth"])
+        finding = _finding_with_sensitive_headers()
+        finding.request["headers"]["x-company-auth"] = "company-secret"
+
+        data = finding.to_dict()
+
+        self.assertEqual(data["request"]["headers"]["x-company-auth"], "<redacted>")
+        self.assertEqual(data["request"]["headers"]["Accept"], "*/*")
+        self.assertEqual(
+            finding.request["headers"]["x-company-auth"],
+            "company-secret",
+        )
+
+    def test_runtime_sensitive_header_redacts_entire_reproduction_item(self):
+        register_sensitive_headers(["X-Access-Credential"])
+        finding = _finding_with_sensitive_headers()
+        finding.request["headers"]["x-access-credential"] = "credential-secret"
+
+        item = _finding_to_repro_item(finding, 1)
+
+        self.assertEqual(
+            item["request"]["headers"]["x-access-credential"],
+            "<redacted>",
+        )
+        self.assertNotIn("credential-secret", item["curl_command"])
+        self.assertIn(
+            "X-Access-Credential".lower(),
+            item["curl_command"].lower(),
+        )
 
 
 if __name__ == "__main__":
