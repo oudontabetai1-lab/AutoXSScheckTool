@@ -24,6 +24,7 @@ import asyncio
 import datetime
 import fnmatch
 import json
+import os
 import re
 import xml.etree.ElementTree as _ET
 from collections import deque
@@ -44,6 +45,20 @@ _CURRENT_WORKER: ContextVar = ContextVar("wscan_worker", default=None)
 # Per-task payload override: maps check_type → list[str].  Set for the duration
 # of a single scan_field call so parallel workers never clobber each other.
 _FIELD_PAYLOAD_OVERRIDES: ContextVar = ContextVar("wscan_payload_overrides", default=None)
+
+
+def _coerce_header_scope_enforce(value, default: bool = True) -> bool:
+    """設定値/env を bool 化する。明示的な false 値だけが逃げ道を有効にする。"""
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    normalized = str(value).strip().lower()
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    return default
 
 # 検査名と一致／前置しない別 check_type を出すスキャナのエイリアス。
 # resume 時の Finding 絞り込み（_check_type_in_scope）で使う。
@@ -423,6 +438,7 @@ class ScanEngine:
         headers: Optional[dict] = None,
         header_refresh_cmd: str = "",
         header_refresh_interval: float = 0.0,
+        header_scope_enforce: bool = True,
         tls_client_cert: str = "",
         tls_client_key: str = "",
         tls_client_pfx: str = "",
@@ -696,6 +712,15 @@ class ScanEngine:
         self._mfa_config = MFAConfig.from_env(overrides=_mfa_overrides)
         self._mfa_solver = MFASolver(self._mfa_config) if self._mfa_config.enabled else None
 
+        configured_header_scope = _coerce_header_scope_enforce(
+            header_scope_enforce
+        )
+        env_header_scope = os.environ.get("WSCAN_HEADER_SCOPE_ENFORCE")
+        self.header_scope_enforce = _coerce_header_scope_enforce(
+            env_header_scope,
+            default=configured_header_scope,
+        )
+
         # Components
         self._browser = BrowserManager(
             headless=headless, timeout=timeout, monitor=monitor,
@@ -711,6 +736,7 @@ class ScanEngine:
                 self.access_urls,
                 self.login_url,
             ),
+            header_scope_enforce=self.header_scope_enforce,
             request_logger=self.request_logger,
             mfa_solver=self._mfa_solver,
         )

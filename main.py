@@ -79,6 +79,7 @@ def _load_config(path: Path = _CONFIG_PATH) -> dict:
     cfg["tls_client_cert_password"] = str(b.get("tls_client_cert_password", "") or "")
     cfg["tls_ca_cert"]             = str(b.get("tls_ca_cert", "") or "")
     cfg["tls_verify"]              = bool(b.get("tls_verify", False))
+    cfg["header_scope_enforce"]     = bool(b.get("header_scope_enforce", True))
 
     cfg["llm_provider"]            = str(l.get("provider",     "ollama"))
     cfg["ollama_model"]            = str(l.get("ollama_model", "llama3"))
@@ -1733,6 +1734,7 @@ async def run_scan(args):
             headers=_resolved_headers,
             header_refresh_cmd=getattr(args, "header_refresh_cmd", "") or "",
             header_refresh_interval=getattr(args, "header_refresh_interval", 0.0) or 0.0,
+            header_scope_enforce=_CFG.get("header_scope_enforce", True),
             tls_client_cert=getattr(args, "tls_client_cert", "") or "",
             tls_client_key=getattr(args, "tls_client_key", "") or "",
             tls_client_pfx=getattr(args, "tls_client_pfx", "") or "",
@@ -1965,6 +1967,7 @@ async def run_serve(args):
         "tls_client_cert_password": _CFG.get("tls_client_cert_password", ""),
         "tls_ca_cert": _CFG.get("tls_ca_cert", ""),
         "tls_verify": _CFG.get("tls_verify", False),
+        "header_scope_enforce": _CFG.get("header_scope_enforce", True),
         "llm": _CFG.get("llm_provider", "ollama"),
         "ollama_model": _CFG.get("ollama_model", "llama3"),
         "openai_model": _CFG.get("openai_model", "gpt-4o-mini"),
@@ -2266,6 +2269,10 @@ async def run_serve(args):
                 ),
                 header_refresh_cmd=cfg.get("header_refresh_cmd", "") or "",
                 header_refresh_interval=float(cfg.get("header_refresh_interval", 0.0) or 0.0),
+                header_scope_enforce=cfg.get(
+                    "header_scope_enforce",
+                    _CFG.get("header_scope_enforce", True),
+                ),
             )
             # アウトプットフォルダに送信された設定スナップショットを保存しておく
             # (ブラウザの自動ダウンロードに頼らず、レポートと同じ場所に残す)

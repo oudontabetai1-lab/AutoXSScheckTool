@@ -178,6 +178,7 @@ class BrowserManager:
         tls_config: Optional[TLSConfig] = None,
         target_url: str = "",
         header_scope_origins: Optional[set] = None,
+        header_scope_enforce: bool = True,
         request_logger=None,
         mfa_solver=None,
     ):
@@ -197,10 +198,16 @@ class BrowserManager:
         # origins are known they are added per request; otherwise the legacy
         # context-wide behavior is preserved.
         self.extra_headers: dict[str, str] = dict(extra_headers or {})
-        self.header_scope_origins = set(header_scope_origins or ())
+        self.header_scope_enforce = bool(header_scope_enforce)
+        self.header_scope_origins = (
+            set(header_scope_origins or ())
+            if self.header_scope_enforce
+            else set()
+        )
         self._header_route_active: bool = False
         self._header_route_fallback_warned: bool = False
         self._header_request_fallback_warned: bool = False
+        self._header_scope_disabled_warned: bool = False
         self._context_wide_headers_active: bool = False
         self._service_worker_block_fallback_warned: bool = False
         self._playwright = None
@@ -219,6 +226,8 @@ class BrowserManager:
 
     async def init(self):
         """Launch browser and create page."""
+        if self.extra_headers and not self.header_scope_enforce:
+            await self._warn_header_scope_disabled()
         self._playwright = await async_playwright().start()
         launch_args = ["--disable-web-security", "--disable-features=IsolateOrigins"]
         launch_kwargs: dict = {"headless": self.headless, "args": launch_args}
@@ -315,6 +324,17 @@ class BrowserManager:
             "（第三者サブリソースにも送信され得ます）"
         )
 
+    async def _warn_header_scope_disabled(self) -> None:
+        """明示的なスコープ制御無効化を、ヘッダ値なしで一度だけ通知する。"""
+        if self._header_scope_disabled_warned:
+            return
+        self._header_scope_disabled_warned = True
+        await self._emit_header_notice(
+            "認証ヘッダのスコープ制御が無効です。"
+            "コンテキスト全体へ適用するため、第三者サブリソースにも"
+            "認証ヘッダが送信されます"
+        )
+
     async def _warn_service_worker_block_fallback(self) -> None:
         """Service Worker 無効化不可の通知を、値を含めず一度だけ出す。"""
         if self._service_worker_block_fallback_warned:
@@ -405,6 +425,8 @@ class BrowserManager:
     async def update_extra_headers(self, headers: dict) -> None:
         """Replace extra HTTP headers used by the refresh task."""
         self.extra_headers = dict(headers or {})
+        if self.extra_headers and not self.header_scope_enforce:
+            await self._warn_header_scope_disabled()
         if self._context is None or self._header_route_active:
             return
         if self.extra_headers and self.header_scope_origins:

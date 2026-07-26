@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import fnmatch
+import inspect
 import json
 import re
 import secrets
@@ -43,6 +44,8 @@ if TYPE_CHECKING:
     from wscan.monitor import MonitorServer
 
 console = Console()
+
+_TARGET_HANDLER_TIMEOUT_SECONDS = 3.0
 
 
 def _normalize_agent_url(url: str) -> str:
@@ -741,8 +744,15 @@ class AgentBrowserScanner:
                 try:
                     # browser-use の既存 attachedToTarget ハンドラは、Fetch の
                     # 設定完了後、target を再開する前に引き渡す。
-                    before_resume()
+                    result = before_resume()
+                    if inspect.isawaitable(result):
+                        await asyncio.wait_for(
+                            result,
+                            timeout=_TARGET_HANDLER_TIMEOUT_SECONDS,
+                        )
                 except Exception:
+                    # 既存ハンドラの失敗やタイムアウトで target を停止したままに
+                    # せず、下の runIfWaitingForDebugger へ必ず進む。
                     pass
             if cdp_session_id:
                 try:
@@ -783,13 +793,7 @@ class AgentBrowserScanner:
                 def _forward_existing_handler():
                     if existing_handler is None:
                         return
-                    result = existing_handler(event, event_session_id)
-                    if asyncio.iscoroutine(result):
-                        existing_task = asyncio.create_task(result)
-                        self._target_event_tasks.add(existing_task)
-                        existing_task.add_done_callback(
-                            self._target_event_tasks.discard
-                        )
+                    return existing_handler(event, event_session_id)
 
                 task = asyncio.create_task(
                     self._enable_fetch_for_attached_target(

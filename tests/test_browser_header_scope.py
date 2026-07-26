@@ -1,6 +1,8 @@
 """通常スキャンのリクエスト単位ヘッダ付与と共有オリジン判定のテスト。"""
+import os
 import tempfile
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -317,6 +319,41 @@ class BrowserHeaderModeTests(unittest.IsolatedAsyncioTestCase):
         context.set_extra_http_headers.assert_not_awaited()
         self.assertTrue(browser._header_route_active)
 
+    async def test_disabled_scope_uses_context_wide_headers_and_warns_once(self):
+        starter, fake_browser, context = self._playwright_fakes()
+        browser = BrowserManager(
+            extra_headers={"Authorization": "Bearer secret"},
+            header_scope_origins={"https://app.example"},
+            header_scope_enforce=False,
+        )
+        browser.monitor = SimpleNamespace(emit_status=AsyncMock())
+
+        with patch("wscan.browser.async_playwright", return_value=starter):
+            await browser.init()
+            await browser.update_extra_headers(
+                {"Authorization": "Bearer fresh"}
+            )
+
+        self.assertEqual(browser.header_scope_origins, set())
+        self.assertEqual(
+            fake_browser.new_context.await_args.kwargs["extra_http_headers"],
+            {"Authorization": "Bearer secret"},
+        )
+        self.assertNotIn(
+            "service_workers",
+            fake_browser.new_context.await_args.kwargs,
+        )
+        context.route.assert_not_awaited()
+        context.set_extra_http_headers.assert_awaited_once_with(
+            {"Authorization": "Bearer fresh"}
+        )
+        browser.monitor.emit_status.assert_awaited_once_with(
+            "認証ヘッダのスコープ制御が無効です。"
+            "コンテキスト全体へ適用するため、第三者サブリソースにも"
+            "認証ヘッダが送信されます",
+            "running",
+        )
+
     async def test_route_registration_failure_uses_context_wide_fallback(self):
         starter, fake_browser, context = self._playwright_fakes(
             route_error=RuntimeError("route unavailable"),
@@ -477,6 +514,38 @@ class HeaderScopeSharedHelperTests(unittest.TestCase):
                 "https://identity.example",
             },
         )
+
+    def test_engine_env_disables_header_scope(self):
+        from wscan.engine import ScanEngine
+
+        with tempfile.TemporaryDirectory() as output_dir:
+            with patch.dict(
+                os.environ,
+                {"WSCAN_HEADER_SCOPE_ENFORCE": "0"},
+            ):
+                engine = ScanEngine(
+                    url="https://app.example/start",
+                    headers={"Authorization": "Bearer secret"},
+                    output_dir=output_dir,
+                )
+
+        self.assertFalse(engine.header_scope_enforce)
+        self.assertFalse(engine._browser.header_scope_enforce)
+        self.assertEqual(engine._browser.header_scope_origins, set())
+
+    def test_config_can_disable_header_scope(self):
+        from main import _load_config
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "wscan.yaml"
+            with open(config_path, "w", encoding="utf-8") as config_file:
+                config_file.write(
+                    "browser:\n"
+                    "  header_scope_enforce: false\n"
+                )
+            config = _load_config(config_path)
+
+        self.assertFalse(config["header_scope_enforce"])
 
 
 if __name__ == "__main__":

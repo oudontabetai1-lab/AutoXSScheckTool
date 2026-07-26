@@ -699,6 +699,150 @@ class AgentBrowserHeaderApplicationTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIn("popup-target", scanner._fetch_enabled_targets)
 
+    async def test_target_event_awaits_async_existing_handler_before_resume(self):
+        scanner = AgentBrowserScanner(
+            "http://fixture.test",
+            extra_headers={"Authorization": "Bearer test-token"},
+        )
+        session = _RequestScopedHeaderSession(target_events=True)
+        handler_completed = False
+        resume_observations = []
+
+        async def _existing_handler(event, session_id=None):
+            nonlocal handler_completed
+            await asyncio.sleep(0)
+            handler_completed = True
+
+        async def _resume(params=None, session_id=None):
+            resume_observations.append((handler_completed, session_id))
+
+        session._cdp_client_root._event_registry._handlers[
+            "Target.attachedToTarget"
+        ] = _existing_handler
+        session.runtime_commands.runIfWaitingForDebugger = _resume
+        await scanner._enable_request_scoped_headers(session)
+
+        session.target_registration.callback(
+            {
+                "sessionId": "popup-session",
+                "targetInfo": {
+                    "targetId": "popup-target",
+                    "type": "page",
+                },
+            },
+            "root-session",
+        )
+        await asyncio.gather(*tuple(scanner._target_event_tasks))
+
+        self.assertTrue(handler_completed)
+        self.assertEqual(resume_observations, [(True, "popup-session")])
+
+    async def test_target_event_calls_sync_existing_handler_before_resume(self):
+        scanner = AgentBrowserScanner(
+            "http://fixture.test",
+            extra_headers={"Authorization": "Bearer test-token"},
+        )
+        session = _RequestScopedHeaderSession(target_events=True)
+        call_order = []
+
+        def _existing_handler(event, session_id=None):
+            call_order.append(("handler", session_id))
+
+        async def _resume(params=None, session_id=None):
+            call_order.append(("resume", session_id))
+
+        session._cdp_client_root._event_registry._handlers[
+            "Target.attachedToTarget"
+        ] = _existing_handler
+        session.runtime_commands.runIfWaitingForDebugger = _resume
+        await scanner._enable_request_scoped_headers(session)
+
+        session.target_registration.callback(
+            {
+                "sessionId": "popup-session",
+                "targetInfo": {
+                    "targetId": "popup-target",
+                    "type": "page",
+                },
+            },
+            "root-session",
+        )
+        await asyncio.gather(*tuple(scanner._target_event_tasks))
+
+        self.assertEqual(
+            call_order,
+            [("handler", "root-session"), ("resume", "popup-session")],
+        )
+
+    async def test_target_event_handler_exception_still_resumes_target(self):
+        scanner = AgentBrowserScanner(
+            "http://fixture.test",
+            extra_headers={"Authorization": "Bearer test-token"},
+        )
+        session = _RequestScopedHeaderSession(target_events=True)
+
+        async def _existing_handler(event, session_id=None):
+            raise RuntimeError("existing handler failed")
+
+        session._cdp_client_root._event_registry._handlers[
+            "Target.attachedToTarget"
+        ] = _existing_handler
+        await scanner._enable_request_scoped_headers(session)
+
+        session.target_registration.callback(
+            {
+                "sessionId": "popup-session",
+                "targetInfo": {
+                    "targetId": "popup-target",
+                    "type": "page",
+                },
+            },
+            "root-session",
+        )
+        await asyncio.gather(*tuple(scanner._target_event_tasks))
+
+        self.assertEqual(
+            session.runtime_commands.calls,
+            [("runIfWaitingForDebugger", None, "popup-session")],
+        )
+
+    async def test_target_event_handler_timeout_still_resumes_target(self):
+        scanner = AgentBrowserScanner(
+            "http://fixture.test",
+            extra_headers={"Authorization": "Bearer test-token"},
+        )
+        session = _RequestScopedHeaderSession(target_events=True)
+        never_finishes = asyncio.Event()
+
+        async def _existing_handler(event, session_id=None):
+            await never_finishes.wait()
+
+        session._cdp_client_root._event_registry._handlers[
+            "Target.attachedToTarget"
+        ] = _existing_handler
+        await scanner._enable_request_scoped_headers(session)
+
+        with patch(
+            "wscan.llm_agent_browser._TARGET_HANDLER_TIMEOUT_SECONDS",
+            0.01,
+        ):
+            session.target_registration.callback(
+                {
+                    "sessionId": "popup-session",
+                    "targetInfo": {
+                        "targetId": "popup-target",
+                        "type": "page",
+                    },
+                },
+                "root-session",
+            )
+            await asyncio.gather(*tuple(scanner._target_event_tasks))
+
+        self.assertEqual(
+            session.runtime_commands.calls,
+            [("runIfWaitingForDebugger", None, "popup-session")],
+        )
+
     async def test_target_event_fetch_failure_still_resumes_target(self):
         scanner = AgentBrowserScanner(
             "http://fixture.test",
