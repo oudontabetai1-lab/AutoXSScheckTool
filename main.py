@@ -15,6 +15,7 @@ import json
 import os
 import sys
 import webbrowser
+from datetime import datetime
 from pathlib import Path
 
 # Ensure the wscan package is importable
@@ -315,6 +316,106 @@ def _coerce_serve_ints(cfg: dict) -> tuple[dict, dict]:
                 invalid[key] = raw
         values[key] = parsed
     return values, invalid
+
+
+def _hybrid_recon_wait_seconds(
+    now: datetime,
+    allowed_hours=None,
+    forbidden_hours=None,
+):
+    """Hybrid 偵察を開始できるまでの秒数を返す純粋関数。
+
+    時間帯設定が無ければ ``None``、現在許可中なら ``0.0`` を返す。
+    指定済みルールが全て不正、または探索範囲内に許可時間が無い場合は
+    fail-closed を示す ``float("inf")`` を返す。
+    """
+    if not allowed_hours and not forbidden_hours:
+        return None
+
+    from wscan import time_window
+
+    allowed = time_window.parse_windows(allowed_hours)
+    forbidden = time_window.parse_windows(forbidden_hours)
+    if (
+        (bool(allowed_hours) and not allowed)
+        or (bool(forbidden_hours) and not forbidden)
+    ):
+        return float("inf")
+    if time_window.is_allowed(now, allowed, forbidden):
+        return 0.0
+    return time_window.seconds_until_allowed(now, allowed, forbidden)
+
+
+async def _wait_for_hybrid_recon_window(
+    monitor,
+    allowed_hours=None,
+    forbidden_hours=None,
+    *,
+    now_fn=None,
+    sleep_fn=None,
+) -> bool:
+    """serve Hybrid の Phase 1 前で時間帯ゲートを待つ。
+
+    待機中は dashboard の既存 command queue を短い間隔で確認し、abort を
+    受けたら ``False`` を返す。Phase 2 向けのその他のコマンドは、ゲート通過時に
+    元の queue へ戻す。
+    """
+    if not allowed_hours and not forbidden_hours:
+        return True
+
+    now_fn = now_fn or datetime.now
+    sleep_fn = sleep_fn or asyncio.sleep
+    deferred_commands = []
+    announced = False
+
+    while True:
+        abort_requested = False
+        while True:
+            try:
+                command = monitor.command_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            if str(command).lower().strip() in ("abort", "q"):
+                abort_requested = True
+            else:
+                deferred_commands.append(command)
+
+        if abort_requested:
+            await monitor.emit_status(
+                "ハイブリッド Phase 1 の時間帯待機を中断しました。", "done"
+            )
+            return False
+
+        wait = _hybrid_recon_wait_seconds(
+            now_fn(), allowed_hours, forbidden_hours
+        )
+        if wait is None or wait <= 0:
+            for command in deferred_commands:
+                monitor.command_queue.put_nowait(command)
+            if announced:
+                await monitor.emit_status(
+                    "検査可能時間帯になりました。ハイブリッド Phase 1 を再開します。",
+                    "running",
+                )
+            return True
+
+        if wait == float("inf"):
+            await monitor.emit_status(
+                "検査可能時間帯に到達できない設定のため、"
+                "ハイブリッド Phase 1 を中断しました。",
+                "error",
+            )
+            return False
+
+        if not announced:
+            await monitor.emit_status(
+                f"検査可能時間外 — ハイブリッド Phase 1 を約 {int(wait)} 秒待機",
+                "paused",
+            )
+            announced = True
+
+        # dashboard の abort に素早く反応できるよう、長い待機を細かく刻む。
+        await sleep_fn(min(0.5, max(0.05, wait)))
 
 
 def _effective_totp_sources(args) -> tuple[str, str, str]:
@@ -2242,6 +2343,12 @@ async def run_serve(args):
             # Phase2 が互換・偵察が公式 openai の場合に Phase2 用 URL を偵察へ誤適用しない。
             # 明示的に AgentEngine へ渡し、グローバル env は書き換えない。
             _recon_base = (cfg.get("openai_base_url", "") or "") if cfg.get("hybrid_llm") == "openai_compatible" else ""
+            if not await _wait_for_hybrid_recon_window(
+                monitor,
+                cfg.get("allowed_hours") or None,
+                cfg.get("forbidden_hours") or None,
+            ):
+                return
             await monitor.emit_status("🔀 ハイブリッド Phase 1: Agent偵察中...", "running")
             try:
                 recon_engine = AgentEngine(
