@@ -37,6 +37,8 @@ TEMPLATES_DIR = Path(__file__).parent.parent / "templates"
 OUTPUT_BASE = Path(__file__).parent.parent / "output"
 
 _UPLOAD_MAX_BYTES = 8 * 1024 * 1024
+_UPLOAD_DIR_MAX_BYTES = 200 * 1024 * 1024
+_UPLOAD_MAX_AGE_SECONDS = 7 * 24 * 3600
 _UPLOAD_ALLOWED_EXT = {
     ".crt", ".pem", ".cer", ".key", ".p12", ".pfx", ".yaml", ".yml",
     ".json", ".txt", ".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif",
@@ -67,6 +69,78 @@ def _upload_destination(filename: str) -> tuple[str, Path, Path]:
     except ValueError as exc:
         raise ValueError("invalid path") from exc
     return safe, updir, dest
+
+
+def _upload_dir_total_bytes(updir: Path) -> Optional[int]:
+    """uploads 直下の通常ファイル合計を返す。確認不能なら安全側で None。"""
+    try:
+        paths = list(updir.iterdir())
+    except FileNotFoundError:
+        return 0
+    except Exception:
+        return None
+
+    total = 0
+    for path in paths:
+        try:
+            if path.is_file():
+                total += path.stat().st_size
+        except Exception:
+            # 容量を確認できないファイルを無視すると上限を超え得るため保存を拒否する。
+            return None
+    return total
+
+
+def prune_upload_dir(
+    updir: Path,
+    max_bytes: int,
+    max_age_seconds: int,
+    now: float,
+) -> list[Path]:
+    """保持期間超過を削除し、なお上限超過なら古い順に削除する。"""
+    try:
+        paths = list(updir.iterdir())
+    except Exception:
+        return []
+
+    entries: list[tuple[Path, int, float]] = []
+    for path in paths:
+        try:
+            if path.is_file():
+                stat_result = path.stat()
+                entries.append((path, stat_result.st_size, stat_result.st_mtime))
+        except Exception:
+            # 個別ファイルの権限・競合エラーで他の掃除を止めない。
+            continue
+
+    deleted: list[Path] = []
+    total_bytes = sum(size for _path, size, _mtime in entries)
+    cutoff = now - max_age_seconds
+    remaining: list[tuple[Path, int, float]] = []
+
+    for path, size, mtime in entries:
+        if mtime < cutoff:
+            try:
+                path.unlink()
+            except Exception:
+                remaining.append((path, size, mtime))
+            else:
+                deleted.append(path)
+                total_bytes -= size
+        else:
+            remaining.append((path, size, mtime))
+
+    for path, size, _mtime in sorted(remaining, key=lambda item: (item[2], item[0].name)):
+        if total_bytes <= max_bytes:
+            break
+        try:
+            path.unlink()
+        except Exception:
+            continue
+        deleted.append(path)
+        total_bytes -= size
+
+    return deleted
 
 
 def _session_value(token: str) -> str:
@@ -536,19 +610,43 @@ class MonitorServer:
                 except OSError:
                     # Windows 等、POSIX パーミッションを適用できない環境では継続する。
                     pass
+                now = time.time()
+                # 新規ファイル分を予約した上限で先に掃除し、保存後の総量超過を防ぐ。
+                prune_upload_dir(
+                    updir,
+                    _UPLOAD_DIR_MAX_BYTES - len(raw),
+                    _UPLOAD_MAX_AGE_SECONDS,
+                    now,
+                )
+                current_bytes = _upload_dir_total_bytes(updir)
+                if (
+                    current_bytes is None
+                    or current_bytes + len(raw) > _UPLOAD_DIR_MAX_BYTES
+                ):
+                    return JSONResponse(
+                        {"error": "アップロード容量の上限に達しました"},
+                        status_code=507,
+                    )
                 dest.write_bytes(raw)
                 try:
                     os.chmod(dest, 0o600)
                 except OSError:
                     # 保存先を読むエンジンとの互換性を優先し、chmod 非対応環境では継続する。
                     pass
+                prune_upload_dir(
+                    updir,
+                    _UPLOAD_DIR_MAX_BYTES,
+                    _UPLOAD_MAX_AGE_SECONDS,
+                    time.time(),
+                )
             except Exception:
                 # ファイル内容や証明書情報を例外メッセージ経由で返さない。
                 return JSONResponse({"error": "アップロードの保存に失敗しました"}, status_code=500)
             finally:
                 await file.close()
 
-            # 監査にはファイル名だけを記録し、内容・保存パス・秘匿値は残さない。
+            # 監査には sanitize 済みファイル名だけを記録し、内容・保存パス・秘匿値は
+            # 残さない（誰が何をアップロードしたかは運用上の監査に必要な情報）。
             self._audit("upload", self._client_ip(request), safe)
             return JSONResponse({"path": str(dest), "name": safe, "size": len(raw)})
 

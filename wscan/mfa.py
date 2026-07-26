@@ -30,6 +30,8 @@ from typing import Optional
 
 # ── 純粋関数（MCP 非依存・テスト対象） ─────────────────────────────────────
 
+_TOTP_MIN_REMAINING_SECONDS = 3
+
 # MFA チャレンジ画面の強いシグナル（日本語/英語）。通常のログインフォームでの
 # 誤検知を避けるため、"code" 単体のような弱い語は含めない。
 _MFA_SIGNALS = (
@@ -55,6 +57,13 @@ _MFA_SIGNALS = (
     "二要素",
     "ワンタイムパスワード",
 )
+
+
+def seconds_until_next_window(timestamp: float, period: int) -> float:
+    """現在時刻から次の TOTP 窓開始までの秒数（純粋関数）。"""
+    if period <= 0:
+        raise ValueError("period must be positive")
+    return float(period - (timestamp % period))
 
 
 def looks_like_mfa_page(html: str) -> bool:
@@ -624,10 +633,14 @@ class MFASolver:
                     algorithm=cfg.totp_algorithm,
                 )
                 if resolved:
+                    period = int(resolved["period"])
+                    remaining = seconds_until_next_window(time.time(), period)
+                    if remaining < _TOTP_MIN_REMAINING_SECONDS:
+                        await asyncio.sleep(min(remaining + 0.2, float(period)))
                     code = generate_totp(
                         resolved["secret"],
                         digits=resolved["digits"],
-                        period=resolved["period"],
+                        period=period,
                         algorithm=resolved["algorithm"],
                     )
                     if code:

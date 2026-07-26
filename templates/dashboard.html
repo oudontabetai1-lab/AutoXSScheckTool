@@ -1789,7 +1789,7 @@ https://example.com/search?q=test" style="width:100%;font-family:monospace;font-
   <a id="openReportBtn" href="#" target="_blank" rel="noopener" style="display:none;background:var(--accent);color:#001018;border:none;border-radius:4px;padding:6px 12px;font-weight:700;cursor:pointer;text-decoration:none">📄 レポートを開く</a>
   <a id="downloadZipBtn" href="#" style="display:none;background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:6px 12px;font-weight:700;cursor:pointer;text-decoration:none">⬇ 成果物zip</a>
   <span style="font-size:.78rem;color:var(--text-muted);font-weight:700;text-transform:uppercase">After Crawl</span>
-  <button onclick="rerunLastScan()" style="background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:6px 12px;font-weight:700;cursor:pointer">再巡回</button>
+  <button id="rerunLastScanBtn" onclick="rerunLastScan()" style="background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:6px 12px;font-weight:700;cursor:pointer">再巡回</button>
   <button onclick="openManualCrawlAfterScan()" style="background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:6px 12px;font-weight:700;cursor:pointer">手動巡回を追加</button>
   <a href="/" style="margin-left:auto;background:transparent;color:var(--text-muted);border:1px solid var(--border);border-radius:4px;padding:6px 12px;font-weight:700;cursor:pointer;text-decoration:none">🏠 ポータルへ</a>
 </div>
@@ -2143,6 +2143,8 @@ const state = {
   _smPanWired: false,
   checkStats: {},
   lastScanConfig: null,
+  // 他タブ/REST の scan_started に含まれる伏字済み config は再送信しない。
+  lastScanConfigRedacted: false,
   // 送信済みだが scan_started で受理確認されていないフル config。
   // 拒否時は破棄し、最後に実際に開始した lastScanConfig は維持する。
   pendingScanConfig: null,
@@ -2169,6 +2171,18 @@ function _markOwnScan(config) {
   return config;
 }
 
+function containsRedactedValues(cfg) {
+  if (typeof cfg === 'string') return cfg.includes('***REDACTED***');
+  if (Array.isArray(cfg)) return cfg.some(containsRedactedValues);
+  if (cfg && typeof cfg === 'object') {
+    return Object.values(cfg).some(containsRedactedValues);
+  }
+  return false;
+}
+
+const REDACTED_RERUN_MESSAGE =
+  'この画面は実行結果を観測しているため、認証情報を含む再巡回はできません。設定画面から再度スキャンを開始してください。';
+
 function _discardRejectedPendingScan(data) {
   // scan_rejected は全タブへ配信されるため、nonce が一致する自分の要求だけを破棄する。
   if (data && data._client_nonce && data._client_nonce === state.myScanNonce) {
@@ -2178,6 +2192,7 @@ function _discardRejectedPendingScan(data) {
 
 function _promotePendingScan(data) {
   if (data && data._client_nonce && data._client_nonce === state.myScanNonce) {
+    state.lastScanConfigRedacted = false;
     // 再接続時に同じ scan_started が再生されても、昇格済みの設定を null で潰さない。
     if (state.pendingScanConfig !== null) {
       state.lastScanConfig = state.pendingScanConfig;
@@ -2186,6 +2201,7 @@ function _promotePendingScan(data) {
   } else {
     // 他タブ/REST が開始したスキャンの観測では、従来どおり配信データを採用する。
     state.lastScanConfig = JSON.parse(JSON.stringify(data || {}));
+    state.lastScanConfigRedacted = containsRedactedValues(data);
   }
 }
 
@@ -2734,9 +2750,22 @@ function useManualCrawlOutput() {
 function showPostScanActions(show) {
   const el = document.getElementById('postScanActions');
   if (el) el.style.display = show ? 'flex' : 'none';
+  const rerunBtn = document.getElementById('rerunLastScanBtn');
+  if (rerunBtn) {
+    const blocked = Boolean(state.lastScanConfigRedacted);
+    rerunBtn.disabled = blocked;
+    rerunBtn.title = blocked ? REDACTED_RERUN_MESSAGE : '';
+    rerunBtn.style.cursor = blocked ? 'not-allowed' : 'pointer';
+    rerunBtn.style.opacity = blocked ? '0.55' : '1';
+  }
 }
 
 function rerunLastScan() {
+  if (state.lastScanConfigRedacted) {
+    setStatus(REDACTED_RERUN_MESSAGE, 'error');
+    addEventLog('status', REDACTED_RERUN_MESSAGE);
+    return;
+  }
   if (!state.lastScanConfig) {
     alert('再巡回できるスキャン設定がありません。');
     return;

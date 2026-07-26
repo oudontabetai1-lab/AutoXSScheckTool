@@ -7,6 +7,13 @@
 from wscan import mfa
 
 
+# ── TOTP 窓境界 ────────────────────────────────────────────────────────────
+def test_seconds_until_next_window_boundaries():
+    assert mfa.seconds_until_next_window(60.0, 30) == 30.0
+    assert mfa.seconds_until_next_window(75.0, 30) == 15.0
+    assert abs(mfa.seconds_until_next_window(89.9, 30) - 0.1) < 1e-9
+
+
 # ── extract_otp ────────────────────────────────────────────────────────────
 def test_extract_otp_default_6_digits():
     assert mfa.extract_otp("Your code is 482913 — valid 5 min") == "482913"
@@ -636,8 +643,40 @@ def test_solver_native_totp_is_deterministic_without_mcp(monkeypatch):
         raise AssertionError("ネイティブ成功時に MCP を呼んではならない")
 
     monkeypatch.setattr(totp.time, "time", lambda: 59)
+    monkeypatch.setattr(mfa, "_TOTP_MIN_REMAINING_SECONDS", 0)
     monkeypatch.setattr(mfa, "_call_mcp_tool", _unexpected_mcp)
     assert asyncio.run(mfa.MFASolver(cfg)._solve_totp()) == "94287082"
+
+
+def test_solver_native_totp_waits_for_next_window(monkeypatch):
+    import asyncio
+
+    from wscan import totp
+
+    secret = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"
+    cfg = mfa.MFAConfig.from_env(
+        env={},
+        overrides={
+            "type": "totp",
+            "totp_secret": secret,
+            "totp_digits": 8,
+            "totp_period": 30,
+        },
+    )
+    timestamps = iter((29.0, 30.0))
+    sleep_calls = []
+
+    async def _fake_sleep(delay):
+        sleep_calls.append(delay)
+
+    monkeypatch.setattr(mfa.time, "time", lambda: next(timestamps))
+    monkeypatch.setattr(mfa.asyncio, "sleep", _fake_sleep)
+
+    code = asyncio.run(mfa.MFASolver(cfg)._solve_totp())
+
+    assert len(sleep_calls) == 1
+    assert abs(sleep_calls[0] - 1.2) < 1e-9
+    assert code == totp.generate_totp(secret, digits=8, period=30, timestamp=30.0)
 
 
 def test_mfaconfig_legacy_totp_mcp_remains_enabled():

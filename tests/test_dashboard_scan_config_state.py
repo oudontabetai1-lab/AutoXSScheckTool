@@ -18,6 +18,7 @@ global.self = {{crypto: {{randomUUID: () => 'test-nonce-1'}}}};
 global.crypto = self.crypto;
 const state = {{
   lastScanConfig: {{url: 'https://accepted.example', auth_pass: 'original-value'}},
+  lastScanConfigRedacted: false,
   pendingScanConfig: null,
   myScanNonce: null,
 }};
@@ -41,10 +42,57 @@ _promotePendingScan({{
 if (state.pendingScanConfig !== null) process.exit(20);
 if (state.lastScanConfig.url !== accepted.url) process.exit(21);
 if (state.lastScanConfig.auth_pass !== 'full-value') process.exit(22);
+if (state.lastScanConfigRedacted !== false) process.exit(23);
 
-_promotePendingScan({{url: 'https://observed.example', auth_pass: '***REDACTED***'}});
+_promotePendingScan({{
+  url: 'https://observed.example',
+  auth: [{{password: 'prefix-***REDACTED***-suffix'}}],
+}});
 if (state.lastScanConfig.url !== 'https://observed.example') process.exit(30);
-if (state.lastScanConfig.auth_pass !== '***REDACTED***') process.exit(31);
+if (state.lastScanConfig.auth[0].password !== 'prefix-***REDACTED***-suffix') process.exit(31);
+if (state.lastScanConfigRedacted !== true) process.exit(32);
+"""
+        result = subprocess.run(
+            [shutil.which("node"), "-e", script],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required for dashboard JS test")
+    def test_redacted_observed_config_cannot_be_rerun(self):
+        html = Path("templates/dashboard.html").read_text(encoding="utf-8")
+        helper_start = html.index("function _markOwnScan(config)")
+        helper_end = html.index("// finding の安定キー", helper_start)
+        helpers = html[helper_start:helper_end]
+        rerun_start = html.index("function rerunLastScan()")
+        rerun_end = html.index("function openManualCrawlAfterScan()", rerun_start)
+        rerun = html[rerun_start:rerun_end]
+
+        script = f"""
+global.self = {{crypto: {{randomUUID: () => 'unused-nonce'}}}};
+global.crypto = self.crypto;
+global.WebSocket = {{OPEN: 1}};
+let sent = 0;
+const statuses = [];
+const eventLogs = [];
+const state = {{
+  lastScanConfig: {{url: 'https://observed.example', auth_pass: '***REDACTED***'}},
+  lastScanConfigRedacted: true,
+  pendingScanConfig: null,
+  myScanNonce: null,
+  ws: {{readyState: WebSocket.OPEN, send: () => {{ sent += 1; }}}},
+}};
+function setStatus(message, level) {{ statuses.push([message, level]); }}
+function addEventLog(type, message) {{ eventLogs.push([type, message]); }}
+{helpers}
+{rerun}
+
+rerunLastScan();
+if (sent !== 0) process.exit(10);
+if (statuses.length !== 1 || !statuses[0][0].includes('再巡回はできません')) process.exit(11);
+if (eventLogs.length !== 1 || eventLogs[0][0] !== 'status') process.exit(12);
 """
         result = subprocess.run(
             [shutil.which("node"), "-e", script],
