@@ -16,6 +16,7 @@ from wscan.header_manager import apply_bearer, parse_header_args
 from wscan.llm_agent_browser import (
     AgentBrowserScanner,
     allowed_header_origins,
+    effective_origin_url,
     headers_allowed_for_url,
 )
 
@@ -41,8 +42,9 @@ class _FailingHeaderSession:
 
 
 class _RecordingInitialHeaderSession:
-    def __init__(self):
+    def __init__(self, current_url="http://fixture.test"):
         self.calls = []
+        self.current_url = current_url
 
     async def start(self):
         self.calls.append("start")
@@ -52,7 +54,7 @@ class _RecordingInitialHeaderSession:
         return object()
 
     async def get_current_page_url(self):
-        return "http://fixture.test"
+        return self.current_url
 
     async def set_extra_headers(self, headers):
         self.calls.append(("set_extra_headers", headers))
@@ -137,6 +139,32 @@ class AgentHeaderCompositionTests(unittest.TestCase):
 
 
 class AgentHeaderOriginTests(unittest.TestCase):
+    def test_effective_origin_url_uses_intended_url_for_blank_pages(self):
+        intended_url = "https://fixture.test/start"
+
+        for current_url in (
+            "",
+            "about:blank",
+            "chrome://newtab/",
+            "about:newtab",
+        ):
+            with self.subTest(current_url=current_url):
+                self.assertEqual(
+                    effective_origin_url(current_url, intended_url),
+                    intended_url,
+                )
+
+    def test_effective_origin_url_keeps_current_real_url(self):
+        current_url = "https://fixture.test/current"
+
+        self.assertEqual(
+            effective_origin_url(
+                current_url,
+                "https://fixture.test/intended",
+            ),
+            current_url,
+        )
+
     def test_allowed_header_origins_collects_all_explicit_scopes(self):
         origins = allowed_header_origins(
             "https://primary.example/start",
@@ -194,6 +222,39 @@ class AgentHeaderOriginTests(unittest.TestCase):
         self.assertFalse(headers_allowed_for_url("", allowed))
         self.assertFalse(headers_allowed_for_url("not-a-url", allowed))
         self.assertFalse(headers_allowed_for_url("http://[invalid", allowed))
+
+    def test_headers_allowed_for_url_normalizes_default_ports(self):
+        https_allowed = allowed_header_origins(
+            "https://host.example:443/start",
+            [],
+            [],
+        )
+        http_allowed = allowed_header_origins(
+            "http://host.example:80/start",
+            [],
+            [],
+        )
+
+        self.assertEqual(https_allowed, {"https://host.example"})
+        self.assertTrue(
+            headers_allowed_for_url(
+                "https://host.example/current",
+                https_allowed,
+            )
+        )
+        self.assertEqual(http_allowed, {"http://host.example"})
+        self.assertTrue(
+            headers_allowed_for_url(
+                "http://host.example/current",
+                http_allowed,
+            )
+        )
+        self.assertFalse(
+            headers_allowed_for_url(
+                "https://host.example:8443/current",
+                https_allowed,
+            )
+        )
 
 
 class AgentHeaderWiringTests(unittest.IsolatedAsyncioTestCase):
@@ -280,6 +341,51 @@ class AgentBrowserHeaderApplicationTests(unittest.IsolatedAsyncioTestCase):
                 ),
             ],
         )
+
+    async def test_prepare_headers_uses_intended_url_on_blank_page(self):
+        scanner = AgentBrowserScanner(
+            "http://fixture.test",
+            extra_headers={"Authorization": "Bearer test-token"},
+        )
+        session = _RecordingInitialHeaderSession("about:blank")
+
+        await scanner._prepare_extra_headers_before_run(
+            session,
+            "http://fixture.test/start",
+        )
+
+        self.assertEqual(
+            session.calls,
+            [
+                "start",
+                "get_current_page",
+                (
+                    "set_extra_headers",
+                    {"Authorization": "Bearer test-token"},
+                ),
+            ],
+        )
+
+    async def test_prepare_headers_rejects_disallowed_intended_url_on_blank_page(self):
+        scanner = AgentBrowserScanner(
+            "http://fixture.test",
+            extra_headers={"Authorization": "Bearer test-token"},
+        )
+        session = _RecordingInitialHeaderSession("about:blank")
+
+        await scanner._prepare_extra_headers_before_run(
+            session,
+            "https://evil.example/start",
+        )
+
+        self.assertEqual(
+            session.calls,
+            [
+                "start",
+                "get_current_page",
+            ],
+        )
+        self.assertFalse(scanner._headers_applied)
 
     async def test_prepare_headers_before_run_skips_empty_headers(self):
         scanner = AgentBrowserScanner("http://fixture.test")

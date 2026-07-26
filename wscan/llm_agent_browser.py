@@ -36,6 +36,8 @@ if TYPE_CHECKING:
 
 console = Console()
 
+_BLANK_URLS = frozenset({"", "about:blank", "chrome://newtab/", "about:newtab"})
+
 
 def _normalize_agent_url(url: str) -> str:
     """Agent が扱う URL を scheme 付きへ正規化する。"""
@@ -84,8 +86,25 @@ def _url_origin(url: str) -> str:
     normalized_host = hostname.lower()
     if ":" in normalized_host:
         normalized_host = f"[{normalized_host}]"
-    port_suffix = f":{port}" if port is not None else ""
-    return f"{parsed.scheme.lower()}://{normalized_host}{port_suffix}"
+    scheme = parsed.scheme.lower()
+    default_ports = {"http": 80, "https": 443}
+    port_suffix = (
+        f":{port}"
+        if port is not None and port != default_ports.get(scheme)
+        else ""
+    )
+    return f"{scheme}://{normalized_host}{port_suffix}"
+
+
+def effective_origin_url(current_url: str, intended_url: str) -> str:
+    """オリジン判定に使う URL を返す（純粋関数）。
+
+    current_url が未確定（about:blank 等）なら intended_url を使う。
+    """
+    normalized_current = str(current_url or "").strip()
+    if normalized_current in _BLANK_URLS:
+        return str(intended_url or "").strip()
+    return normalized_current
 
 
 def allowed_header_origins(
@@ -602,7 +621,7 @@ class AgentBrowserScanner:
         else:
             self._headers_applied = False
 
-    async def _apply_extra_headers(self, session) -> None:
+    async def _apply_extra_headers(self, session, intended_url: str = "") -> None:
         """許可オリジンの Agent 対象ページにだけ追加ヘッダを適用する。"""
         if not self.extra_headers or not hasattr(session, "set_extra_headers"):
             return
@@ -615,7 +634,8 @@ class AgentBrowserScanner:
         except Exception:
             await self._clear_extra_headers(session)
             return
-        if not headers_allowed_for_url(current_url, self._header_origins):
+        origin_url = effective_origin_url(current_url, intended_url)
+        if not headers_allowed_for_url(origin_url, self._header_origins):
             await self._clear_extra_headers(session)
             return
         try:
@@ -626,7 +646,9 @@ class AgentBrowserScanner:
         else:
             self._headers_applied = True
 
-    async def _prepare_extra_headers_before_run(self, session) -> None:
+    async def _prepare_extra_headers_before_run(
+        self, session, intended_url: str = ""
+    ) -> None:
         """初期ナビゲーション前に対象ページを確立し、追加ヘッダを適用する。"""
         if not self.extra_headers:
             return
@@ -646,7 +668,7 @@ class AgentBrowserScanner:
             # set_extra_headers() が no-op になるため、この順序を維持する。
             await session.start()
             await session.get_current_page()
-            await self._apply_extra_headers(session)
+            await self._apply_extra_headers(session, intended_url)
         except Exception:
             # バージョン差異や起動失敗時も秘匿値を出さず Agent を継続する。
             pass
@@ -763,7 +785,7 @@ class AgentBrowserScanner:
                     f"Agent Browser: {self.target_url} をスキャン中", "running"
                 )
 
-            await self._prepare_extra_headers_before_run(browser)
+            await self._prepare_extra_headers_before_run(browser, start_url)
 
             if self.extra_headers and hasattr(browser, "set_extra_headers"):
                 async def _apply_headers_on_step(_agent):
