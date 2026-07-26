@@ -119,7 +119,9 @@ python3 main.py agent https://example.com --llm claude --headless \
   --bearer "$WSCAN_BEARER"
 ```
 
-`agent` は `--bearer`、`-H/--header`、`--header-file` を Agent ブラウザへ適用します。認証ヘッダは明示された target/access スコープのオリジンにのみ送信され、Agent が辿った外部サイトへは送信されません。Agent/Hybrid Phase 1 では、対応する browser-use 環境なら初期ナビゲーション前に `start` → `get_current_page` → CDP の `set_extra_headers` を best-effort で実行し、各ステップ開始時にも現在のオリジンを確認して適用または解除します。環境の API 差異やブラウザ起動・target 確立の失敗によっては、最初の landing 読み込みに間に合わない可能性が残ります。その場合も recon は後続ナビゲーションで回復を試みます。Agent が申告する Finding は、決定論 Finding と同じ確証を意味しません。HTML レポートの「🤖 Agent発見」バッジと証拠を確認してください。
+`agent` は `--bearer`、`-H/--header`、`--header-file` を Agent ブラウザへ適用します。認証ヘッダは、Agent が明示された target/access スコープのオリジンを開いている間だけ適用され、スコープ外のページへ遷移すると解除されます。Agent/Hybrid Phase 1 では、対応する browser-use 環境なら初期ナビゲーション前に `start` → `get_current_page` → CDP の `set_extra_headers` を best-effort で実行し、各ステップ開始時にも現在のオリジンを確認して適用または解除します。
+
+> ⚠️ **残存リスク**: CDP `Network.setExtraHTTPHeaders` はそのブラウザターゲットの**全リクエスト**に適用されるため、スコープ内ページが読み込む第三者サブリソース（外部スクリプト・画像など）や、1ステップ内で発生した外部へのリダイレクト／遷移には、次のオリジン判定が走る前にヘッダが付く可能性があります。これは通常ツール層（`scan`）で Playwright の `extra_http_headers` をブラウザコンテキスト全体へ設定している既存挙動と同じ範囲です（Agent 層はこれに加えてトップレベルのオリジンゲートを持つぶん厳格）。リクエスト単位の厳密な制御（CDP `Fetch` 傍受／Playwright `route`）は別途対応予定です。**外部リソースを多数読み込む対象で高権限トークンを使う場合は、影響範囲を絞ったトークンを用意してください。**環境の API 差異やブラウザ起動・target 確立の失敗によっては、最初の landing 読み込みに間に合わない可能性が残ります。その場合も recon は後続ナビゲーションで回復を試みます。Agent が申告する Finding は、決定論 Finding と同じ確証を意味しません。HTML レポートの「🤖 Agent発見」バッジと証拠を確認してください。
 
 ### Hybrid モード — 最短手順
 
