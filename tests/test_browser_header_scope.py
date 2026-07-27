@@ -514,6 +514,10 @@ class HeaderScopeSharedHelperTests(unittest.TestCase):
                 "https://identity.example",
             },
         )
+        self.assertEqual(
+            engine._header_scope_origins,
+            engine._browser.header_scope_origins,
+        )
 
     def test_engine_env_disables_header_scope(self):
         from wscan.engine import ScanEngine
@@ -546,6 +550,91 @@ class HeaderScopeSharedHelperTests(unittest.TestCase):
             config = _load_config(config_path)
 
         self.assertFalse(config["header_scope_enforce"])
+
+
+class EngineDirectHeaderScopeTests(unittest.TestCase):
+    def _engine(self, output_dir: str, **overrides):
+        from wscan.engine import ScanEngine
+
+        options = {
+            "url": "https://app.example/start",
+            "headers": {
+                "Authorization": "Bearer secret",
+                "X-API-Key": "api-secret",
+            },
+            "output_dir": output_dir,
+        }
+        options.update(overrides)
+        with patch.dict(
+            os.environ,
+            {"WSCAN_HEADER_SCOPE_ENFORCE": ""},
+        ):
+            return ScanEngine(**options)
+
+    def test_headers_for_url_includes_custom_headers_for_allowed_origin(self):
+        with tempfile.TemporaryDirectory() as output_dir:
+            engine = self._engine(output_dir)
+
+        self.assertEqual(
+            engine.headers_for_url("https://app.example/private"),
+            {
+                "Authorization": "Bearer secret",
+                "X-API-Key": "api-secret",
+            },
+        )
+
+    def test_headers_for_url_omits_custom_headers_for_external_origin(self):
+        with tempfile.TemporaryDirectory() as output_dir:
+            engine = self._engine(output_dir)
+
+        self.assertEqual(
+            engine.headers_for_url("https://external.example/private"),
+            {},
+        )
+
+    def test_external_origin_keeps_scanner_default_headers(self):
+        with tempfile.TemporaryDirectory() as output_dir:
+            engine = self._engine(output_dir)
+
+        headers = engine.auth_headers(
+            {"User-Agent": "wscan-test", "Accept": "application/json"},
+            url="https://external.example/private",
+        )
+
+        self.assertNotIn("Authorization", headers)
+        self.assertNotIn("X-API-Key", headers)
+        self.assertEqual(headers["User-Agent"], "wscan-test")
+        self.assertEqual(headers["Accept"], "application/json")
+
+    def test_disabled_enforcement_always_returns_custom_headers(self):
+        with tempfile.TemporaryDirectory() as output_dir:
+            engine = self._engine(
+                output_dir,
+                header_scope_enforce=False,
+            )
+
+        self.assertEqual(
+            engine.headers_for_url("https://external.example/private"),
+            {
+                "Authorization": "Bearer secret",
+                "X-API-Key": "api-secret",
+            },
+        )
+
+    def test_unknown_scope_preserves_legacy_custom_headers(self):
+        with tempfile.TemporaryDirectory() as output_dir:
+            engine = self._engine(
+                output_dir,
+                url="not-a-url",
+            )
+
+        self.assertEqual(
+            engine.headers_for_url("https://external.example/private"),
+            {
+                "Authorization": "Bearer secret",
+                "X-API-Key": "api-secret",
+            },
+        )
 
 
 if __name__ == "__main__":

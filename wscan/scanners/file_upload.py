@@ -93,7 +93,7 @@ class FileUploadScanner(BaseScanner):
             client_kwargs["proxy"] = getattr(self.engine, "proxy", "")
             client_kwargs["verify"] = False
         if hasattr(self.engine, "auth_headers"):
-            client_kwargs["headers"] = self.engine.auth_headers()
+            client_kwargs["headers"] = self.auth_headers_for_url(url)
 
         request_kwargs = {
             "files": {field_name: (filename, io.BytesIO(content), content_type)},

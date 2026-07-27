@@ -150,10 +150,10 @@ class MassAssignmentScanner(BaseScanner):
                 findings.append(f)
         return findings
 
-    def _client_kwargs(self, content_type: str) -> dict:
+    def _client_kwargs(self, content_type: str, url: str) -> dict:
         hdrs: dict = {"Content-Type": content_type}
         if hasattr(self.engine, "auth_headers"):
-            base = self.engine.auth_headers()
+            base = self.auth_headers_for_url(url)
             base.update(hdrs)
             hdrs = base
         kwargs: dict = {"timeout": getattr(self.engine, "timeout", 15),
@@ -174,7 +174,10 @@ class MassAssignmentScanner(BaseScanner):
         if not sentinels:
             return None
         polluted = augment_body(base_body, sentinels)
-        kwargs = self._client_kwargs(getattr(tmpl, "content_type", "application/json"))
+        kwargs = self._client_kwargs(
+            getattr(tmpl, "content_type", "application/json"),
+            tmpl.url,
+        )
         # スペックで宣言された必須ヘッダ（X-API-Version/tenant 等）を載せる。欠落すると
         # 400/401/404 で検査が空振りするため。ただし認証情報ヘッダ（Authorization/
         # API-key）は利用者の --header / 更新トークン（auth_headers 由来）を spec の

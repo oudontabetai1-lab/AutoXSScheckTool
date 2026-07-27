@@ -190,7 +190,7 @@ class JWTScanner(BaseScanner):
         # --header values and refreshed bearer tokens are always included.
         req_headers = dict(_HEADERS)
         if hasattr(self.engine, "auth_headers"):
-            req_headers.update(self.engine.auth_headers())
+            req_headers.update(self.auth_headers_for_url(url))
         else:
             cookies_str = getattr(self.engine, "cookies", "") or ""
             if cookies_str:
@@ -669,7 +669,7 @@ class JWTScanner(BaseScanner):
                 return None
             headers = dict(_HEADERS)
             if hasattr(self.engine, "auth_headers"):
-                headers.update(self.engine.auth_headers())
+                headers.update(self.auth_headers_for_url(finding.url))
             else:
                 cookies_str = getattr(self.engine, "cookies", "") or ""
                 if cookies_str:

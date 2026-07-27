@@ -110,6 +110,10 @@ class WAFDetector:
             extra_headers: dict = {}
             if self.headers_provider:
                 try:
+                    extra_headers = self.headers_provider(url) or {}
+                except TypeError:
+                    # Backward-compatible provider contract for standalone
+                    # users/tests that still expose a zero-argument callable.
                     extra_headers = self.headers_provider() or {}
                 except Exception:
                     extra_headers = {}

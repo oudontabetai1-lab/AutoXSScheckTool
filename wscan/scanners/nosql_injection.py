@@ -264,7 +264,7 @@ class NoSQLInjectionScanner(BaseScanner):
         timeout = getattr(self.engine, "timeout", 15)
         hdrs: dict = {"Content-Type": "application/json"}
         if hasattr(self.engine, "auth_headers"):
-            base = self.engine.auth_headers()
+            base = self.auth_headers_for_url(url)
             base.update(hdrs)
             hdrs = base
         kwargs: dict = {
@@ -379,7 +379,7 @@ class NoSQLInjectionScanner(BaseScanner):
         timeout = getattr(self.engine, "timeout", 15)
         hdrs: dict = {"Content-Type": "application/json"}
         if hasattr(self.engine, "auth_headers"):
-            base = self.engine.auth_headers()
+            base = self.auth_headers_for_url(finding.url)
             base.update(hdrs)
             hdrs = base
         kwargs: dict = {

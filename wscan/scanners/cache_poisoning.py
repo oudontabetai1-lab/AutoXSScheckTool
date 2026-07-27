@@ -186,9 +186,9 @@ class CachePoisoningScanner(BaseScanner):
             kwargs["proxy"] = self.engine.proxy
         return kwargs
 
-    def _auth_headers(self) -> dict:
+    def _auth_headers(self, url: str) -> dict:
         if hasattr(self.engine, "auth_headers"):
-            return dict(self.engine.auth_headers())
+            return dict(self.auth_headers_for_url(url))
         return {}
 
     async def _scan_poisoning(self, url: str) -> list[Finding]:
@@ -202,7 +202,7 @@ class CachePoisoningScanner(BaseScanner):
             # キャッシュから返って X-Host 等の脆弱性を取りこぼす。
             cb = secrets.token_hex(6)
             probe_url = f"{url}{sep}cb={cb}"
-            inj_headers = self._auth_headers()
+            inj_headers = self._auth_headers(probe_url)
             inj_headers[header] = marker_host
             await self.log_payload_test(
                 f"(header) {header}", marker_host, "cache_poisoning", url
@@ -222,7 +222,10 @@ class CachePoisoningScanner(BaseScanner):
             confirmed = False
             try:
                 async with httpx.AsyncClient(**self._client_kwargs()) as client:
-                    clean = await client.get(probe_url, headers=self._auth_headers())
+                    clean = await client.get(
+                        probe_url,
+                        headers=self._auth_headers(probe_url),
+                    )
                 confirmed = reflected(clean.text, marker_host) and cache_hit(
                     dict(clean.headers)
                 )
@@ -280,8 +283,11 @@ class CachePoisoningScanner(BaseScanner):
         await self.log_payload_test("(path)", css_url, "cache_deception", url)
         try:
             async with httpx.AsyncClient(**self._client_kwargs()) as client:
-                base = await client.get(url, headers=self._auth_headers())
-                css = await client.get(css_url, headers=self._auth_headers())
+                base = await client.get(url, headers=self._auth_headers(url))
+                css = await client.get(
+                    css_url,
+                    headers=self._auth_headers(css_url),
+                )
         except Exception:
             return []
 

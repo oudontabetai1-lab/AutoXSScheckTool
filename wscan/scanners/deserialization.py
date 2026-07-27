@@ -224,7 +224,7 @@ class DeserializationScanner(BaseScanner):
                 if hasattr(self.engine, "auth_headers"):
                     # Underlay engine auth headers (Cookie / custom) so requests
                     # against authenticated endpoints don't 401.
-                    base = self.engine.auth_headers()
+                    base = self.auth_headers_for_url(url)
                     base.update(hdrs)
                     hdrs = base
                 kwargs: dict = {
@@ -340,7 +340,7 @@ class DeserializationScanner(BaseScanner):
         timeout = getattr(self.engine, "timeout", 15)
         hdrs: dict = {"Content-Type": content_type}
         if hasattr(self.engine, "auth_headers"):
-            base = self.engine.auth_headers()
+            base = self.auth_headers_for_url(url)
             base.update(hdrs)
             hdrs = base
         kwargs: dict = {

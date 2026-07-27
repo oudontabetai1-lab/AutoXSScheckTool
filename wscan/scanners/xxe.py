@@ -66,9 +66,8 @@ class XXEScanner(BaseScanner):
     async def _post_xml(self, url: str, payload: str) -> tuple[str, int, float]:
         timeout = getattr(self.engine, "timeout", 15)
         headers = {"Content-Type": "application/xml"}
-        auth_headers = getattr(self.engine, "auth_headers", None)
-        if callable(auth_headers):
-            headers = auth_headers(headers)
+        if hasattr(self.engine, "auth_headers"):
+            headers = self.auth_headers_for_url(url, headers)
         client_kwargs: dict = {
             "timeout": timeout,
             "follow_redirects": True,

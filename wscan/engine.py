@@ -136,7 +136,7 @@ from rich import box as rbox
 from .attack_planner import AttackPlanner, FieldAttackPlan, PageAttackPlan
 from .adaptive_payload import AdaptivePayloadEngine
 from .browser import BrowserManager
-from .header_scope import allowed_header_origins
+from .header_scope import allowed_header_origins, headers_allowed_for_url
 from .tls_config import TLSConfig
 from .chain_scanner import ChainScanner, ChainFinding
 from .ctf_flag_finder import FlagFinder
@@ -720,6 +720,12 @@ class ScanEngine:
             env_header_scope,
             default=configured_header_scope,
         )
+        self._header_scope_origins = allowed_header_origins(
+            self.target_url,
+            self.target_urls,
+            self.access_urls,
+            self.login_url,
+        )
 
         # Components
         self._browser = BrowserManager(
@@ -730,12 +736,7 @@ class ScanEngine:
             extra_headers=self.header_manager.current(),
             tls_config=self.tls_config,
             target_url=self.target_url,
-            header_scope_origins=allowed_header_origins(
-                self.target_url,
-                self.target_urls,
-                self.access_urls,
-                self.login_url,
-            ),
+            header_scope_origins=self._header_scope_origins,
             header_scope_enforce=self.header_scope_enforce,
             request_logger=self.request_logger,
             mfa_solver=self._mfa_solver,
@@ -799,7 +800,7 @@ class ScanEngine:
         self.waf_detector = WAFDetector(
             payload_gen=self.payload_gen,
             proxy=proxy,
-            headers_provider=lambda: self.auth_headers(),
+            headers_provider=lambda url="": self.auth_headers(url=url),
             tls_options_provider=lambda: self.tls_config.httpx_options(),
         )
         # A-3: Payload continuous learning
@@ -1017,7 +1018,32 @@ class ScanEngine:
     # browser property — transparently returns the current worker's browser
     # =========================================================================
 
-    def auth_headers(self, extra: Optional[dict] = None, *, include_cookie: bool = True) -> dict:
+    def headers_for_url(self, url: str) -> dict:
+        """Return current custom headers only when ``url`` is in header scope.
+
+        An explicitly disabled scope, an unknown scope, and headerless scans
+        preserve the legacy behavior.  The returned snapshot can be safely
+        merged underneath scanner defaults without removing headers such as
+        User-Agent or Content-Type.
+        """
+        headers = self.header_manager.current()
+        if (
+            not self.header_scope_enforce
+            or not headers
+            or not self._header_scope_origins
+        ):
+            return headers
+        if headers_allowed_for_url(url, self._header_scope_origins):
+            return headers
+        return {}
+
+    def auth_headers(
+        self,
+        extra: Optional[dict] = None,
+        *,
+        include_cookie: bool = True,
+        url: str = "",
+    ) -> dict:
         """
         Central source of HTTP headers for direct httpx calls.
 
@@ -1026,8 +1052,16 @@ class ScanEngine:
           * The current Cookie string (engine.cookies) unless ``include_cookie=False``
             and the user hasn't already supplied a Cookie header
           * Caller-supplied ``extra``
+
+        When ``url`` is supplied, custom HeaderManager keys are included only
+        for an allowed origin.  An omitted URL intentionally preserves legacy
+        behavior for callers whose destination is not yet known.
         """
-        headers: dict = self.header_manager.current()
+        headers: dict = (
+            self.headers_for_url(url)
+            if url
+            else self.header_manager.current()
+        )
         if include_cookie and self.cookies:
             # Don't clobber an explicit Cookie header from --header.
             if not any(k.lower() == "cookie" for k in headers):
@@ -1508,7 +1542,7 @@ class ScanEngine:
             kwargs = self.httpx_client_kwargs(**kwargs)
         elif getattr(self, "proxy", ""):
             kwargs["proxy"] = self.proxy
-        headers = self.auth_headers() if hasattr(self, "auth_headers") else {}
+        headers = self.auth_headers(url=url) if hasattr(self, "auth_headers") else {}
         try:
             async with httpx.AsyncClient(**kwargs) as client:
                 r = await client.get(url, headers=headers)
@@ -1758,12 +1792,15 @@ class ScanEngine:
             **self.httpx_client_kwargs(
                 timeout=10.0,
                 follow_redirects=True,
-                headers=self.auth_headers(),
             )
         ) as client:
             # robots.txt
             try:
-                r = await client.get(f"{base}/robots.txt")
+                robots_url = f"{base}/robots.txt"
+                r = await client.get(
+                    robots_url,
+                    headers=self.auth_headers(url=robots_url),
+                )
                 if r.status_code == 200:
                     for line in r.text.splitlines():
                         line = line.strip()
@@ -1780,7 +1817,11 @@ class ScanEngine:
 
             # sitemap.xml (try directly if not found via robots)
             try:
-                r = await client.get(f"{base}/sitemap.xml")
+                sitemap_url = f"{base}/sitemap.xml"
+                r = await client.get(
+                    sitemap_url,
+                    headers=self.auth_headers(url=sitemap_url),
+                )
                 if r.status_code == 200:
                     discovered += self._extract_sitemap_locs(r.text)
             except Exception:
@@ -1796,7 +1837,11 @@ class ScanEngine:
     async def _parse_sitemap(self, client, sitemap_url: str) -> list[str]:
         """Fetch and parse a sitemap URL (supports sitemap index)."""
         try:
-            r = await client.get(sitemap_url, timeout=10.0)
+            r = await client.get(
+                sitemap_url,
+                timeout=10.0,
+                headers=self.auth_headers(url=sitemap_url),
+            )
             if r.status_code == 200:
                 return self._extract_sitemap_locs(r.text)
         except Exception:
@@ -4494,16 +4539,22 @@ class ScanEngine:
                         new_qs[f.field_name] = [value]
                         return urlunparse(parsed._replace(query=urlencode(new_qs, doseq=True)))
 
-                    headers = self.auth_headers()
                     async with httpx.AsyncClient(
                         **self.httpx_client_kwargs(
                             follow_redirects=True,
                             timeout=self.timeout,
-                            headers=headers,
                         )
                     ) as client:
-                        baseline_resp = await client.get(_with_value("wscan_ssti_baseline"))
-                        probe_resp = await client.get(_with_value(f.payload))
+                        baseline_url = _with_value("wscan_ssti_baseline")
+                        probe_url = _with_value(f.payload)
+                        baseline_resp = await client.get(
+                            baseline_url,
+                            headers=self.auth_headers(url=baseline_url),
+                        )
+                        probe_resp = await client.get(
+                            probe_url,
+                            headers=self.auth_headers(url=probe_url),
+                        )
                     baseline_text = baseline_resp.text
                     probe_text = probe_resp.text
                     for expected in expected_values:

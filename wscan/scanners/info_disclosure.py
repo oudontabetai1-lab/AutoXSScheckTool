@@ -133,7 +133,7 @@ class InfoDisclosureScanner(BaseScanner):
         elif proxy:
             kwargs["proxy"] = proxy
         if hasattr(self.engine, "auth_headers"):
-            kwargs["headers"] = self.engine.auth_headers()
+            kwargs["headers"] = self.auth_headers_for_url(origin)
 
         if self.monitor:
             await self.monitor.emit_status(
@@ -302,7 +302,7 @@ class InfoDisclosureScanner(BaseScanner):
         elif proxy:
             kwargs["proxy"] = proxy
         if hasattr(self.engine, "auth_headers"):
-            kwargs["headers"] = self.engine.auth_headers()
+            kwargs["headers"] = self.auth_headers_for_url(url)
         async with httpx.AsyncClient(**kwargs) as client:
             return await client.get(url)
 

@@ -46,6 +46,20 @@ class _Engine:
         return headers
 
 
+class _ScopedEngine(_Engine):
+    def headers_for_url(self, url):
+        if url.startswith("http://fixture.test/"):
+            return {"Authorization": "Bearer test"}
+        return {}
+
+    def auth_headers(self, extra=None, include_cookie=True, url=""):
+        headers = self.headers_for_url(url)
+        if include_cookie:
+            headers["Cookie"] = "sid=abc"
+        headers.update(extra or {})
+        return headers
+
+
 class DirectHttpAuthHeaderTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         _CaptureClient.calls = []
@@ -70,6 +84,22 @@ class DirectHttpAuthHeaderTests(unittest.IsolatedAsyncioTestCase):
         _method, _url, request_kwargs, _client_kwargs = _CaptureClient.calls[0]
         self.assertEqual(request_kwargs["headers"]["Authorization"], "Bearer test")
         self.assertEqual(request_kwargs["headers"]["Cookie"], "sid=abc")
+
+    async def test_cors_external_url_omits_custom_auth_and_keeps_probe_header(self):
+        scanner = CORSScanner(_ScopedEngine())
+
+        with patch("wscan.scanners.cors.httpx.AsyncClient", _CaptureClient):
+            await scanner._get_with_origin(
+                "https://external.example/private",
+                "https://origin-probe.example",
+            )
+
+        _method, _url, _request_kwargs, client_kwargs = _CaptureClient.calls[0]
+        self.assertNotIn("Authorization", client_kwargs["headers"])
+        self.assertEqual(
+            client_kwargs["headers"]["Origin"],
+            "https://origin-probe.example",
+        )
 
 
 if __name__ == "__main__":

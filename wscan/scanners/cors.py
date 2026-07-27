@@ -124,7 +124,7 @@ class CORSScanner(BaseScanner):
         proxy = getattr(self.engine, "proxy", "") or None
         headers = self._origin_headers(origin)
         if hasattr(self.engine, "auth_headers"):
-            base = self.engine.auth_headers()
+            base = self.auth_headers_for_url(url)
             base.update(headers)
             headers = base
         kwargs: dict = {

@@ -47,12 +47,18 @@ if TYPE_CHECKING:
     from wscan.engine import ScanEngine
 
 
-def _engine_custom_headers(engine) -> dict:
+def _engine_custom_headers(engine, url: str = "") -> dict:
     """Return custom --header / refreshed-token headers, *without* the Cookie
     (privesc deliberately swaps the Cookie under test)."""
     if not hasattr(engine, "auth_headers"):
         return {}
-    hdrs = engine.auth_headers(include_cookie=False)
+    if url and hasattr(engine, "headers_for_url"):
+        hdrs = engine.auth_headers(
+            include_cookie=False,
+            url=url,
+        )
+    else:
+        hdrs = engine.auth_headers(include_cookie=False)
     return {k: v for k, v in hdrs.items() if k.lower() != "cookie"}
 
 
@@ -581,7 +587,11 @@ class PrivEscScanner(BaseScanner):
             async with httpx.AsyncClient(
                 follow_redirects=False,
                 timeout=timeout,
-                headers={**_HEADERS, **_engine_custom_headers(self.engine), "Cookie": low_priv_cookies},
+                headers={
+                    **_HEADERS,
+                    **_engine_custom_headers(self.engine, url),
+                    "Cookie": low_priv_cookies,
+                },
                 **self._client_transport_kwargs(),
             ) as client:
                 resp = await client.get(url)
@@ -1235,8 +1245,13 @@ class PrivEscScanner(BaseScanner):
                 follow_redirects=True,
                 timeout=timeout,
                 headers=(
-                    {**_HEADERS, **_engine_custom_headers(self.engine), "Cookie": cookies}
-                    if cookies else {**_HEADERS, **_engine_custom_headers(self.engine)}
+                    {
+                        **_HEADERS,
+                        **_engine_custom_headers(self.engine, url),
+                        "Cookie": cookies,
+                    }
+                    if cookies
+                    else {**_HEADERS, **_engine_custom_headers(self.engine, url)}
                 ),
                 **self._client_transport_kwargs(),
             ) as client:
@@ -1259,7 +1274,12 @@ class PrivEscScanner(BaseScanner):
         unauthenticated — so credential headers from --header / a refreshed
         token are stripped. Explicit probe ``headers`` are applied afterwards
         and never stripped (they carry the bypass payload itself)."""
-        hdrs = {**_HEADERS, **_strip_credential_headers(_engine_custom_headers(self.engine))}
+        hdrs = {
+            **_HEADERS,
+            **_strip_credential_headers(
+                _engine_custom_headers(self.engine, url)
+            ),
+        }
         if headers:
             hdrs.update(headers)
         if cookies:
@@ -1387,8 +1407,13 @@ class PrivEscScanner(BaseScanner):
                 follow_redirects=False,
                 timeout=timeout,
                 headers=(
-                    {**_HEADERS, **_engine_custom_headers(self.engine), "Cookie": cookies}
-                    if cookies else {**_HEADERS, **_engine_custom_headers(self.engine)}
+                    {
+                        **_HEADERS,
+                        **_engine_custom_headers(self.engine, url),
+                        "Cookie": cookies,
+                    }
+                    if cookies
+                    else {**_HEADERS, **_engine_custom_headers(self.engine, url)}
                 ),
                 **self._client_transport_kwargs(),
             ) as client:
