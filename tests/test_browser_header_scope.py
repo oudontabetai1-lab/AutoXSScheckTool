@@ -24,6 +24,11 @@ class _Request:
         self.headers = dict(headers or {})
 
 
+class _FailingHeaders:
+    def keys(self):
+        raise RuntimeError("request headers unavailable")
+
+
 class _Route:
     def __init__(
         self,
@@ -119,9 +124,9 @@ class BrowserHeaderRouteTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(route.fulfill_calls, [])
         self.assertEqual(route.abort_calls, [])
 
-    async def test_fetch_failure_falls_back_to_continue_without_headers(self):
+    async def test_fetch_failure_aborts_without_resending(self):
         browser = self._browser()
-        route = _Route(fetch_failure=TypeError("max_redirects unsupported"))
+        route = _Route(fetch_failure=TimeoutError("response timed out"))
 
         with patch("wscan.browser.console") as mock_console:
             await browser._auth_header_route(
@@ -140,8 +145,8 @@ class BrowserHeaderRouteTests(unittest.IsolatedAsyncioTestCase):
             }],
         )
         self.assertEqual(route.fulfill_calls, [])
-        self.assertEqual(route.abort_calls, [])
-        self.assertEqual(route.continue_calls, [{}])
+        self.assertEqual(route.abort_calls, [{}])
+        self.assertEqual(route.continue_calls, [])
         mock_console.print.assert_called_once()
         notice = mock_console.print.call_args.args[0]
         self.assertIn("認証ヘッダなし", notice)
@@ -182,15 +187,18 @@ class BrowserHeaderRouteTests(unittest.IsolatedAsyncioTestCase):
     async def test_headerless_fallback_failure_retries_without_headers(self):
         browser = self._browser()
         route = _Route(
-            fetch_failure=AttributeError("route.fetch unavailable"),
             continue_failures=1,
         )
+        request = _Request("https://app.example/private")
+        request.headers = _FailingHeaders()
 
         await browser._auth_header_route(
             route,
-            _Request("https://app.example/private"),
+            request,
         )
 
+        self.assertEqual(route.fetch_calls, [])
+        self.assertEqual(route.abort_calls, [])
         self.assertEqual(
             route.continue_calls,
             [{}, {}],
