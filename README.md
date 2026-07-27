@@ -165,7 +165,7 @@ MFA コード取得や blind XSS/SSRF・メールヘッダ注入の OOB 確証�
 python3 -m pip install -r requirements-mcp.txt
 ```
 
-MFA は外部の `mcp-totp-authenticator` または `mcp-email-server` を起動します。OOB メールの環境変数と受信ボックスは [OOB メール設定](docs/oob_email_ja.md) を参照してください。API キー、TOTP シークレット、メールパスワードはリポジトリや YAML に保存せず環境変数で渡してください。
+TOTP はネイティブ生成を利用でき、従来の `mcp-totp-authenticator` も互換経路として残っています。メール MFA は `mcp-email-server` を使います。OOB メールの環境変数と受信ボックスは [OOB メール設定](docs/oob_email_ja.md) を参照してください。API キー、TOTP シークレット、メールパスワードはリポジトリや YAML に保存しないでください。
 
 ## 5. ダッシュボード
 
@@ -186,14 +186,18 @@ python3 main.py serve --host 127.0.0.1 --port 8765
 | --- | --- |
 | 基本設定 | Depth、Timeout、Max Forms、並列数、ペイロード上限、遅延、遷移リトライ、プロキシ、TLS、Headless |
 | 検査項目 | 実行する決定論スキャナ |
-| 認証・Cookie | Cookie、自動ログイン、低権限 Cookie、MFA、複数アカウント |
+| 認証・Cookie | Cookie、自動ログイン、低権限 Cookie、ネイティブ TOTP、Bearer/カスタムヘッダ、複数アカウント |
 | LLM設定 | provider、モデル、互換ベース URL、役割別モデル |
-| 機能フラグ | Planner、AI 分析、WAF、学習、sitemap、SPA、巡回レビューなど |
+| 機能フラグ | Planner、AI 分析、WAF、学習、community ペイロード、sitemap、SPA、巡回レビューなど |
 | スコープ・除外 | 攻撃対象、アクセスのみ許可、除外 URL、除外フィールド |
 | 手動巡回 | 可視ブラウザ、遠隔ブラウザ、URL リストから巡回シードを作成 |
 | 攻撃フロー | navigate / fill / click / wait 等の複数手順 |
 
 「スキャン開始」は通常モードです。`planner.interactive=true` または画面の攻撃プラン確認を有効にした場合、巡回後にフィールド、チェック、カスタムペイロードを確認してから攻撃へ進みます。
+
+認証タブの TOTP は `otpauth://` URI、Base32 シークレット、QR 画像からサーバー内でローカル生成します。Bearer トークンまたは1行1件のカスタムヘッダは、通常ツール層（`scan`）の crawl と全 HTTP リクエストへ適用されます。明示した `Authorization` ヘッダは Bearer 欄より優先されます。TOTP URI/シークレットと Bearer は設定 export やブラウザ保存へ含めません。任意コマンドを実行する `header_refresh_cmd` はサーバー配備時の RCE 面になるため、ダッシュボードには公開していません。
+
+サーバー配備時は、TLS 証明書/秘密鍵/PFX/CA、カスタムペイロード、手動巡回 JSON、TOTP QR をブラウザからアップロードできます。保存先は `output/uploads/`、上限は1ファイル 8MBです。拡張子は用途別に制限され、既存のサーバー側パス入力も後方互換で利用できます。出力ディレクトリと手動巡回の保存先はアップロード対象ではないため、リモート運用では空欄（自動）を推奨します。
 
 ### Agent タブ
 
@@ -277,13 +281,20 @@ python3 main.py scan URL [options]
 | `--header-file FILE` | 空 | JSON/YAML/1行1ヘッダ形式 |
 | `--header-refresh-cmd CMD` | 空 | stdout からヘッダを更新するコマンド |
 | `--header-refresh-interval SECONDS` | `0` | ヘッダ更新間隔。0 は無効 |
+| `--bearer TOKEN` | 空 | `Authorization: Bearer TOKEN` を全リクエストへ付与 |
 | `--auth-user USER` / `--auth-pass PASS` | config / 空 | ログインフォーム用資格情報 |
 | `--login-url URL` | 空 | 自動ログイン URL |
 | `--login-user-field NAME` | `username` | ユーザー名入力欄 |
 | `--login-pass-field NAME` | `password` | パスワード入力欄 |
 | `--login-success TEXT` | 空 | 成功確認用の URL/ページ内文字列 |
-| `--mfa-type totp\|email` | 未指定 | 外部 MCP で MFA コード取得 |
+| `--mfa-type totp\|email` | 未指定 | ネイティブ TOTP または外部 MCP で MFA コード取得 |
 | `--mfa-field NAME` | 空（実行時既定 `otp`） | MFA 入力欄の name/id |
+| `--mfa-totp-uri URI` | 空 | `otpauth://totp/...` からネイティブ TOTP を生成 |
+| `--mfa-totp-secret BASE32` | 空 | 生 Base32 シークレットからネイティブ TOTP を生成 |
+| `--mfa-totp-qr FILE` | 空 | QR 画像からネイティブ TOTP を生成（opencv は任意依存） |
+| `--mfa-totp-digits N` | `6` | 生 Base32 / QR 用の TOTP 桁数 |
+| `--mfa-totp-period SEC` | `30` | 生 Base32 / QR 用の TOTP 周期秒 |
+| `--mfa-totp-algorithm ALG` | `SHA1` | 生 Base32 / QR 用のハッシュ（SHA1/SHA256/SHA512） |
 | `--mfa-email-account EMAIL` | 空 | 登録済み `account_name` |
 | `--mfa-email-address EMAIL` | 空 | 動的 IMAP のメールアドレス |
 | `--mfa-email-imap-host HOST` | 空 | 動的 IMAP の受信ホスト |
@@ -662,6 +673,8 @@ adaptive LLM ラウンドはフィールド全体を一括完了にせず、`fie
 
 長時間スキャンでは認証切れを 401、ログインフォーム残存などの強いシグナルから検出し、既定で再ログインします。`--logged-in-marker` で精度を補強し、不要なら `--no-relogin` を指定します。許可/禁止時間帯では攻撃を待機し、再開可能な checkpoint を維持します。
 
+時間帯は CLI の `--allowed-hours` / `--forbidden-hours` に加え、ダッシュボードの「基本設定」からも1行1件で指定できます（例: `Mon-Fri 22:00-06:00`）。空欄なら時間帯ゲートは無効です。
+
 ## 12. 出力・連携
 
 代表的な出力:
@@ -710,7 +723,7 @@ Finding 検出時に Slack Incoming Webhook または汎用 JSON POST エンド�
 
 ### REST / WebSocket
 
-`serve` は `/api/v1/scan`、`/api/v1/scan/status`、`/api/v1/scan/findings`、`/api/v1/scan/results`、`/api/v1/scans`、スケジュール・履歴・手動巡回 API と `/ws` を提供します。トークン設定時は Bearer 認証が必要です。`/health` は稼働確認に使えます。
+`serve` は `/api/v1/scan`、`/api/v1/scan/status`、`/api/v1/scan/findings`、`/api/v1/scan/results`、`/api/v1/scans`、認証必須の `/api/v1/upload`、スケジュール・履歴・手動巡回 API と `/ws` を提供します。トークン設定時は Bearer 認証が必要です。`/health` は稼働確認に使えます。
 
 ### batch
 
@@ -734,7 +747,21 @@ python3 main.py scan https://example.com \
 
 ### MFA
 
-TOTP とメールコードを外部 MCP から取得し、パスワード送信後の MFA 入力欄へ投入できます。
+ここは確実性を重視する通常ツール層（`scan`）の認証付きスキャン補助です。脆弱性判定には影響せず、TOTP とメールコードをパスワード送信後の MFA 入力欄へ投入します。
+
+TOTP は `otpauth://` URI、生 Base32、QR 画像のいずれかからネットワークなしで生成できます。`--mfa-totp-*` だけでも TOTP 方式へ自動昇格しますが、方式を明示する場合は次のように指定します。
+
+```bash
+export WSCAN_MFA_TOTP_URI='otpauth://totp/Example:ops?secret=<base32-secret>&issuer=Example'
+
+python3 main.py scan https://example.com \
+  --login-url https://example.com/login --auth-user ops --auth-pass 'p@ss' \
+  --mfa-type totp --mfa-totp-uri "$WSCAN_MFA_TOTP_URI" --mfa-field otp
+```
+
+URI の代わりに `--mfa-totp-secret BASE32` または `--mfa-totp-qr code.png` も使えます。QR 読み取りだけは任意依存の opencv が必要です（`pip install opencv-python-headless`）。シークレットや URI は保存されないため、毎回 CLI または `WSCAN_MFA_TOTP_URI` / `WSCAN_MFA_TOTP_SECRET` / `WSCAN_MFA_TOTP_QR` で渡してください。
+
+従来の外部 MCP による TOTP 取得も引き続き利用できます。
 
 ```bash
 # TOTP
@@ -766,6 +793,21 @@ python3 main.py scan https://example.com \
 ```
 
 動的 IMAP は `--mfa-email-address`、`--mfa-email-imap-host`、`--mfa-email-imap-port`、`--mfa-email-imap-user` で指定し、パスワードは `WSCAN_MFA_EMAIL_IMAP_PASSWORD` を推奨します。メールは一覧取得後に本文を取得し、ポーリング開始後の新着からコードを抽出します。
+
+### Bearer 認証
+
+通常ツール層（`scan`）で Cognito などの静的 Bearer トークンを使う場合、`--bearer` は Authorization ヘッダ指定の近道です。ブラウザ巡回と httpx の全リクエストに同じヘッダを送ります。
+
+```bash
+export WSCAN_BEARER='<token>'
+python3 main.py scan https://api.example.com --bearer "$WSCAN_BEARER"
+```
+
+環境変数は `WSCAN_BEARER` を使います（`--header "Authorization: Bearer <token>"` でも指定可、`--header`/`--header-file` の Authorization を優先）。トークンはローカルへ保存されないため、毎回 CLI または環境変数で渡してください。
+
+> ⚠️ serve の保護トークン `WSCAN_AUTH_TOKEN` は**ダッシュボード/API を守る control-plane 用**で、スキャン対象へ送る Bearer とは別物です。`--bearer` はこれを参照しません（管理トークンが検査対象へ漏れるのを防ぐため）。対象用トークンは必ず `WSCAN_BEARER` か `--bearer` で渡してください。
+
+> ℹ️ **既知の制約（Hybrid/Agent モード）**: 通常ツール層（`scan`）の crawl・攻撃は Bearer/カスタムヘッダを全リクエストへ付与しますが、**Agent 偵察（`agent` / `scan --hybrid` の Phase 1）は現状 Bearer/カスタムヘッダを未サポート**です（Cookie/フォームログインは可）。Bearer のみで認証する対象を Hybrid で回すと、Phase 1 の URL 発見が未認証範囲に限られ、認証後ページの発見漏れが起き得ます（Phase 2 の決定論スキャン自体はヘッダを honor します）。Agent ブラウザ（browser-use）へのヘッダ配線は別途対応予定です。
 
 ### スコープ
 

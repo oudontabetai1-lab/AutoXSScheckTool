@@ -554,6 +554,7 @@ class AgentBrowserScanner:
 
         task = self._build_recon_task() if self.recon_mode else self._build_task()
         result = AgentScanResult(target_url=self.target_url)
+        browser = None
 
         try:
             from browser_use import Agent, Browser
@@ -647,16 +648,23 @@ class AgentBrowserScanner:
                 for err in errors[:3]:
                     console.print(f"    [dim]{str(err)[:120]}[/dim]")
 
-            # BrowserSession は close() を持たない — stop() が正しい
-            await browser.stop()
-
         except ImportError:
             result.error = "browser-use がインストールされていません。pip install browser-use を実行してください。"
             console.print(f"[red]{result.error}[/red]")
             return result
+        except asyncio.CancelledError:
+            raise
         except Exception as exc:
             result.error = str(exc)
             console.print(f"[red]エージェントスキャンエラー: {exc}[/red]")
+        finally:
+            if browser is not None:
+                try:
+                    # BrowserSession は close() を持たない — stop() が正しい。
+                    # Agent task の cancel 時もここを通し、プローブを確実に止める。
+                    await browser.stop()
+                except Exception as exc:
+                    console.print(f"[yellow]ブラウザ終了エラー: {exc}[/yellow]")
 
         # サマリー表示
         console.print(Rule("[bold magenta] Agent Scan Complete [/bold magenta]", style="magenta"))

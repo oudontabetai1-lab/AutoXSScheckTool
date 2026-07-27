@@ -83,6 +83,18 @@ def parse_header_args(values: Optional[list[str]]) -> dict[str, str]:
     return out
 
 
+def apply_bearer(headers: dict[str, str], token: str) -> dict[str, str]:
+    """Authorization 未設定時だけ Bearer ヘッダを加えたコピーを返す。"""
+    out = dict(headers or {})
+    try:
+        value = str(token or "").strip()
+        if value and not any(str(key).lower() == "authorization" for key in out):
+            out["Authorization"] = f"Bearer {value}"
+    except Exception:
+        pass
+    return out
+
+
 def load_header_file(path: str) -> dict[str, str]:
     """Load headers from a JSON / YAML / plain ``Name: Value`` file."""
     if not path:

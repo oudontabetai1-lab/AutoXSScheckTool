@@ -1249,7 +1249,10 @@ document.querySelectorAll('.plan-payloads-toggle').forEach(btn => {{
             return '<div class="network-box"><h4>Request</h4><div class="network-content">N/A</div></div>'
         method = req.get("method", "GET")
         url = req.get("url", "")
-        headers = req.get("headers", {})
+        # Authorization/Cookie/X-Api-Key 等の認証ヘッダはレポート成果物へ平文で残さない
+        # （request_logger と同じ _redact_headers を単一の真実として再利用）。
+        from .request_logger import _redact_headers
+        headers = _redact_headers(req.get("headers", {}))
         body = req.get("post_data", "") or ""
         headers_text = "\n".join(f"{k}: {v}" for k, v in list(headers.items())[:10])
         content = f"{method} {url}\n\n{headers_text}"
@@ -1261,7 +1264,9 @@ document.querySelectorAll('.plan-payloads-toggle').forEach(btn => {{
         if not resp:
             return '<div class="network-box"><h4>Response</h4><div class="network-content">N/A</div></div>'
         status = resp.get("status", "")
-        headers = resp.get("headers", {})
+        # Set-Cookie 等の機微な応答ヘッダも伏字化する。
+        from .request_logger import _redact_headers
+        headers = _redact_headers(resp.get("headers", {}))
         body = finding.response.get("body", "") or ""
         headers_text = "\n".join(f"{k}: {v}" for k, v in list(headers.items())[:10])
         content = f"HTTP {status}\n\n{headers_text}"

@@ -1031,15 +1031,21 @@ body {
           </div>
           <div class="cfg-field">
             <label>クライアント証明書 (PEM)</label>
-            <input type="text" id="cfgTlsClientCert" placeholder="/path/to/client.crt">
+            <input type="text" id="cfgTlsClientCert" placeholder="アップロードするか、サーバ側パスを入力">
+            <input type="file" id="upTlsClientCert" accept=".crt,.pem,.cer" style="font-size:0.75rem">
+            <span id="upTlsClientCertStatus" style="font-size:0.72rem;color:var(--text-muted)"></span>
           </div>
           <div class="cfg-field">
             <label>クライアント秘密鍵 (PEM)</label>
-            <input type="text" id="cfgTlsClientKey" placeholder="/path/to/client.key">
+            <input type="text" id="cfgTlsClientKey" placeholder="アップロードするか、サーバ側パスを入力">
+            <input type="file" id="upTlsClientKey" accept=".key,.pem" style="font-size:0.75rem">
+            <span id="upTlsClientKeyStatus" style="font-size:0.72rem;color:var(--text-muted)"></span>
           </div>
           <div class="cfg-field">
             <label>クライアント証明書 (PFX/PKCS#12)</label>
-            <input type="text" id="cfgTlsClientPfx" placeholder="/path/to/client.p12">
+            <input type="text" id="cfgTlsClientPfx" placeholder="アップロードするか、サーバ側パスを入力">
+            <input type="file" id="upTlsClientPfx" accept=".p12,.pfx" style="font-size:0.75rem">
+            <span id="upTlsClientPfxStatus" style="font-size:0.72rem;color:var(--text-muted)"></span>
           </div>
           <div class="cfg-field">
             <label>証明書パスフレーズ</label>
@@ -1047,11 +1053,29 @@ body {
           </div>
           <div class="cfg-field">
             <label>CA証明書バンドル</label>
-            <input type="text" id="cfgTlsCaCert" placeholder="/path/to/ca.pem">
+            <input type="text" id="cfgTlsCaCert" placeholder="アップロードするか、サーバ側パスを入力">
+            <input type="file" id="upTlsCaCert" accept=".pem,.crt,.cer" style="font-size:0.75rem">
+            <span id="upTlsCaCertStatus" style="font-size:0.72rem;color:var(--text-muted)"></span>
           </div>
           <div class="cfg-field">
-            <label>出力ディレクトリ (空=自動)</label>
-            <input type="text" id="cfgOutputDir" placeholder="/path/to/reports">
+            <label>サーバ側の保存先パス (空=自動)</label>
+            <input type="text" id="cfgOutputDir" placeholder="リモート配備では空欄を推奨">
+            <div style="font-size:0.72rem;color:var(--text-muted);margin-top:4px">出力先のためアップロード対象ではありません。</div>
+          </div>
+        </div>
+        <div class="cfg-section-title" style="margin-top:16px">検査時間帯（任意・1行1件）</div>
+        <div style="font-size:0.78rem;color:var(--text-muted);margin-bottom:10px">
+          指定した時間帯だけ/以外で攻撃を待機します。形式: <code>Mon-Fri 22:00-06:00</code>,
+          <code>Sat,Sun 00:00-24:00</code>（日跨ぎ可）。時間帯外は自動的に待機し、Abort で中断できます。
+        </div>
+        <div class="cfg-grid">
+          <div class="cfg-field">
+            <label>検査可能時間帯 (allowed)</label>
+            <textarea id="cfgAllowedHours" rows="2" placeholder="Sat,Sun 00:00-24:00"></textarea>
+          </div>
+          <div class="cfg-field">
+            <label>検査停止時間帯 (forbidden)</label>
+            <textarea id="cfgForbiddenHours" rows="2" placeholder="Mon-Fri 09:00-18:00"></textarea>
           </div>
         </div>
         <div class="cfg-toggle-row" style="margin-top:14px">
@@ -1128,15 +1152,15 @@ body {
         </div>
         <div class="cfg-section-title" style="margin-top:16px">MFA (2段階認証) 自動入力</div>
         <div style="font-size:0.78rem;color:var(--text-muted);margin-bottom:10px">
-          ログイン後のワンタイムコードを外部 MCP サーバ経由で取得・投入します。
-          シークレット等は環境変数 (TOTP_SECRET_* / MCP_EMAIL_SERVER_* / WSCAN_MFA_*) で設定。
+          TOTPは otpauth URI / QR / Base32シークレット からローカル生成（外部MCP不要）。
+          メールや従来のMCP方式も引き続き利用可。シークレットは保存されず実行時のみ使用。
         </div>
         <div class="cfg-grid">
           <div class="cfg-field">
             <label>MFA タイプ</label>
             <select id="cfgMfaType">
               <option value="">無効</option>
-              <option value="totp">TOTP (mcp-totp-authenticator)</option>
+              <option value="totp">TOTP (otpauth URI / QR / Base32)</option>
               <option value="email">メール (mcp-email-server)</option>
             </select>
           </div>
@@ -1152,6 +1176,49 @@ body {
             </div>
           </div>
         </div>
+        <details id="cfgTotpDetails" style="margin-top:10px" open>
+          <summary style="cursor:pointer;font-size:0.8rem;color:var(--accent)">
+            TOTP設定（Authenticatorの登録情報。URI / QR / シークレットのいずれか）
+          </summary>
+          <div style="font-size:0.72rem;color:var(--text-muted);margin:8px 0;line-height:1.6">
+            Authenticator登録画面の「セットアップキー/URI」を貼るのが最も確実です。
+            QRはブラウザからアップロードするか<strong>サーバ側のファイルパス</strong>で指定します（opencvが必要）。
+            digits/period/algorithm は otpauth URI 指定時はURIの値が優先されます。
+          </div>
+          <div class="cfg-field" style="grid-column:1/-1">
+            <label>otpauth URI</label>
+            <input type="text" id="cfgMfaTotpUri" placeholder="otpauth://totp/Issuer:acct?secret=...&issuer=..." autocomplete="off">
+          </div>
+          <div class="cfg-grid">
+            <div class="cfg-field">
+              <label>Base32シークレット</label>
+              <input type="password" id="cfgMfaTotpSecret" placeholder="JBSWY3DPEHPK3PXP" autocomplete="off">
+            </div>
+            <div class="cfg-field">
+              <label>QR画像（アップロード / サーバ側パス）</label>
+              <input type="text" id="cfgMfaTotpQr" placeholder="アップロードするか、サーバ側パスを入力">
+              <input type="file" id="upMfaTotpQr" accept=".png,.jpg,.jpeg,.webp,.bmp,.gif" style="font-size:0.75rem">
+              <span id="upMfaTotpQrStatus" style="font-size:0.72rem;color:var(--text-muted)"></span>
+            </div>
+            <div class="cfg-field">
+              <label>桁数</label>
+              <input type="text" id="cfgMfaTotpDigits" placeholder="6">
+            </div>
+            <div class="cfg-field">
+              <label>周期(秒)</label>
+              <input type="text" id="cfgMfaTotpPeriod" placeholder="30">
+            </div>
+            <div class="cfg-field">
+              <label>アルゴリズム</label>
+              <select id="cfgMfaTotpAlgorithm">
+                <option value="">既定(SHA1)</option>
+                <option value="SHA1">SHA1</option>
+                <option value="SHA256">SHA256</option>
+                <option value="SHA512">SHA512</option>
+              </select>
+            </div>
+          </div>
+        </details>
         <details style="margin-top:10px">
           <summary style="cursor:pointer;font-size:0.8rem;color:var(--accent)">IMAP 認証情報を直接指定（サーバ側に未登録のアドレスを動的に使う）</summary>
           <div style="font-size:0.72rem;color:var(--text-muted);margin:8px 0;line-height:1.6">
@@ -1190,6 +1257,23 @@ body {
             </div>
           </div>
         </details>
+        <div class="cfg-section-title" style="margin-top:16px">認証ヘッダ（Bearer / カスタムヘッダ）</div>
+        <div style="font-size:0.78rem;color:var(--text-muted);margin-bottom:10px">
+          Cognito等のBearer認証向け。指定した Authorization / カスタムヘッダは
+          crawl と全HTTPリクエストに付与されます。トークンは保存されず実行時のみ使用。
+        </div>
+        <div class="cfg-field">
+          <label>Bearerトークン</label>
+          <input type="password" id="cfgBearer" placeholder="eyJraWQiO...（Authorization: Bearer に展開）" autocomplete="off">
+        </div>
+        <div class="cfg-field">
+          <label>カスタムヘッダ（1行1件 &quot;Name: Value&quot;）</label>
+          <textarea id="cfgHeaders" rows="3" placeholder="X-Api-Key: abc123&#10;X-Tenant: acme"></textarea>
+          <div style="font-size:0.72rem;color:var(--text-muted);margin-top:4px">
+            ここで Authorization を明示した場合は Bearerトークンより優先されます。
+          </div>
+        </div>
+        <!-- header_refresh_cmd はサーバ配備時のRCE面になるためUIへ露出せず、静的ヘッダで代替する。 -->
         <div class="cfg-section-title" style="margin-top:16px">Cookie</div>
         <div class="cfg-field">
           <label>Cookie文字列 (session=xxx; token=yyy)</label>
@@ -1298,6 +1382,7 @@ body {
           <div class="cfg-toggle on" id="tog-enable_ai_analysis" onclick="toggleCfg('enable_ai_analysis')">AI総合分析レポート</div>
           <div class="cfg-toggle on" id="tog-enable_waf_detection" onclick="toggleCfg('enable_waf_detection')">WAF自動検出</div>
           <div class="cfg-toggle on" id="tog-enable_payload_learning" onclick="toggleCfg('enable_payload_learning')">ペイロード学習</div>
+          <div class="cfg-toggle on" id="tog-community_payloads" onclick="toggleCfg('community_payloads')">community ペイロード</div>
           <div class="cfg-toggle on" id="tog-enable_sitemap_crawl" onclick="toggleCfg('enable_sitemap_crawl')">サイトマップ/robots.txtクロール</div>
           <div class="cfg-toggle off" id="tog-spa_crawl" onclick="toggleCfg('spa_crawl')">SPA クロール (React/Vue/Angular)</div>
           <div class="cfg-toggle off" id="tog-interactive_crawl_review" onclick="toggleCfg('interactive_crawl_review')" title="巡回完了後に画面一覧を確認し、再巡回・手動巡回追加を選べる">🔍 巡回レビュー (検査前に画面確認)</div>
@@ -1384,8 +1469,10 @@ body {
           <div class="cfg-grid">
             <div class="cfg-field" style="grid-column:1/-1">
               <label>カスタムペイロードファイル</label>
-              <input type="text" id="cfgPayloadsFile" placeholder="/path/to/my_payloads.yaml">
-              <div class="cfg-field-hint">YAMLパスを指定。空欄＝デフォルトのペイロード辞書を使用。</div>
+              <input type="text" id="cfgPayloadsFile" placeholder="アップロードするか、サーバ側パスを入力">
+              <input type="file" id="upPayloadsFile" accept=".yaml,.yml,.json,.txt" style="font-size:0.75rem">
+              <span id="upPayloadsFileStatus" style="font-size:0.72rem;color:var(--text-muted)"></span>
+              <div class="cfg-field-hint">空欄＝デフォルトのペイロード辞書を使用。</div>
             </div>
           </div>
         </div>
@@ -1414,15 +1501,18 @@ body {
         <div class="cfg-grid">
           <div class="cfg-field" style="grid-column:1/-1">
             <label>手動巡回JSON (スキャン取り込み用)</label>
-            <input type="text" id="cfgManualCrawlFile" placeholder="flows/manual_crawl.json">
+            <input type="text" id="cfgManualCrawlFile" placeholder="アップロードするか、サーバ側パスを入力">
+            <input type="file" id="upManualCrawlFile" accept=".json" style="font-size:0.75rem">
+            <span id="upManualCrawlFileStatus" style="font-size:0.72rem;color:var(--text-muted)"></span>
           </div>
           <div class="cfg-field" style="grid-column:1/-1">
             <label>開始URL (空欄の場合は Basic タブの Target URL を使用)</label>
             <input type="text" id="manualCrawlStartUrl" placeholder="https://example.com/login">
           </div>
           <div class="cfg-field">
-            <label>保存先</label>
+            <label>サーバ側の保存先パス</label>
             <input type="text" id="manualCrawlOutput" value="flows/manual_crawl.json">
+            <div style="font-size:0.72rem;color:var(--text-muted);margin-top:4px">リモート配備では空欄（自動）を推奨します。</div>
           </div>
           <div class="cfg-field">
             <label>状態</label>
@@ -1699,7 +1789,7 @@ https://example.com/search?q=test" style="width:100%;font-family:monospace;font-
   <a id="openReportBtn" href="#" target="_blank" rel="noopener" style="display:none;background:var(--accent);color:#001018;border:none;border-radius:4px;padding:6px 12px;font-weight:700;cursor:pointer;text-decoration:none">📄 レポートを開く</a>
   <a id="downloadZipBtn" href="#" style="display:none;background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:6px 12px;font-weight:700;cursor:pointer;text-decoration:none">⬇ 成果物zip</a>
   <span style="font-size:.78rem;color:var(--text-muted);font-weight:700;text-transform:uppercase">After Crawl</span>
-  <button onclick="rerunLastScan()" style="background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:6px 12px;font-weight:700;cursor:pointer">再巡回</button>
+  <button id="rerunLastScanBtn" onclick="rerunLastScan()" style="background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:6px 12px;font-weight:700;cursor:pointer">再巡回</button>
   <button onclick="openManualCrawlAfterScan()" style="background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:4px;padding:6px 12px;font-weight:700;cursor:pointer">手動巡回を追加</button>
   <a href="/" style="margin-left:auto;background:transparent;color:var(--text-muted);border:1px solid var(--border);border-radius:4px;padding:6px 12px;font-weight:700;cursor:pointer;text-decoration:none">🏠 ポータルへ</a>
 </div>
@@ -1928,8 +2018,10 @@ https://example.com/search?q=test" style="width:100%;font-family:monospace;font-
 
       <div class="cfg-section-title" style="margin-top:14px">手動巡回JSONの追加（任意）</div>
       <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-        <input type="text" id="crawlReviewManualFile" placeholder="flows/manual_crawl.json"
+        <input type="text" id="crawlReviewManualFile" placeholder="アップロードするか、サーバ側パスを入力"
           style="flex:1;padding:7px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:4px;min-width:240px;font-size:.82rem">
+        <input type="file" id="upCrawlReviewManualFile" accept=".json" style="font-size:0.75rem">
+        <span id="upCrawlReviewManualFileStatus" style="font-size:0.72rem;color:var(--text-muted)"></span>
         <button onclick="openManualCrawlFromReview()" style="padding:6px 12px;background:var(--surface2);border:1px solid var(--border);color:var(--text);border-radius:4px;cursor:pointer;font-size:.78rem">
           手動巡回タブを開く
         </button>
@@ -2051,10 +2143,67 @@ const state = {
   _smPanWired: false,
   checkStats: {},
   lastScanConfig: null,
+  // 他タブ/REST の scan_started に含まれる伏字済み config は再送信しない。
+  lastScanConfigRedacted: false,
+  // 送信済みだが scan_started で受理確認されていないフル config。
+  // 拒否時は破棄し、最後に実際に開始した lastScanConfig は維持する。
+  pendingScanConfig: null,
+  // このタブが開始したスキャンを識別する nonce。start_scan の config に載せ、
+  // scan_started の配信データ(非秘匿フィールドは保持される)に echo される値と照合する。
+  // 一致＝自分の開始→pending を昇格、不一致＝観測→配信データを採用(stale回避)。
+  myScanNonce: null,
   // WS 再接続時にサーバが直近イベント履歴を再送するため、同一 finding が
   // 重複してカードに積まれるのを防ぐ。安定キー(url|field|check|payload|type)で抑止。
   findingKeys: new Set(),
 };
+
+// スキャン開始時に呼ぶ: config に一意な nonce を刻み、受理確認までは pending に置く。
+// scan_started は config の非秘匿フィールドを echo するため、この nonce で「自分の開始」を
+// 識別でき、ブロードキャストされる他タブのイベントに惑わされずに済む。
+function _markOwnScan(config) {
+  const nonce = (self.crypto && crypto.randomUUID)
+    ? crypto.randomUUID()
+    : (Date.now() + '-' + Math.random().toString(16).slice(2));
+  state.myScanNonce = nonce;
+  config._client_nonce = nonce;
+  // フル config(認証情報込み)は、受理後にだけ lastScanConfig へ昇格する。
+  state.pendingScanConfig = JSON.parse(JSON.stringify(config));
+  return config;
+}
+
+function containsRedactedValues(cfg) {
+  if (typeof cfg === 'string') return cfg.includes('***REDACTED***');
+  if (Array.isArray(cfg)) return cfg.some(containsRedactedValues);
+  if (cfg && typeof cfg === 'object') {
+    return Object.values(cfg).some(containsRedactedValues);
+  }
+  return false;
+}
+
+const REDACTED_RERUN_MESSAGE =
+  'この画面は実行結果を観測しているため、認証情報を含む再巡回はできません。設定画面から再度スキャンを開始してください。';
+
+function _discardRejectedPendingScan(data) {
+  // scan_rejected は全タブへ配信されるため、nonce が一致する自分の要求だけを破棄する。
+  if (data && data._client_nonce && data._client_nonce === state.myScanNonce) {
+    state.pendingScanConfig = null;
+  }
+}
+
+function _promotePendingScan(data) {
+  if (data && data._client_nonce && data._client_nonce === state.myScanNonce) {
+    state.lastScanConfigRedacted = false;
+    // 再接続時に同じ scan_started が再生されても、昇格済みの設定を null で潰さない。
+    if (state.pendingScanConfig !== null) {
+      state.lastScanConfig = state.pendingScanConfig;
+      state.pendingScanConfig = null;
+    }
+  } else {
+    // 他タブ/REST が開始したスキャンの観測では、従来どおり配信データを採用する。
+    state.lastScanConfig = JSON.parse(JSON.stringify(data || {}));
+    state.lastScanConfigRedacted = containsRedactedValues(data);
+  }
+}
 
 // finding の安定キー。再送・再接続時の重複カードを抑止するために使う。
 function findingKey(d) {
@@ -2073,6 +2222,7 @@ const cfgToggles = {
   enable_ai_analysis: true,
   enable_waf_detection: true,
   enable_payload_learning: true,
+  community_payloads: true,
   enable_sitemap_crawl: true,
   enable_llm_web_browsing: false,
   ctf_mode: false,
@@ -2297,6 +2447,131 @@ function applyMfaImap(cfg) {
   // パスワードはサーバから返さないため復元しない。
 }
 
+// ネイティブTOTP設定をまとめて収集する。URI/シークレットは保存直前に除外する。
+function mfaTotpFields() {
+  const g = id => (document.getElementById(id)?.value || '').trim();
+  return {
+    mfa_totp_uri:       g('cfgMfaTotpUri'),
+    mfa_totp_secret:    g('cfgMfaTotpSecret'),
+    mfa_totp_qr:        g('cfgMfaTotpQr'),
+    mfa_totp_digits:    g('cfgMfaTotpDigits'),
+    mfa_totp_period:    g('cfgMfaTotpPeriod'),
+    mfa_totp_algorithm: g('cfgMfaTotpAlgorithm'),
+  };
+}
+
+// "Name: Value" 複数行テキストをヘッダオブジェクトへ変換する。
+function parseHeaderText(text) {
+  const out = {};
+  (text || '').split('\n').forEach(line => {
+    const i = line.indexOf(':');
+    if (i > 0) {
+      const k = line.slice(0, i).trim();
+      const v = line.slice(i + 1).trim();
+      if (k) out[k] = v;
+    }
+  });
+  return out;
+}
+
+// Bearerとカスタムヘッダをまとめて収集する。Bearerは保存直前に除外する。
+function authHeaderFields() {
+  const bearer = (document.getElementById('cfgBearer')?.value || '').trim();
+  const headers = parseHeaderText(document.getElementById('cfgHeaders')?.value || '');
+  const out = {};
+  if (bearer) out.bearer = bearer;
+  if (Object.keys(headers).length) out.headers = headers;
+  return out;
+}
+
+// 検査可能/停止時間帯を1行ずつ収集する。空欄はキー自体を送らず従来動作を保つ。
+function timeWindowFields() {
+  const toList = id => (document.getElementById(id)?.value || '')
+    .split('\n').map(s => s.trim()).filter(Boolean);
+  const out = {};
+  const a = toList('cfgAllowedHours'); if (a.length) out.allowed_hours = a;
+  const f = toList('cfgForbiddenHours'); if (f.length) out.forbidden_hours = f;
+  return out;
+}
+
+function applyTimeWindows(cfg) {
+  const setVal = (id, v) => {
+    const el = document.getElementById(id);
+    if (el && v != null) el.value = v;
+  };
+  if (Array.isArray(cfg.allowed_hours)) {
+    setVal('cfgAllowedHours', cfg.allowed_hours.join('\n'));
+  } else if (typeof cfg.allowed_hours === 'string') {
+    setVal('cfgAllowedHours', cfg.allowed_hours);
+  }
+  if (Array.isArray(cfg.forbidden_hours)) {
+    setVal('cfgForbiddenHours', cfg.forbidden_hours.join('\n'));
+  } else if (typeof cfg.forbidden_hours === 'string') {
+    setVal('cfgForbiddenHours', cfg.forbidden_hours);
+  }
+}
+
+function applyMfaTotp(cfg) {
+  if (!cfg) return;
+  const setVal = (id, v) => {
+    const el = document.getElementById(id);
+    if (el != null && v != null) el.value = v;
+  };
+  setVal('cfgMfaTotpUri', cfg.mfa_totp_uri);
+  setVal('cfgMfaTotpSecret', cfg.mfa_totp_secret);
+  setVal('cfgMfaTotpQr', cfg.mfa_totp_qr);
+  setVal('cfgMfaTotpDigits', cfg.mfa_totp_digits);
+  setVal('cfgMfaTotpPeriod', cfg.mfa_totp_period);
+  setVal('cfgMfaTotpAlgorithm', cfg.mfa_totp_algorithm);
+}
+
+function applyAuthHeaders(cfg) {
+  if (!cfg) return;
+  const setVal = (id, v) => {
+    const el = document.getElementById(id);
+    if (el != null && v != null) el.value = v;
+  };
+  if (cfg.bearer != null) setVal('cfgBearer', cfg.bearer);
+  if (cfg.headers && typeof cfg.headers === 'object') {
+    setVal('cfgHeaders', Object.entries(cfg.headers).map(([k, v]) => `${k}: ${v}`).join('\n'));
+  } else if (typeof cfg.headers === 'string') {
+    setVal('cfgHeaders', cfg.headers);
+  }
+}
+
+async function uploadFile(file) {
+  const fd = new FormData();
+  fd.append('file', file);
+  const res = await fetch('/api/v1/upload', {method: 'POST', body: fd});
+  if (!res.ok) {
+    let msg = 'アップロード失敗';
+    try { msg = (await res.json()).error || msg; } catch (e) {}
+    throw new Error(msg);
+  }
+  return (await res.json()).path;
+}
+
+// 選択ファイルをアップロードし、engineへ渡すサーバ側パスをテキスト欄へ反映する。
+function wireUpload(fileInputId, targetTextId, statusId) {
+  const fi = document.getElementById(fileInputId);
+  if (!fi) return;
+  fi.addEventListener('change', async () => {
+    const f = fi.files && fi.files[0];
+    if (!f) return;
+    const st = statusId ? document.getElementById(statusId) : null;
+    if (st) st.textContent = 'アップロード中…';
+    try {
+      const path = await uploadFile(f);
+      const target = document.getElementById(targetTextId);
+      if (target) target.value = path;
+      if (st) st.textContent = '✓ ' + f.name;
+    } catch (e) {
+      if (st) st.textContent = '✗ ' + e.message;
+      else alert(e.message);
+    }
+  });
+}
+
 function renderManualCrawlStatus(status) {
   const statusEl = document.getElementById('manualCrawlStatus');
   const urlsEl = document.getElementById('manualCrawlUrls');
@@ -2475,9 +2750,22 @@ function useManualCrawlOutput() {
 function showPostScanActions(show) {
   const el = document.getElementById('postScanActions');
   if (el) el.style.display = show ? 'flex' : 'none';
+  const rerunBtn = document.getElementById('rerunLastScanBtn');
+  if (rerunBtn) {
+    const blocked = Boolean(state.lastScanConfigRedacted);
+    rerunBtn.disabled = blocked;
+    rerunBtn.title = blocked ? REDACTED_RERUN_MESSAGE : '';
+    rerunBtn.style.cursor = blocked ? 'not-allowed' : 'pointer';
+    rerunBtn.style.opacity = blocked ? '0.55' : '1';
+  }
 }
 
 function rerunLastScan() {
+  if (state.lastScanConfigRedacted) {
+    setStatus(REDACTED_RERUN_MESSAGE, 'error');
+    addEventLog('status', REDACTED_RERUN_MESSAGE);
+    return;
+  }
   if (!state.lastScanConfig) {
     alert('再巡回できるスキャン設定がありません。');
     return;
@@ -2487,6 +2775,9 @@ function rerunLastScan() {
     return;
   }
   showPostScanActions(false);
+  // 再実行も「自分の開始」。新しい nonce を刻んで自分の scan_started を識別する
+  // （さもないと直後の伏字 scan_started で lastScanConfig が上書きされ認証情報を失う）。
+  _markOwnScan(state.lastScanConfig);
   state.ws.send(JSON.stringify({ action: 'start_scan', config: state.lastScanConfig }));
   setStatus('再巡回を開始しています...', 'running');
   addEventLog('status', '前回設定で再巡回を開始');
@@ -2534,6 +2825,7 @@ function submitScanConfig() {
     enable_ai_analysis:    cfgToggles.enable_ai_analysis,
     enable_waf_detection:  cfgToggles.enable_waf_detection,
     enable_payload_learning: cfgToggles.enable_payload_learning,
+    enable_community_payloads: cfgToggles.community_payloads,
     enable_sitemap_crawl:  cfgToggles.enable_sitemap_crawl,
     enable_llm_web_browsing: cfgToggles.enable_llm_web_browsing,
     ctf_mode:    cfgToggles.ctf_mode,
@@ -2560,6 +2852,9 @@ function submitScanConfig() {
     mfa_field:   document.getElementById('cfgMfaField').value.trim(),
     mfa_email_account: document.getElementById('cfgMfaEmailAccount').value.trim(),
     ...mfaImapFields(),
+    ...mfaTotpFields(),
+    ...authHeaderFields(),
+    ...timeWindowFields(),
     ...mfaImapPassword(),
     cookies:     document.getElementById('cfgCookies').value.trim(),
     low_priv_cookies: document.getElementById('cfgLowPrivCookies').value.trim(),
@@ -2590,6 +2885,9 @@ function submitScanConfig() {
   if (state.ws && state.ws.readyState === WebSocket.OPEN) {
     // 設定スナップショットはサーバ側でアウトプットフォルダに自動保存される。
     // ブラウザへのダウンロードは「📤 設定をエクスポート」ボタン押下時のみ。
+    // 開始したクライアントはフル config をローカル保持し「再実行」で認証情報を保つ
+    // （配信される scan_started は伏字版なので、そこからは復元できないため）。
+    _markOwnScan(config);
     state.ws.send(JSON.stringify({ action: 'start_scan', config }));
     document.getElementById('scanConfigOverlay').classList.remove('active');
     setStatus('スキャン開始リクエスト送信中...', 'running');
@@ -2601,7 +2899,7 @@ function submitScanConfig() {
 // ─── Config Export / Import ─────────────────────────────────────
 function _collectFullConfigForExport() {
   const collect = id => (document.getElementById(id)?.value ?? '');
-  return {
+  const cfg = {
     _meta: {
       tool: 'WScan',
       kind: 'wscan-scan-config',
@@ -2641,6 +2939,9 @@ function _collectFullConfigForExport() {
     mfa_field: collect('cfgMfaField'),
     mfa_email_account: collect('cfgMfaEmailAccount'),
     ...mfaImapFields(),
+    ...mfaTotpFields(),
+    ...authHeaderFields(),
+    ...timeWindowFields(),
     cookies: collect('cfgCookies'),
     low_priv_cookies: collect('cfgLowPrivCookies'),
     auto_register_count: collect('cfgAutoRegisterCount'),
@@ -2654,6 +2955,15 @@ function _collectFullConfigForExport() {
     flows: collectFlows(),
     accounts: (typeof collectAccounts === 'function') ? collectAccounts() : [],
   };
+  // 長期保存するJSONにはTOTP登録情報・Bearer・カスタムヘッダ値を含めない。
+  // （カスタムヘッダには Authorization / X-Api-Key 等の認証情報が入り得る。
+  //   QRパスはシークレットを符号化した画像の所在を示すため同様に除外する）
+  delete cfg.mfa_totp_uri;
+  delete cfg.mfa_totp_secret;
+  delete cfg.mfa_totp_qr;
+  delete cfg.bearer;
+  delete cfg.headers;
+  return cfg;
 }
 
 function _downloadJson(obj, filename) {
@@ -2736,6 +3046,9 @@ function applyImportedConfig(cfg) {
   setVal('cfgMfaField', cfg.mfa_field);
   setVal('cfgMfaEmailAccount', cfg.mfa_email_account);
   applyMfaImap(cfg);
+  applyMfaTotp(cfg);
+  applyAuthHeaders(cfg);
+  applyTimeWindows(cfg);
   setVal('cfgCookies', cfg.cookies);
   setVal('cfgLowPrivCookies', cfg.low_priv_cookies);
   setVal('cfgAutoRegisterCount', cfg.auto_register_count);
@@ -2774,6 +3087,14 @@ function applyImportedConfig(cfg) {
 
 function initConfigOverlay() {
   initCheckGroups();
+  wireUpload('upTlsClientCert', 'cfgTlsClientCert', 'upTlsClientCertStatus');
+  wireUpload('upTlsClientKey', 'cfgTlsClientKey', 'upTlsClientKeyStatus');
+  wireUpload('upTlsClientPfx', 'cfgTlsClientPfx', 'upTlsClientPfxStatus');
+  wireUpload('upTlsCaCert', 'cfgTlsCaCert', 'upTlsCaCertStatus');
+  wireUpload('upPayloadsFile', 'cfgPayloadsFile', 'upPayloadsFileStatus');
+  wireUpload('upManualCrawlFile', 'cfgManualCrawlFile', 'upManualCrawlFileStatus');
+  wireUpload('upCrawlReviewManualFile', 'crawlReviewManualFile', 'upCrawlReviewManualFileStatus');
+  wireUpload('upMfaTotpQr', 'cfgMfaTotpQr', 'upMfaTotpQrStatus');
   // Read current port from URL
   const port = location.port || '8765';
   const portEl = document.getElementById('cfgPortDisp');
@@ -2817,11 +3138,14 @@ function submitAgentScan() {
     login_url:  document.getElementById('agentLoginUrl').value.trim(),
     auth_user:  document.getElementById('agentAuthUser').value.trim(),
     auth_pass:  document.getElementById('agentAuthPass').value,
+    ...timeWindowFields(),
     headless: true,
     open_report: true,
   };
 
   if (state.ws && state.ws.readyState === WebSocket.OPEN) {
+    // 再実行のためフル config をローカル保持（配信は伏字版のため）。
+    _markOwnScan(config);
     state.ws.send(JSON.stringify({ action: 'start_scan', config }));
     document.getElementById('scanConfigOverlay').classList.remove('active');
     setStatus('Agent Browser スキャン開始リクエスト送信中...', 'running');
@@ -2866,6 +3190,9 @@ function saveConfigToStorage() {
       mfa_field: document.getElementById('cfgMfaField').value,
       mfa_email_account: document.getElementById('cfgMfaEmailAccount').value,
       ...mfaImapFields(),
+      ...mfaTotpFields(),
+      ...authHeaderFields(),
+      ...timeWindowFields(),
       cookies: document.getElementById('cfgCookies').value,
       exclude_fields: document.getElementById('cfgExcludeFields').value,
       exclude_urls: document.getElementById('cfgExcludeUrls').value,
@@ -2877,6 +3204,12 @@ function saveConfigToStorage() {
       checks: getSelectedChecks(),
       flows: collectFlows(),
     };
+    // localStorageにもTOTP登録情報・Bearer・カスタムヘッダ値・QRパスを残さない。
+    delete cfg.mfa_totp_uri;
+    delete cfg.mfa_totp_secret;
+    delete cfg.mfa_totp_qr;
+    delete cfg.bearer;
+    delete cfg.headers;
     localStorage.setItem('wscan_config', JSON.stringify(cfg));
   } catch(e) {}
 }
@@ -2918,6 +3251,9 @@ function loadConfigFromStorage() {
     if (cfg.mfa_field) document.getElementById('cfgMfaField').value = cfg.mfa_field;
     if (cfg.mfa_email_account !== undefined) document.getElementById('cfgMfaEmailAccount').value = cfg.mfa_email_account || '';
     applyMfaImap(cfg);
+    applyMfaTotp(cfg);
+    applyAuthHeaders(cfg);
+    applyTimeWindows(cfg);
     if (cfg.cookies) document.getElementById('cfgCookies').value = cfg.cookies;
     if (cfg.exclude_fields) document.getElementById('cfgExcludeFields').value = cfg.exclude_fields;
     if (cfg.exclude_urls) document.getElementById('cfgExcludeUrls').value = cfg.exclude_urls;
@@ -2978,6 +3314,9 @@ async function loadDefaultConfigFromServer() {
     if (cfg.mfa_field) document.getElementById('cfgMfaField').value = cfg.mfa_field;
     if (cfg.mfa_email_account !== undefined) document.getElementById('cfgMfaEmailAccount').value = cfg.mfa_email_account || '';
     applyMfaImap(cfg);
+    applyMfaTotp(cfg);
+    applyAuthHeaders(cfg);
+    applyTimeWindows(cfg);
     if (cfg.exclude_fields) document.getElementById('cfgExcludeFields').value = cfg.exclude_fields;
     if (cfg.exclude_urls) document.getElementById('cfgExcludeUrls').value = cfg.exclude_urls;
     if (cfg.manual_crawl_file) document.getElementById('cfgManualCrawlFile').value = cfg.manual_crawl_file;
@@ -3778,12 +4117,26 @@ function handleEvent(event) {
       setStatus('設定フォームに入力してスキャンを開始してください', '');
       break;
 
+    case 'scan_rejected':
+      // 自分の拒否なら pending だけを破棄する。最後に受理済みの設定は変えない。
+      _discardRejectedPendingScan(data);
+      // 拒否表示は要求元タブにだけ出す。scan_rejected は全クライアントへ配信されるため、
+      // 別タブ/ユーザーの拒否で観測中タブのステータスを error にしない（自分のスキャンは継続中）。
+      if (data && data._client_nonce && data._client_nonce === state.myScanNonce) {
+        setStatus(`スキャン開始が拒否されました: ${data.message || ''}`, 'error');
+      }
+      break;
+
     case 'scan_started':
       // Hide config overlay once scan begins
       document.getElementById('scanConfigOverlay').classList.remove('active');
       // 新スキャン開始時は前スキャンのレビュー待ちモーダルを破棄。
       closeInteractiveModals();
-      state.lastScanConfig = JSON.parse(JSON.stringify(data || {}));
+      // 自分が開始したスキャンかを nonce で識別する。config に載せた _client_nonce は
+      // scan_started の配信データ(非秘匿フィールドは保持)に echo される。一致すれば
+      // pending のフル config を lastScanConfig へ昇格して認証情報を保つ。不一致
+      // (他タブ/REST の観測)なら最新の(伏字)config を採用して stale を避ける。
+      _promotePendingScan(data);
       showPostScanActions(false);
       resetLiveScanState();
       state.eventCount = 1;
@@ -4570,6 +4923,9 @@ function submitHybridScan() {
     mfa_field:    (document.getElementById('cfgMfaField')?.value || '').trim(),
     mfa_email_account: (document.getElementById('cfgMfaEmailAccount')?.value || '').trim(),
     ...mfaImapFields(),
+    ...mfaTotpFields(),
+    ...authHeaderFields(),
+    ...timeWindowFields(),
     ...mfaImapPassword(),
     cookies:      (document.getElementById('cfgCookies')?.value || '').trim(),
     llm:          document.getElementById('cfgLlm')?.value || 'none',
@@ -4585,8 +4941,11 @@ function submitHybridScan() {
     target_urls:  (document.getElementById('cfgTargetUrls')?.value || '').split('\n').map(s=>s.trim()).filter(Boolean),
     access_urls:  (document.getElementById('cfgAccessUrls')?.value || '').split('\n').map(s=>s.trim()).filter(Boolean),
     fast_mode:    cfgToggles.fast_mode,
+    enable_community_payloads: cfgToggles.community_payloads,
     max_payloads: parseInt(document.getElementById('cfgMaxPayloads')?.value) || 0,
   };
+  // nonce を刻んで自分の scan_started を識別し、フル config をローカル保持する。
+  _markOwnScan(config);
   state.ws.send(JSON.stringify({ action: 'start_scan', config }));
   document.getElementById('scanConfigOverlay').classList.remove('active');
   setStatus('🔀 ハイブリッドスキャン開始リクエスト送信中...', 'running');

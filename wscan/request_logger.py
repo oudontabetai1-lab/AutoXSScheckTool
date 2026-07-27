@@ -33,6 +33,29 @@ _SENSITIVE_HEADERS = frozenset({
     "x-auth-token", "x-amz-security-token", "x-csrf-token", "x-xsrf-token",
 })
 
+# ユーザーが --header/ダッシュボードで設定したカスタムヘッダ名（実行時登録）。
+# 非標準名の認証ヘッダ（X-Company-Auth 等）も伏字化するために使う。
+_RUNTIME_SENSITIVE_HEADERS: set[str] = set()
+
+
+def register_sensitive_headers(names) -> None:
+    """カスタムヘッダ名を伏字対象に登録する（小文字化。冪等）。"""
+    _RUNTIME_SENSITIVE_HEADERS.update(str(name).lower() for name in names)
+
+
+def clear_sensitive_headers() -> None:
+    """登録済みのカスタムヘッダ名を消す（主にテスト用）。"""
+    _RUNTIME_SENSITIVE_HEADERS.clear()
+
+
+def _is_sensitive_header(name) -> bool:
+    normalized = str(name).lower()
+    return (
+        normalized in _SENSITIVE_HEADERS
+        or normalized in _RUNTIME_SENSITIVE_HEADERS
+    )
+
+
 # urlencoded / JSON ボディや URL クエリでマスクするキーのトークン（部分一致）
 _SENSITIVE_BODY_KEYS = (
     "password", "passwd", "pwd", "secret", "token", "api_key", "apikey",
@@ -50,7 +73,7 @@ def _redact_headers(headers: dict) -> dict:
     if not isinstance(headers, dict):
         return headers
     return {
-        k: (_REDACTED if str(k).lower() in _SENSITIVE_HEADERS else v)
+        k: (_REDACTED if _is_sensitive_header(k) else v)
         for k, v in headers.items()
     }
 

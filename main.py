@@ -15,6 +15,7 @@ import json
 import os
 import sys
 import webbrowser
+from datetime import datetime
 from pathlib import Path
 
 # Ensure the wscan package is importable
@@ -24,6 +25,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 # Config file loader (config/wscan.yaml)
 # ──────────────────────────────────────────────────────────────────
 _CONFIG_PATH = Path(__file__).parent / "config" / "wscan.yaml"
+HYBRID_RECON_MAX_RETRIES = 2
 
 
 def _load_config(path: Path = _CONFIG_PATH) -> dict:
@@ -133,6 +135,14 @@ def _load_config(path: Path = _CONFIG_PATH) -> dict:
     cfg["mfa_email_imap_user"]     = str(a.get("mfa_email_imap_user", "") or "")
     cfg["mfa_email_imap_password"] = str(a.get("mfa_email_imap_password", "") or "")
     cfg["mfa_email_imap_ssl"]      = a.get("mfa_email_imap_ssl", None)
+    cfg["mfa_totp_uri"]            = str(a.get("mfa_totp_uri", "") or "")
+    cfg["mfa_totp_secret"]         = str(a.get("mfa_totp_secret", "") or "")
+    cfg["mfa_totp_qr"]             = str(a.get("mfa_totp_qr", "") or "")
+    cfg["mfa_totp_digits"]         = str(a.get("mfa_totp_digits", "") or "")
+    cfg["mfa_totp_period"]         = str(a.get("mfa_totp_period", "") or "")
+    cfg["mfa_totp_algorithm"]      = str(a.get("mfa_totp_algorithm", "") or "")
+    cfg["bearer_token"]            = str(a.get("bearer_token", "") or "")
+    cfg["headers_text"]            = str(a.get("headers_text", "") or "")
 
     cfg["dom_xss"]                 = bool(f.get("dom_xss",          False))
     cfg["ai_analysis"]             = bool(f.get("ai_analysis",      True))
@@ -164,23 +174,496 @@ _CFG = _load_config()
 
 # 設定スナップショット等で永続化してはいけない秘匿フィールド。キー名に以下の
 # 語を含む値（パスワード/シークレット/トークン/APIキー）は伏字にする。
-_SECRET_KEY_TOKENS = ("password", "secret", "token", "api_key", "apikey")
+_SECRET_KEY_TOKENS = ("password", "secret", "token", "bearer", "api_key", "apikey")
+# 部分一致では拾えない明示キー（"auth_pass" は "password" を含まない、Cookie 系、
+# TOTP QR の画像パスなど）。login_pass_field 等の「フィールド名」は秘匿でないため対象にしない。
+# mfa_totp_qr はパス自体がシークレットを符号化した画像の所在を示すため伏せる。
+_SECRET_EXACT_KEYS = ("auth_pass", "cookies", "low_priv_cookies", "mfa_totp_qr")
+
+# ダッシュボードへは空で配信する秘匿フィールド。空で戻ってきたら config へ
+# フォールバックする。headers は値に認証情報を含み得るため同様に扱う。
+_SERVE_SECRET_FALLBACK_KEYS = (
+    "auth_pass",
+    "cookies",
+    "low_priv_cookies",
+    "bearer",
+    "mfa_totp_secret",
+    "mfa_totp_uri",
+    "mfa_totp_qr",
+    "mfa_email_imap_password",
+    "tls_client_cert_password",
+    "headers",
+)
+
+_SERVE_SECRET_CONFIG_KEYS = {
+    "bearer": "bearer_token",
+    "headers": "headers_text",
+}
+
+_TOTP_SOURCE_KEYS = (
+    "mfa_totp_uri",
+    "mfa_totp_secret",
+    "mfa_totp_qr",
+)
 
 
-def _redact_secrets(cfg: dict) -> dict:
-    """秘匿値を伏字にした設定の浅いコピーを返す（ディスク保存・共有用）。
+def _redact_secrets(cfg: dict, placeholder: str = "***REDACTED***") -> dict:
+    """秘匿値を伏字にした設定の浅いコピーを返す（ディスク保存・共有・配信用）。
 
     ダッシュボードは IMAP アプリパスワード等を「送信のみ・非保存」として扱うため、
-    成果物（``scan_config.json``）へ平文で書き出さない。
+    成果物（``scan_config.json``）や再接続クライアントへ平文で書き出さない。
+
+    *placeholder* を ``""`` にすると値を空にできる。フォーム初期値
+    （``/api/config/defaults``。未認証 serve では誰でも読める）へ秘匿値を
+    載せないために使う（``"***REDACTED***"`` を入れると欄に文字列が入ってしまう）。
     """
     redacted: dict = {}
     for key, value in (cfg or {}).items():
         lname = str(key).lower()
-        if value not in ("", None) and any(tok in lname for tok in _SECRET_KEY_TOKENS):
-            redacted[key] = "***REDACTED***"
+        if lname == "headers" and isinstance(value, dict):
+            # ヘッダ名は診断に有用だが、値にはトークンや証明情報が含まれ得るため保存しない。
+            redacted[key] = {str(name): placeholder for name in value}
+        elif lname == "headers" and isinstance(value, str) and value.strip():
+            # headers_text 形式（"Name: Value" 複数行の文字列。config 由来）。
+            # dict と同様に値へ認証情報が入り得るため丸ごと伏字化する。
+            redacted[key] = placeholder
+        elif lname == "mfa_totp_uri" and value not in ("", None):
+            # otpauth URI はクエリに Base32 シークレットを含むため値全体を伏字にする。
+            redacted[key] = placeholder
+        elif lname in _SECRET_EXACT_KEYS and value not in ("", None):
+            # 部分一致では拾えない明示キー（ログインPW・Cookie 等）を伏字にする。
+            # scan_started の再生や snapshot でクレデンシャルが漏れないようにするため。
+            redacted[key] = placeholder
+        elif value not in ("", None) and any(tok in lname for tok in _SECRET_KEY_TOKENS):
+            redacted[key] = placeholder
         else:
             redacted[key] = value
     return redacted
+
+
+def resolve_submitted_totp_sources(
+    cfg: dict,
+    config_defaults: dict,
+) -> tuple[str, str, str]:
+    """serve で使う TOTP の (uri, secret, qr) を排他的に解決する。
+
+    ダッシュボードから1つでも非空値が送られた場合は、送信された3項目だけを
+    採用し、空だった項目を config で補わない。3項目とも空の場合に限り config
+    の値へフォールバックする。
+    """
+    submitted = tuple(
+        (cfg or {}).get(key, "") or "" for key in _TOTP_SOURCE_KEYS
+    )
+    if any(submitted):
+        return submitted
+    defaults = config_defaults or {}
+    return tuple(defaults.get(key, "") or "" for key in _TOTP_SOURCE_KEYS)
+
+
+def apply_config_secret_fallback(cfg: dict, config_defaults: dict) -> dict:
+    """空で届いた秘匿フィールドを config の値で補う（浅いコピーを返す。純粋関数）。
+
+    ブラウザへ秘密を配信しない代償として、画面から空で戻る値は「未入力」とみなし
+    サーバ側の設定値へフォールバックする。非空なら画面の入力値を優先する。
+    TOTP の3ソースだけは1つでも画面入力があれば、他ソースを補完せず排他的に扱う。
+    """
+    resolved = dict(cfg or {})
+    defaults = config_defaults or {}
+    for key in _SERVE_SECRET_FALLBACK_KEYS:
+        if key in _TOTP_SOURCE_KEYS:
+            continue
+        value = resolved.get(key)
+        is_empty = value in ("", None) or (key == "headers" and value == {})
+        if not is_empty:
+            continue
+        config_key = _SERVE_SECRET_CONFIG_KEYS.get(key, key)
+        config_value = defaults.get(config_key)
+        if config_value not in ("", None):
+            resolved[key] = config_value
+    if any(key in resolved or key in defaults for key in _TOTP_SOURCE_KEYS):
+        resolved.update(
+            zip(
+                _TOTP_SOURCE_KEYS,
+                resolve_submitted_totp_sources(cfg, defaults),
+            )
+        )
+    return resolved
+
+
+def _coerce_headers(value) -> dict:
+    """config/ダッシュボード由来の headers を dict へ正規化する（純粋関数）。
+
+    文字列（headers_text 形式）は parse_header_lines で解釈し、dict はコピーを返す。
+    None/空/解釈不能は空 dict。
+    """
+    if isinstance(value, dict):
+        return dict(value)
+    if not isinstance(value, str) or not value.strip():
+        return {}
+    try:
+        from wscan.header_manager import parse_header_lines
+
+        return parse_header_lines(value)
+    except Exception:
+        return {}
+
+
+def _safe_int(value, default: int = 0) -> int:
+    """数値に解釈できない入力を default に落とす（純粋関数）。"""
+    if value in ("", None):
+        return default
+    try:
+        if isinstance(value, str) and not value.strip().isascii():
+            return default
+        parsed = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return default
+    return parsed if parsed >= 0 else default
+
+
+_SERVE_INT_DEFAULTS = {
+    "agent_max_steps": 50,
+    "hybrid_max_steps": 30,
+    "depth": 2,
+    "timeout": 30,
+    "max_forms": 50,
+    "concurrency": 1,
+    "llm_max_retries": 2,
+    "mfa_totp_digits": 0,
+    "mfa_totp_period": 0,
+    "max_payloads": 0,
+    "navigation_retries": 2,
+    "auto_register_count": 2,
+}
+
+
+def _coerce_serve_ints(cfg: dict) -> tuple[dict, dict]:
+    """serve の整数設定を正規化し、実際の誤入力を返す（純粋関数）。"""
+    values: dict = {}
+    invalid: dict = {}
+    source = cfg or {}
+    for key, default in _SERVE_INT_DEFAULTS.items():
+        raw = source.get(key, default)
+        parsed = _safe_int(raw, -1)
+        if parsed < 0:
+            parsed = default
+            # 空欄/None はダッシュボード上の「未指定」なので警告対象にしない。
+            if raw not in ("", None):
+                invalid[key] = raw
+        values[key] = parsed
+    return values, invalid
+
+
+def _scan_window_wait_seconds(
+    now: datetime,
+    allowed_hours=None,
+    forbidden_hours=None,
+):
+    """Agent 系処理を開始できるまでの秒数を返す純粋関数。
+
+    時間帯設定が無ければ ``None``、現在許可中なら ``0.0`` を返す。
+    指定済みルールが全て不正、または探索範囲内に許可時間が無い場合は
+    fail-closed を示す ``float("inf")`` を返す。
+    """
+    if not allowed_hours and not forbidden_hours:
+        return None
+
+    from wscan import time_window
+
+    allowed = time_window.parse_windows(allowed_hours)
+    forbidden = time_window.parse_windows(forbidden_hours)
+    if (
+        (bool(allowed_hours) and not allowed)
+        or (bool(forbidden_hours) and not forbidden)
+    ):
+        return float("inf")
+    if time_window.is_allowed(now, allowed, forbidden):
+        return 0.0
+    return time_window.seconds_until_allowed(now, allowed, forbidden)
+
+
+def _hybrid_recon_wait_seconds(
+    now: datetime,
+    allowed_hours=None,
+    forbidden_hours=None,
+):
+    """後方互換用: Hybrid 偵察の時間帯判定。"""
+    return _scan_window_wait_seconds(now, allowed_hours, forbidden_hours)
+
+
+async def _wait_for_scan_window(
+    monitor,
+    allowed_hours=None,
+    forbidden_hours=None,
+    *,
+    phase_label: str,
+    now_fn=None,
+    sleep_fn=None,
+) -> bool:
+    """serve の Agent 系フェーズ前で時間帯ゲートを待つ。
+
+    待機中は dashboard の既存 command queue を短い間隔で確認し、abort を
+    受けたら ``False`` を返す。後続フェーズ向けのその他のコマンドは、ゲート通過時に
+    元の queue へ戻す。
+    """
+    if not allowed_hours and not forbidden_hours:
+        return True
+
+    now_fn = now_fn or datetime.now
+    sleep_fn = sleep_fn or asyncio.sleep
+    deferred_commands = []
+    announced = False
+
+    while True:
+        abort_requested = False
+        while True:
+            try:
+                command = monitor.command_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            if str(command).lower().strip() in ("abort", "q"):
+                abort_requested = True
+            else:
+                deferred_commands.append(command)
+
+        if abort_requested:
+            await monitor.emit_status(
+                f"{phase_label} の時間帯待機を中断しました。", "done"
+            )
+            return False
+
+        wait = _scan_window_wait_seconds(
+            now_fn(), allowed_hours, forbidden_hours
+        )
+        if wait is None or wait <= 0:
+            for command in deferred_commands:
+                monitor.command_queue.put_nowait(command)
+            if announced:
+                await monitor.emit_status(
+                    f"検査可能時間帯になりました。{phase_label} を開始します。",
+                    "running",
+                )
+            return True
+
+        if wait == float("inf"):
+            await monitor.emit_status(
+                "検査可能時間帯に到達できない設定のため、"
+                f"{phase_label} を中断しました。",
+                "error",
+            )
+            return False
+
+        if not announced:
+            await monitor.emit_status(
+                f"検査可能時間外 — {phase_label} を約 {int(wait)} 秒待機",
+                "paused",
+            )
+            announced = True
+
+        # dashboard の abort に素早く反応できるよう、長い待機を細かく刻む。
+        await sleep_fn(min(0.5, max(0.05, wait)))
+
+
+async def _wait_for_hybrid_recon_window(
+    monitor,
+    allowed_hours=None,
+    forbidden_hours=None,
+    *,
+    now_fn=None,
+    sleep_fn=None,
+) -> bool:
+    """後方互換用: serve Hybrid の Phase 1 前で時間帯ゲートを待つ。"""
+    return await _wait_for_scan_window(
+        monitor,
+        allowed_hours,
+        forbidden_hours,
+        phase_label="ハイブリッド Phase 1",
+        now_fn=now_fn,
+        sleep_fn=sleep_fn,
+    )
+
+
+async def _run_with_time_window_monitor(
+    operation,
+    monitor,
+    allowed_hours=None,
+    forbidden_hours=None,
+    *,
+    phase_label: str,
+    terminal_on_interrupt: bool = False,
+    now_fn=None,
+    sleep_fn=None,
+):
+    """Agent 系処理を実行し、許可時間外へ変わったら task cancel で停止する。
+
+    戻り値は ``(result, interrupted)``。時間帯未設定時は監視タスクを作らず、
+    従来どおり operation をそのまま実行する。単独スキャンなど中断がスキャン
+    自体の終了を意味する呼び出し元は ``terminal_on_interrupt=True`` を指定する。
+    """
+    if not allowed_hours and not forbidden_hours:
+        return await operation(), False
+
+    now_fn = now_fn or datetime.now
+    sleep_fn = sleep_fn or asyncio.sleep
+
+    async def watch_window():
+        while True:
+            wait = _scan_window_wait_seconds(
+                now_fn(), allowed_hours, forbidden_hours
+            )
+            if wait is not None and wait > 0:
+                return
+            await sleep_fn(0.5)
+
+    operation_task = asyncio.create_task(operation())
+    watcher_task = asyncio.create_task(watch_window())
+    try:
+        done, _pending = await asyncio.wait(
+            {operation_task, watcher_task},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if operation_task in done:
+            watcher_task.cancel()
+            await asyncio.gather(watcher_task, return_exceptions=True)
+            return operation_task.result(), False
+
+        operation_task.cancel()
+        await asyncio.gather(operation_task, return_exceptions=True)
+        if terminal_on_interrupt:
+            message = (
+                f"検査時間帯を外れたため {phase_label} を中断しました。"
+            )
+            state = "done"
+        else:
+            message = (
+                f"検査可能時間外へ移行したため {phase_label} を停止しました。"
+            )
+            state = "paused"
+        await monitor.emit_status(
+            message,
+            state,
+        )
+        return None, True
+    finally:
+        for task in (operation_task, watcher_task):
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(
+            operation_task, watcher_task, return_exceptions=True
+        )
+
+
+async def _run_hybrid_recon_with_retries(
+    operation,
+    monitor,
+    allowed_hours=None,
+    forbidden_hours=None,
+    *,
+    now_fn=None,
+    sleep_fn=None,
+    max_retries=None,
+):
+    """時間帯中断された Hybrid 偵察を、次の許可枠で上限付き再実行する。
+
+    戻り値は ``(handoff, continue_to_phase2)``。再試行上限に達した場合は
+    ``(None, True)`` として seed 無しの Phase 2 へフォールバックする。
+    ゲート待機中に abort された場合だけ ``continue_to_phase2`` は ``False``。
+    """
+    if max_retries is None:
+        max_retries = HYBRID_RECON_MAX_RETRIES
+
+    handoff, interrupted = await _run_with_time_window_monitor(
+        operation,
+        monitor,
+        allowed_hours,
+        forbidden_hours,
+        phase_label="ハイブリッド Phase 1",
+        now_fn=now_fn,
+        sleep_fn=sleep_fn,
+    )
+    retries = 0
+
+    while interrupted and retries < max_retries:
+        retries += 1
+        await monitor.emit_status(
+            "ハイブリッド Phase 1 が時間帯終了で中断されました。"
+            f"次の許可枠で再試行します ({retries}/{max_retries})。",
+            "paused",
+        )
+        if not await _wait_for_hybrid_recon_window(
+            monitor,
+            allowed_hours,
+            forbidden_hours,
+            now_fn=now_fn,
+            sleep_fn=sleep_fn,
+        ):
+            return None, False
+        await monitor.emit_status(
+            f"ハイブリッド Phase 1: 再試行 {retries}/{max_retries} を開始します。",
+            "running",
+        )
+        handoff, interrupted = await _run_with_time_window_monitor(
+            operation,
+            monitor,
+            allowed_hours,
+            forbidden_hours,
+            phase_label="ハイブリッド Phase 1",
+            now_fn=now_fn,
+            sleep_fn=sleep_fn,
+        )
+
+    if interrupted:
+        await monitor.emit_status(
+            "ハイブリッド Phase 1 は時間帯終了による再試行上限"
+            f" ({max_retries} 回) に達しました。"
+            "URL シードなしで Phase 2 を続行します。",
+            "warning",
+        )
+        return None, True
+
+    return handoff, True
+
+
+def _effective_totp_sources(args) -> tuple[str, str, str]:
+    """(uri, secret, qr) の実効値を返す。
+
+    CLI で1つでも明示された場合は CLI で明示されたものだけを使い、config 由来の
+    他ソースは無視する。CLI 未指定なら config の値をそのまま使う。
+    """
+    cli_sources = (
+        getattr(args, "mfa_totp_uri", "") or "",
+        getattr(args, "mfa_totp_secret", "") or "",
+        getattr(args, "mfa_totp_qr", "") or "",
+    )
+    if any(cli_sources):
+        return cli_sources
+    return (
+        _CFG.get("mfa_totp_uri", "") or "",
+        _CFG.get("mfa_totp_secret", "") or "",
+        _CFG.get("mfa_totp_qr", "") or "",
+    )
+
+
+def _effective_mfa_type(args):
+    """ScanEngine へ渡す mfa_type を決める。
+
+    - `--mfa-type` を明示した場合はそれを使う（最優先）。
+    - 未指定でも `--mfa-totp-*`（native TOTP）を渡した場合は、config の mfa_type
+      （例: email）を「明示 type」として扱わず None を返し、TOTP 自動昇格に委ねる。
+      config type を焼き込むと per-scan の TOTP 入力が無視されるため。
+    - それ以外は config(wscan.yaml) の mfa_type を既定として使う（無ければ None）。
+    """
+    explicit = getattr(args, "mfa_type", None)
+    if explicit is not None:
+        return explicit
+    native_totp = bool(
+        (getattr(args, "mfa_totp_secret", "") or "")
+        or (getattr(args, "mfa_totp_uri", "") or "")
+        or (getattr(args, "mfa_totp_qr", "") or "")
+    )
+    if native_totp:
+        return None
+    return _CFG.get("mfa_type") or None
 
 
 def parse_args():
@@ -408,6 +891,18 @@ Examples:
         ),
     )
     scan.add_argument(
+        # 注意: serve の保護トークン WSCAN_AUTH_TOKEN は control-plane 用であり、
+        # スキャン対象へ Bearer として送る認証情報ではない。両者を取り違えると
+        # ダッシュボードの管理トークンが検査対象へ漏れるため、ここでは参照しない。
+        "--bearer", metavar="TOKEN",
+        default=os.environ.get("WSCAN_BEARER", _CFG.get("bearer_token", "")),
+        help=(
+            "Bearerトークンの近道。'Authorization: Bearer <TOKEN>' を全リクエスト"
+            "(crawl+httpx)へ付与。Cognito等のBearer認証向け。env WSCAN_BEARER。"
+            "--header の Authorization を明示指定した場合はそちらが優先。"
+        ),
+    )
+    scan.add_argument(
         "--auth-user", metavar="USER", default=_CFG.get("auth_user", ""),
         help="Username/email for login form auto-fill",
     )
@@ -485,18 +980,62 @@ Examples:
         "--login-success", metavar="TEXT", default=_CFG.get("login_success_indicator", ""),
         help="Substring expected in the post-login URL or page to confirm success.",
     )
-    # MFA (2FA) automation via external MCP servers. Secrets live in env
-    # (TOTP_SECRET_* / MCP_EMAIL_SERVER_*); see README.
+    # MFA (2FA) automation. TOTP はネイティブ生成または外部 MCP、メールは外部 MCP。
+    # 秘匿情報は WSCAN_MFA_* 等の env または都度 CLI で渡す。
     scan.add_argument(
+        # 既定は None（＝CLI 未指定）。config(wscan.yaml)の mfa_type は「明示指定」ではなく
+        # 既定として扱いたいため、ここには焼き込まず後段(_effective_mfa_type)で適用する。
+        # config を焼き込むと、per-scan の --mfa-totp-* を渡しても config の type=email が
+        # 明示 override 扱いになり TOTP 自動昇格を塞いでしまう。
         "--mfa-type", metavar="KIND", choices=["totp", "email"],
-        default=(_CFG.get("mfa_type") or None),
-        help="Solve login MFA via external MCP: 'totp' (mcp-totp-authenticator) "
-             "or 'email' (mcp-email-server). Configure via WSCAN_MFA_* env. "
-             "Unset → falls back to WSCAN_MFA_TYPE env.",
+        default=None,
+        help="ログインMFA方式。'totp'（ネイティブまたはmcp-totp-authenticator）/ "
+             "'email'（mcp-email-server）。WSCAN_MFA_* envでも設定可能。"
+             "未指定時は config の mfa_type / WSCAN_MFA_TYPE へフォールバック"
+             "（ただし --mfa-totp-* を明示した場合は TOTP を優先）。",
     )
     scan.add_argument(
         "--mfa-field", metavar="NAME", default=_CFG.get("mfa_field", ""),
         help="One-time-code input field name/id on the login form (default: otp).",
+    )
+    # uri/secret/qr は CLI の明示有無を保持し、後段(_effective_totp_sources)で config
+    # 既定を解決する。config/env の URI をここへ焼き込むと、明示 secret/qr より URI が
+    # 優先され、別アカウントの TOTP を生成し得るため。
+    scan.add_argument(
+        "--mfa-totp-uri", metavar="URI",
+        default="",
+        help="TOTPの otpauth:// URI（Authenticator登録画面の「セットアップキー/URI」）。"
+             "未指定時は config / env WSCAN_MFA_TOTP_URI。",
+    )
+    scan.add_argument(
+        "--mfa-totp-secret", metavar="BASE32",
+        default="",
+        help="TOTPの生Base32シークレット。未指定時は config / env WSCAN_MFA_TOTP_SECRET。",
+    )
+    scan.add_argument(
+        "--mfa-totp-qr", metavar="FILE",
+        default="",
+        help="TOTPのQRコード画像ファイル（PNG等）。opencvが必要"
+             "（pip install opencv-python-headless）。未指定時は config / env WSCAN_MFA_TOTP_QR。",
+    )
+    # digits/period/algorithm は config(wscan.yaml)の値を既定として尊重する
+    # （0/空だと ScanEngine が override を送らず 6/30/SHA1 に落ちるため。他の
+    # --mfa-* と同様に _CFG を参照する）。otpauth URI 指定時は URI の値が優先。
+    scan.add_argument(
+        "--mfa-totp-digits", metavar="N", type=int,
+        default=_safe_int(_CFG.get("mfa_totp_digits", 0), 0),
+        help="TOTP桁数（既定6, otpauth URI指定時はURI優先）。",
+    )
+    scan.add_argument(
+        "--mfa-totp-period", metavar="SEC", type=int,
+        default=_safe_int(_CFG.get("mfa_totp_period", 0), 0),
+        help="TOTP周期秒（既定30, URI優先）。",
+    )
+    scan.add_argument(
+        "--mfa-totp-algorithm", metavar="ALG",
+        choices=["SHA1", "SHA256", "SHA512"],
+        default=(_CFG.get("mfa_totp_algorithm", "") or ""),
+        help="TOTPハッシュ（既定SHA1, URI優先）。",
     )
     scan.add_argument(
         "--mfa-email-account", metavar="EMAIL", default=_CFG.get("mfa_email_account", ""),
@@ -1462,8 +2001,8 @@ async def run_scan(args):
             f"privilege escalation testing[/cyan]"
         )
 
-    # Build custom HTTP header set: --header-file underneath, CLI -H values on top.
-    from wscan.header_manager import parse_header_args, load_header_file
+    # カスタムヘッダは header-file、Bearer、CLI -H の順に重ねる。
+    from wscan.header_manager import apply_bearer, load_header_file, parse_header_args
     _resolved_headers: dict = {}
     _hdr_file = getattr(args, "header_file", "") or ""
     if _hdr_file:
@@ -1471,7 +2010,17 @@ async def run_scan(args):
             _resolved_headers.update(load_header_file(_hdr_file))
         except Exception as _hex:
             console.print(f"[yellow]Warning: could not load header file: {_hex}[/yellow]")
+    _resolved_headers = apply_bearer(
+        _resolved_headers, getattr(args, "bearer", "") or ""
+    )
     _cli_headers = parse_header_args(getattr(args, "header", []) or [])
+    # CLI で明示した Authorization は大文字小文字にかかわらず最優先にする。
+    if any(str(key).lower() == "authorization" for key in _cli_headers):
+        _resolved_headers = {
+            key: value
+            for key, value in _resolved_headers.items()
+            if str(key).lower() != "authorization"
+        }
     _resolved_headers.update(_cli_headers)
     if _resolved_headers:
         console.print(
@@ -1487,6 +2036,7 @@ async def run_scan(args):
         )
 
     def _engine_kwargs(monitor_obj):
+        mfa_totp_uri, mfa_totp_secret, mfa_totp_qr = _effective_totp_sources(args)
         return dict(
             url=args.url,
             monitor=monitor_obj,
@@ -1527,9 +2077,17 @@ async def run_scan(args):
             login_user_field=getattr(args, "login_user_field", "username") or "username",
             login_pass_field=getattr(args, "login_pass_field", "password") or "password",
             login_success_indicator=getattr(args, "login_success", "") or "",
-            # None=未指定(env に委ねる) / ""=明示無効 / "totp"|"email"=明示有効
-            mfa_type=getattr(args, "mfa_type", None),
+            # None=未指定(config/env に委ねる) / "totp"|"email"=明示有効。
+            # --mfa-type 未指定でも config mfa_type を既定に使うが、per-scan の
+            # --mfa-totp-* を明示した場合は config type を無視し TOTP 自動昇格に委ねる。
+            mfa_type=_effective_mfa_type(args),
             mfa_field=getattr(args, "mfa_field", "") or "",
+            mfa_totp_secret=mfa_totp_secret,
+            mfa_totp_uri=mfa_totp_uri,
+            mfa_totp_qr=mfa_totp_qr,
+            mfa_totp_digits=getattr(args, "mfa_totp_digits", 0) or 0,
+            mfa_totp_period=getattr(args, "mfa_totp_period", 0) or 0,
+            mfa_totp_algorithm=getattr(args, "mfa_totp_algorithm", "") or "",
             mfa_email_account=getattr(args, "mfa_email_account", "") or "",
             mfa_email_imap={
                 "address": getattr(args, "mfa_email_address", "") or "",
@@ -1698,6 +2256,7 @@ async def run_serve(args):
     from rich.panel import Panel
     from wscan.monitor import MonitorServer
     from wscan.engine import ScanEngine
+    from wscan.header_manager import apply_bearer as _apply_bearer_to
 
     console = Console()
     port = args.port
@@ -1813,6 +2372,8 @@ async def run_serve(args):
         "max_forms": _CFG.get("max_forms", 50),
         "request_delay": _CFG.get("request_delay", 0.5),
         "navigation_retries": _CFG.get("navigation_retries", 2),
+        "allowed_hours": _CFG.get("allowed_hours", []) or [],
+        "forbidden_hours": _CFG.get("forbidden_hours", []) or [],
         "proxy": _CFG.get("proxy", ""),
         "tls_client_cert": _CFG.get("tls_client_cert", ""),
         "tls_client_key": _CFG.get("tls_client_key", ""),
@@ -1843,6 +2404,14 @@ async def run_serve(args):
         "mfa_email_imap_port": _CFG.get("mfa_email_imap_port", ""),
         "mfa_email_imap_user": _CFG.get("mfa_email_imap_user", ""),
         "mfa_email_imap_ssl": _CFG.get("mfa_email_imap_ssl", ""),
+        "mfa_totp_uri": _CFG.get("mfa_totp_uri", ""),
+        "mfa_totp_secret": _CFG.get("mfa_totp_secret", ""),
+        "mfa_totp_qr": _CFG.get("mfa_totp_qr", ""),
+        "mfa_totp_digits": _CFG.get("mfa_totp_digits", ""),
+        "mfa_totp_period": _CFG.get("mfa_totp_period", ""),
+        "mfa_totp_algorithm": _CFG.get("mfa_totp_algorithm", ""),
+        "bearer": _CFG.get("bearer_token", ""),
+        "headers": _CFG.get("headers_text", ""),
         "exclude_fields": ", ".join(_CFG.get("exclude_fields", []) or []),
         "exclude_urls": "\n".join(_CFG.get("exclude_urls", []) or []),
         "target_urls": "\n".join(_CFG.get("target_urls", []) or []),
@@ -1857,7 +2426,7 @@ async def run_serve(args):
             "enable_ai_analysis": _CFG.get("ai_analysis", True),
             "enable_waf_detection": _CFG.get("waf_detection", True),
             "enable_payload_learning": _CFG.get("payload_learning", True),
-            "enable_community_payloads": _CFG.get("community_payloads", True),
+            "community_payloads": _CFG.get("community_payloads", True),
             "enable_sitemap_crawl": _CFG.get("sitemap_crawl", True),
             "spa_crawl": _CFG.get("spa_crawl", False),
             "interactive_crawl_review": _CFG.get("interactive_crawl_review", False),
@@ -1866,6 +2435,11 @@ async def run_serve(args):
             "allow_state_changing_probes": _CFG.get("allow_state_changing_probes", False),
         },
     }
+    # /api/config/defaults はフォーム初期値として dashboard へ返るが、未認証 serve では
+    # 誰でも読める。config(wscan.yaml)に置かれた秘匿値（TOTP secret/URI・Bearer・
+    # ログインPW・Cookie 等）を空にして配信し、エンドポイント経由の漏洩を防ぐ
+    # （digits/period/algorithm 等の非秘匿フィールドは保持）。
+    monitor.default_scan_cfg = _redact_secrets(monitor.default_scan_cfg, placeholder="")
     # /api/auto-config エンドポイント用に LLM 設定をキャッシュ
     _llm_section = _CFG.get("llm", {}) if isinstance(_CFG.get("llm"), dict) else {}
     monitor.llm_cfg = {
@@ -1908,7 +2482,27 @@ async def run_serve(args):
                 "openai_base_url": cfg.get("openai_base_url", "") or "",
                 "role_models":  cfg.get("role_models", {}) or {},
             })
-        await monitor.emit_scan_started(cfg)
+        # scan_started は event_history に積まれ再接続クライアントへ再生されるため、
+        # Bearer/TOTP/ヘッダ等の秘匿値を伏字化して配信する（エンジンへはフルの cfg を
+        # 別経路で渡すので機能には影響しない）。
+        await monitor.emit_scan_started(_redact_secrets(cfg))
+
+        _int_cfg = dict(cfg)
+        _int_cfg.setdefault(
+            "llm_max_retries", _CFG.get("llm_max_retries", 2)
+        )
+        _serve_ints, _invalid_ints = _coerce_serve_ints(_int_cfg)
+        if _invalid_ints:
+            details = ", ".join(
+                f"{key}={value!r}" for key, value in _invalid_ints.items()
+            )
+            warning = (
+                f"数値設定が不正なため既定値で続行します: {details}"
+            )
+            if monitor is not None:
+                await monitor.emit_status(warning, "warning")
+            else:
+                console.print(f"[yellow]Warning: {warning}[/yellow]")
 
         # 外部 OpenAI 互換（tsuzumi2 等）のベース URL は各エンジン/PayloadGenerator に
         # 明示的に渡す。グローバル env は書き換えない（serve での operator 設定
@@ -1919,6 +2513,13 @@ async def run_serve(args):
         # ── Agent Browser mode ─────────────────────────────────────
         if cfg.get("agent_mode"):
             from wscan.agent_engine import AgentEngine
+            if not await _wait_for_scan_window(
+                monitor,
+                cfg.get("allowed_hours") or None,
+                cfg.get("forbidden_hours") or None,
+                phase_label="Agent Browser スキャン",
+            ):
+                return
             await monitor.emit_status(f"Agent Browser: {url} をスキャン中", "running")
             try:
                 agent_engine = AgentEngine(
@@ -1932,12 +2533,23 @@ async def run_serve(args):
                     auth_user=cfg.get("auth_user", "") or "",
                     auth_pass=cfg.get("auth_pass", "") or "",
                     login_url=cfg.get("login_url", "") or "",
-                    max_steps=int(cfg.get("agent_max_steps", 50)),
+                    max_steps=_serve_ints["agent_max_steps"],
                     open_report=bool(cfg.get("open_report", True)),
                     monitor=monitor,
                     port=port,
                 )
-                await agent_engine.run()
+                _agent_result, agent_interrupted = (
+                    await _run_with_time_window_monitor(
+                        agent_engine.run,
+                        monitor,
+                        cfg.get("allowed_hours") or None,
+                        cfg.get("forbidden_hours") or None,
+                        phase_label="Agent Browser スキャン",
+                        terminal_on_interrupt=True,
+                    )
+                )
+                if agent_interrupted:
+                    return
                 console.print("[dim]Agent scan finished — dashboard ready for the next scan.[/dim]")
             except asyncio.CancelledError:
                 raise
@@ -1955,6 +2567,12 @@ async def run_serve(args):
             # Phase2 が互換・偵察が公式 openai の場合に Phase2 用 URL を偵察へ誤適用しない。
             # 明示的に AgentEngine へ渡し、グローバル env は書き換えない。
             _recon_base = (cfg.get("openai_base_url", "") or "") if cfg.get("hybrid_llm") == "openai_compatible" else ""
+            if not await _wait_for_hybrid_recon_window(
+                monitor,
+                cfg.get("allowed_hours") or None,
+                cfg.get("forbidden_hours") or None,
+            ):
+                return
             await monitor.emit_status("🔀 ハイブリッド Phase 1: Agent偵察中...", "running")
             try:
                 recon_engine = AgentEngine(
@@ -1972,19 +2590,24 @@ async def run_serve(args):
                     access_urls=cfg.get("access_urls", []) or [],
                     exclude_urls=cfg.get("exclude_urls", []) or [],
                     exclude_fields=cfg.get("exclude_fields", []) or [],
-                    max_steps=int(cfg.get("hybrid_max_steps", 30)),
+                    max_steps=_serve_ints["hybrid_max_steps"],
                     open_report=False,
                     monitor=monitor,
                     port=port,
                 )
-                handoff = await recon_engine.run_recon()
-                seed_urls = handoff.discovered_urls
-                agent_findings = handoff.findings
-                await monitor.emit_status(
-                    f"🔀 Phase 2: {len(seed_urls)} URL / "
-                    f"{len(agent_findings)} Agent Finding 発見済み。通常スキャン開始...",
-                    "running",
+                handoff, continue_to_phase2 = (
+                    await _run_hybrid_recon_with_retries(
+                        recon_engine.run_recon,
+                        monitor,
+                        cfg.get("allowed_hours") or None,
+                        cfg.get("forbidden_hours") or None,
+                    )
                 )
+                if not continue_to_phase2:
+                    return
+                if handoff is not None:
+                    seed_urls = handoff.discovered_urls
+                    agent_findings = handoff.findings
             except Exception as exc:
                 console.print(
                     f"[yellow]⚠ 偵察フェーズ失敗 ({exc})。"
@@ -1993,17 +2616,33 @@ async def run_serve(args):
                 seed_urls = []
                 agent_findings = []
 
+            # Phase 1 完了と時間枠終了が競合した場合も、Phase 2 を枠外で
+            # 開始しないよう必ず直前に同じゲートを再確認する。
+            if not await _wait_for_scan_window(
+                monitor,
+                cfg.get("allowed_hours") or None,
+                cfg.get("forbidden_hours") or None,
+                phase_label="ハイブリッド Phase 2",
+            ):
+                return
+            await monitor.emit_status(
+                f"🔀 Phase 2: {len(seed_urls)} URL / "
+                f"{len(agent_findings)} Agent Finding 発見済み。通常スキャン開始...",
+                "running",
+            )
+
         await monitor.emit_status(f"Starting scan of {url}", "running")
 
         try:
+            _hdrs = _coerce_headers(cfg.get("headers"))
             engine = ScanEngine(
                 url=url,
                 monitor=monitor,
-                depth=int(cfg.get("depth", 2)),
-                timeout=int(cfg.get("timeout", 30)),
-                max_forms=int(cfg.get("max_forms", 50)),
+                depth=_serve_ints["depth"],
+                timeout=_serve_ints["timeout"],
+                max_forms=_serve_ints["max_forms"],
                 headless=bool(cfg.get("headless", True)),
-                concurrency=int(cfg.get("concurrency", 1)),
+                concurrency=_serve_ints["concurrency"],
                 checks=checks,
                 llm_provider=cfg.get("llm", "none") or "none",
                 ollama_model=cfg.get("ollama_model", "llama3") or "llama3",
@@ -2015,9 +2654,7 @@ async def run_serve(args):
                 llm_timeout_seconds=float(
                     cfg.get("llm_timeout_seconds", _CFG.get("llm_timeout_seconds", 30))
                 ),
-                llm_max_retries=int(
-                    cfg.get("llm_max_retries", _CFG.get("llm_max_retries", 2))
-                ),
+                llm_max_retries=_serve_ints["llm_max_retries"],
                 auth_user=cfg.get("auth_user", "") or "",
                 auth_pass=cfg.get("auth_pass", "") or "",
                 cookies=cfg.get("cookies", "") or "",
@@ -2049,6 +2686,12 @@ async def run_serve(args):
                         str(cfg.get("mfa_email_imap_ssl") or "").lower()
                     ),
                 },
+                mfa_totp_uri=cfg.get("mfa_totp_uri", "") or "",
+                mfa_totp_secret=cfg.get("mfa_totp_secret", "") or "",
+                mfa_totp_qr=cfg.get("mfa_totp_qr", "") or "",
+                mfa_totp_digits=_serve_ints["mfa_totp_digits"],
+                mfa_totp_period=_serve_ints["mfa_totp_period"],
+                mfa_totp_algorithm=cfg.get("mfa_totp_algorithm", "") or "",
                 payloads_file=cfg.get("payloads_file") or None,
                 learning_file=cfg.get("learning_file") or None,
                 output_dir=cfg.get("output_dir") or None,
@@ -2075,12 +2718,15 @@ async def run_serve(args):
                 flows=cfg.get("flows", []) or [],
                 spa_crawl=bool(cfg.get("spa_crawl", False)),
                 fast_mode=bool(cfg.get("fast_mode", False)),
-                max_payloads=int(cfg.get("max_payloads", 0)),
+                max_payloads=_serve_ints["max_payloads"],
                 request_delay=float(cfg.get("request_delay", 0.5) or 0.0),
-                navigation_retries=int(cfg.get("navigation_retries", 2)),
+                navigation_retries=_serve_ints["navigation_retries"],
+                # 空/未指定は None にそろえ、従来どおり時間帯ゲートを無効にする。
+                allowed_hours=cfg.get("allowed_hours") or None,
+                forbidden_hours=cfg.get("forbidden_hours") or None,
                 accounts=cfg.get("accounts", []) or [],
                 auto_register=bool(cfg.get("auto_register", False)),
-                auto_register_count=int(cfg.get("auto_register_count", 2)),
+                auto_register_count=_serve_ints["auto_register_count"],
                 allow_state_changing_probes=bool(
                     cfg.get(
                         "allow_state_changing_probes",
@@ -2090,7 +2736,7 @@ async def run_serve(args):
                 seed_urls=seed_urls or None,
                 additional_report_findings=agent_findings or None,
                 manual_crawl_path=cfg.get("manual_crawl_file", "") or "",
-                headers=cfg.get("headers", {}) or {},
+                headers=_apply_bearer_to(_hdrs, cfg.get("bearer", "") or ""),
                 header_refresh_cmd=cfg.get("header_refresh_cmd", "") or "",
                 header_refresh_interval=float(cfg.get("header_refresh_interval", 0.0) or 0.0),
             )
@@ -2190,6 +2836,7 @@ async def run_serve(args):
             monitor.event_history.clear()
             monitor.pending_interactive = None
             cfg = monitor.scan_request_data or {}
+            cfg = apply_config_secret_fallback(cfg, _CFG)
             try:
                 if monitor.scan_max_seconds:
                     # watchdog はまず graceful な abort を要求する(scheduler_task)。

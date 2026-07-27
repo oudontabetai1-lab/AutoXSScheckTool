@@ -8,16 +8,18 @@ import datetime
 import hashlib
 import json
 import os
+import re
 import secrets
 import shutil
 import tempfile
 import time
+import uuid
 import zipfile
 from pathlib import Path
 from typing import Set, Any, Optional
 from urllib.parse import urlparse
 
-from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, File, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import (
     HTMLResponse,
     JSONResponse,
@@ -34,10 +36,111 @@ TEMPLATES_DIR = Path(__file__).parent.parent / "templates"
 # Defined here to avoid importing the heavy engine module (pulls in Playwright).
 OUTPUT_BASE = Path(__file__).parent.parent / "output"
 
+_UPLOAD_MAX_BYTES = 8 * 1024 * 1024
+_UPLOAD_DIR_MAX_BYTES = 200 * 1024 * 1024
+_UPLOAD_MAX_AGE_SECONDS = 7 * 24 * 3600
+_UPLOAD_ALLOWED_EXT = {
+    ".crt", ".pem", ".cer", ".key", ".p12", ".pfx", ".yaml", ".yml",
+    ".json", ".txt", ".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif",
+}
+# OUTPUT_BASE 直下だが「スキャン成果物」ではない予約ディレクトリ。scan_id として
+# 解決させず、artifact 配信/削除ルートから隔離する（アップロードした秘匿ファイル保護）。
+_RESERVED_OUTPUT_NAMES = {"uploads"}
+
 # Name of the session cookie set after a successful token login.
 SESSION_COOKIE = "wscan_session"
 # Paths that never require authentication (health checks, the login page itself).
 _PUBLIC_PATHS = {"/health", "/login", "/favicon.ico"}
+
+
+def _upload_destination(filename: str) -> tuple[str, Path, Path]:
+    """アップロード名を安全化し、uploads 配下の保存先を返す。"""
+    # ブラウザが Windows 形式のフルパスを送る場合も basename だけを使う。
+    name = os.path.basename((filename or "upload").replace("\\", "/"))
+    ext = os.path.splitext(name)[1].lower()
+    if ext not in _UPLOAD_ALLOWED_EXT:
+        raise ValueError(f"許可されない拡張子: {ext}")
+    safe = re.sub(r"[^A-Za-z0-9._-]", "_", name)[:80] or "upload"
+    updir = (OUTPUT_BASE / "uploads").resolve()
+    dest = (updir / f"{uuid.uuid4().hex}_{safe}").resolve()
+    # _scan_dir と同じ resolve + relative_to で保存先トラバーサルを拒否する。
+    try:
+        dest.relative_to(updir)
+    except ValueError as exc:
+        raise ValueError("invalid path") from exc
+    return safe, updir, dest
+
+
+def _upload_dir_total_bytes(updir: Path) -> Optional[int]:
+    """uploads 直下の通常ファイル合計を返す。確認不能なら安全側で None。"""
+    try:
+        paths = list(updir.iterdir())
+    except FileNotFoundError:
+        return 0
+    except Exception:
+        return None
+
+    total = 0
+    for path in paths:
+        try:
+            if path.is_file():
+                total += path.stat().st_size
+        except Exception:
+            # 容量を確認できないファイルを無視すると上限を超え得るため保存を拒否する。
+            return None
+    return total
+
+
+def prune_upload_dir(
+    updir: Path,
+    max_bytes: int,
+    max_age_seconds: int,
+    now: float,
+) -> list[Path]:
+    """保持期間超過を削除し、なお上限超過なら古い順に削除する。"""
+    try:
+        paths = list(updir.iterdir())
+    except Exception:
+        return []
+
+    entries: list[tuple[Path, int, float]] = []
+    for path in paths:
+        try:
+            if path.is_file():
+                stat_result = path.stat()
+                entries.append((path, stat_result.st_size, stat_result.st_mtime))
+        except Exception:
+            # 個別ファイルの権限・競合エラーで他の掃除を止めない。
+            continue
+
+    deleted: list[Path] = []
+    total_bytes = sum(size for _path, size, _mtime in entries)
+    cutoff = now - max_age_seconds
+    remaining: list[tuple[Path, int, float]] = []
+
+    for path, size, mtime in entries:
+        if mtime < cutoff:
+            try:
+                path.unlink()
+            except Exception:
+                remaining.append((path, size, mtime))
+            else:
+                deleted.append(path)
+                total_bytes -= size
+        else:
+            remaining.append((path, size, mtime))
+
+    for path, size, _mtime in sorted(remaining, key=lambda item: (item[2], item[0].name)):
+        if total_bytes <= max_bytes:
+            break
+        try:
+            path.unlink()
+        except Exception:
+            continue
+        deleted.append(path)
+        total_bytes -= size
+
+    return deleted
 
 
 def _session_value(token: str) -> str:
@@ -484,6 +587,68 @@ class MonitorServer:
         @app.get("/health")
         async def health():
             return {"status": "ok", "clients": len(self.clients)}
+
+        @app.post("/api/v1/upload")
+        async def api_upload(request: Request, file: UploadFile = File(...)):
+            """UIで選択した入力ファイルを認証済みサーバーへ保存する。"""
+            try:
+                safe, updir, dest = _upload_destination(file.filename or "upload")
+            except ValueError as exc:
+                await file.close()
+                return JSONResponse({"error": str(exc)}, status_code=400)
+
+            try:
+                raw = await file.read(_UPLOAD_MAX_BYTES + 1)
+                if len(raw) > _UPLOAD_MAX_BYTES:
+                    return JSONResponse(
+                        {"error": "ファイルが大きすぎます（最大8MB）"},
+                        status_code=413,
+                    )
+                updir.mkdir(parents=True, exist_ok=True)
+                try:
+                    os.chmod(updir, 0o700)
+                except OSError:
+                    # Windows 等、POSIX パーミッションを適用できない環境では継続する。
+                    pass
+                now = time.time()
+                # 新規ファイル分を予約した上限で先に掃除し、保存後の総量超過を防ぐ。
+                prune_upload_dir(
+                    updir,
+                    _UPLOAD_DIR_MAX_BYTES - len(raw),
+                    _UPLOAD_MAX_AGE_SECONDS,
+                    now,
+                )
+                current_bytes = _upload_dir_total_bytes(updir)
+                if (
+                    current_bytes is None
+                    or current_bytes + len(raw) > _UPLOAD_DIR_MAX_BYTES
+                ):
+                    return JSONResponse(
+                        {"error": "アップロード容量の上限に達しました"},
+                        status_code=507,
+                    )
+                dest.write_bytes(raw)
+                try:
+                    os.chmod(dest, 0o600)
+                except OSError:
+                    # 保存先を読むエンジンとの互換性を優先し、chmod 非対応環境では継続する。
+                    pass
+                prune_upload_dir(
+                    updir,
+                    _UPLOAD_DIR_MAX_BYTES,
+                    _UPLOAD_MAX_AGE_SECONDS,
+                    time.time(),
+                )
+            except Exception:
+                # ファイル内容や証明書情報を例外メッセージ経由で返さない。
+                return JSONResponse({"error": "アップロードの保存に失敗しました"}, status_code=500)
+            finally:
+                await file.close()
+
+            # 監査には sanitize 済みファイル名だけを記録し、内容・保存パス・秘匿値は
+            # 残さない（誰が何をアップロードしたかは運用上の監査に必要な情報）。
+            self._audit("upload", self._client_ip(request), safe)
+            return JSONResponse({"path": str(dest), "name": safe, "size": len(raw)})
 
         @app.get("/api/v1/settings")
         async def api_get_settings():
@@ -1029,6 +1194,12 @@ class MonitorServer:
         """Resolve a scan id to its output folder, rejecting path traversal."""
         if not scan_id or "/" in scan_id or "\\" in scan_id or scan_id in (".", ".."):
             return None
+        # OUTPUT_BASE 配下の非スキャン予約ディレクトリ（アップロード済み TLS 秘密鍵や
+        # TOTP QR 等の秘匿入力）は scan_id として解決させない。一覧から隠すだけでは
+        # /api/v1/scans/<id>/download や /reports/<id>/<file> 経由で取得/削除され得るため、
+        # 唯一の解決口である本メソッドで拒否して全 artifact ルートを一括で塞ぐ。
+        if scan_id.strip().lower() in _RESERVED_OUTPUT_NAMES:
+            return None
         d = (OUTPUT_BASE / scan_id).resolve()
         try:
             d.relative_to(OUTPUT_BASE.resolve())
@@ -1043,6 +1214,9 @@ class MonitorServer:
             return scans
         for d in OUTPUT_BASE.iterdir():
             if not d.is_dir():
+                continue
+            # UI入力ファイルの保管領域はスキャン履歴・保持期限の対象にしない。
+            if d.name == "uploads":
                 continue
             info: dict[str, Any] = {
                 "id": d.name,
@@ -1495,24 +1669,37 @@ class MonitorServer:
             # Serve mode: dashboard submits full scan config. Ignore the request
             # if a scan is already running so it is not silently dropped when the
             # persistent loop next clears the event.
+            cfg = msg.get("config", {}) or {}
+            client_nonce = cfg.get("_client_nonce")
+
+            def rejection_data(message: str) -> dict:
+                # nonce だけを echo し、ブラウザが自分の拒否を識別できるようにする。
+                # config の認証情報などは拒否イベントへ載せない。
+                data = {"message": message}
+                if isinstance(client_nonce, str):
+                    data["_client_nonce"] = client_nonce
+                return data
+
             if self.scan_in_progress or self.scan_request_event.is_set():
                 # Notify the client without disturbing the in-progress scan's status.
                 try:
                     asyncio.get_running_loop().create_task(
-                        self.emit("scan_rejected", {
-                            "message": "スキャンが既に実行中です。完了後に再試行してください。",
-                        })
+                        self.emit(
+                            "scan_rejected",
+                            rejection_data(
+                                "スキャンが既に実行中です。完了後に再試行してください。"
+                            ),
+                        )
                     )
                 except RuntimeError:
                     pass
                 return
-            cfg = msg.get("config", {}) or {}
             # HTTP API と同様に対象スコープを検査（WS 経由でのスコープ回避を防ぐ）。
             scope_err = self._config_scope_error(cfg)
             if scope_err:
                 try:
                     asyncio.get_running_loop().create_task(
-                        self.emit("scan_rejected", {"message": scope_err})
+                        self.emit("scan_rejected", rejection_data(scope_err))
                     )
                 except RuntimeError:
                     pass

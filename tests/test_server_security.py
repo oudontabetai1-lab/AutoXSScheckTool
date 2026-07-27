@@ -3,9 +3,11 @@
 - 対象スコープ(allow/deny)による誤爆・悪用防止。
 - ログイン総当たりのレート制限(ロックアウト)。
 """
+import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import wscan.monitor as monitor_mod
 from wscan.monitor import MonitorServer, target_in_scope
@@ -170,6 +172,170 @@ class ServerGuardEndpointTests(unittest.TestCase):
         ]
         self.assertEqual(codes[-1], 429)  # 上限超過でロックアウト
         self.assertTrue(all(x == 401 for x in codes[:-1]))
+
+
+class UploadEndpointTests(unittest.TestCase):
+    """認証済みアップロードの拡張子・容量・保存先ガードを検証する。"""
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmpdir.name)
+        self._orig = monitor_mod.OUTPUT_BASE
+        monitor_mod.OUTPUT_BASE = self.tmp
+        self.srv = MonitorServer(port=0, auth_token="upload-test-token")
+        self.client = TestClient(self.srv.app)
+        self.auth = {"Authorization": "Bearer upload-test-token"}
+
+    def tearDown(self):
+        monitor_mod.OUTPUT_BASE = self._orig
+        self._tmpdir.cleanup()
+
+    def test_upload_requires_auth_and_rejects_extension(self):
+        files = {"file": ("payload.exe", b"not executable", "application/octet-stream")}
+        self.assertEqual(self.client.post("/api/v1/upload", files=files).status_code, 401)
+        response = self.client.post("/api/v1/upload", files=files, headers=self.auth)
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("許可されない拡張子", response.json()["error"])
+        self.assertFalse((self.tmp / "uploads").exists())
+
+    def test_upload_rejects_over_8mb(self):
+        files = {
+            "file": (
+                "too-large.json",
+                b"x" * (monitor_mod._UPLOAD_MAX_BYTES + 1),
+                "application/json",
+            )
+        }
+        response = self.client.post("/api/v1/upload", files=files, headers=self.auth)
+        self.assertEqual(response.status_code, 413)
+        self.assertIn("最大8MB", response.json()["error"])
+
+    def test_upload_sanitizes_name_and_stays_under_uploads(self):
+        response = self.client.post(
+            "/api/v1/upload",
+            files={"file": ("../認証 cert.pem", b"certificate", "application/x-pem-file")},
+            headers=self.auth,
+        )
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["name"], "___cert.pem")
+        dest = Path(body["path"]).resolve()
+        dest.relative_to((self.tmp / "uploads").resolve())
+        self.assertEqual(dest.read_bytes(), b"certificate")
+        self.assertNotIn("uploads", [scan["id"] for scan in self.srv._list_scans()])
+        audit = self.srv.read_audit(1)[0]
+        # 監査には sanitize 済みファイル名のみ（保存パスや内容は残さない）。
+        self.assertEqual(audit["detail"], body["name"])
+        self.assertNotIn(str(dest), audit["detail"])
+
+    def test_prune_upload_dir_removes_expired_file(self):
+        updir = self.tmp / "uploads"
+        updir.mkdir()
+        expired = updir / "expired.pem"
+        current = updir / "current.pem"
+        expired.write_bytes(b"old")
+        current.write_bytes(b"new")
+        os.utime(expired, (100.0, 100.0))
+        os.utime(current, (950.0, 950.0))
+
+        deleted = monitor_mod.prune_upload_dir(
+            updir,
+            max_bytes=100,
+            max_age_seconds=100,
+            now=1000.0,
+        )
+
+        self.assertEqual(deleted, [expired])
+        self.assertFalse(expired.exists())
+        self.assertTrue(current.exists())
+
+    def test_prune_upload_dir_removes_oldest_until_under_limit(self):
+        updir = self.tmp / "uploads"
+        updir.mkdir()
+        oldest = updir / "oldest.pem"
+        middle = updir / "middle.pem"
+        newest = updir / "newest.pem"
+        for path, mtime in ((oldest, 100.0), (middle, 200.0), (newest, 300.0)):
+            path.write_bytes(b"1234")
+            os.utime(path, (mtime, mtime))
+
+        deleted = monitor_mod.prune_upload_dir(
+            updir,
+            max_bytes=8,
+            max_age_seconds=1000,
+            now=500.0,
+        )
+
+        self.assertEqual(deleted, [oldest])
+        self.assertFalse(oldest.exists())
+        self.assertTrue(middle.exists())
+        self.assertTrue(newest.exists())
+
+    def test_upload_returns_507_when_new_file_cannot_fit(self):
+        with patch.object(monitor_mod, "_UPLOAD_DIR_MAX_BYTES", 3):
+            response = self.client.post(
+                "/api/v1/upload",
+                files={"file": ("too-full.pem", b"1234", "application/x-pem-file")},
+                headers=self.auth,
+            )
+
+        self.assertEqual(response.status_code, 507)
+        self.assertEqual(
+            response.json(),
+            {"error": "アップロード容量の上限に達しました"},
+        )
+        self.assertEqual(list((self.tmp / "uploads").iterdir()), [])
+
+    @unittest.skipUnless(os.name == "posix", "POSIX permissions are required")
+    def test_uploaded_pem_is_owner_readable_only(self):
+        response = self.client.post(
+            "/api/v1/upload",
+            files={"file": ("client.pem", b"private material", "application/x-pem-file")},
+            headers=self.auth,
+        )
+        self.assertEqual(response.status_code, 200)
+        dest = Path(response.json()["path"])
+        self.assertEqual(dest.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(dest.parent.stat().st_mode & 0o777, 0o700)
+
+    def test_uploaded_secrets_not_reachable_via_scan_routes(self):
+        # アップロードした秘匿ファイル(TLS秘密鍵/TOTP QR)は uploads/ に保存されるが、
+        # scan_id=uploads として artifact ルート(download/reports/delete)から
+        # 取得・削除できてはならない。一覧から隠すだけでなく解決口 _scan_dir で拒否する。
+        up = self.client.post(
+            "/api/v1/upload",
+            files={
+                "file": (
+                    "client.key",
+                    b"-----BEGIN PRIVATE KEY-----",
+                    "application/octet-stream",
+                )
+            },
+            headers=self.auth,
+        )
+        self.assertEqual(up.status_code, 200)
+        fname = Path(up.json()["path"]).name
+
+        # 中央リゾルバが予約名を拒否（大文字・前後空白のゆらぎも）。
+        self.assertIsNone(self.srv._scan_dir("uploads"))
+        self.assertIsNone(self.srv._scan_dir("UPLOADS"))
+        self.assertIsNone(self.srv._scan_dir(" uploads "))
+
+        # zip 一括DL・個別レポート取得・削除がいずれも 404。
+        self.assertEqual(
+            self.client.get("/api/v1/scans/uploads/download", headers=self.auth).status_code,
+            404,
+        )
+        self.assertEqual(
+            self.client.get(f"/reports/uploads/{fname}", headers=self.auth).status_code,
+            404,
+        )
+        self.assertEqual(
+            self.client.delete("/api/v1/scans/uploads", headers=self.auth).status_code,
+            404,
+        )
+        # サーバ側の実体はエンジンが読むため残っている（アクセス経路だけを塞ぐ）。
+        self.assertTrue((self.tmp / "uploads" / fname).exists())
 
 
 if __name__ == "__main__":

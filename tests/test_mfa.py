@@ -7,6 +7,13 @@
 from wscan import mfa
 
 
+# ── TOTP 窓境界 ────────────────────────────────────────────────────────────
+def test_seconds_until_next_window_boundaries():
+    assert mfa.seconds_until_next_window(60.0, 30) == 30.0
+    assert mfa.seconds_until_next_window(75.0, 30) == 15.0
+    assert abs(mfa.seconds_until_next_window(89.9, 30) - 0.1) < 1e-9
+
+
 # ── extract_otp ────────────────────────────────────────────────────────────
 def test_extract_otp_default_6_digits():
     assert mfa.extract_otp("Your code is 482913 — valid 5 min") == "482913"
@@ -187,6 +194,117 @@ def test_mfaconfig_totp_without_args_disabled():
     cfg = mfa.MFAConfig.from_env(env={"WSCAN_MFA_TYPE": "totp"})
     # node コマンド既定はあるが起動スクリプト(args)が無いので無効
     assert cfg.enabled is False
+
+
+def test_mfaconfig_native_totp_uri_auto_enables():
+    cfg = mfa.MFAConfig.from_env(
+        env={},
+        overrides={"totp_uri": "otpauth://totp/x?secret=GEZDGNBVGY3TQOJQ"},
+    )
+    assert cfg.type == "totp"
+    assert cfg.has_native_totp is True
+    assert cfg.enabled is True
+
+
+def test_explicit_secret_override_suppresses_stale_env_uri():
+    # env に古い WSCAN_MFA_TOTP_URI が残っていても、per-scan で secret override を
+    # 渡したら env URI を無効化し、明示入力(secret)を優先する。
+    cfg = mfa.MFAConfig.from_env(
+        env={"WSCAN_MFA_TOTP_URI": "otpauth://totp/old?secret=OLDBASE32"},
+        overrides={"totp_secret": "GEZDGNBVGY3TQOJQ"},
+    )
+    assert cfg.totp_uri == ""
+    assert cfg.totp_secret == "GEZDGNBVGY3TQOJQ"
+
+
+def test_explicit_qr_override_suppresses_stale_env_uri():
+    cfg = mfa.MFAConfig.from_env(
+        env={"WSCAN_MFA_TOTP_URI": "otpauth://totp/old?secret=OLDBASE32"},
+        overrides={"totp_qr": "/uploads/new.png"},
+    )
+    assert cfg.totp_uri == ""
+    assert cfg.totp_qr == "/uploads/new.png"
+
+
+def test_explicit_uri_override_is_kept():
+    # uri override を明示した場合は抑制しない（明示 URI が最優先）。
+    cfg = mfa.MFAConfig.from_env(
+        env={"WSCAN_MFA_TOTP_URI": "otpauth://totp/env?secret=ENV"},
+        overrides={"totp_uri": "otpauth://totp/explicit?secret=EXP", "totp_secret": "S"},
+    )
+    assert cfg.totp_uri == "otpauth://totp/explicit?secret=EXP"
+
+
+def test_env_uri_preserved_without_explicit_secret_or_qr():
+    # override が無ければ env の URI をそのまま採用する（従来挙動を壊さない）。
+    cfg = mfa.MFAConfig.from_env(
+        env={"WSCAN_MFA_TOTP_URI": "otpauth://totp/env?secret=ENVBASE32"},
+    )
+    assert cfg.totp_uri == "otpauth://totp/env?secret=ENVBASE32"
+
+
+def test_per_scan_totp_override_promotes_over_env_type():
+    # env に WSCAN_MFA_TYPE=email が残っていても、per-scan の native TOTP override は
+    # 明示的な TOTP 選択として totp に昇格する。
+    cfg = mfa.MFAConfig.from_env(
+        env={"WSCAN_MFA_TYPE": "email"},
+        overrides={"totp_secret": "GEZDGNBVGY3TQOJQ"},
+    )
+    assert cfg.type == "totp"
+    assert cfg.enabled is True
+
+
+def test_explicit_type_override_beats_native_totp_override():
+    # scan が明示的に type を指定した場合は per-scan TOTP override でも昇格しない。
+    cfg = mfa.MFAConfig.from_env(
+        env={"WSCAN_MFA_TYPE": "email"},
+        overrides={"type": "email", "totp_secret": "GEZDGNBVGY3TQOJQ"},
+    )
+    assert cfg.type == "email"
+
+
+def test_env_type_respected_without_per_scan_totp_override():
+    # per-scan override が無く env に native TOTP しか無い場合、env の type を尊重する
+    # （env WSCAN_MFA_TYPE=email が残っていれば totp へ昇格しない＝従来挙動）。
+    cfg = mfa.MFAConfig.from_env(
+        env={"WSCAN_MFA_TYPE": "email", "WSCAN_MFA_TOTP_SECRET": "GEZDGNBVGY3TQOJQ"},
+    )
+    assert cfg.type == "email"
+
+
+def test_mfaconfig_native_totp_secret_enabled_with_explicit_type():
+    cfg = mfa.MFAConfig.from_env(
+        env={},
+        overrides={
+            "type": "totp",
+            "totp_secret": "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ",
+        },
+    )
+    assert cfg.has_native_totp is True
+    assert cfg.enabled is True
+
+
+def test_mfaconfig_native_totp_numeric_overrides_and_algorithm():
+    cfg = mfa.MFAConfig.from_env(
+        env={"WSCAN_MFA_TOTP_DIGITS": "6", "WSCAN_MFA_TOTP_PERIOD": "30"},
+        overrides={
+            "totp_secret": "GEZDGNBVGY3TQOJQ",
+            "totp_digits": "8",
+            "totp_period": 45,
+            "totp_algorithm": "sha256",
+        },
+    )
+    assert cfg.totp_digits == 8
+    assert cfg.totp_period == 45
+    assert cfg.totp_algorithm == "SHA256"
+
+
+def test_mfaconfig_native_totp_respects_explicit_type():
+    cfg = mfa.MFAConfig.from_env(
+        env={},
+        overrides={"type": "email", "totp_secret": "GEZDGNBVGY3TQOJQ"},
+    )
+    assert cfg.type == "email"
 
 
 def test_mfaconfig_email_requires_account():
@@ -505,3 +623,87 @@ def test_solver_prime_noop_for_totp():
     # TOTP では prime は何もしない（例外も出さない）。
     asyncio.run(solver.prime())
     assert solver._email_baseline is None
+
+
+def test_solver_native_totp_is_deterministic_without_mcp(monkeypatch):
+    import asyncio
+
+    from wscan import totp
+
+    cfg = mfa.MFAConfig.from_env(
+        env={},
+        overrides={
+            "type": "totp",
+            "totp_secret": "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ",
+            "totp_digits": 8,
+        },
+    )
+
+    async def _unexpected_mcp(*_args, **_kwargs):
+        raise AssertionError("ネイティブ成功時に MCP を呼んではならない")
+
+    monkeypatch.setattr(totp.time, "time", lambda: 59)
+    monkeypatch.setattr(mfa, "_TOTP_MIN_REMAINING_SECONDS", 0)
+    monkeypatch.setattr(mfa, "_call_mcp_tool", _unexpected_mcp)
+    assert asyncio.run(mfa.MFASolver(cfg)._solve_totp()) == "94287082"
+
+
+def test_solver_native_totp_waits_for_next_window(monkeypatch):
+    import asyncio
+
+    from wscan import totp
+
+    secret = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"
+    cfg = mfa.MFAConfig.from_env(
+        env={},
+        overrides={
+            "type": "totp",
+            "totp_secret": secret,
+            "totp_digits": 8,
+            "totp_period": 30,
+        },
+    )
+    timestamps = iter((29.0, 30.0))
+    sleep_calls = []
+
+    async def _fake_sleep(delay):
+        sleep_calls.append(delay)
+
+    monkeypatch.setattr(mfa.time, "time", lambda: next(timestamps))
+    monkeypatch.setattr(mfa.asyncio, "sleep", _fake_sleep)
+
+    code = asyncio.run(mfa.MFASolver(cfg)._solve_totp())
+
+    assert len(sleep_calls) == 1
+    assert abs(sleep_calls[0] - 1.2) < 1e-9
+    assert code == totp.generate_totp(secret, digits=8, period=30, timestamp=30.0)
+
+
+def test_mfaconfig_legacy_totp_mcp_remains_enabled():
+    cfg = mfa.MFAConfig.from_env(
+        env={
+            "WSCAN_MFA_TYPE": "totp",
+            "WSCAN_MFA_TOTP_COMMAND": "node",
+            "WSCAN_MFA_TOTP_ARGS": "/srv/dist/index.js",
+        }
+    )
+    assert cfg.has_native_totp is False
+    assert cfg.enabled is True
+
+
+def test_engine_passes_native_totp_overrides():
+    from wscan.engine import ScanEngine
+
+    engine = ScanEngine(
+        url="http://example.test",
+        mfa_totp_secret="GEZDGNBVGY3TQOJQ",
+        mfa_totp_digits=8,
+        mfa_totp_period=45,
+        mfa_totp_algorithm="SHA256",
+    )
+    assert engine._mfa_config.type == "totp"
+    assert engine._mfa_config.totp_secret == "GEZDGNBVGY3TQOJQ"
+    assert engine._mfa_config.totp_digits == 8
+    assert engine._mfa_config.totp_period == 45
+    assert engine._mfa_config.totp_algorithm == "SHA256"
+    assert engine._mfa_solver is not None
