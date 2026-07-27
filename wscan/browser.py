@@ -4,8 +4,11 @@ Playwright-based browser automation with evidence collection.
 """
 import asyncio
 import base64
+import json
 import re
+import socket
 import time
+import urllib.request
 from urllib.parse import urlparse as _urlparse
 from typing import Optional, Callable, Any
 from urllib.parse import urljoin, urlparse
@@ -18,6 +21,117 @@ from .tls_config import TLSConfig
 
 
 console = Console()
+
+
+class _BrowserCDPConnection:
+    """flatten CDP の子 session へ直接送信する最小限の接続。"""
+
+    def __init__(self):
+        self._websocket = None
+        self._receive_task: Optional[asyncio.Task] = None
+        self._next_id = 0
+        self._pending: dict[int, asyncio.Future] = {}
+        self._event_handler = None
+
+    async def connect(self, websocket_url: str, event_handler) -> None:
+        from websockets import connect
+
+        self._event_handler = event_handler
+        self._websocket = await connect(
+            websocket_url,
+            open_timeout=3,
+            close_timeout=1,
+            max_size=None,
+        )
+        self._receive_task = asyncio.create_task(self._receive())
+
+    async def _receive(self) -> None:
+        try:
+            async for raw_message in self._websocket:
+                message = json.loads(raw_message)
+                command_id = message.get("id")
+                if command_id is not None:
+                    future = self._pending.pop(command_id, None)
+                    if future is not None and not future.done():
+                        future.set_result(message)
+                    continue
+                if self._event_handler is not None:
+                    try:
+                        self._event_handler(
+                            message.get("method") or "",
+                            message.get("params") or {},
+                            message.get("sessionId") or "",
+                        )
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        finally:
+            for future in self._pending.values():
+                if not future.done():
+                    future.set_exception(RuntimeError("CDP connection closed"))
+            self._pending.clear()
+
+    async def send(
+        self,
+        method: str,
+        params: Optional[dict] = None,
+        *,
+        session_id: str = "",
+    ) -> dict:
+        if self._websocket is None:
+            raise RuntimeError("CDP connection is unavailable")
+        self._next_id += 1
+        command_id = self._next_id
+        future = asyncio.get_running_loop().create_future()
+        self._pending[command_id] = future
+        message = {
+            "id": command_id,
+            "method": method,
+            "params": params or {},
+        }
+        if session_id:
+            message["sessionId"] = session_id
+        try:
+            await self._websocket.send(json.dumps(message))
+            response = await asyncio.wait_for(future, timeout=3.0)
+        except Exception:
+            self._pending.pop(command_id, None)
+            raise
+        if response.get("error"):
+            # CDP のエラー本文にリクエスト情報が含まれる可能性があるため露出しない。
+            raise RuntimeError("CDP command failed")
+        return response.get("result") or {}
+
+    async def close(self) -> None:
+        websocket = self._websocket
+        self._websocket = None
+        if websocket is not None:
+            try:
+                await websocket.close()
+            except Exception:
+                pass
+        if self._receive_task is not None:
+            try:
+                await self._receive_task
+            except Exception:
+                pass
+            self._receive_task = None
+
+
+class _RoutedCDPSession:
+    """Browser CDP 接続上の子 session を通常の send API として扱う。"""
+
+    def __init__(self, connection: _BrowserCDPConnection, session_id: str):
+        self._connection = connection
+        self._session_id = session_id
+
+    async def send(self, method: str, params: Optional[dict] = None) -> dict:
+        return await self._connection.send(
+            method,
+            params,
+            session_id=self._session_id,
+        )
 
 
 class NetworkCapture:
@@ -213,8 +327,15 @@ class BrowserManager:
         self._context_wide_headers_active: bool = False
         self._service_worker_block_fallback_warned: bool = False
         self._header_attached_page_ids: set[int] = set()
+        self._header_explicit_target_ids: set[str] = set()
         self._header_attach_tasks: dict[int, asyncio.Task] = {}
         self._header_cdp_sessions: dict[int, Any] = {}
+        self._header_browser_cdp: Optional[_BrowserCDPConnection] = None
+        self._header_browser_session_id: str = ""
+        self._header_auto_target_sessions: dict[str, str] = {}
+        self._header_auto_attach_active: bool = False
+        self._header_debug_port: Optional[int] = None
+        self._header_target_tasks: set[asyncio.Task] = set()
         self._header_page_tasks: set[asyncio.Task] = set()
         self._header_pause_tasks: set[asyncio.Task] = set()
         self._header_interception_closing: bool = False
@@ -237,7 +358,22 @@ class BrowserManager:
         if self.extra_headers and not self.header_scope_enforce:
             await self._warn_header_scope_disabled()
         self._playwright = await async_playwright().start()
+        use_scoped_headers = bool(self.extra_headers and self.header_scope_origins)
         launch_args = ["--disable-web-security", "--disable-features=IsolateOrigins"]
+        if use_scoped_headers:
+            # Playwright の CDPSession.send() は flatten された子 session_id を
+            # 指定できない。loopback の一時 endpoint から browser CDP へ接続し、
+            # popup target を停止中の同一 session で設定・再開できるようにする。
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+                    probe.bind(("127.0.0.1", 0))
+                    self._header_debug_port = probe.getsockname()[1]
+                launch_args.extend([
+                    "--remote-debugging-address=127.0.0.1",
+                    f"--remote-debugging-port={self._header_debug_port}",
+                ])
+            except Exception:
+                self._header_debug_port = None
         launch_kwargs: dict = {"headless": self.headless, "args": launch_args}
         if self.proxy:
             launch_kwargs["proxy"] = {"server": self.proxy}
@@ -249,7 +385,6 @@ class BrowserManager:
         ctx_kwargs.update(self.tls_config.playwright_context_options(self.target_url))
         if self.proxy:
             ctx_kwargs["proxy"] = {"server": self.proxy}
-        use_scoped_headers = bool(self.extra_headers and self.header_scope_origins)
         if self.extra_headers and not use_scoped_headers:
             # Keep header names case-preserving but de-dupe case-insensitive collisions
             # so Playwright doesn't reject duplicates.
@@ -288,6 +423,9 @@ class BrowserManager:
         if use_scoped_headers:
             # 最初のナビゲーションより前に Fetch.enable の完了を保証する。
             await self._activate_scoped_header_interception(self.page)
+            if self._header_intercept_mode == "cdp":
+                # 失敗時は context の page イベントによる現行方式を維持する。
+                await self._activate_header_target_auto_attach()
         self.page.set_default_timeout(self.timeout)
 
         # Set up network interception
@@ -369,10 +507,199 @@ class BrowserManager:
             "該当リクエストは認証ヘッダなしで実行しました"
         )
 
-    def _dispatch_fetch_request_paused(self, cdp, event: dict) -> None:
-        """CDP の同期イベントから、必ず解放する非同期ハンドラを起動する。"""
+    async def _find_debugger_websocket_url(self) -> str:
+        """loopback の DevTools endpoint が起動するまで短時間だけ待つ。"""
+        if not self._header_debug_port:
+            return ""
+        endpoint = (
+            f"http://127.0.0.1:{self._header_debug_port}/json/version"
+        )
+        deadline = asyncio.get_running_loop().time() + 0.5
+        while asyncio.get_running_loop().time() < deadline:
+            try:
+                def _read_version():
+                    with urllib.request.urlopen(endpoint, timeout=0.3) as response:
+                        return json.loads(response.read())
+
+                version = await asyncio.to_thread(_read_version)
+                websocket_url = str(version.get("webSocketDebuggerUrl") or "")
+                if websocket_url:
+                    return websocket_url
+            except Exception:
+                await asyncio.sleep(0.05)
+        return ""
+
+    def _on_header_browser_cdp_event(
+        self,
+        method: str,
+        params: dict,
+        session_id: str,
+    ) -> None:
+        """browser CDP の同期通知を、停止を残さない非同期処理へ渡す。"""
         if self._header_interception_closing:
             return
+        if method == "Target.attachedToTarget":
+            if session_id != self._header_browser_session_id:
+                return
+            try:
+                task = asyncio.create_task(
+                    self._enable_fetch_for_attached_header_target(params)
+                )
+            except Exception:
+                return
+            self._header_target_tasks.add(task)
+            task.add_done_callback(self._header_target_tasks.discard)
+            return
+        if method == "Target.detachedFromTarget":
+            detached_session_id = str(params.get("sessionId") or "")
+            for target_id, current_session_id in tuple(
+                self._header_auto_target_sessions.items()
+            ):
+                if current_session_id == detached_session_id:
+                    self._header_auto_target_sessions.pop(target_id, None)
+            return
+        if method == "Fetch.requestPaused" and session_id:
+            cdp = self._header_browser_cdp
+            if cdp is not None:
+                self._dispatch_fetch_request_paused(
+                    _RoutedCDPSession(cdp, session_id),
+                    params,
+                )
+
+    async def _enable_fetch_for_attached_header_target(
+        self,
+        event: dict,
+    ) -> None:
+        """停止中の page target へ Fetch を設定し、必ず再開する。"""
+        target_info = event.get("targetInfo") or {}
+        target_id = str(target_info.get("targetId") or "")
+        target_type = str(target_info.get("type") or "")
+        cdp_session_id = str(event.get("sessionId") or "")
+        cdp = self._header_browser_cdp
+        try:
+            if (
+                cdp is not None
+                and target_type in {"page", "tab"}
+                and target_id
+                and cdp_session_id
+                and target_id not in self._header_explicit_target_ids
+                and self._header_auto_target_sessions.get(target_id)
+                != cdp_session_id
+            ):
+                # responseStage は指定せず、応答ストリームを止めない。
+                await cdp.send(
+                    "Fetch.enable",
+                    {"patterns": [{"urlPattern": "*"}]},
+                    session_id=cdp_session_id,
+                )
+                self._header_auto_target_sessions[target_id] = cdp_session_id
+        except Exception:
+            # この target はヘッダなしで継続し、他の page の傍受は維持する。
+            try:
+                await self._warn_header_request_fallback()
+            except Exception:
+                pass
+        finally:
+            if cdp is not None and cdp_session_id:
+                try:
+                    # waitForDebuggerOnStart で停止した target は、種別や Fetch の
+                    # 成否にかかわらず同一 session で必ず再開する。
+                    await cdp.send(
+                        "Runtime.runIfWaitingForDebugger",
+                        session_id=cdp_session_id,
+                    )
+                except Exception:
+                    pass
+
+    async def _activate_header_target_auto_attach(self) -> bool:
+        """新 page を初回ナビゲーション前に停止して Fetch を有効化する。"""
+        if self._header_auto_attach_active:
+            return True
+        websocket_url = await self._find_debugger_websocket_url()
+        if not websocket_url:
+            return False
+        cdp = _BrowserCDPConnection()
+        try:
+            await cdp.connect(
+                websocket_url,
+                self._on_header_browser_cdp_event,
+            )
+            browser_session = await cdp.send("Target.attachToBrowserTarget")
+            browser_session_id = str(browser_session.get("sessionId") or "")
+            if not browser_session_id:
+                raise RuntimeError("browser CDP session is unavailable")
+            self._header_browser_cdp = cdp
+            self._header_browser_session_id = browser_session_id
+            await cdp.send(
+                "Target.setAutoAttach",
+                {
+                    "autoAttach": True,
+                    "waitForDebuggerOnStart": True,
+                    "flatten": True,
+                },
+                session_id=browser_session_id,
+            )
+        except Exception:
+            self._header_browser_cdp = None
+            self._header_browser_session_id = ""
+            try:
+                await cdp.close()
+            except Exception:
+                pass
+            return False
+        self._header_auto_attach_active = True
+        return True
+
+    async def _deactivate_header_target_auto_attach(self) -> None:
+        """auto-attach の購読と子 session を best-effort で解放する。"""
+        cdp = self._header_browser_cdp
+        browser_session_id = self._header_browser_session_id
+        self._header_auto_attach_active = False
+        if cdp is None:
+            return
+        if browser_session_id:
+            try:
+                await cdp.send(
+                    "Target.setAutoAttach",
+                    {
+                        "autoAttach": False,
+                        "waitForDebuggerOnStart": False,
+                        "flatten": True,
+                    },
+                    session_id=browser_session_id,
+                )
+            except Exception:
+                pass
+        if self._header_target_tasks:
+            await asyncio.gather(
+                *list(self._header_target_tasks),
+                return_exceptions=True,
+            )
+        for cdp_session_id in set(
+            self._header_auto_target_sessions.values()
+        ):
+            try:
+                await cdp.send(
+                    "Fetch.disable",
+                    session_id=cdp_session_id,
+                )
+            except Exception:
+                pass
+        if browser_session_id:
+            try:
+                await cdp.send(
+                    "Target.detachFromTarget",
+                    {"sessionId": browser_session_id},
+                )
+            except Exception:
+                pass
+        await cdp.close()
+        self._header_browser_cdp = None
+        self._header_browser_session_id = ""
+        self._header_auto_target_sessions.clear()
+
+    def _dispatch_fetch_request_paused(self, cdp, event: dict) -> None:
+        """CDP の同期イベントから、必ず解放する非同期ハンドラを起動する。"""
         try:
             task = asyncio.create_task(
                 self._on_fetch_request_paused(cdp, event)
@@ -430,6 +757,9 @@ class BrowserManager:
         page_id = id(page)
         if page_id in self._header_attached_page_ids:
             return
+        if self._header_auto_attach_active:
+            # auto-attach が新 page の停止中に設定済み。別 session で重ねない。
+            return
         existing = self._header_attach_tasks.get(page_id)
         if existing is not None:
             await existing
@@ -450,6 +780,16 @@ class BrowserManager:
                     "Fetch.enable",
                     {"patterns": [{"urlPattern": "*"}]},
                 )
+                try:
+                    target = await cdp.send("Target.getTargetInfo")
+                    target_id = str(
+                        (target or {}).get("targetInfo", {}).get("targetId") or ""
+                    )
+                    if target_id:
+                        self._header_explicit_target_ids.add(target_id)
+                except Exception:
+                    # target ID の取得不可は Fetch 自体の成功を取り消さない。
+                    pass
             except Exception:
                 if cdp is not None:
                     try:
@@ -1958,7 +2298,16 @@ class BrowserManager:
     async def close(self):
         """Close browser and playwright."""
         try:
+            await self._deactivate_header_target_auto_attach()
             self._header_interception_closing = True
+            if self._context:
+                try:
+                    self._context.remove_listener(
+                        "page",
+                        self._on_header_context_page,
+                    )
+                except Exception:
+                    pass
             if self._header_page_tasks:
                 await asyncio.gather(
                     *list(self._header_page_tasks),
@@ -1973,11 +2322,18 @@ class BrowserManager:
                     await cdp.detach()
                 except Exception:
                     pass
+            if self._header_pause_tasks:
+                await asyncio.gather(
+                    *list(self._header_pause_tasks),
+                    return_exceptions=True,
+                )
             self._header_cdp_sessions.clear()
             self._header_attached_page_ids.clear()
+            self._header_explicit_target_ids.clear()
             self._header_attach_tasks.clear()
             self._header_intercept_mode = "none"
             self._header_route_active = False
+            self._header_debug_port = None
             if self._context:
                 await self._context.close()
             if self._browser:

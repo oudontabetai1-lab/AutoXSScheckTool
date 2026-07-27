@@ -121,11 +121,16 @@ def _scoped_handler(
                 self.end_headers()
                 return
 
+            response_body = (
+                b"<html><body>popup</body></html>"
+                if self.path.startswith("/popup.html")
+                else html
+            )
             self.send_response(200)
             self.send_header("Content-Type", "text/html")
-            self.send_header("Content-Length", str(len(html)))
+            self.send_header("Content-Length", str(len(response_body)))
             self.end_headers()
-            self.wfile.write(html)
+            self.wfile.write(response_body)
 
         def log_message(self, *_args):
             pass
@@ -177,11 +182,10 @@ class BrowserHeaderCDPEndToEndTests(unittest.IsolatedAsyncioTestCase):
         try:
             await browser.init()
             self.assertEqual(browser._header_intercept_mode, "cdp")
+            self.assertTrue(browser._header_auto_attach_active)
 
-            # context の page イベントと明示 attach が同時に走る worker でも、
-            # 初回遷移前に一つの CDP session だけが有効になることを実機確認する。
+            # auto-attach 有効時も通常の worker 生成・終了が停止しないことを確認する。
             worker = await browser.create_worker()
-            self.assertIn(id(worker.page), browser._header_attached_page_ids)
             await worker.close()
 
             navigated = await browser.navigate(
@@ -189,6 +193,12 @@ class BrowserHeaderCDPEndToEndTests(unittest.IsolatedAsyncioTestCase):
                 retries=0,
             )
             self.assertTrue(navigated)
+
+            async with browser._context.expect_page() as popup_info:
+                await browser.page.evaluate("window.open('/popup.html')")
+            popup = await popup_info.value
+            await popup.wait_for_load_state("domcontentloaded")
+            self.assertTrue(popup.url.endswith("/popup.html"))
 
             deadline = asyncio.get_running_loop().time() + 5
             streamed = False
@@ -213,6 +223,7 @@ class BrowserHeaderCDPEndToEndTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(any(path.startswith("/index.html") for path in scoped_paths))
         self.assertTrue(any(path.startswith("/sse") for path in scoped_paths))
         self.assertTrue(any(path.startswith("/go") for path in scoped_paths))
+        self.assertTrue(any(path.startswith("/popup.html") for path in scoped_paths))
         self.assertTrue(
             all(auth == _TEST_AUTH for _path, auth in self.scoped_records)
         )

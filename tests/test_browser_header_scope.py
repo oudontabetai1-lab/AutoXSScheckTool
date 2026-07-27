@@ -90,6 +90,24 @@ class _CDPSession:
         self.detach_calls += 1
 
 
+class _BrowserCDP:
+    def __init__(self, *, fail_methods=None):
+        self.fail_methods = set(fail_methods or ())
+        self.send_calls = []
+        self.close_calls = 0
+
+    async def send(self, method, params=None, *, session_id=""):
+        self.send_calls.append((method, params, session_id))
+        if method in self.fail_methods:
+            raise RuntimeError("CDP command failed")
+        if method == "Target.attachToBrowserTarget":
+            return {"sessionId": "browser-session"}
+        return {}
+
+    async def close(self):
+        self.close_calls += 1
+
+
 class BrowserHeaderCDPTests(unittest.IsolatedAsyncioTestCase):
     def _browser(self):
         return BrowserManager(
@@ -195,12 +213,187 @@ class BrowserHeaderCDPTests(unittest.IsolatedAsyncioTestCase):
         browser._context.new_cdp_session.assert_awaited_once_with(page)
         self.assertEqual(
             cdp.send_calls,
+            [
+                (
+                    "Fetch.enable",
+                    {"patterns": [{"urlPattern": "*"}]},
+                ),
+                ("Target.getTargetInfo", None),
+            ],
+        )
+        self.assertIn("Fetch.requestPaused", cdp.handlers)
+
+    async def test_auto_attached_popup_enables_fetch_only_once_and_resumes(self):
+        browser = self._browser()
+        cdp = _BrowserCDP()
+        browser._header_browser_cdp = cdp
+        event = {
+            "sessionId": "popup-session",
+            "waitingForDebugger": True,
+            "targetInfo": {
+                "targetId": "popup-target",
+                "type": "page",
+            },
+        }
+
+        await browser._enable_fetch_for_attached_header_target(event)
+        await browser._enable_fetch_for_attached_header_target(event)
+
+        self.assertEqual(
+            [
+                call
+                for call in cdp.send_calls
+                if call[0] == "Fetch.enable"
+            ],
             [(
                 "Fetch.enable",
                 {"patterns": [{"urlPattern": "*"}]},
+                "popup-session",
             )],
         )
-        self.assertIn("Fetch.requestPaused", cdp.handlers)
+        self.assertEqual(
+            [
+                call
+                for call in cdp.send_calls
+                if call[0] == "Runtime.runIfWaitingForDebugger"
+            ],
+            [
+                ("Runtime.runIfWaitingForDebugger", None, "popup-session"),
+                ("Runtime.runIfWaitingForDebugger", None, "popup-session"),
+            ],
+        )
+
+    async def test_auto_attach_prevents_explicit_page_fetch_enable(self):
+        browser = self._browser()
+        browser._header_auto_attach_active = True
+        page = object()
+        browser._context = SimpleNamespace(
+            new_cdp_session=AsyncMock(),
+        )
+
+        await browser._attach_header_interception(page)
+
+        browser._context.new_cdp_session.assert_not_awaited()
+
+    async def test_auto_attached_popup_resumes_when_fetch_enable_fails(self):
+        browser = self._browser()
+        cdp = _BrowserCDP(fail_methods={"Fetch.enable"})
+        browser._header_browser_cdp = cdp
+        browser.monitor = SimpleNamespace(emit_status=AsyncMock())
+
+        await browser._enable_fetch_for_attached_header_target({
+            "sessionId": "popup-session",
+            "targetInfo": {
+                "targetId": "popup-target",
+                "type": "page",
+            },
+        })
+
+        self.assertEqual(
+            cdp.send_calls[-1],
+            ("Runtime.runIfWaitingForDebugger", None, "popup-session"),
+        )
+        self.assertNotIn(
+            "popup-target",
+            browser._header_auto_target_sessions,
+        )
+
+    async def test_auto_attach_uses_waiting_flattened_browser_session(self):
+        browser = self._browser()
+        cdp = _BrowserCDP()
+
+        with (
+            patch.object(
+                browser,
+                "_find_debugger_websocket_url",
+                AsyncMock(return_value="ws://fixture.test/devtools/browser/test"),
+            ),
+            patch(
+                "wscan.browser._BrowserCDPConnection",
+                return_value=cdp,
+            ),
+        ):
+            cdp.connect = AsyncMock()
+            enabled = await browser._activate_header_target_auto_attach()
+
+        self.assertTrue(enabled)
+        cdp.connect.assert_awaited_once()
+        self.assertIn(
+            (
+                "Target.setAutoAttach",
+                {
+                    "autoAttach": True,
+                    "waitForDebuggerOnStart": True,
+                    "flatten": True,
+                },
+                "browser-session",
+            ),
+            cdp.send_calls,
+        )
+
+    async def test_auto_attach_failure_keeps_context_page_fallback(self):
+        browser = self._browser()
+        cdp = _BrowserCDP(fail_methods={"Target.setAutoAttach"})
+        cdp.connect = AsyncMock()
+        cdp.close = AsyncMock()
+
+        with (
+            patch.object(
+                browser,
+                "_find_debugger_websocket_url",
+                AsyncMock(return_value="ws://fixture.test/devtools/browser/test"),
+            ),
+            patch(
+                "wscan.browser._BrowserCDPConnection",
+                return_value=cdp,
+            ),
+        ):
+            enabled = await browser._activate_header_target_auto_attach()
+
+        self.assertFalse(enabled)
+        self.assertFalse(browser._header_auto_attach_active)
+        self.assertIsNone(browser._header_browser_cdp)
+        cdp.close.assert_awaited_once()
+
+    async def test_close_disables_auto_fetch_and_detaches_browser_session(self):
+        browser = self._browser()
+        cdp = _BrowserCDP()
+        browser._header_browser_cdp = cdp
+        browser._header_browser_session_id = "browser-session"
+        browser._header_auto_attach_active = True
+        browser._header_auto_target_sessions = {
+            "popup-target": "popup-session",
+        }
+
+        await browser._deactivate_header_target_auto_attach()
+
+        self.assertIn(
+            (
+                "Target.setAutoAttach",
+                {
+                    "autoAttach": False,
+                    "waitForDebuggerOnStart": False,
+                    "flatten": True,
+                },
+                "browser-session",
+            ),
+            cdp.send_calls,
+        )
+        self.assertIn(
+            ("Fetch.disable", None, "popup-session"),
+            cdp.send_calls,
+        )
+        self.assertIn(
+            (
+                "Target.detachFromTarget",
+                {"sessionId": "browser-session"},
+                "",
+            ),
+            cdp.send_calls,
+        )
+        self.assertEqual(cdp.close_calls, 1)
+        self.assertIsNone(browser._header_browser_cdp)
+        self.assertFalse(browser._header_auto_attach_active)
 
     async def test_close_disables_and_detaches_cdp_session(self):
         browser = self._browser()
@@ -560,10 +753,13 @@ class BrowserHeaderModeTests(unittest.IsolatedAsyncioTestCase):
         context.new_cdp_session.assert_awaited_once_with(browser.page)
         self.assertEqual(
             cdp.send_calls,
-            [(
-                "Fetch.enable",
-                {"patterns": [{"urlPattern": "*"}]},
-            )],
+            [
+                (
+                    "Fetch.enable",
+                    {"patterns": [{"urlPattern": "*"}]},
+                ),
+                ("Target.getTargetInfo", None),
+            ],
         )
         context.route.assert_not_awaited()
         context.set_extra_http_headers.assert_not_awaited()

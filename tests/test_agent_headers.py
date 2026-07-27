@@ -716,7 +716,7 @@ class AgentBrowserHeaderApplicationTests(unittest.IsolatedAsyncioTestCase):
             2,
         )
         self.assertEqual(
-            scanner._fetch_enabled_targets,
+            set(scanner._fetch_enabled_targets),
             {"target-1", "target-2"},
         )
 
@@ -978,6 +978,59 @@ class AgentBrowserHeaderApplicationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             [call[0] for call in session.fetch_commands.calls].count("enable"),
             1,
+        )
+
+    async def test_same_target_is_reenabled_when_client_or_session_changes(self):
+        scanner = AgentBrowserScanner(
+            "http://fixture.test",
+            extra_headers={"Authorization": "Bearer test-token"},
+        )
+        first_session = _RequestScopedHeaderSession()
+        await scanner._enable_request_scoped_headers(first_session)
+
+        enabled = await scanner._enable_fetch_for_cdp_target(
+            first_session.cdp_session.cdp_client,
+            "reconnected-session",
+            "target-1",
+        )
+
+        self.assertTrue(enabled)
+        self.assertEqual(
+            [
+                call
+                for call in first_session.fetch_commands.calls
+                if call[0] == "enable"
+            ][-1],
+            (
+                "enable",
+                {"patterns": [{"urlPattern": "*"}]},
+                "reconnected-session",
+            ),
+        )
+
+        second_fetch = _FetchCommands()
+        second_client = SimpleNamespace(
+            send=SimpleNamespace(Fetch=second_fetch),
+            register=SimpleNamespace(Fetch=_FetchRegistration()),
+        )
+        enabled = await scanner._enable_fetch_for_cdp_target(
+            second_client,
+            "reconnected-session",
+            "target-1",
+        )
+
+        self.assertTrue(enabled)
+        self.assertEqual(
+            second_fetch.calls,
+            [(
+                "enable",
+                {"patterns": [{"urlPattern": "*"}]},
+                "reconnected-session",
+            )],
+        )
+        self.assertEqual(
+            scanner._fetch_enabled_targets["target-1"],
+            (id(second_client), "reconnected-session"),
         )
 
     async def test_request_scoped_headers_new_target_failure_is_swallowed(self):

@@ -556,7 +556,9 @@ class AgentBrowserScanner:
             urls_without_scheme,
         )
         self._request_scoped_headers = False
-        self._fetch_enabled_targets: set[str] = set()
+        # Fetch.enable は target ではなく CDP session 単位の状態。browser-use が
+        # 同じ target へ再接続した場合も、新しい client/session では再設定する。
+        self._fetch_enabled_targets: dict[str, tuple[int, str]] = {}
         self._target_event_client = None
         self._target_event_tasks: set[asyncio.Task] = set()
         self._headers_applied = False
@@ -658,12 +660,13 @@ class AgentBrowserScanner:
         cdp_session_id: str,
         target_id: str,
     ) -> bool:
-        """指定した CDP target が未設定なら Fetch を有効化する。"""
+        """現在の client/session で未設定なら Fetch を有効化する。"""
         fetch_commands = None
         try:
             if not target_id:
                 return False
-            if target_id in self._fetch_enabled_targets:
+            session_key = (id(cdp_client), str(cdp_session_id or ""))
+            if self._fetch_enabled_targets.get(target_id) == session_key:
                 return True
 
             fetch_commands = cdp_client.send.Fetch
@@ -746,7 +749,7 @@ class AgentBrowserScanner:
                     pass
             return False
 
-        self._fetch_enabled_targets.add(target_id)
+        self._fetch_enabled_targets[target_id] = session_key
         return True
 
     async def _enable_fetch_for_current_target(self, session) -> bool:
@@ -755,8 +758,6 @@ class AgentBrowserScanner:
             target_id = session.agent_focus_target_id
             if not target_id:
                 return False
-            if target_id in self._fetch_enabled_targets:
-                return True
             cdp_session = await session.get_or_create_cdp_session(
                 target_id,
                 focus=False,
