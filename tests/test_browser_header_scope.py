@@ -30,14 +30,17 @@ class _Route:
         *,
         fetch_failure=None,
         fulfill_failure=None,
+        abort_failure=None,
         continue_failures=0,
     ):
         self.response = object()
         self.fetch_failure = fetch_failure
         self.fulfill_failure = fulfill_failure
+        self.abort_failure = abort_failure
         self.continue_failures = continue_failures
         self.fetch_calls = []
         self.fulfill_calls = []
+        self.abort_calls = []
         self.continue_calls = []
 
     async def fetch(self, **kwargs):
@@ -50,6 +53,11 @@ class _Route:
         self.fulfill_calls.append(kwargs)
         if self.fulfill_failure is not None:
             raise self.fulfill_failure
+
+    async def abort(self, **kwargs):
+        self.abort_calls.append(kwargs)
+        if self.abort_failure is not None:
+            raise self.abort_failure
 
     async def continue_(self, **kwargs):
         self.continue_calls.append(kwargs)
@@ -93,6 +101,7 @@ class BrowserHeaderRouteTests(unittest.IsolatedAsyncioTestCase):
             }],
         )
         self.assertEqual(route.fulfill_calls, [{"response": route.response}])
+        self.assertEqual(route.abort_calls, [])
         self.assertEqual(route.continue_calls, [])
 
     async def test_disallowed_origin_continues_without_headers_or_fetch(self):
@@ -108,6 +117,7 @@ class BrowserHeaderRouteTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(route.continue_calls, [{}])
         self.assertEqual(route.fetch_calls, [])
         self.assertEqual(route.fulfill_calls, [])
+        self.assertEqual(route.abort_calls, [])
 
     async def test_fetch_failure_falls_back_to_continue_without_headers(self):
         browser = self._browser()
@@ -130,6 +140,7 @@ class BrowserHeaderRouteTests(unittest.IsolatedAsyncioTestCase):
             }],
         )
         self.assertEqual(route.fulfill_calls, [])
+        self.assertEqual(route.abort_calls, [])
         self.assertEqual(route.continue_calls, [{}])
         mock_console.print.assert_called_once()
         notice = mock_console.print.call_args.args[0]
@@ -137,7 +148,7 @@ class BrowserHeaderRouteTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("Authorization", notice)
         self.assertNotIn("secret", notice)
 
-    async def test_fulfill_failure_falls_back_to_continue_without_headers(self):
+    async def test_fulfill_failure_aborts_without_resending(self):
         browser = self._browser()
         route = _Route(fulfill_failure=RuntimeError("fulfill failed"))
 
@@ -148,7 +159,25 @@ class BrowserHeaderRouteTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(route.fetch_calls), 1)
         self.assertEqual(route.fulfill_calls, [{"response": route.response}])
-        self.assertEqual(route.continue_calls, [{}])
+        self.assertEqual(route.abort_calls, [{}])
+        self.assertEqual(route.continue_calls, [])
+
+    async def test_fulfill_and_abort_failure_does_not_escape_handler(self):
+        browser = self._browser()
+        route = _Route(
+            fulfill_failure=RuntimeError("fulfill failed"),
+            abort_failure=RuntimeError("abort failed"),
+        )
+
+        await browser._auth_header_route(
+            route,
+            _Request("https://app.example/private"),
+        )
+
+        self.assertEqual(len(route.fetch_calls), 1)
+        self.assertEqual(route.fulfill_calls, [{"response": route.response}])
+        self.assertEqual(route.abort_calls, [{}])
+        self.assertEqual(route.continue_calls, [])
 
     async def test_headerless_fallback_failure_retries_without_headers(self):
         browser = self._browser()

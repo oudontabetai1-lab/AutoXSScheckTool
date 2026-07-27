@@ -364,6 +364,7 @@ class BrowserManager:
         追うため、continue_ で注入したヘッダがそのまま外部へ送られてしまう）。
         """
         headers = None
+        fetched = False
         try:
             if not headers_allowed_for_url(request.url, self.header_scope_origins):
                 await route.continue_()
@@ -374,10 +375,21 @@ class BrowserManager:
                 {key.lower(): str(value) for key, value in self.extra_headers.items()}
             )
             response = await route.fetch(headers=headers, max_redirects=0)
+            fetched = True
             await route.fulfill(response=response)
             return
         except Exception:
             await self._warn_header_request_fallback()
+
+        if fetched:
+            try:
+                # fetch 済みのリクエストを continue_ するとサーバへ再送されるため、
+                # fulfill 失敗時は新たな送信を行わない abort でルートを解放する。
+                await route.abort()
+            except Exception:
+                # ページやコンテキストが既に閉じている場合は abort も失敗し得る。
+                pass
+            return
 
         try:
             # continue_ に headers を渡すと Chromium がリダイレクト先にも
