@@ -37,6 +37,7 @@ from .header_scope import (
     _url_origin,
     allowed_header_origins,
     effective_origin_url,
+    expand_scheme_variants,
     headers_allowed_for_url,
 )
 
@@ -508,6 +509,13 @@ class AgentBrowserScanner:
         extra_headers: Optional[dict] = None,
     ):
         # CDP / SecurityWatchdog が scheme 無し URL を拒否するため補完する。
+        raw_target_url = str(target_url or "").strip()
+        raw_login_url = str(login_url or "").strip()
+        urls_without_scheme = {
+            raw_url
+            for raw_url in (raw_target_url, raw_login_url)
+            if raw_url and not re.match(r"^https?://", raw_url, re.IGNORECASE)
+        }
         self.target_url = _normalize_agent_url(target_url)
         self.llm_provider = llm_provider
         self.llm_model = llm_model
@@ -545,6 +553,7 @@ class AgentBrowserScanner:
             self.target_urls,
             self.access_urls,
             self.login_url,
+            urls_without_scheme,
         )
         self._request_scoped_headers = False
         self._fetch_enabled_targets: set[str] = set()
