@@ -199,6 +199,12 @@ _SERVE_SECRET_CONFIG_KEYS = {
     "headers": "headers_text",
 }
 
+_TOTP_SOURCE_KEYS = (
+    "mfa_totp_uri",
+    "mfa_totp_secret",
+    "mfa_totp_qr",
+)
+
 
 def _redact_secrets(cfg: dict, placeholder: str = "***REDACTED***") -> dict:
     """秘匿値を伏字にした設定の浅いコピーを返す（ディスク保存・共有・配信用）。
@@ -234,15 +240,37 @@ def _redact_secrets(cfg: dict, placeholder: str = "***REDACTED***") -> dict:
     return redacted
 
 
+def resolve_submitted_totp_sources(
+    cfg: dict,
+    config_defaults: dict,
+) -> tuple[str, str, str]:
+    """serve で使う TOTP の (uri, secret, qr) を排他的に解決する。
+
+    ダッシュボードから1つでも非空値が送られた場合は、送信された3項目だけを
+    採用し、空だった項目を config で補わない。3項目とも空の場合に限り config
+    の値へフォールバックする。
+    """
+    submitted = tuple(
+        (cfg or {}).get(key, "") or "" for key in _TOTP_SOURCE_KEYS
+    )
+    if any(submitted):
+        return submitted
+    defaults = config_defaults or {}
+    return tuple(defaults.get(key, "") or "" for key in _TOTP_SOURCE_KEYS)
+
+
 def apply_config_secret_fallback(cfg: dict, config_defaults: dict) -> dict:
     """空で届いた秘匿フィールドを config の値で補う（浅いコピーを返す。純粋関数）。
 
     ブラウザへ秘密を配信しない代償として、画面から空で戻る値は「未入力」とみなし
     サーバ側の設定値へフォールバックする。非空なら画面の入力値を優先する。
+    TOTP の3ソースだけは1つでも画面入力があれば、他ソースを補完せず排他的に扱う。
     """
     resolved = dict(cfg or {})
     defaults = config_defaults or {}
     for key in _SERVE_SECRET_FALLBACK_KEYS:
+        if key in _TOTP_SOURCE_KEYS:
+            continue
         value = resolved.get(key)
         is_empty = value in ("", None) or (key == "headers" and value == {})
         if not is_empty:
@@ -251,6 +279,13 @@ def apply_config_secret_fallback(cfg: dict, config_defaults: dict) -> dict:
         config_value = defaults.get(config_key)
         if config_value not in ("", None):
             resolved[key] = config_value
+    if any(key in resolved or key in defaults for key in _TOTP_SOURCE_KEYS):
+        resolved.update(
+            zip(
+                _TOTP_SOURCE_KEYS,
+                resolve_submitted_totp_sources(cfg, defaults),
+            )
+        )
     return resolved
 
 
@@ -2419,7 +2454,17 @@ async def run_serve(args):
                     monitor=monitor,
                     port=port,
                 )
-                await agent_engine.run()
+                _agent_result, agent_interrupted = (
+                    await _run_with_time_window_monitor(
+                        agent_engine.run,
+                        monitor,
+                        cfg.get("allowed_hours") or None,
+                        cfg.get("forbidden_hours") or None,
+                        phase_label="Agent Browser スキャン",
+                    )
+                )
+                if agent_interrupted:
+                    return
                 console.print("[dim]Agent scan finished — dashboard ready for the next scan.[/dim]")
             except asyncio.CancelledError:
                 raise

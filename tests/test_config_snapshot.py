@@ -174,5 +174,59 @@ class ConfigSecretFallbackTests(unittest.TestCase):
         self.assertIsNot(out, cfg)
 
 
+class SubmittedTotpSourceTests(unittest.TestCase):
+    def test_dashboard_secret_suppresses_config_uri(self):
+        sources = main.resolve_submitted_totp_sources(
+            {
+                "mfa_totp_uri": "",
+                "mfa_totp_secret": "submitted-secret",
+                "mfa_totp_qr": "",
+            },
+            {"mfa_totp_uri": "config-uri"},
+        )
+
+        self.assertEqual(sources, ("", "submitted-secret", ""))
+
+    def test_empty_dashboard_sources_use_config_values(self):
+        sources = main.resolve_submitted_totp_sources(
+            {
+                "mfa_totp_uri": "",
+                "mfa_totp_secret": "",
+                "mfa_totp_qr": "",
+            },
+            {
+                "mfa_totp_uri": "config-uri",
+                "mfa_totp_secret": "config-secret",
+                "mfa_totp_qr": "config-qr",
+            },
+        )
+
+        self.assertEqual(
+            sources,
+            ("config-uri", "config-secret", "config-qr"),
+        )
+
+    def test_dashboard_uri_is_used_without_other_fallbacks(self):
+        sources = main.resolve_submitted_totp_sources(
+            {"mfa_totp_uri": "submitted-uri"},
+            {
+                "mfa_totp_secret": "config-secret",
+                "mfa_totp_qr": "config-qr",
+            },
+        )
+
+        self.assertEqual(sources, ("submitted-uri", "", ""))
+
+    def test_secret_fallback_applies_same_exclusive_rule(self):
+        resolved = main.apply_config_secret_fallback(
+            {"mfa_totp_secret": "submitted-secret"},
+            {"mfa_totp_uri": "config-uri"},
+        )
+
+        self.assertEqual(resolved["mfa_totp_uri"], "")
+        self.assertEqual(resolved["mfa_totp_secret"], "submitted-secret")
+        self.assertEqual(resolved["mfa_totp_qr"], "")
+
+
 if __name__ == "__main__":
     unittest.main()

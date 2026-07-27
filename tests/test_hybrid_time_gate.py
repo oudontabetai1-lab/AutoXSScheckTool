@@ -188,6 +188,43 @@ def test_hybrid_recon_is_cancelled_when_window_closes_without_real_sleep():
     ]
 
 
+def test_agent_scan_is_cancelled_when_window_closes_without_real_sleep():
+    monitor = _Monitor()
+    current = [datetime(2024, 1, 1, 11, 59, 59)]
+    operation_stopped = []
+
+    async def fake_sleep(_delay):
+        current[0] = datetime(2024, 1, 1, 12, 0)
+
+    async def agent_operation():
+        try:
+            await asyncio.Event().wait()
+        finally:
+            operation_stopped.append(True)
+
+    result, interrupted = asyncio.run(
+        main._run_with_time_window_monitor(
+            agent_operation,
+            monitor,
+            ["Mon 10:00-12:00"],
+            None,
+            phase_label="Agent Browser スキャン",
+            now_fn=lambda: current[0],
+            sleep_fn=fake_sleep,
+        )
+    )
+
+    assert result is None
+    assert interrupted is True
+    assert operation_stopped == [True]
+    assert monitor.statuses == [
+        (
+            "検査可能時間外へ移行したため Agent Browser スキャン を停止しました。",
+            "paused",
+        )
+    ]
+
+
 def test_window_monitor_is_disabled_when_unconfigured():
     monitor = _Monitor()
     sleeps = []

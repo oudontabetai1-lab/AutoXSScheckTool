@@ -81,6 +81,10 @@ class ServeTimeWindowWiringTests(unittest.TestCase):
         self.assertIn(
             "_wait_for_scan_window", called_helpers(config_branch("agent_mode"))
         )
+        self.assertIn(
+            "_run_with_time_window_monitor",
+            called_helpers(config_branch("agent_mode")),
+        )
         hybrid_helpers = called_helpers(config_branch("hybrid_mode"))
         self.assertIn("_wait_for_hybrid_recon_window", hybrid_helpers)
         self.assertIn("_run_with_time_window_monitor", hybrid_helpers)
