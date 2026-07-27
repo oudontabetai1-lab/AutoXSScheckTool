@@ -171,20 +171,6 @@ def _load_config(path: Path = _CONFIG_PATH) -> dict:
 _CFG = _load_config()
 
 
-def _coerce_headers(value) -> dict:
-    """config/ダッシュボード由来の headers を dict へ正規化する（純粋関数）。"""
-    if isinstance(value, dict):
-        return dict(value)
-    if isinstance(value, str):
-        try:
-            from wscan.header_manager import parse_header_lines
-
-            return parse_header_lines(value)
-        except Exception:
-            return {}
-    return {}
-
-
 # 設定スナップショット等で永続化してはいけない秘匿フィールド。キー名に以下の
 # 語を含む値（パスワード/シークレット/トークン/APIキー）は伏字にする。
 _SECRET_KEY_TOKENS = ("password", "secret", "token", "bearer", "api_key", "apikey")
