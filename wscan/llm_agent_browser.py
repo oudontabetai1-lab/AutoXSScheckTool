@@ -552,6 +552,8 @@ class AgentBrowserScanner:
         self._target_event_tasks: set[asyncio.Task] = set()
         self._headers_applied = False
         self._missing_header_url_api_warned = False
+        self._header_application_failed_warned = False
+        self._header_clear_failed_warned = False
         self._step_count = 0
         self._memory = AgentMemory()
         self._session_nonce = secrets.token_urlsafe(16)
@@ -567,6 +569,42 @@ class AgentBrowserScanner:
             "（requirements-agent.txt の browser-use 0.12.6 では対応）。[/yellow]"
         )
 
+    async def _warn_header_application_failed(self) -> None:
+        """認証ヘッダの適用失敗を、秘匿値を含めず一度だけ通知する。"""
+        if self._header_application_failed_warned:
+            return
+        self._header_application_failed_warned = True
+        message = (
+            "Agent ブラウザへ認証ヘッダを適用できませんでした。"
+            "認証が必要なページを偵察できない可能性があります。"
+        )
+        if self.monitor:
+            try:
+                await self.monitor.emit_status(message, "running")
+                return
+            except Exception:
+                # monitor 障害でも Agent の探索は止めず、コンソールへフォールバックする。
+                pass
+        console.print(f"[yellow]{message}[/yellow]")
+
+    async def _warn_header_clear_failed(self) -> None:
+        """認証ヘッダの解除失敗を、秘匿値を含めず一度だけ通知する。"""
+        if self._header_clear_failed_warned:
+            return
+        self._header_clear_failed_warned = True
+        message = (
+            "Agent ブラウザの認証ヘッダを解除できませんでした。"
+            "対象外ページへ認証情報が送信される可能性があります。"
+        )
+        if self.monitor:
+            try:
+                await self.monitor.emit_status(message, "running")
+                return
+            except Exception:
+                # monitor 障害でも Agent の探索は止めず、コンソールへフォールバックする。
+                pass
+        console.print(f"[yellow]{message}[/yellow]")
+
     async def _clear_extra_headers(self, session) -> None:
         """直前に適用した追加ヘッダを、値を露出せず解除する。"""
         if not self._headers_applied:
@@ -575,7 +613,7 @@ class AgentBrowserScanner:
             await session.set_extra_headers({})
         except Exception:
             # ヘッダ値をログや例外へ出さず、Agent の探索を継続する。
-            pass
+            await self._warn_header_clear_failed()
         else:
             self._headers_applied = False
 
@@ -591,6 +629,7 @@ class AgentBrowserScanner:
             current_url = await session.get_current_page_url()
         except Exception:
             await self._clear_extra_headers(session)
+            await self._warn_header_application_failed()
             return
         origin_url = effective_origin_url(current_url, intended_url)
         if not headers_allowed_for_url(origin_url, self._header_origins):
@@ -600,7 +639,7 @@ class AgentBrowserScanner:
             await session.set_extra_headers(self.extra_headers)
         except Exception:
             # ヘッダ値をログや例外へ出さず、Agent の探索を継続する。
-            pass
+            await self._warn_header_application_failed()
         else:
             self._headers_applied = True
 
@@ -889,7 +928,7 @@ class AgentBrowserScanner:
             await self._apply_extra_headers(session, intended_url)
         except Exception:
             # バージョン差異や起動失敗時も秘匿値を出さず Agent を継続する。
-            pass
+            await self._warn_header_application_failed()
 
     # ------------------------------------------------------------------
     # Public entry point
@@ -914,6 +953,7 @@ class AgentBrowserScanner:
 
         task = self._build_recon_task() if self.recon_mode else self._build_task()
         result = AgentScanResult(target_url=self.target_url)
+        browser = None
 
         try:
             from browser_use import Agent, Browser
@@ -1064,16 +1104,23 @@ class AgentBrowserScanner:
                 for err in errors[:3]:
                     console.print(f"    [dim]{str(err)[:120]}[/dim]")
 
-            # BrowserSession は close() を持たない — stop() が正しい
-            await browser.stop()
-
         except ImportError:
             result.error = "browser-use がインストールされていません。pip install browser-use を実行してください。"
             console.print(f"[red]{result.error}[/red]")
             return result
+        except asyncio.CancelledError:
+            raise
         except Exception as exc:
             result.error = str(exc)
             console.print(f"[red]エージェントスキャンエラー: {exc}[/red]")
+        finally:
+            if browser is not None:
+                try:
+                    # BrowserSession は close() を持たない — stop() が正しい。
+                    # Agent task の cancel 時もここを通し、プローブを確実に止める。
+                    await browser.stop()
+                except Exception as exc:
+                    console.print(f"[yellow]ブラウザ終了エラー: {exc}[/yellow]")
 
         # サマリー表示
         console.print(Rule("[bold magenta] Agent Scan Complete [/bold magenta]", style="magenta"))

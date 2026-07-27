@@ -202,6 +202,37 @@ class _RequestScopedHeaderSession:
 
 
 class AgentHeaderCompositionTests(unittest.TestCase):
+    def test_multiline_config_headers_are_coerced_before_scan_setup(self):
+        cfg = {"headers": "X-Tenant: example\nX-Trace: enabled"}
+
+        headers = apply_bearer(main._coerce_headers(cfg.get("headers")), "")
+
+        self.assertEqual(
+            headers,
+            {
+                "X-Tenant": "example",
+                "X-Trace": "enabled",
+            },
+        )
+        self.assertIsInstance(headers, dict)
+
+    def test_config_header_dict_is_copied(self):
+        config_headers = {"X-Tenant": "example"}
+
+        headers = main._coerce_headers(config_headers)
+        headers["X-Trace"] = "enabled"
+
+        self.assertEqual(config_headers, {"X-Tenant": "example"})
+        self.assertIsNot(headers, config_headers)
+
+    def test_empty_or_none_config_headers_become_empty_dict(self):
+        for value in ("", "   \n", None):
+            with self.subTest(value=value):
+                self.assertEqual(main._coerce_headers(value), {})
+
+    def test_unparseable_config_headers_do_not_raise(self):
+        self.assertEqual(main._coerce_headers("not a header\nalso invalid"), {})
+
     def test_cli_headers_and_bearer_are_combined(self):
         headers = apply_bearer(
             parse_header_args(["X-Tenant: example", "X-Trace: enabled"]),
@@ -1026,9 +1057,11 @@ class AgentBrowserHeaderApplicationTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("Bearer test-token", printed)
 
     async def test_apply_extra_headers_calls_session_once(self):
+        monitor = SimpleNamespace(emit_status=AsyncMock())
         scanner = AgentBrowserScanner(
             "http://fixture.test",
             extra_headers={"Authorization": "Bearer test-token"},
+            monitor=monitor,
         )
         session = _RecordingHeaderSession()
 
@@ -1038,6 +1071,7 @@ class AgentBrowserHeaderApplicationTests(unittest.IsolatedAsyncioTestCase):
             session.calls,
             [{"Authorization": "Bearer test-token"}],
         )
+        monitor.emit_status.assert_not_awaited()
 
     async def test_apply_extra_headers_skips_disallowed_origin(self):
         scanner = AgentBrowserScanner(
@@ -1101,13 +1135,79 @@ class AgentBrowserHeaderApplicationTests(unittest.IsolatedAsyncioTestCase):
 
         await scanner._apply_extra_headers(object())
 
-    async def test_apply_extra_headers_swallows_session_errors(self):
+    async def test_apply_extra_headers_warns_monitor_once_on_session_errors(self):
+        monitor = SimpleNamespace(emit_status=AsyncMock())
         scanner = AgentBrowserScanner(
             "http://fixture.test",
             extra_headers={"X-Tenant": "example"},
+            monitor=monitor,
+        )
+        session = _FailingHeaderSession()
+
+        await scanner._apply_extra_headers(session)
+        await scanner._apply_extra_headers(session)
+
+        monitor.emit_status.assert_awaited_once_with(
+            "Agent ブラウザへ認証ヘッダを適用できませんでした。"
+            "認証が必要なページを偵察できない可能性があります。",
+            "running",
         )
 
-        await scanner._apply_extra_headers(_FailingHeaderSession())
+    async def test_apply_extra_headers_warns_console_without_monitor(self):
+        scanner = AgentBrowserScanner(
+            "http://fixture.test",
+            extra_headers={"X-Tenant": "secret-tenant"},
+        )
+
+        with patch("wscan.llm_agent_browser.console") as mock_console:
+            await scanner._apply_extra_headers(_FailingHeaderSession())
+
+        mock_console.print.assert_called_once()
+        printed = str(mock_console.print.call_args)
+        self.assertIn("認証ヘッダを適用できませんでした", printed)
+        self.assertNotIn("X-Tenant", printed)
+        self.assertNotIn("secret-tenant", printed)
+
+    async def test_prepare_extra_headers_warns_once_on_session_start_error(self):
+        monitor = SimpleNamespace(emit_status=AsyncMock())
+        scanner = AgentBrowserScanner(
+            "http://fixture.test",
+            extra_headers={"X-Tenant": "secret-tenant"},
+            monitor=monitor,
+        )
+        session = SimpleNamespace(
+            start=AsyncMock(side_effect=RuntimeError("session start failed")),
+            get_current_page=AsyncMock(),
+            set_extra_headers=AsyncMock(),
+        )
+
+        await scanner._prepare_extra_headers_before_run(session)
+        await scanner._prepare_extra_headers_before_run(session)
+
+        monitor.emit_status.assert_awaited_once_with(
+            "Agent ブラウザへ認証ヘッダを適用できませんでした。"
+            "認証が必要なページを偵察できない可能性があります。",
+            "running",
+        )
+
+    async def test_clear_extra_headers_warns_monitor_once_on_session_errors(self):
+        monitor = SimpleNamespace(emit_status=AsyncMock())
+        scanner = AgentBrowserScanner(
+            "http://fixture.test",
+            extra_headers={"X-Tenant": "secret-tenant"},
+            monitor=monitor,
+        )
+        scanner._headers_applied = True
+        session = _FailingHeaderSession()
+
+        await scanner._clear_extra_headers(session)
+        await scanner._clear_extra_headers(session)
+
+        monitor.emit_status.assert_awaited_once_with(
+            "Agent ブラウザの認証ヘッダを解除できませんでした。"
+            "対象外ページへ認証情報が送信される可能性があります。",
+            "running",
+        )
 
 
 if __name__ == "__main__":

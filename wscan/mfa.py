@@ -30,6 +30,8 @@ from typing import Optional
 
 # ── 純粋関数（MCP 非依存・テスト対象） ─────────────────────────────────────
 
+_TOTP_MIN_REMAINING_SECONDS = 3
+
 # MFA チャレンジ画面の強いシグナル（日本語/英語）。通常のログインフォームでの
 # 誤検知を避けるため、"code" 単体のような弱い語は含めない。
 _MFA_SIGNALS = (
@@ -55,6 +57,13 @@ _MFA_SIGNALS = (
     "二要素",
     "ワンタイムパスワード",
 )
+
+
+def seconds_until_next_window(timestamp: float, period: int) -> float:
+    """現在時刻から次の TOTP 窓開始までの秒数（純粋関数）。"""
+    if period <= 0:
+        raise ValueError("period must be positive")
+    return float(period - (timestamp % period))
 
 
 def looks_like_mfa_page(html: str) -> bool:
@@ -474,9 +483,17 @@ class MFAConfig:
         )
         if cfg.totp_algorithm not in ("SHA1", "SHA256", "SHA512"):
             cfg.totp_algorithm = "SHA1"
-        # TOTP 入力だけを指定した場合は自動で有効化する。明示 type は尊重する。
-        if "type" not in ov and "WSCAN_MFA_TYPE" not in e and cfg.has_native_totp:
-            cfg.type = "totp"
+        # TOTP 入力だけを指定した場合は自動で有効化する。明示 type(override)は尊重する。
+        # per-scan で native TOTP override(secret/uri/qr)が明示された場合は、
+        # env の WSCAN_MFA_TYPE(例: 前回設定の email)が残っていても TOTP を優先する
+        # （per-scan の TOTP 入力＝明示的な TOTP 選択とみなす）。env 由来の native TOTP
+        # しか無い場合は従来どおり env の WSCAN_MFA_TYPE が未設定のときだけ昇格する。
+        if "type" not in ov and cfg.has_native_totp:
+            _native_totp_override = bool(
+                ov.get("totp_secret") or ov.get("totp_uri") or ov.get("totp_qr")
+            )
+            if _native_totp_override or "WSCAN_MFA_TYPE" not in e:
+                cfg.type = "totp"
         return cfg
 
 
@@ -616,10 +633,14 @@ class MFASolver:
                     algorithm=cfg.totp_algorithm,
                 )
                 if resolved:
+                    period = int(resolved["period"])
+                    remaining = seconds_until_next_window(time.time(), period)
+                    if remaining < _TOTP_MIN_REMAINING_SECONDS:
+                        await asyncio.sleep(min(remaining + 0.2, float(period)))
                     code = generate_totp(
                         resolved["secret"],
                         digits=resolved["digits"],
-                        period=resolved["period"],
+                        period=period,
                         algorithm=resolved["algorithm"],
                     )
                     if code:

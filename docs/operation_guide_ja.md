@@ -189,6 +189,8 @@ python3 main.py scan https://app.example.com \
   --navigation-retries 2
 ```
 
+検査可能/停止時間帯は CLI の `--allowed-hours` / `--forbidden-hours`、またはダッシュボードの「基本設定」から指定できます。ダッシュボードでは `Mon-Fri 22:00-06:00` のように1行1件で入力し、空欄なら無効です。
+
 ## 6. プロキシ連携
 
 Burp Suite、ZAP、mitmproxy などで通信を確認したい場合:

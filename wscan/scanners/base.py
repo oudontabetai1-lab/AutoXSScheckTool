@@ -203,6 +203,15 @@ class Finding:
 
     def to_dict(self) -> dict:
         from wscan.compliance_map import get_refs
+        from wscan.request_logger import _redact_headers
+
+        request = dict(self.request)
+        if "headers" in request:
+            request["headers"] = _redact_headers(request["headers"])
+        response = {k: v for k, v in self.response.items() if k != "body"}
+        if "headers" in response:
+            response["headers"] = _redact_headers(response["headers"])
+
         return {
             "check_type": self.check_type,
             "severity": self.severity,
@@ -210,8 +219,8 @@ class Finding:
             "field_name": self.field_name,
             "payload": self.payload,
             "evidence": self.evidence,
-            "request": self.request,
-            "response": {k: v for k, v in self.response.items() if k != "body"},
+            "request": request,
+            "response": response,
             "response_body_excerpt": (self.response.get("body", "") or "")[:500],
             "screenshot_b64": self.screenshot_b64,
             "dialog_confirmed": self.dialog_confirmed,

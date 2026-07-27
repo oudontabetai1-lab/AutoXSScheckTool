@@ -1,6 +1,8 @@
 """Tests for the token-based access control used when hosting the dashboard
 on a server / intranet (`serve` mode)."""
+import asyncio
 import unittest
+from unittest.mock import AsyncMock
 
 from fastapi.testclient import TestClient
 
@@ -125,6 +127,24 @@ class ConcurrentScanRejectionTests(unittest.TestCase):
             '{"action": "start_scan", "config": {"url": "https://example.com"}}'
         )
         self.assertFalse(self.srv.scan_request_event.is_set())
+
+    def test_ws_rejection_echoes_only_client_nonce_from_config(self):
+        async def exercise():
+            self.srv.scan_in_progress = True
+            self.srv.emit = AsyncMock()
+            self.srv._handle_client_message(
+                '{"action":"start_scan","config":{'
+                '"url":"https://example.com","_client_nonce":"nonce-123",'
+                '"auth_pass":"must-not-be-broadcast"}}'
+            )
+            await asyncio.sleep(0)
+            self.srv.emit.assert_awaited_once()
+            event_type, data = self.srv.emit.await_args.args
+            self.assertEqual(event_type, "scan_rejected")
+            self.assertEqual(data["_client_nonce"], "nonce-123")
+            self.assertNotIn("auth_pass", data)
+
+        asyncio.run(exercise())
 
     def test_completed_scan_state_is_queryable_while_idle(self):
         # Simulate a finished scan that published its results.

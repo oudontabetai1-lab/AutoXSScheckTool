@@ -621,7 +621,7 @@ class ScanEngine:
         (self.output_dir / "screenshots").mkdir(exist_ok=True)
         # リクエスト/ペイロードの監査ログ。送信した全 HTTP リクエスト
         # (http_requests.jsonl) と投入ペイロード (payloads.jsonl) を保存する。
-        from .request_logger import RequestLogger
+        from .request_logger import RequestLogger, register_sensitive_headers
         self.request_logger = RequestLogger(self.output_dir)
         if self.monitor is not None:
             self.monitor.request_logger = self.request_logger
@@ -665,6 +665,7 @@ class ScanEngine:
             refresh_cmd=header_refresh_cmd or "",
             refresh_interval=float(header_refresh_interval or 0.0),
         )
+        register_sensitive_headers(self.header_manager.current().keys())
         # MFA（2FA）ソルバ: ネイティブ TOTP または外部 MCP からコードを取得。
         # 種別/欄は env（WSCAN_MFA_*）が既定。UI/CLI/config が明示的に値を渡した
         # ときはそれを優先する。mfa_type=None は「未指定→env に委ねる」、空文字 ""
@@ -744,6 +745,7 @@ class ScanEngine:
         # When the refresh task fetches a new token, push it into the browser
         # context so crawled pages immediately use the rotated header.
         async def _propagate_headers(new_headers: dict):
+            register_sensitive_headers(new_headers.keys())
             try:
                 await self._browser.update_extra_headers(new_headers)
             except Exception:

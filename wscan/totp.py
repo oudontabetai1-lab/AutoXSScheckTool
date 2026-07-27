@@ -17,6 +17,22 @@ _ALGORITHMS = {
     "SHA512": hashlib.sha512,
 }
 
+_MIN_TOTP_DIGITS = 6
+_MAX_TOTP_DIGITS = 10
+_DEFAULT_TOTP_DIGITS = 6
+_MIN_TOTP_PERIOD = 1
+_MAX_TOTP_PERIOD = 24 * 60 * 60
+_DEFAULT_TOTP_PERIOD = 30
+
+
+def _bounded_int(value, minimum: int, maximum: int, default=None):
+    """整数を安全に範囲検証し、不正値は ``default`` へ落とす。"""
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return default
+    return parsed if minimum <= parsed <= maximum else default
+
 
 def normalize_base32(secret: str) -> str:
     """空白とハイフンを除去し、大文字化とパディング補完を行う。"""
@@ -38,13 +54,6 @@ def parse_otpauth_uri(uri: str) -> Optional[dict]:
         if not secret:
             return None
 
-        def _positive_int(name: str, default: int) -> int:
-            try:
-                value = int((query.get(name) or [default])[0])
-                return value if value > 0 else default
-            except (TypeError, ValueError):
-                return default
-
         algorithm = str((query.get("algorithm") or ["SHA1"])[0]).upper()
         if algorithm not in _ALGORITHMS:
             algorithm = "SHA1"
@@ -54,8 +63,18 @@ def parse_otpauth_uri(uri: str) -> Optional[dict]:
             issuer = label.split(":", 1)[0]
         return {
             "secret": secret,
-            "digits": _positive_int("digits", 6),
-            "period": _positive_int("period", 30),
+            "digits": _bounded_int(
+                (query.get("digits") or [_DEFAULT_TOTP_DIGITS])[0],
+                _MIN_TOTP_DIGITS,
+                _MAX_TOTP_DIGITS,
+                _DEFAULT_TOTP_DIGITS,
+            ),
+            "period": _bounded_int(
+                (query.get("period") or [_DEFAULT_TOTP_PERIOD])[0],
+                _MIN_TOTP_PERIOD,
+                _MAX_TOTP_PERIOD,
+                _DEFAULT_TOTP_PERIOD,
+            ),
             "algorithm": algorithm,
             "label": label,
             "issuer": issuer,
@@ -90,10 +109,15 @@ def generate_totp(
 ) -> Optional[str]:
     """RFC 6238 の TOTP コードを生成する純粋関数。"""
     try:
-        digits = int(digits)
-        period = int(period)
+        digits = _bounded_int(digits, _MIN_TOTP_DIGITS, _MAX_TOTP_DIGITS)
+        period = _bounded_int(period, _MIN_TOTP_PERIOD, _MAX_TOTP_PERIOD)
         algorithm = str(algorithm or "").upper()
-        if not secret_base32 or digits <= 0 or period <= 0 or algorithm not in _ALGORITHMS:
+        if (
+            not secret_base32
+            or digits is None
+            or period is None
+            or algorithm not in _ALGORITHMS
+        ):
             return None
         normalized = normalize_base32(secret_base32)
         if not normalized:
@@ -145,15 +169,35 @@ def resolve_totp_secret(
                 else:
                     return {
                         "secret": decoded,
-                        "digits": digits,
-                        "period": period,
+                        "digits": _bounded_int(
+                            digits,
+                            _MIN_TOTP_DIGITS,
+                            _MAX_TOTP_DIGITS,
+                            _DEFAULT_TOTP_DIGITS,
+                        ),
+                        "period": _bounded_int(
+                            period,
+                            _MIN_TOTP_PERIOD,
+                            _MAX_TOTP_PERIOD,
+                            _DEFAULT_TOTP_PERIOD,
+                        ),
                         "algorithm": algorithm,
                     }
         if secret:
             return {
                 "secret": secret,
-                "digits": digits,
-                "period": period,
+                "digits": _bounded_int(
+                    digits,
+                    _MIN_TOTP_DIGITS,
+                    _MAX_TOTP_DIGITS,
+                    _DEFAULT_TOTP_DIGITS,
+                ),
+                "period": _bounded_int(
+                    period,
+                    _MIN_TOTP_PERIOD,
+                    _MAX_TOTP_PERIOD,
+                    _DEFAULT_TOTP_PERIOD,
+                ),
                 "algorithm": algorithm,
             }
     except Exception:

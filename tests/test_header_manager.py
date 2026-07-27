@@ -1,6 +1,7 @@
 """Tests for the HeaderManager (custom headers + periodic refresh)."""
 import asyncio
 import unittest
+from unittest.mock import AsyncMock
 
 from wscan.header_manager import (
     HeaderManager,
@@ -9,6 +10,7 @@ from wscan.header_manager import (
     parse_header_args,
     parse_header_lines,
 )
+from wscan.request_logger import _redact_headers, clear_sensitive_headers
 
 
 class ParseTests(unittest.TestCase):
@@ -86,6 +88,12 @@ class HeaderManagerTests(unittest.IsolatedAsyncioTestCase):
 
 
 class EngineIntegrationTests(unittest.TestCase):
+    def setUp(self):
+        clear_sensitive_headers()
+
+    def tearDown(self):
+        clear_sensitive_headers()
+
     def test_engine_auth_headers_merges_custom_and_cookie(self):
         from wscan.engine import ScanEngine
 
@@ -100,6 +108,36 @@ class EngineIntegrationTests(unittest.TestCase):
         self.assertEqual(merged["Cookie"], "session=abc")
         # include_cookie=False suppresses the Cookie header.
         self.assertNotIn("Cookie", eng.auth_headers(include_cookie=False))
+
+    def test_engine_registers_initial_custom_header_name_for_redaction(self):
+        from wscan.engine import ScanEngine
+
+        ScanEngine(
+            url="http://example.test",
+            headers={"X-Company-Auth": "initial-secret"},
+        )
+
+        self.assertEqual(
+            _redact_headers({"x-company-auth": "initial-secret"}),
+            {"x-company-auth": "<redacted>"},
+        )
+
+    def test_engine_registers_header_name_added_by_refresh(self):
+        from wscan.engine import ScanEngine
+
+        eng = ScanEngine(url="http://example.test")
+        eng._browser.update_extra_headers = AsyncMock()
+
+        asyncio.run(
+            eng.header_manager.update({
+                "X-Access-Credential": "rotated-secret",
+            })
+        )
+
+        self.assertEqual(
+            _redact_headers({"x-access-credential": "rotated-secret"}),
+            {"x-access-credential": "<redacted>"},
+        )
 
 
 if __name__ == "__main__":
