@@ -36,6 +36,8 @@ if TYPE_CHECKING:
 
 console = Console()
 
+_BLANK_URLS = frozenset({"", "about:blank", "chrome://newtab/", "about:newtab"})
+
 
 def _normalize_agent_url(url: str) -> str:
     """Agent が扱う URL を scheme 付きへ正規化する。"""
@@ -69,6 +71,81 @@ def _url_matches_scope(url: str, scopes: list[str]) -> bool:
         if parsed.path == scope or parsed.path.startswith(scope.rstrip("/") + "/"):
             return True
     return False
+
+
+def _url_origin(url: str) -> str:
+    """URL から比較用の scheme://host[:port] を抽出する。"""
+    try:
+        parsed = urlparse(str(url or "").strip())
+        hostname = parsed.hostname
+        port = parsed.port
+    except (TypeError, ValueError):
+        return ""
+    if not parsed.scheme or not parsed.netloc or not hostname:
+        return ""
+    normalized_host = hostname.lower()
+    if ":" in normalized_host:
+        normalized_host = f"[{normalized_host}]"
+    scheme = parsed.scheme.lower()
+    default_ports = {"http": 80, "https": 443}
+    port_suffix = (
+        f":{port}"
+        if port is not None and port != default_ports.get(scheme)
+        else ""
+    )
+    return f"{scheme}://{normalized_host}{port_suffix}"
+
+
+def effective_origin_url(current_url: str, intended_url: str) -> str:
+    """オリジン判定に使う URL を返す（純粋関数）。
+
+    current_url が未確定（about:blank 等）なら intended_url を使う。
+    """
+    normalized_current = str(current_url or "").strip()
+    if normalized_current in _BLANK_URLS:
+        return str(intended_url or "").strip()
+    return normalized_current
+
+
+def allowed_header_origins(
+    target_url: str,
+    target_urls: list[str],
+    access_urls: list[str],
+    login_url: str = "",
+    urls_without_scheme: Optional[set[str]] = None,
+) -> set[str]:
+    """認証ヘッダを送ってよいオリジン集合(scheme://host[:port])を返す（純粋関数）。"""
+    origins: set[str] = set()
+    for url in [target_url, *target_urls, *access_urls, login_url]:
+        origin = _url_origin(url)
+        if origin:
+            origins.add(origin)
+    return expand_scheme_variants(origins, urls_without_scheme or set())
+
+
+def expand_scheme_variants(
+    origins: set[str],
+    urls_without_scheme: set[str],
+) -> set[str]:
+    """scheme を自動補完した URL の http/https オリジンを追加する（純粋関数）。"""
+    expanded = set(origins)
+    for raw_url in urls_without_scheme:
+        normalized = _normalize_agent_url(raw_url)
+        parsed = urlparse(normalized)
+        if not parsed.hostname:
+            continue
+        for scheme in ("http", "https"):
+            variant = parsed._replace(scheme=scheme).geturl()
+            origin = _url_origin(variant)
+            if origin:
+                expanded.add(origin)
+    return expanded
+
+
+def headers_allowed_for_url(url: str, allowed_origins: set[str]) -> bool:
+    """現在ページ URL が許可オリジンなら True（純粋関数）。"""
+    origin = _url_origin(url)
+    return bool(origin and origin in allowed_origins)
 
 
 def _url_is_excluded(url: str, exclude_urls: list[str]) -> bool:
@@ -494,8 +571,16 @@ class AgentBrowserScanner:
         access_urls: Optional[list[str]] = None,
         exclude_urls: Optional[list[str]] = None,
         exclude_fields: Optional[list[str]] = None,
+        extra_headers: Optional[dict] = None,
     ):
         # CDP / SecurityWatchdog が scheme 無し URL を拒否するため補完する。
+        raw_target_url = str(target_url or "").strip()
+        raw_login_url = str(login_url or "").strip()
+        urls_without_scheme = {
+            raw_url
+            for raw_url in (raw_target_url, raw_login_url)
+            if raw_url and not re.match(r"^https?://", raw_url, re.IGNORECASE)
+        }
         self.target_url = _normalize_agent_url(target_url)
         self.llm_provider = llm_provider
         self.llm_model = llm_model
@@ -527,9 +612,133 @@ class AgentBrowserScanner:
         self.exclude_fields = [
             str(value).strip() for value in (exclude_fields or []) if str(value).strip()
         ]
+        self.extra_headers = dict(extra_headers or {})
+        self._header_origins = allowed_header_origins(
+            self.target_url,
+            self.target_urls,
+            self.access_urls,
+            self.login_url,
+            urls_without_scheme,
+        )
+        self._headers_applied = False
+        self._missing_header_url_api_warned = False
+        self._header_application_failed_warned = False
+        self._header_clear_failed_warned = False
         self._step_count = 0
         self._memory = AgentMemory()
         self._session_nonce = secrets.token_urlsafe(16)
+
+    def _warn_missing_header_url_api(self) -> None:
+        """現在 URL を安全に判定できない browser-use 版を一度だけ警告する。"""
+        if self._missing_header_url_api_warned:
+            return
+        self._missing_header_url_api_warned = True
+        console.print(
+            "[yellow]警告: この browser-use では現在ページのオリジンを確認できないため、"
+            "Agent 偵察は指定した認証ヘッダなしで実行されます"
+            "（requirements-agent.txt の browser-use 0.12.6 では対応）。[/yellow]"
+        )
+
+    async def _warn_header_application_failed(self) -> None:
+        """認証ヘッダの適用失敗を、秘匿値を含めず一度だけ通知する。"""
+        if self._header_application_failed_warned:
+            return
+        self._header_application_failed_warned = True
+        message = (
+            "Agent ブラウザへ認証ヘッダを適用できませんでした。"
+            "認証が必要なページを偵察できない可能性があります。"
+        )
+        if self.monitor:
+            try:
+                await self.monitor.emit_status(message, "running")
+                return
+            except Exception:
+                # monitor 障害でも Agent の探索は止めず、コンソールへフォールバックする。
+                pass
+        console.print(f"[yellow]{message}[/yellow]")
+
+    async def _warn_header_clear_failed(self) -> None:
+        """認証ヘッダの解除失敗を、秘匿値を含めず一度だけ通知する。"""
+        if self._header_clear_failed_warned:
+            return
+        self._header_clear_failed_warned = True
+        message = (
+            "Agent ブラウザの認証ヘッダを解除できませんでした。"
+            "対象外ページへ認証情報が送信される可能性があります。"
+        )
+        if self.monitor:
+            try:
+                await self.monitor.emit_status(message, "running")
+                return
+            except Exception:
+                # monitor 障害でも Agent の探索は止めず、コンソールへフォールバックする。
+                pass
+        console.print(f"[yellow]{message}[/yellow]")
+
+    async def _clear_extra_headers(self, session) -> None:
+        """直前に適用した追加ヘッダを、値を露出せず解除する。"""
+        if not self._headers_applied:
+            return
+        try:
+            await session.set_extra_headers({})
+        except Exception:
+            # ヘッダ値をログや例外へ出さず、Agent の探索を継続する。
+            await self._warn_header_clear_failed()
+        else:
+            self._headers_applied = False
+
+    async def _apply_extra_headers(self, session, intended_url: str = "") -> None:
+        """許可オリジンの Agent 対象ページにだけ追加ヘッダを適用する。"""
+        if not self.extra_headers or not hasattr(session, "set_extra_headers"):
+            return
+        if not hasattr(session, "get_current_page_url"):
+            self._warn_missing_header_url_api()
+            await self._clear_extra_headers(session)
+            return
+        try:
+            current_url = await session.get_current_page_url()
+        except Exception:
+            await self._clear_extra_headers(session)
+            await self._warn_header_application_failed()
+            return
+        origin_url = effective_origin_url(current_url, intended_url)
+        if not headers_allowed_for_url(origin_url, self._header_origins):
+            await self._clear_extra_headers(session)
+            return
+        try:
+            await session.set_extra_headers(self.extra_headers)
+        except Exception:
+            # ヘッダ値をログや例外へ出さず、Agent の探索を継続する。
+            await self._warn_header_application_failed()
+        else:
+            self._headers_applied = True
+
+    async def _prepare_extra_headers_before_run(
+        self, session, intended_url: str = ""
+    ) -> None:
+        """初期ナビゲーション前に対象ページを確立し、追加ヘッダを適用する。"""
+        if not self.extra_headers:
+            return
+        required_apis = ("start", "get_current_page", "set_extra_headers")
+        if not all(hasattr(session, name) for name in required_apis):
+            # requirements-agent.txt が固定する browser-use 0.12.6 の BrowserSession は
+            # set_extra_headers(CDP)を公開しているが、想定外の版では適用できない。
+            # その場合に「未認証のまま静かに偵察する」のを避け、値は伏せて警告する。
+            console.print(
+                "[yellow]警告: この browser-use では追加リクエストヘッダを設定できず、"
+                "Agent 偵察は指定した認証ヘッダなしで実行されます"
+                "（requirements-agent.txt の browser-use 0.12.6 では対応）。[/yellow]"
+            )
+            return
+        try:
+            # BrowserSession.start() は冪等。先に target を確立しないと
+            # set_extra_headers() が no-op になるため、この順序を維持する。
+            await session.start()
+            await session.get_current_page()
+            await self._apply_extra_headers(session, intended_url)
+        except Exception:
+            # バージョン差異や起動失敗時も秘匿値を出さず Agent を継続する。
+            await self._warn_header_application_failed()
 
     # ------------------------------------------------------------------
     # Public entry point
@@ -559,20 +768,22 @@ class AgentBrowserScanner:
         try:
             from browser_use import Agent, Browser
 
-            # browser_use ≥ 0.2 uses BrowserConfig; older versions accept direct kwargs.
-            # BrowserConfig's disable_security properly disables SecurityWatchdog,
-            # while the legacy Browser(disable_security=True) only affects Playwright flags.
-            try:
-                from browser_use import BrowserConfig
-                browser = Browser(config=BrowserConfig(
-                    headless=self.headless,
-                    disable_security=True,
-                ))
-            except (ImportError, TypeError):
-                browser = Browser(
-                    headless=self.headless,
-                    disable_security=True,
-                )
+            def _build_legacy_browser():
+                """ヘッダ無しの従来ブラウザ構築（API差異時のフォールバック兼用）。"""
+                # browser_use ≥ 0.2 uses BrowserConfig; older versions accept direct kwargs.
+                # BrowserConfig's disable_security properly disables SecurityWatchdog,
+                # while the legacy Browser(disable_security=True) only affects Playwright flags.
+                try:
+                    from browser_use import BrowserConfig
+                    return Browser(config=BrowserConfig(
+                        headless=self.headless,
+                        disable_security=True,
+                    ))
+                except (ImportError, TypeError):
+                    return Browser(
+                        headless=self.headless,
+                        disable_security=True,
+                    )
 
             # タスク文字列には SSRF/redirect ペイロードとして複数の URL が含まれる。
             # directly_open_url=True (デフォルト) は「複数 URL 検出 → スキップ」する仕様のため、
@@ -593,10 +804,9 @@ class AgentBrowserScanner:
                 .replace("{SESSION_NONCE}", self._session_nonce)
                 .replace("{SECURITY_SCOPE}", self._build_security_scope_policy())
             )
-            agent = Agent(
+            agent_kwargs = dict(
                 task=task,
                 llm=llm,
-                browser=browser,
                 override_system_message=system_prompt,
                 max_failures=5,
                 use_vision=True,
@@ -607,13 +817,54 @@ class AgentBrowserScanner:
                 register_new_step_callback=self._on_step,
             )
 
+            if self.extra_headers:
+                # browser-use 0.12.6 の実 API:
+                # BrowserSession(browser_profile=...) → Agent(browser_session=...)。
+                # 注意: BrowserProfile.headers は「ブラウザ/CDP エンドポイントへの接続時
+                # ヘッダ」であり、リモート/クラウド CDP ブラウザだと対象の Bearer が
+                # ブラウザ提供者へ送られて漏れる。よって対象の認証ヘッダはここに載せず、
+                # ページの HTTP リクエストには CDP set_extra_headers(下記)だけを使う。
+                # 値はログやタスク文字列へ出さない。構築失敗時は従来経路へ戻す。
+                try:
+                    from browser_use import BrowserSession
+                    from browser_use.browser.profile import BrowserProfile
+
+                    browser_profile = BrowserProfile(
+                        headless=self.headless,
+                        disable_security=True,
+                    )
+                    browser = BrowserSession(browser_profile=browser_profile)
+                    agent = Agent(browser_session=browser, **agent_kwargs)
+                except Exception:
+                    console.print(
+                        "[yellow]追加HTTPヘッダをブラウザへ設定できなかったため、"
+                        "従来構成で続行します。[/yellow]"
+                    )
+                    browser = _build_legacy_browser()
+                    agent = Agent(browser=browser, **agent_kwargs)
+            else:
+                # ヘッダ未指定時は完全に従来どおりの構築経路を使う。
+                browser = _build_legacy_browser()
+                agent = Agent(browser=browser, **agent_kwargs)
+
             console.print("[dim]エージェント起動中...[/dim]")
             if self.monitor:
                 await self.monitor.emit_status(
                     f"Agent Browser: {self.target_url} をスキャン中", "running"
                 )
 
-            history = await agent.run(max_steps=self.max_steps)
+            await self._prepare_extra_headers_before_run(browser, start_url)
+
+            if self.extra_headers and hasattr(browser, "set_extra_headers"):
+                async def _apply_headers_on_step(_agent):
+                    await self._apply_extra_headers(browser)
+
+                history = await agent.run(
+                    max_steps=self.max_steps,
+                    on_step_start=_apply_headers_on_step,
+                )
+            else:
+                history = await agent.run(max_steps=self.max_steps)
 
             result.steps_taken = self._step_count
             result.success = history.is_successful()

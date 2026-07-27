@@ -92,6 +92,7 @@ class AgentEngine:
     access_urls     : 訪問・認証のみ許可する URL
     exclude_urls    : security probe を禁止する URL パターン
     exclude_fields  : security probe を禁止するフィールド名
+    extra_headers   : Agent ブラウザの全リクエストへ追加する HTTP ヘッダ
     """
 
     def __init__(
@@ -115,6 +116,7 @@ class AgentEngine:
         access_urls: Optional[list[str]] = None,
         exclude_urls: Optional[list[str]] = None,
         exclude_fields: Optional[list[str]] = None,
+        extra_headers: Optional[dict] = None,
     ):
         self.url = url.rstrip("/")
         self.llm_provider = llm_provider
@@ -134,6 +136,7 @@ class AgentEngine:
         self.access_urls = _scope_list(access_urls)
         self.exclude_urls = _scope_list(exclude_urls)
         self.exclude_fields = _scope_list(exclude_fields)
+        self.extra_headers = dict(extra_headers or {})
 
         ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         self.output_dir = Path(output_dir) if output_dir else OUTPUT_BASE / f"agent_{ts}"
@@ -175,6 +178,7 @@ class AgentEngine:
             access_urls=self.access_urls,
             exclude_urls=self.exclude_urls,
             exclude_fields=self.exclude_fields,
+            extra_headers=self.extra_headers,
         )
 
         result: AgentScanResult = await scanner.run()
@@ -283,6 +287,7 @@ class AgentEngine:
             access_urls=self.access_urls,
             exclude_urls=self.exclude_urls,
             exclude_fields=self.exclude_fields,
+            extra_headers=self.extra_headers,
         )
 
         result = await scanner.run()

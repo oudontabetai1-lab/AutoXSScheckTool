@@ -3138,6 +3138,10 @@ function submitAgentScan() {
     login_url:  document.getElementById('agentLoginUrl').value.trim(),
     auth_user:  document.getElementById('agentAuthUser').value.trim(),
     auth_pass:  document.getElementById('agentAuthPass').value,
+    // 認証タブの Bearer/カスタムヘッダを Agent 偵察ブラウザへも渡す
+    // （通常/Hybrid の start と同じく authHeaderFields を spread する）。
+    ...authHeaderFields(),
+    // 検査時間帯も Agent 単独スキャンへ引き継ぐ（枠外なら待機/中断される）。
     ...timeWindowFields(),
     headless: true,
     open_report: true,

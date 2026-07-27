@@ -112,7 +112,7 @@ python3 main.py scan https://app.example.com \
 
 ### Authorization ヘッダを使う
 
-この節は確実性を重視する通常ツール層（`scan`）の認証付きスキャン補助です。Cognito などの Bearer 認証は、静的トークンをブラウザ巡回と httpx の全リクエストへ付ける `--bearer` で簡潔に指定できます。
+通常ツール層（`scan`）では、Cognito などの Bearer 認証をブラウザ巡回と httpx の全リクエストへ付ける `--bearer` で簡潔に指定できます。Agent モードと Hybrid Phase 1 の Agent 偵察も Bearer/カスタムヘッダに対応しています。
 
 ```bash
 export WSCAN_BEARER='<token>'
@@ -120,6 +120,18 @@ python3 main.py scan https://api.example.com --bearer "$WSCAN_BEARER"
 ```
 
 環境変数は `WSCAN_BEARER` に対応します（従来のヘッダ指定も利用でき、明示した Authorization を優先）。serve の保護トークン `WSCAN_AUTH_TOKEN` は control-plane 用のため `--bearer` は参照しません（管理トークンの検査対象への漏洩防止）。
+
+Agent CLI では同じトークンとカスタムヘッダを Agent ブラウザへ渡せます。
+
+```bash
+python3 main.py agent https://api.example.com \
+  --bearer "$WSCAN_BEARER" \
+  -H "X-Tenant: test"
+```
+
+`agent` は `--header-file` にも対応します。ダッシュボードの Agent/Hybrid は「認証・Cookie」で指定した Bearer/カスタムヘッダを引き継ぎ、Hybrid では Phase 1 偵察と Phase 2 通常スキャンの両方へ同じ実効ヘッダを渡します。認証ヘッダは、Agent が明示された target/access スコープのオリジンを開いている間だけ適用され、スコープ外へ遷移すると解除されます。Agent/Hybrid Phase 1 では、対応する browser-use 環境なら初期ナビゲーション前に `start` → `get_current_page` → CDP の `set_extra_headers` を best-effort で実行し、各ステップ開始時にも現在のオリジンを確認して適用または解除します。
+
+> ⚠️ **残存リスク**: CDP `Network.setExtraHTTPHeaders` はブラウザターゲットの全リクエストに適用されるため、スコープ内ページが読み込む第三者サブリソースや、1ステップ内の外部リダイレクト／遷移には、次のオリジン判定より前にヘッダが付く可能性があります。通常ツール層で Playwright の `extra_http_headers` をコンテキスト全体へ設定しているのと同じ範囲です。リクエスト単位の制御は別途対応予定のため、外部リソースを多く読み込む対象では権限を絞ったトークンの利用を推奨します。環境の API 差異やブラウザ起動・target 確立の失敗によっては、最初の landing 読み込みに間に合わない可能性が残ります。その場合も recon は後続ナビゲーションで回復を試みます。動的な `--header-refresh-cmd` は通常ツール層専用です。
 
 ```bash
 python3 main.py scan https://api.example.com \

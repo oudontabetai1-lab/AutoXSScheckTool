@@ -1396,6 +1396,29 @@ Examples:
         help="Login page URL (agent will log in before testing)",
     )
     agent.add_argument(
+        "-H", "--header", metavar="HEADER", action="append", default=[],
+        help=(
+            "Agentブラウザの全リクエストへ追加するHTTPヘッダ。"
+            "'Name: Value' 形式で複数指定可。"
+        ),
+    )
+    agent.add_argument(
+        "--header-file", metavar="FILE", default="",
+        help=(
+            "Agent用カスタムヘッダファイル。JSON/YAML/"
+            "1行1ヘッダ形式を受け付ける。"
+        ),
+    )
+    agent.add_argument(
+        # WSCAN_AUTH_TOKEN はダッシュボード保護用であり、対象へ送信しない。
+        "--bearer", metavar="TOKEN",
+        default=os.environ.get("WSCAN_BEARER", _CFG.get("bearer_token", "")),
+        help=(
+            "Agentブラウザへ Authorization: Bearer <TOKEN> を付与。"
+            "env WSCAN_BEARER。--header の明示指定を優先。"
+        ),
+    )
+    agent.add_argument(
         "--output", "-o", metavar="DIR",
         default=_CFG.get("output_dir") or None,
         help="Output directory for report and evidence (default: output/agent_<timestamp>)",
@@ -1735,6 +1758,28 @@ async def run_agent(args):
     # グローバル env は書き換えない（serve での operator 設定を壊さないため）。
     _agent_base = _effective_llm_base_url(args)
 
+    # ヘッダ値は表示・監査・タスク文字列へ入れず、AgentEngine へだけ渡す。
+    from wscan.header_manager import apply_bearer, load_header_file, parse_header_args
+    _agent_headers: dict = {}
+    _agent_header_file = getattr(args, "header_file", "") or ""
+    if _agent_header_file:
+        try:
+            _agent_headers.update(load_header_file(_agent_header_file))
+        except Exception:
+            # 例外文へヘッダ値が混入する可能性を避け、詳細は表示しない。
+            console.print("[yellow]Warning: could not load header file.[/yellow]")
+    _agent_headers = apply_bearer(
+        _agent_headers, getattr(args, "bearer", "") or ""
+    )
+    _agent_cli_headers = parse_header_args(getattr(args, "header", []) or [])
+    if any(str(key).lower() == "authorization" for key in _agent_cli_headers):
+        _agent_headers = {
+            key: value
+            for key, value in _agent_headers.items()
+            if str(key).lower() != "authorization"
+        }
+    _agent_headers.update(_agent_cli_headers)
+
     headless = not getattr(args, "no_headless", False)
 
     model_display = args.model or "(default)"
@@ -1765,6 +1810,7 @@ async def run_agent(args):
             open_report=not getattr(args, "no_open_report", False),
             monitor=monitor,
             port=args.port,
+            extra_headers=_agent_headers,
         )
         await engine.run()
         return
@@ -1804,6 +1850,7 @@ async def run_agent(args):
                 open_report=not getattr(args, "no_open_report", False),
                 monitor=monitor,
                 port=args.port,
+                extra_headers=_agent_headers,
             )
             await engine.run()
             console.print("[dim]Dashboard is still running — press Ctrl+C to stop.[/dim]")
@@ -2509,6 +2556,8 @@ async def run_serve(args):
         # WSCAN_LLM_BASE_URL を、公式 openai を使う別スキャンが消してしまうのを防ぐ）。
         # 公式 openai へ互換 URL を誤適用しないよう、openai_compatible のときだけ渡す。
         _scan_base = (cfg.get("openai_base_url", "") or "") if cfg.get("llm") == "openai_compatible" else ""
+        _hdrs = _coerce_headers(cfg.get("headers"))
+        _hdrs = _apply_bearer_to(_hdrs, cfg.get("bearer", "") or "")
 
         # ── Agent Browser mode ─────────────────────────────────────
         if cfg.get("agent_mode"):
@@ -2537,6 +2586,7 @@ async def run_serve(args):
                     open_report=bool(cfg.get("open_report", True)),
                     monitor=monitor,
                     port=port,
+                    extra_headers=_hdrs,
                 )
                 _agent_result, agent_interrupted = (
                     await _run_with_time_window_monitor(
@@ -2594,6 +2644,7 @@ async def run_serve(args):
                     open_report=False,
                     monitor=monitor,
                     port=port,
+                    extra_headers=_hdrs,
                 )
                 handoff, continue_to_phase2 = (
                     await _run_hybrid_recon_with_retries(
@@ -2634,7 +2685,11 @@ async def run_serve(args):
         await monitor.emit_status(f"Starting scan of {url}", "running")
 
         try:
-            _hdrs = _coerce_headers(cfg.get("headers"))
+            # 文字列形式(headers_text)にも対応させ、Bearer を合成してから engine へ渡す
+            # （Agent/Hybrid 経路と同じ流儀。--header の Authorization が bearer より優先）。
+            _hdrs = _apply_bearer_to(
+                _coerce_headers(cfg.get("headers")), cfg.get("bearer", "") or ""
+            )
             engine = ScanEngine(
                 url=url,
                 monitor=monitor,
@@ -2736,7 +2791,7 @@ async def run_serve(args):
                 seed_urls=seed_urls or None,
                 additional_report_findings=agent_findings or None,
                 manual_crawl_path=cfg.get("manual_crawl_file", "") or "",
-                headers=_apply_bearer_to(_hdrs, cfg.get("bearer", "") or ""),
+                headers=_hdrs,
                 header_refresh_cmd=cfg.get("header_refresh_cmd", "") or "",
                 header_refresh_interval=float(cfg.get("header_refresh_interval", 0.0) or 0.0),
             )

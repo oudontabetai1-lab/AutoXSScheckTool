@@ -114,10 +114,14 @@ python3 main.py serve --host 127.0.0.1 --port 8765
 ```bash
 python3 -m pip install -r requirements-agent.txt
 export ANTHROPIC_API_KEY="<api-key>"
-python3 main.py agent https://example.com --llm claude --headless
+export WSCAN_BEARER="<target-token>"
+python3 main.py agent https://example.com --llm claude --headless \
+  --bearer "$WSCAN_BEARER"
 ```
 
-Agent が申告する Finding は、決定論 Finding と同じ確証を意味しません。HTML レポートの「🤖 Agent発見」バッジと証拠を確認してください。
+`agent` は `--bearer`、`-H/--header`、`--header-file` を Agent ブラウザへ適用します。認証ヘッダは、Agent が明示された target/access スコープのオリジンを開いている間だけ適用され、スコープ外のページへ遷移すると解除されます。Agent/Hybrid Phase 1 では、対応する browser-use 環境なら初期ナビゲーション前に `start` → `get_current_page` → CDP の `set_extra_headers` を best-effort で実行し、各ステップ開始時にも現在のオリジンを確認して適用または解除します。
+
+> ⚠️ **残存リスク**: CDP `Network.setExtraHTTPHeaders` はそのブラウザターゲットの**全リクエスト**に適用されるため、スコープ内ページが読み込む第三者サブリソース（外部スクリプト・画像など）や、1ステップ内で発生した外部へのリダイレクト／遷移には、次のオリジン判定が走る前にヘッダが付く可能性があります。これは通常ツール層（`scan`）で Playwright の `extra_http_headers` をブラウザコンテキスト全体へ設定している既存挙動と同じ範囲です（Agent 層はこれに加えてトップレベルのオリジンゲートを持つぶん厳格）。リクエスト単位の厳密な制御（CDP `Fetch` 傍受／Playwright `route`）は別途対応予定です。**外部リソースを多数読み込む対象で高権限トークンを使う場合は、影響範囲を絞ったトークンを用意してください。**環境の API 差異やブラウザ起動・target 確立の失敗によっては、最初の landing 読み込みに間に合わない可能性が残ります。その場合も recon は後続ナビゲーションで回復を試みます。Agent が申告する Finding は、決定論 Finding と同じ確証を意味しません。HTML レポートの「🤖 Agent発見」バッジと証拠を確認してください。
 
 ### Hybrid モード — 最短手順
 
@@ -195,7 +199,7 @@ python3 main.py serve --host 127.0.0.1 --port 8765
 
 「スキャン開始」は通常モードです。`planner.interactive=true` または画面の攻撃プラン確認を有効にした場合、巡回後にフィールド、チェック、カスタムペイロードを確認してから攻撃へ進みます。
 
-認証タブの TOTP は `otpauth://` URI、Base32 シークレット、QR 画像からサーバー内でローカル生成します。Bearer トークンまたは1行1件のカスタムヘッダは、通常ツール層（`scan`）の crawl と全 HTTP リクエストへ適用されます。明示した `Authorization` ヘッダは Bearer 欄より優先されます。TOTP URI/シークレットと Bearer は設定 export やブラウザ保存へ含めません。任意コマンドを実行する `header_refresh_cmd` はサーバー配備時の RCE 面になるため、ダッシュボードには公開していません。
+認証タブの TOTP は `otpauth://` URI、Base32 シークレット、QR 画像からサーバー内でローカル生成します。Bearer トークンまたは1行1件のカスタムヘッダは、通常ツール層（`scan`）の crawl と全 HTTP リクエストに加え、Agent モードと Hybrid Phase 1 の Agent 偵察にも適用されます。明示した `Authorization` ヘッダは Bearer 欄より優先されます。TOTP URI/シークレットと Bearer は設定 export やブラウザ保存へ含めません。任意コマンドを実行する `header_refresh_cmd` はサーバー配備時の RCE 面になるため、ダッシュボードには公開していません。
 
 サーバー配備時は、TLS 証明書/秘密鍵/PFX/CA、カスタムペイロード、手動巡回 JSON、TOTP QR をブラウザからアップロードできます。保存先は `output/uploads/`、上限は1ファイル 8MBです。拡張子は用途別に制限され、既存のサーバー側パス入力も後方互換で利用できます。出力ディレクトリと手動巡回の保存先はアップロード対象ではないため、リモート運用では空欄（自動）を推奨します。
 
@@ -369,6 +373,9 @@ python3 main.py agent URL [options]
 | `--max-steps N` | `100` | 最大操作ステップ |
 | `--headless / --no-headless` | headless | 非表示/表示ブラウザ |
 | `--auth-user`, `--auth-pass`, `--login-url` | config / 空 | 事前ログイン |
+| `--bearer TOKEN` | `WSCAN_BEARER` / config / 空 | Agent ブラウザへ Bearer 認証を付与 |
+| `-H, --header "Name: Value"` | `[]` | Agent ブラウザへカスタムヘッダを追加。複数指定可 |
+| `--header-file FILE` | 空 | JSON/YAML/1行1ヘッダ形式 |
 | `-o, --output DIR` | `output/agent_<timestamp>/` | 出力先 |
 | `--port PORT` | `8765` | モニターポート |
 | `--no-monitor`, `--no-open-report` | 無効 | モニター/自動表示を無効化 |
@@ -807,7 +814,7 @@ python3 main.py scan https://api.example.com --bearer "$WSCAN_BEARER"
 
 > ⚠️ serve の保護トークン `WSCAN_AUTH_TOKEN` は**ダッシュボード/API を守る control-plane 用**で、スキャン対象へ送る Bearer とは別物です。`--bearer` はこれを参照しません（管理トークンが検査対象へ漏れるのを防ぐため）。対象用トークンは必ず `WSCAN_BEARER` か `--bearer` で渡してください。
 
-> ℹ️ **既知の制約（Hybrid/Agent モード）**: 通常ツール層（`scan`）の crawl・攻撃は Bearer/カスタムヘッダを全リクエストへ付与しますが、**Agent 偵察（`agent` / `scan --hybrid` の Phase 1）は現状 Bearer/カスタムヘッダを未サポート**です（Cookie/フォームログインは可）。Bearer のみで認証する対象を Hybrid で回すと、Phase 1 の URL 発見が未認証範囲に限られ、認証後ページの発見漏れが起き得ます（Phase 2 の決定論スキャン自体はヘッダを honor します）。Agent ブラウザ（browser-use）へのヘッダ配線は別途対応予定です。
+> ℹ️ **Hybrid/Agent モードの Bearer/カスタムヘッダ**: 対応済みです。CLI の `agent` は `--bearer`、`-H/--header`、`--header-file` を Agent ブラウザへ渡し、ダッシュボードの Agent と Hybrid Phase 1 は「認証・Cookie」の Bearer/カスタムヘッダを引き継ぎます。Hybrid Phase 2 も同じ実効ヘッダを通常スキャンへ適用します。明示した `Authorization` は Bearer 欄より優先されます。動的な `--header-refresh-cmd` は通常ツール層専用です。
 
 ### スコープ
 
