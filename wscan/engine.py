@@ -604,7 +604,11 @@ class ScanEngine:
         (self.output_dir / "screenshots").mkdir(exist_ok=True)
         # リクエスト/ペイロードの監査ログ。送信した全 HTTP リクエスト
         # (http_requests.jsonl) と投入ペイロード (payloads.jsonl) を保存する。
-        from .request_logger import RequestLogger, register_sensitive_headers
+        from .request_logger import (
+            RequestLogger,
+            clear_sensitive_headers,
+            register_sensitive_headers,
+        )
         self.request_logger = RequestLogger(self.output_dir)
         if self.monitor is not None:
             self.monitor.request_logger = self.request_logger
@@ -648,6 +652,10 @@ class ScanEngine:
             refresh_cmd=header_refresh_cmd or "",
             refresh_interval=float(header_refresh_interval or 0.0),
         )
+        # Runtime redaction names are process-global, so reset them at each scan
+        # boundary. serve runs only one scan at a time; concurrent scans would
+        # require context-local redaction state instead of this simple reset.
+        clear_sensitive_headers()
         register_sensitive_headers(self.header_manager.current().keys())
         # MFA（2FA）ソルバ: ネイティブ TOTP または外部 MCP からコードを取得。
         # 種別/欄は env（WSCAN_MFA_*）が既定。UI/CLI/config が明示的に値を渡した

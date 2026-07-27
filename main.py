@@ -939,12 +939,12 @@ Examples:
     # --mfa-* と同様に _CFG を参照する）。otpauth URI 指定時は URI の値が優先。
     scan.add_argument(
         "--mfa-totp-digits", metavar="N", type=int,
-        default=int(_CFG.get("mfa_totp_digits", 0) or 0),
+        default=_safe_int(_CFG.get("mfa_totp_digits", 0), 0),
         help="TOTP桁数（既定6, otpauth URI指定時はURI優先）。",
     )
     scan.add_argument(
         "--mfa-totp-period", metavar="SEC", type=int,
-        default=int(_CFG.get("mfa_totp_period", 0) or 0),
+        default=_safe_int(_CFG.get("mfa_totp_period", 0), 0),
         help="TOTP周期秒（既定30, URI優先）。",
     )
     scan.add_argument(
