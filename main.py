@@ -25,6 +25,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 # Config file loader (config/wscan.yaml)
 # ──────────────────────────────────────────────────────────────────
 _CONFIG_PATH = Path(__file__).parent / "config" / "wscan.yaml"
+HYBRID_RECON_MAX_RETRIES = 2
 
 
 def _load_config(path: Path = _CONFIG_PATH) -> dict:
@@ -490,13 +491,15 @@ async def _run_with_time_window_monitor(
     forbidden_hours=None,
     *,
     phase_label: str,
+    terminal_on_interrupt: bool = False,
     now_fn=None,
     sleep_fn=None,
 ):
     """Agent 系処理を実行し、許可時間外へ変わったら task cancel で停止する。
 
     戻り値は ``(result, interrupted)``。時間帯未設定時は監視タスクを作らず、
-    従来どおり operation をそのまま実行する。
+    従来どおり operation をそのまま実行する。単独スキャンなど中断がスキャン
+    自体の終了を意味する呼び出し元は ``terminal_on_interrupt=True`` を指定する。
     """
     if not allowed_hours and not forbidden_hours:
         return await operation(), False
@@ -527,9 +530,19 @@ async def _run_with_time_window_monitor(
 
         operation_task.cancel()
         await asyncio.gather(operation_task, return_exceptions=True)
+        if terminal_on_interrupt:
+            message = (
+                f"検査時間帯を外れたため {phase_label} を中断しました。"
+            )
+            state = "done"
+        else:
+            message = (
+                f"検査可能時間外へ移行したため {phase_label} を停止しました。"
+            )
+            state = "paused"
         await monitor.emit_status(
-            f"検査可能時間外へ移行したため {phase_label} を停止しました。",
-            "paused",
+            message,
+            state,
         )
         return None, True
     finally:
@@ -539,6 +552,77 @@ async def _run_with_time_window_monitor(
         await asyncio.gather(
             operation_task, watcher_task, return_exceptions=True
         )
+
+
+async def _run_hybrid_recon_with_retries(
+    operation,
+    monitor,
+    allowed_hours=None,
+    forbidden_hours=None,
+    *,
+    now_fn=None,
+    sleep_fn=None,
+    max_retries=None,
+):
+    """時間帯中断された Hybrid 偵察を、次の許可枠で上限付き再実行する。
+
+    戻り値は ``(handoff, continue_to_phase2)``。再試行上限に達した場合は
+    ``(None, True)`` として seed 無しの Phase 2 へフォールバックする。
+    ゲート待機中に abort された場合だけ ``continue_to_phase2`` は ``False``。
+    """
+    if max_retries is None:
+        max_retries = HYBRID_RECON_MAX_RETRIES
+
+    handoff, interrupted = await _run_with_time_window_monitor(
+        operation,
+        monitor,
+        allowed_hours,
+        forbidden_hours,
+        phase_label="ハイブリッド Phase 1",
+        now_fn=now_fn,
+        sleep_fn=sleep_fn,
+    )
+    retries = 0
+
+    while interrupted and retries < max_retries:
+        retries += 1
+        await monitor.emit_status(
+            "ハイブリッド Phase 1 が時間帯終了で中断されました。"
+            f"次の許可枠で再試行します ({retries}/{max_retries})。",
+            "paused",
+        )
+        if not await _wait_for_hybrid_recon_window(
+            monitor,
+            allowed_hours,
+            forbidden_hours,
+            now_fn=now_fn,
+            sleep_fn=sleep_fn,
+        ):
+            return None, False
+        await monitor.emit_status(
+            f"ハイブリッド Phase 1: 再試行 {retries}/{max_retries} を開始します。",
+            "running",
+        )
+        handoff, interrupted = await _run_with_time_window_monitor(
+            operation,
+            monitor,
+            allowed_hours,
+            forbidden_hours,
+            phase_label="ハイブリッド Phase 1",
+            now_fn=now_fn,
+            sleep_fn=sleep_fn,
+        )
+
+    if interrupted:
+        await monitor.emit_status(
+            "ハイブリッド Phase 1 は時間帯終了による再試行上限"
+            f" ({max_retries} 回) に達しました。"
+            "URL シードなしで Phase 2 を続行します。",
+            "warning",
+        )
+        return None, True
+
+    return handoff, True
 
 
 def _effective_totp_sources(args) -> tuple[str, str, str]:
@@ -940,12 +1024,12 @@ Examples:
     # --mfa-* と同様に _CFG を参照する）。otpauth URI 指定時は URI の値が優先。
     scan.add_argument(
         "--mfa-totp-digits", metavar="N", type=int,
-        default=int(_CFG.get("mfa_totp_digits", 0) or 0),
+        default=_safe_int(_CFG.get("mfa_totp_digits", 0), 0),
         help="TOTP桁数（既定6, otpauth URI指定時はURI優先）。",
     )
     scan.add_argument(
         "--mfa-totp-period", metavar="SEC", type=int,
-        default=int(_CFG.get("mfa_totp_period", 0) or 0),
+        default=_safe_int(_CFG.get("mfa_totp_period", 0), 0),
         help="TOTP周期秒（既定30, URI優先）。",
     )
     scan.add_argument(
@@ -2514,6 +2598,7 @@ async def run_serve(args):
                         cfg.get("allowed_hours") or None,
                         cfg.get("forbidden_hours") or None,
                         phase_label="Agent Browser スキャン",
+                        terminal_on_interrupt=True,
                     )
                 )
                 if agent_interrupted:
@@ -2564,14 +2649,17 @@ async def run_serve(args):
                     port=port,
                     extra_headers=_hdrs,
                 )
-                handoff, recon_interrupted = await _run_with_time_window_monitor(
-                    recon_engine.run_recon,
-                    monitor,
-                    cfg.get("allowed_hours") or None,
-                    cfg.get("forbidden_hours") or None,
-                    phase_label="ハイブリッド Phase 1",
+                handoff, continue_to_phase2 = (
+                    await _run_hybrid_recon_with_retries(
+                        recon_engine.run_recon,
+                        monitor,
+                        cfg.get("allowed_hours") or None,
+                        cfg.get("forbidden_hours") or None,
+                    )
                 )
-                if not recon_interrupted:
+                if not continue_to_phase2:
+                    return
+                if handoff is not None:
                     seed_urls = handoff.discovered_urls
                     agent_findings = handoff.findings
             except Exception as exc:

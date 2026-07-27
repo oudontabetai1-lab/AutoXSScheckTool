@@ -140,11 +140,18 @@ class TotpConfigDefaultsTests(unittest.TestCase):
 
     def test_config_totp_params_become_cli_defaults(self):
         args = self._parse_args(
-            {"mfa_totp_digits": 8, "mfa_totp_period": 45, "mfa_totp_algorithm": "SHA256"}
+            {"mfa_totp_digits": "8", "mfa_totp_period": "45", "mfa_totp_algorithm": "SHA256"}
         )
         self.assertEqual(args.mfa_totp_digits, 8)
         self.assertEqual(args.mfa_totp_period, 45)
         self.assertEqual(args.mfa_totp_algorithm, "SHA256")
+
+    def test_invalid_config_totp_params_fall_back_without_breaking_parse_args(self):
+        args = self._parse_args(
+            {"mfa_totp_digits": "6x", "mfa_totp_period": "3O"}
+        )
+        self.assertEqual(args.mfa_totp_digits, 0)
+        self.assertEqual(args.mfa_totp_period, 0)
 
     def test_absent_config_keeps_zero_empty_defaults(self):
         # 未設定なら 0/空（=ScanEngine が override を送らず内部既定 6/30/SHA1）。

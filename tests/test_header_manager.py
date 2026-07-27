@@ -122,6 +122,24 @@ class EngineIntegrationTests(unittest.TestCase):
             {"x-company-auth": "<redacted>"},
         )
 
+    def test_engine_does_not_carry_redaction_names_across_scans(self):
+        from wscan.engine import ScanEngine
+
+        ScanEngine(
+            url="http://first.example.test",
+            headers={"Content-Type": "application/private"},
+        )
+        self.assertEqual(
+            _redact_headers({"Content-Type": "application/private"}),
+            {"Content-Type": "<redacted>"},
+        )
+
+        ScanEngine(url="http://second.example.test")
+        self.assertEqual(
+            _redact_headers({"Content-Type": "text/html"}),
+            {"Content-Type": "text/html"},
+        )
+
     def test_engine_registers_header_name_added_by_refresh(self):
         from wscan.engine import ScanEngine
 
