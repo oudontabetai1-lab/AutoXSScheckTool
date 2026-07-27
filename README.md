@@ -123,6 +123,8 @@ python3 main.py agent https://example.com --llm claude --headless \
 
 通常ツール層で認証ヘッダをオリジン単位にスコープ制御する場合は、既定で CDP `Fetch` のリクエスト段階を傍受します。応答本文はバッファリングしないため、SSE（`text/event-stream`）などのストリーミング応答を維持したまま、許可オリジンにだけヘッダを付与します。Service Worker 経由の通信を確実に傍受できないため、スコープ制御時は Service Worker を無効化します。
 
+通常ツール層（`scan`）の popup は、既定では Playwright の `context.on("page")` で best-effort に傍受します。この安全な既定ではローカル DevTools ポートを開かず、popup の初回リクエストには Bearer/カスタム認証ヘッダが付きません（フェイルクローズ）。page へ傍受を設定した後の2本目以降のリクエストには、許可オリジンの場合だけヘッダが付きます。初回リクエストにも必要な場合だけ `--popup-header-intercept`、`WSCAN_POPUP_HEADER_INTERCEPT=1`（または `true`）、あるいは `browser.popup_header_intercept: true` で明示的に有効化できます。有効化すると Chromium 終了まで無認証の DevTools ポートが loopback に開き、同一ホストの別プロセスから Cookie・セッションを含むブラウザ全体を操作され得るため、共有ホストやサーバ運用では推奨しません。
+
 > ⚠️ **WebSocket 認証の制約**: 認証ヘッダのスコープ制御が有効な間、CDP `Fetch` とフォールバック先の Playwright `context.route()` は WebSocket のアップグレード要求へ認証ヘッダを付与しないため、WebSocket ハンドシェイクには Bearer/カスタム認証ヘッダが付きません。`route_web_socket()` でもハンドシェイクヘッダは変更できません。WS 認証が必要な対象や `websocket` スキャナを使う場合は、`config/wscan.yaml` の `browser.header_scope_enforce: false` または環境変数 `WSCAN_HEADER_SCOPE_ENFORCE=0` を指定してください。これは従来のコンテキスト全体適用へ戻す逃げ道であり、第三者サブリソースにも認証ヘッダが送信されるため、対象専用かつ最小権限のトークンを使用してください。既定値は `true` で、通常のスコープ制御は変わりません。
 
 > ⚠️ **残存リスク**: Agent 層は対応する browser-use / cdp_use では新 target を停止状態で検知し、`Fetch.enable` 後に再開します。イベント購読 API が利用できない場合は各ステップ開始時の未設定 target 検出を継続しますが、新 target の初回リクエストには間に合わず、追加認証ヘッダなしで送信される可能性があります（フェイルクローズ）。初期 target で `Fetch.enable` 自体ができない場合は、探索を停止せず従来の CDP `Network.setExtraHTTPHeaders` 方式へフォールバックします。この方式ではブラウザターゲットの全リクエストにヘッダが適用されるため、第三者サブリソースや1ステップ内の外部リダイレクト／遷移へ送信される可能性が残ります。通常ツール層（`scan`）は CDP `Fetch` と httpx の直接送信先 URL の双方でオリジンを判定します。Service Worker 経由やクロスオリジン iframe（OOPIF）など CDP session の傍受対象外になる経路には認証ヘッダを付与しません（フェイルクローズ）。CDP を利用できない環境では従来の Playwright `route.fetch()` / `route.fulfill()` 方式へ切り替えるため、SSE など終端しないストリーミング応答が途中で切れる可能性があります。さらに route 登録にも失敗した場合だけコンテキスト全体適用へフォールバックします。ただし、既存検査との互換性のため `follow_redirects=True` を使う一部の httpx リクエストは自動追尾を維持しており、許可オリジンへ付けたカスタム認証ヘッダが外部のリダイレクト先へ引き継がれる可能性が残ります。**フォールバック環境、外部リダイレクト、外部リソースを多数含む対象で高権限トークンを使う場合は、影響範囲を絞ったトークンを用意してください。**Agent が申告する Finding は、決定論 Finding と同じ確証を意味しません。HTML レポートの「🤖 Agent発見」バッジと証拠を確認してください。
@@ -494,6 +496,7 @@ python3 main.py import-payloads [options]
 | `browser.tls_ca_cert` | str | `""` | `--tls-ca-cert` / 基本設定 |
 | `browser.tls_verify` | bool | `false` | `--tls-verify` / 基本設定 |
 | `browser.header_scope_enforce` | bool | `true` | `WSCAN_HEADER_SCOPE_ENFORCE=0` で無効化 |
+| `browser.popup_header_intercept` | bool | `false` | `--popup-header-intercept` / `WSCAN_POPUP_HEADER_INTERCEPT=1` |
 
 ### `llm`
 

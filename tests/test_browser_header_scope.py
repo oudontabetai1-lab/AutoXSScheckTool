@@ -1,5 +1,6 @@
 """通常スキャンのリクエスト単位ヘッダ付与と共有オリジン判定のテスト。"""
 import os
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -765,6 +766,94 @@ class BrowserHeaderModeTests(unittest.IsolatedAsyncioTestCase):
         context.set_extra_http_headers.assert_not_awaited()
         self.assertEqual(browser._header_intercept_mode, "cdp")
         self.assertFalse(browser._header_route_active)
+        launch_args = browser._playwright.chromium.launch.await_args.kwargs["args"]
+        self.assertFalse(
+            any(arg.startswith("--remote-debugging-port=") for arg in launch_args)
+        )
+        self.assertNotIn(
+            "--remote-debugging-address=127.0.0.1",
+            launch_args,
+        )
+        self.assertIsNone(browser._header_debug_port)
+        self.assertFalse(browser._header_auto_attach_active)
+
+    async def test_popup_opt_in_adds_loopback_devtools_args_and_warns_once(self):
+        starter, _fake_browser, _context, _cdp = self._playwright_fakes()
+        browser = BrowserManager(
+            extra_headers={"Authorization": "Bearer secret"},
+            header_scope_origins={"https://app.example"},
+            popup_header_intercept=True,
+        )
+        browser.monitor = SimpleNamespace(emit_status=AsyncMock())
+
+        with (
+            patch("wscan.browser.async_playwright", return_value=starter),
+            patch.object(
+                browser,
+                "_activate_header_target_auto_attach",
+                AsyncMock(return_value=True),
+            ),
+        ):
+            await browser.init()
+            await browser._warn_popup_header_intercept()
+
+        launch_args = browser._playwright.chromium.launch.await_args.kwargs["args"]
+        self.assertIn(
+            "--remote-debugging-address=127.0.0.1",
+            launch_args,
+        )
+        debug_args = [
+            arg
+            for arg in launch_args
+            if arg.startswith("--remote-debugging-port=")
+        ]
+        self.assertEqual(len(debug_args), 1)
+        self.assertTrue(debug_args[0].removeprefix(
+            "--remote-debugging-port="
+        ).isdigit())
+        browser.monitor.emit_status.assert_awaited_once_with(
+            "popup 傍受のためローカル DevTools ポートを開きます。"
+            "同一ホストの他プロセスからブラウザを操作され得るため、"
+            "共有ホストでは使用しないでください",
+            "running",
+        )
+        notice = browser.monitor.emit_status.await_args.args[0]
+        self.assertNotIn("Authorization", notice)
+        self.assertNotIn("secret", notice)
+
+    async def test_popup_opt_in_port_allocation_failure_keeps_page_fallback(self):
+        starter, _fake_browser, context, _cdp = self._playwright_fakes()
+        browser = BrowserManager(
+            extra_headers={"Authorization": "Bearer secret"},
+            header_scope_origins={"https://app.example"},
+            popup_header_intercept=True,
+        )
+        browser.monitor = SimpleNamespace(emit_status=AsyncMock())
+
+        with (
+            patch("wscan.browser.async_playwright", return_value=starter),
+            patch(
+                "wscan.browser.socket.socket",
+                side_effect=OSError("port unavailable"),
+            ),
+        ):
+            await browser.init()
+
+        launch_args = browser._playwright.chromium.launch.await_args.kwargs["args"]
+        self.assertNotIn(
+            "--remote-debugging-address=127.0.0.1",
+            launch_args,
+        )
+        self.assertFalse(
+            any(arg.startswith("--remote-debugging-port=") for arg in launch_args)
+        )
+        self.assertIsNone(browser._header_debug_port)
+        self.assertFalse(browser._header_auto_attach_active)
+        context.on.assert_called_once_with(
+            "page",
+            browser._on_header_context_page,
+        )
+        browser.monitor.emit_status.assert_not_awaited()
 
     async def test_disabled_scope_uses_context_wide_headers_and_warns_once(self):
         starter, fake_browser, context, _cdp = self._playwright_fakes()
@@ -1006,6 +1095,43 @@ class HeaderScopeSharedHelperTests(unittest.TestCase):
             engine._header_scope_origins,
             engine._browser.header_scope_origins,
         )
+        self.assertFalse(engine.popup_header_intercept)
+        self.assertFalse(engine._browser.popup_header_intercept)
+
+    def test_engine_env_enables_popup_header_intercept_when_unspecified(self):
+        from wscan.engine import ScanEngine
+
+        for env_value in ("1", "true"):
+            with self.subTest(env_value=env_value):
+                with tempfile.TemporaryDirectory() as output_dir:
+                    with patch.dict(
+                        os.environ,
+                        {"WSCAN_POPUP_HEADER_INTERCEPT": env_value},
+                    ):
+                        engine = ScanEngine(
+                            url="https://app.example/start",
+                            output_dir=output_dir,
+                        )
+
+                self.assertTrue(engine.popup_header_intercept)
+                self.assertTrue(engine._browser.popup_header_intercept)
+
+    def test_explicit_popup_header_setting_overrides_engine_env(self):
+        from wscan.engine import ScanEngine
+
+        with tempfile.TemporaryDirectory() as output_dir:
+            with patch.dict(
+                os.environ,
+                {"WSCAN_POPUP_HEADER_INTERCEPT": "true"},
+            ):
+                engine = ScanEngine(
+                    url="https://app.example/start",
+                    popup_header_intercept=False,
+                    output_dir=output_dir,
+                )
+
+        self.assertFalse(engine.popup_header_intercept)
+        self.assertFalse(engine._browser.popup_header_intercept)
 
     def test_engine_env_disables_header_scope(self):
         from wscan.engine import ScanEngine
@@ -1038,6 +1164,75 @@ class HeaderScopeSharedHelperTests(unittest.TestCase):
             config = _load_config(config_path)
 
         self.assertFalse(config["header_scope_enforce"])
+
+    def test_config_can_enable_popup_header_intercept(self):
+        from main import _load_config
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "wscan.yaml"
+            with open(config_path, "w", encoding="utf-8") as config_file:
+                config_file.write(
+                    "browser:\n"
+                    "  popup_header_intercept: true\n"
+                )
+            config = _load_config(config_path)
+
+        self.assertTrue(config["popup_header_intercept"])
+
+
+class PopupHeaderInterceptCliTests(unittest.TestCase):
+    def _parse(self, *, config_value=False, env_value=None, cli=False):
+        import main
+
+        argv = ["main.py", "scan", "https://app.example"]
+        if cli:
+            argv.append("--popup-header-intercept")
+        with patch.object(
+            main,
+            "_CFG",
+            {"popup_header_intercept": config_value},
+        ):
+            with patch.dict(os.environ, {}, clear=False):
+                os.environ.pop("WSCAN_POPUP_HEADER_INTERCEPT", None)
+                if env_value is not None:
+                    os.environ["WSCAN_POPUP_HEADER_INTERCEPT"] = env_value
+                with patch.object(sys, "argv", argv):
+                    return main.parse_args()
+
+    def test_default_is_off(self):
+        self.assertFalse(self._parse().popup_header_intercept)
+
+    def test_cli_can_opt_in(self):
+        self.assertTrue(self._parse(cli=True).popup_header_intercept)
+
+    def test_env_can_opt_in(self):
+        for env_value in ("1", "true"):
+            with self.subTest(env_value=env_value):
+                self.assertTrue(
+                    self._parse(env_value=env_value).popup_header_intercept
+                )
+
+    def test_config_can_opt_in(self):
+        self.assertTrue(
+            self._parse(config_value=True).popup_header_intercept
+        )
+
+    def test_env_false_overrides_config_true(self):
+        self.assertFalse(
+            self._parse(
+                config_value=True,
+                env_value="false",
+            ).popup_header_intercept
+        )
+
+    def test_cli_true_overrides_env_false(self):
+        self.assertTrue(
+            self._parse(
+                config_value=True,
+                env_value="false",
+                cli=True,
+            ).popup_header_intercept
+        )
 
 
 class EngineDirectHeaderScopeTests(unittest.TestCase):

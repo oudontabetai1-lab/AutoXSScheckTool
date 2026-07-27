@@ -293,6 +293,7 @@ class BrowserManager:
         target_url: str = "",
         header_scope_origins: Optional[set] = None,
         header_scope_enforce: bool = True,
+        popup_header_intercept: bool = False,
         request_logger=None,
         mfa_solver=None,
     ):
@@ -313,6 +314,7 @@ class BrowserManager:
         # context-wide behavior is preserved.
         self.extra_headers: dict[str, str] = dict(extra_headers or {})
         self.header_scope_enforce = bool(header_scope_enforce)
+        self.popup_header_intercept = bool(popup_header_intercept)
         self.header_scope_origins = (
             set(header_scope_origins or ())
             if self.header_scope_enforce
@@ -324,6 +326,7 @@ class BrowserManager:
         self._header_route_fallback_warned: bool = False
         self._header_request_fallback_warned: bool = False
         self._header_scope_disabled_warned: bool = False
+        self._popup_header_intercept_warned: bool = False
         self._context_wide_headers_active: bool = False
         self._service_worker_block_fallback_warned: bool = False
         self._header_attached_page_ids: set[int] = set()
@@ -360,7 +363,7 @@ class BrowserManager:
         self._playwright = await async_playwright().start()
         use_scoped_headers = bool(self.extra_headers and self.header_scope_origins)
         launch_args = ["--disable-web-security", "--disable-features=IsolateOrigins"]
-        if use_scoped_headers:
+        if use_scoped_headers and self.popup_header_intercept:
             # Playwright の CDPSession.send() は flatten された子 session_id を
             # 指定できない。loopback の一時 endpoint から browser CDP へ接続し、
             # popup target を停止中の同一 session で設定・再開できるようにする。
@@ -368,6 +371,7 @@ class BrowserManager:
                 with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
                     probe.bind(("127.0.0.1", 0))
                     self._header_debug_port = probe.getsockname()[1]
+                await self._warn_popup_header_intercept()
                 launch_args.extend([
                     "--remote-debugging-address=127.0.0.1",
                     f"--remote-debugging-port={self._header_debug_port}",
@@ -485,6 +489,17 @@ class BrowserManager:
             "認証ヘッダのスコープ制御が無効です。"
             "コンテキスト全体へ適用するため、第三者サブリソースにも"
             "認証ヘッダが送信されます"
+        )
+
+    async def _warn_popup_header_intercept(self) -> None:
+        """DevTools ポートを開く明示 opt-in を、値なしで一度だけ通知する。"""
+        if self._popup_header_intercept_warned:
+            return
+        self._popup_header_intercept_warned = True
+        await self._emit_header_notice(
+            "popup 傍受のためローカル DevTools ポートを開きます。"
+            "同一ホストの他プロセスからブラウザを操作され得るため、"
+            "共有ホストでは使用しないでください"
         )
 
     async def _warn_service_worker_block_fallback(self) -> None:

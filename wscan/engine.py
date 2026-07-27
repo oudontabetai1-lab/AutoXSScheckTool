@@ -60,6 +60,21 @@ def _coerce_header_scope_enforce(value, default: bool = True) -> bool:
         return True
     return default
 
+
+def _coerce_popup_header_intercept(value, default: bool = False) -> bool:
+    """DevTools ポートを開く明示 opt-in 値だけを bool 化する。"""
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    normalized = str(value).strip().lower()
+    if normalized in {"1", "true"}:
+        return True
+    if normalized in {"0", "false"}:
+        return False
+    return default
+
+
 # 検査名と一致／前置しない別 check_type を出すスキャナのエイリアス。
 # resume 時の Finding 絞り込み（_check_type_in_scope）で使う。
 # 例: cache_poisoning スキャナは cache_deception も出す。
@@ -439,6 +454,7 @@ class ScanEngine:
         header_refresh_cmd: str = "",
         header_refresh_interval: float = 0.0,
         header_scope_enforce: bool = True,
+        popup_header_intercept: Optional[bool] = None,
         tls_client_cert: str = "",
         tls_client_key: str = "",
         tls_client_pfx: str = "",
@@ -729,6 +745,18 @@ class ScanEngine:
             env_header_scope,
             default=configured_header_scope,
         )
+        if popup_header_intercept is None:
+            self.popup_header_intercept = _coerce_popup_header_intercept(
+                os.environ.get("WSCAN_POPUP_HEADER_INTERCEPT"),
+                default=False,
+            )
+        else:
+            # main.py 側で CLI > env > config を解決済み。明示値を env で
+            # 上書きせず、そのまま BrowserManager へ渡す。
+            self.popup_header_intercept = _coerce_popup_header_intercept(
+                popup_header_intercept,
+                default=False,
+            )
         self._header_scope_origins = allowed_header_origins(
             self.target_url,
             self.target_urls,
@@ -747,6 +775,7 @@ class ScanEngine:
             target_url=self.target_url,
             header_scope_origins=self._header_scope_origins,
             header_scope_enforce=self.header_scope_enforce,
+            popup_header_intercept=self.popup_header_intercept,
             request_logger=self.request_logger,
             mfa_solver=self._mfa_solver,
         )

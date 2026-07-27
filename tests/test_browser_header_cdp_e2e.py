@@ -171,6 +171,61 @@ class BrowserHeaderCDPEndToEndTests(unittest.IsolatedAsyncioTestCase):
             server.server_close()
             thread.join(timeout=5)
 
+    async def asyncSetUp(self):
+        self.scoped_records.clear()
+        self.external_records.clear()
+
+    async def test_default_popup_intercept_attaches_after_first_request(self):
+        browser = BrowserManager(
+            headless=True,
+            timeout=10,
+            target_url=self.scoped_origin,
+            extra_headers={"Authorization": _TEST_AUTH},
+            header_scope_origins={self.scoped_origin},
+        )
+        try:
+            await browser.init()
+            self.assertIsNone(browser._header_debug_port)
+            self.assertFalse(browser._header_auto_attach_active)
+            navigated = await browser.navigate(
+                f"{self.scoped_origin}/index.html",
+                retries=0,
+            )
+            self.assertTrue(navigated)
+
+            async with browser._context.expect_page() as popup_info:
+                await browser.page.evaluate("window.open('/popup.html')")
+            popup = await popup_info.value
+            await popup.wait_for_load_state("domcontentloaded")
+            self.assertTrue(popup.url.endswith("/popup.html"))
+
+            deadline = asyncio.get_running_loop().time() + 5
+            while (
+                id(popup) not in browser._header_attached_page_ids
+                and asyncio.get_running_loop().time() < deadline
+            ):
+                await asyncio.sleep(0.05)
+            self.assertIn(id(popup), browser._header_attached_page_ids)
+
+            await popup.evaluate(
+                "fetch('/popup-second').then(response => response.text())"
+            )
+        finally:
+            await browser.close()
+
+        popup_first = [
+            auth
+            for path, auth in self.scoped_records
+            if path.startswith("/popup.html")
+        ]
+        popup_second = [
+            auth
+            for path, auth in self.scoped_records
+            if path.startswith("/popup-second")
+        ]
+        self.assertEqual(popup_first, [None])
+        self.assertEqual(popup_second, [_TEST_AUTH])
+
     async def test_streaming_redirect_and_subresource_scope(self):
         browser = BrowserManager(
             headless=True,
@@ -178,6 +233,7 @@ class BrowserHeaderCDPEndToEndTests(unittest.IsolatedAsyncioTestCase):
             target_url=self.scoped_origin,
             extra_headers={"Authorization": _TEST_AUTH},
             header_scope_origins={self.scoped_origin},
+            popup_header_intercept=True,
         )
         try:
             await browser.init()
