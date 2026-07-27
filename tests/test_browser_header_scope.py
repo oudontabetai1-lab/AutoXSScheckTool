@@ -71,6 +71,152 @@ class _Route:
             raise RuntimeError("continue failed")
 
 
+class _CDPSession:
+    def __init__(self, *, send_failure=None):
+        self.send_failure = send_failure
+        self.handlers = {}
+        self.send_calls = []
+        self.detach_calls = 0
+
+    def on(self, event, handler):
+        self.handlers[event] = handler
+
+    async def send(self, method, params=None):
+        self.send_calls.append((method, params))
+        if self.send_failure is not None:
+            raise self.send_failure
+
+    async def detach(self):
+        self.detach_calls += 1
+
+
+class BrowserHeaderCDPTests(unittest.IsolatedAsyncioTestCase):
+    def _browser(self):
+        return BrowserManager(
+            extra_headers={
+                "Authorization": "Bearer secret",
+                "X-Tenant": 42,
+            },
+            header_scope_origins={"https://app.example"},
+        )
+
+    async def test_allowed_origin_continues_with_case_insensitive_overrides(self):
+        browser = self._browser()
+        cdp = _CDPSession()
+
+        await browser._on_fetch_request_paused(
+            cdp,
+            {
+                "requestId": "request-1",
+                "request": {
+                    "url": "https://app.example/private",
+                    "headers": {
+                        "authorization": "Bearer stale",
+                        "Accept": "application/json",
+                    },
+                },
+            },
+        )
+
+        self.assertEqual(len(cdp.send_calls), 1)
+        method, params = cdp.send_calls[0]
+        self.assertEqual(method, "Fetch.continueRequest")
+        self.assertEqual(params["requestId"], "request-1")
+        self.assertEqual(
+            params["headers"],
+            [
+                {"name": "Accept", "value": "application/json"},
+                {"name": "Authorization", "value": "Bearer secret"},
+                {"name": "X-Tenant", "value": "42"},
+            ],
+        )
+
+    async def test_disallowed_origin_continues_without_headers_parameter(self):
+        browser = self._browser()
+        cdp = _CDPSession()
+
+        await browser._on_fetch_request_paused(
+            cdp,
+            {
+                "requestId": "request-2",
+                "request": {
+                    "url": "https://third-party.example/script.js",
+                    "headers": {"Accept": "*/*"},
+                },
+            },
+        )
+
+        self.assertEqual(
+            cdp.send_calls,
+            [("Fetch.continueRequest", {"requestId": "request-2"})],
+        )
+
+    async def test_origin_check_failure_still_continues_exactly_once(self):
+        browser = self._browser()
+        cdp = _CDPSession()
+        browser.monitor = SimpleNamespace(emit_status=AsyncMock())
+
+        with patch(
+            "wscan.browser.headers_allowed_for_url",
+            side_effect=RuntimeError("origin check failed"),
+        ):
+            await browser._on_fetch_request_paused(
+                cdp,
+                {
+                    "requestId": "request-3",
+                    "request": {
+                        "url": "https://app.example/private",
+                        "headers": {},
+                    },
+                },
+            )
+
+        self.assertEqual(
+            cdp.send_calls,
+            [("Fetch.continueRequest", {"requestId": "request-3"})],
+        )
+        browser.monitor.emit_status.assert_awaited_once_with(
+            "リクエスト単位のヘッダ付与に失敗したため、"
+            "該当リクエストは認証ヘッダなしで実行しました",
+            "running",
+        )
+
+    async def test_same_page_is_attached_only_once(self):
+        browser = self._browser()
+        cdp = _CDPSession()
+        page = object()
+        browser._context = SimpleNamespace(
+            new_cdp_session=AsyncMock(return_value=cdp),
+        )
+
+        await browser._attach_header_interception(page)
+        await browser._attach_header_interception(page)
+
+        browser._context.new_cdp_session.assert_awaited_once_with(page)
+        self.assertEqual(
+            cdp.send_calls,
+            [(
+                "Fetch.enable",
+                {"patterns": [{"urlPattern": "*"}]},
+            )],
+        )
+        self.assertIn("Fetch.requestPaused", cdp.handlers)
+
+    async def test_close_disables_and_detaches_cdp_session(self):
+        browser = self._browser()
+        cdp = _CDPSession()
+        browser._header_cdp_sessions[id(object())] = cdp
+        browser._header_intercept_mode = "cdp"
+        browser._context = SimpleNamespace(close=AsyncMock())
+
+        await browser.close()
+
+        self.assertEqual(cdp.send_calls, [("Fetch.disable", None)])
+        self.assertEqual(cdp.detach_calls, 1)
+        browser._context.close.assert_awaited_once()
+        self.assertEqual(browser._header_intercept_mode, "none")
+
+
 class BrowserHeaderRouteTests(unittest.IsolatedAsyncioTestCase):
     def _browser(self):
         return BrowserManager(
@@ -240,6 +386,7 @@ class BrowserHeaderRouteTests(unittest.IsolatedAsyncioTestCase):
     async def test_header_refresh_only_replaces_route_handler_state(self):
         browser = self._browser()
         browser._header_route_active = True
+        browser._header_intercept_mode = "route"
         browser._context = SimpleNamespace(
             set_extra_http_headers=AsyncMock()
         )
@@ -252,11 +399,15 @@ class BrowserHeaderRouteTests(unittest.IsolatedAsyncioTestCase):
         )
         browser._context.set_extra_http_headers.assert_not_awaited()
 
-    async def test_header_refresh_enables_route_when_scoped_headers_appear(self):
+    async def test_header_refresh_enables_cdp_when_scoped_headers_appear(self):
         browser = BrowserManager(
             header_scope_origins={"https://app.example"},
         )
+        page = object()
+        cdp = _CDPSession()
+        browser.page = page
         browser._context = SimpleNamespace(
+            new_cdp_session=AsyncMock(return_value=cdp),
             route=AsyncMock(),
             set_extra_http_headers=AsyncMock(),
         )
@@ -265,12 +416,11 @@ class BrowserHeaderRouteTests(unittest.IsolatedAsyncioTestCase):
             {"Authorization": "Bearer fresh"}
         )
 
-        browser._context.route.assert_awaited_once_with(
-            "**/*",
-            browser._auth_header_route,
-        )
+        browser._context.new_cdp_session.assert_awaited_once_with(page)
+        browser._context.route.assert_not_awaited()
         browser._context.set_extra_http_headers.assert_not_awaited()
-        self.assertTrue(browser._header_route_active)
+        self.assertEqual(browser._header_intercept_mode, "cdp")
+        self.assertFalse(browser._header_route_active)
 
     async def test_header_refresh_unknown_scope_remains_context_wide(self):
         browser = BrowserManager()
@@ -288,12 +438,17 @@ class BrowserHeaderRouteTests(unittest.IsolatedAsyncioTestCase):
             {"Authorization": "Bearer fresh"}
         )
         self.assertFalse(browser._header_route_active)
+        self.assertEqual(browser._header_intercept_mode, "context")
 
-    async def test_header_refresh_route_failure_uses_context_wide_fallback(self):
+    async def test_header_refresh_cdp_and_route_failure_uses_context_fallback(self):
         browser = BrowserManager(
             header_scope_origins={"https://app.example"},
         )
+        browser.page = object()
         browser._context = SimpleNamespace(
+            new_cdp_session=AsyncMock(
+                side_effect=RuntimeError("cdp unavailable")
+            ),
             route=AsyncMock(side_effect=RuntimeError("route unavailable")),
             set_extra_http_headers=AsyncMock(),
         )
@@ -308,21 +463,70 @@ class BrowserHeaderRouteTests(unittest.IsolatedAsyncioTestCase):
             {"Authorization": "Bearer fresh"}
         )
         self.assertFalse(browser._header_route_active)
-        browser.monitor.emit_status.assert_awaited_once_with(
-            "リクエスト単位のヘッダ付与を有効化できず、"
-            "コンテキスト全体へ適用します"
-            "（第三者サブリソースにも送信され得ます）",
-            "running",
+        self.assertEqual(browser._header_intercept_mode, "context")
+        self.assertEqual(
+            browser.monitor.emit_status.await_args_list,
+            [
+                unittest.mock.call(
+                    "CDP による傍受を有効化できないため従来方式で継続します。"
+                    "ストリーミング応答（SSE 等）が途中で切れる可能性があります",
+                    "running",
+                ),
+                unittest.mock.call(
+                    "リクエスト単位のヘッダ付与を有効化できず、"
+                    "コンテキスト全体へ適用します"
+                    "（第三者サブリソースにも送信され得ます）",
+                    "running",
+                ),
+            ],
         )
+
+    async def test_header_refresh_does_not_overlap_unclearable_context_headers(self):
+        browser = BrowserManager(
+            header_scope_origins={"https://app.example"},
+        )
+        browser.page = object()
+        browser._header_intercept_mode = "context"
+        browser._context_wide_headers_active = True
+        browser._context = SimpleNamespace(
+            new_cdp_session=AsyncMock(),
+            route=AsyncMock(),
+            set_extra_http_headers=AsyncMock(
+                side_effect=[RuntimeError("clear failed"), None]
+            ),
+        )
+        browser.monitor = SimpleNamespace(emit_status=AsyncMock())
+
+        await browser.update_extra_headers(
+            {"Authorization": "Bearer fresh"}
+        )
+
+        browser._context.new_cdp_session.assert_not_awaited()
+        browser._context.route.assert_not_awaited()
+        self.assertEqual(
+            browser._context.set_extra_http_headers.await_args_list,
+            [
+                unittest.mock.call({}),
+                unittest.mock.call({"Authorization": "Bearer fresh"}),
+            ],
+        )
+        self.assertEqual(browser._header_intercept_mode, "context")
+        self.assertTrue(browser._context_wide_headers_active)
 
 
 class BrowserHeaderModeTests(unittest.IsolatedAsyncioTestCase):
-    def _playwright_fakes(self, *, route_error=None):
+    def _playwright_fakes(self, *, cdp_error=None, route_error=None):
         page = SimpleNamespace(
             set_default_timeout=MagicMock(),
             on=MagicMock(),
         )
+        cdp = _CDPSession()
         context = SimpleNamespace(
+            on=MagicMock(),
+            new_cdp_session=AsyncMock(
+                return_value=cdp,
+                side_effect=cdp_error,
+            ),
             route=AsyncMock(side_effect=route_error),
             set_extra_http_headers=AsyncMock(),
             new_page=AsyncMock(return_value=page),
@@ -334,10 +538,10 @@ class BrowserHeaderModeTests(unittest.IsolatedAsyncioTestCase):
             )
         )
         starter = SimpleNamespace(start=AsyncMock(return_value=playwright))
-        return starter, browser, context
+        return starter, browser, context, cdp
 
-    async def test_scoped_headers_enable_route_without_context_headers(self):
-        starter, fake_browser, context = self._playwright_fakes()
+    async def test_scoped_headers_enable_cdp_without_route_or_context_headers(self):
+        starter, fake_browser, context, cdp = self._playwright_fakes()
         browser = BrowserManager(
             extra_headers={"Authorization": "Bearer secret"},
             header_scope_origins={"https://app.example"},
@@ -349,15 +553,25 @@ class BrowserHeaderModeTests(unittest.IsolatedAsyncioTestCase):
         kwargs = fake_browser.new_context.await_args.kwargs
         self.assertNotIn("extra_http_headers", kwargs)
         self.assertEqual(kwargs["service_workers"], "block")
-        context.route.assert_awaited_once_with(
-            "**/*",
-            browser._auth_header_route,
+        context.on.assert_called_once_with(
+            "page",
+            browser._on_header_context_page,
         )
+        context.new_cdp_session.assert_awaited_once_with(browser.page)
+        self.assertEqual(
+            cdp.send_calls,
+            [(
+                "Fetch.enable",
+                {"patterns": [{"urlPattern": "*"}]},
+            )],
+        )
+        context.route.assert_not_awaited()
         context.set_extra_http_headers.assert_not_awaited()
-        self.assertTrue(browser._header_route_active)
+        self.assertEqual(browser._header_intercept_mode, "cdp")
+        self.assertFalse(browser._header_route_active)
 
     async def test_disabled_scope_uses_context_wide_headers_and_warns_once(self):
-        starter, fake_browser, context = self._playwright_fakes()
+        starter, fake_browser, context, _cdp = self._playwright_fakes()
         browser = BrowserManager(
             extra_headers={"Authorization": "Bearer secret"},
             header_scope_origins={"https://app.example"},
@@ -391,8 +605,35 @@ class BrowserHeaderModeTests(unittest.IsolatedAsyncioTestCase):
             "running",
         )
 
-    async def test_route_registration_failure_uses_context_wide_fallback(self):
-        starter, fake_browser, context = self._playwright_fakes(
+    async def test_cdp_failure_uses_route_and_warns_about_streaming(self):
+        starter, fake_browser, context, _cdp = self._playwright_fakes(
+            cdp_error=RuntimeError("cdp unavailable"),
+        )
+        browser = BrowserManager(
+            extra_headers={"Authorization": "Bearer secret"},
+            header_scope_origins={"https://app.example"},
+        )
+        browser.monitor = SimpleNamespace(emit_status=AsyncMock())
+
+        with patch("wscan.browser.async_playwright", return_value=starter):
+            await browser.init()
+
+        context.route.assert_awaited_once_with(
+            "**/*",
+            browser._auth_header_route,
+        )
+        context.set_extra_http_headers.assert_not_awaited()
+        self.assertEqual(browser._header_intercept_mode, "route")
+        self.assertTrue(browser._header_route_active)
+        browser.monitor.emit_status.assert_awaited_once_with(
+            "CDP による傍受を有効化できないため従来方式で継続します。"
+            "ストリーミング応答（SSE 等）が途中で切れる可能性があります",
+            "running",
+        )
+
+    async def test_cdp_and_route_failure_uses_context_wide_fallback(self):
+        starter, fake_browser, context, _cdp = self._playwright_fakes(
+            cdp_error=RuntimeError("cdp unavailable"),
             route_error=RuntimeError("route unavailable"),
         )
         browser = BrowserManager(
@@ -412,15 +653,26 @@ class BrowserHeaderModeTests(unittest.IsolatedAsyncioTestCase):
             {"Authorization": "Bearer secret"}
         )
         self.assertFalse(browser._header_route_active)
-        browser.monitor.emit_status.assert_awaited_once_with(
-            "リクエスト単位のヘッダ付与を有効化できず、"
-            "コンテキスト全体へ適用します"
-            "（第三者サブリソースにも送信され得ます）",
-            "running",
+        self.assertEqual(browser._header_intercept_mode, "context")
+        self.assertEqual(
+            browser.monitor.emit_status.await_args_list,
+            [
+                unittest.mock.call(
+                    "CDP による傍受を有効化できないため従来方式で継続します。"
+                    "ストリーミング応答（SSE 等）が途中で切れる可能性があります",
+                    "running",
+                ),
+                unittest.mock.call(
+                    "リクエスト単位のヘッダ付与を有効化できず、"
+                    "コンテキスト全体へ適用します"
+                    "（第三者サブリソースにも送信され得ます）",
+                    "running",
+                ),
+            ],
         )
 
     async def test_unsupported_service_worker_option_retries_without_it(self):
-        starter, fake_browser, context = self._playwright_fakes()
+        starter, fake_browser, context, _cdp = self._playwright_fakes()
         fake_browser.new_context.side_effect = [
             TypeError("unsupported service_workers option"),
             context,
@@ -438,7 +690,8 @@ class BrowserHeaderModeTests(unittest.IsolatedAsyncioTestCase):
         second_kwargs = fake_browser.new_context.await_args_list[1].kwargs
         self.assertEqual(first_kwargs["service_workers"], "block")
         self.assertNotIn("service_workers", second_kwargs)
-        context.route.assert_awaited_once()
+        context.new_cdp_session.assert_awaited_once()
+        context.route.assert_not_awaited()
         mock_console.print.assert_called_once()
         notice = mock_console.print.call_args.args[0]
         self.assertIn("Service Worker", notice)
@@ -446,7 +699,7 @@ class BrowserHeaderModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("secret", notice)
 
     async def test_unknown_scope_preserves_context_wide_behavior(self):
-        starter, fake_browser, context = self._playwright_fakes()
+        starter, fake_browser, context, _cdp = self._playwright_fakes()
         browser = BrowserManager(
             extra_headers={"Authorization": "Bearer secret"},
         )
@@ -464,9 +717,10 @@ class BrowserHeaderModeTests(unittest.IsolatedAsyncioTestCase):
         )
         context.route.assert_not_awaited()
         self.assertFalse(browser._header_route_active)
+        self.assertEqual(browser._header_intercept_mode, "context")
 
     async def test_empty_headers_do_not_enable_either_header_mode(self):
-        starter, fake_browser, context = self._playwright_fakes()
+        starter, fake_browser, context, _cdp = self._playwright_fakes()
         browser = BrowserManager(
             header_scope_origins={"https://app.example"},
         )
@@ -484,6 +738,7 @@ class BrowserHeaderModeTests(unittest.IsolatedAsyncioTestCase):
         )
         context.route.assert_not_awaited()
         self.assertFalse(browser._header_route_active)
+        self.assertEqual(browser._header_intercept_mode, "none")
 
 
 class HeaderScopeSharedHelperTests(unittest.TestCase):

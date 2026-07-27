@@ -204,12 +204,20 @@ class BrowserManager:
             if self.header_scope_enforce
             else set()
         )
+        self._header_intercept_mode: str = "none"
         self._header_route_active: bool = False
+        self._header_cdp_fallback_warned: bool = False
         self._header_route_fallback_warned: bool = False
         self._header_request_fallback_warned: bool = False
         self._header_scope_disabled_warned: bool = False
         self._context_wide_headers_active: bool = False
         self._service_worker_block_fallback_warned: bool = False
+        self._header_attached_page_ids: set[int] = set()
+        self._header_attach_tasks: dict[int, asyncio.Task] = {}
+        self._header_cdp_sessions: dict[int, Any] = {}
+        self._header_page_tasks: set[asyncio.Task] = set()
+        self._header_pause_tasks: set[asyncio.Task] = set()
+        self._header_interception_closing: bool = False
         self._playwright = None
         self._browser: Optional[Browser] = None
         self._context: Optional[BrowserContext] = None
@@ -241,49 +249,45 @@ class BrowserManager:
         ctx_kwargs.update(self.tls_config.playwright_context_options(self.target_url))
         if self.proxy:
             ctx_kwargs["proxy"] = {"server": self.proxy}
-        use_header_route = bool(self.extra_headers and self.header_scope_origins)
-        if self.extra_headers and not use_header_route:
+        use_scoped_headers = bool(self.extra_headers and self.header_scope_origins)
+        if self.extra_headers and not use_scoped_headers:
             # Keep header names case-preserving but de-dupe case-insensitive collisions
             # so Playwright doesn't reject duplicates.
             seen: dict[str, str] = {}
             for k, v in self.extra_headers.items():
                 seen[k.lower()] = v
                 ctx_kwargs.setdefault("extra_http_headers", {})[k] = str(v)
-        if use_header_route:
-            # Service Worker が処理するリクエストは context.route() で傍受できないため、
-            # リクエスト単位でスコープ制御する場合だけ無効化する。
+        if use_scoped_headers:
+            # Service Worker が処理するリクエストは CDP Fetch / context.route()
+            # のどちらでも確実に傍受できないため、スコープ制御時だけ無効化する。
             ctx_kwargs["service_workers"] = "block"
         try:
             self._context = await self._browser.new_context(**ctx_kwargs)
         except TypeError:
-            if not use_header_route or "service_workers" not in ctx_kwargs:
+            if not use_scoped_headers or "service_workers" not in ctx_kwargs:
                 raise
             # 古い Playwright は service_workers を受け付けない。この場合も scan を
-            # 中断せず、該当オプションだけ外して既存の route 方式を試す。
+            # 中断せず、該当オプションだけ外してリクエスト単位の傍受を試す。
             ctx_kwargs.pop("service_workers", None)
             await self._warn_service_worker_block_fallback()
             self._context = await self._browser.new_context(**ctx_kwargs)
         self._context_wide_headers_active = bool(
-            self.extra_headers and not use_header_route
+            self.extra_headers and not use_scoped_headers
         )
-        if use_header_route:
+        self._header_intercept_mode = (
+            "context" if self._context_wide_headers_active else "none"
+        )
+        if self.header_scope_origins:
             try:
-                await self._context.route("**/*", self._auth_header_route)
-                self._header_route_active = True
+                self._context.on("page", self._on_header_context_page)
             except Exception:
-                self._header_route_active = False
-                await self._warn_header_route_fallback()
-                try:
-                    await self._context.set_extra_http_headers(
-                        {k: str(v) for k, v in self.extra_headers.items()}
-                    )
-                except Exception:
-                    # Route registration failed, but inability to apply the
-                    # fallback must not abort the scan.
-                    pass
-                else:
-                    self._context_wide_headers_active = True
+                # main/worker page は明示 attach するため、イベント購読に失敗しても
+                # スキャンを止めない。popup はヘッダなしのフェイルクローズになる。
+                pass
         self.page = await self._context.new_page()
+        if use_scoped_headers:
+            # 最初のナビゲーションより前に Fetch.enable の完了を保証する。
+            await self._activate_scoped_header_interception(self.page)
         self.page.set_default_timeout(self.timeout)
 
         # Set up network interception
@@ -312,6 +316,16 @@ class BrowserManager:
                 # 通知障害でスキャンを中断せず、CLI へ表示して見落としを防ぐ。
                 pass
         console.print(f"[yellow]{message}[/yellow]")
+
+    async def _warn_header_cdp_fallback(self) -> None:
+        """CDP から従来 route 方式への切替を、値を含めず一度だけ通知する。"""
+        if self._header_cdp_fallback_warned:
+            return
+        self._header_cdp_fallback_warned = True
+        await self._emit_header_notice(
+            "CDP による傍受を有効化できないため従来方式で継続します。"
+            "ストリーミング応答（SSE 等）が途中で切れる可能性があります"
+        )
 
     async def _warn_header_route_fallback(self) -> None:
         """ルート登録失敗の通知を、ヘッダ値を含めず一度だけ出す。"""
@@ -354,6 +368,194 @@ class BrowserManager:
             "リクエスト単位のヘッダ付与に失敗したため、"
             "該当リクエストは認証ヘッダなしで実行しました"
         )
+
+    def _dispatch_fetch_request_paused(self, cdp, event: dict) -> None:
+        """CDP の同期イベントから、必ず解放する非同期ハンドラを起動する。"""
+        if self._header_interception_closing:
+            return
+        try:
+            task = asyncio.create_task(
+                self._on_fetch_request_paused(cdp, event)
+            )
+        except Exception:
+            return
+        self._header_pause_tasks.add(task)
+        task.add_done_callback(self._header_pause_tasks.discard)
+
+    async def _on_fetch_request_paused(self, cdp, event: dict) -> None:
+        """許可オリジンだけヘッダを上書きし、停止中リクエストを解放する。"""
+        try:
+            request_id = event["requestId"]
+        except Exception:
+            # requestId が無ければ CDP へ返せる識別子がないため、何もしない。
+            return
+
+        params = {"requestId": request_id}
+        try:
+            request = event["request"]
+            url = request["url"]
+            if headers_allowed_for_url(url, self.header_scope_origins):
+                headers = {
+                    str(name): str(value)
+                    for name, value in (request.get("headers") or {}).items()
+                }
+                for name, value in self.extra_headers.items():
+                    lowered = str(name).lower()
+                    headers = {
+                        current_name: current_value
+                        for current_name, current_value in headers.items()
+                        if current_name.lower() != lowered
+                    }
+                    headers[str(name)] = str(value)
+                params["headers"] = [
+                    {"name": name, "value": value}
+                    for name, value in headers.items()
+                ]
+        except Exception:
+            # 判定やヘッダ合成に失敗した場合も、値を付けずに必ず解放する。
+            try:
+                await self._warn_header_request_fallback()
+            except Exception:
+                pass
+            params = {"requestId": request_id}
+
+        try:
+            await cdp.send("Fetch.continueRequest", params)
+        except Exception:
+            # page/context 終了でセッションが消滅した場合はスキャンへ伝播させない。
+            pass
+
+    async def _attach_header_interception(self, page) -> None:
+        """同じ page へ二重登録せず、request stage の CDP Fetch を有効化する。"""
+        page_id = id(page)
+        if page_id in self._header_attached_page_ids:
+            return
+        existing = self._header_attach_tasks.get(page_id)
+        if existing is not None:
+            await existing
+            return
+
+        async def _attach() -> None:
+            if self._context is None:
+                raise RuntimeError("browser context is unavailable")
+            cdp = None
+            try:
+                cdp = await self._context.new_cdp_session(page)
+                cdp.on(
+                    "Fetch.requestPaused",
+                    lambda event: self._dispatch_fetch_request_paused(cdp, event),
+                )
+                # responseStage は指定しない。応答本文を待たずストリームを維持する。
+                await cdp.send(
+                    "Fetch.enable",
+                    {"patterns": [{"urlPattern": "*"}]},
+                )
+            except Exception:
+                if cdp is not None:
+                    try:
+                        await cdp.send("Fetch.disable")
+                    except Exception:
+                        pass
+                    try:
+                        await cdp.detach()
+                    except Exception:
+                        pass
+                raise
+            self._header_cdp_sessions[page_id] = cdp
+            self._header_attached_page_ids.add(page_id)
+
+        task = asyncio.create_task(_attach())
+        self._header_attach_tasks[page_id] = task
+        try:
+            await task
+        except Exception:
+            if self._header_attach_tasks.get(page_id) is task:
+                self._header_attach_tasks.pop(page_id, None)
+            self._header_attached_page_ids.discard(page_id)
+            raise
+
+    def _on_header_context_page(self, page) -> None:
+        """popup 等の追加 page へ CDP Fetch を冪等に設定する。"""
+        if (
+            self._header_intercept_mode != "cdp"
+            or self._header_interception_closing
+        ):
+            return
+        try:
+            task = asyncio.create_task(
+                self._attach_additional_header_page(page)
+            )
+        except Exception:
+            return
+        self._header_page_tasks.add(task)
+        task.add_done_callback(self._header_page_tasks.discard)
+
+    async def _attach_additional_header_page(self, page) -> None:
+        try:
+            await self._attach_header_interception(page)
+        except Exception:
+            # 一部 page の attach 失敗後に route を併用すると CDP Fetch と競合する。
+            # その page はヘッダなしで継続し、既存 session のスキャンを維持する。
+            await self._warn_header_request_fallback()
+
+    async def _activate_scoped_header_interception(self, page) -> None:
+        """CDP -> route -> context の順でスコープ付きヘッダを有効化する。"""
+        if self._context is None:
+            return
+        if self._header_intercept_mode in {"cdp", "route"}:
+            return
+        if self._header_route_active:
+            self._header_intercept_mode = "route"
+            return
+
+        if self._context_wide_headers_active:
+            try:
+                await self._context.set_extra_http_headers({})
+            except Exception:
+                # context-wide 設定を解除できないまま CDP/route を重ねると、
+                # スコープ外にもヘッダが残る。従来 mode のまま継続する。
+                self._header_intercept_mode = "context"
+                await self._warn_header_route_fallback()
+                try:
+                    await self._context.set_extra_http_headers(
+                        {k: str(v) for k, v in self.extra_headers.items()}
+                    )
+                except Exception:
+                    pass
+                return
+            self._context_wide_headers_active = False
+            self._header_intercept_mode = "none"
+
+        try:
+            await self._attach_header_interception(page)
+        except Exception:
+            await self._warn_header_cdp_fallback()
+        else:
+            self._header_intercept_mode = "cdp"
+            self._header_route_active = False
+            return
+
+        try:
+            await self._context.route("**/*", self._auth_header_route)
+        except Exception:
+            self._header_route_active = False
+            await self._warn_header_route_fallback()
+        else:
+            self._header_intercept_mode = "route"
+            self._header_route_active = True
+            return
+
+        try:
+            await self._context.set_extra_http_headers(
+                {k: str(v) for k, v in self.extra_headers.items()}
+            )
+        except Exception:
+            self._header_intercept_mode = "none"
+        else:
+            self._context_wide_headers_active = bool(self.extra_headers)
+            self._header_intercept_mode = (
+                "context" if self._context_wide_headers_active else "none"
+            )
 
     async def _auth_header_route(self, route, request):
         """許可オリジンのリクエストにだけ認証ヘッダを付けて継続する。
@@ -439,28 +641,18 @@ class BrowserManager:
         self.extra_headers = dict(headers or {})
         if self.extra_headers and not self.header_scope_enforce:
             await self._warn_header_scope_disabled()
-        if self._context is None or self._header_route_active:
+        if self._context is None:
+            return
+        if self._header_route_active:
+            self._header_intercept_mode = "route"
+            return
+        if self._header_intercept_mode in {"cdp", "route"}:
             return
         if self.extra_headers and self.header_scope_origins:
-            try:
-                # Service Worker の block はコンテキスト生成時オプションであり、
-                # 後付け route では変更できない。そのため SW 経由のリクエストは
-                # routing を通らない可能性があるが、ここでは既存挙動を変更しない。
-                await self._context.route("**/*", self._auth_header_route)
-                self._header_route_active = True
-            except Exception:
-                await self._warn_header_route_fallback()
-            else:
-                if self._context_wide_headers_active:
-                    try:
-                        await self._context.set_extra_http_headers({})
-                    except Exception:
-                        # 既存の context-wide 設定を安全に解除できない場合でも、
-                        # refresh タスク自体は中断しない。
-                        pass
-                    else:
-                        self._context_wide_headers_active = False
-                return
+            # Service Worker の block はコンテキスト生成時にしか設定できない。
+            # 遅延有効化でも CDP -> route -> context の順序は維持する。
+            await self._activate_scoped_header_interception(self.page)
+            return
         try:
             await self._context.set_extra_http_headers(self.extra_headers)
         except Exception:
@@ -469,6 +661,9 @@ class BrowserManager:
             pass
         else:
             self._context_wide_headers_active = bool(self.extra_headers)
+            self._header_intercept_mode = (
+                "context" if self._context_wide_headers_active else "none"
+            )
 
     def reset_dialog(self):
         self.dialog_fired = False
@@ -1521,6 +1716,10 @@ class BrowserManager:
         but has its own Playwright page, network capture, and dialog state.
         """
         page = await self._context.new_page()
+        if self._header_intercept_mode == "cdp":
+            # context の page イベントと競合しても attach 側の task ガードで
+            # Fetch.enable は一度だけになる。worker の初回遷移前を明示保証する。
+            await self._attach_header_interception(page)
         page.set_default_timeout(self.timeout)
         worker = WorkerBrowser(self, page)
         page.on("request", worker.network.on_request)
@@ -1759,6 +1958,26 @@ class BrowserManager:
     async def close(self):
         """Close browser and playwright."""
         try:
+            self._header_interception_closing = True
+            if self._header_page_tasks:
+                await asyncio.gather(
+                    *list(self._header_page_tasks),
+                    return_exceptions=True,
+                )
+            for cdp in list(self._header_cdp_sessions.values()):
+                try:
+                    await cdp.send("Fetch.disable")
+                except Exception:
+                    pass
+                try:
+                    await cdp.detach()
+                except Exception:
+                    pass
+            self._header_cdp_sessions.clear()
+            self._header_attached_page_ids.clear()
+            self._header_attach_tasks.clear()
+            self._header_intercept_mode = "none"
+            self._header_route_active = False
             if self._context:
                 await self._context.close()
             if self._browser:
