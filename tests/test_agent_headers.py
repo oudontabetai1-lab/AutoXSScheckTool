@@ -17,6 +17,7 @@ from wscan.llm_agent_browser import (
     AgentBrowserScanner,
     allowed_header_origins,
     effective_origin_url,
+    expand_scheme_variants,
     headers_allowed_for_url,
 )
 
@@ -236,6 +237,44 @@ class AgentHeaderOriginTests(unittest.TestCase):
         self.assertEqual(
             origins,
             {"https://api.example", "https://api.example:8443"},
+        )
+
+    def test_expand_scheme_variants_adds_http_and_https_for_omitted_scheme(self):
+        origins = expand_scheme_variants(
+            {"http://fixture.test"},
+            {"fixture.test/start"},
+        )
+
+        self.assertEqual(
+            origins,
+            {"http://fixture.test", "https://fixture.test"},
+        )
+
+    def test_explicit_http_target_does_not_expand_to_https(self):
+        scanner = AgentBrowserScanner("http://fixture.test")
+
+        self.assertEqual(scanner._header_origins, {"http://fixture.test"})
+
+    def test_omitted_scheme_with_port_preserves_port_for_both_variants(self):
+        origins = expand_scheme_variants(
+            {"http://fixture.test:8443"},
+            {"fixture.test:8443/start"},
+        )
+
+        self.assertEqual(
+            origins,
+            {
+                "http://fixture.test:8443",
+                "https://fixture.test:8443",
+            },
+        )
+
+    def test_scanner_wires_omitted_target_scheme_to_both_variants(self):
+        scanner = AgentBrowserScanner("fixture.test/start")
+
+        self.assertEqual(
+            scanner._header_origins,
+            {"http://fixture.test", "https://fixture.test"},
         )
 
     def test_headers_allowed_for_url_matches_only_allowed_origin(self):

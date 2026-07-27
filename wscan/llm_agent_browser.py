@@ -112,6 +112,7 @@ def allowed_header_origins(
     target_urls: list[str],
     access_urls: list[str],
     login_url: str = "",
+    urls_without_scheme: Optional[set[str]] = None,
 ) -> set[str]:
     """認証ヘッダを送ってよいオリジン集合(scheme://host[:port])を返す（純粋関数）。"""
     origins: set[str] = set()
@@ -119,7 +120,26 @@ def allowed_header_origins(
         origin = _url_origin(url)
         if origin:
             origins.add(origin)
-    return origins
+    return expand_scheme_variants(origins, urls_without_scheme or set())
+
+
+def expand_scheme_variants(
+    origins: set[str],
+    urls_without_scheme: set[str],
+) -> set[str]:
+    """scheme を自動補完した URL の http/https オリジンを追加する（純粋関数）。"""
+    expanded = set(origins)
+    for raw_url in urls_without_scheme:
+        normalized = _normalize_agent_url(raw_url)
+        parsed = urlparse(normalized)
+        if not parsed.hostname:
+            continue
+        for scheme in ("http", "https"):
+            variant = parsed._replace(scheme=scheme).geturl()
+            origin = _url_origin(variant)
+            if origin:
+                expanded.add(origin)
+    return expanded
 
 
 def headers_allowed_for_url(url: str, allowed_origins: set[str]) -> bool:
@@ -554,6 +574,13 @@ class AgentBrowserScanner:
         extra_headers: Optional[dict] = None,
     ):
         # CDP / SecurityWatchdog が scheme 無し URL を拒否するため補完する。
+        raw_target_url = str(target_url or "").strip()
+        raw_login_url = str(login_url or "").strip()
+        urls_without_scheme = {
+            raw_url
+            for raw_url in (raw_target_url, raw_login_url)
+            if raw_url and not re.match(r"^https?://", raw_url, re.IGNORECASE)
+        }
         self.target_url = _normalize_agent_url(target_url)
         self.llm_provider = llm_provider
         self.llm_model = llm_model
@@ -591,6 +618,7 @@ class AgentBrowserScanner:
             self.target_urls,
             self.access_urls,
             self.login_url,
+            urls_without_scheme,
         )
         self._headers_applied = False
         self._missing_header_url_api_warned = False
