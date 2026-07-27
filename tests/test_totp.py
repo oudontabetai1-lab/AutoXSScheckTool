@@ -45,6 +45,24 @@ def test_generate_totp_invalid_inputs_return_none():
     assert totp.generate_totp("GEZDGNBVGY3TQOJQ", algorithm="MD5") is None
 
 
+@pytest.mark.parametrize("digits", [1000000000, 0, -1, "abc"])
+def test_generate_totp_rejects_out_of_range_digits_immediately(digits):
+    assert totp.generate_totp("GEZDGNBVGY3TQOJQ", digits=digits, timestamp=59) is None
+
+
+@pytest.mark.parametrize("digits", [6, 8])
+def test_generate_totp_keeps_supported_digits(digits):
+    code = totp.generate_totp("GEZDGNBVGY3TQOJQ", digits=digits, timestamp=59)
+
+    assert code is not None
+    assert len(code) == digits
+
+
+@pytest.mark.parametrize("period", [0, -1, 86401, "abc"])
+def test_generate_totp_rejects_out_of_range_period(period):
+    assert totp.generate_totp("GEZDGNBVGY3TQOJQ", period=period, timestamp=59) is None
+
+
 def test_normalize_base32():
     assert totp.normalize_base32(" gezd-gnbv gy3tqojq ") == "GEZDGNBVGY3TQOJQ"
     assert totp.normalize_base32("mzxw6") == "MZXW6==="
@@ -96,6 +114,26 @@ def test_parse_otpauth_uri_unknown_algorithm_falls_back_to_sha1():
     assert parsed["algorithm"] == "SHA1"
 
 
+@pytest.mark.parametrize("digits", ["1000000000", "0", "-1", "abc"])
+def test_parse_otpauth_uri_defaults_invalid_digits(digits):
+    parsed = totp.parse_otpauth_uri(
+        "otpauth://totp/x?secret=GEZDGNBVGY3TQOJQ&digits=" + digits
+    )
+
+    assert parsed is not None
+    assert parsed["digits"] == 6
+
+
+@pytest.mark.parametrize("period", ["0", "-1", "86401", "abc"])
+def test_parse_otpauth_uri_defaults_invalid_period(period):
+    parsed = totp.parse_otpauth_uri(
+        "otpauth://totp/x?secret=GEZDGNBVGY3TQOJQ&period=" + period
+    )
+
+    assert parsed is not None
+    assert parsed["period"] == 30
+
+
 def test_resolve_totp_secret_uri_precedes_secret():
     resolved = totp.resolve_totp_secret(
         uri="otpauth://totp/x?secret=GEZDGNBVGY3TQOJQ&digits=8&period=45",
@@ -133,6 +171,32 @@ def test_resolve_totp_secret_raw_parameters():
         "period": 45,
         "algorithm": "SHA256",
     }
+
+
+def test_resolve_totp_secret_bounds_raw_parameters():
+    resolved = totp.resolve_totp_secret(
+        secret="GEZDGNBVGY3TQOJQ",
+        digits=1000000000,
+        period=1000000000,
+    )
+
+    assert resolved is not None
+    assert resolved["digits"] == 6
+    assert resolved["period"] == 30
+
+
+def test_resolve_totp_secret_bounds_raw_qr_parameters(monkeypatch):
+    monkeypatch.setattr(totp, "decode_qr_image", lambda _path: "GEZDGNBVGY3TQOJQ")
+
+    resolved = totp.resolve_totp_secret(
+        qr="code.png",
+        digits="abc",
+        period=-1,
+    )
+
+    assert resolved is not None
+    assert resolved["digits"] == 6
+    assert resolved["period"] == 30
 
 
 def test_decode_qr_image_missing_path_returns_none(tmp_path):

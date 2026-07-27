@@ -115,5 +115,118 @@ class RedactSecretsTests(unittest.TestCase):
         self.assertEqual(out["login_user_field"], "username")
 
 
+class ConfigSecretFallbackTests(unittest.TestCase):
+    def test_empty_values_fall_back_to_config_keys(self):
+        cfg = {
+            "auth_pass": "",
+            "bearer": "",
+            "mfa_totp_secret": "",
+            "headers": {},
+        }
+        defaults = {
+            "auth_pass": "config-password",
+            "bearer_token": "config-bearer",
+            "mfa_totp_secret": "config-totp",
+            "headers_text": "Authorization: config-header",
+        }
+
+        out = main.apply_config_secret_fallback(cfg, defaults)
+
+        self.assertEqual(out["auth_pass"], "config-password")
+        self.assertEqual(out["bearer"], "config-bearer")
+        self.assertEqual(out["mfa_totp_secret"], "config-totp")
+        self.assertEqual(out["headers"], "Authorization: config-header")
+
+    def test_non_empty_dashboard_values_win(self):
+        cfg = {
+            "auth_pass": "dashboard-password",
+            "bearer": "dashboard-bearer",
+            "headers": {"Authorization": "dashboard-header"},
+        }
+        defaults = {
+            "auth_pass": "config-password",
+            "bearer_token": "config-bearer",
+            "headers_text": "Authorization: config-header",
+        }
+
+        out = main.apply_config_secret_fallback(cfg, defaults)
+
+        self.assertEqual(out, cfg)
+
+    def test_missing_config_value_keeps_dashboard_value_empty(self):
+        cfg = {"auth_pass": "", "headers": ""}
+
+        out = main.apply_config_secret_fallback(cfg, {})
+
+        self.assertEqual(out["auth_pass"], "")
+        self.assertEqual(out["headers"], "")
+
+    def test_does_not_mutate_input(self):
+        cfg = {"auth_pass": "", "headers": {}}
+        original = {"auth_pass": "", "headers": {}}
+
+        out = main.apply_config_secret_fallback(
+            cfg,
+            {"auth_pass": "config-password", "headers_text": "X-Test: config"},
+        )
+
+        self.assertEqual(cfg, original)
+        self.assertIsNot(out, cfg)
+
+
+class SubmittedTotpSourceTests(unittest.TestCase):
+    def test_dashboard_secret_suppresses_config_uri(self):
+        sources = main.resolve_submitted_totp_sources(
+            {
+                "mfa_totp_uri": "",
+                "mfa_totp_secret": "submitted-secret",
+                "mfa_totp_qr": "",
+            },
+            {"mfa_totp_uri": "config-uri"},
+        )
+
+        self.assertEqual(sources, ("", "submitted-secret", ""))
+
+    def test_empty_dashboard_sources_use_config_values(self):
+        sources = main.resolve_submitted_totp_sources(
+            {
+                "mfa_totp_uri": "",
+                "mfa_totp_secret": "",
+                "mfa_totp_qr": "",
+            },
+            {
+                "mfa_totp_uri": "config-uri",
+                "mfa_totp_secret": "config-secret",
+                "mfa_totp_qr": "config-qr",
+            },
+        )
+
+        self.assertEqual(
+            sources,
+            ("config-uri", "config-secret", "config-qr"),
+        )
+
+    def test_dashboard_uri_is_used_without_other_fallbacks(self):
+        sources = main.resolve_submitted_totp_sources(
+            {"mfa_totp_uri": "submitted-uri"},
+            {
+                "mfa_totp_secret": "config-secret",
+                "mfa_totp_qr": "config-qr",
+            },
+        )
+
+        self.assertEqual(sources, ("submitted-uri", "", ""))
+
+    def test_secret_fallback_applies_same_exclusive_rule(self):
+        resolved = main.apply_config_secret_fallback(
+            {"mfa_totp_secret": "submitted-secret"},
+            {"mfa_totp_uri": "config-uri"},
+        )
+
+        self.assertEqual(resolved["mfa_totp_uri"], "")
+        self.assertEqual(resolved["mfa_totp_secret"], "submitted-secret")
+        self.assertEqual(resolved["mfa_totp_qr"], "")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -5,7 +5,12 @@ from pathlib import Path
 
 from wscan.browser import NetworkCapture
 from wscan.monitor import MonitorServer
-from wscan.request_logger import RequestLogger
+from wscan.request_logger import (
+    RequestLogger,
+    _redact_headers,
+    clear_sensitive_headers,
+    register_sensitive_headers,
+)
 
 
 def _read_jsonl(path: Path) -> list[dict]:
@@ -13,6 +18,31 @@ def _read_jsonl(path: Path) -> list[dict]:
 
 
 class RedactionTests(unittest.TestCase):
+    def setUp(self):
+        clear_sensitive_headers()
+
+    def tearDown(self):
+        clear_sensitive_headers()
+
+    def test_runtime_sensitive_headers_are_case_insensitive_and_clearable(self):
+        register_sensitive_headers(["X-Company-Auth"])
+
+        redacted = _redact_headers({
+            "x-company-auth": "secret",
+            "Accept": "*/*",
+        })
+
+        self.assertEqual(redacted["x-company-auth"], "<redacted>")
+        self.assertEqual(redacted["Accept"], "*/*")
+
+        clear_sensitive_headers()
+        restored = _redact_headers({
+            "X-COMPANY-AUTH": "secret",
+            "Authorization": "Bearer fixed-secret",
+        })
+        self.assertEqual(restored["X-COMPANY-AUTH"], "secret")
+        self.assertEqual(restored["Authorization"], "<redacted>")
+
     def test_sensitive_headers_redacted(self):
         with tempfile.TemporaryDirectory() as d:
             logger = RequestLogger(d)

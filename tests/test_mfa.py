@@ -7,6 +7,13 @@
 from wscan import mfa
 
 
+# ── TOTP 窓境界 ────────────────────────────────────────────────────────────
+def test_seconds_until_next_window_boundaries():
+    assert mfa.seconds_until_next_window(60.0, 30) == 30.0
+    assert mfa.seconds_until_next_window(75.0, 30) == 15.0
+    assert abs(mfa.seconds_until_next_window(89.9, 30) - 0.1) < 1e-9
+
+
 # ── extract_otp ────────────────────────────────────────────────────────────
 def test_extract_otp_default_6_digits():
     assert mfa.extract_otp("Your code is 482913 — valid 5 min") == "482913"
@@ -234,6 +241,35 @@ def test_env_uri_preserved_without_explicit_secret_or_qr():
         env={"WSCAN_MFA_TOTP_URI": "otpauth://totp/env?secret=ENVBASE32"},
     )
     assert cfg.totp_uri == "otpauth://totp/env?secret=ENVBASE32"
+
+
+def test_per_scan_totp_override_promotes_over_env_type():
+    # env に WSCAN_MFA_TYPE=email が残っていても、per-scan の native TOTP override は
+    # 明示的な TOTP 選択として totp に昇格する。
+    cfg = mfa.MFAConfig.from_env(
+        env={"WSCAN_MFA_TYPE": "email"},
+        overrides={"totp_secret": "GEZDGNBVGY3TQOJQ"},
+    )
+    assert cfg.type == "totp"
+    assert cfg.enabled is True
+
+
+def test_explicit_type_override_beats_native_totp_override():
+    # scan が明示的に type を指定した場合は per-scan TOTP override でも昇格しない。
+    cfg = mfa.MFAConfig.from_env(
+        env={"WSCAN_MFA_TYPE": "email"},
+        overrides={"type": "email", "totp_secret": "GEZDGNBVGY3TQOJQ"},
+    )
+    assert cfg.type == "email"
+
+
+def test_env_type_respected_without_per_scan_totp_override():
+    # per-scan override が無く env に native TOTP しか無い場合、env の type を尊重する
+    # （env WSCAN_MFA_TYPE=email が残っていれば totp へ昇格しない＝従来挙動）。
+    cfg = mfa.MFAConfig.from_env(
+        env={"WSCAN_MFA_TYPE": "email", "WSCAN_MFA_TOTP_SECRET": "GEZDGNBVGY3TQOJQ"},
+    )
+    assert cfg.type == "email"
 
 
 def test_mfaconfig_native_totp_secret_enabled_with_explicit_type():
@@ -607,8 +643,40 @@ def test_solver_native_totp_is_deterministic_without_mcp(monkeypatch):
         raise AssertionError("ネイティブ成功時に MCP を呼んではならない")
 
     monkeypatch.setattr(totp.time, "time", lambda: 59)
+    monkeypatch.setattr(mfa, "_TOTP_MIN_REMAINING_SECONDS", 0)
     monkeypatch.setattr(mfa, "_call_mcp_tool", _unexpected_mcp)
     assert asyncio.run(mfa.MFASolver(cfg)._solve_totp()) == "94287082"
+
+
+def test_solver_native_totp_waits_for_next_window(monkeypatch):
+    import asyncio
+
+    from wscan import totp
+
+    secret = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"
+    cfg = mfa.MFAConfig.from_env(
+        env={},
+        overrides={
+            "type": "totp",
+            "totp_secret": secret,
+            "totp_digits": 8,
+            "totp_period": 30,
+        },
+    )
+    timestamps = iter((29.0, 30.0))
+    sleep_calls = []
+
+    async def _fake_sleep(delay):
+        sleep_calls.append(delay)
+
+    monkeypatch.setattr(mfa.time, "time", lambda: next(timestamps))
+    monkeypatch.setattr(mfa.asyncio, "sleep", _fake_sleep)
+
+    code = asyncio.run(mfa.MFASolver(cfg)._solve_totp())
+
+    assert len(sleep_calls) == 1
+    assert abs(sleep_calls[0] - 1.2) < 1e-9
+    assert code == totp.generate_totp(secret, digits=8, period=30, timestamp=30.0)
 
 
 def test_mfaconfig_legacy_totp_mcp_remains_enabled():

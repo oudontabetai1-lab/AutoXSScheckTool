@@ -10,6 +10,7 @@ import json
 import shlex
 from pathlib import Path
 
+from .request_logger import _is_sensitive_header, _redact_headers
 from .scanners.base import Finding
 
 
@@ -46,8 +47,13 @@ def write_reproduction_package(findings: list[Finding], output_dir: Path) -> dic
 
 
 def _finding_to_repro_item(finding: Finding, item_id: int) -> dict:
-    request = finding.request or {}
-    response = finding.response or {}
+    request = dict(finding.request or {})
+    if "headers" in request:
+        request["headers"] = _redact_headers(request["headers"])
+    response = {k: v for k, v in (finding.response or {}).items() if k != "body"}
+    if "headers" in response:
+        response["headers"] = _redact_headers(response["headers"])
+
     return {
         "id": item_id,
         "check_type": finding.check_type,
@@ -62,8 +68,8 @@ def _finding_to_repro_item(finding: Finding, item_id: int) -> dict:
         "evidence_details": finding.evidence_details,
         "reproduction_steps": finding.reproduction_steps,
         "request": request,
-        "response": {k: v for k, v in response.items() if k != "body"},
-        "curl_command": _curl_from_request(request),
+        "response": response,
+        "curl_command": _curl_from_request(finding.request or {}),
     }
 
 
@@ -79,13 +85,12 @@ def _curl_from_request(request: dict) -> str:
     skip_headers = {"host", "content-length", "connection", "accept-encoding"}
     # 認証ヘッダの値は成果物へ平文で残さない（curl はテンプレートとして提示し、
     # 実行時にトークンを差し替える前提）。ヘッダ名は再現の手掛かりとして残す。
-    from .request_logger import _SENSITIVE_HEADERS
     for key, value in headers.items():
         if key.lower() in skip_headers:
             continue
         if key.lower().startswith(":"):
             continue
-        if key.lower() in _SENSITIVE_HEADERS:
+        if _is_sensitive_header(key):
             value = "<REDACTED: トークンを差し替えて実行>"
         parts.extend(["-H", shlex.quote(f"{key}: {value}")])
     if body:
