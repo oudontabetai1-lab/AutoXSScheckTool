@@ -821,6 +821,82 @@ class BrowserHeaderModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("Authorization", notice)
         self.assertNotIn("secret", notice)
 
+    async def test_popup_opt_in_with_expected_late_headers_adds_devtools_args(self):
+        starter, _fake_browser, _context, _cdp = self._playwright_fakes()
+        browser = BrowserManager(
+            extra_headers={},
+            header_scope_origins={"https://app.example"},
+            expect_late_headers=True,
+            popup_header_intercept=True,
+        )
+
+        with (
+            patch("wscan.browser.async_playwright", return_value=starter),
+            patch.object(
+                browser,
+                "_activate_header_target_auto_attach",
+                AsyncMock(return_value=True),
+            ),
+        ):
+            await browser.init()
+
+        launch_args = browser._playwright.chromium.launch.await_args.kwargs["args"]
+        self.assertIn(
+            "--remote-debugging-address=127.0.0.1",
+            launch_args,
+        )
+        self.assertEqual(
+            sum(
+                arg.startswith("--remote-debugging-port=")
+                for arg in launch_args
+            ),
+            1,
+        )
+
+    async def test_popup_opt_in_without_headers_does_not_add_devtools_args(self):
+        starter, _fake_browser, _context, _cdp = self._playwright_fakes()
+        browser = BrowserManager(
+            extra_headers={},
+            header_scope_origins={"https://app.example"},
+            expect_late_headers=False,
+            popup_header_intercept=True,
+        )
+
+        with patch("wscan.browser.async_playwright", return_value=starter):
+            await browser.init()
+
+        launch_args = browser._playwright.chromium.launch.await_args.kwargs["args"]
+        self.assertNotIn(
+            "--remote-debugging-address=127.0.0.1",
+            launch_args,
+        )
+        self.assertFalse(
+            any(arg.startswith("--remote-debugging-port=") for arg in launch_args)
+        )
+
+    async def test_expected_late_headers_without_popup_opt_in_do_not_add_devtools_args(
+        self,
+    ):
+        starter, _fake_browser, _context, _cdp = self._playwright_fakes()
+        browser = BrowserManager(
+            extra_headers={},
+            header_scope_origins={"https://app.example"},
+            expect_late_headers=True,
+            popup_header_intercept=False,
+        )
+
+        with patch("wscan.browser.async_playwright", return_value=starter):
+            await browser.init()
+
+        launch_args = browser._playwright.chromium.launch.await_args.kwargs["args"]
+        self.assertNotIn(
+            "--remote-debugging-address=127.0.0.1",
+            launch_args,
+        )
+        self.assertFalse(
+            any(arg.startswith("--remote-debugging-port=") for arg in launch_args)
+        )
+
     async def test_popup_opt_in_port_allocation_failure_keeps_page_fallback(self):
         starter, _fake_browser, context, _cdp = self._playwright_fakes()
         browser = BrowserManager(

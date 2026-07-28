@@ -364,13 +364,14 @@ class BrowserManager:
             await self._warn_header_scope_disabled()
         self._playwright = await async_playwright().start()
         use_scoped_headers = bool(self.extra_headers and self.header_scope_origins)
-        block_service_workers = bool(
+        scoped_headers_possible = bool(
             self.header_scope_enforce
             and self.header_scope_origins
             and (self.extra_headers or self.expect_late_headers)
         )
+        block_service_workers = scoped_headers_possible
         launch_args = ["--disable-web-security", "--disable-features=IsolateOrigins"]
-        if use_scoped_headers and self.popup_header_intercept:
+        if scoped_headers_possible and self.popup_header_intercept:
             # Playwright の CDPSession.send() は flatten された子 session_id を
             # 指定できない。loopback の一時 endpoint から browser CDP へ接続し、
             # popup target を停止中の同一 session で設定・再開できるようにする。
