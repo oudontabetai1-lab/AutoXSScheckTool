@@ -293,6 +293,7 @@ class BrowserManager:
         target_url: str = "",
         header_scope_origins: Optional[set] = None,
         header_scope_enforce: bool = True,
+        expect_late_headers: bool = False,
         popup_header_intercept: bool = False,
         request_logger=None,
         mfa_solver=None,
@@ -314,6 +315,7 @@ class BrowserManager:
         # context-wide behavior is preserved.
         self.extra_headers: dict[str, str] = dict(extra_headers or {})
         self.header_scope_enforce = bool(header_scope_enforce)
+        self.expect_late_headers = bool(expect_late_headers)
         self.popup_header_intercept = bool(popup_header_intercept)
         self.header_scope_origins = (
             set(header_scope_origins or ())
@@ -362,6 +364,11 @@ class BrowserManager:
             await self._warn_header_scope_disabled()
         self._playwright = await async_playwright().start()
         use_scoped_headers = bool(self.extra_headers and self.header_scope_origins)
+        block_service_workers = bool(
+            self.header_scope_enforce
+            and self.header_scope_origins
+            and (self.extra_headers or self.expect_late_headers)
+        )
         launch_args = ["--disable-web-security", "--disable-features=IsolateOrigins"]
         if use_scoped_headers and self.popup_header_intercept:
             # Playwright の CDPSession.send() は flatten された子 session_id を
@@ -396,14 +403,15 @@ class BrowserManager:
             for k, v in self.extra_headers.items():
                 seen[k.lower()] = v
                 ctx_kwargs.setdefault("extra_http_headers", {})[k] = str(v)
-        if use_scoped_headers:
+        if block_service_workers:
             # Service Worker が処理するリクエストは CDP Fetch / context.route()
-            # のどちらでも確実に傍受できないため、スコープ制御時だけ無効化する。
+            # のどちらでも確実に傍受できないため、初期ヘッダがある場合に加え、
+            # refresh で後から届き得る場合もコンテキスト生成時に無効化する。
             ctx_kwargs["service_workers"] = "block"
         try:
             self._context = await self._browser.new_context(**ctx_kwargs)
         except TypeError:
-            if not use_scoped_headers or "service_workers" not in ctx_kwargs:
+            if not block_service_workers or "service_workers" not in ctx_kwargs:
                 raise
             # 古い Playwright は service_workers を受け付けない。この場合も scan を
             # 中断せず、該当オプションだけ外してリクエスト単位の傍受を試す。

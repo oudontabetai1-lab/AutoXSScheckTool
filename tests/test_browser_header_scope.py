@@ -1008,6 +1008,7 @@ class BrowserHeaderModeTests(unittest.IsolatedAsyncioTestCase):
         starter, fake_browser, context, _cdp = self._playwright_fakes()
         browser = BrowserManager(
             header_scope_origins={"https://app.example"},
+            expect_late_headers=False,
         )
 
         with patch("wscan.browser.async_playwright", return_value=starter):
@@ -1023,6 +1024,48 @@ class BrowserHeaderModeTests(unittest.IsolatedAsyncioTestCase):
         )
         context.route.assert_not_awaited()
         self.assertFalse(browser._header_route_active)
+        self.assertEqual(browser._header_intercept_mode, "none")
+
+    async def test_expected_late_headers_only_block_service_workers(self):
+        starter, fake_browser, context, _cdp = self._playwright_fakes()
+        browser = BrowserManager(
+            header_scope_origins={"https://app.example"},
+            expect_late_headers=True,
+        )
+
+        with patch("wscan.browser.async_playwright", return_value=starter):
+            await browser.init()
+
+        kwargs = fake_browser.new_context.await_args.kwargs
+        self.assertEqual(kwargs["service_workers"], "block")
+        self.assertNotIn("extra_http_headers", kwargs)
+        context.new_cdp_session.assert_not_awaited()
+        context.route.assert_not_awaited()
+        context.set_extra_http_headers.assert_not_awaited()
+        self.assertFalse(browser._context_wide_headers_active)
+        self.assertFalse(browser._header_route_active)
+        self.assertEqual(browser._header_intercept_mode, "none")
+
+    async def test_expected_late_headers_retry_without_unsupported_sw_option(self):
+        starter, fake_browser, context, _cdp = self._playwright_fakes()
+        fake_browser.new_context.side_effect = [
+            TypeError("unsupported service_workers option"),
+            context,
+        ]
+        browser = BrowserManager(
+            header_scope_origins={"https://app.example"},
+            expect_late_headers=True,
+        )
+
+        with patch("wscan.browser.async_playwright", return_value=starter):
+            await browser.init()
+
+        first_kwargs = fake_browser.new_context.await_args_list[0].kwargs
+        second_kwargs = fake_browser.new_context.await_args_list[1].kwargs
+        self.assertEqual(first_kwargs["service_workers"], "block")
+        self.assertNotIn("service_workers", second_kwargs)
+        context.new_cdp_session.assert_not_awaited()
+        context.route.assert_not_awaited()
         self.assertEqual(browser._header_intercept_mode, "none")
 
 
@@ -1097,6 +1140,18 @@ class HeaderScopeSharedHelperTests(unittest.TestCase):
         )
         self.assertFalse(engine.popup_header_intercept)
         self.assertFalse(engine._browser.popup_header_intercept)
+
+    def test_engine_marks_refresh_command_as_expected_late_headers(self):
+        from wscan.engine import ScanEngine
+
+        with tempfile.TemporaryDirectory() as output_dir:
+            engine = ScanEngine(
+                url="https://app.example/start",
+                header_refresh_cmd="refresh-auth-headers",
+                output_dir=output_dir,
+            )
+
+        self.assertTrue(engine._browser.expect_late_headers)
 
     def test_engine_env_enables_popup_header_intercept_when_unspecified(self):
         from wscan.engine import ScanEngine

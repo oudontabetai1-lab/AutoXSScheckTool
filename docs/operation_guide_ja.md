@@ -151,6 +151,8 @@ python3 main.py scan https://api.example.com --header-file headers.yaml
 
 トークンが短時間で切れる場合は、`--header-refresh-cmd` と `--header-refresh-interval` を使って更新できます。
 
+既定のスコープ制御が有効な通常ツール層で `--header-refresh-cmd` を使うスキャンは、後から届く認証ヘッダが Service Worker 経由のリクエストから抜けるのを防ぐため、初期ヘッダが空でも Service Worker を無効化します。
+
 ### ネイティブ TOTP を使う
 
 通常ツール層（`scan`）のログイン補助として、`otpauth://` URI、生 Base32、QR 画像から TOTP を生成できます。URI だけを渡した場合も TOTP 方式へ自動昇格します。

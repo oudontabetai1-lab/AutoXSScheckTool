@@ -775,6 +775,7 @@ class ScanEngine:
             target_url=self.target_url,
             header_scope_origins=self._header_scope_origins,
             header_scope_enforce=self.header_scope_enforce,
+            expect_late_headers=bool(header_refresh_cmd),
             popup_header_intercept=self.popup_header_intercept,
             request_logger=self.request_logger,
             mfa_solver=self._mfa_solver,

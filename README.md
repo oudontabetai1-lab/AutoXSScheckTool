@@ -824,6 +824,8 @@ python3 main.py scan https://api.example.com --bearer "$WSCAN_BEARER"
 
 > ℹ️ **Hybrid/Agent モードの Bearer/カスタムヘッダ**: 対応済みです。CLI の `agent` は `--bearer`、`-H/--header`、`--header-file` を Agent ブラウザへ渡し、ダッシュボードの Agent と Hybrid Phase 1 は「認証・Cookie」の Bearer/カスタムヘッダを引き継ぎます。Hybrid Phase 2 も同じ実効ヘッダを通常スキャンへ適用します。明示した `Authorization` は Bearer 欄より優先されます。動的な `--header-refresh-cmd` は通常ツール層専用です。
 
+既定のスコープ制御が有効な通常ツール層で `--header-refresh-cmd` を使うスキャンは、後から届く認証ヘッダが Service Worker 経由のリクエストから抜けるのを防ぐため、初期ヘッダが空でも Service Worker を無効化します。
+
 ### スコープ
 
 - `target`: 巡回・攻撃してよい URL/オリジン/プレフィックス。
