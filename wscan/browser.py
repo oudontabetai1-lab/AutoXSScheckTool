@@ -4,14 +4,134 @@ Playwright-based browser automation with evidence collection.
 """
 import asyncio
 import base64
+import json
 import re
+import socket
 import time
+import urllib.request
 from urllib.parse import urlparse as _urlparse
 from typing import Optional, Callable, Any
 from urllib.parse import urljoin, urlparse
 
 from playwright.async_api import async_playwright, Browser, BrowserContext, Page, Request, Response
+from rich.console import Console
+
+from .header_scope import headers_allowed_for_url
 from .tls_config import TLSConfig
+
+
+console = Console()
+
+
+class _BrowserCDPConnection:
+    """flatten CDP の子 session へ直接送信する最小限の接続。"""
+
+    def __init__(self):
+        self._websocket = None
+        self._receive_task: Optional[asyncio.Task] = None
+        self._next_id = 0
+        self._pending: dict[int, asyncio.Future] = {}
+        self._event_handler = None
+
+    async def connect(self, websocket_url: str, event_handler) -> None:
+        from websockets import connect
+
+        self._event_handler = event_handler
+        self._websocket = await connect(
+            websocket_url,
+            open_timeout=3,
+            close_timeout=1,
+            max_size=None,
+        )
+        self._receive_task = asyncio.create_task(self._receive())
+
+    async def _receive(self) -> None:
+        try:
+            async for raw_message in self._websocket:
+                message = json.loads(raw_message)
+                command_id = message.get("id")
+                if command_id is not None:
+                    future = self._pending.pop(command_id, None)
+                    if future is not None and not future.done():
+                        future.set_result(message)
+                    continue
+                if self._event_handler is not None:
+                    try:
+                        self._event_handler(
+                            message.get("method") or "",
+                            message.get("params") or {},
+                            message.get("sessionId") or "",
+                        )
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        finally:
+            for future in self._pending.values():
+                if not future.done():
+                    future.set_exception(RuntimeError("CDP connection closed"))
+            self._pending.clear()
+
+    async def send(
+        self,
+        method: str,
+        params: Optional[dict] = None,
+        *,
+        session_id: str = "",
+    ) -> dict:
+        if self._websocket is None:
+            raise RuntimeError("CDP connection is unavailable")
+        self._next_id += 1
+        command_id = self._next_id
+        future = asyncio.get_running_loop().create_future()
+        self._pending[command_id] = future
+        message = {
+            "id": command_id,
+            "method": method,
+            "params": params or {},
+        }
+        if session_id:
+            message["sessionId"] = session_id
+        try:
+            await self._websocket.send(json.dumps(message))
+            response = await asyncio.wait_for(future, timeout=3.0)
+        except Exception:
+            self._pending.pop(command_id, None)
+            raise
+        if response.get("error"):
+            # CDP のエラー本文にリクエスト情報が含まれる可能性があるため露出しない。
+            raise RuntimeError("CDP command failed")
+        return response.get("result") or {}
+
+    async def close(self) -> None:
+        websocket = self._websocket
+        self._websocket = None
+        if websocket is not None:
+            try:
+                await websocket.close()
+            except Exception:
+                pass
+        if self._receive_task is not None:
+            try:
+                await self._receive_task
+            except Exception:
+                pass
+            self._receive_task = None
+
+
+class _RoutedCDPSession:
+    """Browser CDP 接続上の子 session を通常の send API として扱う。"""
+
+    def __init__(self, connection: _BrowserCDPConnection, session_id: str):
+        self._connection = connection
+        self._session_id = session_id
+
+    async def send(self, method: str, params: Optional[dict] = None) -> dict:
+        return await self._connection.send(
+            method,
+            params,
+            session_id=self._session_id,
+        )
 
 
 class NetworkCapture:
@@ -171,6 +291,10 @@ class BrowserManager:
         extra_headers: Optional[dict] = None,
         tls_config: Optional[TLSConfig] = None,
         target_url: str = "",
+        header_scope_origins: Optional[set] = None,
+        header_scope_enforce: bool = True,
+        expect_late_headers: bool = False,
+        popup_header_intercept: bool = False,
         request_logger=None,
         mfa_solver=None,
     ):
@@ -186,10 +310,40 @@ class BrowserManager:
         self.sleep_factor = sleep_factor
         self.tls_config = tls_config or TLSConfig()
         self.target_url = target_url
-        # Custom HTTP headers (Authorization, X-API-Key, …) applied to every
-        # request through the Playwright context. Updated live by HeaderManager
-        # when ``--header-refresh-cmd`` rotates the token.
+        # Custom HTTP headers (Authorization, X-API-Key, …). When explicit
+        # origins are known they are added per request; otherwise the legacy
+        # context-wide behavior is preserved.
         self.extra_headers: dict[str, str] = dict(extra_headers or {})
+        self.header_scope_enforce = bool(header_scope_enforce)
+        self.expect_late_headers = bool(expect_late_headers)
+        self.popup_header_intercept = bool(popup_header_intercept)
+        self.header_scope_origins = (
+            set(header_scope_origins or ())
+            if self.header_scope_enforce
+            else set()
+        )
+        self._header_intercept_mode: str = "none"
+        self._header_route_active: bool = False
+        self._header_cdp_fallback_warned: bool = False
+        self._header_route_fallback_warned: bool = False
+        self._header_request_fallback_warned: bool = False
+        self._header_scope_disabled_warned: bool = False
+        self._popup_header_intercept_warned: bool = False
+        self._context_wide_headers_active: bool = False
+        self._service_worker_block_fallback_warned: bool = False
+        self._header_attached_page_ids: set[int] = set()
+        self._header_explicit_target_ids: set[str] = set()
+        self._header_attach_tasks: dict[int, asyncio.Task] = {}
+        self._header_cdp_sessions: dict[int, Any] = {}
+        self._header_browser_cdp: Optional[_BrowserCDPConnection] = None
+        self._header_browser_session_id: str = ""
+        self._header_auto_target_sessions: dict[str, str] = {}
+        self._header_auto_attach_active: bool = False
+        self._header_debug_port: Optional[int] = None
+        self._header_target_tasks: set[asyncio.Task] = set()
+        self._header_page_tasks: set[asyncio.Task] = set()
+        self._header_pause_tasks: set[asyncio.Task] = set()
+        self._header_interception_closing: bool = False
         self._playwright = None
         self._browser: Optional[Browser] = None
         self._context: Optional[BrowserContext] = None
@@ -206,8 +360,32 @@ class BrowserManager:
 
     async def init(self):
         """Launch browser and create page."""
+        if self.extra_headers and not self.header_scope_enforce:
+            await self._warn_header_scope_disabled()
         self._playwright = await async_playwright().start()
+        use_scoped_headers = bool(self.extra_headers and self.header_scope_origins)
+        scoped_headers_possible = bool(
+            self.header_scope_enforce
+            and self.header_scope_origins
+            and (self.extra_headers or self.expect_late_headers)
+        )
+        block_service_workers = scoped_headers_possible
         launch_args = ["--disable-web-security", "--disable-features=IsolateOrigins"]
+        if scoped_headers_possible and self.popup_header_intercept:
+            # Playwright の CDPSession.send() は flatten された子 session_id を
+            # 指定できない。loopback の一時 endpoint から browser CDP へ接続し、
+            # popup target を停止中の同一 session で設定・再開できるようにする。
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+                    probe.bind(("127.0.0.1", 0))
+                    self._header_debug_port = probe.getsockname()[1]
+                await self._warn_popup_header_intercept()
+                launch_args.extend([
+                    "--remote-debugging-address=127.0.0.1",
+                    f"--remote-debugging-port={self._header_debug_port}",
+                ])
+            except Exception:
+                self._header_debug_port = None
         launch_kwargs: dict = {"headless": self.headless, "args": launch_args}
         if self.proxy:
             launch_kwargs["proxy"] = {"server": self.proxy}
@@ -219,15 +397,48 @@ class BrowserManager:
         ctx_kwargs.update(self.tls_config.playwright_context_options(self.target_url))
         if self.proxy:
             ctx_kwargs["proxy"] = {"server": self.proxy}
-        if self.extra_headers:
+        if self.extra_headers and not use_scoped_headers:
             # Keep header names case-preserving but de-dupe case-insensitive collisions
             # so Playwright doesn't reject duplicates.
             seen: dict[str, str] = {}
             for k, v in self.extra_headers.items():
                 seen[k.lower()] = v
                 ctx_kwargs.setdefault("extra_http_headers", {})[k] = str(v)
-        self._context = await self._browser.new_context(**ctx_kwargs)
+        if block_service_workers:
+            # Service Worker が処理するリクエストは CDP Fetch / context.route()
+            # のどちらでも確実に傍受できないため、初期ヘッダがある場合に加え、
+            # refresh で後から届き得る場合もコンテキスト生成時に無効化する。
+            ctx_kwargs["service_workers"] = "block"
+        try:
+            self._context = await self._browser.new_context(**ctx_kwargs)
+        except TypeError:
+            if not block_service_workers or "service_workers" not in ctx_kwargs:
+                raise
+            # 古い Playwright は service_workers を受け付けない。この場合も scan を
+            # 中断せず、該当オプションだけ外してリクエスト単位の傍受を試す。
+            ctx_kwargs.pop("service_workers", None)
+            await self._warn_service_worker_block_fallback()
+            self._context = await self._browser.new_context(**ctx_kwargs)
+        self._context_wide_headers_active = bool(
+            self.extra_headers and not use_scoped_headers
+        )
+        self._header_intercept_mode = (
+            "context" if self._context_wide_headers_active else "none"
+        )
+        if self.header_scope_origins:
+            try:
+                self._context.on("page", self._on_header_context_page)
+            except Exception:
+                # main/worker page は明示 attach するため、イベント購読に失敗しても
+                # スキャンを止めない。popup はヘッダなしのフェイルクローズになる。
+                pass
         self.page = await self._context.new_page()
+        if use_scoped_headers:
+            # 最初のナビゲーションより前に Fetch.enable の完了を保証する。
+            await self._activate_scoped_header_interception(self.page)
+            if self._header_intercept_mode == "cdp":
+                # 失敗時は context の page イベントによる現行方式を維持する。
+                await self._activate_header_target_auto_attach()
         self.page.set_default_timeout(self.timeout)
 
         # Set up network interception
@@ -245,6 +456,520 @@ class BrowserManager:
             if req:
                 await self.monitor.emit_request(req.get("request", {}))
                 await self.monitor.emit_response(req.get("response", {}))
+
+    async def _emit_header_notice(self, message: str) -> None:
+        """ヘッダ関連の重要通知を monitor または CLI へ出す。"""
+        if self.monitor:
+            try:
+                await self.monitor.emit_status(message, "running")
+                return
+            except Exception:
+                # 通知障害でスキャンを中断せず、CLI へ表示して見落としを防ぐ。
+                pass
+        console.print(f"[yellow]{message}[/yellow]")
+
+    async def _warn_header_cdp_fallback(self) -> None:
+        """CDP から従来 route 方式への切替を、値を含めず一度だけ通知する。"""
+        if self._header_cdp_fallback_warned:
+            return
+        self._header_cdp_fallback_warned = True
+        await self._emit_header_notice(
+            "CDP による傍受を有効化できないため従来方式で継続します。"
+            "ストリーミング応答（SSE 等）が途中で切れる可能性があります"
+        )
+
+    async def _warn_header_route_fallback(self) -> None:
+        """ルート登録失敗の通知を、ヘッダ値を含めず一度だけ出す。"""
+        if self._header_route_fallback_warned:
+            return
+        self._header_route_fallback_warned = True
+        await self._emit_header_notice(
+            "リクエスト単位のヘッダ付与を有効化できず、"
+            "コンテキスト全体へ適用します"
+            "（第三者サブリソースにも送信され得ます）"
+        )
+
+    async def _warn_header_scope_disabled(self) -> None:
+        """明示的なスコープ制御無効化を、ヘッダ値なしで一度だけ通知する。"""
+        if self._header_scope_disabled_warned:
+            return
+        self._header_scope_disabled_warned = True
+        await self._emit_header_notice(
+            "認証ヘッダのスコープ制御が無効です。"
+            "コンテキスト全体へ適用するため、第三者サブリソースにも"
+            "認証ヘッダが送信されます"
+        )
+
+    async def _warn_popup_header_intercept(self) -> None:
+        """DevTools ポートを開く明示 opt-in を、値なしで一度だけ通知する。"""
+        if self._popup_header_intercept_warned:
+            return
+        self._popup_header_intercept_warned = True
+        await self._emit_header_notice(
+            "popup 傍受のためローカル DevTools ポートを開きます。"
+            "同一ホストの他プロセスからブラウザを操作され得るため、"
+            "共有ホストでは使用しないでください"
+        )
+
+    async def _warn_service_worker_block_fallback(self) -> None:
+        """Service Worker 無効化不可の通知を、値を含めず一度だけ出す。"""
+        if self._service_worker_block_fallback_warned:
+            return
+        self._service_worker_block_fallback_warned = True
+        await self._emit_header_notice(
+            "Service Worker を無効化できないため、一部のリクエストでは"
+            "リクエスト単位のヘッダ付与が適用されない可能性があります"
+        )
+
+    async def _warn_header_request_fallback(self) -> None:
+        """リクエスト単位の付与失敗を、ヘッダ値を含めず一度だけ通知する。"""
+        if self._header_request_fallback_warned:
+            return
+        self._header_request_fallback_warned = True
+        await self._emit_header_notice(
+            "リクエスト単位のヘッダ付与に失敗したため、"
+            "該当リクエストは認証ヘッダなしで実行しました"
+        )
+
+    async def _find_debugger_websocket_url(self) -> str:
+        """loopback の DevTools endpoint が起動するまで短時間だけ待つ。"""
+        if not self._header_debug_port:
+            return ""
+        endpoint = (
+            f"http://127.0.0.1:{self._header_debug_port}/json/version"
+        )
+        deadline = asyncio.get_running_loop().time() + 0.5
+        while asyncio.get_running_loop().time() < deadline:
+            try:
+                def _read_version():
+                    with urllib.request.urlopen(endpoint, timeout=0.3) as response:
+                        return json.loads(response.read())
+
+                version = await asyncio.to_thread(_read_version)
+                websocket_url = str(version.get("webSocketDebuggerUrl") or "")
+                if websocket_url:
+                    return websocket_url
+            except Exception:
+                await asyncio.sleep(0.05)
+        return ""
+
+    def _on_header_browser_cdp_event(
+        self,
+        method: str,
+        params: dict,
+        session_id: str,
+    ) -> None:
+        """browser CDP の同期通知を、停止を残さない非同期処理へ渡す。"""
+        if self._header_interception_closing:
+            return
+        if method == "Target.attachedToTarget":
+            if session_id != self._header_browser_session_id:
+                return
+            try:
+                task = asyncio.create_task(
+                    self._enable_fetch_for_attached_header_target(params)
+                )
+            except Exception:
+                return
+            self._header_target_tasks.add(task)
+            task.add_done_callback(self._header_target_tasks.discard)
+            return
+        if method == "Target.detachedFromTarget":
+            detached_session_id = str(params.get("sessionId") or "")
+            for target_id, current_session_id in tuple(
+                self._header_auto_target_sessions.items()
+            ):
+                if current_session_id == detached_session_id:
+                    self._header_auto_target_sessions.pop(target_id, None)
+            return
+        if method == "Fetch.requestPaused" and session_id:
+            cdp = self._header_browser_cdp
+            if cdp is not None:
+                self._dispatch_fetch_request_paused(
+                    _RoutedCDPSession(cdp, session_id),
+                    params,
+                )
+
+    async def _enable_fetch_for_attached_header_target(
+        self,
+        event: dict,
+    ) -> None:
+        """停止中の page target へ Fetch を設定し、必ず再開する。"""
+        target_info = event.get("targetInfo") or {}
+        target_id = str(target_info.get("targetId") or "")
+        target_type = str(target_info.get("type") or "")
+        cdp_session_id = str(event.get("sessionId") or "")
+        cdp = self._header_browser_cdp
+        try:
+            if (
+                cdp is not None
+                and target_type in {"page", "tab"}
+                and target_id
+                and cdp_session_id
+                and target_id not in self._header_explicit_target_ids
+                and self._header_auto_target_sessions.get(target_id)
+                != cdp_session_id
+            ):
+                # responseStage は指定せず、応答ストリームを止めない。
+                await cdp.send(
+                    "Fetch.enable",
+                    {"patterns": [{"urlPattern": "*"}]},
+                    session_id=cdp_session_id,
+                )
+                self._header_auto_target_sessions[target_id] = cdp_session_id
+        except Exception:
+            # この target はヘッダなしで継続し、他の page の傍受は維持する。
+            try:
+                await self._warn_header_request_fallback()
+            except Exception:
+                pass
+        finally:
+            if cdp is not None and cdp_session_id:
+                try:
+                    # waitForDebuggerOnStart で停止した target は、種別や Fetch の
+                    # 成否にかかわらず同一 session で必ず再開する。
+                    await cdp.send(
+                        "Runtime.runIfWaitingForDebugger",
+                        session_id=cdp_session_id,
+                    )
+                except Exception:
+                    pass
+
+    async def _activate_header_target_auto_attach(self) -> bool:
+        """新 page を初回ナビゲーション前に停止して Fetch を有効化する。"""
+        if self._header_auto_attach_active:
+            return True
+        websocket_url = await self._find_debugger_websocket_url()
+        if not websocket_url:
+            return False
+        cdp = _BrowserCDPConnection()
+        try:
+            await cdp.connect(
+                websocket_url,
+                self._on_header_browser_cdp_event,
+            )
+            browser_session = await cdp.send("Target.attachToBrowserTarget")
+            browser_session_id = str(browser_session.get("sessionId") or "")
+            if not browser_session_id:
+                raise RuntimeError("browser CDP session is unavailable")
+            self._header_browser_cdp = cdp
+            self._header_browser_session_id = browser_session_id
+            await cdp.send(
+                "Target.setAutoAttach",
+                {
+                    "autoAttach": True,
+                    "waitForDebuggerOnStart": True,
+                    "flatten": True,
+                },
+                session_id=browser_session_id,
+            )
+        except Exception:
+            self._header_browser_cdp = None
+            self._header_browser_session_id = ""
+            try:
+                await cdp.close()
+            except Exception:
+                pass
+            return False
+        self._header_auto_attach_active = True
+        return True
+
+    async def _deactivate_header_target_auto_attach(self) -> None:
+        """auto-attach の購読と子 session を best-effort で解放する。"""
+        cdp = self._header_browser_cdp
+        browser_session_id = self._header_browser_session_id
+        self._header_auto_attach_active = False
+        if cdp is None:
+            return
+        if browser_session_id:
+            try:
+                await cdp.send(
+                    "Target.setAutoAttach",
+                    {
+                        "autoAttach": False,
+                        "waitForDebuggerOnStart": False,
+                        "flatten": True,
+                    },
+                    session_id=browser_session_id,
+                )
+            except Exception:
+                pass
+        if self._header_target_tasks:
+            await asyncio.gather(
+                *list(self._header_target_tasks),
+                return_exceptions=True,
+            )
+        for cdp_session_id in set(
+            self._header_auto_target_sessions.values()
+        ):
+            try:
+                await cdp.send(
+                    "Fetch.disable",
+                    session_id=cdp_session_id,
+                )
+            except Exception:
+                pass
+        if browser_session_id:
+            try:
+                await cdp.send(
+                    "Target.detachFromTarget",
+                    {"sessionId": browser_session_id},
+                )
+            except Exception:
+                pass
+        await cdp.close()
+        self._header_browser_cdp = None
+        self._header_browser_session_id = ""
+        self._header_auto_target_sessions.clear()
+
+    def _dispatch_fetch_request_paused(self, cdp, event: dict) -> None:
+        """CDP の同期イベントから、必ず解放する非同期ハンドラを起動する。"""
+        try:
+            task = asyncio.create_task(
+                self._on_fetch_request_paused(cdp, event)
+            )
+        except Exception:
+            return
+        self._header_pause_tasks.add(task)
+        task.add_done_callback(self._header_pause_tasks.discard)
+
+    async def _on_fetch_request_paused(self, cdp, event: dict) -> None:
+        """許可オリジンだけヘッダを上書きし、停止中リクエストを解放する。"""
+        try:
+            request_id = event["requestId"]
+        except Exception:
+            # requestId が無ければ CDP へ返せる識別子がないため、何もしない。
+            return
+
+        params = {"requestId": request_id}
+        try:
+            request = event["request"]
+            url = request["url"]
+            if headers_allowed_for_url(url, self.header_scope_origins):
+                headers = {
+                    str(name): str(value)
+                    for name, value in (request.get("headers") or {}).items()
+                }
+                for name, value in self.extra_headers.items():
+                    lowered = str(name).lower()
+                    headers = {
+                        current_name: current_value
+                        for current_name, current_value in headers.items()
+                        if current_name.lower() != lowered
+                    }
+                    headers[str(name)] = str(value)
+                params["headers"] = [
+                    {"name": name, "value": value}
+                    for name, value in headers.items()
+                ]
+        except Exception:
+            # 判定やヘッダ合成に失敗した場合も、値を付けずに必ず解放する。
+            try:
+                await self._warn_header_request_fallback()
+            except Exception:
+                pass
+            params = {"requestId": request_id}
+
+        try:
+            await cdp.send("Fetch.continueRequest", params)
+        except Exception:
+            # page/context 終了でセッションが消滅した場合はスキャンへ伝播させない。
+            pass
+
+    async def _attach_header_interception(self, page) -> None:
+        """同じ page へ二重登録せず、request stage の CDP Fetch を有効化する。"""
+        page_id = id(page)
+        if page_id in self._header_attached_page_ids:
+            return
+        if self._header_auto_attach_active:
+            # auto-attach が新 page の停止中に設定済み。別 session で重ねない。
+            return
+        existing = self._header_attach_tasks.get(page_id)
+        if existing is not None:
+            await existing
+            return
+
+        async def _attach() -> None:
+            if self._context is None:
+                raise RuntimeError("browser context is unavailable")
+            cdp = None
+            try:
+                cdp = await self._context.new_cdp_session(page)
+                cdp.on(
+                    "Fetch.requestPaused",
+                    lambda event: self._dispatch_fetch_request_paused(cdp, event),
+                )
+                # responseStage は指定しない。応答本文を待たずストリームを維持する。
+                await cdp.send(
+                    "Fetch.enable",
+                    {"patterns": [{"urlPattern": "*"}]},
+                )
+                try:
+                    target = await cdp.send("Target.getTargetInfo")
+                    target_id = str(
+                        (target or {}).get("targetInfo", {}).get("targetId") or ""
+                    )
+                    if target_id:
+                        self._header_explicit_target_ids.add(target_id)
+                except Exception:
+                    # target ID の取得不可は Fetch 自体の成功を取り消さない。
+                    pass
+            except Exception:
+                if cdp is not None:
+                    try:
+                        await cdp.send("Fetch.disable")
+                    except Exception:
+                        pass
+                    try:
+                        await cdp.detach()
+                    except Exception:
+                        pass
+                raise
+            self._header_cdp_sessions[page_id] = cdp
+            self._header_attached_page_ids.add(page_id)
+
+        task = asyncio.create_task(_attach())
+        self._header_attach_tasks[page_id] = task
+        try:
+            await task
+        except Exception:
+            if self._header_attach_tasks.get(page_id) is task:
+                self._header_attach_tasks.pop(page_id, None)
+            self._header_attached_page_ids.discard(page_id)
+            raise
+
+    def _on_header_context_page(self, page) -> None:
+        """popup 等の追加 page へ CDP Fetch を冪等に設定する。"""
+        if (
+            self._header_intercept_mode != "cdp"
+            or self._header_interception_closing
+        ):
+            return
+        try:
+            task = asyncio.create_task(
+                self._attach_additional_header_page(page)
+            )
+        except Exception:
+            return
+        self._header_page_tasks.add(task)
+        task.add_done_callback(self._header_page_tasks.discard)
+
+    async def _attach_additional_header_page(self, page) -> None:
+        try:
+            await self._attach_header_interception(page)
+        except Exception:
+            # 一部 page の attach 失敗後に route を併用すると CDP Fetch と競合する。
+            # その page はヘッダなしで継続し、既存 session のスキャンを維持する。
+            await self._warn_header_request_fallback()
+
+    async def _activate_scoped_header_interception(self, page) -> None:
+        """CDP -> route -> context の順でスコープ付きヘッダを有効化する。"""
+        if self._context is None:
+            return
+        if self._header_intercept_mode in {"cdp", "route"}:
+            return
+        if self._header_route_active:
+            self._header_intercept_mode = "route"
+            return
+
+        if self._context_wide_headers_active:
+            try:
+                await self._context.set_extra_http_headers({})
+            except Exception:
+                # context-wide 設定を解除できないまま CDP/route を重ねると、
+                # スコープ外にもヘッダが残る。従来 mode のまま継続する。
+                self._header_intercept_mode = "context"
+                await self._warn_header_route_fallback()
+                try:
+                    await self._context.set_extra_http_headers(
+                        {k: str(v) for k, v in self.extra_headers.items()}
+                    )
+                except Exception:
+                    pass
+                return
+            self._context_wide_headers_active = False
+            self._header_intercept_mode = "none"
+
+        try:
+            await self._attach_header_interception(page)
+        except Exception:
+            await self._warn_header_cdp_fallback()
+        else:
+            self._header_intercept_mode = "cdp"
+            self._header_route_active = False
+            return
+
+        try:
+            await self._context.route("**/*", self._auth_header_route)
+        except Exception:
+            self._header_route_active = False
+            await self._warn_header_route_fallback()
+        else:
+            self._header_intercept_mode = "route"
+            self._header_route_active = True
+            return
+
+        try:
+            await self._context.set_extra_http_headers(
+                {k: str(v) for k, v in self.extra_headers.items()}
+            )
+        except Exception:
+            self._header_intercept_mode = "none"
+        else:
+            self._context_wide_headers_active = bool(self.extra_headers)
+            self._header_intercept_mode = (
+                "context" if self._context_wide_headers_active else "none"
+            )
+
+    async def _auth_header_route(self, route, request):
+        """許可オリジンのリクエストにだけ認証ヘッダを付けて継続する。
+
+        許可オリジンでは max_redirects=0 で自前取得し fulfill する。ブラウザに 30x を
+        そのまま返すことで、リダイレクト先は新規リクエストとして再度この判定を通り、
+        スコープ外オリジンへ認証ヘッダが引き継がれない（Chromium はリダイレクトを内部で
+        追うため、continue_ で注入したヘッダがそのまま外部へ送られてしまう）。
+        """
+        headers = None
+        attempted_fetch = False
+        try:
+            if not headers_allowed_for_url(request.url, self.header_scope_origins):
+                await route.continue_()
+                return
+
+            headers = dict(request.headers)
+            headers.update(
+                {key.lower(): str(value) for key, value in self.extra_headers.items()}
+            )
+            attempted_fetch = True
+            response = await route.fetch(headers=headers, max_redirects=0)
+            await route.fulfill(response=response)
+            return
+        except Exception:
+            await self._warn_header_request_fallback()
+
+        if attempted_fetch:
+            try:
+                # fetch はリクエスト送信後にも失敗し得る。成功可否ではなく試行した
+                # 事実で判定し、continue_ による再送を避けて abort で解放する。
+                await route.abort()
+            except Exception:
+                # ページやコンテキストが既に閉じている場合は abort も失敗し得る。
+                pass
+            return
+
+        try:
+            # continue_ に headers を渡すと Chromium がリダイレクト先にも
+            # 引き継ぎ、外部オリジンへ漏洩し得るため、失敗時は必ずヘッダ無しで
+            # 継続する（認証よりフェイルクローズを優先）。
+            await route.continue_()
+        except Exception:
+            try:
+                # 継続自体の一時的な失敗でもハングさせないよう、素通しを再試行する。
+                await route.continue_()
+            except Exception:
+                # A route that was already continued, closed, or failed again
+                # still must not propagate an exception into Playwright.
+                pass
 
     async def _on_dialog(self, dialog):
         """Capture alert dialogs (XSS indicator)."""
@@ -276,9 +1001,21 @@ class BrowserManager:
             pass
 
     async def update_extra_headers(self, headers: dict) -> None:
-        """Replace the context-wide extra HTTP headers (used by the refresh task)."""
+        """Replace extra HTTP headers used by the refresh task."""
         self.extra_headers = dict(headers or {})
+        if self.extra_headers and not self.header_scope_enforce:
+            await self._warn_header_scope_disabled()
         if self._context is None:
+            return
+        if self._header_route_active:
+            self._header_intercept_mode = "route"
+            return
+        if self._header_intercept_mode in {"cdp", "route"}:
+            return
+        if self.extra_headers and self.header_scope_origins:
+            # Service Worker の block はコンテキスト生成時にしか設定できない。
+            # 遅延有効化でも CDP -> route -> context の順序は維持する。
+            await self._activate_scoped_header_interception(self.page)
             return
         try:
             await self._context.set_extra_http_headers(self.extra_headers)
@@ -286,6 +1023,11 @@ class BrowserManager:
             # Older Playwright builds or already-closed contexts — swallow so a
             # rotating-token failure never aborts an in-progress scan.
             pass
+        else:
+            self._context_wide_headers_active = bool(self.extra_headers)
+            self._header_intercept_mode = (
+                "context" if self._context_wide_headers_active else "none"
+            )
 
     def reset_dialog(self):
         self.dialog_fired = False
@@ -1338,6 +2080,10 @@ class BrowserManager:
         but has its own Playwright page, network capture, and dialog state.
         """
         page = await self._context.new_page()
+        if self._header_intercept_mode == "cdp":
+            # context の page イベントと競合しても attach 側の task ガードで
+            # Fetch.enable は一度だけになる。worker の初回遷移前を明示保証する。
+            await self._attach_header_interception(page)
         page.set_default_timeout(self.timeout)
         worker = WorkerBrowser(self, page)
         page.on("request", worker.network.on_request)
@@ -1576,6 +2322,42 @@ class BrowserManager:
     async def close(self):
         """Close browser and playwright."""
         try:
+            await self._deactivate_header_target_auto_attach()
+            self._header_interception_closing = True
+            if self._context:
+                try:
+                    self._context.remove_listener(
+                        "page",
+                        self._on_header_context_page,
+                    )
+                except Exception:
+                    pass
+            if self._header_page_tasks:
+                await asyncio.gather(
+                    *list(self._header_page_tasks),
+                    return_exceptions=True,
+                )
+            for cdp in list(self._header_cdp_sessions.values()):
+                try:
+                    await cdp.send("Fetch.disable")
+                except Exception:
+                    pass
+                try:
+                    await cdp.detach()
+                except Exception:
+                    pass
+            if self._header_pause_tasks:
+                await asyncio.gather(
+                    *list(self._header_pause_tasks),
+                    return_exceptions=True,
+                )
+            self._header_cdp_sessions.clear()
+            self._header_attached_page_ids.clear()
+            self._header_explicit_target_ids.clear()
+            self._header_attach_tasks.clear()
+            self._header_intercept_mode = "none"
+            self._header_route_active = False
+            self._header_debug_port = None
             if self._context:
                 await self._context.close()
             if self._browser:

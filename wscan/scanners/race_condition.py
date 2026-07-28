@@ -116,7 +116,7 @@ class RaceConditionScanner(BaseScanner):
             client_kwargs["proxy"] = getattr(self.engine, "proxy", "")
             client_kwargs["verify"] = False
         if hasattr(self.engine, "auth_headers"):
-            base_headers = self.engine.auth_headers()
+            base_headers = self.auth_headers_for_url(url)
             base_headers.update(headers or {})
             headers = base_headers
 

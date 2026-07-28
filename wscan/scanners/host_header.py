@@ -153,7 +153,7 @@ class HostHeaderScanner(BaseScanner):
         # tests still authenticate.
         merged = {}
         if hasattr(self.engine, "auth_headers"):
-            merged.update(self.engine.auth_headers())
+            merged.update(self.auth_headers_for_url(url))
         merged.update(headers or {})
         async with httpx.AsyncClient(**client_kwargs) as client:
             return await client.get(url, headers=merged)

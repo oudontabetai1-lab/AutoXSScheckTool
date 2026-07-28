@@ -129,9 +129,13 @@ python3 main.py agent https://api.example.com \
   -H "X-Tenant: test"
 ```
 
-`agent` は `--header-file` にも対応します。ダッシュボードの Agent/Hybrid は「認証・Cookie」で指定した Bearer/カスタムヘッダを引き継ぎ、Hybrid では Phase 1 偵察と Phase 2 通常スキャンの両方へ同じ実効ヘッダを渡します。認証ヘッダは、Agent が明示された target/access スコープのオリジンを開いている間だけ適用され、スコープ外へ遷移すると解除されます。Agent/Hybrid Phase 1 では、対応する browser-use 環境なら初期ナビゲーション前に `start` → `get_current_page` → CDP の `set_extra_headers` を best-effort で実行し、各ステップ開始時にも現在のオリジンを確認して適用または解除します。
+`agent` は `--header-file` にも対応します。ダッシュボードの Agent/Hybrid は「認証・Cookie」で指定した Bearer/カスタムヘッダを引き継ぎ、Hybrid では Phase 1 偵察と Phase 2 通常スキャンの両方へ同じ実効ヘッダを渡します。Agent/Hybrid Phase 1 では、対応する browser-use 環境なら CDP `Fetch` で全リクエストを傍受し、各リクエスト URL が明示された target/access スコープのオリジンに属する場合だけ認証ヘッダを付与します。このため、第三者オリジンのサブリソースや外部へのリダイレクト／遷移には認証ヘッダを付与しません。
 
-> ⚠️ **残存リスク**: CDP `Network.setExtraHTTPHeaders` はブラウザターゲットの全リクエストに適用されるため、スコープ内ページが読み込む第三者サブリソースや、1ステップ内の外部リダイレクト／遷移には、次のオリジン判定より前にヘッダが付く可能性があります。通常ツール層で Playwright の `extra_http_headers` をコンテキスト全体へ設定しているのと同じ範囲です。リクエスト単位の制御は別途対応予定のため、外部リソースを多く読み込む対象では権限を絞ったトークンの利用を推奨します。環境の API 差異やブラウザ起動・target 確立の失敗によっては、最初の landing 読み込みに間に合わない可能性が残ります。その場合も recon は後続ナビゲーションで回復を試みます。動的な `--header-refresh-cmd` は通常ツール層専用です。
+通常ツール層で認証ヘッダをオリジン単位にスコープ制御する場合は、既定で CDP `Fetch` のリクエスト段階を傍受します。応答本文はバッファリングしないため、SSE（`text/event-stream`）などのストリーミング応答を維持したまま、許可オリジンにだけヘッダを付与します。Service Worker 経由の通信を確実に傍受できないため、スコープ制御時は Service Worker を無効化します。
+
+> ⚠️ **WebSocket 認証の制約**: 認証ヘッダのスコープ制御が有効な間、CDP `Fetch` とフォールバック先の Playwright `context.route()` は WebSocket のアップグレード要求へ認証ヘッダを付与しないため、WebSocket ハンドシェイクには認証ヘッダが付きません。`route_web_socket()` もハンドシェイクヘッダを制御できません。WS 認証が必要な対象や `websocket` スキャナを使う場合は、`config/wscan.yaml` の `browser.header_scope_enforce: false` または `WSCAN_HEADER_SCOPE_ENFORCE=0` を指定し、従来のコンテキスト全体適用へ戻してください。無効化時は起動時に1回警告され、第三者サブリソースにも認証ヘッダが送信されます。対象専用かつ最小権限のトークンを使用してください。既定値は `true` です。
+
+> ⚠️ **残存リスク**: Agent 層は対応する browser-use / cdp_use では新 target を停止状態で検知し、`Fetch.enable` 後に再開します。イベント購読 API が利用できない場合は各ステップ開始時の未設定 target 検出を継続しますが、新 target の初回リクエストには間に合わず、追加認証ヘッダなしで送信される可能性があります（フェイルクローズ）。初期 target で `Fetch.enable` 自体ができない場合は、探索を停止せず従来の CDP `Network.setExtraHTTPHeaders` 方式へフォールバックします。この方式ではブラウザターゲットの全リクエストにヘッダが適用されるため、第三者サブリソースや1ステップ内の外部リダイレクト／遷移へ送信される可能性が残ります。通常ツール層（`scan`）は CDP `Fetch` と httpx の直接送信先 URL の双方でオリジンを判定します。通常ツール層の popup は既定で `context.on("page")` による best-effort 傍受となり、ローカル DevTools ポートを開きません。この場合、popup の初回リクエストには認証ヘッダが付かず（フェイルクローズ）、傍受設定後の2本目以降だけ許可オリジンへ付与されます。初回リクエストにも必要な場合は `--popup-header-intercept`、`WSCAN_POPUP_HEADER_INTERCEPT=1`（または `true`）、または `config/wscan.yaml` の `browser.popup_header_intercept: true` で明示 opt-in できます。ただし有効化すると Chromium 終了まで loopback に無認証の DevTools ポートが開き、同一ホストの別プロセスから Cookie・セッションを含むブラウザ全体を操作され得るため、共有ホストやサーバ運用では推奨しません。Service Worker 経由やクロスオリジン iframe（OOPIF）など CDP session の傍受対象外になる経路には認証ヘッダを付与しません（フェイルクローズ）。CDP を利用できない環境では従来の Playwright `route.fetch()` / `route.fulfill()` 方式へ切り替えるため、SSE など終端しないストリーミング応答が途中で切れる可能性があります。さらに route 登録にも失敗した場合だけコンテキスト全体適用へフォールバックします。ただし、既存検査との互換性のため `follow_redirects=True` を使う一部の httpx リクエストは自動追尾を維持しており、許可オリジンへ付けたカスタム認証ヘッダが外部のリダイレクト先へ引き継がれる可能性が残ります。フォールバック環境、外部リダイレクト、外部リソースを多く含む対象では、権限を絞ったトークンの利用を推奨します。動的な `--header-refresh-cmd` は通常ツール層専用です。
 
 ```bash
 python3 main.py scan https://api.example.com \
@@ -146,6 +150,8 @@ python3 main.py scan https://api.example.com --header-file headers.yaml
 ```
 
 トークンが短時間で切れる場合は、`--header-refresh-cmd` と `--header-refresh-interval` を使って更新できます。
+
+既定のスコープ制御が有効な通常ツール層で `--header-refresh-cmd` を使うスキャンは、後から届く認証ヘッダが Service Worker 経由のリクエストから抜けるのを防ぐため、初期ヘッダが空でも Service Worker を無効化します。
 
 ### ネイティブ TOTP を使う
 

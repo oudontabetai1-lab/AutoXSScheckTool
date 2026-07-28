@@ -280,20 +280,18 @@ class GraphQLScanner(BaseScanner):
 
         timeout = float(getattr(self.engine, "timeout", 30))
 
-        # Build auth headers from session cookies + custom --header values.
-        # Pulling through engine.auth_headers() means rotating bearer tokens
-        # (refreshed by HeaderManager) take effect on the very next probe.
-        req_headers = dict(_HEADERS)
-        if hasattr(self.engine, "auth_headers"):
-            req_headers.update(self.engine.auth_headers())
-        else:
-            cookies_str = getattr(self.engine, "cookies", "") or ""
-            if cookies_str:
-                req_headers["Cookie"] = cookies_str
-
         findings: list[Finding] = []
 
         for endpoint in candidates:
+            # Build per-endpoint headers so candidates on a disallowed origin
+            # never inherit HeaderManager custom authentication keys.
+            req_headers = dict(_HEADERS)
+            if hasattr(self.engine, "auth_headers"):
+                req_headers.update(self.auth_headers_for_url(endpoint))
+            else:
+                cookies_str = getattr(self.engine, "cookies", "") or ""
+                if cookies_str:
+                    req_headers["Cookie"] = cookies_str
             if await self._is_graphql(endpoint, req_headers, timeout):
                 self._confirmed_endpoints.append(endpoint)
                 endpoint_findings = await self._test_endpoint(
@@ -707,7 +705,7 @@ class GraphQLScanner(BaseScanner):
     async def verify_finding(self, finding: Finding) -> bool | None:
         headers = dict(_HEADERS)
         if hasattr(self.engine, "auth_headers"):
-            headers.update(self.engine.auth_headers())
+            headers.update(self.auth_headers_for_url(finding.url))
         else:
             cookies_str = getattr(self.engine, "cookies", "") or ""
             if cookies_str:

@@ -81,6 +81,8 @@ def _load_config(path: Path = _CONFIG_PATH) -> dict:
     cfg["tls_client_cert_password"] = str(b.get("tls_client_cert_password", "") or "")
     cfg["tls_ca_cert"]             = str(b.get("tls_ca_cert", "") or "")
     cfg["tls_verify"]              = bool(b.get("tls_verify", False))
+    cfg["header_scope_enforce"]     = bool(b.get("header_scope_enforce", True))
+    cfg["popup_header_intercept"]   = bool(b.get("popup_header_intercept", False))
 
     cfg["llm_provider"]            = str(l.get("provider",     "ollama"))
     cfg["ollama_model"]            = str(l.get("ollama_model", "llama3"))
@@ -170,6 +172,31 @@ def _load_config(path: Path = _CONFIG_PATH) -> dict:
 
 # Load once at import time so parse_args() can reference it
 _CFG = _load_config()
+
+
+def _coerce_popup_header_intercept(value, default: bool = False) -> bool:
+    """popup 初回ヘッダ傍受の明示 opt-in 値を安全に bool 化する。"""
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    normalized = str(value).strip().lower()
+    if normalized in {"1", "true"}:
+        return True
+    if normalized in {"0", "false"}:
+        return False
+    return default
+
+
+def _popup_header_intercept_default() -> bool:
+    """env を config より優先して CLI の既定値を解決する。"""
+    configured = _coerce_popup_header_intercept(
+        _CFG.get("popup_header_intercept", False)
+    )
+    return _coerce_popup_header_intercept(
+        os.environ.get("WSCAN_POPUP_HEADER_INTERCEPT"),
+        default=configured,
+    )
 
 
 # 設定スナップショット等で永続化してはいけない秘匿フィールド。キー名に以下の
@@ -888,6 +915,16 @@ Examples:
         help=(
             "Re-run --header-refresh-cmd this often during the scan "
             "(seconds). 0 disables periodic refresh."
+        ),
+    )
+    scan.add_argument(
+        "--popup-header-intercept",
+        action="store_true",
+        default=_popup_header_intercept_default(),
+        help=(
+            "Open a local unauthenticated DevTools port so scoped custom headers "
+            "can be attached before a popup's first request. Disabled by default; "
+            "do not use on shared hosts."
         ),
     )
     scan.add_argument(
@@ -2194,6 +2231,10 @@ async def run_scan(args):
             headers=_resolved_headers,
             header_refresh_cmd=getattr(args, "header_refresh_cmd", "") or "",
             header_refresh_interval=getattr(args, "header_refresh_interval", 0.0) or 0.0,
+            header_scope_enforce=_CFG.get("header_scope_enforce", True),
+            popup_header_intercept=getattr(
+                args, "popup_header_intercept", False
+            ),
             tls_client_cert=getattr(args, "tls_client_cert", "") or "",
             tls_client_key=getattr(args, "tls_client_key", "") or "",
             tls_client_pfx=getattr(args, "tls_client_pfx", "") or "",
@@ -2428,6 +2469,8 @@ async def run_serve(args):
         "tls_client_cert_password": _CFG.get("tls_client_cert_password", ""),
         "tls_ca_cert": _CFG.get("tls_ca_cert", ""),
         "tls_verify": _CFG.get("tls_verify", False),
+        "header_scope_enforce": _CFG.get("header_scope_enforce", True),
+        "popup_header_intercept": _popup_header_intercept_default(),
         "llm": _CFG.get("llm_provider", "ollama"),
         "ollama_model": _CFG.get("ollama_model", "llama3"),
         "openai_model": _CFG.get("openai_model", "gpt-4o-mini"),
@@ -2794,6 +2837,16 @@ async def run_serve(args):
                 headers=_hdrs,
                 header_refresh_cmd=cfg.get("header_refresh_cmd", "") or "",
                 header_refresh_interval=float(cfg.get("header_refresh_interval", 0.0) or 0.0),
+                header_scope_enforce=cfg.get(
+                    "header_scope_enforce",
+                    _CFG.get("header_scope_enforce", True),
+                ),
+                popup_header_intercept=_coerce_popup_header_intercept(
+                    cfg.get(
+                        "popup_header_intercept",
+                        _popup_header_intercept_default(),
+                    )
+                ),
             )
             # アウトプットフォルダに送信された設定スナップショットを保存しておく
             # (ブラウザの自動ダウンロードに頼らず、レポートと同じ場所に残す)

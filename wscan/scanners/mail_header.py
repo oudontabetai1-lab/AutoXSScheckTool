@@ -458,7 +458,10 @@ class MailHeaderInjectionScanner(BaseScanner):
         # よう include_cookie=False で取得。
         if hasattr(self.engine, "auth_headers"):
             try:
-                client_kwargs["headers"] = self.engine.auth_headers(include_cookie=False)
+                client_kwargs["headers"] = self.auth_headers_for_url(
+                    action,
+                    include_cookie=False,
+                )
             except TypeError:
                 client_kwargs["headers"] = self.engine.auth_headers()
         client_kwargs["cookies"] = await self._collect_cookies()

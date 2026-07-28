@@ -165,7 +165,11 @@ class RequestSmugglingScanner(BaseScanner):
 
     async def _measure_normal(self, url: str, timeout: float, proxy: str | None) -> float:
         normal_start = time.monotonic()
-        headers = self.engine.auth_headers() if hasattr(self.engine, "auth_headers") else {}
+        headers = (
+            self.auth_headers_for_url(url)
+            if hasattr(self.engine, "auth_headers")
+            else {}
+        )
         async with httpx.AsyncClient(
             timeout=timeout,
             follow_redirects=False,
@@ -187,7 +191,7 @@ class RequestSmugglingScanner(BaseScanner):
             # Merge engine custom headers underneath probe-specific ones so
             # smuggling probes still authenticate against gated endpoints.
             if hasattr(self.engine, "auth_headers"):
-                base = self.engine.auth_headers()
+                base = self.auth_headers_for_url(url)
                 base.update(headers or {})
                 headers = base
             async with httpx.AsyncClient(

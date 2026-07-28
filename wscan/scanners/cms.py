@@ -122,7 +122,7 @@ class CmsScanner(BaseScanner):
             # Strip Cookie from auth_headers because we already pass it via
             # the ``cookies`` kwarg below; httpx would otherwise duplicate it.
             client_kwargs["headers"] = {
-                k: v for k, v in self.engine.auth_headers().items()
+                k: v for k, v in self.auth_headers_for_url(base).items()
                 if k.lower() != "cookie"
             }
 

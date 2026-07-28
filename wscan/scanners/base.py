@@ -315,6 +315,30 @@ class BaseScanner(ABC):
         """Scaling factor for sleep durations (0.5 in CTF mode, 1.0 otherwise)."""
         return getattr(self.engine, "sleep_factor", 1.0)
 
+    def auth_headers_for_url(
+        self,
+        url: str,
+        extra: Optional[dict] = None,
+        *,
+        include_cookie: bool = True,
+    ) -> dict:
+        """Return engine authentication headers scoped to a request URL.
+
+        Lightweight scanner test doubles created before URL-scoped headers do
+        not expose ``headers_for_url``.  Keep those compatible while ensuring
+        the real ScanEngine always reaches its URL-aware helper.
+        """
+        auth_headers = getattr(self.engine, "auth_headers", None)
+        if not callable(auth_headers):
+            return dict(extra or {})
+        if hasattr(self.engine, "headers_for_url"):
+            return auth_headers(
+                extra,
+                include_cookie=include_cookie,
+                url=url,
+            )
+        return auth_headers(extra, include_cookie=include_cookie)
+
     async def log_payload_test(
         self, field_name: str, payload: str, check_type: str, url: str = ""
     ) -> None:

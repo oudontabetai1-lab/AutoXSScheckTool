@@ -228,7 +228,7 @@ class PrototypePollutionScanner(BaseScanner):
 
         hdrs: dict = {"Content-Type": ctype}
         if hasattr(self.engine, "auth_headers"):
-            base = self.engine.auth_headers()
+            base = self.auth_headers_for_url(url)
             base.update(hdrs)
             hdrs = base
         if tmpl and isinstance(getattr(tmpl, "headers", None), dict):

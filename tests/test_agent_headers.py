@@ -2,6 +2,7 @@
 
 browser-use は optional 依存のため、実ブラウザや browser_use 自体は起動しない。
 """
+import asyncio
 import tempfile
 import unittest
 import sys
@@ -70,6 +71,135 @@ class _SessionWithoutCurrentPage:
 
     async def set_extra_headers(self, headers):
         self.calls.append(("set_extra_headers", headers))
+
+
+class _FetchCommands:
+    def __init__(self, fail_enable=False, fail_header_continue=False):
+        self.calls = []
+        self.fail_enable = fail_enable
+        self.fail_header_continue = fail_header_continue
+
+    async def enable(self, params=None, session_id=None):
+        self.calls.append(("enable", params, session_id))
+        if self.fail_enable:
+            raise RuntimeError("Fetch enable failed")
+
+    async def disable(self, params=None, session_id=None):
+        self.calls.append(("disable", params, session_id))
+
+    async def continueRequest(self, params, session_id=None):
+        self.calls.append(("continueRequest", params, session_id))
+        if self.fail_header_continue and "headers" in params:
+            raise RuntimeError("Fetch continue failed")
+
+
+class _FetchRegistration:
+    def __init__(self, fail_registration=False):
+        self.callback = None
+        self.fail_registration = fail_registration
+
+    def requestPaused(self, callback):
+        if self.fail_registration:
+            raise RuntimeError("Fetch handler registration failed")
+        self.callback = callback
+
+
+class _TargetCommands:
+    def __init__(self):
+        self.calls = []
+
+    async def setAutoAttach(self, params=None, session_id=None):
+        self.calls.append(("setAutoAttach", params, session_id))
+
+
+class _RuntimeCommands:
+    def __init__(self):
+        self.calls = []
+
+    async def runIfWaitingForDebugger(self, params=None, session_id=None):
+        self.calls.append(
+            ("runIfWaitingForDebugger", params, session_id)
+        )
+
+
+class _TargetRegistration:
+    def __init__(self, registry):
+        self.registry = registry
+        self.callback = None
+
+    def attachedToTarget(self, callback):
+        self.callback = callback
+        self.registry._handlers["Target.attachedToTarget"] = callback
+
+
+class _EventRegistry:
+    def __init__(self, attached_handler):
+        self._handlers = {"Target.attachedToTarget": attached_handler}
+
+    def unregister(self, method):
+        self._handlers.pop(method, None)
+
+
+class _RequestScopedHeaderSession:
+    def __init__(
+        self,
+        *,
+        fail_enable=False,
+        fail_registration=False,
+        fail_header_continue=False,
+        target_events=False,
+    ):
+        self.calls = []
+        self.agent_focus_target_id = "target-1"
+        self.fetch_commands = _FetchCommands(
+            fail_enable=fail_enable,
+            fail_header_continue=fail_header_continue,
+        )
+        self.fetch_registration = _FetchRegistration(
+            fail_registration=fail_registration
+        )
+        cdp_client = SimpleNamespace(
+            send=SimpleNamespace(Fetch=self.fetch_commands),
+            register=SimpleNamespace(Fetch=self.fetch_registration),
+        )
+        self.cdp_session = SimpleNamespace(
+            cdp_client=cdp_client,
+            session_id="target-session",
+        )
+        if target_events:
+            self.attached_events = []
+
+            def _existing_attached_handler(event, session_id=None):
+                self.attached_events.append((event, session_id))
+
+            event_registry = _EventRegistry(_existing_attached_handler)
+            target_registration = _TargetRegistration(event_registry)
+            self.target_commands = _TargetCommands()
+            self.runtime_commands = _RuntimeCommands()
+            self._cdp_client_root = SimpleNamespace(
+                _event_registry=event_registry,
+                send=SimpleNamespace(
+                    Fetch=self.fetch_commands,
+                    Target=self.target_commands,
+                    Runtime=self.runtime_commands,
+                ),
+                register=SimpleNamespace(
+                    Fetch=self.fetch_registration,
+                    Target=target_registration,
+                ),
+            )
+            self.target_registration = target_registration
+
+    async def start(self):
+        self.calls.append("start")
+
+    async def get_current_page(self):
+        self.calls.append("get_current_page")
+        return object()
+
+    async def get_or_create_cdp_session(self, target_id, focus=False):
+        self.calls.append(("get_or_create_cdp_session", target_id, focus))
+        return self.cdp_session
 
 
 class AgentHeaderCompositionTests(unittest.TestCase):
@@ -391,6 +521,534 @@ class AgentHeaderWiringTests(unittest.IsolatedAsyncioTestCase):
 
 
 class AgentBrowserHeaderApplicationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_request_scoped_headers_adds_headers_for_allowed_origin(self):
+        scanner = AgentBrowserScanner(
+            "http://fixture.test",
+            extra_headers={"Authorization": "Bearer test-token"},
+        )
+        session = _RequestScopedHeaderSession()
+
+        enabled = await scanner._enable_request_scoped_headers(session)
+        await session.fetch_registration.callback(
+            {
+                "requestId": "allowed-request",
+                "request": {
+                    "url": "http://fixture.test/page",
+                    "headers": {
+                        "Accept": "text/html",
+                        "authorization": "stale-value",
+                    },
+                },
+            },
+            "event-session",
+        )
+
+        self.assertTrue(enabled)
+        self.assertTrue(scanner._request_scoped_headers)
+        self.assertEqual(
+            session.fetch_commands.calls[-1],
+            (
+                "continueRequest",
+                {
+                    "requestId": "allowed-request",
+                    "headers": [
+                        {"name": "Accept", "value": "text/html"},
+                        {
+                            "name": "Authorization",
+                            "value": "Bearer test-token",
+                        },
+                    ],
+                },
+                "event-session",
+            ),
+        )
+
+    async def test_request_scoped_headers_omits_headers_for_disallowed_origin(self):
+        scanner = AgentBrowserScanner(
+            "http://fixture.test",
+            extra_headers={"Authorization": "Bearer test-token"},
+        )
+        session = _RequestScopedHeaderSession()
+
+        enabled = await scanner._enable_request_scoped_headers(session)
+        await session.fetch_registration.callback(
+            {
+                "requestId": "disallowed-request",
+                "request": {
+                    "url": "https://third-party.example/script.js",
+                    "headers": {"Accept": "*/*"},
+                },
+            },
+            None,
+        )
+
+        self.assertTrue(enabled)
+        self.assertEqual(
+            session.fetch_commands.calls[-1],
+            (
+                "continueRequest",
+                {"requestId": "disallowed-request"},
+                "target-session",
+            ),
+        )
+
+    async def test_request_scoped_handler_exception_still_continues_request(self):
+        scanner = AgentBrowserScanner(
+            "http://fixture.test",
+            extra_headers={"Authorization": "Bearer test-token"},
+        )
+        session = _RequestScopedHeaderSession()
+        await scanner._enable_request_scoped_headers(session)
+
+        with patch(
+            "wscan.llm_agent_browser.headers_allowed_for_url",
+            side_effect=RuntimeError("origin check failed"),
+        ):
+            await session.fetch_registration.callback(
+                {
+                    "requestId": "fallback-request",
+                    "request": {"url": "http://fixture.test/page", "headers": {}},
+                },
+                None,
+            )
+
+        self.assertEqual(
+            session.fetch_commands.calls[-1],
+            (
+                "continueRequest",
+                {"requestId": "fallback-request"},
+                "target-session",
+            ),
+        )
+
+    async def test_request_scoped_continue_failure_retries_without_headers(self):
+        scanner = AgentBrowserScanner(
+            "http://fixture.test",
+            extra_headers={"Authorization": "Bearer test-token"},
+        )
+        session = _RequestScopedHeaderSession(fail_header_continue=True)
+        await scanner._enable_request_scoped_headers(session)
+
+        await session.fetch_registration.callback(
+            {
+                "requestId": "retry-request",
+                "request": {"url": "http://fixture.test/page", "headers": {}},
+            },
+            None,
+        )
+
+        continue_calls = [
+            call
+            for call in session.fetch_commands.calls
+            if call[0] == "continueRequest"
+        ]
+        self.assertEqual(len(continue_calls), 2)
+        self.assertIn("headers", continue_calls[0][1])
+        self.assertEqual(
+            continue_calls[1],
+            (
+                "continueRequest",
+                {"requestId": "retry-request"},
+                "target-session",
+            ),
+        )
+
+    async def test_request_scoped_enable_failure_disables_and_returns_false(self):
+        scanner = AgentBrowserScanner(
+            "http://fixture.test",
+            extra_headers={"Authorization": "Bearer test-token"},
+        )
+        session = _RequestScopedHeaderSession(fail_enable=True)
+
+        enabled = await scanner._enable_request_scoped_headers(session)
+
+        self.assertFalse(enabled)
+        self.assertFalse(scanner._request_scoped_headers)
+        self.assertEqual(
+            session.fetch_commands.calls[-1],
+            ("disable", None, "target-session"),
+        )
+
+    async def test_request_scoped_registration_failure_never_enables_fetch(self):
+        scanner = AgentBrowserScanner(
+            "http://fixture.test",
+            extra_headers={"Authorization": "Bearer test-token"},
+        )
+        session = _RequestScopedHeaderSession(fail_registration=True)
+
+        enabled = await scanner._enable_request_scoped_headers(session)
+
+        self.assertFalse(enabled)
+        self.assertFalse(scanner._request_scoped_headers)
+        self.assertNotIn(
+            "enable",
+            [call[0] for call in session.fetch_commands.calls],
+        )
+        self.assertEqual(
+            session.fetch_commands.calls[-1],
+            ("disable", None, "target-session"),
+        )
+
+    async def test_request_scoped_headers_skips_empty_headers(self):
+        scanner = AgentBrowserScanner("http://fixture.test")
+        session = _RequestScopedHeaderSession()
+
+        enabled = await scanner._enable_request_scoped_headers(session)
+
+        self.assertFalse(enabled)
+        self.assertEqual(session.calls, [])
+        self.assertEqual(session.fetch_commands.calls, [])
+
+    async def test_request_scoped_headers_enable_fetch_for_new_target(self):
+        scanner = AgentBrowserScanner(
+            "http://fixture.test",
+            extra_headers={"Authorization": "Bearer test-token"},
+        )
+        session = _RequestScopedHeaderSession()
+        await scanner._enable_request_scoped_headers(session)
+
+        session.agent_focus_target_id = "target-2"
+        enabled = await scanner._enable_fetch_for_current_target(session)
+
+        self.assertTrue(enabled)
+        self.assertEqual(
+            [call[0] for call in session.fetch_commands.calls].count("enable"),
+            2,
+        )
+        self.assertEqual(
+            set(scanner._fetch_enabled_targets),
+            {"target-1", "target-2"},
+        )
+
+    async def test_request_scoped_headers_enable_fetch_on_target_event(self):
+        scanner = AgentBrowserScanner(
+            "http://fixture.test",
+            extra_headers={"Authorization": "Bearer test-token"},
+        )
+        session = _RequestScopedHeaderSession(target_events=True)
+
+        enabled = await scanner._enable_request_scoped_headers(session)
+
+        self.assertTrue(enabled)
+        self.assertIs(scanner._target_event_client, session._cdp_client_root)
+        self.assertEqual(
+            session.target_commands.calls,
+            [(
+                "setAutoAttach",
+                {
+                    "autoAttach": True,
+                    "waitForDebuggerOnStart": True,
+                    "flatten": True,
+                },
+                None,
+            )],
+        )
+
+        event = {
+            "sessionId": "popup-session",
+            "waitingForDebugger": True,
+            "targetInfo": {
+                "targetId": "popup-target",
+                "type": "page",
+            },
+        }
+        session.target_registration.callback(event, "root-session")
+        await asyncio.gather(*tuple(scanner._target_event_tasks))
+
+        self.assertIn(
+            ("enable", {"patterns": [{"urlPattern": "*"}]}, "popup-session"),
+            session.fetch_commands.calls,
+        )
+        self.assertEqual(
+            session.runtime_commands.calls,
+            [("runIfWaitingForDebugger", None, "popup-session")],
+        )
+        self.assertEqual(
+            session.attached_events,
+            [(event, "root-session")],
+        )
+        self.assertIn("popup-target", scanner._fetch_enabled_targets)
+
+    async def test_target_event_awaits_async_existing_handler_before_resume(self):
+        scanner = AgentBrowserScanner(
+            "http://fixture.test",
+            extra_headers={"Authorization": "Bearer test-token"},
+        )
+        session = _RequestScopedHeaderSession(target_events=True)
+        handler_completed = False
+        resume_observations = []
+
+        async def _existing_handler(event, session_id=None):
+            nonlocal handler_completed
+            await asyncio.sleep(0)
+            handler_completed = True
+
+        async def _resume(params=None, session_id=None):
+            resume_observations.append((handler_completed, session_id))
+
+        session._cdp_client_root._event_registry._handlers[
+            "Target.attachedToTarget"
+        ] = _existing_handler
+        session.runtime_commands.runIfWaitingForDebugger = _resume
+        await scanner._enable_request_scoped_headers(session)
+
+        session.target_registration.callback(
+            {
+                "sessionId": "popup-session",
+                "targetInfo": {
+                    "targetId": "popup-target",
+                    "type": "page",
+                },
+            },
+            "root-session",
+        )
+        await asyncio.gather(*tuple(scanner._target_event_tasks))
+
+        self.assertTrue(handler_completed)
+        self.assertEqual(resume_observations, [(True, "popup-session")])
+
+    async def test_target_event_calls_sync_existing_handler_before_resume(self):
+        scanner = AgentBrowserScanner(
+            "http://fixture.test",
+            extra_headers={"Authorization": "Bearer test-token"},
+        )
+        session = _RequestScopedHeaderSession(target_events=True)
+        call_order = []
+
+        def _existing_handler(event, session_id=None):
+            call_order.append(("handler", session_id))
+
+        async def _resume(params=None, session_id=None):
+            call_order.append(("resume", session_id))
+
+        session._cdp_client_root._event_registry._handlers[
+            "Target.attachedToTarget"
+        ] = _existing_handler
+        session.runtime_commands.runIfWaitingForDebugger = _resume
+        await scanner._enable_request_scoped_headers(session)
+
+        session.target_registration.callback(
+            {
+                "sessionId": "popup-session",
+                "targetInfo": {
+                    "targetId": "popup-target",
+                    "type": "page",
+                },
+            },
+            "root-session",
+        )
+        await asyncio.gather(*tuple(scanner._target_event_tasks))
+
+        self.assertEqual(
+            call_order,
+            [("handler", "root-session"), ("resume", "popup-session")],
+        )
+
+    async def test_target_event_handler_exception_still_resumes_target(self):
+        scanner = AgentBrowserScanner(
+            "http://fixture.test",
+            extra_headers={"Authorization": "Bearer test-token"},
+        )
+        session = _RequestScopedHeaderSession(target_events=True)
+
+        async def _existing_handler(event, session_id=None):
+            raise RuntimeError("existing handler failed")
+
+        session._cdp_client_root._event_registry._handlers[
+            "Target.attachedToTarget"
+        ] = _existing_handler
+        await scanner._enable_request_scoped_headers(session)
+
+        session.target_registration.callback(
+            {
+                "sessionId": "popup-session",
+                "targetInfo": {
+                    "targetId": "popup-target",
+                    "type": "page",
+                },
+            },
+            "root-session",
+        )
+        await asyncio.gather(*tuple(scanner._target_event_tasks))
+
+        self.assertEqual(
+            session.runtime_commands.calls,
+            [("runIfWaitingForDebugger", None, "popup-session")],
+        )
+
+    async def test_target_event_handler_timeout_still_resumes_target(self):
+        scanner = AgentBrowserScanner(
+            "http://fixture.test",
+            extra_headers={"Authorization": "Bearer test-token"},
+        )
+        session = _RequestScopedHeaderSession(target_events=True)
+        never_finishes = asyncio.Event()
+
+        async def _existing_handler(event, session_id=None):
+            await never_finishes.wait()
+
+        session._cdp_client_root._event_registry._handlers[
+            "Target.attachedToTarget"
+        ] = _existing_handler
+        await scanner._enable_request_scoped_headers(session)
+
+        with patch(
+            "wscan.llm_agent_browser._TARGET_HANDLER_TIMEOUT_SECONDS",
+            0.01,
+        ):
+            session.target_registration.callback(
+                {
+                    "sessionId": "popup-session",
+                    "targetInfo": {
+                        "targetId": "popup-target",
+                        "type": "page",
+                    },
+                },
+                "root-session",
+            )
+            await asyncio.gather(*tuple(scanner._target_event_tasks))
+
+        self.assertEqual(
+            session.runtime_commands.calls,
+            [("runIfWaitingForDebugger", None, "popup-session")],
+        )
+
+    async def test_target_event_fetch_failure_still_resumes_target(self):
+        scanner = AgentBrowserScanner(
+            "http://fixture.test",
+            extra_headers={"Authorization": "Bearer test-token"},
+        )
+        session = _RequestScopedHeaderSession(target_events=True)
+        await scanner._enable_request_scoped_headers(session)
+        session.fetch_commands.fail_enable = True
+
+        session.target_registration.callback(
+            {
+                "sessionId": "popup-session",
+                "waitingForDebugger": True,
+                "targetInfo": {
+                    "targetId": "popup-target",
+                    "type": "page",
+                },
+            },
+            "root-session",
+        )
+        await asyncio.gather(*tuple(scanner._target_event_tasks))
+
+        self.assertNotIn("popup-target", scanner._fetch_enabled_targets)
+        self.assertEqual(
+            session.fetch_commands.calls[-1],
+            ("disable", None, "popup-session"),
+        )
+        self.assertEqual(
+            session.runtime_commands.calls,
+            [("runIfWaitingForDebugger", None, "popup-session")],
+        )
+
+    async def test_request_scoped_headers_keep_step_path_without_target_events(self):
+        scanner = AgentBrowserScanner(
+            "http://fixture.test",
+            extra_headers={"Authorization": "Bearer test-token"},
+        )
+        session = _RequestScopedHeaderSession()
+
+        enabled = await scanner._enable_request_scoped_headers(session)
+        session.agent_focus_target_id = "target-2"
+        step_enabled = await scanner._enable_fetch_for_current_target(session)
+
+        self.assertTrue(enabled)
+        self.assertIsNone(scanner._target_event_client)
+        self.assertTrue(step_enabled)
+        self.assertEqual(
+            [call[0] for call in session.fetch_commands.calls].count("enable"),
+            2,
+        )
+
+    async def test_request_scoped_headers_do_not_enable_same_target_twice(self):
+        scanner = AgentBrowserScanner(
+            "http://fixture.test",
+            extra_headers={"Authorization": "Bearer test-token"},
+        )
+        session = _RequestScopedHeaderSession()
+        await scanner._enable_request_scoped_headers(session)
+
+        enabled = await scanner._enable_fetch_for_current_target(session)
+
+        self.assertTrue(enabled)
+        self.assertEqual(
+            [call[0] for call in session.fetch_commands.calls].count("enable"),
+            1,
+        )
+
+    async def test_same_target_is_reenabled_when_client_or_session_changes(self):
+        scanner = AgentBrowserScanner(
+            "http://fixture.test",
+            extra_headers={"Authorization": "Bearer test-token"},
+        )
+        first_session = _RequestScopedHeaderSession()
+        await scanner._enable_request_scoped_headers(first_session)
+
+        enabled = await scanner._enable_fetch_for_cdp_target(
+            first_session.cdp_session.cdp_client,
+            "reconnected-session",
+            "target-1",
+        )
+
+        self.assertTrue(enabled)
+        self.assertEqual(
+            [
+                call
+                for call in first_session.fetch_commands.calls
+                if call[0] == "enable"
+            ][-1],
+            (
+                "enable",
+                {"patterns": [{"urlPattern": "*"}]},
+                "reconnected-session",
+            ),
+        )
+
+        second_fetch = _FetchCommands()
+        second_client = SimpleNamespace(
+            send=SimpleNamespace(Fetch=second_fetch),
+            register=SimpleNamespace(Fetch=_FetchRegistration()),
+        )
+        enabled = await scanner._enable_fetch_for_cdp_target(
+            second_client,
+            "reconnected-session",
+            "target-1",
+        )
+
+        self.assertTrue(enabled)
+        self.assertEqual(
+            second_fetch.calls,
+            [(
+                "enable",
+                {"patterns": [{"urlPattern": "*"}]},
+                "reconnected-session",
+            )],
+        )
+        self.assertEqual(
+            scanner._fetch_enabled_targets["target-1"],
+            (id(second_client), "reconnected-session"),
+        )
+
+    async def test_request_scoped_headers_new_target_failure_is_swallowed(self):
+        scanner = AgentBrowserScanner(
+            "http://fixture.test",
+            extra_headers={"Authorization": "Bearer test-token"},
+        )
+        session = _RequestScopedHeaderSession()
+        await scanner._enable_request_scoped_headers(session)
+        session.agent_focus_target_id = "target-2"
+        session.fetch_commands.fail_enable = True
+
+        enabled = await scanner._enable_fetch_for_current_target(session)
+
+        self.assertFalse(enabled)
+        self.assertNotIn("target-2", scanner._fetch_enabled_targets)
+        self.assertEqual(session.fetch_commands.calls[-1][0], "disable")
+
     async def test_prepare_headers_before_run_uses_required_lifecycle_order(self):
         scanner = AgentBrowserScanner(
             "http://fixture.test",

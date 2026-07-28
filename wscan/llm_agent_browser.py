@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import fnmatch
+import inspect
 import json
 import re
 import secrets
@@ -31,12 +32,21 @@ from urllib.parse import urlparse
 from rich.console import Console
 from rich.rule import Rule
 
+from .header_scope import (
+    _BLANK_URLS,
+    _url_origin,
+    allowed_header_origins,
+    effective_origin_url,
+    expand_scheme_variants,
+    headers_allowed_for_url,
+)
+
 if TYPE_CHECKING:
     from wscan.monitor import MonitorServer
 
 console = Console()
 
-_BLANK_URLS = frozenset({"", "about:blank", "chrome://newtab/", "about:newtab"})
+_TARGET_HANDLER_TIMEOUT_SECONDS = 3.0
 
 
 def _normalize_agent_url(url: str) -> str:
@@ -71,81 +81,6 @@ def _url_matches_scope(url: str, scopes: list[str]) -> bool:
         if parsed.path == scope or parsed.path.startswith(scope.rstrip("/") + "/"):
             return True
     return False
-
-
-def _url_origin(url: str) -> str:
-    """URL から比較用の scheme://host[:port] を抽出する。"""
-    try:
-        parsed = urlparse(str(url or "").strip())
-        hostname = parsed.hostname
-        port = parsed.port
-    except (TypeError, ValueError):
-        return ""
-    if not parsed.scheme or not parsed.netloc or not hostname:
-        return ""
-    normalized_host = hostname.lower()
-    if ":" in normalized_host:
-        normalized_host = f"[{normalized_host}]"
-    scheme = parsed.scheme.lower()
-    default_ports = {"http": 80, "https": 443}
-    port_suffix = (
-        f":{port}"
-        if port is not None and port != default_ports.get(scheme)
-        else ""
-    )
-    return f"{scheme}://{normalized_host}{port_suffix}"
-
-
-def effective_origin_url(current_url: str, intended_url: str) -> str:
-    """オリジン判定に使う URL を返す（純粋関数）。
-
-    current_url が未確定（about:blank 等）なら intended_url を使う。
-    """
-    normalized_current = str(current_url or "").strip()
-    if normalized_current in _BLANK_URLS:
-        return str(intended_url or "").strip()
-    return normalized_current
-
-
-def allowed_header_origins(
-    target_url: str,
-    target_urls: list[str],
-    access_urls: list[str],
-    login_url: str = "",
-    urls_without_scheme: Optional[set[str]] = None,
-) -> set[str]:
-    """認証ヘッダを送ってよいオリジン集合(scheme://host[:port])を返す（純粋関数）。"""
-    origins: set[str] = set()
-    for url in [target_url, *target_urls, *access_urls, login_url]:
-        origin = _url_origin(url)
-        if origin:
-            origins.add(origin)
-    return expand_scheme_variants(origins, urls_without_scheme or set())
-
-
-def expand_scheme_variants(
-    origins: set[str],
-    urls_without_scheme: set[str],
-) -> set[str]:
-    """scheme を自動補完した URL の http/https オリジンを追加する（純粋関数）。"""
-    expanded = set(origins)
-    for raw_url in urls_without_scheme:
-        normalized = _normalize_agent_url(raw_url)
-        parsed = urlparse(normalized)
-        if not parsed.hostname:
-            continue
-        for scheme in ("http", "https"):
-            variant = parsed._replace(scheme=scheme).geturl()
-            origin = _url_origin(variant)
-            if origin:
-                expanded.add(origin)
-    return expanded
-
-
-def headers_allowed_for_url(url: str, allowed_origins: set[str]) -> bool:
-    """現在ページ URL が許可オリジンなら True（純粋関数）。"""
-    origin = _url_origin(url)
-    return bool(origin and origin in allowed_origins)
 
 
 def _url_is_excluded(url: str, exclude_urls: list[str]) -> bool:
@@ -620,6 +555,12 @@ class AgentBrowserScanner:
             self.login_url,
             urls_without_scheme,
         )
+        self._request_scoped_headers = False
+        # Fetch.enable は target ではなく CDP session 単位の状態。browser-use が
+        # 同じ target へ再接続した場合も、新しい client/session では再設定する。
+        self._fetch_enabled_targets: dict[str, tuple[int, str]] = {}
+        self._target_event_client = None
+        self._target_event_tasks: set[asyncio.Task] = set()
         self._headers_applied = False
         self._missing_header_url_api_warned = False
         self._header_application_failed_warned = False
@@ -712,6 +653,265 @@ class AgentBrowserScanner:
             await self._warn_header_application_failed()
         else:
             self._headers_applied = True
+
+    async def _enable_fetch_for_cdp_target(
+        self,
+        cdp_client,
+        cdp_session_id: str,
+        target_id: str,
+    ) -> bool:
+        """現在の client/session で未設定なら Fetch を有効化する。"""
+        fetch_commands = None
+        try:
+            if not target_id:
+                return False
+            session_key = (id(cdp_client), str(cdp_session_id or ""))
+            if self._fetch_enabled_targets.get(target_id) == session_key:
+                return True
+
+            fetch_commands = cdp_client.send.Fetch
+            fetch_registration = cdp_client.register.Fetch
+
+            # cdp_use 1.4.5 / browser-use 0.12.6 の EventRegistry は async
+            # callback を await する。Fetch.enable より先に登録し、有効化直後の
+            # requestPaused に未処理区間が生じないようにする。
+            async def _continue_paused_request(event, event_session_id=None):
+                request_id = None
+                continued = False
+                continue_session_id = event_session_id or cdp_session_id
+                try:
+                    request_id = event.get("requestId") or event.get("request_id")
+                    if not request_id:
+                        return
+
+                    request = event.get("request") or {}
+                    request_url = request.get("url") or ""
+                    params = {"requestId": request_id}
+                    if headers_allowed_for_url(request_url, self._header_origins):
+                        existing_headers = request.get("headers") or {}
+                        overridden_names = {
+                            str(name).lower() for name in self.extra_headers
+                        }
+                        headers = [
+                            {"name": str(name), "value": str(value)}
+                            for name, value in existing_headers.items()
+                            if str(name).lower() not in overridden_names
+                        ]
+                        headers.extend(
+                            {"name": str(name), "value": str(value)}
+                            for name, value in self.extra_headers.items()
+                        )
+                        params["headers"] = headers
+
+                    await asyncio.wait_for(
+                        fetch_commands.continueRequest(
+                            params=params,
+                            session_id=continue_session_id,
+                        ),
+                        timeout=3.0,
+                    )
+                    continued = True
+                except Exception:
+                    # 判定・ヘッダ生成・CDP 送信のどこで失敗しても値は出力しない。
+                    pass
+                finally:
+                    if request_id and not continued:
+                        try:
+                            await asyncio.wait_for(
+                                fetch_commands.continueRequest(
+                                    params={"requestId": request_id},
+                                    session_id=continue_session_id,
+                                ),
+                                timeout=3.0,
+                            )
+                        except Exception:
+                            # 最後の素通しも失敗した場合は Agent 全体を止めない。
+                            pass
+
+            # 登録を先に行うことで、登録失敗時には Fetch を有効化しない。
+            fetch_registration.requestPaused(_continue_paused_request)
+            await asyncio.wait_for(
+                fetch_commands.enable(
+                    params={"patterns": [{"urlPattern": "*"}]},
+                    session_id=cdp_session_id,
+                ),
+                timeout=3.0,
+            )
+        except Exception:
+            # 登録または有効化が部分的に成功していても paused request を残さない。
+            if fetch_commands is not None:
+                try:
+                    await asyncio.wait_for(
+                        fetch_commands.disable(session_id=cdp_session_id),
+                        timeout=3.0,
+                    )
+                except Exception:
+                    pass
+            return False
+
+        self._fetch_enabled_targets[target_id] = session_key
+        return True
+
+    async def _enable_fetch_for_current_target(self, session) -> bool:
+        """現在の browser target が未設定なら CDP Fetch を有効化する。"""
+        try:
+            target_id = session.agent_focus_target_id
+            if not target_id:
+                return False
+            cdp_session = await session.get_or_create_cdp_session(
+                target_id,
+                focus=False,
+            )
+            return await self._enable_fetch_for_cdp_target(
+                cdp_session.cdp_client,
+                cdp_session.session_id,
+                target_id,
+            )
+        except Exception:
+            return False
+
+    async def _enable_fetch_for_attached_target(
+        self,
+        cdp_client,
+        event: dict,
+        before_resume=None,
+    ) -> None:
+        """停止中の新 target に Fetch を設定し、成否にかかわらず再開する。"""
+        target_info = event.get("targetInfo") or {}
+        target_id = target_info.get("targetId") or ""
+        target_type = target_info.get("type") or ""
+        cdp_session_id = event.get("sessionId") or ""
+        try:
+            if target_type in {"page", "tab"} and target_id and cdp_session_id:
+                await self._enable_fetch_for_cdp_target(
+                    cdp_client,
+                    cdp_session_id,
+                    target_id,
+                )
+        finally:
+            if before_resume is not None:
+                try:
+                    # browser-use の既存 attachedToTarget ハンドラは、Fetch の
+                    # 設定完了後、target を再開する前に引き渡す。
+                    result = before_resume()
+                    if inspect.isawaitable(result):
+                        await asyncio.wait_for(
+                            result,
+                            timeout=_TARGET_HANDLER_TIMEOUT_SECONDS,
+                        )
+                except Exception:
+                    # 既存ハンドラの失敗やタイムアウトで target を停止したままに
+                    # せず、下の runIfWaitingForDebugger へ必ず進む。
+                    pass
+            if cdp_session_id:
+                try:
+                    # waitForDebuggerOnStart=True で停止させた target は、Fetch の
+                    # 成否や対象種別にかかわらず必ず再開してブラウザをハングさせない。
+                    await asyncio.wait_for(
+                        cdp_client.send.Runtime.runIfWaitingForDebugger(
+                            session_id=cdp_session_id,
+                        ),
+                        timeout=3.0,
+                    )
+                except Exception:
+                    # browser-use の SessionManager も再開を試みる。ここで例外を
+                    # 伝播してイベント処理や Agent 全体を停止させない。
+                    pass
+
+    async def _subscribe_fetch_for_new_targets(self, session) -> bool:
+        """新 target を停止状態で検知し、初回リクエスト前に Fetch を有効化する。"""
+        cdp_client = getattr(session, "_cdp_client_root", None)
+        if cdp_client is None:
+            return False
+        if self._target_event_client is cdp_client:
+            return True
+
+        event_registry = None
+        existing_handler = None
+        target_registration = None
+        try:
+            event_registry = cdp_client._event_registry
+            existing_handler = event_registry._handlers.get(
+                "Target.attachedToTarget"
+            )
+            target_registration = cdp_client.register.Target
+
+            # cdp_use 1.4.5 の EventRegistry はイベントごとに単一ハンドラ。
+            # browser-use の SessionManager を壊さないよう既存ハンドラを包む。
+            def _on_attached(event, event_session_id=None):
+                def _forward_existing_handler():
+                    if existing_handler is None:
+                        return
+                    return existing_handler(event, event_session_id)
+
+                task = asyncio.create_task(
+                    self._enable_fetch_for_attached_target(
+                        cdp_client,
+                        event,
+                        before_resume=_forward_existing_handler,
+                    )
+                )
+                self._target_event_tasks.add(task)
+                task.add_done_callback(self._target_event_tasks.discard)
+                return None
+
+            target_registration.attachedToTarget(_on_attached)
+            await cdp_client.send.Target.setAutoAttach(
+                params={
+                    "autoAttach": True,
+                    "waitForDebuggerOnStart": True,
+                    "flatten": True,
+                }
+            )
+        except Exception:
+            # 登録途中で失敗した場合は browser-use の元ハンドラを復元する。
+            try:
+                if existing_handler is not None:
+                    target_registration.attachedToTarget(existing_handler)
+                else:
+                    event_registry.unregister("Target.attachedToTarget")
+            except Exception:
+                pass
+            return False
+
+        self._target_event_client = cdp_client
+        return True
+
+    async def _enable_request_scoped_headers(self, session) -> bool:
+        """CDP Fetch でリクエスト単位のヘッダ付与を有効化する。
+
+        失敗時は Fetch を無効化して False を返す。呼び出し側は従来の
+        set_extra_headers 方式へフォールバックする。
+        """
+        if not self.extra_headers:
+            return False
+
+        required_apis = (
+            "start",
+            "get_current_page",
+            "get_or_create_cdp_session",
+            "agent_focus_target_id",
+        )
+        if not all(hasattr(session, name) for name in required_apis):
+            return False
+
+        try:
+            # BrowserSession.start() は冪等。Fetch を有効化する target を先に確立する。
+            await session.start()
+            await session.get_current_page()
+            enabled = await self._enable_fetch_for_current_target(session)
+        except Exception:
+            enabled = False
+
+        if not enabled:
+            self._request_scoped_headers = False
+            return False
+
+        self._request_scoped_headers = True
+        # 利用可能な browser-use / cdp_use では新 target をイベントで即時設定する。
+        # API 差異や登録失敗時も、各ステップの current target 確認を残して補完する。
+        await self._subscribe_fetch_for_new_targets(session)
+        return True
 
     async def _prepare_extra_headers_before_run(
         self, session, intended_url: str = ""
@@ -853,9 +1053,24 @@ class AgentBrowserScanner:
                     f"Agent Browser: {self.target_url} をスキャン中", "running"
                 )
 
-            await self._prepare_extra_headers_before_run(browser, start_url)
+            self._request_scoped_headers = (
+                await self._enable_request_scoped_headers(browser)
+            )
+            if not self._request_scoped_headers:
+                await self._prepare_extra_headers_before_run(browser, start_url)
 
-            if self.extra_headers and hasattr(browser, "set_extra_headers"):
+            if self.extra_headers and self._request_scoped_headers:
+                async def _enable_fetch_on_step(_agent):
+                    # イベント購読が使えない版や CDP 再接続後も、ポップアップや
+                    # 新規タブの current target を各ステップで補完する。
+                    await self._subscribe_fetch_for_new_targets(browser)
+                    await self._enable_fetch_for_current_target(browser)
+
+                history = await agent.run(
+                    max_steps=self.max_steps,
+                    on_step_start=_enable_fetch_on_step,
+                )
+            elif self.extra_headers and hasattr(browser, "set_extra_headers"):
                 async def _apply_headers_on_step(_agent):
                     await self._apply_extra_headers(browser)
 

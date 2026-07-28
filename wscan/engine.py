@@ -24,6 +24,7 @@ import asyncio
 import datetime
 import fnmatch
 import json
+import os
 import re
 import xml.etree.ElementTree as _ET
 from collections import deque
@@ -44,6 +45,35 @@ _CURRENT_WORKER: ContextVar = ContextVar("wscan_worker", default=None)
 # Per-task payload override: maps check_type → list[str].  Set for the duration
 # of a single scan_field call so parallel workers never clobber each other.
 _FIELD_PAYLOAD_OVERRIDES: ContextVar = ContextVar("wscan_payload_overrides", default=None)
+
+
+def _coerce_header_scope_enforce(value, default: bool = True) -> bool:
+    """設定値/env を bool 化する。明示的な false 値だけが逃げ道を有効にする。"""
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    normalized = str(value).strip().lower()
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    return default
+
+
+def _coerce_popup_header_intercept(value, default: bool = False) -> bool:
+    """DevTools ポートを開く明示 opt-in 値だけを bool 化する。"""
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    normalized = str(value).strip().lower()
+    if normalized in {"1", "true"}:
+        return True
+    if normalized in {"0", "false"}:
+        return False
+    return default
+
 
 # 検査名と一致／前置しない別 check_type を出すスキャナのエイリアス。
 # resume 時の Finding 絞り込み（_check_type_in_scope）で使う。
@@ -121,6 +151,7 @@ from rich import box as rbox
 from .attack_planner import AttackPlanner, FieldAttackPlan, PageAttackPlan
 from .adaptive_payload import AdaptivePayloadEngine
 from .browser import BrowserManager
+from .header_scope import allowed_header_origins, headers_allowed_for_url
 from .tls_config import TLSConfig
 from .chain_scanner import ChainScanner, ChainFinding
 from .ctf_flag_finder import FlagFinder
@@ -422,6 +453,8 @@ class ScanEngine:
         headers: Optional[dict] = None,
         header_refresh_cmd: str = "",
         header_refresh_interval: float = 0.0,
+        header_scope_enforce: bool = True,
+        popup_header_intercept: Optional[bool] = None,
         tls_client_cert: str = "",
         tls_client_key: str = "",
         tls_client_pfx: str = "",
@@ -704,6 +737,33 @@ class ScanEngine:
         self._mfa_config = MFAConfig.from_env(overrides=_mfa_overrides)
         self._mfa_solver = MFASolver(self._mfa_config) if self._mfa_config.enabled else None
 
+        configured_header_scope = _coerce_header_scope_enforce(
+            header_scope_enforce
+        )
+        env_header_scope = os.environ.get("WSCAN_HEADER_SCOPE_ENFORCE")
+        self.header_scope_enforce = _coerce_header_scope_enforce(
+            env_header_scope,
+            default=configured_header_scope,
+        )
+        if popup_header_intercept is None:
+            self.popup_header_intercept = _coerce_popup_header_intercept(
+                os.environ.get("WSCAN_POPUP_HEADER_INTERCEPT"),
+                default=False,
+            )
+        else:
+            # main.py 側で CLI > env > config を解決済み。明示値を env で
+            # 上書きせず、そのまま BrowserManager へ渡す。
+            self.popup_header_intercept = _coerce_popup_header_intercept(
+                popup_header_intercept,
+                default=False,
+            )
+        self._header_scope_origins = allowed_header_origins(
+            self.target_url,
+            self.target_urls,
+            self.access_urls,
+            self.login_url,
+        )
+
         # Components
         self._browser = BrowserManager(
             headless=headless, timeout=timeout, monitor=monitor,
@@ -713,6 +773,10 @@ class ScanEngine:
             extra_headers=self.header_manager.current(),
             tls_config=self.tls_config,
             target_url=self.target_url,
+            header_scope_origins=self._header_scope_origins,
+            header_scope_enforce=self.header_scope_enforce,
+            expect_late_headers=bool(header_refresh_cmd),
+            popup_header_intercept=self.popup_header_intercept,
             request_logger=self.request_logger,
             mfa_solver=self._mfa_solver,
         )
@@ -776,7 +840,7 @@ class ScanEngine:
         self.waf_detector = WAFDetector(
             payload_gen=self.payload_gen,
             proxy=proxy,
-            headers_provider=lambda: self.auth_headers(),
+            headers_provider=lambda url="": self.auth_headers(url=url),
             tls_options_provider=lambda: self.tls_config.httpx_options(),
         )
         # A-3: Payload continuous learning
@@ -994,7 +1058,32 @@ class ScanEngine:
     # browser property — transparently returns the current worker's browser
     # =========================================================================
 
-    def auth_headers(self, extra: Optional[dict] = None, *, include_cookie: bool = True) -> dict:
+    def headers_for_url(self, url: str) -> dict:
+        """Return current custom headers only when ``url`` is in header scope.
+
+        An explicitly disabled scope, an unknown scope, and headerless scans
+        preserve the legacy behavior.  The returned snapshot can be safely
+        merged underneath scanner defaults without removing headers such as
+        User-Agent or Content-Type.
+        """
+        headers = self.header_manager.current()
+        if (
+            not self.header_scope_enforce
+            or not headers
+            or not self._header_scope_origins
+        ):
+            return headers
+        if headers_allowed_for_url(url, self._header_scope_origins):
+            return headers
+        return {}
+
+    def auth_headers(
+        self,
+        extra: Optional[dict] = None,
+        *,
+        include_cookie: bool = True,
+        url: str = "",
+    ) -> dict:
         """
         Central source of HTTP headers for direct httpx calls.
 
@@ -1003,8 +1092,16 @@ class ScanEngine:
           * The current Cookie string (engine.cookies) unless ``include_cookie=False``
             and the user hasn't already supplied a Cookie header
           * Caller-supplied ``extra``
+
+        When ``url`` is supplied, custom HeaderManager keys are included only
+        for an allowed origin.  An omitted URL intentionally preserves legacy
+        behavior for callers whose destination is not yet known.
         """
-        headers: dict = self.header_manager.current()
+        headers: dict = (
+            self.headers_for_url(url)
+            if url
+            else self.header_manager.current()
+        )
         if include_cookie and self.cookies:
             # Don't clobber an explicit Cookie header from --header.
             if not any(k.lower() == "cookie" for k in headers):
@@ -1485,7 +1582,7 @@ class ScanEngine:
             kwargs = self.httpx_client_kwargs(**kwargs)
         elif getattr(self, "proxy", ""):
             kwargs["proxy"] = self.proxy
-        headers = self.auth_headers() if hasattr(self, "auth_headers") else {}
+        headers = self.auth_headers(url=url) if hasattr(self, "auth_headers") else {}
         try:
             async with httpx.AsyncClient(**kwargs) as client:
                 r = await client.get(url, headers=headers)
@@ -1735,12 +1832,15 @@ class ScanEngine:
             **self.httpx_client_kwargs(
                 timeout=10.0,
                 follow_redirects=True,
-                headers=self.auth_headers(),
             )
         ) as client:
             # robots.txt
             try:
-                r = await client.get(f"{base}/robots.txt")
+                robots_url = f"{base}/robots.txt"
+                r = await client.get(
+                    robots_url,
+                    headers=self.auth_headers(url=robots_url),
+                )
                 if r.status_code == 200:
                     for line in r.text.splitlines():
                         line = line.strip()
@@ -1757,7 +1857,11 @@ class ScanEngine:
 
             # sitemap.xml (try directly if not found via robots)
             try:
-                r = await client.get(f"{base}/sitemap.xml")
+                sitemap_url = f"{base}/sitemap.xml"
+                r = await client.get(
+                    sitemap_url,
+                    headers=self.auth_headers(url=sitemap_url),
+                )
                 if r.status_code == 200:
                     discovered += self._extract_sitemap_locs(r.text)
             except Exception:
@@ -1773,7 +1877,11 @@ class ScanEngine:
     async def _parse_sitemap(self, client, sitemap_url: str) -> list[str]:
         """Fetch and parse a sitemap URL (supports sitemap index)."""
         try:
-            r = await client.get(sitemap_url, timeout=10.0)
+            r = await client.get(
+                sitemap_url,
+                timeout=10.0,
+                headers=self.auth_headers(url=sitemap_url),
+            )
             if r.status_code == 200:
                 return self._extract_sitemap_locs(r.text)
         except Exception:
@@ -4471,16 +4579,22 @@ class ScanEngine:
                         new_qs[f.field_name] = [value]
                         return urlunparse(parsed._replace(query=urlencode(new_qs, doseq=True)))
 
-                    headers = self.auth_headers()
                     async with httpx.AsyncClient(
                         **self.httpx_client_kwargs(
                             follow_redirects=True,
                             timeout=self.timeout,
-                            headers=headers,
                         )
                     ) as client:
-                        baseline_resp = await client.get(_with_value("wscan_ssti_baseline"))
-                        probe_resp = await client.get(_with_value(f.payload))
+                        baseline_url = _with_value("wscan_ssti_baseline")
+                        probe_url = _with_value(f.payload)
+                        baseline_resp = await client.get(
+                            baseline_url,
+                            headers=self.auth_headers(url=baseline_url),
+                        )
+                        probe_resp = await client.get(
+                            probe_url,
+                            headers=self.auth_headers(url=probe_url),
+                        )
                     baseline_text = baseline_resp.text
                     probe_text = probe_resp.text
                     for expected in expected_values:
