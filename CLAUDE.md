@@ -199,6 +199,87 @@ python main.py scan http://127.0.0.1:8000 --checks xss sqli --no-monitor --llm n
   `tests/test_end_to_end_scan*.py` が実エンジン（crawl→plan→attack→verify）で検出を検証
   （`WSCAN_E2E=1` の opt-in、Chromium 必須）。
 
+## LLM ハーネス（LLM 呼び出しの共通基盤）
+
+「LLM をどう叩くか」の土台。**新しく LLM を叩く箇所を足すときは、まずここを読んで既存の経路に
+合わせる**（URL/キーのハードコード・独自 retry・生 env 読みは禁止）。モード別の狙い（通常＝確実性/
+Agent＝独自性）は「3モードの設計思想」を参照。ここは主に**通常ツール層**の話。
+
+### 3つの呼び出し経路（用途で使い分ける）
+1. **`llm_client.complete_text(pg, prompt, *, max_tokens, temperature, timeout, retries, return_status)`**
+   … 生テキスト1発取得の**唯一の堅牢な入口**。非ストリーミング・retry/バックオフ・失敗種別を内包。
+   `payload_gen`（＝設定保持体）を第1引数に渡す。`remediation` / `adaptive_payload.generate` /
+   `payload_gen.generate` / `engine`（triage 等）が使用。**one-shot な用途はまずこれを使う。**
+2. **`attack_planner` の自前ストリーミング**（`_call_claude/_call_openai/_call_gemini/_call_ollama`）
+   … 計画 JSON をコンソールへ**逐次表示**する必要があるため `complete_text` を使わず独自実装。
+   ただし設定は `payload_gen` インスタンス値を共有する（`use_role("planner")`・`openai_base_url`・
+   `openai_api_key`・`chat_completions_url`）。ストリーミングが要る新経路はこれを踏襲。
+3. **Agent モード（別ハーネス）**（`llm_agent_browser._build_llm`）… browser-use の
+   `ChatAnthropic/ChatOpenAI/ChatOllama` を生成。`complete_text` とは無関係の系。base URL/キーは
+   同じく `llm_endpoint.resolve_instance_base/resolve_api_key` 経由（公式 openai は env を無視）。
+
+### `PayloadGenerator` ＝ LLM 設定の保持体（`payload_gen.py`）
+LLM の provider・モデル・タイムアウト・retry・base URL/キーを1インスタンスに束ねる。`engine` が
+config/CLI から構築し、`adaptive_payload`・`attack_planner`・`waf_detector` 等へ**共有参照**する。
+- `provider` は**構築時に** `llm_endpoint.canonical_provider` で正規化（`openai_compatible`→`openai`）。
+- **base URL / API キーは構築時にスナップショット**（`resolve_instance_base` / `resolve_api_key`）。
+  呼び出し時に env を読み直さない＝長時間 serve で別スキャンが env を書き換えても化けない。
+- `get_model(role)` / `use_role(role)` … 役割別モデル（`planner/payload/adaptive/triage/report`）を
+  `role_models`（config `llm.models`）から解決。未設定なら provider 既定モデルへフォールバック。
+- `_check_llm_available()` は結果をキャッシュ（provider ごとにキー/接続を1度だけ確認）。
+- Claude だけ SDK クライアント（`_get_anthropic_client`、`ANTHROPIC_API_KEY`）。他は httpx 直叩き。
+
+### エンドポイント解決は必ず `llm_endpoint.py` 経由（純粋関数）
+`https://api.openai.com/...` をハードコードしない。URL/キー解決の**単一の真実**：
+- `chat_completions_url(base)` … `/chat/completions` 付与（既に付いていれば尊重）。
+- `resolve_instance_base(provider, explicit)` … 明示 > [`openai_compatible` のみ]`WSCAN_LLM_BASE_URL`/
+  `OPENAI_BASE_URL` > 公式既定。**公式 `openai` は明示が無ければ env を無視**（互換 URL を漏らさない）。
+- `resolve_api_key(provider)` … `openai_compatible`＝`WSCAN_LLM_API_KEY`>`OPENAI_API_KEY`／公式
+  `openai`＝`OPENAI_API_KEY` のみ。**正規化前の元 provider 名を渡すこと**（公式/互換の区別が要る）。
+
+### 失敗種別 `CompletionStatus` と retry の意味論
+`complete_text(..., return_status=True)` は `(text, status)` を返す。**「一時失敗で攻撃入力が黙って
+減る＝偽陰性」も確実性の敵**として扱うのがこのハーネスの肝。
+
+| status | 意味 | retry | 呼び出し側の扱い |
+|---|---|---|---|
+| `ok` | 本文あり | — | 採用 |
+| `empty` | 200 だが本文空 | しない | resume 回収対象（`None` 返し。可用性は倒さない） |
+| `transient` | 408/429/5xx・接続/タイムアウト等 | する→尽きたら | resume 回収対象（可用性は倒さない） |
+| `unavailable` | provider=none・キー/クライアント不在 | しない | 恒久完了。可用性を**倒す** |
+| `permanent` | 4xx（429除く）等の非一時失敗 | しない | 恒久完了。可用性を**倒す** |
+| `blocked` | Gemini 安全ブロック（本文なし 200） | しない | この prompt のみ無駄。LLM 全体は生存＝**倒さない** |
+
+- retry 対象は `_RETRYABLE_STATUS_CODES`＝`{408,429,500,502,503,504,529}` と httpx の接続/読み書き例外、
+  Anthropic の `APIConnectionError/APITimeoutError`、応答形式破損（`_RetryableResponseError`）。
+- バックオフは `backoff_seconds`（指数・cap 8s）。`429` 等で `Retry-After`（秒）があればそれを優先。
+- Gemini は安全ブロック時も HTTP 200＋本文なしを返す → `_gemini_block_reason` で検出し `blocked` に収束。
+
+### 可用性フリップと resume 回収（偽陰性の抑止）
+`engine._adaptive_llm_available` が scan 中の provider 可用性を1度だけ probe しキャッシュ。
+- `permanent`/`unavailable` を観測したら**倒す**（以降 field/check は LLM を呼ばず checkpoint 完了で収束）。
+- `empty`/`transient` は**倒さない**（`--resume` で再試行・回収するため。ここで諦めると見逃しになる）。
+- 済み単位は `checkpoint.py` へ記録し、resume 時は未回収の一時失敗だけを再度 LLM に問う。
+
+### プロンプトインジェクション防御（攻撃者 HTML を LLM へ渡す前）
+スキャン対象ページの HTML は**攻撃者制御の入力**。`adaptive_payload._sanitize_untrusted_html` で
+(1) 長さ切り詰め (2) ``` の無害化（コードフェンスを閉じさせない）(3) 既知の注入トリガ
+（"ignore previous instructions" 等）を `[REDACTED]` 置換、してから prompt へ埋め込む。
+**外部由来テキスト（ページ HTML・レスポンス本文・ヘッダ等）を新しく LLM へ渡す箇所を足すときは、
+必ずこのサニタイズを通す。**
+
+### 新しく LLM を叩く箇所を足すときのチェックリスト
+1. one-shot なら `llm_client.complete_text` を使う（独自 retry を書かない）。ストリーミングが要るなら
+   `attack_planner` 方式で、設定は `payload_gen` インスタンス値を共有する。
+2. URL/キーは `llm_endpoint`（`chat_completions_url`/`resolve_instance_base`/`resolve_api_key`）経由。
+   **base URL はインスタンス値（`pg.openai_base_url` 等）を明示的に渡す**（グローバル env を読み直さない）。
+3. 役割があれば `with pg.use_role("<role>"):` で囲む。
+4. 外部入力を prompt に入れるならサニタイズする。
+5. 失敗時に**攻撃入力が黙って減らない**よう status を見て resume/フォールバックへ繋ぐ（偽陰性を作らない）。
+6. LLM は**攻撃入力（payload/計画）の生成のみ**。脆弱性の判定は決定論スキャナが握る（通常ツール層）。
+7. テストを足す（`tests/test_llm_client.py`・`test_llm_endpoint.py`・`test_payload_gen_retry.py`・
+   `test_adaptive_checkpoint_retry.py` が既存の型。判定は純粋関数に切り出しブラウザ非依存で検証）。
+
 ## 触るときの不変条件・落とし穴
 
 - **ターゲット URL は `url.strip()` で保持**（末尾 `/` を勝手に除去しない）。スコープ照合は
