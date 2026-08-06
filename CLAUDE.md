@@ -199,98 +199,172 @@ python main.py scan http://127.0.0.1:8000 --checks xss sqli --no-monitor --llm n
   `tests/test_end_to_end_scan*.py` が実エンジン（crawl→plan→attack→verify）で検出を検証
   （`WSCAN_E2E=1` の opt-in、Chromium 必須）。
 
-## LLM ハーネス（LLM 呼び出しの共通基盤）
+## LLM ハーネス設計ガイド（一般知見 × 本ツールへの適用）
 
-「LLM をどう叩くか」の土台。**新しく LLM を叩く箇所を足すときは、まずここを読んで既存の経路に
-合わせる**（URL/キーのハードコード・独自 retry・生 env 読みは禁止）。モード別の狙い（通常＝確実性/
-Agent＝独自性）は「3モードの設計思想」を参照。ここは主に**通常ツール層**の話。
+**ハーネス**＝モデル呼び出しを「境界づけられた・状態を持つ・ツール仲介された」タスク実行に変える足場
+（プロンプト構築・出力解析・retry・ツール仲介・コンテキスト管理・検証・観測・ガードレール）。近年の
+知見では **「ハーネスの作り込みはモデル選択より効く」**（同一モデルでも足場次第で成績が大きく動く）。
+本節は外部のベストプラクティスを **本ツール（＝LLM を攻撃入力生成に使う決定論スキャナ＋自律 Agent）**
+向けにかみ砕いた設計指針。既存実装の所在は末尾「実装リファレンス」に集約。モード別品質基準
+（通常＝確実性／Agent＝独自性／Hybrid＝中間）と必ず併読する（同じ原則でもモードで最適解が変わる）。
 
-### 呼び出し経路（用途で使い分ける／新規は原則 1 へ寄せる）
-以下は**従うべきパターン**であり、全 caller の網羅リストではない。新しく LLM を叩くときは原則 1
-（`complete_text`）へ寄せ、逐次表示が要るときだけ 2 を踏襲する。**既存の独自経路（下記 2・4）で
-retry/失敗種別/エンドポイント処理を変えるときは、同種の全 caller を洗い出して同時に直す**（片方だけ
-直すと挙動が割れる）。
-1. **`llm_client.complete_text(pg, prompt, *, max_tokens, temperature, timeout, retries, return_status)`**
-   … 生テキスト1発取得の**堅牢な標準入口**。非ストリーミング・retry/バックオフ・失敗種別を内包。
-   `payload_gen`（＝設定保持体）を第1引数に渡す。`remediation` / `adaptive_payload.generate` /
-   `payload_gen.generate` / `engine`（triage 等）が使用。**one-shot な用途はまずこれを使う。**
-2. **自前ストリーミング**（`complete_text` を使わず provider 別に stream）… コンソールへ**逐次表示**
-   する用途。`attack_planner`（`_call_claude/_call_openai/_call_gemini/_call_ollama`、`use_role("planner")`）と
-   `adaptive_payload.mutate_payload`（`_stream_claude/_stream_openai/_call_gemini/_stream_ollama`、
-   `use_role("adaptive")`）が採用。設定は `payload_gen` インスタンス値を共有する（`openai_base_url`・
-   `openai_api_key`・`chat_completions_url`）。**failure 種別・retry は complete_text と別実装**な点に注意。
-3. **Agent モード（別ハーネス）**（`llm_agent_browser._build_llm`）… browser-use の
-   `ChatAnthropic/ChatOpenAI/ChatOllama` を生成。`complete_text` とは無関係の系。base URL/キーは
-   同じく `llm_endpoint.resolve_instance_base/resolve_api_key` 経由（公式 openai は env を無視）。
-4. **`auto_config._call_llm`**（設定ウィザード）… provider 別の one-shot httpx 呼び出しで、
-   `complete_text` を経由しない独立経路（retry/失敗種別なし）。URL/キーは `llm_endpoint` 経由だが、
-   標準ハーネスの堅牢性は持たない。ここを触るときは 1 への統合も検討する。
+> 各項は【原則（一般知見）】→【本ツールへの適用】の順。出典は末尾。
 
-### `PayloadGenerator` ＝ LLM 設定の保持体（`payload_gen.py`）
-LLM の provider・モデル・タイムアウト・retry・base URL/キーを1インスタンスに束ねる。`engine` が
-config/CLI から構築し、`adaptive_payload`・`attack_planner`・`waf_detector` 等へ**共有参照**する。
-- `provider` は**構築時に** `llm_endpoint.canonical_provider` で正規化（`openai_compatible`→`openai`）。
-- **スナップショットは OpenAI 系だけ**：`openai_base_url` / `openai_api_key` を構築時に確定
-  （`resolve_instance_base` / `resolve_api_key`）し、呼び出し時に env を読み直さない＝長時間 serve で
-  別スキャンが env を書き換えても化けない。**Claude/Gemini は未スナップショット**：Claude は
-  `_get_anthropic_client` が初回に `ANTHROPIC_API_KEY` を遅延読み、Gemini は `complete_text` /
-  `_check_llm_available` が呼び出し時に `GEMINI_API_KEY` を読む。よってこの2つは env 書き換えの影響を
-  受けうる（現状は OpenAI 互換だけが競合安全。他 provider を同保証にするならスナップショット追加が必要）。
-- `get_model(role)` / `use_role(role)` … 役割別モデル（`planner/payload/adaptive/triage/report`）を
-  `role_models`（config `llm.models`）から解決。未設定なら provider 既定モデルへフォールバック。
-- `_check_llm_available()` は結果をキャッシュ（provider ごとにキー/接続を1度だけ確認）。
-- Claude だけ SDK クライアント（`_get_anthropic_client`、`ANTHROPIC_API_KEY`）。他は httpx 直叩き。
+### 1. まず Workflow、Agent は最後の手段
+- **原則**: LLM を「予め決めた code path」で束ねる *workflow* と、LLM が自ら手順/ツールを決める *agent*
+  は別物。単純さを保ち、手順数を事前に予測できない開放的問題で**初めて** agent 化する（agent は
+  コスト増・誤りの連鎖リスク）。定番 workflow は prompt-chaining / routing / parallelization /
+  orchestrator-worker / evaluator-optimizer の5型。
+- **本ツール**: 通常・Hybrid 層は本質的に workflow（LLM は payload/計画を生成するだけ、脆弱性判定は
+  決定論スキャナ＝programmatic **gate**）。真の agent は Agent モード（browser-use の自律ループ）だけ。
+  **新機能はまず workflow で組む**。ペイロード強化パイプラインは prompt-chaining＋gate、並列ワーカーは
+  parallelization、`adaptive`（失敗を観測して次を生成）は evaluator-optimizer の縮小形に対応する。
 
-### エンドポイント解決は必ず `llm_endpoint.py` 経由（純粋関数）
-`https://api.openai.com/...` をハードコードしない。URL/キー解決の**単一の真実**：
-- `chat_completions_url(base)` … `/chat/completions` 付与（既に付いていれば尊重）。
-- `resolve_instance_base(provider, explicit)` … 明示 > [`openai_compatible` のみ]`WSCAN_LLM_BASE_URL`/
-  `OPENAI_BASE_URL` > 公式既定。**公式 `openai` は明示が無ければ env を無視**（互換 URL を漏らさない）。
-- `resolve_api_key(provider)` … `openai_compatible`＝`WSCAN_LLM_API_KEY`>`OPENAI_API_KEY`／公式
-  `openai`＝`OPENAI_API_KEY` のみ。**正規化前の元 provider 名を渡すこと**（公式/互換の区別が要る）。
+### 2. 足場は薄く自作し、framework で隠さない
+- **原則**: framework は内部ロジックを隠し本番で足枷になる。raw API から始めて抽象を最小に。指示
+  ファイルは短く（目安 <60 行）、背景/指示/ツール指針/出力形式を見出しで分節する。
+- **本ツール**: `llm_client.complete_text` が薄い標準足場（httpx/SDK 直叩き、余計な依存なし）。役割別
+  モデル（planner/payload/adaptive/triage/report）で「安いモデルで広く・要所だけ賢く」を実現。
+  **新規 one-shot はまず `complete_text` に寄せ、独自 retry を書かない。**
 
-### 失敗種別 `CompletionStatus` と retry の意味論
-`complete_text(..., return_status=True)` は `(text, status)` を返す。**「一時失敗で攻撃入力が黙って
-減る＝偽陰性」も確実性の敵**として扱うのがこのハーネスの肝。
+### 3. コンテキスト工学 — 最小の高signalトークン
+- **原則**: コンテキストは有限資源。トークンが増えるほど精度が落ちる（*context rot*）。狙いは
+  「望む出力を最大化する **最小の高signalトークン集合**」。技法＝(a) system prompt の *altitude* を
+  Goldilocks に（脆すぎるハードコードでも曖昧すぎでもなく）(b) just-in-time 取得（軽い識別子を持ち
+  実行時にロード）(c) 長期は **compaction**（要約して再開）/ **structured note-taking**（外部ファイルに進捗）
+  / **sub-agent** で文脈隔離（要約だけ返す）。
+- **本ツール**: adaptive prompt は cheatsheet＋**その場観測**（反射文脈・生存文字・試行済み payload）だけを
+  JIT で載せる（全 HTML を積まない）。攻撃者 HTML は 5000 字に切り詰め（attention budget）。Agent モードは
+  recon→attack を分けて文脈を隔離。`checkpoint.json` が「外部進捗ノート」に当たる。**プロンプトへ盛るときは
+  「この1トークンは判断に効くか」を基準に削る。**
+
+### 4. ツール設計＝決定論システムと非決定論エージェントの契約（Agent 層）
+- **原則**: ツールは API エンドポイントの流用ではなく「エージェント向け契約」。名前/説明を新人にも分かる
+  ように、パラメータは曖昧さゼロ（`user` でなく `user_id`）、*poka-yoke*（誤用しにくく：例 絶対パス必須）、
+  関連操作は**統合**（`find`+`create`→`schedule`）、戻り値は高signalのみ・意味のある ID・**訂正可能な
+  エラー文**（不透明コードでなく次の一手を示す）、名前空間で群化。ツール自体を eval する。
+- **本ツール**: 主に Agent モードの `llm_web_tools` が対象。ツールは反射/実行の判定に効く情報だけを返し、
+  scope policy（対象外 URL への逸脱防止）が poka-yoke。通常層は「ツール＝決定論スキャナ」で LLM に生の
+  ツール実行権を渡さない（＝下記 6 の grounding と表裏）。
+
+### 5. 構造化出力は防御的にパースする
+- **原則**: 素の JSON 生成は 5–10% 壊れる（fence 混入・途中切れ）。対策は多層：schema 強制/constrained
+  decoding（<0.1%）→ 無ければ **フォールバック連鎖**（fence 除去→JSON span 抽出→bracket 切り詰め）→
+  検証失敗はエラーを添えて **retry**（Instructor 流）。
+- **本ツール**: `_extract_json_list`（payload 配列）/ `attack_planner._parse_llm_response`（計画 JSON）が
+  regex で頑健抽出。ただし**通常層の思想は「壊れた出力は捨てて既定 payload へフォールバック」**（無理に
+  救って誤検知を作らない＝確実性優先）。constrained decoding は未使用。新パーサも「壊れたら安全側
+  （既定へ）」を守る。
+
+### 6. 主張は evidence に紐づける（grounding／reward hacking 防止）
+- **原則**: すべての主張を検証可能な根拠に traceさせ、変更には falsifiable な予測を添える。自己申告を
+  鵜呑みにすると reward hacking（それらしいが誤り）を招く。
+- **本ツール**: **これがモード別品質基準の核**。通常層は決定論スキャナが再現/確証してから Finding 化し、
+  LLM の「見つけた」を単独では採らない。Agent 層は LLM の自己申告を**消さず**、出自ラベル（Agent 発見/
+  未確証）で決定論 Finding と視覚分離し、任意で決定論再現の注記を加える。**判定ロジックは純粋関数に
+  分離**（`equivalence_probe.evaluate` 等）してブラウザ非依存で検証可能に保つ。
+
+### 7. 失敗を偽陰性にしない — retry・失敗種別・resume
+- **原則**: エージェント処理は plan→execute→observe→improve の目標志向ループ。graceful recovery を設計し、
+  失敗パターンを first-class に分類・保存する。
+- **本ツール**: LLM の**一時障害で攻撃入力が黙って減る＝偽陰性**を確実性の敵として同格に扱う。
+  `CompletionStatus` で恒久失敗（収束）と一時失敗（resume で回収）を分け、`checkpoint.py` で未回収単位だけ
+  再挑戦する。**新しく LLM を挟むときは「落ちたら攻撃が減る」箇所を洗い、status を見てフォールバック/
+  resume に繋ぐ。**
+
+### 8. untrusted content ＝ プロンプトインジェクション前提
+- **原則**: 外部由来テキスト（ツール結果・取得ページ・レスポンス）は信頼境界の外。指示上書き
+  （"ignore previous instructions" 等）を前提に無害化・分離する。
+- **本ツール**: スキャン対象は**定義上敵性**。`adaptive_payload._sanitize_untrusted_html` が長さ切り詰め・
+  コードフェンス無害化・注入トリガ redact を行ってから prompt へ埋める。**外部由来テキストを新たに LLM へ
+  渡す箇所を足すときは必ずこのサニタイズを通す**（レスポンス本文・ヘッダ・DOM 断片も同様）。
+
+### 9. 観測性と評価（eval）を最初から組み込む
+- **原則**: component/experience/decision の3層で観測。精度だけでなく runtime・tool 呼び出し数・トークン・
+  error 率を測る。**held-out テスト**でハーネス改変の reward hacking を検知する。
+- **本ツール**: `request_logger` の JSONL 監査と `payloads.jsonl` が実行トレース。**ハーネスの eval は
+  フィクスチャ（脆弱＋安全ツインの1対）＋E2E**。新しい LLM 経路/生成層を足したら、対応フィクスチャに
+  脆弱＋安全ツインを追加し、E2E で false negative と **false positive の両方**を確認する（安全ツイン無しの
+  追加は禁止）。
+
+### 10. long-running は「進捗の永続化」で設計する
+- **原則**: 長時間タスクは複数コンテキストに跨り記憶を失う。initializer が進捗ファイル/構造化記録を作り、
+  worker が session ごとに増分実行し、durable で queryable な記録を残す。
+- **本ツール**: `checkpoint.py`（URL×field×check 単位の完了記録＋既出 Finding を原子的保存）、`time_window`
+  （時間帯ゲートで待機/再開）、`session_guard`（失効検知→再ログイン）が該当。長時間スキャンの再開性を
+  壊さないこと（可用性フリップと checkpoint の連携＝下記実装リファレンス参照）。
+
+---
+
+### 実装リファレンス（上の原則が本ツールで具体化している場所）
+
+**呼び出し経路**（網羅ではなく従うべきパターン。新規は原則 `complete_text` へ寄せる。既存の独自経路で
+retry/失敗種別/エンドポイント処理を変えるときは同種の全 caller を同時に直す）:
+- **`llm_client.complete_text(pg, prompt, ...)`** … one-shot の堅牢な標準入口（非streaming・retry・失敗種別）。
+  `remediation` / `adaptive_payload.generate` / `payload_gen.generate` / `engine`(triage) が使用。
+- **自前ストリーミング**（逐次表示用）… `attack_planner`（`use_role("planner")`）と
+  `adaptive_payload.mutate_payload`（`use_role("adaptive")`）。**失敗種別/retry は complete_text と別実装**。
+- **Agent モード（別系）**… `llm_agent_browser._build_llm` が browser-use の `ChatAnthropic/ChatOpenAI/ChatOllama` を生成。
+- **`auto_config._call_llm`**（ウィザード）… complete_text 非経由の one-shot（retry なし）。
+
+**`PayloadGenerator`（`payload_gen.py`）＝ LLM 設定の保持体**。`engine` が config/CLI から構築し各所へ共有参照。
+- `provider` は構築時に `canonical_provider` で正規化（`openai_compatible`→`openai`）。
+- **構築時スナップショットは OpenAI 系だけ**（`openai_base_url`/`openai_api_key`）＝長時間 serve で別スキャンが
+  env を書き換えても化けない。**Claude は `_get_anthropic_client` が `ANTHROPIC_API_KEY` を遅延読み、Gemini は
+  呼び出し時に `GEMINI_API_KEY` を読む**（この2つは env 書き換えの影響を受けうる）。
+- `get_model(role)`/`use_role(role)` で役割別モデル（`role_models`＝config `llm.models`）を解決。
+
+**エンドポイント解決 `llm_endpoint.py`（OpenAI 互換系のみ）**。`https://api.openai.com/...` をハードコードしない：
+- `chat_completions_url(base)` / `resolve_instance_base(provider, explicit)` / `resolve_api_key(provider)`。
+- **これらは OpenAI/`openai_compatible` 専用**。`resolve_api_key` は `WSCAN_LLM_API_KEY`/`OPENAI_API_KEY`
+  （公式 `openai` は `OPENAI_API_KEY` のみ）を返すため、**Claude/Gemini のキーは解決しない**。Claude は
+  `_get_anthropic_client()`＋`ANTHROPIC_API_KEY`、Gemini は直接 `GEMINI_API_KEY` を使う既存経路に従う。
+- base URL はインスタンス値（`pg.openai_base_url`）を明示的に渡す（呼び出し時に env を読み直さない）。
+
+**失敗種別 `CompletionStatus`**（`complete_text(..., return_status=True)` が `(text, status)` を返す）:
 
 | status | 意味 | retry | 呼び出し側の扱い |
 |---|---|---|---|
 | `ok` | 本文あり | — | 採用 |
-| `empty` | 200 だが本文空 | しない | resume 回収対象（`None` 返し。可用性は倒さない） |
+| `empty` | 200 だが本文空 | しない | resume 回収対象（可用性は倒さない） |
 | `transient` | 408/429/5xx・接続/タイムアウト等 | する→尽きたら | resume 回収対象（可用性は倒さない） |
 | `unavailable` | provider=none・キー/クライアント不在 | しない | 恒久完了。可用性を**倒す** |
 | `permanent` | 4xx（429除く）等の非一時失敗 | しない | 恒久完了。可用性を**倒す** |
 | `blocked` | Gemini 安全ブロック（本文なし 200） | しない | この prompt のみ無駄。LLM 全体は生存＝**倒さない** |
 
-- retry 対象は `_RETRYABLE_STATUS_CODES`＝`{408,429,500,502,503,504,529}` と httpx の接続/読み書き例外、
-  Anthropic の `APIConnectionError/APITimeoutError`、応答形式破損（`_RetryableResponseError`）。
-- バックオフは `backoff_seconds`（指数・cap 8s）。`429` 等で `Retry-After`（秒）があればそれを優先。
-- Gemini は安全ブロック時も HTTP 200＋本文なしを返す → `_gemini_block_reason` で検出し `blocked` に収束。
+- retry 対象＝`{408,429,500,502,503,504,529}`＋httpx 接続/読み書き例外＋Anthropic `APIConnectionError/APITimeoutError`
+  ＋応答形式破損。バックオフは指数（cap 8s）、`429` の `Retry-After`（秒）優先。
+- **可用性フリップ/resume**: `engine._adaptive_llm_available` を scan 中1度だけ probe。`permanent`/`unavailable`
+  で倒す（以降 LLM を呼ばず checkpoint 完了で収束）、`empty`/`transient` は倒さない（`--resume` で回収）。
+- **プロンプトインジェクション防御**: `adaptive_payload._sanitize_untrusted_html`。
 
-### 可用性フリップと resume 回収（偽陰性の抑止）
-`engine._adaptive_llm_available` が scan 中の provider 可用性を1度だけ probe しキャッシュ。
-- `permanent`/`unavailable` を観測したら**倒す**（以降 field/check は LLM を呼ばず checkpoint 完了で収束）。
-- `empty`/`transient` は**倒さない**（`--resume` で再試行・回収するため。ここで諦めると見逃しになる）。
-- 済み単位は `checkpoint.py` へ記録し、resume 時は未回収の一時失敗だけを再度 LLM に問う。
+### 拡張チェックリスト（新しく LLM を挟むとき）
+1. **どのモードか**を先に確定（通常＝確実性/Agent＝独自性/Hybrid＝中間）。基準はモードで変わる。
+2. まず workflow で組めないか検討（agent 化はコスト/誤りの連鎖を伴う）。
+3. one-shot は `complete_text` へ。逐次表示が要るときだけ自前ストリーミング（設定は `pg` 値を共有）。
+4. OpenAI 互換なら URL/キーは `llm_endpoint` 経由・base URL はインスタンス値を明示。**Claude/Gemini は
+   各 provider の既存経路**（`_get_anthropic_client`/`ANTHROPIC_API_KEY`・`GEMINI_API_KEY`）に従う。
+5. 役割があれば `with pg.use_role("<role>"):` で囲む。
+6. 外部由来テキストを prompt に入れるなら必ずサニタイズ。
+7. 出力パースは「壊れたら安全側（既定へフォールバック）」。誤検知を作らない。
+8. 失敗時に**攻撃入力が黙って減らない**よう status を見て resume/フォールバックへ繋ぐ。
+9. 通常層では**判定は決定論スキャナが握る**（LLM は攻撃入力生成のみ）。判定は純粋関数に分離。
+10. **フィクスチャ（脆弱＋安全ツイン）＋E2E** を足し、false negative と false positive を同時に確認。既存の
+    型は `tests/test_llm_client.py`・`test_llm_endpoint.py`・`test_payload_gen_retry.py`・
+    `test_adaptive_checkpoint_retry.py`。
 
-### プロンプトインジェクション防御（攻撃者 HTML を LLM へ渡す前）
-スキャン対象ページの HTML は**攻撃者制御の入力**。`adaptive_payload._sanitize_untrusted_html` で
-(1) 長さ切り詰め (2) ``` の無害化（コードフェンスを閉じさせない）(3) 既知の注入トリガ
-（"ignore previous instructions" 等）を `[REDACTED]` 置換、してから prompt へ埋め込む。
-**外部由来テキスト（ページ HTML・レスポンス本文・ヘッダ等）を新しく LLM へ渡す箇所を足すときは、
-必ずこのサニタイズを通す。**
-
-### 新しく LLM を叩く箇所を足すときのチェックリスト
-1. one-shot なら `llm_client.complete_text` を使う（独自 retry を書かない）。ストリーミングが要るなら
-   `attack_planner` 方式で、設定は `payload_gen` インスタンス値を共有する。
-2. URL/キーは `llm_endpoint`（`chat_completions_url`/`resolve_instance_base`/`resolve_api_key`）経由。
-   **base URL はインスタンス値（`pg.openai_base_url` 等）を明示的に渡す**（グローバル env を読み直さない）。
-3. 役割があれば `with pg.use_role("<role>"):` で囲む。
-4. 外部入力を prompt に入れるならサニタイズする。
-5. 失敗時に**攻撃入力が黙って減らない**よう status を見て resume/フォールバックへ繋ぐ（偽陰性を作らない）。
-6. LLM は**攻撃入力（payload/計画）の生成のみ**。脆弱性の判定は決定論スキャナが握る（通常ツール層）。
-7. テストを足す（`tests/test_llm_client.py`・`test_llm_endpoint.py`・`test_payload_gen_retry.py`・
-   `test_adaptive_checkpoint_retry.py` が既存の型。判定は純粋関数に切り出しブラウザ非依存で検証）。
+### 出典（LLM ハーネス設計の一次情報）
+- Anthropic「[Building Effective Agents](https://www.anthropic.com/engineering/building-effective-agents)」
+  … workflow vs agent、5パターン、単純さ優先。
+- Anthropic「[Writing Effective Tools for AI Agents](https://www.anthropic.com/engineering/writing-tools-for-agents)」
+  … ツール設計（ACI）、統合、actionable error、eval。
+- Anthropic「[Effective Context Engineering for AI Agents](https://www.anthropic.com/engineering/effective-context-engineering-for-ai-agents)」
+  … context rot、altitude、JIT 取得、compaction、note-taking、sub-agent。
+- Anthropic「[Effective Harnesses for Long-Running Agents](https://www.anthropic.com/engineering/effective-harnesses-for-long-running-agents)」
+  … initializer+worker、進捗ファイル、durable な記録。
+- Lilian Weng「[Harness Engineering](https://lilianweng.github.io/posts/2026-07-04-harness/)」
+  … chain-of-evidence、失敗を first-class に、held-out で reward hacking 検知。
+- LLM 構造化出力の信頼性（JSON mode 5–10% 失敗 vs schema 強制 <0.1%、フォールバック連鎖、Instructor 流 retry）。
 
 ## 触るときの不変条件・落とし穴
 
