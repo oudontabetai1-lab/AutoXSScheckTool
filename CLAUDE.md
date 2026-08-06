@@ -320,8 +320,10 @@ retry/失敗種別/エンドポイント処理を変えるときは同種の全 
   直接呼ぶのは `remediation` / `adaptive_payload.generate` / `payload_gen.generate`(baseline) /
   `engine._ai_analysis_report`→`_call_llm_text`（**report** 生成、`use_role("report")`）。**triage** は
   `triage.py::_llm_analyse`→`pg._call_llm`（`use_role("triage")`）を介した間接 caller（report とは別経路）。
-- **自前ストリーミング**（逐次表示用）… `attack_planner`（`use_role("planner")`）と
-  `adaptive_payload.mutate_payload`（`use_role("adaptive")`）。**失敗種別/retry は complete_text と別実装**。
+- **自前 provider 別実装**（逐次表示用）… `attack_planner`（`use_role("planner")`）と
+  `adaptive_payload.mutate_payload`（`use_role("adaptive")`）。**claude/openai/ollama は真のストリーミング**
+  （逐次表示）だが、**Gemini（`_call_gemini`）は非ストリーミング**：`generateContent` へ通常 `POST` し生成完了後に
+  全文表示（`streamGenerateContent` 未使用）。**失敗種別/retry は complete_text と別実装**。
 - **Agent モード（別系）**… `llm_agent_browser._build_llm` が browser-use の `ChatAnthropic/ChatOpenAI/ChatOllama` を生成。
 - **`auto_config._call_llm`**（ウィザード）… complete_text 非経由の one-shot（retry なし）。
 
@@ -411,9 +413,12 @@ retry/失敗種別/エンドポイント処理を変えるときは同種の全 
   （planner/payload/adaptive/triage/report）あり。
 - 外部 OpenAI 互換 LLM（NTT tsuzumi 2、Azure AI Foundry、vLLM、LiteLLM 等）は
   `provider=openai_compatible`。ベース URL・APIキー・モデル名の解決は純粋関数
-  `llm_endpoint.py` に一元化（全 LLM 呼び出しは `chat_completions_url(base)` /
+  `llm_endpoint.py` に一元化（**OpenAI/互換の呼び出しは** `chat_completions_url(base)` /
   `resolve_api_key()` 経由。`openai_compatible` は `canonical_provider` で内部的に
-  `openai` へ正規化）。設定は CLI(`--llm-base-url`) / config(`llm.openai_base_url`) /
+  `openai` へ正規化）。**この一元化は OpenAI 互換系専用**：Claude は `_get_anthropic_client()`＋
+  `ANTHROPIC_API_KEY`、Gemini は `generateContent`＋`GEMINI_API_KEY` という各 provider 固有経路を使い、
+  `resolve_api_key("claude"|"gemini")` は ANTHROPIC/GEMINI キーを返さない（llm_endpoint を通さない）。設定は
+  CLI(`--llm-base-url`) / config(`llm.openai_base_url`) /
   ダッシュボード / env(`WSCAN_LLM_BASE_URL`・`WSCAN_LLM_API_KEY`。`OPENAI_BASE_URL`・
   `OPENAI_API_KEY` にフォールバック) のいずれからも渡せる。モデル名は `openai_model`
   （例: `tsuzumi-2`）。**ベース URL はグローバル env を書き換えず**、構築時に
@@ -422,8 +427,9 @@ retry/失敗種別/エンドポイント処理を変えるときは同種の全 
   明示的に渡す（長時間 serve プロセスで別スキャンが operator の env を壊す競合を回避）。
   公式 `openai` は明示指定が無ければ env を無視し公式既定を使う（互換 URL を公式に漏らさない）。
   CLI/ダッシュボードは provider が `openai_compatible` のときだけ base URL を渡す
-  （`_effective_llm_base_url` / フロントのゲート）。**新しく LLM を叩く箇所を足すときは
-  URL/キーをハードコードせず必ず `llm_endpoint` を経由し、base URL はインスタンス値を渡すこと。**
+  （`_effective_llm_base_url` / フロントのゲート）。**新しく OpenAI/互換を叩く箇所を足すときは
+  URL/キーをハードコードせず必ず `llm_endpoint` を経由し、base URL はインスタンス値を渡すこと**
+  （Claude/Gemini は各 provider 固有経路に従い、`llm_endpoint` は通さない）。
 
 ### ペイロード強化パイプライン（検知精度）
 注入系スキャナの投入は次の多層構成（**通常ツール層**）。誤検知抑制を最優先（各層とも既存の検知判定を共有し、判定ロジックは変えない）。<br>※ モード別の品質基準は「3モードの設計思想と各層の品質基準」を参照。
