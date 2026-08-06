@@ -94,8 +94,11 @@ diff が大きいほど意図した変更が埋もれる／「ついで修正」
   代わりに **出自を明示ラベル**（Agent 発見/LLM 解釈・未確証）し、決定論 Finding と視覚的に分離する。
   さらに**任意で**「決定論的にも再現確認できた」注記を加える（確証は加点、未確証でも残す）。
 - **Hybrid 層** … Agent を偵察(URL 発見)に使うだけでなく、**Agent 発見の脆弱性仮説もラベル付き
-  Finding として併記**し、決定論 Finding と両立させる（＝真の中間）。現状の実装は偵察のみで
-  確実性寄りに偏っているため、併記対応は改善対象。
+  Finding として併記**し、決定論 Finding と両立させる（＝真の中間）。現状の実装（`AgentEngine.run_recon`）は
+  URL 発見を主目的としつつ、探索中の脆弱性仮説を `_convert_agent_findings` で Finding 化し
+  `AgentHandoffData.findings`→`additional_report_findings` として保持・併記する（未確証ラベル付き、決定論
+  gate で消さない）。実運用では recon タスクが探索寄りのため Agent Finding は少なめ＝確実性寄りに偏るが、
+  仮説の抽出量・提示の充実は引き続き改善対象。
 
 判断に迷ったら: 「この変更はどのモードの基準を上げ、他モードの基準を壊していないか」を一度問う。
 
@@ -215,10 +218,13 @@ python main.py scan http://127.0.0.1:8000 --checks xss sqli --no-monitor --llm n
   は別物。単純さを保ち、手順数を事前に予測できない開放的問題で**初めて** agent 化する（agent は
   コスト増・誤りの連鎖リスク）。定番 workflow は prompt-chaining / routing / parallelization /
   orchestrator-worker / evaluator-optimizer の5型。
-- **本ツール**: 通常・Hybrid 層は本質的に workflow（LLM は payload/計画を生成するだけ、脆弱性判定は
-  決定論スキャナ＝programmatic **gate**）。真の agent は Agent モード（browser-use の自律ループ）だけ。
-  **新機能はまず workflow で組む**。ペイロード強化パイプラインは prompt-chaining＋gate、並列ワーカーは
-  parallelization、`adaptive`（失敗を観測して次を生成）は evaluator-optimizer の縮小形に対応する。
+- **本ツール**: **通常層と Hybrid の決定論フェーズ**は workflow（LLM は payload/計画を生成するだけ、
+  脆弱性判定は決定論スキャナ＝programmatic **gate**）。ただし **Hybrid は Agent 偵察フェーズを含む**：
+  `AgentEngine.run_recon`（browser-use 自律ループ）が URL 発見に加え LLM 自己申告の脆弱性仮説を
+  `_convert_agent_findings` で Finding 化し、`AgentHandoffData.findings`→`additional_report_findings` として
+  **未確証ラベル付きで併記保持**する（＝真の中間。決定論 gate で消さない）。純 agent は Agent モード。
+  **通常層の新機能はまず workflow で組む**。ペイロード強化パイプラインは prompt-chaining＋gate、
+  並列ワーカーは parallelization、`adaptive`（失敗を観測して次を生成）は evaluator-optimizer の縮小形。
 
 ### 2. 足場は薄く自作し、framework で隠さない
 - **原則**: framework は内部ロジックを隠し本番で足枷になる。raw API から始めて抽象を最小に。指示
@@ -243,9 +249,12 @@ python main.py scan http://127.0.0.1:8000 --checks xss sqli --no-monitor --llm n
   ように、パラメータは曖昧さゼロ（`user` でなく `user_id`）、*poka-yoke*（誤用しにくく：例 絶対パス必須）、
   関連操作は**統合**（`find`+`create`→`schedule`）、戻り値は高signalのみ・意味のある ID・**訂正可能な
   エラー文**（不透明コードでなく次の一手を示す）、名前空間で群化。ツール自体を eval する。
-- **本ツール**: 主に Agent モードの `llm_web_tools` が対象。ツールは反射/実行の判定に効く情報だけを返し、
-  scope policy（対象外 URL への逸脱防止）が poka-yoke。通常層は「ツール＝決定論スキャナ」で LLM に生の
-  ツール実行権を渡さない（＝下記 6 の grounding と表裏）。
+- **本ツール**: Agent 層のツール契約と境界は **`llm_agent_browser`**（browser-use の Agent に渡すツール群と、
+  `_build_security_scope_policy` が生成する scope policy＝対象外 URL への逸脱防止＝poka-yoke）。**ここが実際の
+  Agent 境界**なので、Agent の挙動を変えるならこのモジュールを触る。なお `llm_web_tools`
+  （`search_web`/`research_vulnerability`）は **通常層の Web エンリッチ用ヘルパー**で `attack_planner` /
+  `payload_gen` からのみ使われ、Agent ツールでも scope policy でもない（混同しない）。通常層は
+  「ツール＝決定論スキャナ」で LLM に生のツール実行権を渡さない（＝下記 6 の grounding と表裏）。
 
 ### 5. 構造化出力は防御的にパースする
 - **原則**: 素の JSON 生成は 5–10% 壊れる（fence 混入・途中切れ）。対策は多層：schema 強制/constrained
