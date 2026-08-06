@@ -240,9 +240,12 @@ python main.py scan http://127.0.0.1:8000 --checks xss sqli --no-monitor --llm n
   実行時にロード）(c) 長期は **compaction**（要約して再開）/ **structured note-taking**（外部ファイルに進捗）
   / **sub-agent** で文脈隔離（要約だけ返す）。
 - **本ツール**: adaptive prompt は cheatsheet＋**その場観測**（反射文脈・生存文字・試行済み payload）だけを
-  JIT で載せる（全 HTML を積まない）。攻撃者 HTML は 5000 字に切り詰め（attention budget）。Agent モードは
-  recon→attack を分けて文脈を隔離。`checkpoint.json` が「外部進捗ノート」に当たる。**プロンプトへ盛るときは
-  「この1トークンは判断に効くか」を基準に削る。**
+  JIT で載せる（全 HTML を積まない）。攻撃者 HTML は 5000 字に切り詰め（attention budget）。**文脈隔離は
+  Hybrid で**：Phase 1 の Agent 偵察セッション（`AgentEngine.run_recon`）と Phase 2 の決定論スキャンは別実行
+  なので、偵察の文脈は攻撃側へ持ち越さない。**純 Agent モードは単一セッション**（`AgentBrowserScanner.run`
+  が `recon_mode` で `_build_recon_task`/`_build_task` の一方を選び 1 回の `agent.run()` を実行）なので偵察も
+  攻撃も同じコンテキストに蓄積する＝長い偵察を足すと budget を圧迫する点に注意。`checkpoint.json` が
+  「外部進捗ノート」に当たる。**プロンプトへ盛るときは「この1トークンは判断に効くか」を基準に削る。**
 
 ### 4. ツール設計＝決定論システムと非決定論エージェントの契約（Agent 層）
 - **原則**: ツールは API エンドポイントの流用ではなく「エージェント向け契約」。名前/説明を新人にも分かる
@@ -277,9 +280,13 @@ python main.py scan http://127.0.0.1:8000 --checks xss sqli --no-monitor --llm n
 - **原則**: エージェント処理は plan→execute→observe→improve の目標志向ループ。graceful recovery を設計し、
   失敗パターンを first-class に分類・保存する。
 - **本ツール**: LLM の**一時障害で攻撃入力が黙って減る＝偽陰性**を確実性の敵として同格に扱う。
-  `CompletionStatus` で恒久失敗（収束）と一時失敗（resume で回収）を分け、`checkpoint.py` で未回収単位だけ
-  再挑戦する。**新しく LLM を挟むときは「落ちたら攻撃が減る」箇所を洗い、status を見てフォールバック/
-  resume に繋ぐ。**
+  **ただし resume 回収が配線済みなのは adaptive 経路だけ**：`adaptive_engine.generate` が
+  `return_status=True` で `CompletionStatus` を受け、`engine._adaptive_llm_available` と `checkpoint.py` で
+  恒久失敗（収束）と一時失敗（未回収として残し `--resume` で再挑戦）を分ける。**通常掃射（baseline）は
+  未配線**：`PayloadGenerator.generate`→`_call_llm` は `return_status` を使わず、一時失敗時は黙って既定
+  payload へフォールバックし、`_scan_field` は当該 check を checkpoint 済みにする＝baseline の LLM payload が
+  一時障害で減っても `--resume` では戻らない。**新しく LLM を挟むときは「落ちたら攻撃が減る」箇所を洗い、
+  status を見てフォールバック/resume に繋ぐ**（baseline を回収対象にするなら adaptive と同様の配線が要る）。
 
 ### 8. untrusted content ＝ プロンプトインジェクション前提
 - **原則**: 外部由来テキスト（ツール結果・取得ページ・レスポンス）は信頼境界の外。指示上書き
@@ -310,7 +317,9 @@ python main.py scan http://127.0.0.1:8000 --checks xss sqli --no-monitor --llm n
 **呼び出し経路**（網羅ではなく従うべきパターン。新規は原則 `complete_text` へ寄せる。既存の独自経路で
 retry/失敗種別/エンドポイント処理を変えるときは同種の全 caller を同時に直す）:
 - **`llm_client.complete_text(pg, prompt, ...)`** … one-shot の堅牢な標準入口（非streaming・retry・失敗種別）。
-  `remediation` / `adaptive_payload.generate` / `payload_gen.generate` / `engine`(triage) が使用。
+  直接呼ぶのは `remediation` / `adaptive_payload.generate` / `payload_gen.generate`(baseline) /
+  `engine._ai_analysis_report`→`_call_llm_text`（**report** 生成、`use_role("report")`）。**triage** は
+  `triage.py::_llm_analyse`→`pg._call_llm`（`use_role("triage")`）を介した間接 caller（report とは別経路）。
 - **自前ストリーミング**（逐次表示用）… `attack_planner`（`use_role("planner")`）と
   `adaptive_payload.mutate_payload`（`use_role("adaptive")`）。**失敗種別/retry は complete_text と別実装**。
 - **Agent モード（別系）**… `llm_agent_browser._build_llm` が browser-use の `ChatAnthropic/ChatOpenAI/ChatOllama` を生成。
