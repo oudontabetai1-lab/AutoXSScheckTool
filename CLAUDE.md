@@ -205,25 +205,37 @@ python main.py scan http://127.0.0.1:8000 --checks xss sqli --no-monitor --llm n
 合わせる**（URL/キーのハードコード・独自 retry・生 env 読みは禁止）。モード別の狙い（通常＝確実性/
 Agent＝独自性）は「3モードの設計思想」を参照。ここは主に**通常ツール層**の話。
 
-### 3つの呼び出し経路（用途で使い分ける）
+### 呼び出し経路（用途で使い分ける／新規は原則 1 へ寄せる）
+以下は**従うべきパターン**であり、全 caller の網羅リストではない。新しく LLM を叩くときは原則 1
+（`complete_text`）へ寄せ、逐次表示が要るときだけ 2 を踏襲する。**既存の独自経路（下記 2・4）で
+retry/失敗種別/エンドポイント処理を変えるときは、同種の全 caller を洗い出して同時に直す**（片方だけ
+直すと挙動が割れる）。
 1. **`llm_client.complete_text(pg, prompt, *, max_tokens, temperature, timeout, retries, return_status)`**
-   … 生テキスト1発取得の**唯一の堅牢な入口**。非ストリーミング・retry/バックオフ・失敗種別を内包。
+   … 生テキスト1発取得の**堅牢な標準入口**。非ストリーミング・retry/バックオフ・失敗種別を内包。
    `payload_gen`（＝設定保持体）を第1引数に渡す。`remediation` / `adaptive_payload.generate` /
    `payload_gen.generate` / `engine`（triage 等）が使用。**one-shot な用途はまずこれを使う。**
-2. **`attack_planner` の自前ストリーミング**（`_call_claude/_call_openai/_call_gemini/_call_ollama`）
-   … 計画 JSON をコンソールへ**逐次表示**する必要があるため `complete_text` を使わず独自実装。
-   ただし設定は `payload_gen` インスタンス値を共有する（`use_role("planner")`・`openai_base_url`・
-   `openai_api_key`・`chat_completions_url`）。ストリーミングが要る新経路はこれを踏襲。
+2. **自前ストリーミング**（`complete_text` を使わず provider 別に stream）… コンソールへ**逐次表示**
+   する用途。`attack_planner`（`_call_claude/_call_openai/_call_gemini/_call_ollama`、`use_role("planner")`）と
+   `adaptive_payload.mutate_payload`（`_stream_claude/_stream_openai/_call_gemini/_stream_ollama`、
+   `use_role("adaptive")`）が採用。設定は `payload_gen` インスタンス値を共有する（`openai_base_url`・
+   `openai_api_key`・`chat_completions_url`）。**failure 種別・retry は complete_text と別実装**な点に注意。
 3. **Agent モード（別ハーネス）**（`llm_agent_browser._build_llm`）… browser-use の
    `ChatAnthropic/ChatOpenAI/ChatOllama` を生成。`complete_text` とは無関係の系。base URL/キーは
    同じく `llm_endpoint.resolve_instance_base/resolve_api_key` 経由（公式 openai は env を無視）。
+4. **`auto_config._call_llm`**（設定ウィザード）… provider 別の one-shot httpx 呼び出しで、
+   `complete_text` を経由しない独立経路（retry/失敗種別なし）。URL/キーは `llm_endpoint` 経由だが、
+   標準ハーネスの堅牢性は持たない。ここを触るときは 1 への統合も検討する。
 
 ### `PayloadGenerator` ＝ LLM 設定の保持体（`payload_gen.py`）
 LLM の provider・モデル・タイムアウト・retry・base URL/キーを1インスタンスに束ねる。`engine` が
 config/CLI から構築し、`adaptive_payload`・`attack_planner`・`waf_detector` 等へ**共有参照**する。
 - `provider` は**構築時に** `llm_endpoint.canonical_provider` で正規化（`openai_compatible`→`openai`）。
-- **base URL / API キーは構築時にスナップショット**（`resolve_instance_base` / `resolve_api_key`）。
-  呼び出し時に env を読み直さない＝長時間 serve で別スキャンが env を書き換えても化けない。
+- **スナップショットは OpenAI 系だけ**：`openai_base_url` / `openai_api_key` を構築時に確定
+  （`resolve_instance_base` / `resolve_api_key`）し、呼び出し時に env を読み直さない＝長時間 serve で
+  別スキャンが env を書き換えても化けない。**Claude/Gemini は未スナップショット**：Claude は
+  `_get_anthropic_client` が初回に `ANTHROPIC_API_KEY` を遅延読み、Gemini は `complete_text` /
+  `_check_llm_available` が呼び出し時に `GEMINI_API_KEY` を読む。よってこの2つは env 書き換えの影響を
+  受けうる（現状は OpenAI 互換だけが競合安全。他 provider を同保証にするならスナップショット追加が必要）。
 - `get_model(role)` / `use_role(role)` … 役割別モデル（`planner/payload/adaptive/triage/report`）を
   `role_models`（config `llm.models`）から解決。未設定なら provider 既定モデルへフォールバック。
 - `_check_llm_available()` は結果をキャッシュ（provider ごとにキー/接続を1度だけ確認）。
