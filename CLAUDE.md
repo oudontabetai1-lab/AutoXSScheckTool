@@ -239,8 +239,12 @@ python main.py scan http://127.0.0.1:8000 --checks xss sqli --no-monitor --llm n
   Goldilocks に（脆すぎるハードコードでも曖昧すぎでもなく）(b) just-in-time 取得（軽い識別子を持ち
   実行時にロード）(c) 長期は **compaction**（要約して再開）/ **structured note-taking**（外部ファイルに進捗）
   / **sub-agent** で文脈隔離（要約だけ返す）。
-- **本ツール**: adaptive prompt は cheatsheet＋**その場観測**（反射文脈・生存文字・試行済み payload）だけを
-  JIT で載せる（全 HTML を積まない）。攻撃者 HTML は 5000 字に切り詰め（attention budget）。**文脈隔離は
+- **本ツール**: adaptive prompt は cheatsheet＋**その場観測**（`_build_observations` が調べる
+  エンコード/エスケープ挙動・キーワード stripping・部分反射）＋WAF ヒント＋試行済み payload
+  （`tried`＝plan/default のみ）だけを JIT で載せる（全 HTML を積まない）。攻撃者 HTML は 5000 字に
+  切り詰め（attention budget）。**注**: `context_mutator` の「反射文脈・生存文字」観測（LLM 非依存の
+  evolution wave）は adaptive 経路へは渡らない別処理で、直前に実行した evolution/mutation payload も
+  `tried` に含まれない（adaptive を強化するならこれらの観測を明示的に配線する必要がある）。**文脈隔離は
   Hybrid で**：Phase 1 の Agent 偵察セッション（`AgentEngine.run_recon`）と Phase 2 の決定論スキャンは別実行
   なので、偵察の文脈は攻撃側へ持ち越さない。**純 Agent モードは単一セッション**（`AgentBrowserScanner.run`
   が `recon_mode` で `_build_recon_task`/`_build_task` の一方を選び 1 回の `agent.run()` を実行）なので偵察も
