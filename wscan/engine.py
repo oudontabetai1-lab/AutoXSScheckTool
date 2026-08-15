@@ -2441,9 +2441,12 @@ class ScanEngine:
                         if endpoint_key in self._spa_harvest_seen:
                             continue
                         clean = target["url"]
+                        # harvest したエンドポイントは *攻撃対象* になる（Phase3 で注入
+                        # される）。access-only スコープ（訪問のみ許可）への注入を防ぐため、
+                        # access ではなく attack target スコープを要求する。
                         if (
                             clean not in self.visited_urls
-                            and self._is_access_allowed_url(clean)
+                            and self._is_attack_target_url(clean)
                             and not self._is_url_excluded(clean)
                         ):
                             if len(self.visited_urls) >= url_cap:
