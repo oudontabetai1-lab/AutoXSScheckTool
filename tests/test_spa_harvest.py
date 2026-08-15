@@ -18,7 +18,7 @@ class HarvestGetTargetsTests(unittest.TestCase):
         )
 
         self.assertEqual(targets, [{
-            "url": "http://fixture.test/rest/products/search",
+            "url": "http://fixture.test/rest/products/search?q=x&cat=1",
             "params": ["q", "cat"],
             "depth_hint": 0,
         }])
@@ -38,16 +38,19 @@ class HarvestGetTargetsTests(unittest.TestCase):
             [],
         )
 
-    def test_deduplicates_same_url_and_param_set(self):
+    def test_deduplicates_same_endpoint_and_param_set_keeping_first_values(self):
         pairs = [
-            _pair("http://fixture.test/api/search?q=x&cat=1"),
+            _pair("http://fixture.test/api/search?q=x&cat=1#results"),
             _pair("http://fixture.test/api/search?cat=2&q=y&q=z"),
         ]
 
         targets = harvest_get_targets(pairs, base_netloc="fixture.test")
 
-        self.assertEqual(len(targets), 1)
-        self.assertEqual(targets[0]["params"], ["q", "cat"])
+        self.assertEqual(targets, [{
+            "url": "http://fixture.test/api/search?q=x&cat=1",
+            "params": ["q", "cat"],
+            "depth_hint": 0,
+        }])
 
     def test_keeps_json_api_and_caps_unique_params(self):
         query = "&".join(["=ignored", *[f"p{i}=x" for i in range(35)]])

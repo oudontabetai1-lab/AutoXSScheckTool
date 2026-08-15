@@ -2390,12 +2390,30 @@ class ScanEngine:
                     f"for navigation context but will not be attacked[/dim cyan]"
                 )
 
+            # ① SPA crawl: discover dynamically-rendered routes via click interaction
+            if self.spa_crawl:
+                try:
+                    spa_links = await self._browser.explore_spa_interactions(
+                        self._browser.page, url, max_clicks=20
+                    )
+                    for spa_link in spa_links:
+                        clean_spa = spa_link.split("#")[0]
+                        if (
+                            clean_spa not in self.visited_urls
+                            and self._is_access_allowed_url(clean_spa)
+                            and not self._is_url_excluded(clean_spa)
+                        ):
+                            self.visited_urls.add(clean_spa)
+                            queue.append((spa_link, depth + 1, url))
+                except Exception:
+                    pass
+
             # SPA が描画中に呼び出した GET API を既存 URL パラメータ経路へ載せる。
             if self.spa_crawl:
                 try:
                     from . import spa_harvest
 
-                    base_netloc = urlparse(self.target_url).netloc
+                    base_netloc = urlparse(url).netloc
                     url_cap = max(200, self.depth * 50)
                     harvested_count = 0
                     for target in spa_harvest.harvest_get_targets(
@@ -2430,24 +2448,6 @@ class ScanEngine:
                             f"  [dim cyan][SPA][/dim cyan] "
                             f"{harvested_count} 個の API エンドポイントを対象化"
                         )
-                except Exception:
-                    pass
-
-            # ① SPA crawl: discover dynamically-rendered routes via click interaction
-            if self.spa_crawl:
-                try:
-                    spa_links = await self._browser.explore_spa_interactions(
-                        self._browser.page, url, max_clicks=20
-                    )
-                    for spa_link in spa_links:
-                        clean_spa = spa_link.split("#")[0]
-                        if (
-                            clean_spa not in self.visited_urls
-                            and self._is_access_allowed_url(clean_spa)
-                            and not self._is_url_excluded(clean_spa)
-                        ):
-                            self.visited_urls.add(clean_spa)
-                            queue.append((spa_link, depth + 1, url))
                 except Exception:
                     pass
 

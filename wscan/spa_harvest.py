@@ -100,12 +100,13 @@ def harvest_get_targets(
                 if not params:
                     continue
 
-                clean_url = parsed._replace(query="", fragment="").geturl()
-                dedup_key = (clean_url, tuple(sorted(params)))
+                endpoint_url = parsed._replace(query="", fragment="").geturl()
+                dedup_key = (endpoint_url, tuple(sorted(params)))
                 if dedup_key in seen:
                     continue
                 seen.add(dedup_key)
-                results.append({"url": clean_url, "params": params, "depth_hint": 0})
+                observed_url = parsed._replace(fragment="").geturl()
+                results.append({"url": observed_url, "params": params, "depth_hint": 0})
             except Exception:
                 continue
     except Exception:
