@@ -107,6 +107,13 @@ diff が大きいほど意図した変更が埋もれる／「ついで修正」
 - Python 3.11+ / Playwright(Chromium) / FastAPI + WebSocket / httpx。コメントは主に日本語。
 - パッケージは `wscan/`。CLI 入口は `main.py`（サブコマンド: `scan` `agent` `triage`
   `serve` `setup` `batch` `record` `manual-crawl`）。対話ウィザードは `launcher.py`。
+- **基本の操作面は serve ダッシュボード**（`python main.py serve` → ブラウザで開く）。通常/Agent/Hybrid の
+  起動・設定・機能フラグ切替・進捗確認・結果閲覧はここで完結する（Hybrid は現状ダッシュボード専用）。
+  `scan`/`agent` 等の CLI サブコマンドは自動化・CI・スクリプト用の**補助入口**。**新しく利用者向け設定
+  （機能フラグ等）を足したら、まずダッシュボードに露出する**（CLI だけに足して終わりにしない。露出の
+  配線は `templates/dashboard.html` の `cfgToggles`／送信ペイロード → `main.py` serve の `/api/config/defaults`
+  と scan 起動 → `engine` 引数、という既存フラグ〈`spa_crawl`/`enable_sitemap_crawl` 等〉のパターンに倣う）。
+  利用者向け説明を書くときも「ダッシュボードが基本、CLI は補助」を前提にする（README も同様）。
 - 依存: `requirements.txt`（本体）/ `requirements-agent.txt`（Agentモード, browser-use）/
   `requirements-mcp.txt`（OOBメールMCP）。
 
