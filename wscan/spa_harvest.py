@@ -106,7 +106,15 @@ def harvest_get_targets(
                     continue
                 seen.add(dedup_key)
                 observed_url = parsed._replace(fragment="").geturl()
-                results.append({"url": observed_url, "params": params, "depth_hint": 0})
+                # ``endpoint`` はクエリ値を除いた正規URL。呼び出し側がページ跨ぎで
+                # (endpoint, param集合) 単位に大域dedupするためのキーに使う（値違いの
+                # 同一エンドポイントを再スキャンしない）。
+                results.append({
+                    "url": observed_url,
+                    "endpoint": endpoint_url,
+                    "params": params,
+                    "depth_hint": 0,
+                })
             except Exception:
                 continue
     except Exception:

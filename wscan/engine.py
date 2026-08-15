@@ -522,6 +522,8 @@ class ScanEngine:
         self.account_sessions: list = []
         # ①: SPA crawl
         self.spa_crawl = spa_crawl
+        # SPA harvest のページ跨ぎ大域 dedup キー集合 (endpoint, param集合)。
+        self._spa_harvest_seen: set = set()
         # ハイブリッドモード用シード URL (Agent偵察で発見したURL)
         self.seed_urls: list = list(seed_urls or [])
         self.additional_report_findings: list[Finding] = list(
@@ -2408,6 +2410,15 @@ class ScanEngine:
                 except Exception:
                     pass
 
+            # クリック探索が起こした遅延 GET XHR の応答が network.pairs に載るのを待って
+            # から harvest する。explore_spa_interactions() は domcontentloaded で返るため、
+            # 待ちが無いと in-flight の検索/フィルタ API を取りこぼす（次の navigate で消える）。
+            if self.spa_crawl:
+                try:
+                    await self.browser.settle_spa()
+                except Exception:
+                    pass
+
             # SPA が描画中に呼び出した GET API を既存 URL パラメータ経路へ載せる。
             if self.spa_crawl:
                 try:
@@ -2420,6 +2431,15 @@ class ScanEngine:
                         self.browser.network.pairs,
                         base_netloc=base_netloc,
                     ):
+                        # ページ跨ぎの大域 dedup：同一 (endpoint, param集合) は値違いでも
+                        # 一度だけ。値保持で URL が値ごとに変わるため、visited_urls だけだと
+                        # timestamp/pagination 等で URL cap を食い潰し payload が増える。
+                        endpoint_key = (
+                            target["endpoint"],
+                            tuple(sorted(target["params"])),
+                        )
+                        if endpoint_key in self._spa_harvest_seen:
+                            continue
                         clean = target["url"]
                         if (
                             clean not in self.visited_urls
@@ -2434,6 +2454,7 @@ class ScanEngine:
                                     )
                                     _spa_cap_warned = True
                                 break
+                            self._spa_harvest_seen.add(endpoint_key)
                             self.visited_urls.add(clean)
                             pages.append(CrawledPage(
                                 url=target["url"],

@@ -19,6 +19,7 @@ class HarvestGetTargetsTests(unittest.TestCase):
 
         self.assertEqual(targets, [{
             "url": "http://fixture.test/rest/products/search?q=x&cat=1",
+            "endpoint": "http://fixture.test/rest/products/search",
             "params": ["q", "cat"],
             "depth_hint": 0,
         }])
@@ -48,6 +49,7 @@ class HarvestGetTargetsTests(unittest.TestCase):
 
         self.assertEqual(targets, [{
             "url": "http://fixture.test/api/search?q=x&cat=1",
+            "endpoint": "http://fixture.test/api/search",
             "params": ["q", "cat"],
             "depth_hint": 0,
         }])
