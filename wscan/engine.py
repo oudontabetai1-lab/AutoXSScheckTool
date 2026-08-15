@@ -2419,12 +2419,19 @@ class ScanEngine:
                 try:
                     from . import spa_harvest
 
-                    base_netloc = urlparse(url).netloc
+                    # 設定済み攻撃スコープ全体の netloc を許可（現在ページと別オリジンの
+                    # API も、両方が攻撃対象なら拾う）。精密なスコープ判定は下の
+                    # _is_attack_target_url が担う。
+                    attack_netlocs = {
+                        urlparse(t).netloc
+                        for t in self.target_urls
+                        if urlparse(t).netloc
+                    }
                     url_cap = max(200, self.depth * 50)
                     harvested_count = 0
                     for target in spa_harvest.harvest_get_targets(
                         self.browser.network.pairs,
-                        base_netloc=base_netloc,
+                        base_netlocs=attack_netlocs,
                     ):
                         # ページ跨ぎの大域 dedup：同一 (endpoint, param集合) は値違いでも
                         # 一度だけ。値保持で URL が値ごとに変わるため、visited_urls だけだと

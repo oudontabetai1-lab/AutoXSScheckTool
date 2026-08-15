@@ -57,14 +57,27 @@ def looks_like_spa_shell(html: str) -> bool:
 def harvest_get_targets(
     pairs: list[dict],
     *,
-    base_netloc: str,
+    base_netlocs,
 ) -> list[dict]:
-    """同一 netloc の観測済み GET からクエリ注入対象を抽出する。"""
+    """設定済み攻撃スコープの netloc 群に属する観測済み GET からクエリ注入対象を抽出する。
+
+    ``base_netlocs`` は許可する netloc の集合（str も後方互換で受ける）。SPA が別オリジンの
+    API（例: app.example → api.example、両方が攻撃対象）を叩く場合も拾えるよう、現在ページの
+    単一 netloc ではなく設定済み攻撃スコープ全体で受ける。最終的な精密スコープ判定は呼び出し側の
+    ``_is_attack_target_url`` が担う（analytics 等の外部オリジンはそこで除外）。
+    """
     results: list[dict] = []
     seen: set[tuple[str, tuple[str, ...]]] = set()
 
     try:
-        if not isinstance(pairs, list) or not isinstance(base_netloc, str):
+        if isinstance(base_netlocs, str):
+            base_netlocs = {base_netlocs}
+        else:
+            try:
+                base_netlocs = set(base_netlocs or ())
+            except TypeError:
+                return results
+        if not isinstance(pairs, list) or not base_netlocs:
             return results
 
         for pair in pairs:
@@ -84,7 +97,7 @@ def harvest_get_targets(
                 if (
                     parsed.scheme.lower() not in {"http", "https"}
                     or not parsed.netloc
-                    or parsed.netloc != base_netloc
+                    or parsed.netloc not in base_netlocs
                     or not parsed.query
                 ):
                     continue

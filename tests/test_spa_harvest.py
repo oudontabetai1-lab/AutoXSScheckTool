@@ -14,7 +14,7 @@ class HarvestGetTargetsTests(unittest.TestCase):
     def test_harvests_same_netloc_get_with_query_params(self):
         targets = harvest_get_targets(
             [_pair("http://fixture.test/rest/products/search?q=x&cat=1")],
-            base_netloc="fixture.test",
+            base_netlocs={"fixture.test"},
         )
 
         self.assertEqual(targets, [{
@@ -35,7 +35,7 @@ class HarvestGetTargetsTests(unittest.TestCase):
         ]
 
         self.assertEqual(
-            harvest_get_targets(pairs, base_netloc="fixture.test"),
+            harvest_get_targets(pairs, base_netlocs={"fixture.test"}),
             [],
         )
 
@@ -45,7 +45,7 @@ class HarvestGetTargetsTests(unittest.TestCase):
             _pair("http://fixture.test/api/search?cat=2&q=y&q=z"),
         ]
 
-        targets = harvest_get_targets(pairs, base_netloc="fixture.test")
+        targets = harvest_get_targets(pairs, base_netlocs={"fixture.test"})
 
         self.assertEqual(targets, [{
             "url": "http://fixture.test/api/search?q=x&cat=1",
@@ -59,11 +59,29 @@ class HarvestGetTargetsTests(unittest.TestCase):
 
         targets = harvest_get_targets(
             [_pair(f"http://fixture.test/api/data.json?{query}")],
-            base_netloc="fixture.test",
+            base_netlocs={"fixture.test"},
         )
 
         self.assertEqual(len(targets), 1)
         self.assertEqual(targets[0]["params"], [f"p{i}" for i in range(30)])
+
+    def test_accepts_configured_cross_origin_attack_scope(self):
+        # app.example が別オリジン api.example の API を叩き、両方が攻撃スコープなら拾う。
+        pairs = [
+            _pair("http://api.example/rest/search?q=x"),
+            _pair("http://analytics.example/collect?id=1"),  # 対象外 netloc
+        ]
+
+        targets = harvest_get_targets(
+            pairs, base_netlocs={"app.example", "api.example"}
+        )
+
+        self.assertEqual(targets, [{
+            "url": "http://api.example/rest/search?q=x",
+            "endpoint": "http://api.example/rest/search",
+            "params": ["q"],
+            "depth_hint": 0,
+        }])
 
 
 class LooksLikeSpaShellTests(unittest.TestCase):
