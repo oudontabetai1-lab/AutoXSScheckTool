@@ -782,6 +782,9 @@ class ScanEngine:
             request_logger=self.request_logger,
             mfa_solver=self._mfa_solver,
         )
+        # SPA モード時は navigate() 成功後に描画確定待ち(settle_spa)を行う。crawl だけ
+        # でなく attack フェーズの navigate でも待つことで、非同期描画フォームの取りこぼしを防ぐ。
+        self._browser.spa_settle = bool(self.spa_crawl)
         # When the refresh task fetches a new token, push it into the browser
         # context so crawled pages immediately use the rotated header.
         async def _propagate_headers(new_headers: dict):
@@ -2189,11 +2192,7 @@ class ScanEngine:
                 self._record_unscannable_url(url)
                 continue
 
-            if self.spa_crawl:
-                try:
-                    await self.browser.settle_spa()
-                except Exception:
-                    pass
+            # SPA の描画確定待ちは navigate() 内(spa_settle)で行うため、ここでの明示待ちは不要。
 
             # Detect session expiry: if we've been redirected to the login page,
             # re-authenticate before collecting forms from this page.
@@ -2228,11 +2227,7 @@ class ScanEngine:
                             + self._navigation_failure_note(),
                         )
                         continue
-                    if self.spa_crawl:
-                        try:
-                            await self.browser.settle_spa()
-                        except Exception:
-                            pass
+                    # 再ログイン後の再navigate も navigate() 内(spa_settle)で settle する。
                 else:
                     console.print(
                         "  [yellow][Auth] Re-login may have failed — skipping page.[/yellow]"

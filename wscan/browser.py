@@ -1227,6 +1227,15 @@ class BrowserManager:
                     self.last_navigation_error = f"HTTP {response.status}"
                     return False
                 self.last_navigation_error = ""
+                # SPA モードでは navigate 成功後に描画確定を待つ。crawl だけでなく
+                # attack フェーズ（_attack_one_page・各スキャナの fill_and_submit_form
+                # 前 navigate）でも待つことで、非同期描画フォームが「発見済みだが未検査」に
+                # ならないようにする。非SPA(spa_settle=False)では従来挙動のまま。
+                if getattr(self, "spa_settle", False):
+                    try:
+                        await self.settle_spa()
+                    except Exception:
+                        pass
                 return True
             except Exception as e:
                 self.last_navigation_error = f"{type(e).__name__}: {e}"
@@ -2416,6 +2425,8 @@ class WorkerBrowser(BrowserManager):
         self.mfa_solver = getattr(real_browser, "mfa_solver", None)
         self.proxy = real_browser.proxy
         self.sleep_factor = real_browser.sleep_factor
+        # SPA 描画確定待ちフラグを引き継ぐ（worker の attack navigate でも settle する）。
+        self.spa_settle = getattr(real_browser, "spa_settle", False)
         self._playwright = real_browser._playwright
         self._browser = real_browser._browser
         self._context = real_browser._context      # Shared — cookies are inherited
