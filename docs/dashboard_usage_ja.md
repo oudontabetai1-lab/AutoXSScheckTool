@@ -126,7 +126,7 @@ Target URL を入力し、目的に近いプロファイルを選びます。
 | Agent Browser | LLM 自律操作モード |
 | ハイブリッド | Agent 偵察から通常スキャンへ引き渡すモード |
 
-機能フラグの「SPA クロール (React/Vue/Angular)」は、CLI の `--spa-crawl` と同じ動作をします。描画確定までの待機（settle）に加え、巡回中に観測した GET API/XHR エンドポイントを攻撃対象化するため、フォームを辿れない SPA（例: OWASP Juice Shop）でも検査対象が増えます。既定はオフです。
+機能フラグの「SPA クロール (React/Vue/Angular)」は、CLI の `--spa-crawl` と同じ動作をします。`history.pushState`/`replaceState` をフックし、ナビゲーション要素（nav リンク・タブ・`data-route` ボタンなど）をクリックしてクライアント側で切り替わる仮想ルートを発見し、クロール対象に追加します。通常のリンクだけでは辿れない SPA でも巡回範囲が広がります。既定はオフです。
 
 ### 認証とスコープ
 
