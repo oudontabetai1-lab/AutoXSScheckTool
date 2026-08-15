@@ -522,6 +522,8 @@ class ScanEngine:
         self.account_sessions: list = []
         # ①: SPA crawl
         self.spa_crawl = spa_crawl
+        # SPA harvest のページ跨ぎ大域 dedup キー集合 (endpoint, param集合)。
+        self._spa_harvest_seen: set = set()
         # ハイブリッドモード用シード URL (Agent偵察で発見したURL)
         self.seed_urls: list = list(seed_urls or [])
         self.additional_report_findings: list[Finding] = list(
@@ -780,6 +782,9 @@ class ScanEngine:
             request_logger=self.request_logger,
             mfa_solver=self._mfa_solver,
         )
+        # SPA モード時は navigate() 成功後に描画確定待ち(settle_spa)を行う。crawl だけ
+        # でなく attack フェーズの navigate でも待つことで、非同期描画フォームの取りこぼしを防ぐ。
+        self._browser.spa_settle = bool(self.spa_crawl)
         # When the refresh task fetches a new token, push it into the browser
         # context so crawled pages immediately use the rotated header.
         async def _propagate_headers(new_headers: dict):
@@ -2160,6 +2165,7 @@ class ScanEngine:
                     f"{added} URL をクロールキューに追加"
                 )
 
+        _spa_cap_warned = False
         while queue:
             # 停止(abort)/一時停止(pause)をクロール中も尊重する。従来はこのループが
             # チェックポイントを一切通さず、停止要求が attack フェーズ開始まで
@@ -2185,6 +2191,8 @@ class ScanEngine:
                 console.print(f"  [yellow]  ✘ could not load[/yellow]")
                 self._record_unscannable_url(url)
                 continue
+
+            # SPA の描画確定待ちは navigate() 内(spa_settle)で行うため、ここでの明示待ちは不要。
 
             # Detect session expiry: if we've been redirected to the login page,
             # re-authenticate before collecting forms from this page.
@@ -2219,6 +2227,7 @@ class ScanEngine:
                             + self._navigation_failure_note(),
                         )
                         continue
+                    # 再ログイン後の再navigate も navigate() 内(spa_settle)で settle する。
                 else:
                     console.print(
                         "  [yellow][Auth] Re-login may have failed — skipping page.[/yellow]"
@@ -2393,6 +2402,78 @@ class ScanEngine:
                         ):
                             self.visited_urls.add(clean_spa)
                             queue.append((spa_link, depth + 1, url))
+                except Exception:
+                    pass
+
+            # クリック探索が起こした遅延 GET XHR の応答が network.pairs に載るのを待って
+            # から harvest する。explore_spa_interactions() は domcontentloaded で返るため、
+            # 待ちが無いと in-flight の検索/フィルタ API を取りこぼす（次の navigate で消える）。
+            if self.spa_crawl:
+                try:
+                    await self.browser.settle_spa()
+                except Exception:
+                    pass
+
+            # SPA が描画中に呼び出した GET API を既存 URL パラメータ経路へ載せる。
+            if self.spa_crawl:
+                try:
+                    from . import spa_harvest
+
+                    # 設定済み攻撃スコープ全体の netloc を許可（現在ページと別オリジンの
+                    # API も、両方が攻撃対象なら拾う）。精密なスコープ判定は下の
+                    # _is_attack_target_url が担う。
+                    attack_netlocs = {
+                        urlparse(t).netloc
+                        for t in self.target_urls
+                        if urlparse(t).netloc
+                    }
+                    url_cap = max(200, self.depth * 50)
+                    harvested_count = 0
+                    for target in spa_harvest.harvest_get_targets(
+                        self.browser.network.pairs,
+                        base_netlocs=attack_netlocs,
+                    ):
+                        # ページ跨ぎの大域 dedup：同一 (endpoint, param集合) は値違いでも
+                        # 一度だけ。値保持で URL が値ごとに変わるため、visited_urls だけだと
+                        # timestamp/pagination 等で URL cap を食い潰し payload が増える。
+                        endpoint_key = (
+                            target["endpoint"],
+                            tuple(sorted(target["params"])),
+                        )
+                        if endpoint_key in self._spa_harvest_seen:
+                            continue
+                        clean = target["url"]
+                        # harvest したエンドポイントは *攻撃対象* になる（Phase3 で注入
+                        # される）。access-only スコープ（訪問のみ許可）への注入を防ぐため、
+                        # access ではなく attack target スコープを要求する。
+                        if (
+                            clean not in self.visited_urls
+                            and self._is_attack_target_url(clean)
+                            and not self._is_url_excluded(clean)
+                        ):
+                            if len(self.visited_urls) >= url_cap:
+                                if not _spa_cap_warned:
+                                    console.print(
+                                        f"  [yellow]Crawl URL cap ({url_cap}) reached — "
+                                        f"some pages may have been skipped.[/yellow]"
+                                    )
+                                    _spa_cap_warned = True
+                                break
+                            self._spa_harvest_seen.add(endpoint_key)
+                            self.visited_urls.add(clean)
+                            pages.append(CrawledPage(
+                                url=target["url"],
+                                html="",
+                                forms=[],
+                                url_params=target["params"],
+                                depth=depth + 1,
+                            ))
+                            harvested_count += 1
+                    if harvested_count:
+                        console.print(
+                            f"  [dim cyan][SPA][/dim cyan] "
+                            f"{harvested_count} 個の API エンドポイントを対象化"
+                        )
                 except Exception:
                     pass
 

@@ -359,7 +359,7 @@ python3 main.py scan URL [options]
 | `--forbidden-hours WINDOW` | なし | 禁止時間帯。複数指定可 |
 | `--no-relogin` | 自動再ログイン有効 | セッション失効時の再ログインを無効化 |
 | `--logged-in-marker TEXT` | `--login-success` を流用 | 認証済み判定文字列 |
-| `--spa-crawl` | `false` | SPA の動的ルートを探索 |
+| `--spa-crawl` | `false` | SPA を検査（動的ルート探索＋描画確定待ち＋観測した GET API/XHR を攻撃対象化） |
 | `--previous-scan DIR` | なし | 前回 `evidence.json` と差分比較 |
 | `--auto-config / --no-auto-config` | `false` | 起動時の設定ウィザード |
 
@@ -854,7 +854,7 @@ OpenAPI 2.0/3.x、Swagger JSON/YAML、Postman Collection から URL、共通ヘ�
 
 - `cms`: CMS の種類、バージョン、既知露出、危険な設定を確認します。
 - sitemap/robots: 既定で未リンク URL のシードにします。`--no-sitemap-crawl` で無効化します。
-- SPA: `--spa-crawl` で `history.pushState` フックとクリック探索を使い、React/Vue/Angular の動的ルートを収集します。
+- SPA: `--spa-crawl` で React/Vue/Angular の SPA を検査します。(1) `history.pushState` フックとクリック探索で動的ルートを収集、(2) **描画確定待ち**（`networkidle` 上限付き＋ルート要素の描画完了）で `<app-root>` が空のまま抽出されるのを防止、(3) **描画中に観測した同一スコープの GET API/XHR エンドポイント**（クエリ付き。例: `/rest/products/search?q=`）を攻撃対象に自動追加し、URL パラメータとして注入検査します。JSON ボディの POST エンドポイントへの注入は現状対象外です。
 - `js_static`: インライン/外部 JavaScript の危険な source-to-sink フローを静的確認します。
 
 ### flow / 手動巡回 / HAR
