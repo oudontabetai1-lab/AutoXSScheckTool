@@ -980,6 +980,13 @@ Examples:
         default=not _CFG.get("open_report", True),
         help="Do not automatically open the HTML report after scanning.",
     )
+    scan.add_argument(
+        "--open-report", action="store_true", default=False,
+        help=(
+            "Force-open the HTML report even with --no-monitor "
+            "(overrides the --no-monitor auto-suppression)."
+        ),
+    )
     # CI-3: Proxy support
     scan.add_argument(
         "--proxy", metavar="URL", default=_CFG.get("proxy", ""),
@@ -1689,6 +1696,23 @@ def _effective_llm_base_url(args) -> str:
     return ""
 
 
+def _effective_open_report(args) -> bool:
+    """`--no-monitor` などを踏まえた HTML レポート自動オープンの実効値を返す。
+
+    - ``--open-report`` を明示指定していれば常に開く（``--no-monitor`` でも最優先）。
+    - ``--no-open-report``（明示 or config 由来の既定）が真なら開かない。
+    - ``--no-monitor``（ダッシュボード無し＝自動化/テスト文脈）では自動表示しない。
+    - それ以外は従来どおり開く。
+    """
+    if getattr(args, "open_report", False):
+        return True
+    if getattr(args, "no_open_report", False):
+        return False
+    if getattr(args, "no_monitor", False):
+        return False
+    return True
+
+
 def _llm_model_display(args) -> str:
     """Return a short model info string for the startup banner."""
     role_models = getattr(args, "role_models", {}) or {}
@@ -1844,7 +1868,7 @@ async def run_agent(args):
             login_url=getattr(args, "login_url", "") or "",
             max_steps=args.max_steps,
             output_dir=args.output or None,
-            open_report=not getattr(args, "no_open_report", False),
+            open_report=_effective_open_report(args),
             monitor=monitor,
             port=args.port,
             extra_headers=_agent_headers,
@@ -1884,7 +1908,7 @@ async def run_agent(args):
                 login_url=getattr(args, "login_url", "") or "",
                 max_steps=args.max_steps,
                 output_dir=args.output or None,
-                open_report=not getattr(args, "no_open_report", False),
+                open_report=_effective_open_report(args),
                 monitor=monitor,
                 port=args.port,
                 extra_headers=_agent_headers,
@@ -2155,7 +2179,7 @@ async def run_scan(args):
             use_planner=not getattr(args, "no_planner", False),
             interactive_plan=getattr(args, "interactive_plan", False),
             skip_registration=not getattr(args, "include_registration", False),
-            open_report=not getattr(args, "no_open_report", False),
+            open_report=_effective_open_report(args),
             proxy=getattr(args, "proxy", "") or "",
             login_url=getattr(args, "login_url", "") or "",
             login_user_field=getattr(args, "login_user_field", "username") or "username",

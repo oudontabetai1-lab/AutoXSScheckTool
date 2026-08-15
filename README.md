@@ -255,7 +255,7 @@ python3 main.py scan URL [options]
 | `--checks CHECK...` | `sqli xss os` | 実行するチェック。選択肢は「対応チェック種別」参照 |
 | `-d, --depth N` | `2` | クロール深度 |
 | `--headless` | `browser.headless` (`false`) | ブラウザ非表示 |
-| `--no-monitor` | monitor 有効 | ライブモニターを無効化 |
+| `--no-monitor` | monitor 有効 | ライブモニターを無効化（HTML レポートの自動表示も抑止） |
 | `--llm PROVIDER` | `ollama` | `ollama/claude/openai/openai_compatible/gemini/none` |
 | `--ollama-model MODEL` | `llama3` | Ollama モデル |
 | `--openai-model MODEL` | `gpt-4o-mini` | OpenAI / OpenAI 互換モデル |
@@ -334,6 +334,7 @@ python3 main.py scan URL [options]
 | `--no-planner` | planner 有効 | AI 攻撃計画を無効化 |
 | `--interactive-plan` | `false` | 攻撃前に計画を編集 |
 | `--no-open-report` | 自動表示有効 | 完了時の HTML 自動表示を無効化 |
+| `--open-report` | 自動表示（`--no-monitor` 時は抑止） | `--no-monitor` でも HTML レポートを強制的に開く |
 | `--learning-file FILE` | `config/payload_learning.json` | 学習データファイル |
 | `--dom-xss` | `false` | DOM-based XSS を追加 |
 | `--no-ai-analysis` | 有効 | スキャン後 AI 分析を無効化 |
