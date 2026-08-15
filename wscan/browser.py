@@ -1235,6 +1235,32 @@ class BrowserManager:
                 await asyncio.sleep(retry_delay * (attempt + 1))
         return False
 
+    async def settle_spa(self, *, timeout_ms: int = 8000) -> None:
+        """SPA 描画の確定を待つ。失敗時は例外を外へ出さない。"""
+        try:
+            timeout = max(0, int(timeout_ms))
+            try:
+                await self.page.wait_for_load_state("networkidle", timeout=timeout)
+            except Exception:
+                pass
+            try:
+                await self.page.wait_for_function(
+                    """
+                    () => {
+                        const root = document.querySelector('app-root, #root') || document.body;
+                        if (!root) return false;
+                        return root.childElementCount > 0
+                            || (root.innerText || '').trim().length > 0;
+                    }
+                    """,
+                    timeout=timeout,
+                    polling=200,
+                )
+            except Exception:
+                pass
+        except Exception:
+            pass
+
     async def screenshot_b64(self, label: str = "") -> str:
         """Take screenshot and return as base64 string."""
         try:

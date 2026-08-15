@@ -2160,6 +2160,7 @@ class ScanEngine:
                     f"{added} URL をクロールキューに追加"
                 )
 
+        _spa_cap_warned = False
         while queue:
             # 停止(abort)/一時停止(pause)をクロール中も尊重する。従来はこのループが
             # チェックポイントを一切通さず、停止要求が attack フェーズ開始まで
@@ -2185,6 +2186,12 @@ class ScanEngine:
                 console.print(f"  [yellow]  ✘ could not load[/yellow]")
                 self._record_unscannable_url(url)
                 continue
+
+            if self.spa_crawl:
+                try:
+                    await self.browser.settle_spa()
+                except Exception:
+                    pass
 
             # Detect session expiry: if we've been redirected to the login page,
             # re-authenticate before collecting forms from this page.
@@ -2219,6 +2226,11 @@ class ScanEngine:
                             + self._navigation_failure_note(),
                         )
                         continue
+                    if self.spa_crawl:
+                        try:
+                            await self.browser.settle_spa()
+                        except Exception:
+                            pass
                 else:
                     console.print(
                         "  [yellow][Auth] Re-login may have failed — skipping page.[/yellow]"
@@ -2377,6 +2389,49 @@ class ScanEngine:
                     f"    [dim cyan]access-only scope: forms and parameters were collected "
                     f"for navigation context but will not be attacked[/dim cyan]"
                 )
+
+            # SPA が描画中に呼び出した GET API を既存 URL パラメータ経路へ載せる。
+            if self.spa_crawl:
+                try:
+                    from . import spa_harvest
+
+                    base_netloc = urlparse(self.target_url).netloc
+                    url_cap = max(200, self.depth * 50)
+                    harvested_count = 0
+                    for target in spa_harvest.harvest_get_targets(
+                        self.browser.network.pairs,
+                        base_netloc=base_netloc,
+                    ):
+                        clean = target["url"]
+                        if (
+                            clean not in self.visited_urls
+                            and self._is_access_allowed_url(clean)
+                            and not self._is_url_excluded(clean)
+                        ):
+                            if len(self.visited_urls) >= url_cap:
+                                if not _spa_cap_warned:
+                                    console.print(
+                                        f"  [yellow]Crawl URL cap ({url_cap}) reached — "
+                                        f"some pages may have been skipped.[/yellow]"
+                                    )
+                                    _spa_cap_warned = True
+                                break
+                            self.visited_urls.add(clean)
+                            pages.append(CrawledPage(
+                                url=target["url"],
+                                html="",
+                                forms=[],
+                                url_params=target["params"],
+                                depth=depth + 1,
+                            ))
+                            harvested_count += 1
+                    if harvested_count:
+                        console.print(
+                            f"  [dim cyan][SPA][/dim cyan] "
+                            f"{harvested_count} 個の API エンドポイントを対象化"
+                        )
+                except Exception:
+                    pass
 
             # ① SPA crawl: discover dynamically-rendered routes via click interaction
             if self.spa_crawl:

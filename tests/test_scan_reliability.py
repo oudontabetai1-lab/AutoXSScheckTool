@@ -23,7 +23,31 @@ class _FlakyPage:
         return _Response(self.status)
 
 
+class _UnsettledPage:
+    def __init__(self):
+        self.calls = []
+
+    async def wait_for_load_state(self, state, *, timeout):
+        self.calls.append(("load", state, timeout))
+        raise TimeoutError("network never became idle")
+
+    async def wait_for_function(self, expression, *, timeout, polling):
+        self.calls.append(("ready", timeout, polling))
+        raise RuntimeError("root never became ready")
+
+
 class BrowserNavigationReliabilityTests(unittest.IsolatedAsyncioTestCase):
+    async def test_settle_spa_swallows_each_timeout_and_runs_both_waits(self):
+        browser = BrowserManager(headless=True, timeout=1)
+        browser.page = _UnsettledPage()
+
+        await browser.settle_spa(timeout_ms=125)
+
+        self.assertEqual(
+            browser.page.calls,
+            [("load", "networkidle", 125), ("ready", 125, 200)],
+        )
+
     async def test_navigate_retries_transient_page_load_failures(self):
         browser = BrowserManager(headless=True, timeout=1)
         browser.page = _FlakyPage(failures_before_success=2)
