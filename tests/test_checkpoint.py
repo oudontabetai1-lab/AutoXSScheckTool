@@ -10,9 +10,22 @@ from wscan.checkpoint import (
     load_checkpoint,
     checkpoint_path,
 )
+from wscan.injection_point import InjectionPoint
 
 
 class UnitKeyTests(unittest.TestCase):
+    def test_legacy_form_key_is_byte_identical(self):
+        self.assertEqual(
+            unit_key("http://h/a/", "id", 0, "sqli", is_url_param=False),
+            "http://h/a\x1fid\x1f0\x1ff\x1fsqli",
+        )
+
+    def test_legacy_url_param_key_is_byte_identical(self):
+        self.assertEqual(
+            unit_key("http://h/a/", "id", 0, "sqli", is_url_param=True),
+            "http://h/a\x1fid\x1f0\x1fu\x1fsqli",
+        )
+
     def test_trailing_slash_normalised(self):
         self.assertEqual(
             unit_key("http://h/a/", "q", 0, "xss"),
@@ -34,6 +47,48 @@ class UnitKeyTests(unittest.TestCase):
 
 
 class StateTests(unittest.TestCase):
+    def test_form_injection_point_matches_legacy_unit(self):
+        state = CheckpointState()
+        ip = InjectionPoint.for_form("http://h/a/", "id", 2)
+        state.mark_done_ip(ip, "sqli")
+        self.assertTrue(state.is_done("http://h/a", "id", 2, "sqli"))
+        self.assertTrue(state.is_done_ip(ip, "sqli"))
+
+    def test_url_param_injection_point_matches_legacy_unit(self):
+        state = CheckpointState()
+        ip = InjectionPoint.for_url_param("http://h/a/", "id")
+        state.mark_done("http://h/a", "id", 0, "sqli", is_url_param=True)
+        self.assertTrue(state.is_done_ip(ip, "sqli"))
+
+    def test_json_body_pointer_and_method_do_not_collide(self):
+        state = CheckpointState()
+        profile = InjectionPoint.for_json_body(
+            "POST", "http://h/users", "/profile/email"
+        )
+        billing = InjectionPoint.for_json_body(
+            "POST", "http://h/users", "/billing/email"
+        )
+        get_profile = InjectionPoint.for_json_body(
+            "GET", "http://h/users", "/profile/email"
+        )
+        state.mark_done_ip(profile, "sqli")
+        self.assertTrue(state.is_done_ip(profile, "sqli"))
+        self.assertFalse(state.is_done_ip(billing, "sqli"))
+        self.assertFalse(state.is_done_ip(get_profile, "sqli"))
+
+    def test_v3_checkpoint_resumes_without_key_migration(self):
+        legacy_key = "http://h/a\x1fid\x1f0\x1ff\x1fsqli"
+        state = CheckpointState.from_dict({
+            "version": 3,
+            "target_url": "http://h",
+            "checks": ["sqli"],
+            "completed_units": [legacy_key],
+            "findings": [],
+        })
+        self.assertEqual(state.source_version, 3)
+        self.assertTrue(state.is_done("http://h/a", "id", 0, "sqli"))
+        self.assertIn(legacy_key, state.completed_units)
+
     def test_mark_and_is_done(self):
         s = CheckpointState(target_url="http://h", checks=["xss"])
         self.assertFalse(s.is_done("http://h/a", "q", 0, "xss"))

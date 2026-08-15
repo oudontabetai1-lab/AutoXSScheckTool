@@ -2,11 +2,16 @@
 Base Scanner Class
 Provides common utilities for all vulnerability scanners.
 """
+import json
 import re
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Optional, TYPE_CHECKING
+
+import httpx
+
+from wscan.injection_point import InjectionPoint, pointer_set_copy
 
 if TYPE_CHECKING:
     from wscan.engine import ScanEngine
@@ -159,6 +164,10 @@ class Finding:
     reproduction_steps: list[str] = field(default_factory=list)
     source: str = "scanner"          # "scanner" | "agent"
     agent_verified: bool = False      # Agent 発見を決定論スキャナでも再現できたか
+    injection_location: str = ""       # 空文字は旧来または不明の注入経路
+    injection_pointer: str = ""        # JSON body 内の JSON Pointer
+    injection_method: str = ""         # JSON body 送信時の HTTP メソッド
+    injection_template_id: str = ""    # 秘匿値を持たないテンプレート識別子
 
     @classmethod
     def from_dict(cls, data: dict) -> "Finding":
@@ -191,6 +200,10 @@ class Finding:
             reproduction_steps=list(data.get("reproduction_steps", []) or []),
             source=data.get("source", "scanner"),
             agent_verified=bool(data.get("agent_verified", False)),
+            injection_location=data.get("injection_location", ""),
+            injection_pointer=data.get("injection_pointer", ""),
+            injection_method=data.get("injection_method", ""),
+            injection_template_id=data.get("injection_template_id", ""),
         )
 
     @property
@@ -236,8 +249,25 @@ class Finding:
             "reproduction_steps": self.reproduction_steps,
             "source": self.source,
             "agent_verified": self.agent_verified,
+            "injection_location": self.injection_location,
+            "injection_pointer": self.injection_pointer,
+            "injection_method": self.injection_method,
+            "injection_template_id": self.injection_template_id,
             "compliance_refs": get_refs(self.check_type),
         }
+
+
+def injection_point_from_finding(finding: Finding) -> Optional[InjectionPoint]:
+    """JSON body の provenance がある Finding から注入点を復元する。"""
+    if finding.injection_location != "json_body":
+        return None
+    return InjectionPoint.for_json_body(
+        finding.injection_method,
+        finding.url,
+        finding.injection_pointer,
+        display_name=finding.field_name,
+        template_id=finding.injection_template_id,
+    )
 
 
 class BaseScanner(ABC):
@@ -419,6 +449,80 @@ class BaseScanner(ABC):
         if req_ts and resp_ts:
             return resp_ts - req_ts
         return None
+
+    async def _apply_json_payload(
+        self,
+        ip: InjectionPoint,
+        payload,
+    ) -> tuple[str, dict]:
+        """JSON body 注入点へ payload を送信し、応答本文と通信記録を返す。"""
+        template = (
+            getattr(self.engine, "injection_templates", {}) or {}
+        ).get(ip.template_id)
+        if not isinstance(template, dict):
+            return "", {}
+
+        try:
+            url = template.get("url") or ip.url
+            method = (template.get("method") or ip.method or "POST").upper()
+            body = pointer_set_copy(
+                template.get("json_body"),
+                ip.parameter_id,
+                payload,
+            )
+            post_data = json.dumps(body)
+            content_type = template.get("content_type") or "application/json"
+            headers = self.auth_headers_for_url(
+                url,
+                {"Content-Type": content_type},
+            )
+            headers = merge_template_headers(
+                headers,
+                template.get("headers") or {},
+            )
+            kwargs = {
+                "timeout": getattr(self.engine, "timeout", 15),
+                "follow_redirects": True,
+                "headers": headers,
+            }
+            if hasattr(self.engine, "httpx_client_kwargs"):
+                kwargs = self.engine.httpx_client_kwargs(**kwargs)
+            elif getattr(self.engine, "proxy", ""):
+                kwargs["proxy"] = self.engine.proxy
+        except Exception:
+            return "", {}
+
+        # abort 判定を送信直前に通す。AbortScan は呼び出し側へ伝播させる。
+        await self.log_payload_test(
+            ip.display_name or ip.parameter_id,
+            post_data,
+            self.CHECK_TYPE,
+            url,
+        )
+        request_timestamp = time.time()
+        try:
+            async with httpx.AsyncClient(**kwargs) as client:
+                response = await client.request(method, url, content=post_data)
+            response_timestamp = time.time()
+            pair = {
+                "request": {
+                    "url": url,
+                    "method": method,
+                    "headers": headers,
+                    "post_data": post_data,
+                    "timestamp": request_timestamp,
+                },
+                "response": {
+                    "url": str(response.url),
+                    "status": response.status_code,
+                    "headers": dict(response.headers),
+                    "body": response.text,
+                    "timestamp": response_timestamp,
+                },
+            }
+            return response.text, pair
+        except Exception:
+            return "", {}
 
     async def run_equivalence_probe(
         self,
@@ -633,6 +737,7 @@ class BaseScanner(ABC):
         evidence_type: str = "",
         evidence_details: Optional[dict] = None,
         reproduction_steps: Optional[list[str]] = None,
+        injection_point: Optional[InjectionPoint] = None,
     ) -> Finding:
         """Create and record a finding."""
         if screenshot_b64 is None:
@@ -691,6 +796,20 @@ class BaseScanner(ABC):
             evidence_details=evidence_details or {},
             reproduction_steps=reproduction_steps or self._default_reproduction_steps(
                 url, field_name, payload
+            ),
+            injection_location=(injection_point.location if injection_point else ""),
+            injection_pointer=(
+                injection_point.parameter_id
+                if injection_point and injection_point.location == "json_body"
+                else ""
+            ),
+            injection_method=(
+                injection_point.method
+                if injection_point and injection_point.location == "json_body"
+                else ""
+            ),
+            injection_template_id=(
+                injection_point.template_id if injection_point else ""
             ),
         )
         self.findings.append(finding)

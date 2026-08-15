@@ -21,12 +21,16 @@ import json
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from wscan.injection_point import InjectionPoint
 
 # v2: per-field の "(adaptive)" 完了単位を導入。
 # v3: adaptive を "(adaptive:<check_type>)" 単位へ細分化。旧 "(adaptive)" は
 # engine が「全 adaptive check 完了」として尊重するため、旧 checkpoint も読める。
-CHECKPOINT_VERSION = 3
+# v4: JSON body 注入点用の6部品キーを加算。従来キーは5部品のまま保持する。
+CHECKPOINT_VERSION = 4
 CHECKPOINT_FILENAME = "checkpoint.json"
 
 
@@ -36,6 +40,9 @@ def unit_key(
     form_index: int,
     check_type: str,
     is_url_param: bool = False,
+    *,
+    location_token: str | None = None,
+    pointer: str = "",
 ) -> str:
     """攻撃の作業単位を一意な文字列キーにする（純粋関数）。
 
@@ -47,8 +54,18 @@ def unit_key(
     されるのを防ぐため、入力種別（URL param / form）もキーに含める。
     """
     norm_url = (url or "").rstrip("/")
-    location = "u" if is_url_param else "f"
-    return "\x1f".join([norm_url, field_name or "", str(form_index), location, check_type or ""])
+    if location_token is None:
+        location_token = "u" if is_url_param else "f"
+    parts = [
+        norm_url,
+        field_name or "",
+        str(form_index),
+        location_token,
+        check_type or "",
+    ]
+    if pointer:
+        parts.append(pointer)
+    return "\x1f".join(parts)
 
 
 @dataclass
@@ -77,6 +94,32 @@ class CheckpointState:
         is_url_param: bool = False,
     ) -> None:
         self.completed_units.add(unit_key(url, field_name, form_index, check_type, is_url_param))
+        self.updated_at = time.time()
+
+    def is_done_ip(self, ip: "InjectionPoint", check_type: str) -> bool:
+        """InjectionPoint が表す作業単位の完了状態を返す。"""
+        url, field_name, form_index, location_token, pointer = ip.stable_key_parts()
+        key = unit_key(
+            url,
+            field_name,
+            int(form_index),
+            check_type,
+            location_token=location_token,
+            pointer=pointer,
+        )
+        return key in self.completed_units
+
+    def mark_done_ip(self, ip: "InjectionPoint", check_type: str) -> None:
+        """InjectionPoint が表す作業単位を完了済みにする。"""
+        url, field_name, form_index, location_token, pointer = ip.stable_key_parts()
+        self.completed_units.add(unit_key(
+            url,
+            field_name,
+            int(form_index),
+            check_type,
+            location_token=location_token,
+            pointer=pointer,
+        ))
         self.updated_at = time.time()
 
     def add_finding(self, finding_dict: dict) -> None:
