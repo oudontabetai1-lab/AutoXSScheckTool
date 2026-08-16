@@ -5,6 +5,8 @@ Detects template injection using math-probe technique.
 import asyncio
 from typing import TYPE_CHECKING
 
+from wscan.injection_point import InjectionPoint
+
 from .base import BaseScanner, Finding
 
 if TYPE_CHECKING:
@@ -31,27 +33,28 @@ class SSTIScanner(BaseScanner):
 
     CHECK_TYPE = "ssti"
     SEVERITY = "critical"
+    SUPPORTS_JSON_BODY = True
 
-    async def scan_field(
+    async def scan_injection_point(
         self,
-        url: str,
-        form_index: int,
+        ip: InjectionPoint,
         field: dict,
-        is_url_param: bool = False,
     ) -> list[Finding]:
         """Scan a field for SSTI vulnerabilities."""
         findings = []
         field_name = field.get("name", "unknown")
 
         if self.monitor:
-            await self.monitor.emit_status(f"SSTI testing: {field_name} on {url}")
+            await self.monitor.emit_status(
+                f"SSTI testing: {field_name} on {ip.url}"
+            )
 
         # Baseline: submit a neutral value to capture any pre-existing numbers in the response.
         # baseline もフィールド投入なので監査ログに残す（log_payload_test 一元化の不変条件）。
-        await self.log_payload_test(field_name, "wscan_ssti_baseline", "ssti_baseline", url)
-        baseline_source, _ = await self._apply_payload(
-            url, form_index, field_name, "wscan_ssti_baseline", is_url_param
+        await self.log_payload_test(
+            field_name, "wscan_ssti_baseline", "ssti_baseline", ip.url
         )
+        baseline_source, _ = await self._apply_ip(ip, "wscan_ssti_baseline")
 
         async def _test_payload(
             payload: str,
@@ -60,11 +63,9 @@ class SSTIScanner(BaseScanner):
             check_label: str = "ssti",
             confidence: str = "confirmed",
         ) -> bool:
-            await self.log_payload_test(field_name, payload, check_label, url)
+            await self.log_payload_test(field_name, payload, check_label, ip.url)
 
-            source, pair = await self._apply_payload(
-                url, form_index, field_name, payload, is_url_param
-            )
+            source, pair = await self._apply_ip(ip, payload)
 
             await asyncio.sleep(0.2 * self.sleep_factor)
 
@@ -79,7 +80,7 @@ class SSTIScanner(BaseScanner):
                 return False
 
             finding = await self.record_finding(
-                url=url,
+                url=ip.url,
                 field_name=field_name,
                 payload=payload,
                 evidence=(
@@ -96,6 +97,7 @@ class SSTIScanner(BaseScanner):
                 # 進化wave など SSTI_PROBES 外の payload でも verify が再現確認できる
                 # よう、期待出力を finding に持たせる。
                 evidence_details={"expected": expected, "engine": engine_name},
+                injection_point=ip,
             )
             findings.append(finding)
             return True
@@ -106,7 +108,10 @@ class SSTIScanner(BaseScanner):
 
         if not findings:
             extra_payloads = await self.evolved_payloads(
-                url, form_index, field_name, is_url_param
+                ip.url,
+                ip.form_index,
+                ip.parameter_id,
+                ip.legacy_is_url_param(),
             )
             for payload in extra_payloads:
                 if await _test_payload(
@@ -115,6 +120,22 @@ class SSTIScanner(BaseScanner):
                     break
 
         return findings
+
+    async def scan_field(
+        self,
+        url: str,
+        form_index: int,
+        field: dict,
+        is_url_param: bool = False,
+    ) -> list[Finding]:
+        """従来 API を InjectionPoint 駆動へ接続する互換 wrapper。"""
+        name = field.get("name", "unknown")
+        ip = (
+            InjectionPoint.for_url_param(url, name)
+            if is_url_param
+            else InjectionPoint.for_form(url, name, form_index)
+        )
+        return await self.scan_injection_point(ip, field)
 
     async def _apply_payload(
         self,
@@ -159,15 +180,16 @@ class SSTIScanner(BaseScanner):
             urlparse(finding.url).query,
             keep_blank_values=True,
         )
+        ip = (
+            InjectionPoint.for_url_param(finding.url, field_name)
+            if is_url_param
+            else InjectionPoint.for_form(finding.url, field_name, 0)
+        )
         # verify 時の再投入（baseline + payload）も監査ログに残す。
         await self.log_payload_test(field_name, "wscan_ssti_baseline", "ssti_verify_baseline", finding.url)
-        baseline_source, _ = await self._apply_payload(
-            finding.url, 0, field_name, "wscan_ssti_baseline", is_url_param
-        )
+        baseline_source, _ = await self._apply_ip(ip, "wscan_ssti_baseline")
         await self.log_payload_test(field_name, payload, "ssti_verify", finding.url)
-        source, _ = await self._apply_payload(
-            finding.url, 0, field_name, payload, is_url_param
-        )
+        source, _ = await self._apply_ip(ip, payload)
         if not source or expected not in source:
             return False
 

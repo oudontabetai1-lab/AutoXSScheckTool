@@ -6,6 +6,8 @@ import asyncio
 from typing import TYPE_CHECKING
 from urllib.parse import parse_qs, urlparse
 
+from wscan.injection_point import InjectionPoint
+
 from .base import BaseScanner, Finding
 
 if TYPE_CHECKING:
@@ -49,35 +51,34 @@ class HeaderInjectionScanner(BaseScanner):
 
     CHECK_TYPE = "header_injection"
     SEVERITY = "high"
+    SUPPORTS_JSON_BODY = True
 
-    async def scan_field(
+    async def scan_injection_point(
         self,
-        url: str,
-        form_index: int,
+        ip: InjectionPoint,
         field: dict,
-        is_url_param: bool = False,
     ) -> list[Finding]:
         findings = []
         field_name = field.get("name", "unknown")
 
         if self.monitor:
             await self.monitor.emit_status(
-                f"Header injection testing: {field_name} on {url}"
+                f"Header injection testing: {field_name} on {ip.url}"
             )
 
         for payload in CRLF_PAYLOADS:
-            await self.log_payload_test(field_name, payload, "header_injection", url)
-
-            source, pair = await self._apply_payload(
-                url, form_index, field_name, payload, is_url_param
+            await self.log_payload_test(
+                field_name, payload, "header_injection", ip.url
             )
+
+            source, pair = await self._apply_ip(ip, payload)
             await asyncio.sleep(0.2 * self.sleep_factor)
 
             # Confirmed: injected header name appears in the response headers
             detected, signal = _injected_header_detected(pair)
             if detected and signal == "marker_header":
                 finding = await self.record_finding(
-                    url=url,
+                    url=ip.url,
                     field_name=field_name,
                     payload=payload,
                     evidence=(
@@ -86,6 +87,7 @@ class HeaderInjectionScanner(BaseScanner):
                     ),
                     pair=pair,
                     severity="high",
+                    injection_point=ip,
                 )
                 findings.append(finding)
                 break
@@ -93,7 +95,7 @@ class HeaderInjectionScanner(BaseScanner):
             # Secondary: injected Set-Cookie appeared in cookies (case-insensitive value check)
             if detected and signal == "set_cookie":
                 finding = await self.record_finding(
-                    url=url,
+                    url=ip.url,
                     field_name=field_name,
                     payload=payload,
                     evidence=(
@@ -102,26 +104,42 @@ class HeaderInjectionScanner(BaseScanner):
                     ),
                     pair=pair,
                     severity="high",
+                    injection_point=ip,
                 )
                 findings.append(finding)
                 break
 
         return findings
 
+    async def scan_field(
+        self,
+        url: str,
+        form_index: int,
+        field: dict,
+        is_url_param: bool = False,
+    ) -> list[Finding]:
+        """従来 API を InjectionPoint 駆動へ接続する互換 wrapper。"""
+        name = field.get("name", "unknown")
+        ip = (
+            InjectionPoint.for_url_param(url, name)
+            if is_url_param
+            else InjectionPoint.for_form(url, name, form_index)
+        )
+        return await self.scan_injection_point(ip, field)
+
     async def verify_finding(self, finding: Finding) -> bool | None:
         is_url_param = finding.field_name in parse_qs(
             urlparse(finding.url).query, keep_blank_values=True
         )
+        ip = (
+            InjectionPoint.for_url_param(finding.url, finding.field_name)
+            if is_url_param
+            else InjectionPoint.for_form(finding.url, finding.field_name, 0)
+        )
         await self.log_payload_test(
             finding.field_name, finding.payload, "header_injection_verify", finding.url
         )
-        _source, pair = await self._apply_payload(
-            finding.url,
-            0,
-            finding.field_name,
-            finding.payload,
-            is_url_param,
-        )
+        _source, pair = await self._apply_ip(ip, finding.payload)
         detected, _signal = _injected_header_detected(pair)
         return detected
 

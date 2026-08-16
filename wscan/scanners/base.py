@@ -351,6 +351,7 @@ class BaseScanner(ABC):
 
     CHECK_TYPE = "base"
     SEVERITY = "medium"
+    SUPPORTS_JSON_BODY = False
 
     def __init__(self, engine: "ScanEngine"):
         self.engine = engine
@@ -411,6 +412,29 @@ class BaseScanner(ABC):
             ip.url,
             ip.form_index,
             field,
+            ip.legacy_is_url_param(),
+        )
+
+    async def _apply_ip(
+        self,
+        ip: InjectionPoint,
+        payload,
+    ) -> tuple[str, dict]:
+        """注入点の location に応じて既存 transport へ振り分ける。
+
+        form/url_param は既存 ``_apply_payload`` へそのまま委譲し、json_body は
+        capability を明示したスキャナだけ共有 transport を使う。未対応の JSON を
+        form へ暗黙に落とさないことで tri-state を維持する。
+        """
+        if ip.location == "json_body":
+            if not self.SUPPORTS_JSON_BODY:
+                return "", {}
+            return await self._apply_json_payload(ip, payload)
+        return await self._apply_payload(
+            ip.url,
+            ip.form_index,
+            ip.parameter_id,
+            payload,
             ip.legacy_is_url_param(),
         )
 
@@ -920,6 +944,11 @@ class BaseScanner(ABC):
             ),
             injection_template_id=(
                 injection_point.template_id if injection_point else ""
+            ),
+            injection_form_index=(
+                injection_point.form_index
+                if injection_point and injection_point.location == "form"
+                else 0
             ),
         )
         self.findings.append(finding)

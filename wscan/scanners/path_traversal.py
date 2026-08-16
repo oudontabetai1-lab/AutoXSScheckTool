@@ -6,6 +6,8 @@ import asyncio
 from typing import TYPE_CHECKING
 from urllib.parse import parse_qs, urlparse
 
+from wscan.injection_point import InjectionPoint
+
 from .base import BaseScanner, Finding
 
 if TYPE_CHECKING:
@@ -36,39 +38,36 @@ class PathTraversalScanner(BaseScanner):
 
     CHECK_TYPE = "path_traversal"
     SEVERITY = "high"
+    SUPPORTS_JSON_BODY = True
 
-    async def scan_field(
+    async def scan_injection_point(
         self,
-        url: str,
-        form_index: int,
+        ip: InjectionPoint,
         field: dict,
-        is_url_param: bool = False,
     ) -> list[Finding]:
         """Scan a form field or URL parameter for path traversal."""
         findings = []
         field_name = field.get("name", "unknown")
-        payloads = await self.get_payloads(field_name, url)
+        payloads = await self.get_payloads(field_name, ip.url)
 
         if self.monitor:
             await self.monitor.emit_status(
-                f"Path traversal testing: {field_name} on {url}"
+                f"Path traversal testing: {field_name} on {ip.url}"
             )
 
         # Baseline: capture what patterns already appear in a neutral response
         # baseline もフィールド投入なので監査ログに残す（log_payload_test 一元化の不変条件）。
         await self.log_payload_test(
-            field_name, "baseline_test_value", "path_traversal_baseline", url
+            field_name, "baseline_test_value", "path_traversal_baseline", ip.url
         )
-        baseline_source, baseline_pair = await self._apply_payload(
-            url, form_index, field_name, "baseline_test_value", is_url_param
+        baseline_source, baseline_pair = await self._apply_ip(
+            ip, "baseline_test_value"
         )
 
         async def _test_payload(payload: str, check_label: str = "path_traversal") -> bool:
-            await self.log_payload_test(field_name, payload, check_label, url)
+            await self.log_payload_test(field_name, payload, check_label, ip.url)
 
-            source, pair = await self._apply_payload(
-                url, form_index, field_name, payload, is_url_param
-            )
+            source, pair = await self._apply_ip(ip, payload)
             await asyncio.sleep(0.2 * self.sleep_factor)
 
             match = self.check_response_for_patterns(source, PATH_TRAVERSAL_PATTERNS)
@@ -81,7 +80,7 @@ class PathTraversalScanner(BaseScanner):
                 if not baseline_source and not baseline_pair:
                     self._record_scan_note(
                         f"baseline_unavailable:{self.CHECK_TYPE}: "
-                        f"suppressed match '{match}' at {url}"
+                        f"suppressed match '{match}' at {ip.url}"
                     )
                     return False
                 baseline_match = self.check_response_for_patterns(
@@ -91,7 +90,7 @@ class PathTraversalScanner(BaseScanner):
                     return False  # Pattern pre-existed — not caused by our payload
 
                 finding = await self.record_finding(
-                    url=url,
+                    url=ip.url,
                     field_name=field_name,
                     payload=payload,
                     evidence=(
@@ -100,6 +99,7 @@ class PathTraversalScanner(BaseScanner):
                     pair=pair,
                     severity="high",
                     confidence="likely",
+                    injection_point=ip,
                 )
                 findings.append(finding)
                 return True
@@ -111,7 +111,10 @@ class PathTraversalScanner(BaseScanner):
 
         if not findings:
             extra_payloads = await self.evolved_payloads(
-                url, form_index, field_name, is_url_param
+                ip.url,
+                ip.form_index,
+                ip.parameter_id,
+                ip.legacy_is_url_param(),
             )
             for payload in extra_payloads:
                 if await _test_payload(payload, "path_traversal_evolved"):
@@ -119,40 +122,49 @@ class PathTraversalScanner(BaseScanner):
 
         # --- Mutation wave: 二重エンコード + NULL バイト + 拡張子で素朴な防御を回避 ---
         if not findings:
-            mutated = await self.mutated_payloads(field_name, url, payloads)
+            mutated = await self.mutated_payloads(field_name, ip.url, payloads)
             for payload in mutated:
                 if await _test_payload(payload, "path_traversal_mutation"):
                     break
 
         return findings
 
+    async def scan_field(
+        self,
+        url: str,
+        form_index: int,
+        field: dict,
+        is_url_param: bool = False,
+    ) -> list[Finding]:
+        """従来 API を InjectionPoint 駆動へ接続する互換 wrapper。"""
+        name = field.get("name", "unknown")
+        ip = (
+            InjectionPoint.for_url_param(url, name)
+            if is_url_param
+            else InjectionPoint.for_form(url, name, form_index)
+        )
+        return await self.scan_injection_point(ip, field)
+
     async def verify_finding(self, finding: Finding) -> bool | None:
         is_url_param = finding.field_name in parse_qs(
             urlparse(finding.url).query, keep_blank_values=True
+        )
+        ip = (
+            InjectionPoint.for_url_param(finding.url, finding.field_name)
+            if is_url_param
+            else InjectionPoint.for_form(finding.url, finding.field_name, 0)
         )
         # verify 時の再投入（baseline + payload）も監査ログに残す。
         await self.log_payload_test(
             finding.field_name, "baseline_test_value",
             "path_traversal_verify_baseline", finding.url,
         )
-        baseline_source, _ = await self._apply_payload(
-            finding.url,
-            0,
-            finding.field_name,
-            "baseline_test_value",
-            is_url_param,
-        )
+        baseline_source, _ = await self._apply_ip(ip, "baseline_test_value")
         await self.log_payload_test(
             finding.field_name, finding.payload,
             "path_traversal_verify", finding.url,
         )
-        source, _pair = await self._apply_payload(
-            finding.url,
-            0,
-            finding.field_name,
-            finding.payload,
-            is_url_param,
-        )
+        source, _pair = await self._apply_ip(ip, finding.payload)
         match = self.check_response_for_patterns(source or "", PATH_TRAVERSAL_PATTERNS)
         if not match:
             return False
