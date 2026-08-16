@@ -122,6 +122,42 @@ def merge_template_headers(base: dict, tmpl_headers: dict) -> dict:
     return out
 
 
+def _redact_json_evidence_pair(pair: dict, injection_pointer: str) -> dict:
+    """json_body Finding 用に証跡 pair を伏せた**コピー**を返す（純粋・検出には非使用）。
+
+    検出は生 pair で既に完了している前提。ここでは永続/配信される Finding.request/response
+    から、テンプレの兄弟秘匿(request body・エコーされた response 本文)と認証ヘッダ値を伏せる。
+    注入 pointer の値は残す（再現時にどの pointer に何を入れたか読めるように）。
+    - request.post_data: 兄弟をマスク、注入 pointer の値のみ残す。
+    - request.headers: テンプレ由来で ``_SENSITIVE_HEADERS`` 未登録の X-Access-Token 等も
+      伏せるため ``_CREDENTIAL_HEADERS`` で判定してマスク。
+    - response.body: エコーされた既知の兄弟秘匿を符号化違いも含め伏せる。
+    """
+    req = dict(pair.get("request", {}) or {})
+    resp = dict(pair.get("response", {}) or {})
+    raw_post = req.get("post_data")
+    parsed = None
+    if isinstance(raw_post, str) and raw_post:
+        try:
+            parsed = json.loads(raw_post)
+        except ValueError:
+            parsed = None
+    secrets: list[str] = []
+    if isinstance(parsed, (dict, list)):
+        secrets = sibling_string_values(parsed, injection_pointer)
+        req["post_data"] = json.dumps(redact_body_except(parsed, injection_pointer))
+    headers = req.get("headers")
+    if isinstance(headers, dict):
+        req["headers"] = {
+            k: ("***" if str(k).lower() in _CREDENTIAL_HEADERS else v)
+            for k, v in headers.items()
+        }
+    body = resp.get("body")
+    if isinstance(body, str) and secrets:
+        resp["body"] = redact_known_secrets(body, secrets)
+    return {**pair, "request": req, "response": resp}
+
+
 def finding_dedup_key(
     check_type: str,
     url: str,
@@ -532,38 +568,32 @@ class BaseScanner(ABC):
             self.CHECK_TYPE,
             url,
         )
-        # 証跡 pair 用の post_data は**兄弟をマスク**した表現にする（実送信は本物の
-        # post_data。pair は Finding.request として to_dict→checkpoint/report/monitor へ
-        # 流れるが to_dict は post_data を伏せない＝落とし穴8）。注入 pointer の値のみ残す。
-        redacted_post_data = json.dumps(redact_body_except(body, ip.parameter_id))
-        # エコー系エンドポイントは送信 body をレスポンスへ反射し得る。to_dict は本文先頭を
-        # response_body_excerpt として永続/配信するため、**既知の兄弟秘匿値**を本文から伏せる。
-        # 注入 payload marker や SQL エラー等の脆弱性シグナルは兄弟値ではないので消えない
-        # ＝判定に影響しない。source と pair 本文を同一に伏せて食い違いを作らない。
-        secret_values = sibling_string_values(body, ip.parameter_id)
+        # transport は**忠実**に振る舞う: source も pair も生応答を返す。検出（反射/エラー
+        # 文字列/長さ差）は生本文で行う必要があり、兄弟値を先に伏せると短い共通値
+        # （例 "a"/"admin"）が反射 payload やエラー文を壊して偽陰性を生む。秘匿の伏字は
+        # 永続/配信の境界（record_finding=_redact_json_evidence_pair）に一元化する。
         request_timestamp = time.time()
         try:
             async with httpx.AsyncClient(**kwargs) as client:
                 response = await client.request(method, url, content=post_data)
             response_timestamp = time.time()
-            evidence_body = redact_known_secrets(response.text, secret_values)
             pair = {
                 "request": {
                     "url": url,
                     "method": method,
                     "headers": headers,
-                    "post_data": redacted_post_data,
+                    "post_data": post_data,
                     "timestamp": request_timestamp,
                 },
                 "response": {
                     "url": str(response.url),
                     "status": response.status_code,
                     "headers": dict(response.headers),
-                    "body": evidence_body,
+                    "body": response.text,
                     "timestamp": response_timestamp,
                 },
             }
-            return evidence_body, pair
+            return response.text, pair
         except Exception:
             return "", {}
 
@@ -825,6 +855,12 @@ class BaseScanner(ABC):
             # whether the response actually changed.  Default to "tentative" so
             # scanners that care about confidence set it explicitly.
             confidence = "tentative"
+
+        # json_body 注入点の証跡は、永続/配信の**この境界**で伏せる（transport は検出用に
+        # 生 pair を返す）。テンプレの兄弟秘匿(body・エコー応答)と認証ヘッダ値を to_dict へ
+        # 流す前にマスクする。検出は record_finding 呼び出し前に生 pair で済んでいる。
+        if injection_point is not None and injection_point.location == "json_body":
+            pair = _redact_json_evidence_pair(pair, injection_point.parameter_id)
 
         finding = Finding(
             check_type=self.CHECK_TYPE,

@@ -87,12 +87,9 @@ class JsonTransportTests(unittest.IsolatedAsyncioTestCase):
             "old@example.test",
         )
         self.assertEqual(pair["request"]["method"], "POST")
-        # 証跡 pair の post_data は兄弟をマスク。注入 pointer の値のみ残る（実送信は本物）。
-        evidence_body = json.loads(pair["request"]["post_data"])
-        self.assertEqual(evidence_body["profile"]["email"], "wscan-marker")
-        self.assertEqual(evidence_body["profile"]["name"], "***")
-        self.assertEqual(evidence_body["password"], "***")
-        self.assertNotIn("observed-secret", pair["request"]["post_data"])
+        # transport は忠実: source も pair も**生応答**。検出を壊さないため兄弟は伏せない
+        # （秘匿の伏字は record_finding=永続境界で行う。別テストで検証）。
+        self.assertEqual(json.loads(pair["request"]["post_data"]), sent)
         self.assertEqual(pair["request"]["headers"]["Authorization"], "Bearer current")
         self.assertEqual(pair["request"]["headers"]["X-Tenant"], "fixture")
         self.assertGreater(pair["request"]["timestamp"], 0)
@@ -101,10 +98,8 @@ class JsonTransportTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreaterEqual(
             pair["response"]["timestamp"], pair["request"]["timestamp"]
         )
-        # エコーされたレスポンス証跡でも兄弟秘匿は伏せる（source/pair 本文の両方）。
-        # 注入 marker は脆弱性シグナルなので残り、判定は成立する。
-        self.assertNotIn("observed-secret", source)
-        self.assertNotIn("observed-secret", pair["response"]["body"])
+        # 生本文なのでエコーされた兄弟秘匿も含む（検出はこの生本文で行う）。
+        self.assertIn("observed-secret", source)
         self.assertIn("wscan-marker", source)
         self.assertEqual(
             self.scanner.check_response_for_patterns(source, [r"wscan-marker"]),

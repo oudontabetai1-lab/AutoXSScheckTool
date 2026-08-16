@@ -1,4 +1,5 @@
 """Finding の注入点 provenance に関する加算的テスト。"""
+import json
 import unittest
 
 from wscan.injection_point import InjectionPoint
@@ -125,6 +126,46 @@ class FindingInjectionProvenanceTests(unittest.IsolatedAsyncioTestCase):
         # form の dedup は従来通り（同一入力・同一 evidence の2件目は重複扱い）。
         self.assertIsNotNone(f1)
         self.assertIsNone(f2)
+
+    async def test_record_finding_redacts_json_evidence(self):
+        # 検出用 transport は生 pair を返し、伏字はこの永続境界で行う。
+        scanner = _Scanner(_Engine())
+        ip = InjectionPoint.for_json_body(
+            "POST", "http://h/login", "/profile/email", template_id="t"
+        )
+        sent_body = {
+            "profile": {"email": "PAYLOAD", "name": "Alice"},
+            "password": "observed-secret",
+        }
+        pair = {
+            "request": {
+                "url": "http://h/login",
+                "method": "POST",
+                "headers": {
+                    "Authorization": "Bearer x",
+                    "X-Access-Token": "tok-123",  # テンプレ由来の認証ヘッダ
+                    "X-Tenant": "t1",
+                },
+                "post_data": json.dumps(sent_body),
+            },
+            "response": {"status": 200, "body": json.dumps({"received": sent_body})},
+        }
+        finding = await scanner.record_finding(
+            "http://h/login", "email", "PAYLOAD", "evidence", pair,
+            screenshot_b64="", evidence_type="sqli_error", injection_point=ip,
+        )
+        # request body: 兄弟マスク・注入 pointer の値は残る。
+        req_body = json.loads(finding.request["post_data"])
+        self.assertEqual(req_body["profile"]["email"], "PAYLOAD")
+        self.assertEqual(req_body["profile"]["name"], "***")
+        self.assertEqual(req_body["password"], "***")
+        # 認証ヘッダ(テンプレ由来の X-Access-Token 含む)はマスク、非認証は残る。
+        self.assertEqual(finding.request["headers"]["Authorization"], "***")
+        self.assertEqual(finding.request["headers"]["X-Access-Token"], "***")
+        self.assertEqual(finding.request["headers"]["X-Tenant"], "t1")
+        # response 本文: エコーされた兄弟秘匿はマスク、注入値は残る。
+        self.assertNotIn("observed-secret", finding.response["body"])
+        self.assertIn("PAYLOAD", finding.response["body"])
 
     def test_shared_dedup_helper_distinguishes_pointers(self):
         # resume 復元(_init_checkpoint)や engine._record_finding が使う共有ヘルパーも
