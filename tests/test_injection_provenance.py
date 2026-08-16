@@ -148,7 +148,11 @@ class FindingInjectionProvenanceTests(unittest.IsolatedAsyncioTestCase):
                 },
                 "post_data": json.dumps(sent_body),
             },
-            "response": {"status": 200, "body": json.dumps({"received": sent_body})},
+            "response": {
+                "status": 200,
+                "headers": {"X-Access-Token": "resp-tok", "Content-Type": "application/json"},
+                "body": json.dumps({"received": sent_body}),
+            },
         }
         finding = await scanner.record_finding(
             "http://h/login", "email", "PAYLOAD", "evidence", pair,
@@ -163,6 +167,9 @@ class FindingInjectionProvenanceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(finding.request["headers"]["Authorization"], "***")
         self.assertEqual(finding.request["headers"]["X-Access-Token"], "***")
         self.assertEqual(finding.request["headers"]["X-Tenant"], "t1")
+        # response ヘッダの認証情報(サーバ発行の X-Access-Token 等)もマスク、非認証は残る。
+        self.assertEqual(finding.response["headers"]["X-Access-Token"], "***")
+        self.assertEqual(finding.response["headers"]["Content-Type"], "application/json")
         # response 本文: エコーされた兄弟秘匿はマスク、注入値は残る。
         self.assertNotIn("observed-secret", finding.response["body"])
         self.assertIn("PAYLOAD", finding.response["body"])

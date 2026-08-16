@@ -129,8 +129,8 @@ def _redact_json_evidence_pair(pair: dict, injection_pointer: str) -> dict:
     から、テンプレの兄弟秘匿(request body・エコーされた response 本文)と認証ヘッダ値を伏せる。
     注入 pointer の値は残す（再現時にどの pointer に何を入れたか読めるように）。
     - request.post_data: 兄弟をマスク、注入 pointer の値のみ残す。
-    - request.headers: テンプレ由来で ``_SENSITIVE_HEADERS`` 未登録の X-Access-Token 等も
-      伏せるため ``_CREDENTIAL_HEADERS`` で判定してマスク。
+    - request/response.headers: テンプレ由来やサーバ発行で ``_SENSITIVE_HEADERS`` 未登録の
+      X-Access-Token 等も伏せるため、双方のヘッダを ``_CREDENTIAL_HEADERS`` で判定してマスク。
     - response.body: エコーされた既知の兄弟秘匿を符号化違いも含め伏せる。
     """
     req = dict(pair.get("request", {}) or {})
@@ -146,16 +146,24 @@ def _redact_json_evidence_pair(pair: dict, injection_pointer: str) -> dict:
     if isinstance(parsed, (dict, list)):
         secrets = sibling_string_values(parsed, injection_pointer)
         req["post_data"] = json.dumps(redact_body_except(parsed, injection_pointer))
-    headers = req.get("headers")
-    if isinstance(headers, dict):
-        req["headers"] = {
-            k: ("***" if str(k).lower() in _CREDENTIAL_HEADERS else v)
-            for k, v in headers.items()
-        }
+    # request/response 双方の認証ヘッダ値をマスク（サーバが X-Access-Token 等を応答で
+    # 返す場合も to_dict→checkpoint/report/monitor へ流さない）。
+    if isinstance(req.get("headers"), dict):
+        req["headers"] = _mask_credential_headers(req["headers"])
+    if isinstance(resp.get("headers"), dict):
+        resp["headers"] = _mask_credential_headers(resp["headers"])
     body = resp.get("body")
     if isinstance(body, str) and secrets:
         resp["body"] = redact_known_secrets(body, secrets)
     return {**pair, "request": req, "response": resp}
+
+
+def _mask_credential_headers(headers: dict) -> dict:
+    """``_CREDENTIAL_HEADERS`` に該当するヘッダ値を伏せた新 dict を返す（純粋）。"""
+    return {
+        k: ("***" if str(k).lower() in _CREDENTIAL_HEADERS else v)
+        for k, v in headers.items()
+    }
 
 
 def finding_dedup_key(
