@@ -8,6 +8,8 @@ import re
 import uuid
 from typing import TYPE_CHECKING
 
+from wscan.injection_point import InjectionPoint
+
 from .base import BaseScanner, Finding
 
 if TYPE_CHECKING:
@@ -122,21 +124,24 @@ class XSSScanner(BaseScanner):
 
     CHECK_TYPE = "xss"
     SEVERITY = "high"
+    SUPPORTS_JSON_BODY = False
 
-    async def scan_field(
+    async def scan_injection_point(
         self,
-        url: str,
-        form_index: int,
+        ip: InjectionPoint,
         field: dict,
-        is_url_param: bool = False,
     ) -> list[Finding]:
         """Scan a form field or URL parameter for XSS vulnerabilities."""
+        # dialog/DOM 実行に依存するため、ブラウザ遷移しない JSON 注入は扱わない。
+        if ip.location == "json_body":
+            return []
+
         findings = []
-        field_name = field.get("name", "unknown")
-        payloads = await self.get_payloads(field_name, url)
+        field_name = ip.parameter_id
+        payloads = await self.get_payloads(field_name, ip.url)
 
         if self.monitor:
-            await self.monitor.emit_status(f"XSS testing: {field_name} on {url}")
+            await self.monitor.emit_status(f"XSS testing: {field_name} on {ip.url}")
 
         # Capture baseline before injecting any payload. Reflection analysis
         # runs on the raw HTTP response body (where the server's escaping is
@@ -147,15 +152,15 @@ class XSSScanner(BaseScanner):
         # reflections that never appear in the response body.
         baseline_source = ""
         try:
-            await self.browser.navigate(url)
+            await self.browser.navigate(ip.url)
             baseline_source = await self.browser.page.content()
-            body = self._response_body_for(url)
+            body = self._response_body_for(ip.url)
             if body:
                 baseline_source = body
         except Exception as exc:
             if self.monitor:
                 await self.monitor.emit_status(
-                    f"[warn] xss: baseline fetch failed on {url}: {exc}"
+                    f"[warn] xss: baseline fetch failed on {ip.url}: {exc}"
                 )
 
         # baseline（ハンドラ＋リフレクション本文）は「payload と同じ経路を中立値で
@@ -163,7 +168,7 @@ class XSSScanner(BaseScanner):
         # 構成が異なるため、中立投入の応答本文を baseline にしないと、結果ページ固有の
         # onclick="alert(1)" 等を新規注入と誤認してリフレクション・発火の双方で誤検知する。
         baseline_handlers, baseline_path, baseline_submit_source = await self._baseline_handlers(
-            url, form_index, field_name, is_url_param,
+            ip,
             neutral_value=_neutral_baseline_value(field.get("type", "text")),
         )
         if baseline_submit_source:
@@ -175,15 +180,13 @@ class XSSScanner(BaseScanner):
             fire: bool = False,
             expect_token: str = "",
         ) -> bool:
-            await self.log_payload_test(field_name, payload, check_label, url)
+            await self.log_payload_test(field_name, payload, check_label, ip.url)
 
             # Reset dialog detector
             self.browser.reset_dialog()
 
             # Apply payload
-            source, pair = await self._apply_payload(
-                url, form_index, field_name, payload, is_url_param
-            )
+            source, pair = await self._apply_ip(ip, payload)
 
             await asyncio.sleep(0.5 * self.sleep_factor)  # Wait for any JS execution
 
@@ -212,7 +215,7 @@ class XSSScanner(BaseScanner):
                 not expect_token or expect_token in (self.browser.dialog_message or "")
             ):
                 finding = await self.record_finding(
-                    url=url,
+                    url=ip.url,
                     field_name=field_name,
                     payload=payload,
                     evidence=f"JavaScript alert() dialog triggered: '{self.browser.dialog_message}'",
@@ -231,10 +234,11 @@ class XSSScanner(BaseScanner):
                         "fire_token": expect_token,
                     },
                     reproduction_steps=[
-                        f"Open {url}",
+                        f"Open {ip.url}",
                         f"Submit the payload to '{field_name}'",
                         "Observe that the browser fires a JavaScript dialog.",
                     ],
+                    injection_point=ip,
                 )
                 # record_finding は重複 evidence_type のとき None を返す。None を
                 # findings へ積むと後段の any(f.dialog_confirmed ...) が AttributeError。
@@ -260,7 +264,7 @@ class XSSScanner(BaseScanner):
                     confidence = reflection.get("confidence", "tentative")
                     severity = "high" if confidence == "likely" else "medium"
                     finding = await self.record_finding(
-                        url=url,
+                        url=ip.url,
                         field_name=field_name,
                         payload=payload,
                         evidence=(
@@ -273,11 +277,12 @@ class XSSScanner(BaseScanner):
                         evidence_type="xss_reflection",
                         evidence_details=reflection,
                         reproduction_steps=[
-                            f"Open {url}",
+                            f"Open {ip.url}",
                             f"Submit the payload to '{field_name}'",
                             f"Confirm the payload is reflected in {context} context without complete encoding.",
                             "Escalate manually with a context-specific event or script payload if no dialog fires.",
                         ],
+                        injection_point=ip,
                     )
                     if finding:
                         findings.append(finding)
@@ -310,7 +315,10 @@ class XSSScanner(BaseScanner):
         )
         if not have_confirmed and (not findings or attr_ctx_tentative):
             extra_payloads = await self.evolved_payloads(
-                url, form_index, field_name, is_url_param
+                ip.url,
+                ip.form_index,
+                ip.parameter_id,
+                ip.legacy_is_url_param(),
             )
             # 発火トリガで投入するペイロードには一意トークンを埋め、注入ハンドラ値を
             # payload 固有にする（ページ本来の alert(1) 等を発火・確証しないため）。
@@ -331,13 +339,17 @@ class XSSScanner(BaseScanner):
         if not findings:
             for ctx in ("html_attr", "js_string"):
                 probe = await self.run_equivalence_probe(
-                    url, form_index, field_name, is_url_param, context=ctx
+                    ip.url,
+                    ip.form_index,
+                    ip.parameter_id,
+                    ip.legacy_is_url_param(),
+                    context=ctx,
                 )
                 if not probe:
                     continue
                 verdict, pair = probe
                 finding = await self.record_finding(
-                    url=url,
+                    url=ip.url,
                     field_name=field_name,
                     payload=verdict.details.get("matched_payload", ""),
                     evidence=(
@@ -355,19 +367,118 @@ class XSSScanner(BaseScanner):
                         **verdict.details,
                     },
                     reproduction_steps=[
-                        f"Open {url}",
+                        f"Open {ip.url}",
                         f"Submit the quote-splitting payload to '{field_name}': "
                         f"{verdict.details.get('matched_payload', '')}",
                         "Confirm the response collapses to the marker, proving the "
                         "injected quote breaks the surrounding attribute/JS context.",
                         "Escalate manually with a context-appropriate event/script payload.",
                     ],
+                    injection_point=ip,
                 )
                 if finding:
                     findings.append(finding)
                 break
 
         return findings
+
+    async def run_equivalence_probe(
+        self,
+        url: str,
+        form_index: int,
+        field_name: str,
+        is_url_param: bool,
+        *,
+        context: str = "sql",
+    ) -> tuple | None:
+        """等価性 probe の判定を保ち、送信だけ InjectionPoint 経由にする。"""
+        from wscan import equivalence_probe as eqp
+
+        builders = {
+            "sql": eqp.sql_probe_set,
+            "html_attr": eqp.html_attr_probe_set,
+            "js_string": eqp.js_string_probe_set,
+        }
+        builder = builders.get(context)
+        if builder is None:
+            return None
+
+        ip = (
+            InjectionPoint.for_url_param(url, field_name)
+            if is_url_param
+            else InjectionPoint.for_form(url, field_name, form_index)
+        )
+        probe_set = builder()
+        responses: dict[str, str] = {}
+        pairs: dict[str, dict] = {}
+        for probe in probe_set.probes:
+            await self.log_payload_test(
+                field_name, probe.value, f"{self.CHECK_TYPE}_equiv", url
+            )
+            try:
+                source, pair = await self._apply_ip(ip, probe.value)
+            except Exception:
+                continue
+            pairs[probe.name] = pair or {}
+            body = (pair.get("response", {}) or {}).get("body") or source or ""
+            responses[probe.name] = body
+
+        verdict = eqp.evaluate(probe_set, responses)
+        if verdict.injectable:
+            return verdict, pairs.get(verdict.matched_probe, {})
+        return None
+
+    async def _evolution_probe(
+        self,
+        url: str,
+        form_index: int,
+        field_name: str,
+        is_url_param: bool,
+    ) -> tuple[str, set[str], dict]:
+        """文脈 probe の判定を保ち、送信だけ InjectionPoint 経由にする。"""
+        try:
+            from wscan import context_mutator
+
+            marker = context_mutator.make_marker()
+            probe = context_mutator.make_char_probe(marker)
+            await self.log_payload_test(
+                field_name,
+                probe,
+                f"{self.CHECK_TYPE}_evolution_probe",
+                url,
+            )
+            ip = (
+                InjectionPoint.for_url_param(url, field_name)
+                if is_url_param
+                else InjectionPoint.for_form(url, field_name, form_index)
+            )
+            source, pair = await self._apply_ip(ip, probe)
+            response_source = (
+                (pair.get("response", {}) or {}).get("body") or source or ""
+            )
+            surviving = context_mutator.surviving_chars(response_source, marker)
+            detected_context = context_mutator.detect_context(response_source, marker)
+            detected_context["marker"] = marker
+            return response_source, surviving, detected_context
+        except Exception as exc:
+            self._note_wave_degradation("evolution_probe", exc)
+            return "", set(), {}
+
+    async def scan_field(
+        self,
+        url: str,
+        form_index: int,
+        field: dict,
+        is_url_param: bool = False,
+    ) -> list[Finding]:
+        """従来 API を InjectionPoint 駆動へ接続する互換 wrapper。"""
+        name = field.get("name", "unknown")
+        ip = (
+            InjectionPoint.for_url_param(url, name)
+            if is_url_param
+            else InjectionPoint.for_form(url, name, form_index)
+        )
+        return await self.scan_injection_point(ip, field)
 
     def _check_reflected(self, source: str, payload: str, baseline_source: str = "") -> str:
         """
@@ -618,10 +729,7 @@ class XSSScanner(BaseScanner):
 
     async def _baseline_handlers(
         self,
-        url: str,
-        form_index: int,
-        field_name: str,
-        is_url_param: bool,
+        ip: InjectionPoint,
         neutral_value: str = _HANDLER_BASELINE_VALUE,
     ) -> tuple[list, str | None, str]:
         """発火トリガ層とリフレクション判定の baseline を **中立投入の応答**から採る。
@@ -641,12 +749,10 @@ class XSSScanner(BaseScanner):
 
         try:
             await self.log_payload_test(
-                field_name, neutral_value, "xss_handler_baseline", url
+                ip.parameter_id, neutral_value, "xss_handler_baseline", ip.url
             )
             self.browser.reset_dialog()
-            src, pair = await self._apply_payload(
-                url, form_index, field_name, neutral_value, is_url_param
-            )
+            src, pair = await self._apply_ip(ip, neutral_value)
             await asyncio.sleep(0.2 * self.sleep_factor)
             handlers = await self.browser.snapshot_dialog_handlers()
             landing_path = urlparse(self.browser.page.url).path
@@ -711,6 +817,7 @@ class XSSScanner(BaseScanner):
         is_url_param = finding.field_name in parse_qs(
             urlparse(finding.url).query, keep_blank_values=True
         )
+        ip = self._verify_injection_point(finding, is_url_param)
         baseline_source = ""
         try:
             self.browser.reset_dialog()
@@ -728,7 +835,7 @@ class XSSScanner(BaseScanner):
         # 本物の confirmed XSS を未確証扱いにしてしまう）。
         _details = finding.evidence_details or {}
         baseline_handlers, baseline_path, baseline_submit_source = await self._baseline_handlers(
-            finding.url, 0, finding.field_name, is_url_param,
+            ip,
             neutral_value=_neutral_baseline_value(_details.get("field_type", "text")),
         )
         if baseline_submit_source:
@@ -737,13 +844,7 @@ class XSSScanner(BaseScanner):
         await self.log_payload_test(
             finding.field_name, finding.payload, "xss_verify", finding.url
         )
-        source, pair = await self._apply_payload(
-            finding.url,
-            0,
-            finding.field_name,
-            finding.payload,
-            is_url_param,
-        )
+        source, pair = await self._apply_ip(ip, finding.payload)
         await asyncio.sleep(0.5 * self.sleep_factor)
         # 発火は dialog 由来の finding のみ再現（その payload は一意トークン付きなので
         # ページ本来の alert(1) 等を発火・誤確証しない）。reflection 由来は下で反射を
