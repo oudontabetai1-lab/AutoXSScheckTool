@@ -186,8 +186,25 @@ class BrowserCallParityTests(unittest.IsolatedAsyncioTestCase):
         browser = _RecordingBrowser()
         scanner = DOMXSSScanner(_Engine(browser))
         ip = InjectionPoint.for_form("https://example.test/form", "target", 2)
-        await scanner._apply_payload(ip.url, ip.parameter_id, "x", ip.form_index)
+        await scanner._apply_payload(
+            ip.url, ip.parameter_id, "x", ip.form_index, ip.legacy_is_url_param()
+        )
         self.assertIn(("fill_and_submit_form", 2, "target", "x"), browser.calls)
+
+    async def test_dom_xss_form_field_named_like_query_param_submits_form(self):
+        # form field 'q' が /search?q=old と同名でも、明示種別(form)で form 送信する
+        # （URL クエリ推測に戻すと test_url_param へ誤経路し form-only DOM XSS を取りこぼす）。
+        browser = _RecordingBrowser()
+        scanner = DOMXSSScanner(_Engine(browser))
+        ip = InjectionPoint.for_form("https://example.test/search?q=old", "q", 0)
+        await scanner._apply_payload(
+            ip.url, ip.parameter_id, "x", ip.form_index, ip.legacy_is_url_param()
+        )
+        self.assertIn(("fill_and_submit_form", 0, "q", "x"), browser.calls)
+        self.assertNotIn(
+            ("test_url_param", "https://example.test/search?q=old", "q", "x"),
+            browser.calls,
+        )
 
 
 class InjectionPointRoutingTests(unittest.IsolatedAsyncioTestCase):
@@ -227,11 +244,12 @@ class ProvenanceAndCompatibilityTests(unittest.IsolatedAsyncioTestCase):
                 "is_url_param",
             ],
         )
-        # dom_xss は非標準 transport。form_index を明示引数で受け、選択フォームへ送る
-        # （エンジン汎用 verify は dom_xss._apply_payload を呼ばないので engine 互換の制約外）。
+        # dom_xss は非標準 transport。form_index と**明示の is_url_param** を引数で受け、
+        # 選択フォーム/明示種別へ送る（URL クエリ推測はしない。エンジン汎用 verify は
+        # dom_xss._apply_payload を呼ばないので engine 互換の制約外）。
         self.assertEqual(
             list(inspect.signature(DOMXSSScanner._apply_payload).parameters),
-            ["self", "url", "field_name", "payload", "form_index"],
+            ["self", "url", "field_name", "payload", "form_index", "is_url_param"],
         )
 
     async def test_xss_form_finding_stamps_location_and_form_index(self):

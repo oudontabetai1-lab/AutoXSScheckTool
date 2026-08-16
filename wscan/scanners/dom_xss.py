@@ -161,7 +161,8 @@ class DOMXSSScanner(BaseScanner):
             await self._ensure_hook()
 
             source, pair = await self._apply_payload(
-                ip.url, ip.parameter_id, payload, ip.form_index
+                ip.url, ip.parameter_id, payload,
+                ip.form_index, ip.legacy_is_url_param(),
             )
 
             await asyncio.sleep(2.0 * self.sleep_factor)  # Allow JS to settle
@@ -255,7 +256,8 @@ class DOMXSSScanner(BaseScanner):
                     self.browser.reset_dialog()
                     await self.browser.page.add_init_script(_HOOK_SCRIPT)
                     source, pair = await self._apply_payload(
-                        ip.url, ip.parameter_id, payload, ip.form_index
+                        ip.url, ip.parameter_id, payload,
+                        ip.form_index, ip.legacy_is_url_param(),
                     )
                     await asyncio.sleep(2.0 * self.sleep_factor)
                     log = await self.browser.page.evaluate(
@@ -318,7 +320,9 @@ class DOMXSSScanner(BaseScanner):
                 f"{self.CHECK_TYPE}_evolution_probe",
                 url,
             )
-            source, pair = await self._apply_payload(url, field_name, probe, form_index)
+            source, pair = await self._apply_payload(
+                url, field_name, probe, form_index, is_url_param
+            )
             response_source = (
                 (pair.get("response", {}) or {}).get("body") or source or ""
             )
@@ -354,6 +358,16 @@ class DOMXSSScanner(BaseScanner):
         if not marker:
             return None
 
+        # 注入点種別は provenance(injection_location) を優先し、無い旧 Finding のみ
+        # URL クエリ推測へ fallback（旧 verify と同じ推測）。scan と同じ明示種別で再送する。
+        from urllib.parse import parse_qs, urlparse
+
+        if finding.injection_location:
+            is_url_param = finding.injection_location == "url_param"
+        else:
+            is_url_param = finding.field_name in parse_qs(
+                urlparse(finding.url).query, keep_blank_values=True
+            )
         try:
             self.browser.reset_dialog()
             await self._ensure_hook()
@@ -362,7 +376,7 @@ class DOMXSSScanner(BaseScanner):
             )
             await self._apply_payload(
                 finding.url, finding.field_name, finding.payload,
-                finding.injection_form_index,
+                finding.injection_form_index, is_url_param,
             )
             await asyncio.sleep(0.5 * self.sleep_factor)
             log = await self.browser.page.evaluate(
@@ -381,19 +395,21 @@ class DOMXSSScanner(BaseScanner):
         return False
 
     async def _apply_payload(
-        self, url: str, field_name: str, payload: str, form_index: int = 0
+        self,
+        url: str,
+        field_name: str,
+        payload: str,
+        form_index: int = 0,
+        is_url_param: bool = False,
     ):
-        from urllib.parse import parse_qs, urlparse
-
-        is_url_param = field_name in parse_qs(
-            urlparse(url).query, keep_blank_values=True
-        )
+        # **明示の注入点種別**で dispatch する（URL クエリからの推測はしない）。旧 scan 本体は
+        # engine の is_url_param を直接使っていたため、form フィールド名がたまたま URL クエリと
+        # 同名（例 /search?q=old の form field q）でも form へ送っていた。ここで URL 推測に戻すと
+        # test_url_param へ誤経路し form-only DOM XSS を取りこぼす/provenance が url_param になる。
         if is_url_param:
             return await self.browser.test_url_param(url, field_name, payload)
 
         # 選択された form_index を使う（複数フォームのページで別フォームを潰さない）。
-        # 旧実装は scan 本体で fill_and_submit_form(form_index, ...) を直接呼んでおり、
-        # ここを 0 固定にすると form_index>0 の注入点を取りこぼし provenance も不整合になる。
         await self.browser.navigate(url)
         return await self.browser.fill_and_submit_form(form_index, field_name, payload)
 
