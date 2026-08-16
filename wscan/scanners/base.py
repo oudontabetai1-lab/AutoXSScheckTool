@@ -275,7 +275,11 @@ class Finding:
             source=data.get("source", "scanner"),
             agent_verified=bool(data.get("agent_verified", False)),
             injection_location=data.get("injection_location", ""),
-            injection_pointer=data.get("injection_pointer", ""),
+            # 欠落キーは None(sentinel)にして「明示的な空文字ルート pointer」と区別する。
+            # to_dict は常に書き出すので正規の checkpoint では常に存在するが、json_body を
+            # 名乗りつつ pointer キーを欠く不完全 provenance（手編集/異版）は None のまま
+            # resolver で unexecutable 扱いにし、whole-body 再送で誤って未確証化しない。
+            injection_pointer=data.get("injection_pointer"),
             injection_method=data.get("injection_method", ""),
             injection_template_id=data.get("injection_template_id", ""),
             injection_form_index=int(data.get("injection_form_index", 0) or 0),
@@ -351,8 +355,28 @@ def injection_point_from_finding(finding: Finding) -> Optional[InjectionPoint]:
     if location == "url_param":
         return InjectionPoint.for_url_param(finding.url, finding.field_name)
     if location == "json_body":
-        if not finding.injection_pointer:
-            raise ProvenanceError("json_body provenance に injection_pointer がありません")
+        # 空文字は RFC 6901 の**ルート pointer**（ドキュメント全体への注入）で valid。
+        # `parse_pointer("")` は [] を返し `pointer_set_copy(doc, "", payload)` は
+        # body 全体を payload に置換する（whole-body JSON 注入）。空を一律 corrupt と
+        # 誤判定すると verify で再送されず未検証のまま確証扱いになる。malformed は
+        # 非空で '/' 始まりでない場合に parse_pointer が ValueError を投げる分だけ。
+        # json_body の再送は HTTP replay なので **非空の method が必須**。欠落（from_dict が
+        # "" に既定）・明示的 "" は `"".upper()` で例外にならず「実行可能」な IP に化けるが、
+        # 実際には送信不能で空応答→未確証誤判定になる。executability の前提として method が
+        # 非空 str であることを明示検査し、満たさなければ corrupt（unexecutable）へ倒す。
+        # （null/非文字列 method は下の except でも捕えるが、"" は例外にならないためここで弾く。）
+        if not isinstance(finding.injection_method, str) or not finding.injection_method:
+            raise ProvenanceError(
+                "json_body provenance の HTTP method が欠落/空です: "
+                f"{finding.injection_method!r}"
+            )
+        # 上記以外の不完全 provenance（pointer が null・キー欠落=None sentinel・その他の
+        # 非文字列）は for_json_body 内で parse_pointer(pointer) が ValueError/AttributeError/
+        # TypeError を投げる。フィールド毎に型検査を積むと後追い（whack-a-mole）になるので、
+        # **復元境界でまとめて捕え**「壊れた provenance = unexecutable」へ一本化する。これにより
+        # 1 件の破損 entry が verify 経路へ非 ProvenanceError を漏らして _phase_verify 全体を
+        # 止める事故を防ぐ。明示的に格納された "" ルート pointer は valid（欠落=None sentinel
+        # とは区別して復元される）。
         try:
             return InjectionPoint.for_json_body(
                 finding.injection_method,
@@ -361,9 +385,9 @@ def injection_point_from_finding(finding: Finding) -> Optional[InjectionPoint]:
                 display_name=finding.field_name,
                 template_id=finding.injection_template_id,
             )
-        except ValueError as exc:
+        except (ValueError, AttributeError, TypeError) as exc:
             raise ProvenanceError(
-                f"json_body provenance の injection_pointer が不正です: {exc}"
+                f"json_body provenance を復元できません: {exc!r}"
             ) from exc
     raise ProvenanceError(f"未知の injection_location です: {location!r}")
 
