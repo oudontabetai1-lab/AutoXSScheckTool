@@ -215,7 +215,8 @@ class BrowserCallParityTests(unittest.IsolatedAsyncioTestCase):
 class InjectionPointRoutingTests(unittest.IsolatedAsyncioTestCase):
     def test_json_body_capability_matrix(self):
         self.assertIs(SQLiScanner.SUPPORTS_JSON_BODY, True)
-        self.assertIs(NoSQLInjectionScanner.SUPPORTS_JSON_BODY, True)
+        # nosql は構造化オペレータ戦略(PR-b)が要るため 5b では json 未対応。
+        self.assertIs(NoSQLInjectionScanner.SUPPORTS_JSON_BODY, False)
         self.assertIs(MailHeaderInjectionScanner.SUPPORTS_JSON_BODY, False)
         self.assertIs(OpenRedirectScanner.SUPPORTS_JSON_BODY, False)
 
@@ -226,7 +227,7 @@ class InjectionPointRoutingTests(unittest.IsolatedAsyncioTestCase):
             "/target",
             template_id="stage5b2",
         )
-        for scanner_cls in (SQLiScanner, NoSQLInjectionScanner):
+        for scanner_cls in (SQLiScanner,):
             with self.subTest(scanner=scanner_cls.__name__):
                 scanner = scanner_cls(_Engine())
                 scanner._apply_json_payload = AsyncMock(
@@ -253,6 +254,7 @@ class InjectionPointRoutingTests(unittest.IsolatedAsyncioTestCase):
         cases = (
             (MailHeaderInjectionScanner, {"name": "email", "type": "email"}),
             (OpenRedirectScanner, {"name": "next", "type": "text"}),
+            (NoSQLInjectionScanner, {"name": "target", "type": "text"}),
         )
         for scanner_cls, field in cases:
             with self.subTest(scanner=scanner_cls.__name__):
@@ -281,7 +283,7 @@ class InjectionPointRoutingTests(unittest.IsolatedAsyncioTestCase):
             "/target",
             template_id="missing",
         )
-        for scanner_cls in (SQLiScanner, NoSQLInjectionScanner):
+        for scanner_cls in (SQLiScanner,):
             with self.subTest(scanner=scanner_cls.__name__):
                 scanner = scanner_cls(_Engine())
                 findings = await scanner.scan_injection_point(
@@ -317,26 +319,6 @@ class InjectionPointRoutingTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(await sqli.verify_finding(sqli_finding))
         restored_ip = sqli._apply_json_payload.await_args.args[0]
         self.assertEqual(restored_ip.parameter_id, "/profile/target")
-
-        nosql = NoSQLInjectionScanner(_Engine())
-        nosql._apply_json_payload = AsyncMock(
-            side_effect=[
-                ("", {}),
-                ("", {}),
-                ("MongoError", {"response": {"body": "MongoError"}}),
-            ]
-        )
-        nosql_finding = Finding(
-            check_type="nosql",
-            evidence_type="nosql_error",
-            **finding_kwargs,
-        )
-        self.assertTrue(await nosql.verify_finding(nosql_finding))
-        for awaited in nosql._apply_json_payload.await_args_list:
-            self.assertEqual(
-                awaited.args[0].parameter_id,
-                "/profile/target",
-            )
 
 
 class ProvenanceAndCompatibilityTests(unittest.IsolatedAsyncioTestCase):

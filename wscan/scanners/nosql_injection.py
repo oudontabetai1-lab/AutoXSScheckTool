@@ -67,7 +67,10 @@ class NoSQLInjectionScanner(BaseScanner):
 
     CHECK_TYPE = "nosql"
     SEVERITY = "high"
-    SUPPORTS_JSON_BODY = True
+    # json_body の NoSQL 攻撃は pointer に**構造化オペレータ**(dict `{"$ne": ...}`)を入れる戦略が
+    # 必要で、文字列 payload をそのまま送ると `"field": "{...}"` になり検出できない（偽陰性）。
+    # 構造化 payload 戦略は PR-b（json 実配線）の担当なので、5b では json capability を持たせない。
+    SUPPORTS_JSON_BODY = False
 
     def _boolean_expansion(
         self,
@@ -117,6 +120,12 @@ class NoSQLInjectionScanner(BaseScanner):
     ) -> list[Finding]:
         field_name = ip.display_name or ip.parameter_id
         field_type = field.get("type", "text").lower()
+
+        # json_body は未対応（構造化オペレータ戦略は PR-b）。文字列 payload を送って
+        # 偽陰性を出さないよう、また `_test_param_payload` の url_param 用 `[$ne]` 変換や
+        # `_test_json_body` の別 POST 経路へ流さないよう、ここで明示的に打ち切る。
+        if ip.location == "json_body":
+            return []
 
         # Skip non-text fields
         if field_type in ("file", "checkbox", "radio", "submit", "button", "image", "reset"):

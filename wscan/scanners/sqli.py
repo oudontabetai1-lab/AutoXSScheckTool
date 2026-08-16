@@ -378,8 +378,13 @@ class SQLiScanner(BaseScanner):
             # --- Check 4: Authentication bypass via SQLi ---
             # Only applicable when the field looks like a username/password input
             # and the payload is from the auth-bypass set.
+            # **form 限定**にする: `_detect_auth_bypass` はブラウザの現在ページ URL を見るが、
+            # json_body は httpx 送信でブラウザは遷移しないため、SPA で無関係な現在 URL を
+            # 根拠に critical auth bypass を誤検知し得る（移行前は `not is_url_param`＝form 限定
+            # だったのを、location!="url_param" は json も含んでしまうため form へ厳格化）。
+            # json の auth bypass はレスポンス pair 由来の判定として PR-b で扱う。
             if (
-                ip.location != "url_param"
+                ip.location == "form"
                 and self._is_login_field(field_name)
                 and payload in AUTH_BYPASS_PAYLOAD_SET
             ):
