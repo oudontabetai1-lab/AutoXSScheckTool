@@ -132,6 +132,8 @@ class HeaderInjectionScanner(BaseScanner):
             urlparse(finding.url).query, keep_blank_values=True
         )
         ip = self._verify_injection_point(finding, is_url_param)
+        if ip is None:
+            return None
         await self.log_payload_test(
             finding.field_name, finding.payload, "header_injection_verify", finding.url
         )

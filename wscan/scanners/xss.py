@@ -818,6 +818,8 @@ class XSSScanner(BaseScanner):
             urlparse(finding.url).query, keep_blank_values=True
         )
         ip = self._verify_injection_point(finding, is_url_param)
+        if ip is None:
+            return None
         baseline_source = ""
         try:
             self.browser.reset_dialog()

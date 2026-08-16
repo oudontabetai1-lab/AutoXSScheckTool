@@ -3,9 +3,11 @@ import json
 import unittest
 
 from wscan.injection_point import InjectionPoint
+from wscan.engine import ScanEngine
 from wscan.scanners.base import (
     BaseScanner,
     Finding,
+    ProvenanceError,
     finding_dedup_key_for,
     injection_point_from_finding,
 )
@@ -30,6 +32,39 @@ class _Scanner(BaseScanner):
 
     async def scan_field(self, url, form_index, field, is_url_param=False):
         return []
+
+
+class _VerifyBrowser:
+    def __init__(self):
+        self.navigate_calls = []
+
+    async def navigate(self, url, retries=0):
+        self.navigate_calls.append((url, retries))
+
+    def reset_dialog(self):
+        pass
+
+
+class _VerifyScanner:
+    def __init__(self):
+        self.applied_ips = []
+
+    async def verify_finding(self, finding):
+        return None
+
+    async def _apply_ip(self, ip, payload):
+        self.applied_ips.append((ip, payload))
+        return "", {}
+
+
+class _VerifyEngine:
+    _verify_one = ScanEngine._verify_one
+
+    def __init__(self, scanner):
+        self.scanners = {"path_traversal": scanner}
+        self.browser = _VerifyBrowser()
+        self.navigation_retries = 2
+        self._effective_delay = 0
 
 
 class FindingInjectionProvenanceTests(unittest.IsolatedAsyncioTestCase):
@@ -209,6 +244,29 @@ class FindingInjectionProvenanceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ip.parameter_id, "/email")
         self.assertEqual(ip.template_id, "t")
 
+    def test_verify_injection_point_form_uses_form_index(self):
+        scanner = _Scanner(_Engine())
+        finding = Finding(
+            check_type="sqli", severity="high", url="http://h/form",
+            field_name="email", payload="'", evidence="e",
+            injection_location="form", injection_form_index=3,
+        )
+        ip = scanner._verify_injection_point(finding, is_url_param=False)
+        self.assertIsNotNone(ip)
+        self.assertEqual(ip.location, "form")
+        self.assertEqual(ip.form_index, 3)
+
+    def test_verify_injection_point_url_param_from_provenance(self):
+        scanner = _Scanner(_Engine())
+        finding = Finding(
+            check_type="sqli", severity="high", url="http://h/x",
+            field_name="q", payload="'", evidence="e",
+            injection_location="url_param",
+        )
+        ip = scanner._verify_injection_point(finding, is_url_param=False)
+        self.assertIsNotNone(ip)
+        self.assertEqual(ip.location, "url_param")
+
     def test_verify_injection_point_falls_back_to_guess_for_legacy(self):
         scanner = _Scanner(_Engine())
         legacy = Finding(
@@ -222,7 +280,48 @@ class FindingInjectionProvenanceTests(unittest.IsolatedAsyncioTestCase):
             scanner._verify_injection_point(legacy, is_url_param=False).location, "form"
         )
 
-    def test_rebuilds_json_body_only(self):
+    def test_verify_injection_point_unexecutable_on_invalid(self):
+        scanner = _Scanner(_Engine())
+        finding = Finding(
+            check_type="sqli", severity="high", url="http://h/api",
+            field_name="email", payload="'", evidence="e",
+            injection_location="json_body", injection_pointer="",
+            injection_method="POST",
+        )
+        self.assertIsNone(
+            scanner._verify_injection_point(finding, is_url_param=False)
+        )
+
+    async def test_engine_verify_uses_provenance_form_index(self):
+        scanner = _VerifyScanner()
+        engine = _VerifyEngine(scanner)
+        finding = Finding(
+            check_type="path_traversal", severity="high", url="http://h/form",
+            field_name="path", payload="../etc/passwd", evidence="e",
+            injection_location="form", injection_form_index=4,
+        )
+
+        self.assertTrue(await engine._verify_one(finding))
+        self.assertEqual(len(scanner.applied_ips), 1)
+        ip, payload = scanner.applied_ips[0]
+        self.assertEqual(ip.location, "form")
+        self.assertEqual(ip.form_index, 4)
+        self.assertEqual(payload, finding.payload)
+
+    async def test_engine_verify_does_not_resend_invalid_provenance(self):
+        scanner = _VerifyScanner()
+        engine = _VerifyEngine(scanner)
+        finding = Finding(
+            check_type="path_traversal", severity="high", url="http://h/form",
+            field_name="path", payload="../etc/passwd", evidence="e",
+            injection_location="bogus",
+        )
+
+        self.assertTrue(await engine._verify_one(finding))
+        self.assertEqual(scanner.applied_ips, [])
+        self.assertEqual(engine.browser.navigate_calls, [])
+
+    def test_rebuilds_all_locations(self):
         json_finding = Finding(
             check_type="sqli",
             severity="high",
@@ -237,12 +336,47 @@ class FindingInjectionProvenanceTests(unittest.IsolatedAsyncioTestCase):
         )
         ip = injection_point_from_finding(json_finding)
         self.assertIsNotNone(ip)
+        self.assertEqual(ip.location, "json_body")
         self.assertEqual(ip.parameter_id, "/email")
         self.assertEqual(ip.template_id, "login-1")
 
-        for location in ("", "form", "url_param"):
-            json_finding.injection_location = location
-            self.assertIsNone(injection_point_from_finding(json_finding))
+        form_finding = Finding(
+            check_type="sqli", severity="high", url="http://h/form",
+            field_name="email", payload="'", evidence="error",
+            injection_location="form", injection_form_index=2,
+        )
+        form_ip = injection_point_from_finding(form_finding)
+        self.assertIsNotNone(form_ip)
+        self.assertEqual(form_ip.location, "form")
+        self.assertEqual(form_ip.form_index, 2)
+
+        url_finding = Finding(
+            check_type="sqli", severity="high", url="http://h/x?q=1",
+            field_name="q", payload="'", evidence="error",
+            injection_location="url_param",
+        )
+        url_ip = injection_point_from_finding(url_finding)
+        self.assertIsNotNone(url_ip)
+        self.assertEqual(url_ip.location, "url_param")
+
+        legacy = Finding(
+            check_type="sqli", severity="high", url="http://h/x",
+            field_name="q", payload="'", evidence="error",
+        )
+        self.assertIsNone(injection_point_from_finding(legacy))
+
+        legacy.injection_location = "bogus"
+        with self.assertRaises(ProvenanceError):
+            injection_point_from_finding(legacy)
+
+        legacy.injection_location = "json_body"
+        legacy.injection_pointer = ""
+        with self.assertRaises(ProvenanceError):
+            injection_point_from_finding(legacy)
+
+        legacy.injection_pointer = "not-a-pointer"
+        with self.assertRaises(ProvenanceError):
+            injection_point_from_finding(legacy)
 
 
 if __name__ == "__main__":

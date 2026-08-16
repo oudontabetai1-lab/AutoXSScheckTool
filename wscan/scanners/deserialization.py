@@ -334,6 +334,8 @@ class DeserializationScanner(BaseScanner):
             urlparse(finding.url).query, keep_blank_values=True
         )
         ip = self._verify_injection_point(finding, is_url_param)
+        if ip is None:
+            return None
         # verify の再送(baseline + probe)も単層ログ(＋abort checkpoint)を呼び出し側で通す。
         await self.log_payload_test(
             finding.field_name, "wscan_deser_baseline",

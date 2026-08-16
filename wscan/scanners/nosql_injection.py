@@ -339,6 +339,8 @@ class NoSQLInjectionScanner(BaseScanner):
         )
         if hasattr(finding, "injection_location"):
             ip = self._verify_injection_point(finding, is_url_param)
+            if ip is None:
+                return None
         else:
             # provenance 属性を持たない旧 Finding 互換。
             ip = (

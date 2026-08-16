@@ -158,7 +158,13 @@ from .ctf_flag_finder import FlagFinder
 from .intervention import ScanController, AbortScan, SkipField, SkipPage
 from .monitor import MonitorServer
 from .payload_gen import PayloadGenerator
-from .scanners.base import Finding, finding_dedup_key_for
+from .injection_point import InjectionPoint
+from .scanners.base import (
+    Finding,
+    ProvenanceError,
+    finding_dedup_key_for,
+    injection_point_from_finding,
+)
 from .scanners.sqli import SQLiScanner, SQL_ERROR_PATTERNS
 from .scanners.xss import XSSScanner
 from .scanners.os_injection import OSInjectionScanner
@@ -1367,8 +1373,6 @@ class ScanEngine:
         is_url_param: bool,
     ):
         """従来 form/URL parameter から InjectionPoint を一意に生成する。"""
-        from wscan.injection_point import InjectionPoint
-
         if is_url_param:
             return InjectionPoint.for_url_param(url, field_name)
         return InjectionPoint.for_form(url, field_name, form_index)
@@ -4624,12 +4628,23 @@ class ScanEngine:
                 else:
                     return bool(scanner_result)
 
-        # Determine URL-param vs form-field injection context
-        is_url_param = f.field_name in parse_qs(
-            urlparse(f.url).query, keep_blank_values=True
-        )
+        # scanner 固有 verify で判定不能だった場合も、保存済み provenance を唯一の注入先にする。
+        try:
+            ip = injection_point_from_finding(f)
+        except ProvenanceError:
+            return True  # 壊れた provenance は再送せず、既存慣行どおり penalize しない。
+        if ip is None:
+            # location が空の旧 Finding だけ、従来の URL クエリ推測へ fallback する。
+            is_url_param_guess = f.field_name in parse_qs(
+                urlparse(f.url).query, keep_blank_values=True
+            )
+            ip = (
+                InjectionPoint.for_url_param(f.url, f.field_name)
+                if is_url_param_guess
+                else InjectionPoint.for_form(f.url, f.field_name, 0)
+            )
 
-        if f.check_type == "ssti" and is_url_param:
+        if f.check_type == "ssti" and ip.location == "url_param":
             try:
                 import httpx
                 from wscan.scanners.ssti import SSTI_PROBES
@@ -4677,9 +4692,7 @@ class ScanEngine:
         try:
             await self.browser.navigate(f.url, retries=self.navigation_retries)
             self.browser.reset_dialog()
-            source, pair = await scanner._apply_payload(
-                f.url, 0, f.field_name, f.payload, is_url_param
-            )
+            source, pair = await scanner._apply_ip(ip, f.payload)
             await asyncio.sleep(self._effective_delay)
 
             if f.check_type == "xss":
