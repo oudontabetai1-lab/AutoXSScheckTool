@@ -18,8 +18,38 @@ class AdaptiveCheckpointRetryTests(unittest.IsolatedAsyncioTestCase):
         scan_field = AsyncMock(return_value=[])
         if scan_side_effect is not None:
             scan_field.side_effect = scan_side_effect
-        scanner = types.SimpleNamespace(scan_field=scan_field)
+
+        async def scan_injection_point(ip, field):
+            return await scan_field(
+                ip.url, ip.form_index, field, ip.legacy_is_url_param()
+            )
+
+        scanner = types.SimpleNamespace(
+            scan_field=scan_field,
+            scan_injection_point=AsyncMock(side_effect=scan_injection_point),
+        )
         check_llm_available = AsyncMock(return_value=True)
+        checkpoint_is_done = MagicMock(return_value=False)
+        checkpoint_mark_done = MagicMock()
+
+        def checkpoint_is_done_ip(ip, check):
+            return checkpoint_is_done(
+                ip.url,
+                ip.display_name,
+                ip.form_index,
+                check,
+                ip.legacy_is_url_param(),
+            )
+
+        def checkpoint_mark_done_ip(ip, check):
+            checkpoint_mark_done(
+                ip.url,
+                ip.display_name,
+                ip.form_index,
+                check,
+                ip.legacy_is_url_param(),
+            )
+
         engine = types.SimpleNamespace(
             scanners={"xss": scanner},
             payload_gen=types.SimpleNamespace(
@@ -47,14 +77,19 @@ class AdaptiveCheckpointRetryTests(unittest.IsolatedAsyncioTestCase):
             completed_fields=0,
             total_fields=1,
             monitor=None,
-            _checkpoint_is_done=MagicMock(return_value=False),
-            _checkpoint_mark_done=MagicMock(),
+            _checkpoint_is_done=checkpoint_is_done,
+            _checkpoint_mark_done=checkpoint_mark_done,
+            _checkpoint_is_done_ip=MagicMock(side_effect=checkpoint_is_done_ip),
+            _checkpoint_mark_done_ip=MagicMock(side_effect=checkpoint_mark_done_ip),
             _record_scan_matrix=MagicMock(),
             _record_finding=MagicMock(),
             _save_checkpoint=MagicMock(),
         )
         engine._adaptive_attack_field = types.MethodType(
             ScanEngine._adaptive_attack_field, engine
+        )
+        engine._injection_point_for = types.MethodType(
+            ScanEngine._injection_point_for, engine
         )
         return engine
 
@@ -229,10 +264,52 @@ class AdaptivePartialResumeTests(unittest.IsolatedAsyncioTestCase):
 
         xss_scan = AsyncMock(side_effect=[[], []])
         sqli_scan = AsyncMock(side_effect=[[], []])
+
+        async def xss_scan_injection_point(ip, field):
+            return await xss_scan(
+                ip.url, ip.form_index, field, ip.legacy_is_url_param()
+            )
+
+        async def sqli_scan_injection_point(ip, field):
+            return await sqli_scan(
+                ip.url, ip.form_index, field, ip.legacy_is_url_param()
+            )
+
+        checkpoint_is_done = MagicMock(side_effect=is_done)
+        checkpoint_mark_done = MagicMock(side_effect=mark_done)
+
+        def checkpoint_is_done_ip(ip, check):
+            return checkpoint_is_done(
+                ip.url,
+                ip.display_name,
+                ip.form_index,
+                check,
+                ip.legacy_is_url_param(),
+            )
+
+        def checkpoint_mark_done_ip(ip, check):
+            checkpoint_mark_done(
+                ip.url,
+                ip.display_name,
+                ip.form_index,
+                check,
+                ip.legacy_is_url_param(),
+            )
+
         engine = types.SimpleNamespace(
             scanners={
-                "xss": types.SimpleNamespace(scan_field=xss_scan),
-                "sqli": types.SimpleNamespace(scan_field=sqli_scan),
+                "xss": types.SimpleNamespace(
+                    scan_field=xss_scan,
+                    scan_injection_point=AsyncMock(
+                        side_effect=xss_scan_injection_point
+                    ),
+                ),
+                "sqli": types.SimpleNamespace(
+                    scan_field=sqli_scan,
+                    scan_injection_point=AsyncMock(
+                        side_effect=sqli_scan_injection_point
+                    ),
+                ),
             },
             payload_gen=types.SimpleNamespace(
                 default_payloads={"xss": [], "sqli": []},
@@ -251,14 +328,19 @@ class AdaptivePartialResumeTests(unittest.IsolatedAsyncioTestCase):
             completed_fields=0,
             total_fields=1,
             monitor=None,
-            _checkpoint_is_done=MagicMock(side_effect=is_done),
-            _checkpoint_mark_done=MagicMock(side_effect=mark_done),
+            _checkpoint_is_done=checkpoint_is_done,
+            _checkpoint_mark_done=checkpoint_mark_done,
+            _checkpoint_is_done_ip=MagicMock(side_effect=checkpoint_is_done_ip),
+            _checkpoint_mark_done_ip=MagicMock(side_effect=checkpoint_mark_done_ip),
             _record_scan_matrix=MagicMock(),
             _record_finding=MagicMock(),
             _save_checkpoint=MagicMock(),
         )
         engine._adaptive_attack_field = types.MethodType(
             ScanEngine._adaptive_attack_field, engine
+        )
+        engine._injection_point_for = types.MethodType(
+            ScanEngine._injection_point_for, engine
         )
 
         await ScanEngine._scan_field(

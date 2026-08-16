@@ -192,6 +192,17 @@ class InjectionPoint:
     template_id: str = ""
     source: str = ""
 
+    def legacy_is_url_param(self) -> bool:
+        """form/url_param のみ bool を返す。json_body は例外（form 経路への暗黙落ちを封じる）。"""
+        if self.location == "url_param":
+            return True
+        if self.location == "form":
+            return False
+        raise ValueError(
+            "legacy_is_url_param() は json_body に使えない: "
+            f"location={self.location!r}"
+        )
+
     def stable_key_parts(self) -> tuple[str, str, str, str, str]:
         """既存互換の checkpoint キー生成に必要な部品を返す。"""
         norm_url = (self.url or "").rstrip("/")

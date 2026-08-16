@@ -241,6 +241,7 @@ class Finding:
     injection_pointer: str = ""        # JSON body 内の JSON Pointer
     injection_method: str = ""         # JSON body 送信時の HTTP メソッド
     injection_template_id: str = ""    # 秘匿値を持たないテンプレート識別子
+    injection_form_index: int = 0       # form 注入点の index（段階5b で記録）
 
     @classmethod
     def from_dict(cls, data: dict) -> "Finding":
@@ -277,6 +278,7 @@ class Finding:
             injection_pointer=data.get("injection_pointer", ""),
             injection_method=data.get("injection_method", ""),
             injection_template_id=data.get("injection_template_id", ""),
+            injection_form_index=int(data.get("injection_form_index", 0) or 0),
         )
 
     @property
@@ -326,6 +328,7 @@ class Finding:
             "injection_pointer": self.injection_pointer,
             "injection_method": self.injection_method,
             "injection_template_id": self.injection_template_id,
+            "injection_form_index": self.injection_form_index,
             "compliance_refs": get_refs(self.check_type),
         }
 
@@ -394,6 +397,22 @@ class BaseScanner(ABC):
     ) -> list[Finding]:
         """Scan a single input field for vulnerabilities."""
         ...
+
+    async def scan_injection_point(
+        self,
+        ip: InjectionPoint,
+        field: dict,
+    ) -> list[Finding]:
+        """段階5 の一時互換アダプタ。既存 scan_field へ委譲し挙動を変えない。
+
+        段階5b で各スキャナが本メソッドを override し、ip 駆動 dispatch へ移行する。
+        """
+        return await self.scan_field(
+            ip.url,
+            ip.form_index,
+            field,
+            ip.legacy_is_url_param(),
+        )
 
     async def scan_page(self, url: str) -> list[Finding]:
         """
