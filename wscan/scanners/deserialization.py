@@ -23,6 +23,8 @@ from typing import TYPE_CHECKING
 
 import httpx
 
+from wscan.injection_point import InjectionPoint
+
 from .base import BaseScanner, Finding
 
 if TYPE_CHECKING:
@@ -105,6 +107,7 @@ class DeserializationScanner(BaseScanner):
 
     CHECK_TYPE = "deserialization"
     SEVERITY = "critical"
+    SUPPORTS_JSON_BODY = True
 
     def _probe_by_id(self, probe_id: str) -> tuple[str, str, str, str] | None:
         for probe in _PROBES:
@@ -125,12 +128,10 @@ class DeserializationScanner(BaseScanner):
         await self.browser.navigate(url)
         return await self.browser.fill_and_submit_form(form_index, field_name, payload)
 
-    async def scan_field(
+    async def scan_injection_point(
         self,
-        url: str,
-        form_index: int,
+        ip: InjectionPoint,
         field: dict,
-        is_url_param: bool = False,
     ) -> list[Finding]:
         field_name = field.get("name", "unknown")
         field_type = field.get("type", "text").lower()
@@ -141,31 +142,31 @@ class DeserializationScanner(BaseScanner):
 
         if self.monitor:
             await self.monitor.emit_status(
-                f"Deserialization probe: {field_name} on {url}"
+                f"Deserialization probe: {field_name} on {ip.url}"
             )
 
         findings = []
 
         baseline_src = ""
+        # baseline も送信なので単層ログ(＋abort checkpoint)を呼び出し側で通す
+        # （_apply_json_payload は log しない＝json でも payloads.jsonl に残す）。
+        await self.log_payload_test(
+            field_name, "wscan_deser_baseline", "deserialization_baseline", ip.url
+        )
         try:
-            baseline_src, _ = await self._apply_payload(
-                url,
-                form_index,
-                field_name,
-                "wscan_deser_baseline",
-                is_url_param,
-            )
+            baseline_src, _ = await self._apply_ip(ip, "wscan_deser_baseline")
         except Exception:
             baseline_src = ""
 
         for probe_id, description, payload, content_type in _PROBES:
+            # 監査ログには **実際に送る payload** を記録する（probe_id はラベルでなく
+            # check_type 側に残す）。transport 側 log を撤去したため、ここがラベルのままだと
+            # json 経路で送信値が payloads.jsonl/dashboard から欠落し再現できない。
             await self.log_payload_test(
-                    field_name, f"[{probe_id}]", "deserialization", url
-                )
+                field_name, payload, f"deserialization[{probe_id}]", ip.url
+            )
             try:
-                src, pair = await self._apply_payload(
-                    url, form_index, field_name, payload, is_url_param
-                )
+                src, pair = await self._apply_ip(ip, payload)
 
                 err = self.check_response_for_patterns(src, _DESER_ERROR_PATTERNS)
                 baseline_err = self.check_response_for_patterns(
@@ -174,7 +175,7 @@ class DeserializationScanner(BaseScanner):
                 )
                 if err and not baseline_err:
                     finding = await self.record_finding(
-                        url=url,
+                        url=ip.url,
                         field_name=field_name,
                         payload=payload,
                         evidence=(
@@ -193,6 +194,7 @@ class DeserializationScanner(BaseScanner):
                             "matched_error": err[:150],
                             "transport": "field",
                         },
+                        injection_point=ip,
                     )
                     findings.append(finding)
                     break  # One confirmed finding per field is enough
@@ -201,18 +203,43 @@ class DeserializationScanner(BaseScanner):
                 continue
             await asyncio.sleep(0.2 * self.sleep_factor)
 
-        # Also test via raw HTTP POST with appropriate Content-Type headers
-        if not findings:
-            findings += await self._test_raw_post(url, field_name)
+        # Also test via raw HTTP POST with appropriate Content-Type headers。
+        # raw POST は payload を **body 全体** として送る endpoint 単位の検査。json_body の
+        # 葉ごとに呼ぶと同一 endpoint 応答に対する重複 Finding になる（dedup キーの field_name
+        # が葉ごとに違うため）。json では葉単位で走らせず、endpoint 単位のスケジューリングは
+        # PR-b に委ねる（form/url_param は従来どおり）。
+        if not findings and ip.location != "json_body":
+            findings += await self._test_raw_post(ip, field_name)
 
         return findings
+
+    async def scan_field(
+        self,
+        url: str,
+        form_index: int,
+        field: dict,
+        is_url_param: bool = False,
+    ) -> list[Finding]:
+        """従来 API を InjectionPoint 駆動へ接続する互換 wrapper。"""
+        name = field.get("name", "unknown")
+        ip = (
+            InjectionPoint.for_url_param(url, name)
+            if is_url_param
+            else InjectionPoint.for_form(url, name, form_index)
+        )
+        return await self.scan_injection_point(ip, field)
 
     async def scan_page(self, url: str) -> list[Finding]:
         return []
 
-    async def _test_raw_post(self, url: str, field_name: str) -> list[Finding]:
+    async def _test_raw_post(
+        self,
+        ip: InjectionPoint,
+        field_name: str,
+    ) -> list[Finding]:
         """Send raw probe payloads with deserialization-specific Content-Types."""
         findings = []
+        url = ip.url
         proxy = getattr(self.engine, "proxy", "") or None
         timeout = getattr(self.engine, "timeout", 15)
 
@@ -277,6 +304,10 @@ class DeserializationScanner(BaseScanner):
                             "matched_error": err[:150],
                             "transport": "raw_post",
                         },
+                        # raw POST は payload を body 全体として送る（ip.parameter_id には注入しない）。
+                        # 特定 pointer の脆弱性として provenance を付けると、複数葉スキャンで同一の
+                        # endpoint 全体レスポンスに対し pointer 別の重複 Finding が出て、再現メタが実際に
+                        # 撃っていない注入位置を指してしまう。よって field IP の provenance は付けない。
                     )
                     findings.append(finding)
                     break
@@ -302,21 +333,18 @@ class DeserializationScanner(BaseScanner):
         is_url_param = finding.field_name in parse_qs(
             urlparse(finding.url).query, keep_blank_values=True
         )
+        ip = self._verify_injection_point(finding, is_url_param)
+        # verify の再送(baseline + probe)も単層ログ(＋abort checkpoint)を呼び出し側で通す。
+        await self.log_payload_test(
+            finding.field_name, "wscan_deser_baseline",
+            "deserialization_verify_baseline", finding.url,
+        )
         try:
-            baseline_src, _ = await self._apply_payload(
-                finding.url,
-                0,
-                finding.field_name,
-                "wscan_deser_baseline",
-                is_url_param,
+            baseline_src, _ = await self._apply_ip(ip, "wscan_deser_baseline")
+            await self.log_payload_test(
+                finding.field_name, payload, "deserialization_verify", finding.url
             )
-            probe_src, _ = await self._apply_payload(
-                finding.url,
-                0,
-                finding.field_name,
-                payload,
-                is_url_param,
-            )
+            probe_src, _ = await self._apply_ip(ip, payload)
         except Exception:
             return None
 

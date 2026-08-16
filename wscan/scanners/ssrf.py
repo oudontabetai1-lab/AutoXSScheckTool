@@ -13,6 +13,8 @@ import asyncio
 import re
 from typing import TYPE_CHECKING
 
+from wscan.injection_point import InjectionPoint
+
 from .base import BaseScanner, Finding
 
 if TYPE_CHECKING:
@@ -75,6 +77,7 @@ _SSRF_PROBES: list[tuple[str, str, re.Pattern]] = [
 class SSRFScanner(BaseScanner):
     CHECK_TYPE = "ssrf"
     SEVERITY = "critical"
+    SUPPORTS_JSON_BODY = True
 
     @staticmethod
     def _strip_payload_echo(source: str, payload: str) -> str:
@@ -118,41 +121,40 @@ class SSRFScanner(BaseScanner):
         name = field_name.lower().replace("-", "_").replace(" ", "_")
         return any(token in name for token in SSRF_PARAM_NAMES)
 
-    async def scan_field(
+    async def scan_injection_point(
         self,
-        url: str,
-        form_index: int,
+        ip: InjectionPoint,
         field: dict,
-        is_url_param: bool = False,
     ) -> list[Finding]:
         field_name = field.get("name", "unknown")
 
         # Only test fields that plausibly accept URLs or server-side paths
-        if not (is_url_param or self._is_ssrf_param(field_name)):
+        if not (ip.location == "url_param" or self._is_ssrf_param(field_name)):
             return []
 
         findings: list[Finding] = []
 
         if self.monitor:
             await self.monitor.emit_status(
-                f"SSRF testing: {field_name} on {url}"
+                f"SSRF testing: {field_name} on {ip.url}"
             )
 
         # Capture a clean baseline to avoid false-positives from pre-existing content
         # baseline もフィールド投入なので監査ログに残す（log_payload_test 一元化の不変条件）。
         await self.log_payload_test(
-            field_name, "http://wscan-baseline-test.invalid/", "ssrf_baseline", url
+            field_name,
+            "http://wscan-baseline-test.invalid/",
+            "ssrf_baseline",
+            ip.url,
         )
-        baseline_source, _ = await self._apply_payload(
-            url, form_index, field_name, "http://wscan-baseline-test.invalid/", is_url_param
+        baseline_source, _ = await self._apply_ip(
+            ip, "http://wscan-baseline-test.invalid/"
         )
 
         for label, payload, pattern in _SSRF_PROBES:
-            await self.log_payload_test(field_name, payload, "ssrf", url)
+            await self.log_payload_test(field_name, payload, "ssrf", ip.url)
 
-            source, pair = await self._apply_payload(
-                url, form_index, field_name, payload, is_url_param
-            )
+            source, pair = await self._apply_ip(ip, payload)
             await asyncio.sleep(0.3 * self.sleep_factor)
 
             if not source:
@@ -166,7 +168,7 @@ class SSRFScanner(BaseScanner):
             match = self._confirmed_match(source, payload, pattern)
             if match:
                 finding = await self.record_finding(
-                    url=url,
+                    url=ip.url,
                     field_name=field_name,
                     payload=payload,
                     evidence=(
@@ -181,11 +183,28 @@ class SSRFScanner(BaseScanner):
                         "probe_label": label,
                         "matched_marker": match.group(0)[:100],
                     },
+                    injection_point=ip,
                 )
                 findings.append(finding)
                 break  # one confirmed finding per field is sufficient
 
         return findings
+
+    async def scan_field(
+        self,
+        url: str,
+        form_index: int,
+        field: dict,
+        is_url_param: bool = False,
+    ) -> list[Finding]:
+        """従来 API を InjectionPoint 駆動へ接続する互換 wrapper。"""
+        name = field.get("name", "unknown")
+        ip = (
+            InjectionPoint.for_url_param(url, name)
+            if is_url_param
+            else InjectionPoint.for_form(url, name, form_index)
+        )
+        return await self.scan_injection_point(ip, field)
 
     async def verify_finding(self, finding: Finding) -> bool | None:
         probe = next(
@@ -205,29 +224,20 @@ class SSRFScanner(BaseScanner):
         is_url_param = finding.field_name in parse_qs(
             urlparse(finding.url).query, keep_blank_values=True
         )
+        ip = self._verify_injection_point(finding, is_url_param)
         try:
             # verify 時の再投入（baseline + payload）も監査ログに残す。
             await self.log_payload_test(
                 finding.field_name, "http://wscan-baseline-test.invalid/",
                 "ssrf_verify_baseline", finding.url,
             )
-            baseline_source, _ = await self._apply_payload(
-                finding.url,
-                0,
-                finding.field_name,
-                "http://wscan-baseline-test.invalid/",
-                is_url_param,
+            baseline_source, _ = await self._apply_ip(
+                ip, "http://wscan-baseline-test.invalid/"
             )
             await self.log_payload_test(
                 finding.field_name, finding.payload, "ssrf_verify", finding.url
             )
-            probe_source, _ = await self._apply_payload(
-                finding.url,
-                0,
-                finding.field_name,
-                finding.payload,
-                is_url_param,
-            )
+            probe_source, _ = await self._apply_ip(ip, finding.payload)
         except Exception:
             return None
 

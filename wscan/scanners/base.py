@@ -351,6 +351,7 @@ class BaseScanner(ABC):
 
     CHECK_TYPE = "base"
     SEVERITY = "medium"
+    SUPPORTS_JSON_BODY = False
 
     def __init__(self, engine: "ScanEngine"):
         self.engine = engine
@@ -413,6 +414,49 @@ class BaseScanner(ABC):
             field,
             ip.legacy_is_url_param(),
         )
+
+    async def _apply_ip(
+        self,
+        ip: InjectionPoint,
+        payload,
+    ) -> tuple[str, dict]:
+        """注入点の location に応じて既存 transport へ振り分ける。
+
+        form/url_param は既存 ``_apply_payload`` へそのまま委譲し、json_body は
+        capability を明示したスキャナだけ共有 transport を使う。未対応の JSON を
+        form へ暗黙に落とさないことで tri-state を維持する。
+        """
+        if ip.location == "json_body":
+            if not self.SUPPORTS_JSON_BODY:
+                return "", {}
+            return await self._apply_json_payload(ip, payload)
+        return await self._apply_payload(
+            ip.url,
+            ip.form_index,
+            ip.parameter_id,
+            payload,
+            ip.legacy_is_url_param(),
+        )
+
+    def _verify_injection_point(
+        self,
+        finding: "Finding",
+        is_url_param: bool,
+    ) -> InjectionPoint:
+        """verify の再送に使う注入点を復元する。
+
+        json_body の Finding は provenance（location/pointer/method/template_id）から
+        `injection_point_from_finding` で復元し、保存済み JSON template 経由で再送できる
+        ようにする。それ以外（form/url_param・旧 Finding）は従来の URL クエリ推測へ
+        fallback する（form/url_param の verify 挙動は不変）。全 location を provenance 駆動に
+        する切替は 5c。
+        """
+        ip = injection_point_from_finding(finding)
+        if ip is not None:
+            return ip
+        if is_url_param:
+            return InjectionPoint.for_url_param(finding.url, finding.field_name)
+        return InjectionPoint.for_form(finding.url, finding.field_name, 0)
 
     async def scan_page(self, url: str) -> list[Finding]:
         """
@@ -584,17 +628,10 @@ class BaseScanner(ABC):
         except Exception:
             return "", {}
 
-        # abort 判定を送信直前に通す。AbortScan は呼び出し側へ伝播させる。
-        # 監査ログ(payloads.jsonl / monitor)には**注入した値のみ**記録する。テンプレの
-        # 兄弟フィールド(password/token 等)を含む body 全体を渡すと秘匿が平文で永続/配信
-        # されてしまう(落とし穴8: 秘匿の非永続。in-memory レジストリの保護が台無しになる)。
-        log_value = payload if isinstance(payload, str) else json.dumps(payload)
-        await self.log_payload_test(
-            ip.display_name or ip.parameter_id,
-            log_value,
-            self.CHECK_TYPE,
-            url,
-        )
+        # 監査ログ(payloads.jsonl / monitor)と abort 判定は**呼び出し側(scanner)が
+        # _apply_ip の直前に log_payload_test で一元化**する（form/url_param の _apply_payload と同じ
+        # 単層ログ）。ここで再度 log すると json 経路だけ二重記録・二重 dashboard イベントになり、
+        # payloads.jsonl が送信リクエストと 1:1 対応しなくなるため、transport 側では log しない。
         # transport は**忠実**に振る舞う: source も pair も生応答を返す。検出（反射/エラー
         # 文字列/長さ差）は生本文で行う必要があり、兄弟値を先に伏せると短い共通値
         # （例 "a"/"admin"）が反射 payload やエラー文を壊して偽陰性を生む。秘匿の伏字は
@@ -920,6 +957,11 @@ class BaseScanner(ABC):
             ),
             injection_template_id=(
                 injection_point.template_id if injection_point else ""
+            ),
+            injection_form_index=(
+                injection_point.form_index
+                if injection_point and injection_point.location == "form"
+                else 0
             ),
         )
         self.findings.append(finding)

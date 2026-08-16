@@ -7,6 +7,8 @@ import re
 from typing import TYPE_CHECKING
 from urllib.parse import parse_qs, urlparse
 
+from wscan.injection_point import InjectionPoint
+
 from .base import BaseScanner, Finding
 
 if TYPE_CHECKING:
@@ -94,30 +96,29 @@ class OSInjectionScanner(BaseScanner):
 
     CHECK_TYPE = "os"
     SEVERITY = "critical"
+    SUPPORTS_JSON_BODY = True
 
-    async def scan_field(
+    async def scan_injection_point(
         self,
-        url: str,
-        form_index: int,
+        ip: InjectionPoint,
         field: dict,
-        is_url_param: bool = False,
     ) -> list[Finding]:
         """Scan a form field or URL parameter for OS command injection."""
         findings = []
         field_name = field.get("name", "unknown")
-        payloads = await self.get_payloads(field_name, url)
+        payloads = await self.get_payloads(field_name, ip.url)
 
         if self.monitor:
             await self.monitor.emit_status(
-                f"OS injection testing: {field_name} on {url}"
+                f"OS injection testing: {field_name} on {ip.url}"
             )
 
         # Baseline: capture pre-existing patterns and response time
         # baseline もフィールドへの投入なので監査ログに残す（log_payload_test 一元化の不変条件）。
-        await self.log_payload_test(field_name, "baseline_os_test", "os_baseline", url)
-        baseline_source, baseline_pair = await self._apply_payload(
-            url, form_index, field_name, "baseline_os_test", is_url_param
+        await self.log_payload_test(
+            field_name, "baseline_os_test", "os_baseline", ip.url
         )
+        baseline_source, baseline_pair = await self._apply_ip(ip, "baseline_os_test")
         _b_req = baseline_pair.get("request", {})
         _b_resp = baseline_pair.get("response", {})
         _b_ts_req = _b_req.get("timestamp", 0)
@@ -133,12 +134,10 @@ class OSInjectionScanner(BaseScanner):
         async def _test_payload(
             payload: str, check_label: str = "os", echo_baseline: str = ""
         ) -> bool:
-            await self.log_payload_test(field_name, payload, check_label, url)
+            await self.log_payload_test(field_name, payload, check_label, ip.url)
 
             # Apply payload
-            source, pair = await self._apply_payload(
-                url, form_index, field_name, payload, is_url_param
-            )
+            source, pair = await self._apply_ip(ip, payload)
 
             # --- Check 1: Command output in response (not pre-existing in baseline) ---
             match = self.check_response_for_patterns(source, OS_OUTPUT_PATTERNS)
@@ -172,7 +171,7 @@ class OSInjectionScanner(BaseScanner):
                 if not baseline_source and not baseline_pair:
                     self._record_scan_note(
                         f"baseline_unavailable:{self.CHECK_TYPE}: "
-                        f"suppressed match '{match}' at {url}"
+                        f"suppressed match '{match}' at {ip.url}"
                     )
                 else:
                     baseline_match = self.check_response_for_patterns(
@@ -180,13 +179,14 @@ class OSInjectionScanner(BaseScanner):
                     )
                     if not baseline_match:
                         finding = await self.record_finding(
-                            url=url,
+                            url=ip.url,
                             field_name=field_name,
                             payload=payload,
                             evidence=f"OS command output detected in response: '{match}'",
                             pair=pair,
                             severity="critical",
                             confidence="likely",
+                            injection_point=ip,
                         )
                         findings.append(finding)
                         return True
@@ -197,12 +197,13 @@ class OSInjectionScanner(BaseScanner):
             if payload in TIME_BASED_PAYLOADS or _is_time_based_os(payload):
                 if self.response_time_exceeded(pair, threshold=time_threshold):
                     finding = await self.record_finding(
-                        url=url,
+                        url=ip.url,
                         field_name=field_name,
                         payload=payload,
                         evidence=f"Time-based blind OS injection: response delayed (>{time_threshold:.1f}s, baseline {baseline_time:.2f}s)",
                         pair=pair,
                         severity="high",
+                        injection_point=ip,
                     )
                     findings.append(finding)
                     return True
@@ -214,9 +215,14 @@ class OSInjectionScanner(BaseScanner):
             if await _test_payload(payload):
                 break
 
-        if not findings:
+        # evolution wave は legacy browser transport(is_url_param 前提)。json_body では
+        # ip.legacy_is_url_param() が例外になり、かつ適用不能なので skip する（json は標準 payload のみ）。
+        if not findings and ip.location != "json_body":
             extra_payloads = await self.evolved_payloads(
-                url, form_index, field_name, is_url_param
+                ip.url,
+                ip.form_index,
+                ip.parameter_id,
+                ip.legacy_is_url_param(),
             )
             # evolved_payloads は内部で marker 付き probe を投入する。stored 系では
             # この probe が一覧へ永続化されるため、probe 後の状態を baseline 化して
@@ -224,49 +230,52 @@ class OSInjectionScanner(BaseScanner):
             echo_baseline = ""
             if extra_payloads:
                 await self.log_payload_test(
-                    field_name, "baseline_os_test", "os_baseline", url
+                    field_name, "baseline_os_test", "os_baseline", ip.url
                 )
-                echo_baseline, _ = await self._apply_payload(
-                    url, form_index, field_name, "baseline_os_test", is_url_param
-                )
+                echo_baseline, _ = await self._apply_ip(ip, "baseline_os_test")
             for payload in extra_payloads:
                 if await _test_payload(payload, "os_evolved", echo_baseline):
                     break
 
         # --- Mutation wave: キャップで漏れた time-based(blind) 等を確実に投入 ---
         if not findings:
-            mutated = await self.mutated_payloads(field_name, url, payloads)
+            mutated = await self.mutated_payloads(field_name, ip.url, payloads)
             for payload in mutated:
                 if await _test_payload(payload, "os_mutation"):
                     break
 
         return findings
 
+    async def scan_field(
+        self,
+        url: str,
+        form_index: int,
+        field: dict,
+        is_url_param: bool = False,
+    ) -> list[Finding]:
+        """従来 API を InjectionPoint 駆動へ接続する互換 wrapper。"""
+        name = field.get("name", "unknown")
+        ip = (
+            InjectionPoint.for_url_param(url, name)
+            if is_url_param
+            else InjectionPoint.for_form(url, name, form_index)
+        )
+        return await self.scan_injection_point(ip, field)
+
     async def verify_finding(self, finding: Finding) -> bool | None:
         is_url_param = finding.field_name in parse_qs(
             urlparse(finding.url).query, keep_blank_values=True
         )
+        ip = self._verify_injection_point(finding, is_url_param)
         # verify 時の再投入（baseline + payload）も監査ログに残す。
         await self.log_payload_test(
             finding.field_name, "baseline_os_test", "os_verify_baseline", finding.url
         )
-        baseline_source, baseline_pair = await self._apply_payload(
-            finding.url,
-            0,
-            finding.field_name,
-            "baseline_os_test",
-            is_url_param,
-        )
+        baseline_source, baseline_pair = await self._apply_ip(ip, "baseline_os_test")
         await self.log_payload_test(
             finding.field_name, finding.payload, "os_verify", finding.url
         )
-        source, pair = await self._apply_payload(
-            finding.url,
-            0,
-            finding.field_name,
-            finding.payload,
-            is_url_param,
-        )
+        source, pair = await self._apply_ip(ip, finding.payload)
 
         body = pair.get("response", {}).get("body", "") or source or ""
         match = self.check_response_for_patterns(body, OS_OUTPUT_PATTERNS)

@@ -6,6 +6,8 @@ DN/filter syntax, watching for authentication bypass or verbose error messages.
 import re
 from typing import TYPE_CHECKING
 
+from wscan.injection_point import InjectionPoint
+
 from .base import BaseScanner, Finding
 
 if TYPE_CHECKING:
@@ -46,6 +48,7 @@ class LDAPScanner(BaseScanner):
 
     CHECK_TYPE = "ldap"
     SEVERITY = "high"
+    SUPPORTS_JSON_BODY = True
 
     async def _apply_payload(
         self,
@@ -94,41 +97,39 @@ class LDAPScanner(BaseScanner):
 
         return None
 
-    async def scan_field(
+    async def scan_injection_point(
         self,
-        url: str,
-        form_index: int,
+        ip: InjectionPoint,
         field: dict,
-        is_url_param: bool = False,
     ) -> list[Finding]:
-        field_name = field.get("name") or field.get("id") or f"field_{form_index}"
+        field_name = (
+            field.get("name") or field.get("id") or f"field_{ip.form_index}"
+        )
         findings: list[Finding] = []
 
         # Obtain a baseline response first
         # baseline もフィールド投入なので監査ログに残す（log_payload_test 一元化の不変条件）。
-        await self.log_payload_test(field_name, "normaluser", "ldap_baseline", url)
+        await self.log_payload_test(
+            field_name, "normaluser", "ldap_baseline", ip.url
+        )
         try:
-            baseline_html, _ = await self._apply_payload(
-                url, form_index, field_name, "normaluser", is_url_param
-            )
+            baseline_html, _ = await self._apply_ip(ip, "normaluser")
         except Exception as exc:
             if self.monitor:
                 await self.monitor.emit_status(
-                    f"[warn] ldap: baseline failed on {url} ({field_name}): {exc}"
+                    f"[warn] ldap: baseline failed on {ip.url} ({field_name}): {exc}"
                 )
             return []
 
         async def _test_payload(payload: str, check_label: str = self.CHECK_TYPE) -> bool:
-            await self.log_payload_test(field_name, payload, check_label, url)
+            await self.log_payload_test(field_name, payload, check_label, ip.url)
             try:
-                html, pair = await self._apply_payload(
-                    url, form_index, field_name, payload, is_url_param
-                )
+                html, pair = await self._apply_ip(ip, payload)
             except Exception as exc:
                 if self.monitor:
                     await self.monitor.emit_status(
-                        f"[warn] ldap: request failed on {url} ({field_name}): {exc}"
-                )
+                        f"[warn] ldap: request failed on {ip.url} ({field_name}): {exc}"
+                    )
                 return False
 
             classified = self._classify(baseline_html, html, payload)
@@ -136,7 +137,7 @@ class LDAPScanner(BaseScanner):
                 evidence_type, evidence, evidence_details = classified
 
                 finding = await self.record_finding(
-                    url=url,
+                    url=ip.url,
                     field_name=field_name,
                     payload=payload,
                     evidence=evidence,
@@ -145,6 +146,7 @@ class LDAPScanner(BaseScanner):
                     confidence="likely",
                     evidence_type=evidence_type,
                     evidence_details=evidence_details,
+                    injection_point=ip,
                 )
                 findings.append(finding)
                 return True
@@ -154,15 +156,36 @@ class LDAPScanner(BaseScanner):
             if await _test_payload(payload):
                 break  # one confirmed finding per field
 
-        if not findings:
+        # evolution wave は legacy browser transport(is_url_param 前提)。json_body では
+        # ip.legacy_is_url_param() が例外になり、かつ適用不能なので skip する（json は標準 payload のみ）。
+        if not findings and ip.location != "json_body":
             extra_payloads = await self.evolved_payloads(
-                url, form_index, field_name, is_url_param
+                ip.url,
+                ip.form_index,
+                ip.parameter_id,
+                ip.legacy_is_url_param(),
             )
             for payload in extra_payloads:
                 if await _test_payload(payload, "ldap_evolved"):
                     break
 
         return findings
+
+    async def scan_field(
+        self,
+        url: str,
+        form_index: int,
+        field: dict,
+        is_url_param: bool = False,
+    ) -> list[Finding]:
+        """従来 API を InjectionPoint 駆動へ接続する互換 wrapper。"""
+        name = field.get("name") or field.get("id") or f"field_{form_index}"
+        ip = (
+            InjectionPoint.for_url_param(url, name)
+            if is_url_param
+            else InjectionPoint.for_form(url, name, form_index)
+        )
+        return await self.scan_injection_point(ip, field)
 
     async def scan_page(self, url: str) -> list[Finding]:
         return []
@@ -173,28 +196,17 @@ class LDAPScanner(BaseScanner):
         is_url_param = finding.field_name in parse_qs(
             urlparse(finding.url).query, keep_blank_values=True
         )
+        ip = self._verify_injection_point(finding, is_url_param)
         try:
             # verify 時の再投入（baseline + payload）も監査ログに残す。
             await self.log_payload_test(
                 finding.field_name, "normaluser", "ldap_verify_baseline", finding.url
             )
-            baseline_html, _ = await self._apply_payload(
-                finding.url,
-                0,
-                finding.field_name,
-                "normaluser",
-                is_url_param,
-            )
+            baseline_html, _ = await self._apply_ip(ip, "normaluser")
             await self.log_payload_test(
                 finding.field_name, finding.payload, "ldap_verify", finding.url
             )
-            probe_html, _ = await self._apply_payload(
-                finding.url,
-                0,
-                finding.field_name,
-                finding.payload,
-                is_url_param,
-            )
+            probe_html, _ = await self._apply_ip(ip, finding.payload)
         except Exception:
             return None
 
