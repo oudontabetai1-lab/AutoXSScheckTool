@@ -275,7 +275,11 @@ class Finding:
             source=data.get("source", "scanner"),
             agent_verified=bool(data.get("agent_verified", False)),
             injection_location=data.get("injection_location", ""),
-            injection_pointer=data.get("injection_pointer", ""),
+            # 欠落キーは None(sentinel)にして「明示的な空文字ルート pointer」と区別する。
+            # to_dict は常に書き出すので正規の checkpoint では常に存在するが、json_body を
+            # 名乗りつつ pointer キーを欠く不完全 provenance（手編集/異版）は None のまま
+            # resolver で unexecutable 扱いにし、whole-body 再送で誤って未確証化しない。
+            injection_pointer=data.get("injection_pointer"),
             injection_method=data.get("injection_method", ""),
             injection_template_id=data.get("injection_template_id", ""),
             injection_form_index=int(data.get("injection_form_index", 0) or 0),
@@ -356,9 +360,10 @@ def injection_point_from_finding(finding: Finding) -> Optional[InjectionPoint]:
         # body 全体を payload に置換する（whole-body JSON 注入）。空を一律 corrupt と
         # 誤判定すると verify で再送されず未検証のまま確証扱いになる。malformed は
         # 非空で '/' 始まりでない場合に parse_pointer が ValueError を投げる分だけ。
-        # 非文字列（resume した checkpoint の "injection_pointer": null 等）は parse_pointer で
+        # 非文字列（resume した checkpoint の "injection_pointer": null や、キー欠落を
+        # from_dict が None sentinel にした不完全 provenance）は parse_pointer で
         # AttributeError になり verify を巻き込むため、ここで明示的に unexecutable 化する
-        # （"" ルートは str なので通す）。
+        # （明示的に格納された "" ルートは str なので通す＝欠落と区別）。
         if not isinstance(finding.injection_pointer, str):
             raise ProvenanceError(
                 "json_body provenance の injection_pointer が文字列ではありません: "

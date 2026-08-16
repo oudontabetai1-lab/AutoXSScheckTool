@@ -310,8 +310,26 @@ class FindingInjectionProvenanceTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ProvenanceError):
             injection_point_from_finding(finding)
 
+    def test_verify_injection_point_absent_pointer_key_unexecutable(self):
+        # json_body を名乗るが pointer キーを欠く不完全 provenance（手編集/異版 checkpoint）は
+        # from_dict が None sentinel にし、明示的な "" ルートとは区別して unexecutable 化する。
+        scanner = _Scanner(_Engine())
+        finding = Finding.from_dict({
+            "check_type": "sqli", "severity": "high", "url": "http://h/api",
+            "field_name": "body", "payload": "'", "evidence": "e",
+            "injection_location": "json_body", "injection_method": "POST",
+            # injection_pointer キーを意図的に欠落させる
+        })
+        self.assertIsNone(finding.injection_pointer)
+        self.assertIsNone(
+            scanner._verify_injection_point(finding, is_url_param=False)
+        )
+        with self.assertRaises(ProvenanceError):
+            injection_point_from_finding(finding)
+
     def test_verify_injection_point_json_root_pointer_valid(self):
-        # 空文字は RFC 6901 ルート pointer（whole-body 注入）で valid。unexecutable にしない。
+        # 明示的に格納された空文字は RFC 6901 ルート pointer（whole-body 注入）で valid。
+        # 欠落（None sentinel）と区別して unexecutable にしない。
         scanner = _Scanner(_Engine())
         finding = Finding(
             check_type="sqli", severity="high", url="http://h/api",
@@ -323,6 +341,8 @@ class FindingInjectionProvenanceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(ip)
         self.assertEqual(ip.location, "json_body")
         self.assertEqual(ip.parameter_id, "")
+        # 明示的に "" を格納した Finding は round-trip でも "" を保つ（欠落と混同しない）。
+        self.assertEqual(Finding.from_dict(finding.to_dict()).injection_pointer, "")
 
     async def test_engine_verify_uses_provenance_form_index(self):
         scanner = _VerifyScanner()
