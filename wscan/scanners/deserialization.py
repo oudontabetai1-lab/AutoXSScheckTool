@@ -159,8 +159,11 @@ class DeserializationScanner(BaseScanner):
             baseline_src = ""
 
         for probe_id, description, payload, content_type in _PROBES:
+            # 監査ログには **実際に送る payload** を記録する（probe_id はラベルでなく
+            # check_type 側に残す）。transport 側 log を撤去したため、ここがラベルのままだと
+            # json 経路で送信値が payloads.jsonl/dashboard から欠落し再現できない。
             await self.log_payload_test(
-                field_name, f"[{probe_id}]", "deserialization", ip.url
+                field_name, payload, f"deserialization[{probe_id}]", ip.url
             )
             try:
                 src, pair = await self._apply_ip(ip, payload)
