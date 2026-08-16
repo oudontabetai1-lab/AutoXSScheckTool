@@ -194,6 +194,9 @@ class SarifExporter:
                 "field_name":       field_name,
                 "payload":          payload,
                 "verified":         f.get("verified", True),
+                # verified=False でも「実際に再現できず」と「例外で検証未実行(要手動確認)」を
+                # SARIF 消費側が区別できるよう、理由を持つ note も出力する。
+                "verification_note": f.get("verification_note", ""),
                 "source":           source,
                 "agent_verified":   f.get("agent_verified", False),
                 "compliance_refs":  f.get("compliance_refs", {}),
