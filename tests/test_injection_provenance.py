@@ -327,6 +327,23 @@ class FindingInjectionProvenanceTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ProvenanceError):
             injection_point_from_finding(finding)
 
+    def test_verify_injection_point_non_string_method_unexecutable(self):
+        # root pointer "" + method=null（resume checkpoint）は for_json_body の
+        # method.upper() で AttributeError になる。復元境界でまとめて unexecutable 化する。
+        scanner = _Scanner(_Engine())
+        finding = Finding.from_dict({
+            "check_type": "sqli", "severity": "high", "url": "http://h/api",
+            "field_name": "body", "payload": "'", "evidence": "e",
+            "injection_location": "json_body", "injection_pointer": "",
+            "injection_method": None,
+        })
+        self.assertIsNone(finding.injection_method)
+        self.assertIsNone(
+            scanner._verify_injection_point(finding, is_url_param=False)
+        )
+        with self.assertRaises(ProvenanceError):
+            injection_point_from_finding(finding)
+
     def test_verify_injection_point_json_root_pointer_valid(self):
         # 明示的に格納された空文字は RFC 6901 ルート pointer（whole-body 注入）で valid。
         # 欠落（None sentinel）と区別して unexecutable にしない。
@@ -372,6 +389,36 @@ class FindingInjectionProvenanceTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(await engine._verify_one(finding))
         self.assertEqual(scanner.applied_ips, [])
         self.assertEqual(engine.browser.navigate_calls, [])
+
+    async def test_phase_verify_isolates_per_finding_exceptions(self):
+        # 1 件の _verify_one が想定外例外を投げても verify フェーズ全体を止めず、
+        # 残りの finding を検証し続ける（破損 provenance 等の巻き込み防止・no-penalty）。
+        class _Engine2:
+            _phase_verify = ScanEngine._phase_verify
+            _VERIFIABLE_CHECKS = {"sqli"}
+
+            def __init__(self, findings):
+                self.all_findings = findings
+                self.monitor = None
+                self.calls = []
+
+            async def _verify_one(self, finding):
+                self.calls.append(finding.field_name)
+                if finding.field_name == "boom":
+                    raise RuntimeError("simulated verify crash")
+                return True
+
+        boom = Finding(check_type="sqli", severity="high", url="http://h/a",
+                       field_name="boom", payload="'", evidence="e")
+        ok = Finding(check_type="sqli", severity="high", url="http://h/b",
+                     field_name="ok", payload="'", evidence="e")
+        engine = _Engine2([boom, ok])
+        await engine._phase_verify()  # 例外を送出しない
+        # 1 件目の例外で止まらず両方が検証を試みられる。
+        self.assertEqual(engine.calls, ["boom", "ok"])
+        # 例外は no-penalty（verified を False にしない）＋ wave_errors に観測記録。
+        self.assertTrue(boom.verified)
+        self.assertTrue(getattr(engine, "wave_errors", None))
 
     def test_rebuilds_all_locations(self):
         json_finding = Finding(

@@ -360,15 +360,13 @@ def injection_point_from_finding(finding: Finding) -> Optional[InjectionPoint]:
         # body 全体を payload に置換する（whole-body JSON 注入）。空を一律 corrupt と
         # 誤判定すると verify で再送されず未検証のまま確証扱いになる。malformed は
         # 非空で '/' 始まりでない場合に parse_pointer が ValueError を投げる分だけ。
-        # 非文字列（resume した checkpoint の "injection_pointer": null や、キー欠落を
-        # from_dict が None sentinel にした不完全 provenance）は parse_pointer で
-        # AttributeError になり verify を巻き込むため、ここで明示的に unexecutable 化する
-        # （明示的に格納された "" ルートは str なので通す＝欠落と区別）。
-        if not isinstance(finding.injection_pointer, str):
-            raise ProvenanceError(
-                "json_body provenance の injection_pointer が文字列ではありません: "
-                f"{finding.injection_pointer!r}"
-            )
+        # 不完全 provenance（resume した checkpoint の pointer/method が null・キー欠落=
+        # None sentinel・その他の非文字列）は for_json_body 内で parse_pointer(pointer)や
+        # method.upper() が ValueError/AttributeError/TypeError を投げる。フィールド毎に
+        # 型検査を積むと後追い（whack-a-mole）になるので、**復元境界でまとめて捕え**
+        # 「壊れた provenance = unexecutable」へ一本化する。これにより 1 件の破損 entry が
+        # verify 経路へ非 ProvenanceError を漏らして _phase_verify 全体を止める事故を防ぐ。
+        # 明示的に格納された "" ルートは valid（欠落=None sentinel とは区別して復元される）。
         try:
             return InjectionPoint.for_json_body(
                 finding.injection_method,
@@ -377,9 +375,9 @@ def injection_point_from_finding(finding: Finding) -> Optional[InjectionPoint]:
                 display_name=finding.field_name,
                 template_id=finding.injection_template_id,
             )
-        except ValueError as exc:
+        except (ValueError, AttributeError, TypeError) as exc:
             raise ProvenanceError(
-                f"json_body provenance の injection_pointer が不正です: {exc}"
+                f"json_body provenance を復元できません: {exc!r}"
             ) from exc
     raise ProvenanceError(f"未知の injection_location です: {location!r}")
 
