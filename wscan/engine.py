@@ -4574,14 +4574,18 @@ class ScanEngine:
             )
 
         for i, finding in enumerate(to_verify):
+            skipped = False
+            confirmed = False
             try:
                 confirmed = await self._verify_one(finding)
             except Exception as exc:
                 # 想定外の例外（破損 provenance の復元失敗など）で verify フェーズ全体を
                 # 止めない。1 件の異常が残り全 finding の検証を巻き込むのを防ぎ、no-penalty
                 # で finding は残す（_verify_one の「検証不能=確証扱い」慣行と同型）。
-                # 黙って検出力を落とさないよう wave_errors に記録する。
-                confirmed = True
+                # ただし**再現はしていない**ので CONFIRMED（reproduced）は出さず、skip として
+                # 別扱いにする（誤った検証結果を operator に見せない）。verified は倒さない。
+                skipped = True
+                finding.verification_note = "検証が例外で実行できず未再現（no-penalty で保持）"
                 errors = getattr(self, "wave_errors", None)
                 if errors is None:
                     self.wave_errors = errors = []
@@ -4593,7 +4597,9 @@ class ScanEngine:
                     f"on [yellow]{finding.field_name}[/yellow]: "
                     f"{type(exc).__name__} — kept (not penalised)"
                 )
-            if confirmed:
+            if skipped:
+                pass  # 既に VERIFY-SKIP を表示済み。CONFIRMED/UNCONFIRMED は出さない。
+            elif confirmed:
                 console.print(
                     f"  [green][CONFIRMED][/green] {finding.check_type.upper()} "
                     f"on [yellow]{finding.field_name}[/yellow]: reproduced"
