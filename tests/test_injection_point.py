@@ -102,6 +102,22 @@ class JsonPointerTests(unittest.TestCase):
         self.assertNotIn("caf\\u00e9", red)
         self.assertIn("***", red)
 
+    def test_compound_payload_subtree_is_preserved(self):
+        # 注入値が dict（NoSQL の {"$ne": "MARKER"}）でも payload の中身を潰さない。
+        doc = {"filter": {"$ne": "MARKER"}, "password": "observed-secret"}
+        red = redact_body_except(doc, "/filter")
+        self.assertEqual(red["filter"], {"$ne": "MARKER"})  # 子孫まで残す
+        self.assertEqual(red["password"], "***")
+        # レスポンス redact 用の兄弟にも payload の marker を含めない。
+        self.assertEqual(sibling_string_values(doc, "/filter"), ["observed-secret"])
+
+    def test_compound_payload_list_subtree_is_preserved(self):
+        doc = {"q": ["MARK1", "MARK2"], "token": "secret"}
+        red = redact_body_except(doc, "/q")
+        self.assertEqual(red["q"], ["MARK1", "MARK2"])
+        self.assertEqual(red["token"], "***")
+        self.assertEqual(sibling_string_values(doc, "/q"), ["secret"])
+
     def test_root_pointer_has_no_siblings(self):
         doc = {"email": "PAYLOAD", "role": "admin"}
         # 空ポインタ=doc 全体が注入 payload → 兄弟なし・マスクなし。

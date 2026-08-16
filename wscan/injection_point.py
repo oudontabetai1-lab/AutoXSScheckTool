@@ -85,19 +85,26 @@ def redact_body_except(doc: Any, keep_pointer: str, mask: str = "***") -> Any:
     観測テンプレの兄弟フィールド(password/token 等)が Finding.request.post_data として
     report/checkpoint/monitor へ平文で残るのを防ぐ(落とし穴8)。注入した値は自前の payload で
     秘匿ではないため残し、再現時に「どの pointer に何を入れたか」は読めるようにする。
-    keep_pointer に一致しない葉(dict/list の末端)は全て mask に置換する。
+    注入 pointer **以下**(compound payload の子孫含む)は全て残し、それ以外の葉を mask する。
+    注入値が dict/list（例 NoSQL の {"$ne": "MARKER"}）でも payload の中身を潰さない。
     """
     keep_tokens = parse_pointer(keep_pointer)
     if not keep_tokens:
         # 空ポインタ=ドキュメント全体が注入 payload（兄弟テンプレは無い）→何も伏せない。
         return deepcopy(doc)
 
+    def _at_or_below_injection(path: list[str]) -> bool:
+        # 注入 pointer と一致、またはその子孫（compound payload の中身）なら残す。
+        return path[: len(keep_tokens)] == keep_tokens
+
     def _walk(node: Any, path: list[str]) -> Any:
+        if _at_or_below_injection(path):
+            return deepcopy(node)
         if isinstance(node, dict):
             return {k: _walk(v, path + [k]) for k, v in node.items()}
         if isinstance(node, list):
             return [_walk(v, path + [str(i)]) for i, v in enumerate(node)]
-        return node if path == keep_tokens else mask
+        return mask
 
     return _walk(deepcopy(doc), [])
 
@@ -117,7 +124,13 @@ def sibling_string_values(doc: Any, keep_pointer: str) -> list[str]:
         return []
     out: list[str] = []
 
+    def _at_or_below_injection(path: list[str]) -> bool:
+        # 注入 pointer 以下（compound payload の子孫含む）は兄弟ではない。
+        return path[: len(keep_tokens)] == keep_tokens
+
     def _walk(node: Any, path: list[str]) -> None:
+        if _at_or_below_injection(path):
+            return
         if isinstance(node, dict):
             for k, v in node.items():
                 _walk(v, path + [k])
@@ -125,7 +138,7 @@ def sibling_string_values(doc: Any, keep_pointer: str) -> list[str]:
             for i, v in enumerate(node):
                 _walk(v, path + [str(i)])
         else:
-            if path != keep_tokens and isinstance(node, str) and node:
+            if isinstance(node, str) and node:
                 out.append(node)
 
     _walk(doc, [])
