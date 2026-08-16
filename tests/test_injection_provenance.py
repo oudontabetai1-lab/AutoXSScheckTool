@@ -5,6 +5,7 @@ from wscan.injection_point import InjectionPoint
 from wscan.scanners.base import (
     BaseScanner,
     Finding,
+    finding_dedup_key_for,
     injection_point_from_finding,
 )
 
@@ -124,6 +125,27 @@ class FindingInjectionProvenanceTests(unittest.IsolatedAsyncioTestCase):
         # form の dedup は従来通り（同一入力・同一 evidence の2件目は重複扱い）。
         self.assertIsNotNone(f1)
         self.assertIsNone(f2)
+
+    def test_shared_dedup_helper_distinguishes_pointers(self):
+        # resume 復元(_init_checkpoint)や engine._record_finding が使う共有ヘルパーも
+        # pointer を区別する（記録時 6-tuple・復元時 4-tuple の食い違いを防ぐ）。
+        base_kwargs = dict(
+            check_type="sqli", severity="high", url="http://h/u",
+            field_name="id", payload="'", evidence="err", evidence_type="sqli_error",
+        )
+        f1 = Finding(**base_kwargs, injection_location="json_body",
+                     injection_method="POST", injection_pointer="/profile/id")
+        f2 = Finding(**base_kwargs, injection_location="json_body",
+                     injection_method="POST", injection_pointer="/billing/id")
+        self.assertNotEqual(finding_dedup_key_for(f1), finding_dedup_key_for(f2))
+
+    def test_shared_dedup_helper_form_unchanged(self):
+        # form/url_param は従来の4部品キーのまま（回帰ゼロ）。
+        f = Finding(
+            check_type="sqli", severity="high", url="http://h/u",
+            field_name="id", payload="'", evidence="err", evidence_type="sqli_error",
+        )
+        self.assertEqual(finding_dedup_key_for(f), ("http://h/u", "id", "sqli", "sqli_error"))
 
     def test_rebuilds_json_body_only(self):
         json_finding = Finding(

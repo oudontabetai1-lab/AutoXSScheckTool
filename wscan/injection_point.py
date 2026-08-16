@@ -78,6 +78,26 @@ def pointer_set_copy(doc: Any, pointer: str, value: Any) -> Any:
     return copied
 
 
+def redact_body_except(doc: Any, keep_pointer: str, mask: str = "***") -> Any:
+    """注入 pointer の葉だけ残し、他の全ての葉を mask で伏せた複製を返す（純粋）。
+
+    観測テンプレの兄弟フィールド(password/token 等)が Finding.request.post_data として
+    report/checkpoint/monitor へ平文で残るのを防ぐ(落とし穴8)。注入した値は自前の payload で
+    秘匿ではないため残し、再現時に「どの pointer に何を入れたか」は読めるようにする。
+    keep_pointer に一致しない葉(dict/list の末端)は全て mask に置換する。
+    """
+    keep_tokens = parse_pointer(keep_pointer)
+
+    def _walk(node: Any, path: list[str]) -> Any:
+        if isinstance(node, dict):
+            return {k: _walk(v, path + [k]) for k, v in node.items()}
+        if isinstance(node, list):
+            return [_walk(v, path + [str(i)]) for i, v in enumerate(node)]
+        return node if path == keep_tokens else mask
+
+    return _walk(deepcopy(doc), [])
+
+
 @dataclass(frozen=True)
 class InjectionPoint:
     """注入点(endpoint × parameter)の不変記述子。ADR-0008 内部層の第一歩。"""

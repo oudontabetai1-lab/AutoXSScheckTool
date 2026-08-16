@@ -87,7 +87,12 @@ class JsonTransportTests(unittest.IsolatedAsyncioTestCase):
             "old@example.test",
         )
         self.assertEqual(pair["request"]["method"], "POST")
-        self.assertEqual(json.loads(pair["request"]["post_data"]), sent)
+        # 証跡 pair の post_data は兄弟をマスク。注入 pointer の値のみ残る（実送信は本物）。
+        evidence_body = json.loads(pair["request"]["post_data"])
+        self.assertEqual(evidence_body["profile"]["email"], "wscan-marker")
+        self.assertEqual(evidence_body["profile"]["name"], "***")
+        self.assertEqual(evidence_body["password"], "***")
+        self.assertNotIn("observed-secret", pair["request"]["post_data"])
         self.assertEqual(pair["request"]["headers"]["Authorization"], "Bearer current")
         self.assertEqual(pair["request"]["headers"]["X-Tenant"], "fixture")
         self.assertGreater(pair["request"]["timestamp"], 0)

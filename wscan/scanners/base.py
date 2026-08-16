@@ -11,7 +11,7 @@ from typing import Optional, TYPE_CHECKING
 
 import httpx
 
-from wscan.injection_point import InjectionPoint, pointer_set_copy
+from wscan.injection_point import InjectionPoint, pointer_set_copy, redact_body_except
 
 if TYPE_CHECKING:
     from wscan.engine import ScanEngine
@@ -132,12 +132,35 @@ def finding_dedup_key(
     return (url, field_name, check_type, evidence_type or check_type)
 
 
-def finding_dedup_key_for(finding: "Finding") -> tuple[str, str, str, str]:
-    return finding_dedup_key(
-        finding.check_type,
-        finding.url,
-        finding.field_name,
-        finding.evidence_type,
+def _augment_dedup_key(
+    base: tuple,
+    injection_location: str,
+    injection_method: str,
+    injection_pointer: str,
+) -> tuple:
+    """JSON body 注入点の dedup identity を method+pointer で拡張する（純粋）。
+
+    同一 leaf 名(例 /profile/id と /billing/id が共に field_name="id")でも別入力
+    なので取りこぼさない。form/url_param は base のまま(4-tuple)。record_finding・
+    finding_dedup_key_for(engine の _record_finding/_init_checkpoint 経由)の**全 dedup
+    地点で同一キー**になるよう、この 1 箇所に集約する。
+    """
+    if injection_location == "json_body":
+        return base + (injection_method, injection_pointer)
+    return base
+
+
+def finding_dedup_key_for(finding: "Finding") -> tuple:
+    return _augment_dedup_key(
+        finding_dedup_key(
+            finding.check_type,
+            finding.url,
+            finding.field_name,
+            finding.evidence_type,
+        ),
+        getattr(finding, "injection_location", ""),
+        getattr(finding, "injection_method", ""),
+        getattr(finding, "injection_pointer", ""),
     )
 
 
@@ -503,6 +526,10 @@ class BaseScanner(ABC):
             self.CHECK_TYPE,
             url,
         )
+        # 証跡 pair 用の post_data は**兄弟をマスク**した表現にする（実送信は本物の
+        # post_data。pair は Finding.request として to_dict→checkpoint/report/monitor へ
+        # 流れるが to_dict は post_data を伏せない＝落とし穴8）。注入 pointer の値のみ残す。
+        redacted_post_data = json.dumps(redact_body_except(body, ip.parameter_id))
         request_timestamp = time.time()
         try:
             async with httpx.AsyncClient(**kwargs) as client:
@@ -513,7 +540,7 @@ class BaseScanner(ABC):
                     "url": url,
                     "method": method,
                     "headers": headers,
-                    "post_data": post_data,
+                    "post_data": redacted_post_data,
                     "timestamp": request_timestamp,
                 },
                 "response": {
@@ -761,19 +788,17 @@ class BaseScanner(ABC):
                     label=f"[FINDING] {self.CHECK_TYPE} on {field_name}"
                 )
         # Dedup: skip exact evidence repeats while preserving distinct signals
-        # on the same input.
-        dedup_key = finding_dedup_key(
-            self.CHECK_TYPE,
-            url,
-            field_name,
-            evidence_type,
+        # on the same input。JSON body 注入点は leaf 名が同じでも別入力になり得る
+        # (例 /profile/id と /billing/id は共に field_name="id")。_augment_dedup_key に
+        # 集約し、engine の _record_finding/_init_checkpoint(finding_dedup_key_for 経由)と
+        # **完全に同一キー**にする(記録時のみ 6-tuple で resume 復元が 4-tuple、という
+        # 食い違いを防ぐ)。form/url_param は base(4-tuple)のままで回帰ゼロ。
+        dedup_key = _augment_dedup_key(
+            finding_dedup_key(self.CHECK_TYPE, url, field_name, evidence_type),
+            injection_point.location if injection_point is not None else "",
+            injection_point.method if injection_point is not None else "",
+            injection_point.parameter_id if injection_point is not None else "",
         )
-        # JSON body 注入点は leaf 名が同じでも別入力になり得る(例 /profile/id と
-        # /billing/id は共に field_name="id")。method+pointer を identity に足して
-        # 2件目が誤って重複扱いで捨てられるのを防ぐ。form/url_param は従来の4部品キーの
-        # まま(4-tuple と 6-tuple は決して等しくならないので回帰ゼロ)。
-        if injection_point is not None and injection_point.location == "json_body":
-            dedup_key = dedup_key + (injection_point.method, injection_point.parameter_id)
         if dedup_key in self.engine._finding_dedup:
             return None  # duplicate
         self.engine._finding_dedup.add(dedup_key)

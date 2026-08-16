@@ -9,6 +9,7 @@ from wscan.injection_point import (
     parse_pointer,
     pointer_get,
     pointer_set_copy,
+    redact_body_except,
     unescape_token,
 )
 
@@ -42,6 +43,27 @@ class JsonPointerTests(unittest.TestCase):
         self.assertEqual(changed["profile"]["name"], "Alice")
         self.assertEqual(changed["password"], "observed-secret")
         self.assertEqual(doc["profile"]["email"], "old@example.test")
+
+    def test_redact_body_except_masks_siblings_only(self):
+        doc = {
+            "profile": {"email": "PAYLOAD", "name": "Alice"},
+            "password": "observed-secret",
+            "items": [{"id": 7}],
+        }
+        red = redact_body_except(doc, "/profile/email")
+        # 注入 pointer の葉のみ残り、他の葉は全てマスク。
+        self.assertEqual(red["profile"]["email"], "PAYLOAD")
+        self.assertEqual(red["profile"]["name"], "***")
+        self.assertEqual(red["password"], "***")
+        self.assertEqual(red["items"][0]["id"], "***")
+        # 元 doc は不変。
+        self.assertEqual(doc["password"], "observed-secret")
+
+    def test_redact_body_except_keeps_array_leaf(self):
+        doc = {"a": [{"v": "PAYLOAD"}, {"v": "secret"}]}
+        red = redact_body_except(doc, "/a/0/v")
+        self.assertEqual(red["a"][0]["v"], "PAYLOAD")
+        self.assertEqual(red["a"][1]["v"], "***")
 
     def test_pointer_set_copy_handles_array_and_non_string_leaf(self):
         doc = {"filters": [{"email": "a"}, {"email": "b"}]}
