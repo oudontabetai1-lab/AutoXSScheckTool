@@ -129,7 +129,7 @@ class SSRFScanner(BaseScanner):
         field_name = field.get("name", "unknown")
 
         # Only test fields that plausibly accept URLs or server-side paths
-        if not (ip.legacy_is_url_param() or self._is_ssrf_param(field_name)):
+        if not (ip.location == "url_param" or self._is_ssrf_param(field_name)):
             return []
 
         findings: list[Finding] = []

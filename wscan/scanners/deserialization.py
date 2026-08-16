@@ -292,7 +292,10 @@ class DeserializationScanner(BaseScanner):
                             "matched_error": err[:150],
                             "transport": "raw_post",
                         },
-                        injection_point=ip,
+                        # raw POST は payload を body 全体として送る（ip.parameter_id には注入しない）。
+                        # 特定 pointer の脆弱性として provenance を付けると、複数葉スキャンで同一の
+                        # endpoint 全体レスポンスに対し pointer 別の重複 Finding が出て、再現メタが実際に
+                        # 撃っていない注入位置を指してしまう。よって field IP の provenance は付けない。
                     )
                     findings.append(finding)
                     break

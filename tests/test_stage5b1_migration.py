@@ -91,6 +91,29 @@ class _UnsupportedScanner(BaseScanner):
         raise AssertionError("未対応 JSON を form/url_param へ落としてはならない")
 
 
+class JsonBodyDoesNotCrashTests(unittest.IsolatedAsyncioTestCase):
+    async def test_json_scan_does_not_hit_legacy_predicate(self):
+        # SUPPORTS_JSON_BODY のスキャナに json_body ip を流しても、evolution wave の
+        # ip.legacy_is_url_param() や ssrf の url-param 判定で ValueError にならない。
+        # template 不在で _apply_json_payload は ("",{}) を返す → 検出なし → 例外なく [] を返す。
+        for scanner_cls in (
+            LDAPScanner,
+            PathTraversalScanner,
+            OSInjectionScanner,
+            SSTIScanner,
+            SSRFScanner,
+        ):
+            with self.subTest(scanner=scanner_cls.__name__):
+                scanner = scanner_cls(_Engine())
+                ip = InjectionPoint.for_json_body(
+                    "POST", "http://h/api", "/url", template_id="missing"
+                )
+                findings = await scanner.scan_injection_point(
+                    ip, {"name": "url", "type": "text"}
+                )
+                self.assertEqual(findings, [])
+
+
 def _legacy_calls(ip: InjectionPoint, payloads: list[str]) -> list[tuple]:
     """移行前の uniform ``_apply_payload`` が作る呼出し列。"""
     if ip.legacy_is_url_param():

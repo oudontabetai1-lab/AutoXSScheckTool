@@ -156,7 +156,9 @@ class LDAPScanner(BaseScanner):
             if await _test_payload(payload):
                 break  # one confirmed finding per field
 
-        if not findings:
+        # evolution wave は legacy browser transport(is_url_param 前提)。json_body では
+        # ip.legacy_is_url_param() が例外になり、かつ適用不能なので skip する（json は標準 payload のみ）。
+        if not findings and ip.location != "json_body":
             extra_payloads = await self.evolved_payloads(
                 ip.url,
                 ip.form_index,

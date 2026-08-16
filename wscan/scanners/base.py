@@ -608,17 +608,10 @@ class BaseScanner(ABC):
         except Exception:
             return "", {}
 
-        # abort 判定を送信直前に通す。AbortScan は呼び出し側へ伝播させる。
-        # 監査ログ(payloads.jsonl / monitor)には**注入した値のみ**記録する。テンプレの
-        # 兄弟フィールド(password/token 等)を含む body 全体を渡すと秘匿が平文で永続/配信
-        # されてしまう(落とし穴8: 秘匿の非永続。in-memory レジストリの保護が台無しになる)。
-        log_value = payload if isinstance(payload, str) else json.dumps(payload)
-        await self.log_payload_test(
-            ip.display_name or ip.parameter_id,
-            log_value,
-            self.CHECK_TYPE,
-            url,
-        )
+        # 監査ログ(payloads.jsonl / monitor)と abort 判定は**呼び出し側(scanner)が
+        # _apply_ip の直前に log_payload_test で一元化**する（form/url_param の _apply_payload と同じ
+        # 単層ログ）。ここで再度 log すると json 経路だけ二重記録・二重 dashboard イベントになり、
+        # payloads.jsonl が送信リクエストと 1:1 対応しなくなるため、transport 側では log しない。
         # transport は**忠実**に振る舞う: source も pair も生応答を返す。検出（反射/エラー
         # 文字列/長さ差）は生本文で行う必要があり、兄弟値を先に伏せると短い共通値
         # （例 "a"/"admin"）が反射 payload やエラー文を壊して偽陰性を生む。秘匿の伏字は
