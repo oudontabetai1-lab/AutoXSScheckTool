@@ -267,6 +267,8 @@ class OSInjectionScanner(BaseScanner):
             urlparse(finding.url).query, keep_blank_values=True
         )
         ip = self._verify_injection_point(finding, is_url_param)
+        if ip is None:
+            return None
         # verify 時の再投入（baseline + payload）も監査ログに残す。
         await self.log_payload_test(
             finding.field_name, "baseline_os_test", "os_verify_baseline", finding.url

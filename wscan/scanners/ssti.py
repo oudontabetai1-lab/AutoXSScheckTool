@@ -183,6 +183,8 @@ class SSTIScanner(BaseScanner):
             keep_blank_values=True,
         )
         ip = self._verify_injection_point(finding, is_url_param)
+        if ip is None:
+            return None
         # verify 時の再投入（baseline + payload）も監査ログに残す。
         await self.log_payload_test(field_name, "wscan_ssti_baseline", "ssti_verify_baseline", finding.url)
         baseline_source, _ = await self._apply_ip(ip, "wscan_ssti_baseline")

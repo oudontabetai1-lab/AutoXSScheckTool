@@ -333,17 +333,39 @@ class Finding:
         }
 
 
+class ProvenanceError(ValueError):
+    """Finding の非空 provenance が不正または不足している。"""
+
+
 def injection_point_from_finding(finding: Finding) -> Optional[InjectionPoint]:
-    """JSON body の provenance がある Finding から注入点を復元する。"""
-    if finding.injection_location != "json_body":
+    """Finding の provenance から注入点を復元する。空 location は旧 Finding として扱う。"""
+    location = finding.injection_location
+    if location == "":
         return None
-    return InjectionPoint.for_json_body(
-        finding.injection_method,
-        finding.url,
-        finding.injection_pointer,
-        display_name=finding.field_name,
-        template_id=finding.injection_template_id,
-    )
+    if location == "form":
+        return InjectionPoint.for_form(
+            finding.url,
+            finding.field_name,
+            finding.injection_form_index,
+        )
+    if location == "url_param":
+        return InjectionPoint.for_url_param(finding.url, finding.field_name)
+    if location == "json_body":
+        if not finding.injection_pointer:
+            raise ProvenanceError("json_body provenance に injection_pointer がありません")
+        try:
+            return InjectionPoint.for_json_body(
+                finding.injection_method,
+                finding.url,
+                finding.injection_pointer,
+                display_name=finding.field_name,
+                template_id=finding.injection_template_id,
+            )
+        except ValueError as exc:
+            raise ProvenanceError(
+                f"json_body provenance の injection_pointer が不正です: {exc}"
+            ) from exc
+    raise ProvenanceError(f"未知の injection_location です: {location!r}")
 
 
 class BaseScanner(ABC):
@@ -442,16 +464,16 @@ class BaseScanner(ABC):
         self,
         finding: "Finding",
         is_url_param: bool,
-    ) -> InjectionPoint:
+    ) -> Optional[InjectionPoint]:
         """verify の再送に使う注入点を復元する。
 
-        json_body の Finding は provenance（location/pointer/method/template_id）から
-        `injection_point_from_finding` で復元し、保存済み JSON template 経由で再送できる
-        ようにする。それ以外（form/url_param・旧 Finding）は従来の URL クエリ推測へ
-        fallback する（form/url_param の verify 挙動は不変）。全 location を provenance 駆動に
-        する切替は 5c。
+        非空の provenance は全 location で優先し、壊れていれば再送不能として None を返す。
+        location が空の旧 Finding だけ、従来の URL クエリ推測へ fallback する。
         """
-        ip = injection_point_from_finding(finding)
+        try:
+            ip = injection_point_from_finding(finding)
+        except ProvenanceError:
+            return None
         if ip is not None:
             return ip
         if is_url_param:
