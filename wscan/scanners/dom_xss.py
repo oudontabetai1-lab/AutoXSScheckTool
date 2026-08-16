@@ -10,6 +10,8 @@ import re
 import uuid
 from typing import TYPE_CHECKING
 
+from wscan.injection_point import InjectionPoint
+
 from .base import BaseScanner, Finding
 
 if TYPE_CHECKING:
@@ -106,6 +108,7 @@ class DOMXSSScanner(BaseScanner):
 
     CHECK_TYPE = "dom_xss"
     SEVERITY = "critical"
+    SUPPORTS_JSON_BODY = False
 
     async def _ensure_hook(self) -> None:
         """シンクフックを「各ページに対して一度だけ」登録する。
@@ -130,36 +133,37 @@ class DOMXSSScanner(BaseScanner):
         await page.add_init_script(_HOOK_SCRIPT)
         hooked.add(page)
 
-    async def scan_field(
+    async def scan_injection_point(
         self,
-        url: str,
-        form_index: int,
+        ip: InjectionPoint,
         field: dict,
-        is_url_param: bool = False,
     ) -> list[Finding]:
+        # DOM sink/dialog 実行に依存するため、ブラウザ遷移しない JSON 注入は扱わない。
+        if ip.location == "json_body":
+            return []
+
         findings = []
-        field_name = field.get("name", "unknown")
+        field_name = ip.parameter_id
 
         if self.monitor:
-            await self.monitor.emit_status(f"DOM-XSS testing: {field_name} on {url}")
+            await self.monitor.emit_status(
+                f"DOM-XSS testing: {field_name} on {ip.url}"
+            )
 
         uid = uuid.uuid4().hex[:8]
         payload = _DOM_XSS_PAYLOAD.replace("{uid}", uid)
         marker = f"__WSCAN_DOMXSS__{uid}"
 
-        await self.log_payload_test(field_name, payload, "dom_xss", url)
+        await self.log_payload_test(field_name, payload, "dom_xss", ip.url)
 
         try:
             # Install DOM hook before the page loads (once per page)
             await self._ensure_hook()
 
-            if is_url_param:
-                source, pair = await self.browser.test_url_param(url, field_name, payload)
-            else:
-                await self.browser.navigate(url)
-                source, pair = await self.browser.fill_and_submit_form(
-                    form_index, field_name, payload
-                )
+            source, pair = await self._apply_payload(
+                ip.url, ip.parameter_id, payload,
+                ip.form_index, ip.legacy_is_url_param(),
+            )
 
             await asyncio.sleep(2.0 * self.sleep_factor)  # Allow JS to settle
 
@@ -184,7 +188,7 @@ class DOMXSSScanner(BaseScanner):
             data = entry.get("data", "")
             if marker in data:
                 finding = await self.record_finding(
-                    url=url,
+                    url=ip.url,
                     field_name=field_name,
                     payload=payload,
                     evidence=(
@@ -201,10 +205,11 @@ class DOMXSSScanner(BaseScanner):
                         "data_excerpt": data[:200],
                     },
                     reproduction_steps=[
-                        f"Open {url}",
+                        f"Open {ip.url}",
                         f"Inject the payload into field '{field_name}'.",
                         f"Observe that the marker reaches DOM sink '{sink}'.",
                     ],
+                    injection_point=ip,
                 )
                 findings.append(finding)
                 break  # One sink is enough evidence
@@ -212,7 +217,7 @@ class DOMXSSScanner(BaseScanner):
         # Also check if alert fired (extra confirmation)
         if not findings and self.browser.dialog_fired and marker in self.browser.dialog_message:
             finding = await self.record_finding(
-                url=url,
+                url=ip.url,
                 field_name=field_name,
                 payload=payload,
                 evidence=f"DOM-based XSS confirmed: alert() fired with marker in dialog",
@@ -227,32 +232,33 @@ class DOMXSSScanner(BaseScanner):
                     "dialog_message": self.browser.dialog_message,
                 },
                 reproduction_steps=[
-                    f"Open {url}",
+                    f"Open {ip.url}",
                     f"Inject the payload into field '{field_name}'.",
                     "Observe the browser JavaScript dialog.",
                 ],
+                injection_point=ip,
             )
             findings.append(finding)
 
         if not findings:
             extra_payloads = await self.evolved_payloads(
-                url, form_index, field_name, is_url_param
+                ip.url,
+                ip.form_index,
+                ip.parameter_id,
+                ip.legacy_is_url_param(),
             )
             for raw_payload in extra_payloads:
                 payload = marker + raw_payload
-                await self.log_payload_test(field_name, payload, "dom_xss_evolved", url)
+                await self.log_payload_test(
+                    field_name, payload, "dom_xss_evolved", ip.url
+                )
                 try:
                     self.browser.reset_dialog()
                     await self.browser.page.add_init_script(_HOOK_SCRIPT)
-                    if is_url_param:
-                        source, pair = await self.browser.test_url_param(
-                            url, field_name, payload
-                        )
-                    else:
-                        await self.browser.navigate(url)
-                        source, pair = await self.browser.fill_and_submit_form(
-                            form_index, field_name, payload
-                        )
+                    source, pair = await self._apply_payload(
+                        ip.url, ip.parameter_id, payload,
+                        ip.form_index, ip.legacy_is_url_param(),
+                    )
                     await asyncio.sleep(2.0 * self.sleep_factor)
                     log = await self.browser.page.evaluate(
                         "() => window.__wscan_domxss_log || []"
@@ -265,7 +271,7 @@ class DOMXSSScanner(BaseScanner):
                     data = entry.get("data", "")
                     if marker in data:
                         finding = await self.record_finding(
-                            url=url,
+                            url=ip.url,
                             field_name=field_name,
                             payload=payload,
                             evidence=(
@@ -282,10 +288,11 @@ class DOMXSSScanner(BaseScanner):
                                 "data_excerpt": data[:200],
                             },
                             reproduction_steps=[
-                                f"Open {url}",
+                                f"Open {ip.url}",
                                 f"Inject the payload into field '{field_name}'.",
                                 f"Observe that the marker reaches DOM sink '{sink}'.",
                             ],
+                            injection_point=ip,
                         )
                         findings.append(finding)
                         break
@@ -293,6 +300,55 @@ class DOMXSSScanner(BaseScanner):
                     break
 
         return findings
+
+    async def _evolution_probe(
+        self,
+        url: str,
+        form_index: int,
+        field_name: str,
+        is_url_param: bool,
+    ) -> tuple[str, set[str], dict]:
+        """文脈 probe の判定を保ち、非標準 3 引数 transport で送信する。"""
+        try:
+            from wscan import context_mutator
+
+            marker = context_mutator.make_marker()
+            probe = context_mutator.make_char_probe(marker)
+            await self.log_payload_test(
+                field_name,
+                probe,
+                f"{self.CHECK_TYPE}_evolution_probe",
+                url,
+            )
+            source, pair = await self._apply_payload(
+                url, field_name, probe, form_index, is_url_param
+            )
+            response_source = (
+                (pair.get("response", {}) or {}).get("body") or source or ""
+            )
+            surviving = context_mutator.surviving_chars(response_source, marker)
+            detected_context = context_mutator.detect_context(response_source, marker)
+            detected_context["marker"] = marker
+            return response_source, surviving, detected_context
+        except Exception as exc:
+            self._note_wave_degradation("evolution_probe", exc)
+            return "", set(), {}
+
+    async def scan_field(
+        self,
+        url: str,
+        form_index: int,
+        field: dict,
+        is_url_param: bool = False,
+    ) -> list[Finding]:
+        """従来 API を InjectionPoint 駆動へ接続する互換 wrapper。"""
+        name = field.get("name", "unknown")
+        ip = (
+            InjectionPoint.for_url_param(url, name)
+            if is_url_param
+            else InjectionPoint.for_form(url, name, form_index)
+        )
+        return await self.scan_injection_point(ip, field)
 
     async def verify_finding(self, finding: Finding) -> bool | None:
         if finding.evidence_type not in {"dom_xss_sink", "dom_xss_dialog"}:
@@ -302,13 +358,26 @@ class DOMXSSScanner(BaseScanner):
         if not marker:
             return None
 
+        # 注入点種別は provenance(injection_location) を優先し、無い旧 Finding のみ
+        # URL クエリ推測へ fallback（旧 verify と同じ推測）。scan と同じ明示種別で再送する。
+        from urllib.parse import parse_qs, urlparse
+
+        if finding.injection_location:
+            is_url_param = finding.injection_location == "url_param"
+        else:
+            is_url_param = finding.field_name in parse_qs(
+                urlparse(finding.url).query, keep_blank_values=True
+            )
         try:
             self.browser.reset_dialog()
             await self._ensure_hook()
             await self.log_payload_test(
                 finding.field_name, finding.payload, "dom_xss_verify", finding.url
             )
-            await self._apply_payload(finding.url, finding.field_name, finding.payload)
+            await self._apply_payload(
+                finding.url, finding.field_name, finding.payload,
+                finding.injection_form_index, is_url_param,
+            )
             await asyncio.sleep(0.5 * self.sleep_factor)
             log = await self.browser.page.evaluate(
                 "() => window.__wscan_domxss_log || []"
@@ -325,17 +394,24 @@ class DOMXSSScanner(BaseScanner):
 
         return False
 
-    async def _apply_payload(self, url: str, field_name: str, payload: str):
-        from urllib.parse import parse_qs, urlparse
-
-        is_url_param = field_name in parse_qs(
-            urlparse(url).query, keep_blank_values=True
-        )
+    async def _apply_payload(
+        self,
+        url: str,
+        field_name: str,
+        payload: str,
+        form_index: int = 0,
+        is_url_param: bool = False,
+    ):
+        # **明示の注入点種別**で dispatch する（URL クエリからの推測はしない）。旧 scan 本体は
+        # engine の is_url_param を直接使っていたため、form フィールド名がたまたま URL クエリと
+        # 同名（例 /search?q=old の form field q）でも form へ送っていた。ここで URL 推測に戻すと
+        # test_url_param へ誤経路し form-only DOM XSS を取りこぼす/provenance が url_param になる。
         if is_url_param:
             return await self.browser.test_url_param(url, field_name, payload)
 
+        # 選択された form_index を使う（複数フォームのページで別フォームを潰さない）。
         await self.browser.navigate(url)
-        return await self.browser.fill_and_submit_form(0, field_name, payload)
+        return await self.browser.fill_and_submit_form(form_index, field_name, payload)
 
     def _marker_for_finding(self, finding: Finding) -> str:
         details = getattr(finding, "evidence_details", {}) or {}
