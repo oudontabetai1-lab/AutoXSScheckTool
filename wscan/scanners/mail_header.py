@@ -23,6 +23,8 @@ from urllib.parse import urlsplit, urlunsplit, parse_qsl
 
 import httpx
 
+from wscan.injection_point import InjectionPoint
+
 from .base import BaseScanner, Finding
 from ..waf_bypass import crlf_bypass_variants
 
@@ -135,15 +137,18 @@ class MailHeaderInjectionScanner(BaseScanner):
 
     CHECK_TYPE = "mail_header"
     SEVERITY = "high"
+    SUPPORTS_JSON_BODY = False
 
-    async def scan_field(
+    async def scan_injection_point(
         self,
-        url: str,
-        form_index: int,
+        ip: InjectionPoint,
         field: dict,
-        is_url_param: bool = False,
     ) -> list[Finding]:
-        field_name = field.get("name", "unknown")
+        # 生 HTTP transport は form/url_param 専用。未対応 JSON を誤送信しない。
+        if ip.location == "json_body":
+            return []
+
+        field_name = ip.display_name or ip.parameter_id
 
         # Only test fields whose names suggest email header usage
         if not _field_name_suggests_mail(field_name):
@@ -153,28 +158,40 @@ class MailHeaderInjectionScanner(BaseScanner):
 
         if self.monitor:
             await self.monitor.emit_status(
-                f"Mail header injection testing: {field_name} on {url}"
+                f"Mail header injection testing: {field_name} on {ip.url}"
             )
 
         # ── フェーズ 1: 反射 / エラー漏えいのヒューリスティック検知 ──────────
-        heuristic = await self._scan_reflection(
-            url, form_index, field_name, is_url_param
-        )
+        heuristic = await self._scan_reflection(ip, field_name)
         findings.extend(heuristic)
 
         # ── フェーズ 2: OOB 確証（WSCAN_OOB_* 設定時のみ） ──────────────────
-        oob = await self._scan_oob(url, form_index, field_name, is_url_param)
+        oob = await self._scan_oob(ip, field_name)
         if oob:
             findings.append(oob)
 
         return findings
 
-    async def _scan_reflection(
+    async def scan_field(
         self,
         url: str,
         form_index: int,
+        field: dict,
+        is_url_param: bool = False,
+    ) -> list[Finding]:
+        """従来 API を InjectionPoint 駆動へ接続する互換 wrapper。"""
+        name = field.get("name", "unknown")
+        ip = (
+            InjectionPoint.for_url_param(url, name)
+            if is_url_param
+            else InjectionPoint.for_form(url, name, form_index)
+        )
+        return await self.scan_injection_point(ip, field)
+
+    async def _scan_reflection(
+        self,
+        ip: InjectionPoint,
         field_name: str,
-        is_url_param: bool,
     ) -> list[Finding]:
         """注入した CR/LF + ヘッダの反射、またはメールエラー漏えいを検知する。"""
         # ベースライン: CRLF を含まない良性値を投入し、常時出るメールエラーの
@@ -182,16 +199,12 @@ class MailHeaderInjectionScanner(BaseScanner):
         # 無関係なので、ベースラインと同じパターンは除外する。一方、ベースラインに
         # 無い注入特有のエラー（例: invalid mail header）が新たに出た場合は記録する
         # （恒常エラーのある環境でも取りこぼさない）。
-        baseline_patterns = await self._baseline_mail_error_patterns(
-            url, form_index, field_name, is_url_param
-        )
+        baseline_patterns = await self._baseline_mail_error_patterns(ip, field_name)
 
         for payload in reflection_payloads():
-            await self.log_payload_test(field_name, payload, "mail_header", url)
+            await self.log_payload_test(field_name, payload, "mail_header", ip.url)
 
-            source, pair = await self._submit_probe(
-                url, form_index, field_name, payload, is_url_param
-            )
+            source, pair = await self._submit_probe(ip, payload)
             await asyncio.sleep(0.2 * self.sleep_factor)
 
             # Check 1: mail-related error message in response (leaks unsanitised input)。
@@ -200,7 +213,7 @@ class MailHeaderInjectionScanner(BaseScanner):
             if new_patterns:
                 match = self.check_response_for_patterns(source, list(new_patterns))
                 finding = await self.record_finding(
-                    url=url,
+                    url=ip.url,
                     field_name=field_name,
                     payload=payload,
                     evidence=(
@@ -210,13 +223,14 @@ class MailHeaderInjectionScanner(BaseScanner):
                     severity="high",
                     confidence="tentative",
                     evidence_type="mail_header_error",
+                    injection_point=ip,
                 )
                 return [finding] if finding else []
 
             # Check 2: raw CRLF + injected header reflected verbatim in HTML body
             if _REFLECTED_INJECTION_RE.search(source):
                 finding = await self.record_finding(
-                    url=url,
+                    url=ip.url,
                     field_name=field_name,
                     payload=payload,
                     evidence=(
@@ -227,6 +241,7 @@ class MailHeaderInjectionScanner(BaseScanner):
                     severity="high",
                     confidence="likely",
                     evidence_type="mail_header_reflected",
+                    injection_point=ip,
                 )
                 return [finding] if finding else []
 
@@ -243,10 +258,8 @@ class MailHeaderInjectionScanner(BaseScanner):
 
     async def _baseline_mail_error_patterns(
         self,
-        url: str,
-        form_index: int,
+        ip: InjectionPoint,
         field_name: str,
-        is_url_param: bool,
     ) -> set:
         """CRLF を含まない良性値を投入し、恒常的に出るメールエラーのパターン集合を返す。
 
@@ -257,11 +270,9 @@ class MailHeaderInjectionScanner(BaseScanner):
         """
         try:
             await self.log_payload_test(
-                field_name, "baseline@example.com", "mail_header_baseline", url
+                field_name, "baseline@example.com", "mail_header_baseline", ip.url
             )
-            source, _pair = await self._submit_probe(
-                url, form_index, field_name, "baseline@example.com", is_url_param
-            )
+            source, _pair = await self._submit_probe(ip, "baseline@example.com")
             await asyncio.sleep(0.2 * self.sleep_factor)
             return self._matched_mail_error_patterns(source)
         except Exception as exc:
@@ -270,10 +281,8 @@ class MailHeaderInjectionScanner(BaseScanner):
 
     async def _scan_oob(
         self,
-        url: str,
-        form_index: int,
+        ip: InjectionPoint,
         field_name: str,
-        is_url_param: bool,
     ) -> Optional[Finding]:
         """OOB メール受信で注入の実発火を確証する（OOB 未設定なら no-op）。
 
@@ -302,10 +311,8 @@ class MailHeaderInjectionScanner(BaseScanner):
             if i >= len(variants):
                 break
             payload, desc = variants[i]
-            await self.log_payload_test(field_name, payload, "mail_header", url)
-            _source, pair = await self._submit_probe(
-                url, form_index, field_name, payload, is_url_param
-            )
+            await self.log_payload_test(field_name, payload, "mail_header", ip.url)
+            _source, pair = await self._submit_probe(ip, payload)
             attempts.append(
                 {"token": token, "address": oob_addr, "payload": payload,
                  "desc": desc, "pair": pair or {}}
@@ -332,7 +339,7 @@ class MailHeaderInjectionScanner(BaseScanner):
         attempt, received = hit
 
         return await self.record_finding(
-            url=url,
+            url=ip.url,
             field_name=field_name,
             payload=attempt["payload"],
             evidence=(
@@ -351,6 +358,7 @@ class MailHeaderInjectionScanner(BaseScanner):
                 "received_subject": received.subject,
                 "received_to": received.to_addrs,
             },
+            injection_point=ip,
         )
 
     @staticmethod
@@ -382,11 +390,8 @@ class MailHeaderInjectionScanner(BaseScanner):
 
     async def _submit_probe(
         self,
-        url: str,
-        form_index: int,
-        field_name: str,
+        ip: InjectionPoint,
         payload: str,
-        is_url_param: bool,
     ) -> tuple[str, dict]:
         """注入プローブを投入する。生 HTTP 経路を優先し、不能ならブラウザへ。
 
@@ -396,17 +401,20 @@ class MailHeaderInjectionScanner(BaseScanner):
         フォーム抽出や送信が失敗した場合のみ従来のブラウザ経由へフォールバックする。
         """
         try:
+            # raw transport は共有 dispatch に混ぜず、legacy 引数を明示して呼ぶ。
             raw = await self._apply_payload_raw(
-                url, form_index, field_name, payload, is_url_param
+                ip.url,
+                ip.form_index,
+                ip.parameter_id,
+                payload,
+                ip.legacy_is_url_param(),
             )
         except Exception as exc:
             raw = None
             self._note_wave_degradation("mail_raw_submit", exc)
         if raw is not None:
             return raw
-        return await self._apply_payload(
-            url, form_index, field_name, payload, is_url_param
-        )
+        return await self._apply_ip(ip, payload)
 
     async def _apply_payload_raw(
         self,

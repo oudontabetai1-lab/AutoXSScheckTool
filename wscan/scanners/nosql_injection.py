@@ -19,6 +19,8 @@ from typing import TYPE_CHECKING
 
 import httpx
 
+from wscan.injection_point import InjectionPoint
+
 from .base import BaseScanner, Finding
 
 if TYPE_CHECKING:
@@ -65,6 +67,7 @@ class NoSQLInjectionScanner(BaseScanner):
 
     CHECK_TYPE = "nosql"
     SEVERITY = "high"
+    SUPPORTS_JSON_BODY = True
 
     def _boolean_expansion(
         self,
@@ -107,14 +110,12 @@ class NoSQLInjectionScanner(BaseScanner):
         await self.browser.navigate(url)
         return await self.browser.fill_and_submit_form(form_index, field_name, payload)
 
-    async def scan_field(
+    async def scan_injection_point(
         self,
-        url: str,
-        form_index: int,
+        ip: InjectionPoint,
         field: dict,
-        is_url_param: bool = False,
     ) -> list[Finding]:
-        field_name = field.get("name", "unknown")
+        field_name = ip.display_name or ip.parameter_id
         field_type = field.get("type", "text").lower()
 
         # Skip non-text fields
@@ -123,64 +124,46 @@ class NoSQLInjectionScanner(BaseScanner):
 
         if self.monitor:
             await self.monitor.emit_status(
-                f"NoSQL injection test: {field_name} on {url}"
+                f"NoSQL injection test: {field_name} on {ip.url}"
             )
 
         findings = []
 
         # ── Baseline request ──────────────────────────────────────────
         # baseline もフィールド投入なので監査ログに残す（log_payload_test 一元化の不変条件）。
-        await self.log_payload_test(field_name, "baseline_value_wscan", "nosql_baseline", url)
+        await self.log_payload_test(
+            field_name, "baseline_value_wscan", "nosql_baseline", ip.url
+        )
         try:
-            if is_url_param:
-                baseline_src, baseline_pair = await self.browser.test_url_param(
-                    url, field_name, "baseline_value_wscan"
-                )
-            else:
-                await self.browser.navigate(url)
-                baseline_src, baseline_pair = await self.browser.fill_and_submit_form(
-                    form_index, field_name, "baseline_value_wscan"
-                )
+            baseline_src, baseline_pair = await self._apply_ip(
+                ip, "baseline_value_wscan"
+            )
         except Exception:
             return []
 
         baseline_len = len(baseline_src)
         baseline_src2 = ""
-        await self.log_payload_test(field_name, "baseline_value_wscan_2", "nosql_baseline_2", url)
+        await self.log_payload_test(
+            field_name, "baseline_value_wscan_2", "nosql_baseline_2", ip.url
+        )
         try:
-            if is_url_param:
-                baseline_src2, _ = await self.browser.test_url_param(
-                    url, field_name, "baseline_value_wscan_2"
-                )
-            else:
-                await self.browser.navigate(url)
-                baseline_src2, _ = await self.browser.fill_and_submit_form(
-                    form_index, field_name, "baseline_value_wscan_2"
-                )
+            baseline_src2, _ = await self._apply_ip(
+                ip, "baseline_value_wscan_2"
+            )
         except Exception:
             baseline_src2 = ""
 
         async def _test_param_payload(payload: str, check_label: str = "nosql") -> bool:
-            await self.log_payload_test(field_name, payload, check_label, url)
+            await self.log_payload_test(field_name, payload, check_label, ip.url)
             try:
-                if is_url_param:
-                    # Inject as array: field[$ne]=value
-                    # Encode operator as bracket notation
-                    op_param = field_name + "[$ne]"
-                    src, pair = await self.browser.test_url_param(
-                        url, op_param, "wscan_invalid"
-                    )
-                else:
-                    await self.browser.navigate(url)
-                    src, pair = await self.browser.fill_and_submit_form(
-                        form_index, field_name, payload
-                    )
+                # url_param の ``field[$ne]`` 変換は既存 _apply_payload に委譲する。
+                src, pair = await self._apply_ip(ip, payload)
 
                 # Check for error patterns
                 err = self.check_response_for_patterns(src, _NOSQL_ERROR_PATTERNS)
                 if err:
                     finding = await self.record_finding(
-                        url=url,
+                        url=ip.url,
                         field_name=field_name,
                         payload=payload,
                         evidence=(
@@ -191,6 +174,7 @@ class NoSQLInjectionScanner(BaseScanner):
                         severity="high",
                         evidence_type="nosql_error",
                         evidence_details={"matched_error": err[:150]},
+                        injection_point=ip,
                     )
                     findings.append(finding)
                     return True
@@ -204,7 +188,7 @@ class NoSQLInjectionScanner(BaseScanner):
                 )
                 if expanded:
                     finding = await self.record_finding(
-                        url=url,
+                        url=ip.url,
                         field_name=field_name,
                         payload=payload,
                         evidence=(
@@ -218,8 +202,13 @@ class NoSQLInjectionScanner(BaseScanner):
                         evidence_type="nosql_boolean",
                         evidence_details={
                             **details,
-                            "injected_param": field_name + "[$ne]" if is_url_param else field_name,
+                            "injected_param": (
+                                field_name + "[$ne]"
+                                if ip.location == "url_param"
+                                else field_name
+                            ),
                         },
+                        injection_point=ip,
                     )
                     findings.append(finding)
                     return True
@@ -227,7 +216,7 @@ class NoSQLInjectionScanner(BaseScanner):
             except Exception as exc:
                 if self.monitor:
                     await self.monitor.emit_status(
-                        f"[warn] nosql: probe failed on {field_name} @ {url}: {exc}"
+                        f"[warn] nosql: probe failed on {field_name} @ {ip.url}: {exc}"
                     )
                 return False
             await asyncio.sleep(0.2 * self.sleep_factor)
@@ -238,19 +227,40 @@ class NoSQLInjectionScanner(BaseScanner):
             if await _test_param_payload(payload):
                 break
 
-        if not findings:
+        # evolution wave は legacy browser transport 専用なので JSON では実行しない。
+        if not findings and ip.location != "json_body":
             extra_payloads = await self.evolved_payloads(
-                url, form_index, field_name, is_url_param
+                ip.url,
+                ip.form_index,
+                ip.parameter_id,
+                ip.legacy_is_url_param(),
             )
             for payload in extra_payloads:
                 if await _test_param_payload(payload, "nosql_evolved"):
                     break
 
         # ── JSON body injection (for JSON-accepting endpoints) ─────────
-        if not findings:
-            findings += await self._test_json_body(url, field_name, baseline_len)
+        # whole-body fallback は pointer 注入ではないため JSON IP ごとに重複実行しない。
+        if not findings and ip.location != "json_body":
+            findings += await self._test_json_body(ip.url, field_name, baseline_len)
 
         return findings
+
+    async def scan_field(
+        self,
+        url: str,
+        form_index: int,
+        field: dict,
+        is_url_param: bool = False,
+    ) -> list[Finding]:
+        """従来 API を InjectionPoint 駆動へ接続する互換 wrapper。"""
+        name = field.get("name", "unknown")
+        ip = (
+            InjectionPoint.for_url_param(url, name)
+            if is_url_param
+            else InjectionPoint.for_form(url, name, form_index)
+        )
+        return await self.scan_injection_point(ip, field)
 
     async def scan_page(self, url: str) -> list[Finding]:
         return []
@@ -318,38 +328,31 @@ class NoSQLInjectionScanner(BaseScanner):
         is_url_param = finding.field_name in parse_qs(
             urlparse(finding.url).query, keep_blank_values=True
         )
+        if hasattr(finding, "injection_location"):
+            ip = self._verify_injection_point(finding, is_url_param)
+        else:
+            # provenance 属性を持たない旧 Finding 互換。
+            ip = (
+                InjectionPoint.for_url_param(finding.url, finding.field_name)
+                if is_url_param
+                else InjectionPoint.for_form(finding.url, finding.field_name, 0)
+            )
         try:
             # verify 時の再投入（baseline ×2 + payload）も監査ログに残す。
             await self.log_payload_test(
                 finding.field_name, "baseline_value_wscan", "nosql_verify_baseline", finding.url
             )
-            baseline_src, _ = await self._apply_payload(
-                finding.url,
-                0,
-                finding.field_name,
-                "baseline_value_wscan",
-                is_url_param,
-            )
+            baseline_src, _ = await self._apply_ip(ip, "baseline_value_wscan")
             await self.log_payload_test(
                 finding.field_name, "baseline_value_wscan_2", "nosql_verify_baseline_2", finding.url
             )
-            baseline_src2, _ = await self._apply_payload(
-                finding.url,
-                0,
-                finding.field_name,
-                "baseline_value_wscan_2",
-                is_url_param,
+            baseline_src2, _ = await self._apply_ip(
+                ip, "baseline_value_wscan_2"
             )
             await self.log_payload_test(
                 finding.field_name, finding.payload, "nosql_verify", finding.url
             )
-            probe_src, _ = await self._apply_payload(
-                finding.url,
-                0,
-                finding.field_name,
-                finding.payload,
-                is_url_param,
-            )
+            probe_src, _ = await self._apply_ip(ip, finding.payload)
         except Exception:
             return None
 

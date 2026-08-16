@@ -11,6 +11,8 @@ import asyncio
 from typing import TYPE_CHECKING
 from urllib.parse import parse_qs, urlparse, urljoin
 
+from wscan.injection_point import InjectionPoint
+
 from .base import BaseScanner, Finding
 
 if TYPE_CHECKING:
@@ -105,15 +107,18 @@ class OpenRedirectScanner(BaseScanner):
 
     CHECK_TYPE = "open_redirect"
     SEVERITY = "medium"
+    SUPPORTS_JSON_BODY = False
 
-    async def scan_field(
+    async def scan_injection_point(
         self,
-        url: str,
-        form_index: int,
+        ip: InjectionPoint,
         field: dict,
-        is_url_param: bool = False,
     ) -> list[Finding]:
-        field_name = field.get("name", "unknown")
+        # redirect 判定は browser transport 前提。未対応 JSON は明示的に拒否する。
+        if ip.location == "json_body":
+            return []
+
+        field_name = ip.display_name or ip.parameter_id
 
         # Only test fields/params whose names suggest a redirect target
         if field_name.lower() not in REDIRECT_PARAM_NAMES:
@@ -123,15 +128,15 @@ class OpenRedirectScanner(BaseScanner):
 
         if self.monitor:
             await self.monitor.emit_status(
-                f"Open redirect testing: {field_name} on {url}"
+                f"Open redirect testing: {field_name} on {ip.url}"
             )
 
         for payload in REDIRECT_PAYLOADS:
-            await self.log_payload_test(field_name, payload, "open_redirect", url)
-
-            source, pair = await self._apply_payload(
-                url, form_index, field_name, payload, is_url_param
+            await self.log_payload_test(
+                field_name, payload, "open_redirect", ip.url
             )
+
+            source, pair = await self._apply_ip(ip, payload)
             await asyncio.sleep(0.3 * self.sleep_factor)
 
             # Check 1: browser actually navigated to the canary host
@@ -140,13 +145,13 @@ class OpenRedirectScanner(BaseScanner):
             except Exception as exc:
                 if self.monitor:
                     await self.monitor.emit_status(
-                        f"[warn] open_redirect: current_url read failed on {url}: {exc}"
+                        f"[warn] open_redirect: current_url read failed on {ip.url}: {exc}"
                     )
                 current_url = ""
 
-            if _redirected_to_canary(current_url, url):
+            if _redirected_to_canary(current_url, ip.url):
                 finding = await self.record_finding(
-                    url=url,
+                    url=ip.url,
                     field_name=field_name,
                     payload=payload,
                     evidence=(
@@ -155,15 +160,16 @@ class OpenRedirectScanner(BaseScanner):
                     pair=pair,
                     severity="medium",
                     confidence="confirmed",
+                    injection_point=ip,
                 )
                 findings.append(finding)
                 break
 
             # Check 2: Location header in the captured HTTP response points externally
             location = _location_header(pair)
-            if _location_points_to_canary(pair, url):
+            if _location_points_to_canary(pair, ip.url):
                 finding = await self.record_finding(
-                    url=url,
+                    url=ip.url,
                     field_name=field_name,
                     payload=payload,
                     evidence=(
@@ -172,26 +178,46 @@ class OpenRedirectScanner(BaseScanner):
                     pair=pair,
                     severity="medium",
                     confidence="likely",
+                    injection_point=ip,
                 )
                 findings.append(finding)
                 break
 
         return findings
 
+    async def scan_field(
+        self,
+        url: str,
+        form_index: int,
+        field: dict,
+        is_url_param: bool = False,
+    ) -> list[Finding]:
+        """従来 API を InjectionPoint 駆動へ接続する互換 wrapper。"""
+        name = field.get("name", "unknown")
+        ip = (
+            InjectionPoint.for_url_param(url, name)
+            if is_url_param
+            else InjectionPoint.for_form(url, name, form_index)
+        )
+        return await self.scan_injection_point(ip, field)
+
     async def verify_finding(self, finding: Finding) -> bool | None:
         is_url_param = finding.field_name in parse_qs(
             urlparse(finding.url).query, keep_blank_values=True
         )
+        if hasattr(finding, "injection_location"):
+            ip = self._verify_injection_point(finding, is_url_param)
+        else:
+            # provenance 属性を持たない旧 Finding 互換。
+            ip = (
+                InjectionPoint.for_url_param(finding.url, finding.field_name)
+                if is_url_param
+                else InjectionPoint.for_form(finding.url, finding.field_name, 0)
+            )
         await self.log_payload_test(
             finding.field_name, finding.payload, "open_redirect_verify", finding.url
         )
-        _source, pair = await self._apply_payload(
-            finding.url,
-            0,
-            finding.field_name,
-            finding.payload,
-            is_url_param,
-        )
+        _source, pair = await self._apply_ip(ip, finding.payload)
         try:
             current_url = self.browser.page.url
         except Exception:

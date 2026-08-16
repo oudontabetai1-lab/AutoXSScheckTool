@@ -8,6 +8,8 @@ import time
 from difflib import SequenceMatcher
 from typing import TYPE_CHECKING
 
+from wscan.injection_point import InjectionPoint
+
 from .base import BaseScanner, Finding
 
 if TYPE_CHECKING:
@@ -149,6 +151,7 @@ class SQLiScanner(BaseScanner):
 
     CHECK_TYPE = "sqli"
     SEVERITY = "critical"
+    SUPPORTS_JSON_BODY = True
 
     # ------------------------------------------------------------------
     # Auth-bypass helpers
@@ -204,34 +207,30 @@ class SQLiScanner(BaseScanner):
 
         return True, post_url
 
-    async def scan_field(
+    async def scan_injection_point(
         self,
-        url: str,
-        form_index: int,
+        ip: InjectionPoint,
         field: dict,
-        is_url_param: bool = False,
     ) -> list[Finding]:
         """Scan a form field or URL parameter for SQL injection."""
         findings = []
-        field_name = field.get("name", "unknown")
-        payloads = await self.get_payloads(field_name, url)
+        field_name = ip.display_name or ip.parameter_id
+        payloads = await self.get_payloads(field_name, ip.url)
         payloads = self._prioritize_login_payloads(field_name, payloads)
 
         if self.monitor:
             await self.monitor.emit_status(
-                f"SQLi testing: {field_name} on {url}"
+                f"SQLi testing: {field_name} on {ip.url}"
             )
 
         # Get baseline response for comparison (content + timing)
-        baseline_source, baseline_pair = await self._get_baseline(
-            url, form_index, field_name, is_url_param
-        )
+        baseline_source, baseline_pair = await self._get_baseline(ip)
         baseline_len = len(baseline_source)
         baseline_lower = (baseline_source or "").lower()
 
         # Second baseline to measure natural response length variance
         # (dynamic content like ads/timestamps can shift length by hundreds of bytes)
-        baseline_source2, _ = await self._get_baseline(url, form_index, field_name, is_url_param)
+        baseline_source2, _ = await self._get_baseline(ip)
         baseline_variance = abs(len(baseline_source) - len(baseline_source2))
 
         # Measure baseline response time for dynamic time-based threshold
@@ -248,12 +247,10 @@ class SQLiScanner(BaseScanner):
         time_threshold = max(2.5, baseline_time + 2.5)
 
         async def _test_payload(payload: str, check_label: str = "sqli") -> bool:
-            await self.log_payload_test(field_name, payload, check_label, url)
+            await self.log_payload_test(field_name, payload, check_label, ip.url)
 
             # Apply payload
-            source, pair = await self._apply_payload(
-                url, form_index, field_name, payload, is_url_param
-            )
+            source, pair = await self._apply_ip(ip, payload)
 
             # --- Check 1: Error-based SQLi ---
             # baseline に既に同じエラー文字列が出ているなら、それはページ本来の
@@ -264,7 +261,7 @@ class SQLiScanner(BaseScanner):
                 match = None
             if match:
                 finding = await self.record_finding(
-                    url=url,
+                    url=ip.url,
                     field_name=field_name,
                     payload=payload,
                     evidence=f"SQL error message detected: '{match}'",
@@ -278,10 +275,11 @@ class SQLiScanner(BaseScanner):
                         "attack_length": len(source),
                     },
                     reproduction_steps=[
-                        f"Open {url}",
+                        f"Open {ip.url}",
                         f"Submit the payload to '{field_name}'",
                         "Confirm that the response contains a database error message.",
                     ],
+                    injection_point=ip,
                 )
                 findings.append(finding)
                 return True
@@ -293,10 +291,10 @@ class SQLiScanner(BaseScanner):
                 if payload not in (true_payload, false_payload):
                     continue
                 partner = false_payload if payload == true_payload else true_payload
-                await self.log_payload_test(field_name, partner, "sqli_boolean_partner", url)
-                partner_source, _ = await self._apply_payload(
-                    url, form_index, field_name, partner, is_url_param
+                await self.log_payload_test(
+                    field_name, partner, "sqli_boolean_partner", ip.url
                 )
+                partner_source, _ = await self._apply_ip(ip, partner)
                 true_src = source if payload == true_payload else partner_source
                 false_src = partner_source if payload == true_payload else source
                 sim_true_base = self._body_similarity(true_src, baseline_source)
@@ -315,7 +313,7 @@ class SQLiScanner(BaseScanner):
                     and sim_false_base <= 0.80
                 ):
                     finding = await self.record_finding(
-                        url=url,
+                        url=ip.url,
                         field_name=field_name,
                         payload=payload,
                         evidence=(
@@ -338,11 +336,12 @@ class SQLiScanner(BaseScanner):
                             "similarity_false_to_baseline": round(sim_false_base, 4),
                         },
                         reproduction_steps=[
-                            f"Open {url}",
+                            f"Open {ip.url}",
                             f"Submit true-condition payload to '{field_name}': {true_payload}",
                             f"Submit false-condition payload to '{field_name}': {false_payload}",
                             "Confirm that the true response resembles baseline while the false response differs materially.",
                         ],
+                        injection_point=ip,
                     )
                     findings.append(finding)
                     return True
@@ -353,7 +352,7 @@ class SQLiScanner(BaseScanner):
             if payload in TIME_BASED_PAYLOADS or _is_time_based_sql(payload):
                 if self.response_time_exceeded(pair, threshold=time_threshold):
                     finding = await self.record_finding(
-                        url=url,
+                        url=ip.url,
                         field_name=field_name,
                         payload=payload,
                         evidence=f"Time-based blind SQLi: response delayed (>3s)",
@@ -367,10 +366,11 @@ class SQLiScanner(BaseScanner):
                             "payload": payload,
                         },
                         reproduction_steps=[
-                            f"Open {url}",
+                            f"Open {ip.url}",
                             f"Submit the time-delay payload to '{field_name}'",
                             "Confirm that response time exceeds the measured baseline threshold.",
                         ],
+                        injection_point=ip,
                     )
                     findings.append(finding)
                     return True
@@ -379,18 +379,18 @@ class SQLiScanner(BaseScanner):
             # Only applicable when the field looks like a username/password input
             # and the payload is from the auth-bypass set.
             if (
-                not is_url_param
+                ip.location != "url_param"
                 and self._is_login_field(field_name)
                 and payload in AUTH_BYPASS_PAYLOAD_SET
             ):
-                bypassed, post_url = self._detect_auth_bypass(url, source)
+                bypassed, post_url = self._detect_auth_bypass(ip.url, source)
                 if bypassed:
                     finding = await self.record_finding(
-                        url=url,
+                        url=ip.url,
                         field_name=field_name,
                         payload=payload,
                         evidence=(
-                            f"SQL injection authentication bypass: login form at {url!r} "
+                            f"SQL injection authentication bypass: login form at {ip.url!r} "
                             f"bypassed with payload {payload!r} — redirected to {post_url!r}"
                         ),
                         pair=pair,
@@ -399,18 +399,19 @@ class SQLiScanner(BaseScanner):
                         evidence_type="sqli_auth_bypass",
                         evidence_details={
                             "post_login_url": post_url,
-                            "original_url": url,
+                            "original_url": ip.url,
                         },
                         reproduction_steps=[
-                            f"Open login form {url}",
+                            f"Open login form {ip.url}",
                             f"Submit auth-bypass payload to '{field_name}'",
                             f"Confirm the browser is redirected to authenticated page {post_url}",
                         ],
+                        injection_point=ip,
                     )
                     findings.append(finding)
                     # Notify the engine so it can re-crawl the authenticated surface
                     if hasattr(self.engine, "signal_auth_bypass"):
-                        self.engine.signal_auth_bypass(url, payload, post_url)
+                        self.engine.signal_auth_bypass(ip.url, payload, post_url)
                     return True
 
             # Small delay to avoid overwhelming the server
@@ -421,9 +422,13 @@ class SQLiScanner(BaseScanner):
             if await _test_payload(payload):
                 break  # Found vulnerability, move to next field
 
-        if not findings:
+        # evolution wave は legacy browser transport 専用なので JSON では実行しない。
+        if not findings and ip.location != "json_body":
             extra_payloads = await self.evolved_payloads(
-                url, form_index, field_name, is_url_param
+                ip.url,
+                ip.form_index,
+                ip.parameter_id,
+                ip.legacy_is_url_param(),
             )
             for payload in extra_payloads:
                 if await _test_payload(payload, "sqli_evolved"):
@@ -431,7 +436,7 @@ class SQLiScanner(BaseScanner):
 
         # --- Mutation wave: bypass変種 + キャップで漏れた blind(boolean/time) を確実に投入 ---
         if not findings:
-            mutated = await self.mutated_payloads(field_name, url, payloads)
+            mutated = await self.mutated_payloads(field_name, ip.url, payloads)
             for payload in mutated:
                 if await _test_payload(payload, "sqli_mutation"):
                     break
@@ -441,14 +446,19 @@ class SQLiScanner(BaseScanner):
         # filter- and error-independent concatenation-equivalence probe
         # (e.g. AA' 'BB collapsing to AABB), which confirms the quote was
         # interpreted as SQL syntax rather than reflected as data.
-        if not findings:
+        # 等価性 probe も legacy browser transport 専用なので JSON では実行しない。
+        if not findings and ip.location != "json_body":
             probe = await self.run_equivalence_probe(
-                url, form_index, field_name, is_url_param, context="sql"
+                ip.url,
+                ip.form_index,
+                ip.parameter_id,
+                ip.legacy_is_url_param(),
+                context="sql",
             )
             if probe:
                 verdict, pair = probe
                 finding = await self.record_finding(
-                    url=url,
+                    url=ip.url,
                     field_name=field_name,
                     payload=verdict.details.get("matched_payload", ""),
                     evidence=(
@@ -466,17 +476,34 @@ class SQLiScanner(BaseScanner):
                         **verdict.details,
                     },
                     reproduction_steps=[
-                        f"Open {url}",
+                        f"Open {ip.url}",
                         f"Submit the concatenation payload to '{field_name}': "
                         f"{verdict.details.get('matched_payload', '')}",
                         "Confirm the response contains the concatenated marker, "
                         "proving the injected quote was interpreted as SQL syntax.",
                     ],
+                    injection_point=ip,
                 )
                 if finding:
                     findings.append(finding)
 
         return findings
+
+    async def scan_field(
+        self,
+        url: str,
+        form_index: int,
+        field: dict,
+        is_url_param: bool = False,
+    ) -> list[Finding]:
+        """従来 API を InjectionPoint 駆動へ接続する互換 wrapper。"""
+        name = field.get("name", "unknown")
+        ip = (
+            InjectionPoint.for_url_param(url, name)
+            if is_url_param
+            else InjectionPoint.for_form(url, name, form_index)
+        )
+        return await self.scan_injection_point(ip, field)
 
     def _normalise_body(self, body: str) -> str:
         text = body or ""
@@ -494,41 +521,65 @@ class SQLiScanner(BaseScanner):
             return 0.0
         return SequenceMatcher(None, na, nb).ratio()
 
-    async def _get_baseline(
-        self, url: str, form_index: int, field_name: str, is_url_param: bool
-    ) -> tuple[str, dict]:
+    async def _get_baseline(self, ip: InjectionPoint) -> tuple[str, dict]:
         """Get a baseline response with a safe value."""
         # baseline もフィールド投入なので監査ログに残す（log_payload_test 一元化の不変条件）。
-        await self.log_payload_test(field_name, "baseline_test", "sqli_baseline", url)
+        await self.log_payload_test(
+            ip.display_name or ip.parameter_id,
+            "baseline_test",
+            "sqli_baseline",
+            ip.url,
+        )
         try:
-            if is_url_param:
-                return await self.browser.test_url_param(url, field_name, "baseline_test")
-            else:
-                return await self.browser.fill_and_submit_form(
-                    form_index, field_name, "baseline_test"
-                )
+            return await self._apply_ip(ip, "baseline_test", baseline=True)
         except Exception as exc:
             if self.monitor:
                 await self.monitor.emit_status(
-                    f"[warn] sqli: baseline failed on {field_name} @ {url}: {exc}"
+                    f"[warn] sqli: baseline failed on {ip.parameter_id} @ {ip.url}: {exc}"
                 )
             return "", {}
+
+    async def _apply_ip(
+        self,
+        ip: InjectionPoint,
+        payload,
+        *,
+        baseline: bool = False,
+    ) -> tuple[str, dict]:
+        """SQLi baseline の既存 browser 呼出し列を保って注入点 dispatch する。
+
+        移行前の form baseline は再 navigate せず現在のページへ直接 submit していた。
+        通常 payload の ``_apply_payload`` は navigate を行うため、baseline だけその差を
+        明示して回帰を防ぐ。JSON は常に base の共有 transport を使う。
+        """
+        if baseline and ip.location != "json_body":
+            if ip.location == "url_param":
+                return await self.browser.test_url_param(
+                    ip.url, ip.parameter_id, payload
+                )
+            return await self.browser.fill_and_submit_form(
+                ip.form_index, ip.parameter_id, payload
+            )
+        return await super()._apply_ip(ip, payload)
 
     async def verify_finding(self, finding: Finding) -> bool | None:
         from urllib.parse import parse_qs, urlparse
         is_url_param = finding.field_name in parse_qs(
             urlparse(finding.url).query, keep_blank_values=True
         )
+        if hasattr(finding, "injection_location"):
+            ip = self._verify_injection_point(finding, is_url_param)
+        else:
+            # provenance 属性を持たない旧 Finding 互換（既存 unit の簡易 object を含む）。
+            ip = (
+                InjectionPoint.for_url_param(finding.url, finding.field_name)
+                if is_url_param
+                else InjectionPoint.for_form(finding.url, finding.field_name, 0)
+            )
         await self.log_payload_test(
             finding.field_name, finding.payload, "sqli_verify", finding.url
         )
-        source, pair = await self._apply_payload(
-            finding.url,
-            0,
-            finding.field_name,
-            finding.payload,
-            is_url_param,
-        )
+        source, pair = await self._apply_ip(ip, finding.payload)
         body = pair.get("response", {}).get("body", "") or source or ""
         etype = getattr(finding, "evidence_type", "")
         if etype == "sqli_error":
@@ -544,15 +595,13 @@ class SQLiScanner(BaseScanner):
             # ことを要求する。恒常的に遅いだけのエンドポイント（対照との差が小さい）を
             # time-based 陽性と誤判定しないため（注入 SLEEP は約3秒なので 2 秒の差を要求）。
             await self.log_payload_test(finding.field_name, "1", "sqli_verify_control", finding.url)
-            _, control_pair = await self._apply_payload(
-                finding.url, 0, finding.field_name, "1", is_url_param
-            )
+            _, control_pair = await self._apply_ip(ip, "1")
             control_elapsed = self.response_elapsed(control_pair)
             if control_elapsed is not None and (sleep_elapsed - control_elapsed) < 2.0:
                 return False
             return True
         if etype == "sqli_auth_bypass":
-            fresh_result = await self._verify_auth_bypass_fresh_context(finding)
+            fresh_result = await self._verify_auth_bypass_fresh_context(finding, ip)
             if fresh_result is not None:
                 return fresh_result
             bypassed, _ = self._detect_auth_bypass(finding.url, source)
@@ -563,11 +612,11 @@ class SQLiScanner(BaseScanner):
             false_payload = details.get("false_payload")
             if not true_payload or not false_payload:
                 return None
-            baseline_source, _ = await self._get_baseline(finding.url, 0, finding.field_name, is_url_param)
+            baseline_source, _ = await self._get_baseline(ip)
             await self.log_payload_test(finding.field_name, true_payload, "sqli_verify_boolean", finding.url)
-            true_src, _ = await self._apply_payload(finding.url, 0, finding.field_name, true_payload, is_url_param)
+            true_src, _ = await self._apply_ip(ip, true_payload)
             await self.log_payload_test(finding.field_name, false_payload, "sqli_verify_boolean", finding.url)
-            false_src, _ = await self._apply_payload(finding.url, 0, finding.field_name, false_payload, is_url_param)
+            false_src, _ = await self._apply_ip(ip, false_payload)
             baseline_len = len(baseline_source)
             diff_true_base = abs(len(true_src) - baseline_len)
             diff_false_base = abs(len(false_src) - baseline_len)
@@ -588,7 +637,11 @@ class SQLiScanner(BaseScanner):
             return result is not None
         return None
 
-    async def _verify_auth_bypass_fresh_context(self, finding: Finding) -> bool | None:
+    async def _verify_auth_bypass_fresh_context(
+        self,
+        finding: Finding,
+        ip: InjectionPoint | None = None,
+    ) -> bool | None:
         """Re-test auth bypass in a clean browser context to avoid session/dialog noise."""
         try:
             from wscan.browser import BrowserManager
@@ -609,13 +662,11 @@ class SQLiScanner(BaseScanner):
                 await self.log_payload_test(
                     finding.field_name, finding.payload, "sqli_verify", finding.url
                 )
-                source, _ = await self._apply_payload(
-                    finding.url,
-                    0,
-                    finding.field_name,
-                    finding.payload,
-                    False,
+                # 直接呼び出す既存テストでは従来どおり form index=0 を使う。
+                verify_ip = ip or InjectionPoint.for_form(
+                    finding.url, finding.field_name, 0
                 )
+                source, _ = await self._apply_ip(verify_ip, finding.payload)
                 bypassed, _ = self._detect_auth_bypass(finding.url, source)
                 return bypassed
             finally:
