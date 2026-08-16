@@ -161,7 +161,6 @@ class BrowserCallParityTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_dom_xss_form_and_url_param_calls_match_legacy(self):
         field = {"name": "target", "type": "text"}
-        # DOM XSS の非標準 transport は従来どおり form index=0 を使う。
         cases = (
             InjectionPoint.for_form("https://example.test/form", "target", 0),
             InjectionPoint.for_url_param(
@@ -180,6 +179,15 @@ class BrowserCallParityTests(unittest.IsolatedAsyncioTestCase):
 
                 self.assertEqual(findings, [])
                 self.assertEqual(browser.calls, _legacy_dom_xss_calls(ip))
+
+    async def test_dom_xss_uses_selected_form_index(self):
+        # 旧 scan 本体は fill_and_submit_form(form_index, ...) を使っていた。form_index>0 の
+        # 注入点を form 0 で潰さない（provenance 不整合・検出取りこぼし防止）。
+        browser = _RecordingBrowser()
+        scanner = DOMXSSScanner(_Engine(browser))
+        ip = InjectionPoint.for_form("https://example.test/form", "target", 2)
+        await scanner._apply_payload(ip.url, ip.parameter_id, "x", ip.form_index)
+        self.assertIn(("fill_and_submit_form", 2, "target", "x"), browser.calls)
 
 
 class InjectionPointRoutingTests(unittest.IsolatedAsyncioTestCase):
@@ -219,9 +227,11 @@ class ProvenanceAndCompatibilityTests(unittest.IsolatedAsyncioTestCase):
                 "is_url_param",
             ],
         )
+        # dom_xss は非標準 transport。form_index を明示引数で受け、選択フォームへ送る
+        # （エンジン汎用 verify は dom_xss._apply_payload を呼ばないので engine 互換の制約外）。
         self.assertEqual(
             list(inspect.signature(DOMXSSScanner._apply_payload).parameters),
-            ["self", "url", "field_name", "payload"],
+            ["self", "url", "field_name", "payload", "form_index"],
         )
 
     async def test_xss_form_finding_stamps_location_and_form_index(self):

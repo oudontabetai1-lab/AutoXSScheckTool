@@ -161,7 +161,7 @@ class DOMXSSScanner(BaseScanner):
             await self._ensure_hook()
 
             source, pair = await self._apply_payload(
-                ip.url, ip.parameter_id, payload
+                ip.url, ip.parameter_id, payload, ip.form_index
             )
 
             await asyncio.sleep(2.0 * self.sleep_factor)  # Allow JS to settle
@@ -255,7 +255,7 @@ class DOMXSSScanner(BaseScanner):
                     self.browser.reset_dialog()
                     await self.browser.page.add_init_script(_HOOK_SCRIPT)
                     source, pair = await self._apply_payload(
-                        ip.url, ip.parameter_id, payload
+                        ip.url, ip.parameter_id, payload, ip.form_index
                     )
                     await asyncio.sleep(2.0 * self.sleep_factor)
                     log = await self.browser.page.evaluate(
@@ -318,7 +318,7 @@ class DOMXSSScanner(BaseScanner):
                 f"{self.CHECK_TYPE}_evolution_probe",
                 url,
             )
-            source, pair = await self._apply_payload(url, field_name, probe)
+            source, pair = await self._apply_payload(url, field_name, probe, form_index)
             response_source = (
                 (pair.get("response", {}) or {}).get("body") or source or ""
             )
@@ -360,7 +360,10 @@ class DOMXSSScanner(BaseScanner):
             await self.log_payload_test(
                 finding.field_name, finding.payload, "dom_xss_verify", finding.url
             )
-            await self._apply_payload(finding.url, finding.field_name, finding.payload)
+            await self._apply_payload(
+                finding.url, finding.field_name, finding.payload,
+                finding.injection_form_index,
+            )
             await asyncio.sleep(0.5 * self.sleep_factor)
             log = await self.browser.page.evaluate(
                 "() => window.__wscan_domxss_log || []"
@@ -377,7 +380,9 @@ class DOMXSSScanner(BaseScanner):
 
         return False
 
-    async def _apply_payload(self, url: str, field_name: str, payload: str):
+    async def _apply_payload(
+        self, url: str, field_name: str, payload: str, form_index: int = 0
+    ):
         from urllib.parse import parse_qs, urlparse
 
         is_url_param = field_name in parse_qs(
@@ -386,8 +391,11 @@ class DOMXSSScanner(BaseScanner):
         if is_url_param:
             return await self.browser.test_url_param(url, field_name, payload)
 
+        # 選択された form_index を使う（複数フォームのページで別フォームを潰さない）。
+        # 旧実装は scan 本体で fill_and_submit_form(form_index, ...) を直接呼んでおり、
+        # ここを 0 固定にすると form_index>0 の注入点を取りこぼし provenance も不整合になる。
         await self.browser.navigate(url)
-        return await self.browser.fill_and_submit_form(0, field_name, payload)
+        return await self.browser.fill_and_submit_form(form_index, field_name, payload)
 
     def _marker_for_finding(self, finding: Finding) -> str:
         details = getattr(finding, "evidence_details", {}) or {}
