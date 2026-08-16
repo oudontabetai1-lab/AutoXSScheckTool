@@ -195,6 +195,33 @@ class FindingInjectionProvenanceTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(finding_dedup_key_for(f), ("http://h/u", "id", "sqli", "sqli_error"))
 
+    def test_verify_injection_point_prefers_provenance_for_json(self):
+        scanner = _Scanner(_Engine())
+        json_finding = Finding(
+            check_type="sqli", severity="high", url="http://h/login",
+            field_name="email", payload="'", evidence="e",
+            injection_location="json_body", injection_pointer="/email",
+            injection_method="POST", injection_template_id="t",
+        )
+        # 推測は form(False) だが provenance が json_body を復元する。
+        ip = scanner._verify_injection_point(json_finding, is_url_param=False)
+        self.assertEqual(ip.location, "json_body")
+        self.assertEqual(ip.parameter_id, "/email")
+        self.assertEqual(ip.template_id, "t")
+
+    def test_verify_injection_point_falls_back_to_guess_for_legacy(self):
+        scanner = _Scanner(_Engine())
+        legacy = Finding(
+            check_type="sqli", severity="high", url="http://h/x?q=1",
+            field_name="q", payload="'", evidence="e",  # provenance 無し
+        )
+        self.assertEqual(
+            scanner._verify_injection_point(legacy, is_url_param=True).location, "url_param"
+        )
+        self.assertEqual(
+            scanner._verify_injection_point(legacy, is_url_param=False).location, "form"
+        )
+
     def test_rebuilds_json_body_only(self):
         json_finding = Finding(
             check_type="sqli",

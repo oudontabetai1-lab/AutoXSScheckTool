@@ -131,11 +131,7 @@ class HeaderInjectionScanner(BaseScanner):
         is_url_param = finding.field_name in parse_qs(
             urlparse(finding.url).query, keep_blank_values=True
         )
-        ip = (
-            InjectionPoint.for_url_param(finding.url, finding.field_name)
-            if is_url_param
-            else InjectionPoint.for_form(finding.url, finding.field_name, 0)
-        )
+        ip = self._verify_injection_point(finding, is_url_param)
         await self.log_payload_test(
             finding.field_name, finding.payload, "header_injection_verify", finding.url
         )

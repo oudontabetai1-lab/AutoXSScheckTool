@@ -195,8 +195,12 @@ class DeserializationScanner(BaseScanner):
                 continue
             await asyncio.sleep(0.2 * self.sleep_factor)
 
-        # Also test via raw HTTP POST with appropriate Content-Type headers
-        if not findings:
+        # Also test via raw HTTP POST with appropriate Content-Type headers。
+        # raw POST は payload を **body 全体** として送る endpoint 単位の検査。json_body の
+        # 葉ごとに呼ぶと同一 endpoint 応答に対する重複 Finding になる（dedup キーの field_name
+        # が葉ごとに違うため）。json では葉単位で走らせず、endpoint 単位のスケジューリングは
+        # PR-b に委ねる（form/url_param は従来どおり）。
+        if not findings and ip.location != "json_body":
             findings += await self._test_raw_post(ip, field_name)
 
         return findings
@@ -321,11 +325,7 @@ class DeserializationScanner(BaseScanner):
         is_url_param = finding.field_name in parse_qs(
             urlparse(finding.url).query, keep_blank_values=True
         )
-        ip = (
-            InjectionPoint.for_url_param(finding.url, finding.field_name)
-            if is_url_param
-            else InjectionPoint.for_form(finding.url, finding.field_name, 0)
-        )
+        ip = self._verify_injection_point(finding, is_url_param)
         try:
             baseline_src, _ = await self._apply_ip(ip, "wscan_deser_baseline")
             probe_src, _ = await self._apply_ip(ip, payload)

@@ -438,6 +438,26 @@ class BaseScanner(ABC):
             ip.legacy_is_url_param(),
         )
 
+    def _verify_injection_point(
+        self,
+        finding: "Finding",
+        is_url_param: bool,
+    ) -> InjectionPoint:
+        """verify の再送に使う注入点を復元する。
+
+        json_body の Finding は provenance（location/pointer/method/template_id）から
+        `injection_point_from_finding` で復元し、保存済み JSON template 経由で再送できる
+        ようにする。それ以外（form/url_param・旧 Finding）は従来の URL クエリ推測へ
+        fallback する（form/url_param の verify 挙動は不変）。全 location を provenance 駆動に
+        する切替は 5c。
+        """
+        ip = injection_point_from_finding(finding)
+        if ip is not None:
+            return ip
+        if is_url_param:
+            return InjectionPoint.for_url_param(finding.url, finding.field_name)
+        return InjectionPoint.for_form(finding.url, finding.field_name, 0)
+
     async def scan_page(self, url: str) -> list[Finding]:
         """
         Optional page-level check called once per URL, before per-field scanning.

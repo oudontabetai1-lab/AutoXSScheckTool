@@ -224,11 +224,7 @@ class SSRFScanner(BaseScanner):
         is_url_param = finding.field_name in parse_qs(
             urlparse(finding.url).query, keep_blank_values=True
         )
-        ip = (
-            InjectionPoint.for_url_param(finding.url, finding.field_name)
-            if is_url_param
-            else InjectionPoint.for_form(finding.url, finding.field_name, 0)
-        )
+        ip = self._verify_injection_point(finding, is_url_param)
         try:
             # verify 時の再投入（baseline + payload）も監査ログに残す。
             await self.log_payload_test(

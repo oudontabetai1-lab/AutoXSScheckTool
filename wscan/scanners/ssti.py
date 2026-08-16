@@ -182,11 +182,7 @@ class SSTIScanner(BaseScanner):
             urlparse(finding.url).query,
             keep_blank_values=True,
         )
-        ip = (
-            InjectionPoint.for_url_param(finding.url, field_name)
-            if is_url_param
-            else InjectionPoint.for_form(finding.url, field_name, 0)
-        )
+        ip = self._verify_injection_point(finding, is_url_param)
         # verify 時の再投入（baseline + payload）も監査ログに残す。
         await self.log_payload_test(field_name, "wscan_ssti_baseline", "ssti_verify_baseline", finding.url)
         baseline_source, _ = await self._apply_ip(ip, "wscan_ssti_baseline")
