@@ -247,7 +247,8 @@ Finding では、重要度だけでなく確証と出自を確認します。
 | URL / Field | どのページ、パラメータ、入力欄、ヘッダか |
 | Evidence | alert 発火、レスポンス差分、エラー、ヘッダ等 |
 | Request / Response | 実際の投入と応答 |
-| `verified` | 再現確認できたか |
+| `verified` | Finding を保持する互換フラグ。`true` でも `assumed` の場合がある |
+| `verification_state` | `reproduced`（再現済み）/ `assumed`（推定・再検証未実行）/ `unreproduced`（非再現）/ `skipped`（検証 skip）。空は旧 Finding |
 | `confidence` | `confirmed` / `likely` / `tentative` |
 | `evidence_type` | 判定に使った構造化シグナル |
 | `source` | `scanner`（通常）/ `agent`（Agent） |
@@ -257,9 +258,11 @@ HTML レポートのバッジ:
 
 - `🤖 Agent発見（LLM独自解釈・未確証）`: Agent の仮説。人手で証拠と再現手順を確認する。
 - `✅ 決定論的にも再現確認済み`: Agent Finding に決定論的確認が付いている。
+- `〜 推定（再検証未実行）`: 通常 Finding を検証できなかったため保持している。再現済みではない。
+- `⚠ 要確認`: 2回目に再現しなかったか、例外で検証を skip した Finding。詳細は `verification_note` を確認する。
 - バッジなし: 通常の決定論スキャナ由来。
 
-`severity=critical` でも Agent 未確証なら確証済みとは扱いません。通常 Finding でも `confidence=tentative` や `verified=false` の場合は追加確認が必要です。
+`severity=critical` でも Agent 未確証なら確証済みとは扱いません。通常 Finding でも `verification_state=assumed`、`confidence=tentative`、`verified=false` の場合は追加確認が必要です。
 
 ## 10. レポートと証跡を確認する
 

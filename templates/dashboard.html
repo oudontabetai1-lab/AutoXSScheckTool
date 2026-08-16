@@ -451,7 +451,8 @@ body {
 .fc-confidence-likely { color:#facc15; background:rgba(210,153,34,.15); border-color:rgba(210,153,34,.35); }
 .fc-confidence-tentative { color:#a5d6ff; background:rgba(56,139,253,.12); border-color:rgba(56,139,253,.3); }
 .fc-verified { font-size:.65rem; color:#86efac; background:rgba(63,185,80,.12); border:1px solid rgba(63,185,80,.25); padding:2px 8px; border-radius:10px; }
-.fc-unverified { font-size:.65rem; color:#facc15; background:rgba(210,153,34,.12); border:1px solid rgba(210,153,34,.35); padding:2px 8px; border-radius:10px; }
+.fc-assumed { font-size:.65rem; color:#facc15; background:rgba(210,153,34,.12); border:1px solid rgba(210,153,34,.35); padding:2px 8px; border-radius:10px; }
+.fc-unverified { font-size:.65rem; color:#fca5a5; background:rgba(248,81,73,.12); border:1px solid rgba(248,81,73,.35); padding:2px 8px; border-radius:10px; }
 .fc-details { margin-top:8px; border-top:1px solid var(--border); padding-top:8px; }
 .fc-details summary { cursor:pointer; color:var(--accent); font-size:.72rem; font-weight:700; }
 .fc-detail-list { margin-top:6px; display:flex; flex-direction:column; gap:3px; font-family:monospace; font-size:.68rem; color:var(--text-muted); }
@@ -4361,6 +4362,18 @@ function addFinding(data) {
   const sev = (data.severity || 'medium').toLowerCase();
   const confidence = (data.confidence || 'tentative').toLowerCase();
   const verified = data.verified !== false;
+  const verificationState = data.verification_state || '';
+  let verificationClass = 'fc-verified';
+  let verificationLabel = 'reproduced/assumed';
+  if (!verified) {
+    verificationClass = 'fc-unverified';
+    verificationLabel = verificationState === 'skipped' ? 'skipped (needs review)' : 'not reproduced';
+  } else if (verificationState === 'reproduced') {
+    verificationLabel = 'reproduced';
+  } else if (verificationState === 'assumed') {
+    verificationClass = 'fc-assumed';
+    verificationLabel = 'assumed（推定・再検証未実行）';
+  }
   const evidenceType = data.evidence_type || data.check_type || '';
   const details = data.evidence_details || {};
   const detailRows = Object.entries(details).slice(0, 8).map(([k, v]) =>
@@ -4410,7 +4423,7 @@ function addFinding(data) {
     <div class="fc-top">
       <span class="sev-badge sev-${sev}">${sev}</span>
       <span class="fc-confidence fc-confidence-${confidence}">${confidence}</span>
-      <span class="${verified ? 'fc-verified' : 'fc-unverified'}">${verified ? 'reproduced/assumed' : 'not reproduced'}</span>
+      <span class="${verificationClass}">${verificationLabel}</span>
       <span class="fc-type">${escapeHtml(data.check_type?.toUpperCase() || '')}</span>
       <span class="fc-field">Field: ${escapeHtml(data.field_name || '')}</span>
     </div>

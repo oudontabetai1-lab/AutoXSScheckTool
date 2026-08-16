@@ -388,7 +388,7 @@ class FindingInjectionProvenanceTests(unittest.IsolatedAsyncioTestCase):
             injection_location="form", injection_form_index=4,
         )
 
-        self.assertTrue(await engine._verify_one(finding))
+        self.assertEqual(await engine._verify_one(finding), "assumed")
         self.assertEqual(len(scanner.applied_ips), 1)
         ip, payload = scanner.applied_ips[0]
         self.assertEqual(ip.location, "form")
@@ -404,7 +404,7 @@ class FindingInjectionProvenanceTests(unittest.IsolatedAsyncioTestCase):
             injection_location="bogus",
         )
 
-        self.assertTrue(await engine._verify_one(finding))
+        self.assertEqual(await engine._verify_one(finding), "assumed")
         self.assertEqual(scanner.applied_ips, [])
         self.assertEqual(engine.browser.navigate_calls, [])
 
@@ -424,7 +424,7 @@ class FindingInjectionProvenanceTests(unittest.IsolatedAsyncioTestCase):
                 self.calls.append(finding.field_name)
                 if finding.field_name == "boom":
                     raise RuntimeError("simulated verify crash")
-                return True
+                return "reproduced"
 
         boom = Finding(check_type="sqli", severity="high", url="http://h/a",
                        field_name="boom", payload="'", evidence="e")
@@ -439,8 +439,10 @@ class FindingInjectionProvenanceTests(unittest.IsolatedAsyncioTestCase):
         # verified を倒し（⚠ 要確認 + note 経路）理由を note に残す。finding は削除しない。
         # 正常確認の ok は無傷（verified=True・skip note なし）。
         self.assertFalse(boom.verified)
+        self.assertEqual(boom.verification_state, "skipped")
         self.assertIn("未再現", boom.verification_note)
         self.assertTrue(ok.verified)
+        self.assertEqual(ok.verification_state, "reproduced")
         self.assertEqual(ok.verification_note, "")
 
     def test_rebuilds_all_locations(self):

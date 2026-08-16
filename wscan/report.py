@@ -409,6 +409,8 @@ class ReportGenerator:
             if not getattr(f, "verified", True):
                 note = self._escape(getattr(f, "verification_note", ""))
                 extra_badges += f'<span class="badge-unconfirmed" title="{note}">⚠ 要確認</span>'
+            elif getattr(f, "verification_state", "") == "assumed":
+                extra_badges += '<span class="badge-assumed">〜 推定（再検証未実行）</span>'
             # E: 信頼度バッジ
             conf = getattr(f, "confidence", "tentative")
             conf_labels = {"confirmed": ("✔ 確認済", "#276749"), "likely": ("〜 可能性高", "#744210"), "tentative": ("? 暫定", "#4a5568")}
@@ -577,6 +579,7 @@ body {{ font-family: 'Segoe UI', system-ui, -apple-system, sans-serif; backgroun
 .badge-agent {{ background:#6b46c1; color:#faf5ff; padding:2px 8px; border-radius:10px; font-size:0.72rem; font-weight:700; }}
 .badge-agent-verified {{ background:#276749; color:#f0fff4; padding:2px 8px; border-radius:10px; font-size:0.72rem; font-weight:700; }}
 .badge-unconfirmed {{ background:#d97706; color:#fff; padding:2px 8px; border-radius:10px; font-size:0.72rem; font-weight:700; cursor:help; }}
+.badge-assumed {{ background:#854d0e; color:#fef9c3; padding:2px 8px; border-radius:10px; font-size:0.72rem; font-weight:700; }}
 .badge-confidence {{ color:#fff; padding:2px 8px; border-radius:10px; font-size:0.72rem; font-weight:700; }}
 .badge-diff-new {{ background:#276749; color:#f0fff4; padding:2px 8px; border-radius:10px; font-size:0.72rem; font-weight:700; }}
 .badge-diff-persist {{ background:#2b6cb0; color:#ebf8ff; padding:2px 8px; border-radius:10px; font-size:0.72rem; font-weight:700; }}
@@ -1281,10 +1284,20 @@ document.querySelectorAll('.plan-payloads-toggle').forEach(btn => {{
         if not details and not steps and not evidence_type:
             return ""
 
+        state = getattr(finding, "verification_state", "")
+        if not getattr(finding, "verified", True):
+            v_label = "skipped (needs review)" if state == "skipped" else "not reproduced"
+        elif state == "reproduced":
+            v_label = "reproduced"
+        elif state == "assumed":
+            v_label = "assumed (not re-verified)"
+        else:
+            v_label = "reproduced/assumed"
+
         cells = [
             ("Evidence Type", evidence_type),
             ("Confidence", getattr(finding, "confidence", "tentative")),
-            ("Verification", "reproduced/assumed" if getattr(finding, "verified", True) else "not reproduced"),
+            ("Verification", v_label),
         ]
         for key, value in list(details.items())[:8]:
             cells.append((str(key).replace("_", " ").title(), value))

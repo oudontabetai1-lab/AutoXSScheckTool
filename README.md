@@ -625,7 +625,8 @@ Finding は「検出した」という一点だけでなく、出自、再現状
 | フィールド | 値 | 読み方 |
 | --- | --- | --- |
 | `source` | `scanner` / `agent` | 決定論スキャナ由来か Agent の独自解釈か |
-| `verified` | bool | 2回目の再現に成功したか。`false` なら `verification_note` も確認 |
+| `verified` | bool | Finding を保持する互換フラグ。`true` は再現済みまたは検証不能で保持、`false` は非再現または検証 skip |
+| `verification_state` | `reproduced` / `assumed` / `unreproduced` / `skipped` / 空 | 2回目の検証結果。空は旧 Finding で、従来どおり `reproduced/assumed` と表示 |
 | `confidence` | `confirmed` / `likely` / `tentative` | 証拠の強さ。重要度 `severity` とは別軸 |
 | `evidence_type` | 例: `xss_dialog`, `sqli_error` | どの構造化シグナルで判定したか |
 | `agent_verified` | bool | Agent Finding を決定論的にも再現確認できたか |
@@ -636,7 +637,9 @@ HTML レポートでは、`source=agent` の Finding を次のバッジで区別
 - `🤖 Agent発見（LLM独自解釈）` + `✅ 決定論的にも再現確認済み`: `agent_verified=true` の Agent Finding。
 - バッジなし: 通常の決定論スキャナ由来。
 
-Agent Finding は変換時に `source=agent`、`verified=false` となります。`severity` が高くても、Agent 未確証バッジがあれば証拠、Request/Response、再現手順を人手で確認してください。逆に通常 Finding でも `confidence=tentative` や `verified=false` なら確証済みとは扱いません。
+通常スキャナの再検証表示は、`reproduced`（再現済み）、`〜 推定（再検証未実行）`（検証不能だが検出を残す）、`⚠ 要確認`（非再現または検証 skip）に分かれます。`assumed` は Finding を消しませんが、再現済みを意味しません。
+
+Agent Finding は変換時に `source=agent`、`verified=false` となります。`severity` が高くても、Agent 未確証バッジがあれば証拠、Request/Response、再現手順を人手で確認してください。逆に通常 Finding でも `verification_state=assumed`、`confidence=tentative`、`verified=false` のいずれかなら確証済みとは扱いません。
 
 SARIF の `result.properties` にも `source`、`agent_verified`、`verified`、`confidence` を保存し、fingerprint に `source` を含めます。
 

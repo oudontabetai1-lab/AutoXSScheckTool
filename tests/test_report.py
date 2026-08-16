@@ -7,6 +7,47 @@ from wscan.scanners.base import Finding
 
 
 class ReportGeneratorTests(unittest.TestCase):
+    def test_verification_states_have_distinct_labels_and_badges(self):
+        def finding(field_name, state, verified=True, note=""):
+            return Finding(
+                check_type="xss",
+                severity="high",
+                url=f"http://fixture.test/{field_name}",
+                field_name=field_name,
+                payload="<svg/onload=alert(1)>",
+                evidence=f"{state or 'legacy'} evidence",
+                verified=verified,
+                verification_state=state,
+                verification_note=note,
+                evidence_type="xss_reflection",
+            )
+
+        findings = [
+            finding("reproduced", "reproduced"),
+            finding("assumed", "assumed"),
+            finding("unreproduced", "unreproduced", verified=False),
+            finding("skipped", "skipped", verified=False, note="要手動確認"),
+            finding("legacy", ""),
+        ]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            report_path = ReportGenerator(Path(tmp)).generate(
+                target="http://fixture.test",
+                findings=findings,
+                visited_urls=["http://fixture.test/"],
+                checks=["xss"],
+            )
+            html = report_path.read_text(encoding="utf-8")
+
+        self.assertIn(">reproduced</div>", html)
+        self.assertIn(">assumed (not re-verified)</div>", html)
+        self.assertIn(">not reproduced</div>", html)
+        self.assertIn(">skipped (needs review)</div>", html)
+        self.assertIn(">reproduced/assumed</div>", html)
+        self.assertIn("〜 推定（再検証未実行）", html)
+        self.assertEqual(html.count('class="badge-assumed"'), 1)
+        self.assertEqual(html.count("⚠ 要確認"), 2)
+
     def test_agent_findings_have_origin_and_verification_badges(self):
         findings = [
             Finding(

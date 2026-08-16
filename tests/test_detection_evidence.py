@@ -173,6 +173,7 @@ class DetectionEvidenceTests(unittest.TestCase):
         })
         self.assertEqual(legacy.source, "scanner")
         self.assertFalse(legacy.agent_verified)
+        self.assertEqual(legacy.verification_state, "")
 
         agent = Finding(
             check_type="xss",
@@ -187,6 +188,23 @@ class DetectionEvidenceTests(unittest.TestCase):
         restored = Finding.from_dict(agent.to_dict())
         self.assertEqual(restored.source, "agent")
         self.assertTrue(restored.agent_verified)
+
+    def test_finding_verification_state_round_trips(self):
+        finding = Finding(
+            check_type="sqli",
+            severity="critical",
+            url="http://example.test/login",
+            field_name="username",
+            payload="'",
+            evidence="SQL error",
+            verification_state="assumed",
+        )
+
+        data = finding.to_dict()
+        restored = Finding.from_dict(data)
+
+        self.assertEqual(data["verification_state"], "assumed")
+        self.assertEqual(restored.verification_state, "assumed")
 
     def test_dedup_key_preserves_distinct_evidence_types_on_same_input(self):
         finding = Finding(
@@ -968,7 +986,7 @@ class DetectionEvidenceTests(unittest.TestCase):
 
             result = await engine._verify_one(finding)
 
-            self.assertTrue(result)
+            self.assertEqual(result, "reproduced")
             scanner.verify_finding.assert_awaited_once()
 
         self.run_async(run())
@@ -1467,7 +1485,7 @@ class DetectionEvidenceTests(unittest.TestCase):
 
             result = await engine._verify_one(finding)
 
-            self.assertTrue(result)
+            self.assertEqual(result, "reproduced")
             scanner.verify_finding.assert_awaited_once()
 
         self.run_async(run())

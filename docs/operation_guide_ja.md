@@ -292,7 +292,7 @@ python3 main.py scan https://app.example.com --har app.har
 検出結果は、次の順で確認します。
 
 1. `Severity` が Critical / High のものを優先する。
-2. `verified` や `confidence` を確認する。
+2. `verification_state`、`verified`、`confidence` を確認する。`assumed` は検出を保持した推定で、再現済みではない。
 3. `evidence_type` と `evidence_details` で証拠の種類を見る。
 4. Request / Response を見て、実際に攻撃入力が届いているか確認する。
 5. 再現コマンドまたは手動手順で再現する。

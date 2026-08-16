@@ -242,6 +242,7 @@ class Finding:
     injection_method: str = ""         # JSON body 送信時の HTTP メソッド
     injection_template_id: str = ""    # 秘匿値を持たないテンプレート識別子
     injection_form_index: int = 0       # form 注入点の index（段階5b で記録）
+    verification_state: str = ""       # reproduced | assumed | unreproduced | skipped（空は旧 Finding）
 
     @classmethod
     def from_dict(cls, data: dict) -> "Finding":
@@ -268,6 +269,7 @@ class Finding:
             timestamp=data.get("timestamp", time.time()),
             verified=bool(data.get("verified", True)),
             verification_note=data.get("verification_note", ""),
+            verification_state=data.get("verification_state", ""),
             confidence=data.get("confidence", "tentative"),
             evidence_type=data.get("evidence_type", ""),
             evidence_details=dict(data.get("evidence_details", {}) or {}),
@@ -322,6 +324,7 @@ class Finding:
             "cvss_score": self.cvss_score,
             "verified": self.verified,
             "verification_note": self.verification_note,
+            "verification_state": self.verification_state,
             "confidence": self.confidence,
             "evidence_type": self.evidence_type,
             "evidence_details": self.evidence_details,

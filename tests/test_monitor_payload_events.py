@@ -2,6 +2,7 @@ import unittest
 from unittest.mock import AsyncMock
 
 from wscan.monitor import MonitorServer
+from wscan.scanners.base import Finding
 from wscan.scanners.ldap_injection import LDAPScanner
 from wscan.scanners.xxe import XXEScanner
 
@@ -40,6 +41,26 @@ class _Engine:
 
 
 class MonitorPayloadEventTests(unittest.IsolatedAsyncioTestCase):
+    async def test_finding_payload_includes_verification_state(self):
+        monitor = MonitorServer()
+        finding = Finding(
+            check_type="xss",
+            severity="high",
+            url="http://fixture.test/search?q=x",
+            field_name="q",
+            payload="<svg/onload=alert(1)>",
+            evidence="reflected",
+            verification_state="assumed",
+        )
+
+        await monitor.emit_finding(finding.to_dict())
+
+        self.assertEqual(monitor.api_findings[0]["verification_state"], "assumed")
+        self.assertEqual(
+            monitor.event_history[-1]["data"]["verification_state"],
+            "assumed",
+        )
+
     async def test_dashboard_start_scan_resets_api_state(self):
         monitor = MonitorServer()
         monitor.api_findings = [{"stale": True}]
