@@ -356,6 +356,14 @@ def injection_point_from_finding(finding: Finding) -> Optional[InjectionPoint]:
         # body 全体を payload に置換する（whole-body JSON 注入）。空を一律 corrupt と
         # 誤判定すると verify で再送されず未検証のまま確証扱いになる。malformed は
         # 非空で '/' 始まりでない場合に parse_pointer が ValueError を投げる分だけ。
+        # 非文字列（resume した checkpoint の "injection_pointer": null 等）は parse_pointer で
+        # AttributeError になり verify を巻き込むため、ここで明示的に unexecutable 化する
+        # （"" ルートは str なので通す）。
+        if not isinstance(finding.injection_pointer, str):
+            raise ProvenanceError(
+                "json_body provenance の injection_pointer が文字列ではありません: "
+                f"{finding.injection_pointer!r}"
+            )
         try:
             return InjectionPoint.for_json_body(
                 finding.injection_method,

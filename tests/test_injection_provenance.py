@@ -293,6 +293,23 @@ class FindingInjectionProvenanceTests(unittest.IsolatedAsyncioTestCase):
             scanner._verify_injection_point(finding, is_url_param=False)
         )
 
+    def test_verify_injection_point_non_string_pointer_unexecutable(self):
+        # resume した checkpoint の "injection_pointer": null 等（非文字列）は
+        # parse_pointer で AttributeError になり verify を巻き込むため unexecutable 化。
+        scanner = _Scanner(_Engine())
+        finding = Finding.from_dict({
+            "check_type": "sqli", "severity": "high", "url": "http://h/api",
+            "field_name": "body", "payload": "'", "evidence": "e",
+            "injection_location": "json_body", "injection_pointer": None,
+            "injection_method": "POST",
+        })
+        self.assertIsNone(finding.injection_pointer)
+        self.assertIsNone(
+            scanner._verify_injection_point(finding, is_url_param=False)
+        )
+        with self.assertRaises(ProvenanceError):
+            injection_point_from_finding(finding)
+
     def test_verify_injection_point_json_root_pointer_valid(self):
         # 空文字は RFC 6901 ルート pointer（whole-body 注入）で valid。unexecutable にしない。
         scanner = _Scanner(_Engine())
