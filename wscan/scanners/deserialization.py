@@ -148,6 +148,11 @@ class DeserializationScanner(BaseScanner):
         findings = []
 
         baseline_src = ""
+        # baseline も送信なので単層ログ(＋abort checkpoint)を呼び出し側で通す
+        # （_apply_json_payload は log しない＝json でも payloads.jsonl に残す）。
+        await self.log_payload_test(
+            field_name, "wscan_deser_baseline", "deserialization_baseline", ip.url
+        )
         try:
             baseline_src, _ = await self._apply_ip(ip, "wscan_deser_baseline")
         except Exception:
@@ -326,8 +331,16 @@ class DeserializationScanner(BaseScanner):
             urlparse(finding.url).query, keep_blank_values=True
         )
         ip = self._verify_injection_point(finding, is_url_param)
+        # verify の再送(baseline + probe)も単層ログ(＋abort checkpoint)を呼び出し側で通す。
+        await self.log_payload_test(
+            finding.field_name, "wscan_deser_baseline",
+            "deserialization_verify_baseline", finding.url,
+        )
         try:
             baseline_src, _ = await self._apply_ip(ip, "wscan_deser_baseline")
+            await self.log_payload_test(
+                finding.field_name, payload, "deserialization_verify", finding.url
+            )
             probe_src, _ = await self._apply_ip(ip, payload)
         except Exception:
             return None
