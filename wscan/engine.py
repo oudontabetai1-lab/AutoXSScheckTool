@@ -549,6 +549,8 @@ class ScanEngine:
         # （mass_assignment 等が利用する RequestTemplate のリスト）
         self.api_spec_path: str = api_spec_path
         self.api_seed_requests: list = []
+        # JSON body の実値を含み得るため、永続化しないメモリ内レジストリ。
+        self.injection_templates: dict[str, dict] = {}
         # API スペック由来 URL の集合（GraphQL の具体 URL probe を API/GraphQL 系のみへ
         # 限定するために参照。全クロールページへ probe を撒かないためのゲート）。
         self.api_seed_urls: set = set()

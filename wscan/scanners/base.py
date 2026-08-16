@@ -2,11 +2,22 @@
 Base Scanner Class
 Provides common utilities for all vulnerability scanners.
 """
+import json
 import re
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Optional, TYPE_CHECKING
+
+import httpx
+
+from wscan.injection_point import (
+    InjectionPoint,
+    pointer_set_copy,
+    redact_body_except,
+    redact_known_secrets,
+    sibling_string_values,
+)
 
 if TYPE_CHECKING:
     from wscan.engine import ScanEngine
@@ -111,6 +122,50 @@ def merge_template_headers(base: dict, tmpl_headers: dict) -> dict:
     return out
 
 
+def _redact_json_evidence_pair(pair: dict, injection_pointer: str) -> dict:
+    """json_body Finding 用に証跡 pair を伏せた**コピー**を返す（純粋・検出には非使用）。
+
+    検出は生 pair で既に完了している前提。ここでは永続/配信される Finding.request/response
+    から、テンプレの兄弟秘匿(request body・エコーされた response 本文)と認証ヘッダ値を伏せる。
+    注入 pointer の値は残す（再現時にどの pointer に何を入れたか読めるように）。
+    - request.post_data: 兄弟をマスク、注入 pointer の値のみ残す。
+    - request/response.headers: テンプレ由来やサーバ発行で ``_SENSITIVE_HEADERS`` 未登録の
+      X-Access-Token 等も伏せるため、双方のヘッダを ``_CREDENTIAL_HEADERS`` で判定してマスク。
+    - response.body: エコーされた既知の兄弟秘匿を符号化違いも含め伏せる。
+    """
+    req = dict(pair.get("request", {}) or {})
+    resp = dict(pair.get("response", {}) or {})
+    raw_post = req.get("post_data")
+    parsed = None
+    if isinstance(raw_post, str) and raw_post:
+        try:
+            parsed = json.loads(raw_post)
+        except ValueError:
+            parsed = None
+    secrets: list[str] = []
+    if isinstance(parsed, (dict, list)):
+        secrets = sibling_string_values(parsed, injection_pointer)
+        req["post_data"] = json.dumps(redact_body_except(parsed, injection_pointer))
+    # request/response 双方の認証ヘッダ値をマスク（サーバが X-Access-Token 等を応答で
+    # 返す場合も to_dict→checkpoint/report/monitor へ流さない）。
+    if isinstance(req.get("headers"), dict):
+        req["headers"] = _mask_credential_headers(req["headers"])
+    if isinstance(resp.get("headers"), dict):
+        resp["headers"] = _mask_credential_headers(resp["headers"])
+    body = resp.get("body")
+    if isinstance(body, str) and secrets:
+        resp["body"] = redact_known_secrets(body, secrets)
+    return {**pair, "request": req, "response": resp}
+
+
+def _mask_credential_headers(headers: dict) -> dict:
+    """``_CREDENTIAL_HEADERS`` に該当するヘッダ値を伏せた新 dict を返す（純粋）。"""
+    return {
+        k: ("***" if str(k).lower() in _CREDENTIAL_HEADERS else v)
+        for k, v in headers.items()
+    }
+
+
 def finding_dedup_key(
     check_type: str,
     url: str,
@@ -127,12 +182,35 @@ def finding_dedup_key(
     return (url, field_name, check_type, evidence_type or check_type)
 
 
-def finding_dedup_key_for(finding: "Finding") -> tuple[str, str, str, str]:
-    return finding_dedup_key(
-        finding.check_type,
-        finding.url,
-        finding.field_name,
-        finding.evidence_type,
+def _augment_dedup_key(
+    base: tuple,
+    injection_location: str,
+    injection_method: str,
+    injection_pointer: str,
+) -> tuple:
+    """JSON body 注入点の dedup identity を method+pointer で拡張する（純粋）。
+
+    同一 leaf 名(例 /profile/id と /billing/id が共に field_name="id")でも別入力
+    なので取りこぼさない。form/url_param は base のまま(4-tuple)。record_finding・
+    finding_dedup_key_for(engine の _record_finding/_init_checkpoint 経由)の**全 dedup
+    地点で同一キー**になるよう、この 1 箇所に集約する。
+    """
+    if injection_location == "json_body":
+        return base + (injection_method, injection_pointer)
+    return base
+
+
+def finding_dedup_key_for(finding: "Finding") -> tuple:
+    return _augment_dedup_key(
+        finding_dedup_key(
+            finding.check_type,
+            finding.url,
+            finding.field_name,
+            finding.evidence_type,
+        ),
+        getattr(finding, "injection_location", ""),
+        getattr(finding, "injection_method", ""),
+        getattr(finding, "injection_pointer", ""),
     )
 
 
@@ -159,6 +237,10 @@ class Finding:
     reproduction_steps: list[str] = field(default_factory=list)
     source: str = "scanner"          # "scanner" | "agent"
     agent_verified: bool = False      # Agent 発見を決定論スキャナでも再現できたか
+    injection_location: str = ""       # 空文字は旧来または不明の注入経路
+    injection_pointer: str = ""        # JSON body 内の JSON Pointer
+    injection_method: str = ""         # JSON body 送信時の HTTP メソッド
+    injection_template_id: str = ""    # 秘匿値を持たないテンプレート識別子
 
     @classmethod
     def from_dict(cls, data: dict) -> "Finding":
@@ -191,6 +273,10 @@ class Finding:
             reproduction_steps=list(data.get("reproduction_steps", []) or []),
             source=data.get("source", "scanner"),
             agent_verified=bool(data.get("agent_verified", False)),
+            injection_location=data.get("injection_location", ""),
+            injection_pointer=data.get("injection_pointer", ""),
+            injection_method=data.get("injection_method", ""),
+            injection_template_id=data.get("injection_template_id", ""),
         )
 
     @property
@@ -236,8 +322,25 @@ class Finding:
             "reproduction_steps": self.reproduction_steps,
             "source": self.source,
             "agent_verified": self.agent_verified,
+            "injection_location": self.injection_location,
+            "injection_pointer": self.injection_pointer,
+            "injection_method": self.injection_method,
+            "injection_template_id": self.injection_template_id,
             "compliance_refs": get_refs(self.check_type),
         }
+
+
+def injection_point_from_finding(finding: Finding) -> Optional[InjectionPoint]:
+    """JSON body の provenance がある Finding から注入点を復元する。"""
+    if finding.injection_location != "json_body":
+        return None
+    return InjectionPoint.for_json_body(
+        finding.injection_method,
+        finding.url,
+        finding.injection_pointer,
+        display_name=finding.field_name,
+        template_id=finding.injection_template_id,
+    )
 
 
 class BaseScanner(ABC):
@@ -419,6 +522,88 @@ class BaseScanner(ABC):
         if req_ts and resp_ts:
             return resp_ts - req_ts
         return None
+
+    async def _apply_json_payload(
+        self,
+        ip: InjectionPoint,
+        payload,
+    ) -> tuple[str, dict]:
+        """JSON body 注入点へ payload を送信し、応答本文と通信記録を返す。"""
+        template = (
+            getattr(self.engine, "injection_templates", {}) or {}
+        ).get(ip.template_id)
+        if not isinstance(template, dict):
+            return "", {}
+
+        try:
+            url = template.get("url") or ip.url
+            method = (template.get("method") or ip.method or "POST").upper()
+            body = pointer_set_copy(
+                template.get("json_body"),
+                ip.parameter_id,
+                payload,
+            )
+            post_data = json.dumps(body)
+            content_type = template.get("content_type") or "application/json"
+            headers = self.auth_headers_for_url(
+                url,
+                {"Content-Type": content_type},
+            )
+            headers = merge_template_headers(
+                headers,
+                template.get("headers") or {},
+            )
+            kwargs = {
+                "timeout": getattr(self.engine, "timeout", 15),
+                "follow_redirects": True,
+                "headers": headers,
+            }
+            if hasattr(self.engine, "httpx_client_kwargs"):
+                kwargs = self.engine.httpx_client_kwargs(**kwargs)
+            elif getattr(self.engine, "proxy", ""):
+                kwargs["proxy"] = self.engine.proxy
+        except Exception:
+            return "", {}
+
+        # abort 判定を送信直前に通す。AbortScan は呼び出し側へ伝播させる。
+        # 監査ログ(payloads.jsonl / monitor)には**注入した値のみ**記録する。テンプレの
+        # 兄弟フィールド(password/token 等)を含む body 全体を渡すと秘匿が平文で永続/配信
+        # されてしまう(落とし穴8: 秘匿の非永続。in-memory レジストリの保護が台無しになる)。
+        log_value = payload if isinstance(payload, str) else json.dumps(payload)
+        await self.log_payload_test(
+            ip.display_name or ip.parameter_id,
+            log_value,
+            self.CHECK_TYPE,
+            url,
+        )
+        # transport は**忠実**に振る舞う: source も pair も生応答を返す。検出（反射/エラー
+        # 文字列/長さ差）は生本文で行う必要があり、兄弟値を先に伏せると短い共通値
+        # （例 "a"/"admin"）が反射 payload やエラー文を壊して偽陰性を生む。秘匿の伏字は
+        # 永続/配信の境界（record_finding=_redact_json_evidence_pair）に一元化する。
+        request_timestamp = time.time()
+        try:
+            async with httpx.AsyncClient(**kwargs) as client:
+                response = await client.request(method, url, content=post_data)
+            response_timestamp = time.time()
+            pair = {
+                "request": {
+                    "url": url,
+                    "method": method,
+                    "headers": headers,
+                    "post_data": post_data,
+                    "timestamp": request_timestamp,
+                },
+                "response": {
+                    "url": str(response.url),
+                    "status": response.status_code,
+                    "headers": dict(response.headers),
+                    "body": response.text,
+                    "timestamp": response_timestamp,
+                },
+            }
+            return response.text, pair
+        except Exception:
+            return "", {}
 
     async def run_equivalence_probe(
         self,
@@ -633,6 +818,7 @@ class BaseScanner(ABC):
         evidence_type: str = "",
         evidence_details: Optional[dict] = None,
         reproduction_steps: Optional[list[str]] = None,
+        injection_point: Optional[InjectionPoint] = None,
     ) -> Finding:
         """Create and record a finding."""
         if screenshot_b64 is None:
@@ -652,12 +838,16 @@ class BaseScanner(ABC):
                     label=f"[FINDING] {self.CHECK_TYPE} on {field_name}"
                 )
         # Dedup: skip exact evidence repeats while preserving distinct signals
-        # on the same input.
-        dedup_key = finding_dedup_key(
-            self.CHECK_TYPE,
-            url,
-            field_name,
-            evidence_type,
+        # on the same input。JSON body 注入点は leaf 名が同じでも別入力になり得る
+        # (例 /profile/id と /billing/id は共に field_name="id")。_augment_dedup_key に
+        # 集約し、engine の _record_finding/_init_checkpoint(finding_dedup_key_for 経由)と
+        # **完全に同一キー**にする(記録時のみ 6-tuple で resume 復元が 4-tuple、という
+        # 食い違いを防ぐ)。form/url_param は base(4-tuple)のままで回帰ゼロ。
+        dedup_key = _augment_dedup_key(
+            finding_dedup_key(self.CHECK_TYPE, url, field_name, evidence_type),
+            injection_point.location if injection_point is not None else "",
+            injection_point.method if injection_point is not None else "",
+            injection_point.parameter_id if injection_point is not None else "",
         )
         if dedup_key in self.engine._finding_dedup:
             return None  # duplicate
@@ -673,6 +863,12 @@ class BaseScanner(ABC):
             # whether the response actually changed.  Default to "tentative" so
             # scanners that care about confidence set it explicitly.
             confidence = "tentative"
+
+        # json_body 注入点の証跡は、永続/配信の**この境界**で伏せる（transport は検出用に
+        # 生 pair を返す）。テンプレの兄弟秘匿(body・エコー応答)と認証ヘッダ値を to_dict へ
+        # 流す前にマスクする。検出は record_finding 呼び出し前に生 pair で済んでいる。
+        if injection_point is not None and injection_point.location == "json_body":
+            pair = _redact_json_evidence_pair(pair, injection_point.parameter_id)
 
         finding = Finding(
             check_type=self.CHECK_TYPE,
@@ -691,6 +887,20 @@ class BaseScanner(ABC):
             evidence_details=evidence_details or {},
             reproduction_steps=reproduction_steps or self._default_reproduction_steps(
                 url, field_name, payload
+            ),
+            injection_location=(injection_point.location if injection_point else ""),
+            injection_pointer=(
+                injection_point.parameter_id
+                if injection_point and injection_point.location == "json_body"
+                else ""
+            ),
+            injection_method=(
+                injection_point.method
+                if injection_point and injection_point.location == "json_body"
+                else ""
+            ),
+            injection_template_id=(
+                injection_point.template_id if injection_point else ""
             ),
         )
         self.findings.append(finding)
