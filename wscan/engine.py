@@ -1359,6 +1359,30 @@ class ScanEngine:
             return
         self.checkpoint.mark_done(url, field_name, form_index, check, is_url_param)
 
+    def _injection_point_for(
+        self,
+        url: str,
+        field_name: str,
+        form_index: int,
+        is_url_param: bool,
+    ):
+        """従来 form/URL parameter から InjectionPoint を一意に生成する。"""
+        from wscan.injection_point import InjectionPoint
+
+        if is_url_param:
+            return InjectionPoint.for_url_param(url, field_name)
+        return InjectionPoint.for_form(url, field_name, form_index)
+
+    def _checkpoint_is_done_ip(self, ip, check: str) -> bool:
+        if not self.enable_checkpoint or self.checkpoint is None:
+            return False
+        return self.checkpoint.is_done_ip(ip, check)
+
+    def _checkpoint_mark_done_ip(self, ip, check: str) -> None:
+        if not self.enable_checkpoint or self.checkpoint is None:
+            return
+        self.checkpoint.mark_done_ip(ip, check)
+
     # =========================================================================
     # Session expiry / auto re-login
     # =========================================================================
@@ -3991,6 +4015,7 @@ class ScanEngine:
     ):
         """Run enabled scanners on a single field, guided by the attack plan."""
         field_name = field.get("name", "unknown")
+        ip = self._injection_point_for(url, field_name, form_index, is_url_param)
         location = "URL param" if is_url_param else "form field"
 
         if field_plan and field_plan.priority_checks:
@@ -4021,7 +4046,7 @@ class ScanEngine:
                 continue
 
             # 再開可能スキャン: 既に完了した (url, field, location, check) 単位は飛ばす
-            if self._checkpoint_is_done(url, field_name, form_index, check_name, is_url_param):
+            if self._checkpoint_is_done_ip(ip, check_name):
                 self._record_scan_matrix(
                     url=url,
                     field_name=field_name,
@@ -4053,7 +4078,7 @@ class ScanEngine:
             checks_executed += 1
             try:
                 before_count = len(self.all_findings)
-                findings = await scanner.scan_field(url, form_index, field, is_url_param)
+                findings = await scanner.scan_injection_point(ip, field)
                 for f in (findings or []):
                     if f is None:
                         continue
@@ -4096,7 +4121,7 @@ class ScanEngine:
                 # （一時的なブラウザ/ネットワーク障害で取りこぼした検査を resume が
                 # 飛ばしてしまわないようにする — 再開の網羅性を守る）。
                 if not check_errored:
-                    self._checkpoint_mark_done(url, field_name, form_index, check_name, is_url_param)
+                    self._checkpoint_mark_done_ip(ip, check_name)
 
         # CTF: check page source after all scanners ran on this field
         if self.flag_finder:
@@ -4114,21 +4139,15 @@ class ScanEngine:
         # 成功済み check の完了記録を残し、resume では失敗分だけを再試行する。
         # 旧 checkpoint の field 単位 "(adaptive)" marker は「全 check 完了」として尊重し、
         # 読み込み互換と完了済みフィールドへの再送防止を維持する。
-        legacy_adaptive_done = self._checkpoint_is_done(
-            url, field_name, form_index, "(adaptive)", is_url_param
-        )
+        legacy_adaptive_done = self._checkpoint_is_done_ip(ip, "(adaptive)")
         adaptive_checks = [
             check_name for check_name in ordered_checks
             if check_name in self.scanners
             and check_name not in _ADAPTIVE_PAGE_LEVEL_CHECKS
         ]
         adaptive_pending = any(
-            not self._checkpoint_is_done(
-                url,
-                field_name,
-                form_index,
-                _adaptive_checkpoint_check(check_name),
-                is_url_param,
+            not self._checkpoint_is_done_ip(
+                ip, _adaptive_checkpoint_check(check_name)
             )
             for check_name in adaptive_checks
         )
@@ -4176,6 +4195,7 @@ class ScanEngine:
         context-aware bypass payloads, then run the scanner again with those payloads.
         """
         field_name = field.get("name", "unknown")
+        ip = self._injection_point_for(url, field_name, form_index, is_url_param)
 
         # provider 自体が使えない場合はフォールバック完了として収束させる。
         # 個別 generate() の一時失敗とは分離し、可用性 probe は scan 中に一度だけ行う。
@@ -4200,21 +4220,9 @@ class ScanEngine:
                 ):
                     continue
                 adaptive_checkpoint_check = _adaptive_checkpoint_check(check_name)
-                if self._checkpoint_is_done(
-                    url,
-                    field_name,
-                    form_index,
-                    adaptive_checkpoint_check,
-                    is_url_param,
-                ):
+                if self._checkpoint_is_done_ip(ip, adaptive_checkpoint_check):
                     continue
-                self._checkpoint_mark_done(
-                    url,
-                    field_name,
-                    form_index,
-                    adaptive_checkpoint_check,
-                    is_url_param,
-                )
+                self._checkpoint_mark_done_ip(ip, adaptive_checkpoint_check)
                 checkpoint_updated = True
             if checkpoint_updated:
                 self._save_checkpoint()
@@ -4238,25 +4246,13 @@ class ScanEngine:
                 continue
 
             adaptive_checkpoint_check = _adaptive_checkpoint_check(check_name)
-            if self._checkpoint_is_done(
-                url,
-                field_name,
-                form_index,
-                adaptive_checkpoint_check,
-                is_url_param,
-            ):
+            if self._checkpoint_is_done_ip(ip, adaptive_checkpoint_check):
                 continue
 
             # 別 field/check の恒久失敗で可用性キャッシュが倒れた場合も、以降は
             # LLM を呼ばずフォールバック完了として収束させる。
             if self._adaptive_llm_available is False:
-                self._checkpoint_mark_done(
-                    url,
-                    field_name,
-                    form_index,
-                    adaptive_checkpoint_check,
-                    is_url_param,
-                )
+                self._checkpoint_mark_done_ip(ip, adaptive_checkpoint_check)
                 self._save_checkpoint()
                 continue
 
@@ -4288,13 +4284,7 @@ class ScanEngine:
 
             generated_payloads.extend(adaptive_payloads)
             if not adaptive_payloads:
-                self._checkpoint_mark_done(
-                    url,
-                    field_name,
-                    form_index,
-                    adaptive_checkpoint_check,
-                    is_url_param,
-                )
+                self._checkpoint_mark_done_ip(ip, adaptive_checkpoint_check)
                 self._save_checkpoint()
                 continue
 
@@ -4303,7 +4293,7 @@ class ScanEngine:
             _adaptive_token = _FIELD_PAYLOAD_OVERRIDES.set({**current_overrides, check_name: adaptive_payloads})
 
             try:
-                findings = await scanner.scan_field(url, form_index, field, is_url_param)
+                findings = await scanner.scan_injection_point(ip, field)
                 for f in (findings or []):
                     if f is None:
                         continue
@@ -4318,13 +4308,7 @@ class ScanEngine:
                 generation_failed = True
                 console.print(f"    [yellow]Adaptive scanner error ({check_name}): {e}[/yellow]")
             else:
-                self._checkpoint_mark_done(
-                    url,
-                    field_name,
-                    form_index,
-                    adaptive_checkpoint_check,
-                    is_url_param,
-                )
+                self._checkpoint_mark_done_ip(ip, adaptive_checkpoint_check)
                 # 後続 check の失敗やプロセス中断でも部分成功を保持する。
                 self._save_checkpoint()
             finally:
