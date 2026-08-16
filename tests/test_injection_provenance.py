@@ -88,6 +88,43 @@ class FindingInjectionProvenanceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(finding.injection_method, "POST")
         self.assertEqual(finding.injection_template_id, "login-1")
 
+    async def test_json_body_dedup_distinguishes_same_leaf_pointers(self):
+        scanner = _Scanner(_Engine())
+        pair = {"request": {}, "response": {}}
+        ip1 = InjectionPoint.for_json_body(
+            "POST", "http://h/u", "/profile/id", template_id="t"
+        )
+        ip2 = InjectionPoint.for_json_body(
+            "POST", "http://h/u", "/billing/id", template_id="t"
+        )
+        f1 = await scanner.record_finding(
+            "http://h/u", "id", "'", "err", pair, screenshot_b64="",
+            evidence_type="sqli_error", injection_point=ip1,
+        )
+        f2 = await scanner.record_finding(
+            "http://h/u", "id", "'", "err", pair, screenshot_b64="",
+            evidence_type="sqli_error", injection_point=ip2,
+        )
+        # 別ポインタは別入力として両方残る（leaf 名の衝突で捨てない）。
+        self.assertIsNotNone(f1)
+        self.assertIsNotNone(f2)
+
+    async def test_form_dedup_identity_unchanged(self):
+        scanner = _Scanner(_Engine())
+        pair = {"request": {}, "response": {}}
+        ip = InjectionPoint.for_form("http://h/form", "id")
+        f1 = await scanner.record_finding(
+            "http://h/form", "id", "'", "err", pair, screenshot_b64="",
+            evidence_type="sqli_error", injection_point=ip,
+        )
+        f2 = await scanner.record_finding(
+            "http://h/form", "id", "'", "err", pair, screenshot_b64="",
+            evidence_type="sqli_error", injection_point=ip,
+        )
+        # form の dedup は従来通り（同一入力・同一 evidence の2件目は重複扱い）。
+        self.assertIsNotNone(f1)
+        self.assertIsNone(f2)
+
     def test_rebuilds_json_body_only(self):
         json_finding = Finding(
             check_type="sqli",

@@ -493,9 +493,13 @@ class BaseScanner(ABC):
             return "", {}
 
         # abort 判定を送信直前に通す。AbortScan は呼び出し側へ伝播させる。
+        # 監査ログ(payloads.jsonl / monitor)には**注入した値のみ**記録する。テンプレの
+        # 兄弟フィールド(password/token 等)を含む body 全体を渡すと秘匿が平文で永続/配信
+        # されてしまう(落とし穴8: 秘匿の非永続。in-memory レジストリの保護が台無しになる)。
+        log_value = payload if isinstance(payload, str) else json.dumps(payload)
         await self.log_payload_test(
             ip.display_name or ip.parameter_id,
-            post_data,
+            log_value,
             self.CHECK_TYPE,
             url,
         )
@@ -764,6 +768,12 @@ class BaseScanner(ABC):
             field_name,
             evidence_type,
         )
+        # JSON body 注入点は leaf 名が同じでも別入力になり得る(例 /profile/id と
+        # /billing/id は共に field_name="id")。method+pointer を identity に足して
+        # 2件目が誤って重複扱いで捨てられるのを防ぐ。form/url_param は従来の4部品キーの
+        # まま(4-tuple と 6-tuple は決して等しくならないので回帰ゼロ)。
+        if injection_point is not None and injection_point.location == "json_body":
+            dedup_key = dedup_key + (injection_point.method, injection_point.parameter_id)
         if dedup_key in self.engine._finding_dedup:
             return None  # duplicate
         self.engine._finding_dedup.add(dedup_key)
