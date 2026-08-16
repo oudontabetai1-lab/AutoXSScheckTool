@@ -416,12 +416,13 @@ class FindingInjectionProvenanceTests(unittest.IsolatedAsyncioTestCase):
         await engine._phase_verify()  # 例外を送出しない
         # 1 件目の例外で止まらず両方が検証を試みられる。
         self.assertEqual(engine.calls, ["boom", "ok"])
-        # 例外は no-penalty（verified を False にしない）＋ wave_errors に観測記録。
-        self.assertTrue(boom.verified)
         self.assertTrue(getattr(engine, "wave_errors", None))
-        # skip は「再現していない」ので CONFIRMED 扱いにせず、その旨を note に残す
-        # （operator に誤った検証結果を見せない）。正常確認の ok には skip note を付けない。
+        # skip は「再現していない」ので CONFIRMED にせず、report/SARIF で可視化するため
+        # verified を倒し（⚠ 要確認 + note 経路）理由を note に残す。finding は削除しない。
+        # 正常確認の ok は無傷（verified=True・skip note なし）。
+        self.assertFalse(boom.verified)
         self.assertIn("未再現", boom.verification_note)
+        self.assertTrue(ok.verified)
         self.assertEqual(ok.verification_note, "")
 
     def test_rebuilds_all_locations(self):

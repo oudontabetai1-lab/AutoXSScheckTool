@@ -4580,12 +4580,9 @@ class ScanEngine:
                 confirmed = await self._verify_one(finding)
             except Exception as exc:
                 # 想定外の例外（破損 provenance の復元失敗など）で verify フェーズ全体を
-                # 止めない。1 件の異常が残り全 finding の検証を巻き込むのを防ぎ、no-penalty
-                # で finding は残す（_verify_one の「検証不能=確証扱い」慣行と同型）。
-                # ただし**再現はしていない**ので CONFIRMED（reproduced）は出さず、skip として
-                # 別扱いにする（誤った検証結果を operator に見せない）。verified は倒さない。
+                # 止めない。1 件の異常が残り全 finding の検証を巻き込むのを防ぐ。
+                # 黙って検出力を落とさないよう wave_errors に記録する。
                 skipped = True
-                finding.verification_note = "検証が例外で実行できず未再現（no-penalty で保持）"
                 errors = getattr(self, "wave_errors", None)
                 if errors is None:
                     self.wave_errors = errors = []
@@ -4595,10 +4592,16 @@ class ScanEngine:
                 console.print(
                     f"  [yellow][VERIFY-SKIP][/yellow] {finding.check_type.upper()} "
                     f"on [yellow]{finding.field_name}[/yellow]: "
-                    f"{type(exc).__name__} — kept (not penalised)"
+                    f"{type(exc).__name__} — 未検証（要手動確認）"
                 )
             if skipped:
-                pass  # 既に VERIFY-SKIP を表示済み。CONFIRMED/UNCONFIRMED は出さない。
+                # 検証を実行できなかった＝**再現していない**。report/SARIF で可視化するため
+                # verified を倒し（既存の ⚠ 要確認 + note 経路に載せる）、正常な非再現
+                # （false positive 疑い）とは別文言で理由を残す。finding は削除せず manual
+                # review 扱いにする（過検知を消さない＝検出力は落とさない）。CONFIRMED
+                # （reproduced）には決して落とさない。
+                finding.verified = False
+                finding.verification_note = "検証が例外で実行できず未再現（要手動確認）"
             elif confirmed:
                 console.print(
                     f"  [green][CONFIRMED][/green] {finding.check_type.upper()} "
