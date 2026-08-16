@@ -98,6 +98,45 @@ def redact_body_except(doc: Any, keep_pointer: str, mask: str = "***") -> Any:
     return _walk(deepcopy(doc), [])
 
 
+def sibling_string_values(doc: Any, keep_pointer: str) -> list[str]:
+    """注入 pointer 以外の**文字列**葉の値を列挙する（純粋）。
+
+    エコー系エンドポイントは送信 body をレスポンスに反射することがあり、その本文が
+    Finding の response_body_excerpt として checkpoint/report/monitor へ永続/配信される。
+    レスポンス証跡から**既知の兄弟秘匿値を伏せる**ために、伏せ対象の値を集める。
+    非文字列葉(数値/bool/None)は誤マスク(response 中の "1"/"true" 等)を避けて除外する。
+    """
+    keep_tokens = parse_pointer(keep_pointer)
+    out: list[str] = []
+
+    def _walk(node: Any, path: list[str]) -> None:
+        if isinstance(node, dict):
+            for k, v in node.items():
+                _walk(v, path + [k])
+        elif isinstance(node, list):
+            for i, v in enumerate(node):
+                _walk(v, path + [str(i)])
+        else:
+            if path != keep_tokens and isinstance(node, str) and node:
+                out.append(node)
+
+    _walk(doc, [])
+    return out
+
+
+def redact_known_secrets(text: str, secrets, mask: str = "***") -> str:
+    """text 中の既知秘匿値（長い順）を mask に置換する（純粋）。
+
+    判定は生レスポンス側で済ませ、証跡（永続/配信される本文）側だけを伏せる用途。
+    注入した payload marker や SQL エラー等の脆弱性シグナルは兄弟値ではないので消えない。
+    """
+    if not text:
+        return text
+    for secret in sorted({s for s in secrets if s}, key=len, reverse=True):
+        text = text.replace(secret, mask)
+    return text
+
+
 @dataclass(frozen=True)
 class InjectionPoint:
     """注入点(endpoint × parameter)の不変記述子。ADR-0008 内部層の第一歩。"""

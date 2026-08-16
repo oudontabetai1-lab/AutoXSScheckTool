@@ -101,6 +101,11 @@ class JsonTransportTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreaterEqual(
             pair["response"]["timestamp"], pair["request"]["timestamp"]
         )
+        # エコーされたレスポンス証跡でも兄弟秘匿は伏せる（source/pair 本文の両方）。
+        # 注入 marker は脆弱性シグナルなので残り、判定は成立する。
+        self.assertNotIn("observed-secret", source)
+        self.assertNotIn("observed-secret", pair["response"]["body"])
+        self.assertIn("wscan-marker", source)
         self.assertEqual(
             self.scanner.check_response_for_patterns(source, [r"wscan-marker"]),
             "wscan-marker",

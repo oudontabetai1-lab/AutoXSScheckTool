@@ -11,7 +11,13 @@ from typing import Optional, TYPE_CHECKING
 
 import httpx
 
-from wscan.injection_point import InjectionPoint, pointer_set_copy, redact_body_except
+from wscan.injection_point import (
+    InjectionPoint,
+    pointer_set_copy,
+    redact_body_except,
+    redact_known_secrets,
+    sibling_string_values,
+)
 
 if TYPE_CHECKING:
     from wscan.engine import ScanEngine
@@ -530,11 +536,17 @@ class BaseScanner(ABC):
         # post_data。pair は Finding.request として to_dict→checkpoint/report/monitor へ
         # 流れるが to_dict は post_data を伏せない＝落とし穴8）。注入 pointer の値のみ残す。
         redacted_post_data = json.dumps(redact_body_except(body, ip.parameter_id))
+        # エコー系エンドポイントは送信 body をレスポンスへ反射し得る。to_dict は本文先頭を
+        # response_body_excerpt として永続/配信するため、**既知の兄弟秘匿値**を本文から伏せる。
+        # 注入 payload marker や SQL エラー等の脆弱性シグナルは兄弟値ではないので消えない
+        # ＝判定に影響しない。source と pair 本文を同一に伏せて食い違いを作らない。
+        secret_values = sibling_string_values(body, ip.parameter_id)
         request_timestamp = time.time()
         try:
             async with httpx.AsyncClient(**kwargs) as client:
                 response = await client.request(method, url, content=post_data)
             response_timestamp = time.time()
+            evidence_body = redact_known_secrets(response.text, secret_values)
             pair = {
                 "request": {
                     "url": url,
@@ -547,11 +559,11 @@ class BaseScanner(ABC):
                     "url": str(response.url),
                     "status": response.status_code,
                     "headers": dict(response.headers),
-                    "body": response.text,
+                    "body": evidence_body,
                     "timestamp": response_timestamp,
                 },
             }
-            return response.text, pair
+            return evidence_body, pair
         except Exception:
             return "", {}
 

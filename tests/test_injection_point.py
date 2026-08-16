@@ -10,6 +10,8 @@ from wscan.injection_point import (
     pointer_get,
     pointer_set_copy,
     redact_body_except,
+    redact_known_secrets,
+    sibling_string_values,
     unescape_token,
 )
 
@@ -64,6 +66,23 @@ class JsonPointerTests(unittest.TestCase):
         red = redact_body_except(doc, "/a/0/v")
         self.assertEqual(red["a"][0]["v"], "PAYLOAD")
         self.assertEqual(red["a"][1]["v"], "***")
+
+    def test_sibling_string_values_excludes_kept_and_nonstring(self):
+        doc = {
+            "profile": {"email": "PAYLOAD", "name": "Alice"},
+            "password": "observed-secret",
+            "count": 7,
+            "active": True,
+        }
+        vals = sibling_string_values(doc, "/profile/email")
+        # 注入 pointer の値と非文字列葉は除外。
+        self.assertCountEqual(vals, ["Alice", "observed-secret"])
+
+    def test_redact_known_secrets_masks_longest_first(self):
+        text = '{"received":{"password":"observed-secret","email":"wscan-marker"}}'
+        red = redact_known_secrets(text, ["observed-secret", "Alice"])
+        self.assertNotIn("observed-secret", red)
+        self.assertIn("wscan-marker", red)
 
     def test_pointer_set_copy_handles_array_and_non_string_leaf(self):
         doc = {"filters": [{"email": "a"}, {"email": "b"}]}
