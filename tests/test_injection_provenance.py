@@ -281,16 +281,31 @@ class FindingInjectionProvenanceTests(unittest.IsolatedAsyncioTestCase):
         )
 
     def test_verify_injection_point_unexecutable_on_invalid(self):
+        # malformed = 非空だが '/' 始まりでない pointer（parse_pointer が ValueError）。
         scanner = _Scanner(_Engine())
         finding = Finding(
             check_type="sqli", severity="high", url="http://h/api",
             field_name="email", payload="'", evidence="e",
-            injection_location="json_body", injection_pointer="",
+            injection_location="json_body", injection_pointer="not-a-pointer",
             injection_method="POST",
         )
         self.assertIsNone(
             scanner._verify_injection_point(finding, is_url_param=False)
         )
+
+    def test_verify_injection_point_json_root_pointer_valid(self):
+        # 空文字は RFC 6901 ルート pointer（whole-body 注入）で valid。unexecutable にしない。
+        scanner = _Scanner(_Engine())
+        finding = Finding(
+            check_type="sqli", severity="high", url="http://h/api",
+            field_name="body", payload="'", evidence="e",
+            injection_location="json_body", injection_pointer="",
+            injection_method="POST",
+        )
+        ip = scanner._verify_injection_point(finding, is_url_param=False)
+        self.assertIsNotNone(ip)
+        self.assertEqual(ip.location, "json_body")
+        self.assertEqual(ip.parameter_id, "")
 
     async def test_engine_verify_uses_provenance_form_index(self):
         scanner = _VerifyScanner()
@@ -369,10 +384,13 @@ class FindingInjectionProvenanceTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ProvenanceError):
             injection_point_from_finding(legacy)
 
+        # 空文字 pointer = RFC 6901 ルート（whole-body 注入）で valid。復元できる。
         legacy.injection_location = "json_body"
         legacy.injection_pointer = ""
-        with self.assertRaises(ProvenanceError):
-            injection_point_from_finding(legacy)
+        root_ip = injection_point_from_finding(legacy)
+        self.assertIsNotNone(root_ip)
+        self.assertEqual(root_ip.location, "json_body")
+        self.assertEqual(root_ip.parameter_id, "")
 
         legacy.injection_pointer = "not-a-pointer"
         with self.assertRaises(ProvenanceError):

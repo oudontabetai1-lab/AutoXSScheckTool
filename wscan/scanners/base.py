@@ -351,8 +351,11 @@ def injection_point_from_finding(finding: Finding) -> Optional[InjectionPoint]:
     if location == "url_param":
         return InjectionPoint.for_url_param(finding.url, finding.field_name)
     if location == "json_body":
-        if not finding.injection_pointer:
-            raise ProvenanceError("json_body provenance に injection_pointer がありません")
+        # 空文字は RFC 6901 の**ルート pointer**（ドキュメント全体への注入）で valid。
+        # `parse_pointer("")` は [] を返し `pointer_set_copy(doc, "", payload)` は
+        # body 全体を payload に置換する（whole-body JSON 注入）。空を一律 corrupt と
+        # 誤判定すると verify で再送されず未検証のまま確証扱いになる。malformed は
+        # 非空で '/' 始まりでない場合に parse_pointer が ValueError を投げる分だけ。
         try:
             return InjectionPoint.for_json_body(
                 finding.injection_method,
