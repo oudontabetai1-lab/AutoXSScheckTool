@@ -87,6 +87,22 @@ class FindingInjectionProvenanceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(restored.injection_method, "POST")
         self.assertEqual(restored.injection_template_id, "login-1")
 
+    async def test_record_finding_stamps_verification_state(self):
+        # 新規 finding は必ず非空 state（空は旧 Finding 専用）。dialog 発火=reproduced、
+        # それ以外=assumed（検証 phase を通らない finding も曖昧ラベルに落ちない）。
+        scanner = _Scanner(_Engine())
+        pair = {"request": {}, "response": {}}
+        non_dialog = await scanner.record_finding(
+            "http://h/a", "q", "'", "err", pair, screenshot_b64="",
+            evidence_type="sqli_error",
+        )
+        self.assertEqual(non_dialog.verification_state, "assumed")
+        dialog = await scanner.record_finding(
+            "http://h/b", "q", "<script>", "err", pair, screenshot_b64="",
+            evidence_type="xss_dialog", dialog_confirmed=True,
+        )
+        self.assertEqual(dialog.verification_state, "reproduced")
+
     async def test_record_finding_stamps_form_without_pointer_or_method(self):
         scanner = _Scanner(_Engine())
         ip = InjectionPoint.for_form("http://h/form", "email")

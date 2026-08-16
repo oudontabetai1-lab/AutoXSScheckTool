@@ -987,6 +987,12 @@ class BaseScanner(ABC):
             screenshot_b64=screenshot_b64,
             dialog_confirmed=dialog_confirmed,
             dialog_message=dialog_message,
+            # 新規 finding は必ず非空の state を持たせ、空文字を「旧 Finding のみ」に予約する。
+            # dialog 発火は scan 時点で実行確証済み＝reproduced。それ以外は既定 assumed（検証
+            # phase を通らない page-level 系や dialog_confirmed でない finding が
+            # "reproduced/assumed" の曖昧ラベルに落ちるのを防ぐ）。_phase_verify を通る
+            # verifiable finding は後で reproduced/unreproduced/skipped に上書きされる。
+            verification_state=("reproduced" if dialog_confirmed else "assumed"),
             confidence=confidence,
             evidence_type=evidence_type or self.CHECK_TYPE,
             evidence_details=evidence_details or {},
