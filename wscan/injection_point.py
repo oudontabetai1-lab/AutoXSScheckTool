@@ -1,6 +1,7 @@
 """注入点を表す純粋な内部モデルと JSON Pointer ヘルパー。"""
 from __future__ import annotations
 
+import json
 from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any
@@ -87,6 +88,9 @@ def redact_body_except(doc: Any, keep_pointer: str, mask: str = "***") -> Any:
     keep_pointer に一致しない葉(dict/list の末端)は全て mask に置換する。
     """
     keep_tokens = parse_pointer(keep_pointer)
+    if not keep_tokens:
+        # 空ポインタ=ドキュメント全体が注入 payload（兄弟テンプレは無い）→何も伏せない。
+        return deepcopy(doc)
 
     def _walk(node: Any, path: list[str]) -> Any:
         if isinstance(node, dict):
@@ -104,9 +108,13 @@ def sibling_string_values(doc: Any, keep_pointer: str) -> list[str]:
     エコー系エンドポイントは送信 body をレスポンスに反射することがあり、その本文が
     Finding の response_body_excerpt として checkpoint/report/monitor へ永続/配信される。
     レスポンス証跡から**既知の兄弟秘匿値を伏せる**ために、伏せ対象の値を集める。
-    非文字列葉(数値/bool/None)は誤マスク(response 中の "1"/"true" 等)を避けて除外する。
+    非文字列葉(数値/bool/None)は誤マスク(response 中の "1"/"true" 等)を避けて除外する
+    （数値秘匿は低感度かつ過剰マスクの害が大きいため対象外。実配線する PR-b で要否を再検討）。
+    空ポインタ=doc 全体が注入 payload なので兄弟は無い（[] を返す）。
     """
     keep_tokens = parse_pointer(keep_pointer)
+    if not keep_tokens:
+        return []
     out: list[str] = []
 
     def _walk(node: Any, path: list[str]) -> None:
@@ -124,16 +132,37 @@ def sibling_string_values(doc: Any, keep_pointer: str) -> list[str]:
     return out
 
 
+def _secret_representations(secret: str) -> set[str]:
+    """秘匿文字列がレスポンス本文に現れ得る表現を返す（純粋）。
+
+    JSON 直列化は引用符/バックスラッシュ/改行/非ASCII をエスケープするため、生文字列だけを
+    置換すると符号化済みの出現（例 `pa\\"ss`、`caf\\u00e9`）を取りこぼす。生形＋
+    JSON エスケープ形(ensure_ascii 両方)を候補にする。
+    """
+    reps = {secret}
+    for ensure_ascii in (False, True):
+        try:
+            reps.add(json.dumps(secret, ensure_ascii=ensure_ascii)[1:-1])
+        except (TypeError, ValueError):
+            pass
+    return {r for r in reps if r}
+
+
 def redact_known_secrets(text: str, secrets, mask: str = "***") -> str:
-    """text 中の既知秘匿値（長い順）を mask に置換する（純粋）。
+    """text 中の既知秘匿値を、符号化違いも含め mask に置換する（純粋）。
 
     判定は生レスポンス側で済ませ、証跡（永続/配信される本文）側だけを伏せる用途。
     注入した payload marker や SQL エラー等の脆弱性シグナルは兄弟値ではないので消えない。
+    各秘匿の生形＋JSON エスケープ形を候補にし、部分被りを避けるため長い順に置換する。
     """
     if not text:
         return text
-    for secret in sorted({s for s in secrets if s}, key=len, reverse=True):
-        text = text.replace(secret, mask)
+    reps: set[str] = set()
+    for secret in secrets:
+        if secret:
+            reps |= _secret_representations(secret)
+    for rep in sorted(reps, key=len, reverse=True):
+        text = text.replace(rep, mask)
     return text
 
 

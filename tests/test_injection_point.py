@@ -84,6 +84,30 @@ class JsonPointerTests(unittest.TestCase):
         self.assertNotIn("observed-secret", red)
         self.assertIn("wscan-marker", red)
 
+    def test_redact_known_secrets_matches_json_escaped_form(self):
+        import json as _json
+        # 引用符/バックスラッシュを含む秘匿は、レスポンス JSON ではエスケープされる。
+        secret = 'pa"ss\\word'
+        text = _json.dumps({"received": {"pw": secret}})  # -> エスケープ済み本文
+        self.assertNotIn(secret, text)  # 生形は本文に現れない（符号化済み）
+        red = redact_known_secrets(text, [secret])
+        self.assertNotIn("pa", red.split('"pw":')[1][:20])  # エスケープ形が伏せられた
+        self.assertIn("***", red)
+
+    def test_redact_known_secrets_matches_non_ascii(self):
+        import json as _json
+        secret = "café-token"
+        text = _json.dumps({"pw": secret}, ensure_ascii=True)  # -> café-token
+        red = redact_known_secrets(text, [secret])
+        self.assertNotIn("caf\\u00e9", red)
+        self.assertIn("***", red)
+
+    def test_root_pointer_has_no_siblings(self):
+        doc = {"email": "PAYLOAD", "role": "admin"}
+        # 空ポインタ=doc 全体が注入 payload → 兄弟なし・マスクなし。
+        self.assertEqual(sibling_string_values(doc, ""), [])
+        self.assertEqual(redact_body_except(doc, ""), doc)
+
     def test_pointer_set_copy_handles_array_and_non_string_leaf(self):
         doc = {"filters": [{"email": "a"}, {"email": "b"}]}
         payload = {"$ne": ""}
