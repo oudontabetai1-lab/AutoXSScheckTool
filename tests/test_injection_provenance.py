@@ -344,6 +344,24 @@ class FindingInjectionProvenanceTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ProvenanceError):
             injection_point_from_finding(finding)
 
+    def test_verify_injection_point_empty_method_unexecutable(self):
+        # method 欠落（from_dict が "" に既定）や明示的 "" は "".upper() で例外にならず
+        # 「実行可能」な IP に化けるが HTTP replay 不能。非空 method を executability の前提として
+        # 明示検査し unexecutable 化する（root pointer でも method が無ければ送れない）。
+        scanner = _Scanner(_Engine())
+        finding = Finding.from_dict({
+            "check_type": "sqli", "severity": "high", "url": "http://h/api",
+            "field_name": "body", "payload": "'", "evidence": "e",
+            "injection_location": "json_body", "injection_pointer": "",
+            # injection_method キーを欠落（from_dict が "" に既定）
+        })
+        self.assertEqual(finding.injection_method, "")
+        self.assertIsNone(
+            scanner._verify_injection_point(finding, is_url_param=False)
+        )
+        with self.assertRaises(ProvenanceError):
+            injection_point_from_finding(finding)
+
     def test_verify_injection_point_json_root_pointer_valid(self):
         # 明示的に格納された空文字は RFC 6901 ルート pointer（whole-body 注入）で valid。
         # 欠落（None sentinel）と区別して unexecutable にしない。
@@ -474,8 +492,10 @@ class FindingInjectionProvenanceTests(unittest.IsolatedAsyncioTestCase):
             injection_point_from_finding(legacy)
 
         # 空文字 pointer = RFC 6901 ルート（whole-body 注入）で valid。復元できる。
+        # ただし json_body は非空 method が executability の前提（下の empty-method テスト参照）。
         legacy.injection_location = "json_body"
         legacy.injection_pointer = ""
+        legacy.injection_method = "POST"
         root_ip = injection_point_from_finding(legacy)
         self.assertIsNotNone(root_ip)
         self.assertEqual(root_ip.location, "json_body")
