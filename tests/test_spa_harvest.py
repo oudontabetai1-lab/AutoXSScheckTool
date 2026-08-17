@@ -370,6 +370,23 @@ class HarvestJsonBodyTargetsTests(unittest.TestCase):
         self.assertIn("https://api.test/v1/poll", endpoints)
         self.assertLessEqual(len(targets), 3)
 
+    def test_repeated_malformed_body_does_not_starve_later_valid_json(self):
+        # malformed/非container JSON は成功時にしか raw_index に載らないため、修正前は同一 body の
+        # 連投を毎回 parse して processed を食い潰し、後続の valid JSON を飢餓させた（#90 R12）。
+        # 負キャッシュ(rejected)で重複拒否 body は最大 1 回だけ parse・budget も 1 回だけ消費する。
+        ct = {"Content-Type": "application/json"}
+        malformed = [
+            _json_pair("https://api.test/v1/bad", "{not valid json", headers=ct)
+            for _ in range(20)
+        ]
+        valid = [_json_pair("https://api.test/v1/good", {"q": "x"}, headers=ct)]
+        targets = harvest_json_body_targets(
+            malformed + valid, base_netlocs={"api.test"}, max_targets=3,
+        )
+        endpoints = {t["endpoint"] for t in targets}
+        # 20 連投の malformed が cap を食い潰さず、後続の valid JSON が拾える。
+        self.assertIn("https://api.test/v1/good", endpoints)
+
     def test_drops_stale_body_integrity_and_encoding_headers(self):
         # Content-MD5/Digest/Content-Encoding 等は body 再直列化で無効になるため落とす（#90 R6）。
         pairs = [_json_pair(

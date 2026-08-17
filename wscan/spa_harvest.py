@@ -254,6 +254,10 @@ def harvest_json_body_targets(
     seen_index: dict[tuple[str, str, str], int] = {}
     # (method, observed_url, post_data) -> result idx。生 body dedup＋同一観測の headers 最新化に使う。
     raw_index: dict[tuple[str, str, str], int] = {}
+    # 拒否した生 body の負キャッシュ。malformed/非container/pointer 空は raw_index に載らないため、
+    # 同一 body の連投を毎回 parse し processed 予算を食い潰す（有効 JSON を飢餓させる・#90 R12）。
+    # 拒否 raw_key を記録し、重複は最大 1 回だけ parse させる。
+    rejected: set[tuple[str, str, str]] = set()
     processed = 0  # スコープ通過＋JSON 候補の観測数（parse 作業の上限に使う）
 
     try:
@@ -325,6 +329,10 @@ def harvest_json_body_targets(
                 # pre-parse 生 body dedup: 同一 (method,url,body) の連投(polling/autosave)を json.loads 前に
                 # 弾く。ただし headers（refresh された Authorization/CSRF）は最新観測で更新する（#90 R7）。
                 raw_key = (method_upper, observed_url, post_data)
+                # 既知の拒否 body（malformed/非container/pointer 空）は再 parse せず budget も消費しない。
+                # 同一の壊れた body の連投で有効 JSON を飢餓させないため（#90 R12）。
+                if raw_key in rejected:
+                    continue
                 if raw_key in raw_index:
                     content_type, headers = _extract_replay_headers(request_headers)
                     results[raw_index[raw_key]]["headers"] = headers
@@ -337,11 +345,14 @@ def harvest_json_body_targets(
                 try:
                     parsed_body = json.loads(post_data)
                 except (ValueError, TypeError):
+                    rejected.add(raw_key)
                     continue
                 if not isinstance(parsed_body, (dict, list)):
+                    rejected.add(raw_key)
                     continue
                 pointers = enumerate_leaf_pointers(parsed_body)
                 if not pointers:
+                    rejected.add(raw_key)
                     continue
 
                 content_type, headers = _extract_replay_headers(request_headers)
