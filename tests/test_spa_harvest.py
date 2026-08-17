@@ -385,6 +385,32 @@ class HarvestJsonBodyTargetsTests(unittest.TestCase):
         self.assertEqual(len(targets), 2)
         self.assertNotEqual(targets[0]["body_signature"], targets[1]["body_signature"])
 
+    def test_query_distinct_operations_bucketed_separately(self):
+        # ?op=create（churn 2件）と ?op=delete は別 observed_url→別バケツ。cap=2 でも round-robin で
+        # 両 operation が parse される（queryless バケツだと delete が未 parse になる・#90 R14）。
+        pairs = [
+            _json_pair("https://api.test/action?op=create", {"doc": "d", "ts": 1}),
+            _json_pair("https://api.test/action?op=create", {"doc": "d", "ts": 2}),
+            _json_pair("https://api.test/action?op=delete", {"doc": "d"}),
+        ]
+        targets = harvest_json_body_targets(pairs, base_netlocs={"api.test"}, max_targets=2)
+        urls = {t["url"] for t in targets}
+        self.assertIn("https://api.test/action?op=create", urls)
+        self.assertIn("https://api.test/action?op=delete", urls)
+
+    def test_discriminator_beyond_pointer_cap_still_distinguishes(self):
+        # 200 葉を超えた位置の discriminator（method）も full-body 走査で拾い、別 operation を区別する
+        # （enumerate_leaf_pointers の 200 上限に依存しない・#90 R14）。
+        filler = {f"f{i}": i for i in range(250)}  # 250 leaves (>200 pointer cap)
+        body_create = dict(filler); body_create["method"] = "create"
+        body_delete = dict(filler); body_delete["method"] = "delete"
+        targets = harvest_json_body_targets([
+            _json_pair("https://api.test/rpc", body_create),
+            _json_pair("https://api.test/rpc", body_delete),
+        ], base_netlocs={"api.test"})
+        self.assertEqual(len(targets), 2)
+        self.assertNotEqual(targets[0]["body_signature"], targets[1]["body_signature"])
+
     def test_operation_discriminator_preserves_json_type(self):
         # discriminator が JSON 型で operation を分ける（{"action":1} int vs {"action":"1"} str）場合、
         # str() だと同じ "1" に潰れて片方を未 probe にする。repr で型を保持し別ターゲットに残す（#90 R13）。

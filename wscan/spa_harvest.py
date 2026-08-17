@@ -7,7 +7,7 @@ import json
 import re
 from urllib.parse import parse_qsl, urlparse
 
-from .injection_point import enumerate_leaf_pointers, parse_pointer, pointer_get
+from .injection_point import enumerate_leaf_pointers
 
 
 _SPA_MARKERS = (
@@ -178,26 +178,41 @@ _OPERATION_DISCRIMINATOR_KEYS = frozenset({
 })
 
 
+def _collect_discriminators(node, tokens, out, *, depth_cap=8, max_found=64) -> None:
+    """full body を DFS し operation discriminator の (path, 値) を集める（純粋・pointer cap 非依存）。
+
+    enumerate_leaf_pointers は葉を 200 で打ち切るため、200 葉より後ろにある discriminator
+    （例: 大きな body の末尾 method）を pointer 経由で拾うと取りこぼす。ここは parsed_body 全体を
+    直接歩いて discriminator を発見する（#90 R14）。深さ・件数は上限で有界化。
+    """
+    if len(out) >= max_found or len(tokens) > depth_cap:
+        return
+    if isinstance(node, dict):
+        for k, v in node.items():
+            key = str(k)
+            if key.lower() in _OPERATION_DISCRIMINATOR_KEYS and isinstance(v, (str, int, float, bool)):
+                # repr で JSON 型を保持（{"action":1} と {"action":"1"} を区別・#90 R13）。
+                out.append((tuple(tokens + [key]), repr(v)))
+            _collect_discriminators(v, tokens + [key], out, depth_cap=depth_cap, max_found=max_found)
+            if len(out) >= max_found:
+                return
+    elif isinstance(node, list):
+        for index, v in enumerate(node):
+            _collect_discriminators(v, tokens + [str(index)], out, depth_cap=depth_cap, max_found=max_found)
+            if len(out) >= max_found:
+                return
+
+
 def _injection_signature(parsed_body, pointers) -> str:
     """注入 shape の識別子（純粋）。pointer 集合（構造）＋既知 operation discriminator の値だけを
-    署名する。JSON-RPC method / GraphQL operationName 等の operation は区別しつつ、
-    timestamp/resource id/CSRF nonce/autosave 等の通常値変化は collapse して重複 probe を防ぐ。"""
-    disc: list[tuple[str, str]] = []
-    for ptr in pointers:
-        try:
-            tokens = parse_pointer(ptr)
-        except Exception:
-            continue
-        if tokens and str(tokens[-1]).lower() in _OPERATION_DISCRIMINATOR_KEYS:
-            try:
-                val = pointer_get(parsed_body, ptr)
-            except Exception:
-                val = None
-            if isinstance(val, (str, int, float, bool)):
-                # repr で JSON 型を保持する。str(val) だと {"action":1} と {"action":"1"} が
-                # 同じ "1" になり別 operation を collapse して片方を未 probe にする（#90 R13）。
-                # repr は 1 / '1' / True / 1.0 を区別する（bool は int subclass だが repr は別表現）。
-                disc.append((ptr, repr(val)))
+    署名する。JSON-RPC method / GraphQL operationName / APQ sha256Hash 等の operation は区別しつつ、
+    timestamp/resource id/CSRF nonce/autosave 等の通常値変化は collapse して重複 probe を防ぐ。
+    discriminator は **full body から**収集し、200 葉上限を超えた位置の discriminator も拾う（#90 R14）。"""
+    disc: list[tuple] = []
+    try:
+        _collect_discriminators(parsed_body, [], disc)
+    except Exception:
+        disc = []
     payload = repr((tuple(sorted(pointers)), tuple(sorted(disc))))
     return hashlib.sha1(payload.encode("utf-8")).hexdigest()
 
@@ -281,7 +296,7 @@ def harvest_json_body_targets(
         # pairs を観測順に走査し cheap なフィルタ（method/scope/size/content-type）だけを適用。
         # 同一生 body（method,url,post_data）の連投は 1 entry に潰し、headers は最新観測へ更新する
         # （malformed の連投も生 body dedup で 1 回に潰れる＝負キャッシュ不要）。生き残った候補を
-        # endpoint_url でバケツ化し順序を保つ。実 parse は Phase 2 で round-robin に行う。
+        # (method, observed_url) でバケツ化し順序を保つ。実 parse は Phase 2 で round-robin に行う。
         buckets: dict[str, list] = {}
         raw_first: dict[tuple[str, str, str], dict] = {}
         obs_seq = 0  # 候補観測の通し番号。collapse 時に最新観測（order 最大）だけ template を更新する。
@@ -354,7 +369,11 @@ def harvest_json_body_targets(
                     "order": obs_seq,
                 }
                 raw_first[raw_key] = entry
-                buckets.setdefault(endpoint_url, []).append(entry)
+                # バケツキーは (method, observed_url)。queryless endpoint で束ねると ?op=create/
+                # ?op=delete や別 HTTP method の operation が同一バケツに入り、round-robin 公平配分が
+                # それらを区別できず片方を未 parse にする（#90 R14）。値churn は同一 observed_url なので
+                # 引き続き 1 バケツに束ねられ、fairness は保たれる。
+                buckets.setdefault((method_upper, observed_url), []).append(entry)
             except Exception:
                 continue
 
