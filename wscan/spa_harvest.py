@@ -51,6 +51,10 @@ _REPLAY_DROP_HEADERS = frozenset({
     # _apply_json_payload が ("",{}) を返し当該 endpoint の全プローブが偽陰性になる。落として
     # httpx が実行時に扱える codec だけを広告させる（#90 R11）。
     "accept-encoding",
+    # idempotency キー: 同一キーで body だけ変えて連投すると、冪等性を強制する API は初回の
+    # キャッシュ結果を返す/キー再利用（パラメータ不一致）として弾くため、変異 body がハンドラに
+    # 届かず偽陰性になる。replay では落として各プローブを新規リクエスト扱いにする（#90 R14）。
+    "idempotency-key", "x-idempotency-key", "idempotency-token", "x-idempotency-token",
 })
 
 

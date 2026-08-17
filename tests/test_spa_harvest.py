@@ -590,6 +590,17 @@ class AllocatePointersRoundRobinTests(unittest.TestCase):
         self.assertNotIn("Accept-Encoding", headers)
         self.assertEqual(headers.get("X-Keep"), "yes")
 
+    def test_drops_idempotency_key_headers_for_replay(self):
+        # idempotency キーは replay で落とす。同一キーで body を変異すると冪等性 API が初回結果を
+        # キャッシュ返し/キー再利用拒否し、変異 body がハンドラに届かず偽陰性になる（#90 R14）。
+        pairs = [_json_pair("https://api.test/v1/pay", {"amt": 1}, headers={
+            "Idempotency-Key": "abc", "X-Idempotency-Key": "def", "X-Keep": "y",
+        })]
+        headers = harvest_json_body_targets(pairs, base_netlocs={"api.test"})[0]["headers"]
+        self.assertNotIn("Idempotency-Key", headers)
+        self.assertNotIn("X-Idempotency-Key", headers)
+        self.assertEqual(headers.get("X-Keep"), "y")
+
     def test_retains_csrf_token_for_replay(self):
         # X-CSRF-Token は replay 認証のため残す（redaction は Finding 側で行う）。
         pairs = [_json_pair(

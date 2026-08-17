@@ -2549,17 +2549,20 @@ class ScanEngine:
                     # 残容量ではなく固定上限にするのは、後続ページが先頭で cross-page 重複を出すと
                     # 残容量ベースの budget を重複が食い潰し新規 endpoint が未 queue になるため（#90 R10）。
                     json_parse_budget = json_ip_cap * 4
-                    json_remaining = json_ip_cap - len(self.json_injection_points)
-                    # 大域キューが満杯なら以降のページで harvest 自体を呼ばない（parse/材料化を避ける・#90 R9）。
+                    # キュー満杯でも harvest は続ける（#90 R14）。既出 endpoint の再観測は下の
+                    # existing_tid 分岐で template の headers/body を最新化するため、満杯を理由に harvest を
+                    # 止めると、後続ページで token/nonce/version/resource-id が rotate しても stale なまま
+                    # attack replay して 401/403/409 を招く。**新規 point の追加**だけを容量で抑える
+                    # （下の round-robin 配分が残容量 0 で空を返す）。
                     # 精密スコープ判定（scope=query除去/exclusion=原文）で body パース前にフィルタ。
                     # 新規 target を一旦集め、pointer 配分は target 間 round-robin で行う（#90 R13）。
                     accepted_targets: list = []
-                    for target in ([] if json_remaining <= 0 else spa_harvest.harvest_json_body_targets(
+                    for target in spa_harvest.harvest_json_body_targets(
                         self.browser.network.pairs,
                         base_netlocs=attack_netlocs,
                         is_in_scope=self._json_target_in_scope,
                         max_targets=json_parse_budget,
-                    )):
+                    ):
                         # dedup identity は **observed url（query 込み）**＋**body_signature**（値まで含む
                         # 正規化 body の署名）。キー順違いは collapse しつつ、query 別 operation
                         # （?op=create/delete）や値で多重化する operation（JSON-RPC method/GraphQL
