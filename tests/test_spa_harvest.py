@@ -217,6 +217,16 @@ class HarvestJsonBodyTargetsTests(unittest.TestCase):
         self.assertEqual(targets[0]["url"], "https://api.test/v1/search")
         self.assertEqual(targets[1]["method"], "PATCH")
 
+    def test_ordinary_value_changes_collapse_to_one_target(self):
+        # timestamp/id/nonce 等の通常値変化は同一注入 shape として collapse（重複 probe しない・#90 R9）。
+        pairs = [
+            _json_pair("https://api.test/save", {"id": 1, "ts": 100, "csrf": "aaa"}),
+            _json_pair("https://api.test/save", {"id": 2, "ts": 200, "csrf": "bbb"}),
+            _json_pair("https://api.test/save", {"id": 3, "ts": 300, "csrf": "ccc"}),
+        ]
+        targets = harvest_json_body_targets(pairs, base_netlocs={"api.test"})
+        self.assertEqual(len(targets), 1)
+
     def test_body_value_differentiated_operations_kept_separate(self):
         # 同 pointer 集合でも body の**値**で operation を多重化する場合（JSON-RPC method /
         # GraphQL operationName）は別ターゲットに保つ（#90 R8）。

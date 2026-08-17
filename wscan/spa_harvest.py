@@ -7,7 +7,7 @@ import json
 import re
 from urllib.parse import parse_qsl, urlparse
 
-from .injection_point import enumerate_leaf_pointers
+from .injection_point import enumerate_leaf_pointers, parse_pointer, pointer_get
 
 
 _SPA_MARKERS = (
@@ -158,6 +158,33 @@ def harvest_get_targets(
 
 # 1 body の parse/保持サイズ上限（target 支配下の巨大 JSON で CPU/メモリを食わせない・#90 R8）。
 _MAX_JSON_BODY_BYTES = 256 * 1024
+
+# 値で operation を多重化する既知の discriminator キー（小文字）。これらの葉の**値**だけを identity に
+# 含め、timestamp/id/nonce 等の通常値は無視して同一注入 shape を 1 つに collapse する（#90 R9）。
+_OPERATION_DISCRIMINATOR_KEYS = frozenset({
+    "method", "operationname", "operation", "action", "op", "command", "cmd", "type",
+})
+
+
+def _injection_signature(parsed_body, pointers) -> str:
+    """注入 shape の識別子（純粋）。pointer 集合（構造）＋既知 operation discriminator の値だけを
+    署名する。JSON-RPC method / GraphQL operationName 等の operation は区別しつつ、
+    timestamp/resource id/CSRF nonce/autosave 等の通常値変化は collapse して重複 probe を防ぐ。"""
+    disc: list[tuple[str, str]] = []
+    for ptr in pointers:
+        try:
+            tokens = parse_pointer(ptr)
+        except Exception:
+            continue
+        if tokens and str(tokens[-1]).lower() in _OPERATION_DISCRIMINATOR_KEYS:
+            try:
+                val = pointer_get(parsed_body, ptr)
+            except Exception:
+                val = None
+            if isinstance(val, (str, int, float, bool)):
+                disc.append((ptr, str(val)))
+    payload = repr((tuple(sorted(pointers)), tuple(sorted(disc))))
+    return hashlib.sha1(payload.encode("utf-8")).hexdigest()
 
 
 def _raw_content_type(request_headers) -> str | None:
@@ -310,11 +337,10 @@ def harvest_json_body_targets(
                     continue
 
                 content_type, headers = _extract_replay_headers(request_headers)
-                # C1: 値まで含む正規化 body の signature を identity に。キー順違いは sort_keys で
-                # 正規化して collapse、値違い（JSON-RPC method/GraphQL operationName 等）は別ターゲットに保つ。
-                body_signature = hashlib.sha1(
-                    json.dumps(parsed_body, sort_keys=True, separators=(",", ":")).encode("utf-8")
-                ).hexdigest()
+                # 注入 shape の signature を identity に。pointer 集合＋operation discriminator の値のみで、
+                # JSON-RPC method/GraphQL operationName 等の operation は区別しつつ、timestamp/id/nonce 等の
+                # 通常値変化は collapse する（同一注入点の重複 probe で cap を食い潰さない・#90 R9）。
+                body_signature = _injection_signature(parsed_body, pointers)
                 semantic_key = (method_upper, observed_url, body_signature)
                 if semantic_key in seen_index:
                     # C2: semantic 重複（キー順違い＝raw は別だが正規化 body 同一）も headers を最新化。

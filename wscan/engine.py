@@ -2540,15 +2540,18 @@ class ScanEngine:
                         if urlparse(t).netloc
                     }
                     json_ip_cap = max(200, self.depth * 50)
+                    # 大域キューが満杯なら以降のページで harvest 自体を呼ばない（parse/材料化を避ける・
+                    # Codex #90 R9）。残容量だけを max_targets に渡し、無駄な展開を作らない。
+                    json_remaining = json_ip_cap - len(self.json_injection_points)
                     # 精密スコープ判定（scope=query除去/exclusion=原文）と materialize 上限を
                     # harvester に渡し、body パース前にフィルタ/有界化させる（対象外の大きな
                     # body を展開しない・飢餓回避。Codex #90 R3/R4/R5）。
-                    for target in spa_harvest.harvest_json_body_targets(
+                    for target in ([] if json_remaining <= 0 else spa_harvest.harvest_json_body_targets(
                         self.browser.network.pairs,
                         base_netlocs=attack_netlocs,
                         is_in_scope=self._json_target_in_scope,
-                        max_targets=json_ip_cap,
-                    ):
+                        max_targets=json_remaining,
+                    )):
                         # dedup identity は **observed url（query 込み）**＋**body_signature**（値まで含む
                         # 正規化 body の署名）。キー順違いは collapse しつつ、query 別 operation
                         # （?op=create/delete）や値で多重化する operation（JSON-RPC method/GraphQL
