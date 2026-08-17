@@ -46,6 +46,11 @@ _REPLAY_DROP_HEADERS = frozenset({
     # 元 body 用の checksum/encoding を残すと検証するサーバが全プローブを弾く（Codex #90 R6）。
     # 再計算しないので落とす。
     "content-md5", "digest", "content-digest", "content-encoding", "transfer-encoding",
+    # accept-encoding: Chromium 観測値が br/zstd を広告し得るが、requirements の plain httpx は
+    # それらの codec を持たないため、サーバがその codec を選ぶと replay の応答 read が例外→
+    # _apply_json_payload が ("",{}) を返し当該 endpoint の全プローブが偽陰性になる。落として
+    # httpx が実行時に扱える codec だけを広告させる（#90 R11）。
+    "accept-encoding",
 })
 
 

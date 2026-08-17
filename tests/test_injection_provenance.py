@@ -216,6 +216,7 @@ class FindingInjectionProvenanceTests(unittest.IsolatedAsyncioTestCase):
                 "headers": {
                     "Authorization": "Bearer x",
                     "X-Access-Token": "tok-123",  # テンプレ由来の認証ヘッダ
+                    "X-CSRF-Token": "csrf-live",  # replay 用に温存した CSRF は evidence では伏せる
                     "X-Tenant": "t1",
                 },
                 "post_data": json.dumps(sent_body),
@@ -238,6 +239,7 @@ class FindingInjectionProvenanceTests(unittest.IsolatedAsyncioTestCase):
         # 認証ヘッダ(テンプレ由来の X-Access-Token 含む)はマスク、非認証は残る。
         self.assertEqual(finding.request["headers"]["Authorization"], "***")
         self.assertEqual(finding.request["headers"]["X-Access-Token"], "***")
+        self.assertEqual(finding.request["headers"]["X-CSRF-Token"], "***")
         self.assertEqual(finding.request["headers"]["X-Tenant"], "t1")
         # response ヘッダの認証情報(サーバ発行の X-Access-Token 等)もマスク、非認証は残る。
         self.assertEqual(finding.response["headers"]["X-Access-Token"], "***")

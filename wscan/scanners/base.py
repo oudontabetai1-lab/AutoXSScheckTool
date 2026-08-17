@@ -100,6 +100,10 @@ def _cvss_for(check_type: str) -> tuple[str, float]:
 _CREDENTIAL_HEADERS = frozenset({
     "authorization", "x-api-key", "x-auth-token", "x-access-token",
     "proxy-authorization", "cookie",
+    # request_logger._SENSITIVE_HEADERS と揃える。JSON replay 用に温存する CSRF/セッション系
+    # トークンが Finding.request/response evidence（checkpoint/report/monitor）へ平文で残らないよう
+    # ここでも機密扱いにする（#90 R11・replay では温存・evidence では redact）。
+    "x-csrf-token", "x-xsrf-token", "x-amz-security-token", "authentication",
 })
 
 

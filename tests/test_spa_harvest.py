@@ -377,7 +377,7 @@ class HarvestJsonBodyTargetsTests(unittest.TestCase):
             headers={
                 "Content-MD5": "abc==", "Digest": "sha-256=xxx",
                 "Content-Encoding": "gzip", "Transfer-Encoding": "chunked",
-                "X-Keep": "yes",
+                "Accept-Encoding": "br, zstd, gzip", "X-Keep": "yes",
             },
         )]
         headers = harvest_json_body_targets(pairs, base_netlocs={"api.test"})[0]["headers"]
@@ -385,7 +385,19 @@ class HarvestJsonBodyTargetsTests(unittest.TestCase):
         self.assertNotIn("Digest", headers)
         self.assertNotIn("Content-Encoding", headers)
         self.assertNotIn("Transfer-Encoding", headers)
+        # accept-encoding は落とす（httpx が扱えない br/zstd を広告して偽陰性にしない・#90 R11）。
+        self.assertNotIn("Accept-Encoding", headers)
         self.assertEqual(headers.get("X-Keep"), "yes")
+
+    def test_retains_csrf_token_for_replay(self):
+        # X-CSRF-Token は replay 認証のため残す（redaction は Finding 側で行う）。
+        pairs = [_json_pair(
+            "https://api.test/v1/x", {"a": 1},
+            headers={"X-CSRF-Token": "tok", "X-XSRF-Token": "tok2"},
+        )]
+        headers = harvest_json_body_targets(pairs, base_netlocs={"api.test"})[0]["headers"]
+        self.assertEqual(headers.get("X-CSRF-Token"), "tok")
+        self.assertEqual(headers.get("X-XSRF-Token"), "tok2")
 
     def test_caps_pointers_per_body_not_total_targets(self):
         # 1 body の pointer 数は cap（enumerate 側 200）。ただし**総ターゲット数は harvester で
