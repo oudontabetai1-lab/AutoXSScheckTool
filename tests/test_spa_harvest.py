@@ -164,10 +164,11 @@ class HarvestJsonBodyTargetsTests(unittest.TestCase):
             ["/profile/email", "/roles/0", "/roles/1"],
         )
         self.assertEqual(targets[0]["content_type"], "application/json; charset=utf-8")
-        self.assertEqual(
-            targets[0]["headers"],
-            {"Content-Type": "application/json; charset=utf-8", "X-Tenant": "acme"},
-        )
+        # content-type は content_type へ抽出し headers には残さない（transport の
+        # `{"Content-Type": ...}` と大小違いで重複しないように）。非認証は残る。
+        self.assertEqual(targets[0]["headers"], {"X-Tenant": "acme"})
+        self.assertNotIn("Content-Type", targets[0]["headers"])
+        self.assertNotIn("content-type", targets[0]["headers"])
         self.assertEqual(targets[1]["content_type"], "application/json")
 
     def test_skips_invalid_non_json_static_and_out_of_scope_requests(self):
@@ -226,7 +227,10 @@ class HarvestJsonBodyTargetsTests(unittest.TestCase):
             (b["method"], b["endpoint"], tuple(sorted(b["pointers"]))),
         )
 
-    def test_caps_pointers_per_body_and_total_targets(self):
+    def test_caps_pointers_per_body_not_total_targets(self):
+        # 1 body の pointer 数は cap（enumerate 側 200）。ただし**総ターゲット数は harvester で
+        # cap しない**（精密スコープ判定後に engine が json_ip_cap を掛ける＝除外パスばかりの観測が
+        # 有効ターゲットを飢餓させないため。Codex #90 R2）。
         large_body = {f"field{i}": i for i in range(205)}
         pairs = [
             _json_pair(f"https://api.test/v1/items/{i}", {"value": i})
@@ -236,7 +240,9 @@ class HarvestJsonBodyTargetsTests(unittest.TestCase):
 
         targets = harvest_json_body_targets(pairs, base_netlocs={"api.test"})
 
-        self.assertEqual(len(targets), 200)
+        # 総数は 200 で打ち切られない（large + items/0..204 = 206）。
+        self.assertEqual(len(targets), 206)
+        # 1 body の pointer は 200 で cap。
         self.assertEqual(len(targets[0]["pointers"]), 200)
         self.assertEqual(targets[0]["pointers"][0], "/field0")
         self.assertEqual(targets[0]["pointers"][-1], "/field199")

@@ -37,7 +37,10 @@ _CREDENTIAL_HEADERS = frozenset({
     "proxy-authorization", "cookie",
 })
 _REGENERATED_HEADERS = frozenset({"content-length", "host"})
-_MAX_JSON_BODY_TARGETS = 200
+# 攻撃対象数の**実質的な上限は engine 側**が精密スコープ判定（_is_attack_target_url /
+# _is_url_excluded）**の後**に json_ip_cap で掛ける。harvester は粗い netloc/JSON フィルタしか
+# 持たないため、ここで打ち切ると除外パスばかりの観測が有効ターゲットを飢餓させる（Codex #90 R2）。
+# よって harvester 側には attack-surface cap を置かない（1 body の pointer 数は enumerate 側で cap）。
 
 
 def looks_like_spa_shell(html: str) -> bool:
@@ -169,8 +172,6 @@ def harvest_json_body_targets(
 
         for pair in pairs:
             try:
-                if len(results) >= _MAX_JSON_BODY_TARGETS:
-                    break
                 if not isinstance(pair, dict):
                     continue
                 request = pair.get("request") or {}
@@ -210,8 +211,15 @@ def harvest_json_body_targets(
                 headers: dict = {}
                 for name, value in request_headers.items():
                     lowered = str(name).lower()
-                    if lowered == "content-type" and value:
-                        content_type = str(value)
+                    # content-type は content_type へ抽出し、headers には**残さない**。
+                    # transport が `{"Content-Type": content_type}` を起点に case-sensitive
+                    # マージするため、元の小文字 content-type を残すと大小違いの重複
+                    # Content-Type ヘッダになり、重複 singleton を拒否/連結するサーバで
+                    # 全 JSON プローブが弾かれる。
+                    if lowered == "content-type":
+                        if value:
+                            content_type = str(value)
+                        continue
                     if lowered in _CREDENTIAL_HEADERS or lowered in _REGENERATED_HEADERS:
                         continue
                     headers[name] = value
