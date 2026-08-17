@@ -26,11 +26,14 @@ _MAX_POST_DATA = 20000
 # 機微なヘッダ値・ボディフィールドをマスクする。
 _REDACTED = "<redacted>"
 
-# 値をマスクするヘッダ名（小文字・完全一致）
+# 値をマスクするヘッダ名（小文字・完全一致）。
+# ここが機密ヘッダの**単一の正典**。scanners/base（merge_template_headers / evidence redaction）も
+# この集合＋runtime 登録を `is_sensitive_header` 経由で共有する（#90 R13・二重管理の同期漏れ防止）。
 _SENSITIVE_HEADERS = frozenset({
     "authorization", "proxy-authorization", "authentication",
     "cookie", "set-cookie", "x-api-key", "api-key", "apikey",
-    "x-auth-token", "x-amz-security-token", "x-csrf-token", "x-xsrf-token",
+    "x-auth-token", "x-access-token", "x-amz-security-token",
+    "x-csrf-token", "x-xsrf-token",
 })
 
 # ユーザーが --header/ダッシュボードで設定したカスタムヘッダ名（実行時登録）。
@@ -54,6 +57,15 @@ def _is_sensitive_header(name) -> bool:
         normalized in _SENSITIVE_HEADERS
         or normalized in _RUNTIME_SENSITIVE_HEADERS
     )
+
+
+def is_sensitive_header(name) -> bool:
+    """ヘッダ名が機密（静的集合 or runtime 登録）かを返す（正典の公開 API）。
+
+    scanners/base の資格情報判定（テンプレ上書き禁止・evidence redaction）が独自集合を
+    持たずにここへ委譲するための単一の正典（#90 R13）。runtime 登録ヘッダも拾う。
+    """
+    return _is_sensitive_header(name)
 
 
 # urlencoded / JSON ボディや URL クエリでマスクするキーのトークン（部分一致）

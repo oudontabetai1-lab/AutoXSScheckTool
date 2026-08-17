@@ -2,6 +2,7 @@ import json
 import unittest
 
 from wscan.spa_harvest import (
+    allocate_pointers_round_robin,
     harvest_get_targets,
     harvest_json_body_targets,
     looks_like_spa_shell,
@@ -369,6 +370,95 @@ class HarvestJsonBodyTargetsTests(unittest.TestCase):
         # polling は 1 つだけ（20 連投が重複潰し）＋ ユニークが cap 内で拾える。
         self.assertIn("https://api.test/v1/poll", endpoints)
         self.assertLessEqual(len(targets), 3)
+
+    def test_operation_discriminator_preserves_json_type(self):
+        # discriminator が JSON 型で operation を分ける（{"action":1} int vs {"action":"1"} str）場合、
+        # str() だと同じ "1" に潰れて片方を未 probe にする。repr で型を保持し別ターゲットに残す（#90 R13）。
+        targets = harvest_json_body_targets(
+            [
+                _json_pair("https://api.test/v1/act", {"action": 1, "data": "x"}),
+                _json_pair("https://api.test/v1/act", {"action": "1", "data": "x"}),
+            ],
+            base_netlocs={"api.test"},
+        )
+        self.assertEqual(len(targets), 2)
+        self.assertNotEqual(targets[0]["body_signature"], targets[1]["body_signature"])
+
+    def test_value_churn_collapses_but_later_endpoint_still_harvested(self):
+        # 1 endpoint の値churn（timestamp だけ違う distinct body 群）は semantic collapse で 1 ターゲット。
+        # parse 予算に headroom があれば、churn の後に来る別 endpoint も取りこぼさない（#90 R13）。
+        churn = [
+            _json_pair("https://api.test/v1/save", {"doc": "d", "ts": i})
+            for i in range(10)
+        ]
+        later = [_json_pair("https://api.test/v1/other", {"q": "x"})]
+        targets = harvest_json_body_targets(
+            churn + later, base_netlocs={"api.test"}, max_targets=20,
+        )
+        endpoints = {t["endpoint"] for t in targets}
+        # churn は 1 つに潰れ、後続の別 endpoint も残る。
+        self.assertIn("https://api.test/v1/save", endpoints)
+        self.assertIn("https://api.test/v1/other", endpoints)
+        self.assertEqual(
+            sum(1 for t in targets if t["endpoint"] == "https://api.test/v1/save"), 1
+        )
+
+    def test_churn_giveup_frees_parse_budget_for_later_endpoint(self):
+        # 1 url の値churn（tsだけ違う collapse）が連続無駄 parse で give-up され、以降その url を
+        # skip して global parse 予算を後続の別 endpoint に残す（#90 R13）。give-up 無しなら
+        # churn が cap を食い潰し /b が未 parse になる。
+        churn = [
+            _json_pair("https://api.test/v1/a", {"doc": "d", "ts": i})
+            for i in range(50)
+        ]
+        later = [_json_pair("https://api.test/v1/b", {"q": "x"})]
+        targets = harvest_json_body_targets(
+            churn + later, base_netlocs={"api.test"}, max_targets=12,
+        )
+        endpoints = {t["endpoint"] for t in targets}
+        self.assertIn("https://api.test/v1/a", endpoints)
+        self.assertIn("https://api.test/v1/b", endpoints)
+
+    def test_many_operations_same_url_not_gived_up(self):
+        # 同一 url が別 operation（method 値違い）を出し続ける場合は新規 target 毎に churn カウンタが
+        # リセットされ give-up されない（JSON-RPC 多 method endpoint を取りこぼさない・#90 R13）。
+        pairs = [
+            _json_pair("https://api.test/rpc", {"method": f"m{i}", "params": "x"})
+            for i in range(15)
+        ]
+        targets = harvest_json_body_targets(
+            pairs, base_netlocs={"api.test"}, max_targets=50,
+        )
+        self.assertEqual(len(targets), 15)
+
+
+class AllocatePointersRoundRobinTests(unittest.TestCase):
+    def test_round_robin_prevents_single_target_monopoly(self):
+        # 多 pointer の先頭 target が cap を独占せず、少 pointer の後続 target も slot を得る（#90 R13）。
+        targets = [
+            {"pointers": [f"/a{i}" for i in range(200)]},
+            {"pointers": ["/b0", "/b1", "/b2"]},
+        ]
+        alloc = allocate_pointers_round_robin(targets, 10)
+        idxs = [ti for ti, _ in alloc]
+        self.assertEqual(len(alloc), 10)
+        self.assertIn(1, idxs)  # 後続 target も配分される
+        self.assertEqual(idxs[:4], [0, 1, 0, 1])  # 1 pass 1 pointer ずつ交互
+
+    def test_allocates_all_when_cap_exceeds_total(self):
+        targets = [{"pointers": ["/a"]}, {"pointers": ["/b", "/c"]}]
+        alloc = allocate_pointers_round_robin(targets, 100)
+        self.assertEqual({p for _, p in alloc}, {"/a", "/b", "/c"})
+
+    def test_edge_cases(self):
+        self.assertEqual(allocate_pointers_round_robin([], 10), [])
+        self.assertEqual(allocate_pointers_round_robin([{"pointers": ["/a"]}], 0), [])
+        self.assertEqual(allocate_pointers_round_robin([{"pointers": ["/a"]}], -3), [])
+        # cap=None は全 pointer を配分（上限なし）
+        self.assertEqual(
+            allocate_pointers_round_robin([{"pointers": ["/a", "/b"]}], None),
+            [(0, "/a"), (0, "/b")],
+        )
 
     def test_repeated_malformed_body_does_not_starve_later_valid_json(self):
         # malformed/非container JSON は成功時にしか raw_index に載らないため、修正前は同一 body の

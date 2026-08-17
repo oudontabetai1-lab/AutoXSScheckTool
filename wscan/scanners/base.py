@@ -95,22 +95,21 @@ def _cvss_for(check_type: str) -> tuple[str, float]:
     return _CVSS_TABLE.get(check_type) or _CVSS_TABLE.get(base, ("", 0.0))
 
 
-# spec（OpenAPI/Postman）由来のテンプレヘッダで上書きしてはいけない認証情報ヘッダ。
-# 利用者の --header / トークン更新（auth_headers 由来）が常に優先される。
-_CREDENTIAL_HEADERS = frozenset({
-    "authorization", "x-api-key", "x-auth-token", "x-access-token",
-    "proxy-authorization", "cookie",
-    # request_logger._SENSITIVE_HEADERS と揃える。JSON replay 用に温存する CSRF/セッション系
-    # トークンが Finding.request/response evidence（checkpoint/report/monitor）へ平文で残らないよう
-    # ここでも機密扱いにする（#90 R11・replay では温存・evidence では redact）。
-    "x-csrf-token", "x-xsrf-token", "x-amz-security-token", "authentication",
-})
+# spec（OpenAPI/Postman）由来のテンプレヘッダで上書きしてはいけない認証情報ヘッダ、および
+# Finding evidence で伏せる機密ヘッダの判定。**独自集合を持たず** request_logger の正典
+# （静的 `_SENSITIVE_HEADERS` ＋ runtime 登録ヘッダ）へ委譲する（#90 R13）。二重管理だと
+# x-access-token/set-cookie/カスタム認証ヘッダの同期漏れで、テンプレ上書きや evidence 平文残りが
+# 起きるため、単一の正典（request_logger.is_sensitive_header）に一本化する。
+def _is_credential_header(name) -> bool:
+    """ヘッダ名が認証情報/機密か（request_logger の正典へ委譲・runtime 登録も拾う）。"""
+    from wscan.request_logger import is_sensitive_header
+    return is_sensitive_header(name)
 
 
 def merge_template_headers(base: dict, tmpl_headers: dict) -> dict:
     """auth_headers ベースに spec テンプレヘッダを重ねる（純粋）。
 
-    認証情報ヘッダ（``_CREDENTIAL_HEADERS``）が ``base`` に既にあれば、テンプレの値
+    認証情報ヘッダ（``request_logger`` の正典で判定）が ``base`` に既にあれば、テンプレの値
     （spec/Postman の Authorization/API-key の example・default）で上書きしない。
     利用者が ``--header`` で渡した実値や更新トークンを spec のプレースホルダで潰すと、
     保護 API への直接 httpx 検査（mass_assignment / server-side proto）が未認証になり
@@ -120,7 +119,7 @@ def merge_template_headers(base: dict, tmpl_headers: dict) -> dict:
     out = dict(base or {})
     present = {k.lower() for k in out}
     for k, v in (tmpl_headers or {}).items():
-        if k.lower() in _CREDENTIAL_HEADERS and k.lower() in present:
+        if _is_credential_header(k) and k.lower() in present:
             continue
         out[k] = v
     return out
@@ -133,8 +132,8 @@ def _redact_json_evidence_pair(pair: dict, injection_pointer: str) -> dict:
     から、テンプレの兄弟秘匿(request body・エコーされた response 本文)と認証ヘッダ値を伏せる。
     注入 pointer の値は残す（再現時にどの pointer に何を入れたか読めるように）。
     - request.post_data: 兄弟をマスク、注入 pointer の値のみ残す。
-    - request/response.headers: テンプレ由来やサーバ発行で ``_SENSITIVE_HEADERS`` 未登録の
-      X-Access-Token 等も伏せるため、双方のヘッダを ``_CREDENTIAL_HEADERS`` で判定してマスク。
+    - request/response.headers: テンプレ由来やサーバ発行の X-Access-Token 等も伏せるため、
+      双方のヘッダを request_logger の正典（静的＋runtime）で判定してマスク。
     - response.body: エコーされた既知の兄弟秘匿を符号化違いも含め伏せる。
     """
     req = dict(pair.get("request", {}) or {})
@@ -163,9 +162,9 @@ def _redact_json_evidence_pair(pair: dict, injection_pointer: str) -> dict:
 
 
 def _mask_credential_headers(headers: dict) -> dict:
-    """``_CREDENTIAL_HEADERS`` に該当するヘッダ値を伏せた新 dict を返す（純粋）。"""
+    """認証情報/機密ヘッダ値を伏せた新 dict を返す（純粋・判定は正典へ委譲）。"""
     return {
-        k: ("***" if str(k).lower() in _CREDENTIAL_HEADERS else v)
+        k: ("***" if _is_credential_header(k) else v)
         for k, v in headers.items()
     }
 

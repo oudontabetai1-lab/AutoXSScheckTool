@@ -163,6 +163,10 @@ def harvest_get_targets(
 
 # 1 body の parse/保持サイズ上限（target 支配下の巨大 JSON で CPU/メモリを食わせない・#90 R8）。
 _MAX_JSON_BODY_BYTES = 256 * 1024
+# 1 observed_url が連続でこの回数だけ「無駄 parse」（collapse or reject）を出したら churn 判定し、
+# 以降その url の body を parse せず skip する。新規 target が出るたびリセットされるため、
+# 正当に別 operation を出し続ける url（JSON-RPC の多 method 等）は give-up しない（#90 R13）。
+_CHURN_GIVEUP_WASTED_PARSES = 8
 
 # 値で operation を多重化する既知の discriminator キー（小文字）。これらの葉の**値**だけを identity に
 # 含め、timestamp/id/nonce 等の通常値は無視して同一注入 shape を 1 つに collapse する（#90 R9）。
@@ -190,7 +194,10 @@ def _injection_signature(parsed_body, pointers) -> str:
             except Exception:
                 val = None
             if isinstance(val, (str, int, float, bool)):
-                disc.append((ptr, str(val)))
+                # repr で JSON 型を保持する。str(val) だと {"action":1} と {"action":"1"} が
+                # 同じ "1" になり別 operation を collapse して片方を未 probe にする（#90 R13）。
+                # repr は 1 / '1' / True / 1.0 を区別する（bool は int subclass だが repr は別表現）。
+                disc.append((ptr, repr(val)))
     payload = repr((tuple(sorted(pointers)), tuple(sorted(disc))))
     return hashlib.sha1(payload.encode("utf-8")).hexdigest()
 
@@ -258,7 +265,12 @@ def harvest_json_body_targets(
     # 同一 body の連投を毎回 parse し processed 予算を食い潰す（有効 JSON を飢餓させる・#90 R12）。
     # 拒否 raw_key を記録し、重複は最大 1 回だけ parse させる。
     rejected: set[tuple[str, str, str]] = set()
-    processed = 0  # スコープ通過＋JSON 候補の観測数（parse 作業の上限に使う）
+    processed = 0  # スコープ通過＋JSON 候補の観測数（グローバル parse 作業の上限に使う）
+    # observed_url 単位の「無駄 parse」連続数（collapse or reject＝新規 target を生まない parse）。
+    # 新規 target が出たら 0 リセット。一定回連続で churn 判定し以降その url を skip して、
+    # 1 endpoint の値churn が global parse 予算を独占して他 endpoint を飢餓させないようにする（#90 R13）。
+    # JSON-RPC 等で同一 url が別 method を出し続ける場合は毎回リセットされ give-up しない。
+    wasted_parses: dict[str, int] = {}
 
     try:
         if isinstance(base_netlocs, str):
@@ -338,6 +350,10 @@ def harvest_json_body_targets(
                     results[raw_index[raw_key]]["headers"] = headers
                     results[raw_index[raw_key]]["content_type"] = content_type
                     continue
+                # churn give-up: この url が連続で無駄 parse（collapse/reject）を出し続けたら
+                # 以降 parse せず skip し、global parse 予算を他 endpoint に残す（#90 R13）。
+                if wasted_parses.get(observed_url, 0) >= _CHURN_GIVEUP_WASTED_PARSES:
+                    continue
                 # 処理数（スコープ通過＋JSON 候補の観測）を上限に。ユニーク大量でも parse を有界化。
                 if cap is not None and processed >= cap:
                     break
@@ -346,13 +362,16 @@ def harvest_json_body_targets(
                     parsed_body = json.loads(post_data)
                 except (ValueError, TypeError):
                     rejected.add(raw_key)
+                    wasted_parses[observed_url] = wasted_parses.get(observed_url, 0) + 1
                     continue
                 if not isinstance(parsed_body, (dict, list)):
                     rejected.add(raw_key)
+                    wasted_parses[observed_url] = wasted_parses.get(observed_url, 0) + 1
                     continue
                 pointers = enumerate_leaf_pointers(parsed_body)
                 if not pointers:
                     rejected.add(raw_key)
+                    wasted_parses[observed_url] = wasted_parses.get(observed_url, 0) + 1
                     continue
 
                 content_type, headers = _extract_replay_headers(request_headers)
@@ -371,6 +390,8 @@ def harvest_json_body_targets(
                     results[idx]["content_type"] = content_type
                     results[idx]["json_body"] = parsed_body
                     raw_index[raw_key] = idx
+                    # collapse＝新規 target を生まない無駄 parse。churn 判定用に加算。
+                    wasted_parses[observed_url] = wasted_parses.get(observed_url, 0) + 1
                     continue
                 results.append({
                     "method": method_upper,
@@ -385,9 +406,47 @@ def harvest_json_body_targets(
                 idx = len(results) - 1
                 seen_index[semantic_key] = idx
                 raw_index[raw_key] = idx
+                # 新規 target が出た＝この url はまだ有効な operation を出している。churn カウンタを
+                # リセットし、JSON-RPC 等の多 method endpoint を give-up で取りこぼさない（#90 R13）。
+                wasted_parses[observed_url] = 0
             except Exception:
                 continue
     except Exception:
         return []
 
     return results
+
+
+def allocate_pointers_round_robin(targets, cap) -> list[tuple[int, str]]:
+    """target 間で pointer を **round-robin** に配分する（純粋・#90 R13）。
+
+    ``targets`` は各 dict が ``pointers`` (list) を持つ harvest 結果。``cap`` は配分する
+    pointer の総数上限（engine のキュー残容量）。1 pass で各 target から 1 pointer ずつ取り、
+    cap に達するまで繰り返す。これにより 1 body が多数の pointer を持っても global キューを
+    独占せず、後続 endpoint が最低 1 slot を得られる（greedy だと先頭 target が cap を食い潰す）。
+
+    戻り値は ``(target_index, pointer)`` の配分順リスト。各 target 内の pointer 順は入力順を保つ。
+    """
+    out: list[tuple[int, str]] = []
+    try:
+        limit = int(cap) if cap is not None else None
+    except (TypeError, ValueError):
+        return out
+    if limit is not None and limit <= 0:
+        return out
+    if not isinstance(targets, (list, tuple)):
+        return out
+    plists = [list((t or {}).get("pointers") or []) for t in targets]
+    depth = 0
+    while limit is None or len(out) < limit:
+        progressed = False
+        for ti, plist in enumerate(plists):
+            if depth < len(plist):
+                out.append((ti, plist[depth]))
+                progressed = True
+                if limit is not None and len(out) >= limit:
+                    return out
+        if not progressed:
+            break
+        depth += 1
+    return out

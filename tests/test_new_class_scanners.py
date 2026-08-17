@@ -133,6 +133,40 @@ class MergeTemplateHeadersTests(unittest.TestCase):
         out = merge_template_headers({"X-API-Version": "v1"}, {"X-API-Version": "v2"})
         self.assertEqual(out["X-API-Version"], "v2")
 
+    def test_api_key_alias_spellings_treated_as_credential(self):
+        # Api-Key/ApiKey（x- 無し綴り）も request_logger の機密集合と同期し、base の実キーを
+        # 観測/テンプレ値で上書きしない・evidence で redact する（#90 R13）。
+        from wscan.scanners.base import (
+            merge_template_headers, _redact_json_evidence_pair,
+        )
+        base = {"Api-Key": "user-real", "ApiKey": "user-real2"}
+        out = merge_template_headers(base, {"Api-Key": "captured", "ApiKey": "captured2"})
+        self.assertEqual(out["Api-Key"], "user-real")
+        self.assertEqual(out["ApiKey"], "user-real2")
+        # evidence redaction も綴り違いを伏せる
+        pair = {"request": {"headers": {"Api-Key": "live", "ApiKey": "live2"}}}
+        red = _redact_json_evidence_pair(pair, "")
+        self.assertEqual(red["request"]["headers"]["Api-Key"], "***")
+        self.assertEqual(red["request"]["headers"]["ApiKey"], "***")
+
+    def test_credential_judgment_delegates_to_request_logger_canon(self):
+        # base は独自集合を持たず request_logger の正典（静的＋runtime）へ委譲する（#90 R13）。
+        from wscan.scanners.base import merge_template_headers, _mask_credential_headers
+        from wscan import request_logger
+        # set-cookie（旧 base 集合に無かった）と x-access-token（旧 logger 集合に無かった）を
+        # 双方向で同期し、base 側 evidence redaction で伏せる。
+        masked = _mask_credential_headers({"Set-Cookie": "sid=abc", "X-Access-Token": "t"})
+        self.assertEqual(masked["Set-Cookie"], "***")
+        self.assertEqual(masked["X-Access-Token"], "***")
+        # runtime 登録したカスタム認証ヘッダも保護（テンプレで上書きしない）。
+        request_logger.register_sensitive_headers(["X-Company-Auth"])
+        try:
+            out = merge_template_headers({"X-Company-Auth": "real"},
+                                         {"X-Company-Auth": "tmpl"})
+            self.assertEqual(out["X-Company-Auth"], "real")
+        finally:
+            request_logger.clear_sensitive_headers()
+
 
 class CachePoisoningTests(unittest.TestCase):
     def test_is_cacheable_public(self):
