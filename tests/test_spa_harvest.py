@@ -203,22 +203,45 @@ class HarvestJsonBodyTargetsTests(unittest.TestCase):
             [],
         )
 
-    def test_deduplicates_method_endpoint_and_pointer_set(self):
+    def test_deduplicates_same_url_method_and_pointer_set(self):
+        # 同一 url+method、pointer 集合が同じ（キー順違い）は 1 つに。method 違いは別。
         pairs = [
-            _json_pair("https://api.test/v1/search?page=1", {"q": "x", "limit": 10}),
-            _json_pair("https://api.test/v1/search?page=2", {"limit": 20, "q": "y"}),
-            _json_pair(
-                "https://api.test/v1/search?page=3",
-                {"q": "z", "limit": 30},
-                method="PATCH",
-            ),
+            _json_pair("https://api.test/v1/search", {"q": "x", "limit": 10}),
+            _json_pair("https://api.test/v1/search", {"limit": 20, "q": "y"}),
+            _json_pair("https://api.test/v1/search", {"q": "z", "limit": 30}, method="PATCH"),
         ]
 
         targets = harvest_json_body_targets(pairs, base_netlocs={"api.test"})
 
         self.assertEqual(len(targets), 2)
-        self.assertEqual(targets[0]["url"], "https://api.test/v1/search?page=1")
+        self.assertEqual(targets[0]["url"], "https://api.test/v1/search")
         self.assertEqual(targets[1]["method"], "PATCH")
+
+    def test_query_differentiated_operations_kept_separate(self):
+        # 1 パスが query で別 operation を出す場合（?op=create/?op=delete）は別ターゲットとして残す
+        # （identity に observed query を含める・#90 R7）。replay は query 付き URL を保つ。
+        pairs = [
+            _json_pair("https://api.test/action?op=create", {"id": 1}),
+            _json_pair("https://api.test/action?op=delete", {"id": 2}),
+        ]
+        targets = harvest_json_body_targets(pairs, base_netlocs={"api.test"})
+        self.assertEqual(len(targets), 2)
+        self.assertEqual(
+            {t["url"] for t in targets},
+            {"https://api.test/action?op=create", "https://api.test/action?op=delete"},
+        )
+
+    def test_repeated_request_refreshes_replay_headers(self):
+        # 同一 (method,url,body) の再観測で、refresh された Authorization を最新に更新する（#90 R7）。
+        pairs = [
+            _json_pair("https://api.test/v1/x", {"a": 1},
+                       headers={"Authorization": "Bearer OLD"}),
+            _json_pair("https://api.test/v1/x", {"a": 1},
+                       headers={"Authorization": "Bearer NEW"}),
+        ]
+        targets = harvest_json_body_targets(pairs, base_netlocs={"api.test"})
+        self.assertEqual(len(targets), 1)
+        self.assertEqual(targets[0]["headers"]["Authorization"], "Bearer NEW")
 
     def test_same_endpoint_different_key_order_yields_same_sorted_pointers(self):
         # engine の大域 dedup キーは pointer を sorted で持つ。JSON キーの挿入順が違うだけの

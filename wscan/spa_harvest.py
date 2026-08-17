@@ -155,6 +155,28 @@ def harvest_get_targets(
     return results
 
 
+def _extract_replay_headers(request_headers) -> tuple:
+    """観測ヘッダから (content_type, replay 用 headers) を抽出する（純粋）。
+
+    content-type は content_type へ分離（headers には残さず transport の重複 Content-Type を防ぐ）、
+    cookie/proxy-auth/再生成/body 整合系は落とし、Authorization 等の JS 取得トークンは残す。
+    """
+    if not isinstance(request_headers, dict):
+        return "application/json", {}
+    content_type = "application/json"
+    headers: dict = {}
+    for name, value in request_headers.items():
+        lowered = str(name).lower()
+        if lowered == "content-type":
+            if value:
+                content_type = str(value)
+            continue
+        if lowered in _REPLAY_DROP_HEADERS:
+            continue
+        headers[name] = value
+    return content_type, headers
+
+
 def harvest_json_body_targets(
     pairs: list[dict],
     *,
@@ -172,7 +194,8 @@ def harvest_json_body_targets(
     """
     results: list[dict] = []
     seen: set[tuple[str, str, tuple[str, ...]]] = set()
-    seen_raw: set[tuple[str, str, str]] = set()  # pre-parse 生 body dedup
+    # (method, observed_url, post_data) -> result idx。生 body dedup＋同一観測の headers 最新化に使う。
+    raw_index: dict[tuple[str, str, str], int] = {}
     processed = 0  # スコープ通過＋raw-unique な観測数（parse 作業の上限に使う）
 
     try:
@@ -229,12 +252,17 @@ def harvest_json_body_targets(
                     continue
                 method_upper = method.upper()
                 endpoint_url = parsed_url._replace(query="", fragment="").geturl()
-                # pre-parse 生 body dedup: 同一 body の連投(polling/autosave)を json.loads 前に弾く。
-                # post-parse dedup だと重複でも毎回 parse+pointer 列挙され CPU を無制限に消費する（#90 R6）。
-                raw_key = (method_upper, endpoint_url, post_data)
-                if raw_key in seen_raw:
+                # dedup identity は **observed_url（query 込み）**を使う。1 パスが query で別 operation を
+                # 出す場合（?op=create / ?op=delete）に別ターゲットとして残す（replay は query 付き URL を
+                # 保つ・#90 R7）。
+                # pre-parse 生 body dedup: 同一 (method,url,body) の連投(polling/autosave)を json.loads 前に
+                # 弾く。ただし headers（refresh された Authorization/CSRF）は最新観測で更新する（#90 R7）。
+                raw_key = (method_upper, observed_url, post_data)
+                if raw_key in raw_index:
+                    content_type, headers = _extract_replay_headers(request.get("headers"))
+                    results[raw_index[raw_key]]["headers"] = headers
+                    results[raw_index[raw_key]]["content_type"] = content_type
                     continue
-                seen_raw.add(raw_key)
                 # 処理数（スコープ通過＋raw-unique な観測）を上限に。結果数でなく**処理数**を数えることで、
                 # 大量のユニーク body でも parse 作業を有界化する（結果は semantic dedup 後で processed 以下）。
                 if cap is not None and processed >= cap:
@@ -247,30 +275,10 @@ def harvest_json_body_targets(
                 if not pointers:
                     continue
 
-                request_headers = request.get("headers") or {}
-                if not isinstance(request_headers, dict):
-                    request_headers = {}
-                content_type = "application/json"
-                headers: dict = {}
-                for name, value in request_headers.items():
-                    lowered = str(name).lower()
-                    # content-type は content_type へ抽出し、headers には**残さない**。
-                    # transport が `{"Content-Type": content_type}` を起点に case-sensitive
-                    # マージするため、元の小文字 content-type を残すと大小違いの重複
-                    # Content-Type ヘッダになり、重複 singleton を拒否/連結するサーバで
-                    # 全 JSON プローブが弾かれる。
-                    if lowered == "content-type":
-                        if value:
-                            content_type = str(value)
-                        continue
-                    # cookie/proxy-auth/再生成は落とし、Authorization 等の JS 取得トークンは残す。
-                    if lowered in _REPLAY_DROP_HEADERS:
-                        continue
-                    headers[name] = value
+                content_type, headers = _extract_replay_headers(request.get("headers"))
 
-                # method_upper/endpoint_url は pre-parse dedup で算出済み。
-                # semantic dedup（キー順違いの同一エンドポイントを sorted pointer で1つに）。
-                dedup_key = (method_upper, endpoint_url, tuple(sorted(pointers)))
+                # semantic dedup（キー順違いの同一 url+pointer集合を sorted pointer で1つに）。
+                dedup_key = (method_upper, observed_url, tuple(sorted(pointers)))
                 if dedup_key in seen:
                     continue
                 seen.add(dedup_key)
@@ -283,6 +291,7 @@ def harvest_json_body_targets(
                     "headers": headers,
                     "pointers": pointers,
                 })
+                raw_index[raw_key] = len(results) - 1
             except Exception:
                 continue
     except Exception:

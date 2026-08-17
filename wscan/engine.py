@@ -530,8 +530,9 @@ class ScanEngine:
         self.spa_crawl = spa_crawl
         # SPA harvest のページ跨ぎ大域 dedup キー集合 (endpoint, param集合)。
         self._spa_harvest_seen: set = set()
-        # JSON body harvest の大域 dedup と、PR-b2 で消費する非永続キュー。
-        self._spa_json_harvest_seen: set = set()
+        # JSON body harvest の大域 dedup（dedup_key→template_id・再観測で template を最新化）と、
+        # PR-b2 で消費する非永続キュー。
+        self._spa_json_harvest_seen: dict = {}
         self.json_injection_points: list[InjectionPoint] = []
         # ハイブリッドモード用シード URL (Agent偵察で発見したURL)
         self.seed_urls: list = list(seed_urls or [])
@@ -2548,23 +2549,31 @@ class ScanEngine:
                         is_in_scope=self._json_target_in_scope,
                         max_targets=json_ip_cap,
                     ):
-                        # pointer は harvester のローカル dedup と同じ順序非依存表現
-                        # (sorted) にする。同一エンドポイントを別ページで JSON キーの
-                        # 挿入順違いで観測しても重複キュー化しない（seen はページ跨ぎ）。
+                        # dedup identity は **observed url（query 込み）**＋順序非依存 pointer。
+                        # 同一エンドポイントを別ページで JSON キー順違いで観測しても重複キュー化せず
+                        # （seen はページ跨ぎ）、かつ query 別 operation（?op=create/delete）は別扱い（#90 R7）。
                         dedup_key = (
                             target["method"],
-                            target["endpoint"],
+                            target["url"],
                             tuple(sorted(target["pointers"])),
                         )
-                        if dedup_key in self._spa_json_harvest_seen:
+                        existing_tid = self._spa_json_harvest_seen.get(dedup_key)
+                        if existing_tid is not None:
+                            # 再観測: point は追加せず、template を最新観測の headers/body で更新して
+                            # refresh された Authorization/CSRF を attack 時に最新へ保つ（#90 R7）。
+                            tmpl = self.injection_templates.get(existing_tid)
+                            if isinstance(tmpl, dict):
+                                tmpl["headers"] = target["headers"]
+                                tmpl["content_type"] = target["content_type"]
+                                tmpl["json_body"] = target["json_body"]
                             continue
                         # スコープ判定は harvester 側で済むが、cross-page dedup 後の
                         # point 数上限はここで担保（defense-in-depth）。
                         if len(self.json_injection_points) >= json_ip_cap:
                             break
 
-                        self._spa_json_harvest_seen.add(dedup_key)
                         template_id = f"jb-{len(self.injection_templates)}"
+                        self._spa_json_harvest_seen[dedup_key] = template_id
                         self.injection_templates[template_id] = {
                             "method": target["method"],
                             "url": target["url"],
