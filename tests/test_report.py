@@ -48,6 +48,26 @@ class ReportGeneratorTests(unittest.TestCase):
         self.assertEqual(html.count('class="badge-assumed"'), 1)
         self.assertEqual(html.count("⚠ 要確認"), 2)
 
+    def test_assumed_with_verified_false_labeled_assumed_not_unreproduced(self):
+        # Agent 仮説等は verified=False かつ state="assumed"（一度も retry していない）。
+        # legacy boolean を優先すると "not reproduced"＝失敗した再現試行、と偽る。state 優先で
+        # "assumed (not re-verified)" を出す。
+        finding = Finding(
+            check_type="xss", severity="high",
+            url="http://fixture.test/agent", field_name="q",
+            payload="<svg/onload=alert(1)>", evidence="agent hypothesis",
+            verified=False, verification_state="assumed",
+            evidence_type="xss_reflection",
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            html = ReportGenerator(Path(tmp)).generate(
+                target="http://fixture.test", findings=[finding],
+                visited_urls=["http://fixture.test/"], checks=["xss"],
+            ).read_text(encoding="utf-8")
+        self.assertIn(">assumed (not re-verified)</div>", html)
+        # この finding を "not reproduced" とは表示しない。
+        self.assertNotIn(">not reproduced</div>", html)
+
     def test_agent_findings_have_origin_and_verification_badges(self):
         findings = [
             Finding(

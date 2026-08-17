@@ -4363,16 +4363,24 @@ function addFinding(data) {
   const confidence = (data.confidence || 'tentative').toLowerCase();
   const verified = data.verified !== false;
   const verificationState = data.verification_state || '';
+  // 明示的な state を legacy boolean より優先（verified=False でも state=assumed の Agent 仮説等を
+  // "not reproduced"=失敗した再現試行と偽らない）。state 空（旧 Finding）だけ verified に fallback。
   let verificationClass = 'fc-verified';
   let verificationLabel = 'reproduced/assumed';
-  if (!verified) {
-    verificationClass = 'fc-unverified';
-    verificationLabel = verificationState === 'skipped' ? 'skipped (needs review)' : 'not reproduced';
-  } else if (verificationState === 'reproduced') {
+  if (verificationState === 'reproduced') {
     verificationLabel = 'reproduced';
   } else if (verificationState === 'assumed') {
     verificationClass = 'fc-assumed';
     verificationLabel = 'assumed（推定・再検証未実行）';
+  } else if (verificationState === 'unreproduced') {
+    verificationClass = 'fc-unverified';
+    verificationLabel = 'not reproduced';
+  } else if (verificationState === 'skipped') {
+    verificationClass = 'fc-unverified';
+    verificationLabel = 'skipped (needs review)';
+  } else if (!verified) {
+    verificationClass = 'fc-unverified';
+    verificationLabel = 'not reproduced';
   }
   const evidenceType = data.evidence_type || data.check_type || '';
   const details = data.evidence_details || {};

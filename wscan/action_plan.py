@@ -153,6 +153,7 @@ def _related_finding_dict(f: Finding) -> dict:
         "severity": f.severity,
         "confidence": f.confidence,
         "verified": f.verified,
+        "verification_state": getattr(f, "verification_state", ""),
         "url": f.url,
         "field_name": f.field_name,
         "evidence_type": f.evidence_type,

@@ -1284,13 +1284,20 @@ document.querySelectorAll('.plan-payloads-toggle').forEach(btn => {{
         if not details and not steps and not evidence_type:
             return ""
 
+        # 明示的な verification_state を legacy boolean より優先する。verified=False でも
+        # state="assumed"（Agent 仮説など一度も retry していない finding）を "not reproduced"
+        # ＝失敗した再現試行、と偽らないため。state 空（旧 Finding）だけ verified に fallback。
         state = getattr(finding, "verification_state", "")
-        if not getattr(finding, "verified", True):
-            v_label = "skipped (needs review)" if state == "skipped" else "not reproduced"
-        elif state == "reproduced":
+        if state == "reproduced":
             v_label = "reproduced"
         elif state == "assumed":
             v_label = "assumed (not re-verified)"
+        elif state == "unreproduced":
+            v_label = "not reproduced"
+        elif state == "skipped":
+            v_label = "skipped (needs review)"
+        elif not getattr(finding, "verified", True):
+            v_label = "not reproduced"
         else:
             v_label = "reproduced/assumed"
 
