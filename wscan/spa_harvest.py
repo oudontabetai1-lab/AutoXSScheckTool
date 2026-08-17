@@ -51,10 +51,10 @@ _REPLAY_DROP_HEADERS = frozenset({
     # _apply_json_payload が ("",{}) を返し当該 endpoint の全プローブが偽陰性になる。落として
     # httpx が実行時に扱える codec だけを広告させる（#90 R11）。
     "accept-encoding",
-    # idempotency キー: 同一キーで body だけ変えて連投すると、冪等性を強制する API は初回の
-    # キャッシュ結果を返す/キー再利用（パラメータ不一致）として弾くため、変異 body がハンドラに
-    # 届かず偽陰性になる。replay では落として各プローブを新規リクエスト扱いにする（#90 R14）。
-    "idempotency-key", "x-idempotency-key", "idempotency-token", "x-idempotency-token",
+    # 注: Idempotency-Key の扱いは **replay 時のプローブ毎の再生成**が正解（削除だと必須キー API で
+    # 400/422、温存だと冪等 API でキャッシュ返し）。どちらも b1（present but unfed）では replay しない
+    # ため未決定にし、template には温存して b2 の attack replay で fresh key をプローブ毎に生成する
+    # （#90 R14・b2 バックログ）。ここでは落とさない。
 })
 
 
@@ -404,8 +404,10 @@ def harvest_json_body_targets(
                 # 例外が 1 entry で起きても、それ以前の正常 target を巻き添えにしない（#90 R14）。
                 try:
                     parsed_body = json.loads(entry["post_data"])
-                    if not isinstance(parsed_body, (dict, list)):
-                        continue
+                    # container を要求しない。top-level スカラ（"term" / 42 / true / null）も valid JSON で、
+                    # enumerate_leaf_pointers はそれをルート pointer "" で表し whole-body 置換に対応する。
+                    # container 限定にすると検索系など scalar body の endpoint が注入点を得られない（#90 R14）。
+                    # 空 container は pointers が空になり下の not pointers で除外される。
                     pointers = enumerate_leaf_pointers(parsed_body)
                     if not pointers:
                         continue

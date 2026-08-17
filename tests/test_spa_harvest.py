@@ -187,9 +187,8 @@ class HarvestJsonBodyTargetsTests(unittest.TestCase):
     def test_skips_invalid_non_json_static_and_out_of_scope_requests(self):
         pairs = [
             _json_pair("https://api.test/v1/search", {"q": "x"}, method="GET"),
-            _json_pair("https://api.test/v1/search", "not-json"),
-            _json_pair("https://api.test/v1/search", "123"),
-            _json_pair("https://api.test/v1/search", "{}"),
+            _json_pair("https://api.test/v1/search", "not-json"),  # 不正 JSON
+            _json_pair("https://api.test/v1/search", "{}"),        # 空 container=pointer 空
             _json_pair("https://api.test/static/app.js", {"q": "x"}),
             _json_pair("https://other.test/v1/search", {"q": "x"}),
             {"request": {
@@ -198,6 +197,7 @@ class HarvestJsonBodyTargetsTests(unittest.TestCase):
                 "post_data": {"q": "already-parsed"},
             }},
         ]
+        # 注: 有効な JSON スカラ("123" 等)は #90 R14 で harvest 対象（別テストで検証）。
 
         self.assertEqual(
             harvest_json_body_targets(pairs, base_netlocs={"api.test"}),
@@ -424,6 +424,16 @@ class HarvestJsonBodyTargetsTests(unittest.TestCase):
         self.assertEqual(len(targets), 2)
         self.assertNotEqual(targets[0]["body_signature"], targets[1]["body_signature"])
 
+    def test_scalar_root_json_body_harvested_at_root_pointer(self):
+        # top-level スカラ("search term")も valid JSON。container 限定にせず、ルート pointer "" で
+        # 注入点を得る（whole-body 置換に対応・検索系 endpoint を取りこぼさない・#90 R14）。
+        targets = harvest_json_body_targets(
+            [_json_pair("https://api.test/v1/search", json.dumps("search term"))],
+            base_netlocs={"api.test"},
+        )
+        self.assertEqual(len(targets), 1)
+        self.assertEqual(targets[0]["pointers"], [""])
+
     def test_operation_discriminator_preserves_json_type(self):
         # discriminator が JSON 型で operation を分ける（{"action":1} int vs {"action":"1"} str）場合、
         # str() だと同じ "1" に潰れて片方を未 probe にする。repr で型を保持し別ターゲットに残す（#90 R13）。
@@ -590,15 +600,15 @@ class AllocatePointersRoundRobinTests(unittest.TestCase):
         self.assertNotIn("Accept-Encoding", headers)
         self.assertEqual(headers.get("X-Keep"), "yes")
 
-    def test_drops_idempotency_key_headers_for_replay(self):
-        # idempotency キーは replay で落とす。同一キーで body を変異すると冪等性 API が初回結果を
-        # キャッシュ返し/キー再利用拒否し、変異 body がハンドラに届かず偽陰性になる（#90 R14）。
+    def test_retains_idempotency_key_for_b2_regeneration(self):
+        # Idempotency-Key は b1 では落とさず温存する。正しい扱いは b2 replay での**プローブ毎再生成**
+        # （削除だと必須キー API で 400、温存のまま連投だと冪等 API がキャッシュ返し）で、b1 は
+        # replay しないため未決定＝温存（#90 R14・b2 バックログ）。
         pairs = [_json_pair("https://api.test/v1/pay", {"amt": 1}, headers={
-            "Idempotency-Key": "abc", "X-Idempotency-Key": "def", "X-Keep": "y",
+            "Idempotency-Key": "abc", "X-Keep": "y",
         })]
         headers = harvest_json_body_targets(pairs, base_netlocs={"api.test"})[0]["headers"]
-        self.assertNotIn("Idempotency-Key", headers)
-        self.assertNotIn("X-Idempotency-Key", headers)
+        self.assertEqual(headers.get("Idempotency-Key"), "abc")
         self.assertEqual(headers.get("X-Keep"), "y")
 
     def test_retains_csrf_token_for_replay(self):
