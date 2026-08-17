@@ -171,6 +171,10 @@ _OPERATION_DISCRIMINATOR_KEYS = frozenset({
     # 匿名 GraphQL は operationName を省き、operation を `query` フィールド（クエリ本文）で識別する
     # ため query も discriminator に含める（#90 R10）。
     "query",
+    # Apollo persisted query(APQ) は query/operationName を省き extensions.persistedQuery.sha256Hash で
+    # operation を識別する。hash を discriminator に含めないと別 operation が collapse し片方が未 probe に
+    # なる（#90 R14）。leaf キー名で判定（値は operation ごとに安定なため通常値churn にはならない）。
+    "sha256hash",
 })
 
 

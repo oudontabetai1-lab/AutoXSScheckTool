@@ -371,6 +371,20 @@ class HarvestJsonBodyTargetsTests(unittest.TestCase):
         self.assertIn("https://api.test/v1/poll", endpoints)
         self.assertLessEqual(len(targets), 3)
 
+    def test_persisted_graphql_query_hash_is_discriminator(self):
+        # Apollo APQ は query/operationName を省き extensions.persistedQuery.sha256Hash で operation を
+        # 識別する。別 hash（同一 pointer 集合）を別ターゲットに保つ（#90 R14）。
+        targets = harvest_json_body_targets([
+            _json_pair("https://api.test/graphql", {
+                "extensions": {"persistedQuery": {"version": 1, "sha256Hash": "aaa"}},
+                "variables": {"id": 1}}),
+            _json_pair("https://api.test/graphql", {
+                "extensions": {"persistedQuery": {"version": 1, "sha256Hash": "bbb"}},
+                "variables": {"id": 1}}),
+        ], base_netlocs={"api.test"})
+        self.assertEqual(len(targets), 2)
+        self.assertNotEqual(targets[0]["body_signature"], targets[1]["body_signature"])
+
     def test_operation_discriminator_preserves_json_type(self):
         # discriminator が JSON 型で operation を分ける（{"action":1} int vs {"action":"1"} str）場合、
         # str() だと同じ "1" に潰れて片方を未 probe にする。repr で型を保持し別ターゲットに残す（#90 R13）。
