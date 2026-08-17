@@ -1,6 +1,7 @@
 """SPA クロールで観測した描画状態と GET 通信を扱う純粋関数。"""
 from __future__ import annotations
 
+import hashlib
 import html as _html
 import json
 import re
@@ -155,6 +156,26 @@ def harvest_get_targets(
     return results
 
 
+# 1 body の parse/保持サイズ上限（target 支配下の巨大 JSON で CPU/メモリを食わせない・#90 R8）。
+_MAX_JSON_BODY_BYTES = 256 * 1024
+
+
+def _raw_content_type(request_headers) -> str | None:
+    """観測ヘッダから content-type の生値を返す（無ければ None）。budget 消費前の JSON 判定用。"""
+    if not isinstance(request_headers, dict):
+        return None
+    for name, value in request_headers.items():
+        if str(name).lower() == "content-type":
+            return str(value or "")
+    return None
+
+
+def _is_jsonish_content_type(ct: str) -> bool:
+    """JSON 系 content-type か（application/json / +json / text/json）。"""
+    c = (ct or "").lower()
+    return "application/json" in c or "+json" in c or "text/json" in c
+
+
 def _extract_replay_headers(request_headers) -> tuple:
     """観測ヘッダから (content_type, replay 用 headers) を抽出する（純粋）。
 
@@ -193,10 +214,12 @@ def harvest_json_body_targets(
     有効ターゲットを飢餓させず（cap はスコープ後に数える）、かつ untrusted な大量観測でも展開が有界になる。
     """
     results: list[dict] = []
-    seen: set[tuple[str, str, tuple[str, ...]]] = set()
+    # semantic identity (method, observed_url, body_signature) -> result idx。値まで含む正規化 body で、
+    # JSON-RPC/GraphQL のように**値で** operation を多重化する場合も別ターゲットに保つ（#90 R8）。
+    seen_index: dict[tuple[str, str, str], int] = {}
     # (method, observed_url, post_data) -> result idx。生 body dedup＋同一観測の headers 最新化に使う。
     raw_index: dict[tuple[str, str, str], int] = {}
-    processed = 0  # スコープ通過＋raw-unique な観測数（parse 作業の上限に使う）
+    processed = 0  # スコープ通過＋JSON 候補の観測数（parse 作業の上限に使う）
 
     try:
         if isinstance(base_netlocs, str):
@@ -250,38 +273,56 @@ def harvest_json_body_targets(
                 post_data = request.get("post_data")
                 if not isinstance(post_data, str):
                     continue
+                # C3: 1 body のサイズ上限（parse 前）。巨大 body でメモリ/CPU を食わせない。
+                if len(post_data) > _MAX_JSON_BODY_BYTES:
+                    continue
+                # C4: content-type が明示的に非 JSON（form 等）なら budget を消費せず skip。
+                # content-type 無しは JSON かもしれないので parse を試みる。form 大量送信が JSON
+                # 予算(processed)を飢餓させないため、非 JSON は数える前に弾く。
+                raw_ct = _raw_content_type(request.get("headers"))
+                if raw_ct and not _is_jsonish_content_type(raw_ct):
+                    continue
+
                 method_upper = method.upper()
                 endpoint_url = parsed_url._replace(query="", fragment="").geturl()
-                # dedup identity は **observed_url（query 込み）**を使う。1 パスが query で別 operation を
-                # 出す場合（?op=create / ?op=delete）に別ターゲットとして残す（replay は query 付き URL を
-                # 保つ・#90 R7）。
+                request_headers = request.get("headers")
+                # identity は **observed_url（query 込み）**を使う（?op=create/?op=delete を別扱い・#90 R7）。
                 # pre-parse 生 body dedup: 同一 (method,url,body) の連投(polling/autosave)を json.loads 前に
                 # 弾く。ただし headers（refresh された Authorization/CSRF）は最新観測で更新する（#90 R7）。
                 raw_key = (method_upper, observed_url, post_data)
                 if raw_key in raw_index:
-                    content_type, headers = _extract_replay_headers(request.get("headers"))
+                    content_type, headers = _extract_replay_headers(request_headers)
                     results[raw_index[raw_key]]["headers"] = headers
                     results[raw_index[raw_key]]["content_type"] = content_type
                     continue
-                # 処理数（スコープ通過＋raw-unique な観測）を上限に。結果数でなく**処理数**を数えることで、
-                # 大量のユニーク body でも parse 作業を有界化する（結果は semantic dedup 後で processed 以下）。
+                # 処理数（スコープ通過＋JSON 候補の観測）を上限に。ユニーク大量でも parse を有界化。
                 if cap is not None and processed >= cap:
                     break
                 processed += 1
-                parsed_body = json.loads(post_data)
+                try:
+                    parsed_body = json.loads(post_data)
+                except (ValueError, TypeError):
+                    continue
                 if not isinstance(parsed_body, (dict, list)):
                     continue
                 pointers = enumerate_leaf_pointers(parsed_body)
                 if not pointers:
                     continue
 
-                content_type, headers = _extract_replay_headers(request.get("headers"))
-
-                # semantic dedup（キー順違いの同一 url+pointer集合を sorted pointer で1つに）。
-                dedup_key = (method_upper, observed_url, tuple(sorted(pointers)))
-                if dedup_key in seen:
+                content_type, headers = _extract_replay_headers(request_headers)
+                # C1: 値まで含む正規化 body の signature を identity に。キー順違いは sort_keys で
+                # 正規化して collapse、値違い（JSON-RPC method/GraphQL operationName 等）は別ターゲットに保つ。
+                body_signature = hashlib.sha1(
+                    json.dumps(parsed_body, sort_keys=True, separators=(",", ":")).encode("utf-8")
+                ).hexdigest()
+                semantic_key = (method_upper, observed_url, body_signature)
+                if semantic_key in seen_index:
+                    # C2: semantic 重複（キー順違い＝raw は別だが正規化 body 同一）も headers を最新化。
+                    idx = seen_index[semantic_key]
+                    results[idx]["headers"] = headers
+                    results[idx]["content_type"] = content_type
+                    raw_index[raw_key] = idx
                     continue
-                seen.add(dedup_key)
                 results.append({
                     "method": method_upper,
                     "url": observed_url,
@@ -290,8 +331,11 @@ def harvest_json_body_targets(
                     "content_type": content_type,
                     "headers": headers,
                     "pointers": pointers,
+                    "body_signature": body_signature,
                 })
-                raw_index[raw_key] = len(results) - 1
+                idx = len(results) - 1
+                seen_index[semantic_key] = idx
+                raw_index[raw_key] = idx
             except Exception:
                 continue
     except Exception:

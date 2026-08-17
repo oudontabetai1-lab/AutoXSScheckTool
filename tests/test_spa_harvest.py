@@ -203,12 +203,12 @@ class HarvestJsonBodyTargetsTests(unittest.TestCase):
             [],
         )
 
-    def test_deduplicates_same_url_method_and_pointer_set(self):
-        # 同一 url+method、pointer 集合が同じ（キー順違い）は 1 つに。method 違いは別。
+    def test_deduplicates_same_url_method_and_normalized_body(self):
+        # 同一 url+method、**値も同じ**でキー順違いだけは 1 つに collapse。method 違いは別。
         pairs = [
             _json_pair("https://api.test/v1/search", {"q": "x", "limit": 10}),
-            _json_pair("https://api.test/v1/search", {"limit": 20, "q": "y"}),
-            _json_pair("https://api.test/v1/search", {"q": "z", "limit": 30}, method="PATCH"),
+            _json_pair("https://api.test/v1/search", {"limit": 10, "q": "x"}),  # 同値・キー順違い
+            _json_pair("https://api.test/v1/search", {"q": "x", "limit": 10}, method="PATCH"),
         ]
 
         targets = harvest_json_body_targets(pairs, base_netlocs={"api.test"})
@@ -216,6 +216,48 @@ class HarvestJsonBodyTargetsTests(unittest.TestCase):
         self.assertEqual(len(targets), 2)
         self.assertEqual(targets[0]["url"], "https://api.test/v1/search")
         self.assertEqual(targets[1]["method"], "PATCH")
+
+    def test_body_value_differentiated_operations_kept_separate(self):
+        # 同 pointer 集合でも body の**値**で operation を多重化する場合（JSON-RPC method /
+        # GraphQL operationName）は別ターゲットに保つ（#90 R8）。
+        pairs = [
+            _json_pair("https://api.test/rpc", {"method": "create", "params": {"id": 1}}),
+            _json_pair("https://api.test/rpc", {"method": "delete", "params": {"id": 2}}),
+        ]
+        targets = harvest_json_body_targets(pairs, base_netlocs={"api.test"})
+        self.assertEqual(len(targets), 2)
+        self.assertNotEqual(targets[0]["body_signature"], targets[1]["body_signature"])
+
+    def test_semantic_duplicate_refreshes_headers(self):
+        # 値変化なしのキー順違い（raw は別だが正規化 body 同一）でも headers を最新化する（#90 R8 C2）。
+        pairs = [
+            _json_pair("https://api.test/v1/x", {"a": 1, "b": 2},
+                       headers={"Authorization": "Bearer OLD"}),
+            _json_pair("https://api.test/v1/x", {"b": 2, "a": 1},  # 同値・キー順違い＝semantic dup
+                       headers={"Authorization": "Bearer NEW"}),
+        ]
+        targets = harvest_json_body_targets(pairs, base_netlocs={"api.test"})
+        self.assertEqual(len(targets), 1)
+        self.assertEqual(targets[0]["headers"]["Authorization"], "Bearer NEW")
+
+    def test_skips_oversized_body_before_parse(self):
+        # 巨大 body は parse 前に skip（メモリ/CPU ガード・#90 R8 C3）。
+        big = {"blob": "x" * (300 * 1024)}
+        pairs = [_json_pair("https://api.test/v1/big", big)]
+        self.assertEqual(
+            harvest_json_body_targets(pairs, base_netlocs={"api.test"}), []
+        )
+
+    def test_non_json_content_type_does_not_consume_budget(self):
+        # 明示非 JSON(form 等)は budget を消費せず skip。後続の valid JSON が飢餓しない（#90 R8 C4）。
+        forms = [
+            _json_pair(f"https://api.test/form{i}", "a=1&b=2",
+                       headers={"Content-Type": "application/x-www-form-urlencoded"})
+            for i in range(5)
+        ]
+        js = [_json_pair("https://api.test/v1/ok", {"q": "x"})]
+        targets = harvest_json_body_targets(forms + js, base_netlocs={"api.test"}, max_targets=1)
+        self.assertEqual([t["endpoint"] for t in targets], ["https://api.test/v1/ok"])
 
     def test_query_differentiated_operations_kept_separate(self):
         # 1 パスが query で別 operation を出す場合（?op=create/?op=delete）は別ターゲットとして残す

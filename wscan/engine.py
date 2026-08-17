@@ -2549,13 +2549,16 @@ class ScanEngine:
                         is_in_scope=self._json_target_in_scope,
                         max_targets=json_ip_cap,
                     ):
-                        # dedup identity は **observed url（query 込み）**＋順序非依存 pointer。
-                        # 同一エンドポイントを別ページで JSON キー順違いで観測しても重複キュー化せず
-                        # （seen はページ跨ぎ）、かつ query 別 operation（?op=create/delete）は別扱い（#90 R7）。
+                        # dedup identity は **observed url（query 込み）**＋**body_signature**（値まで含む
+                        # 正規化 body の署名）。キー順違いは collapse しつつ、query 別 operation
+                        # （?op=create/delete）や値で多重化する operation（JSON-RPC method/GraphQL
+                        # operationName）を別扱いにする（#90 R7/R8）。body_signature が無い旧形式は
+                        # sorted pointer に fallback。
                         dedup_key = (
                             target["method"],
                             target["url"],
-                            tuple(sorted(target["pointers"])),
+                            target.get("body_signature")
+                            or tuple(sorted(target["pointers"])),
                         )
                         existing_tid = self._spa_json_harvest_seen.get(dedup_key)
                         if existing_tid is not None:
