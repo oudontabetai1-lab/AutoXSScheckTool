@@ -41,6 +41,10 @@ _STATIC_ASSET_SUFFIXES = (
 # 永続/配信は record_finding=_redact_json_evidence_pair が _CREDENTIAL_HEADERS をマスクする（平文非保存）。
 _REPLAY_DROP_HEADERS = frozenset({
     "content-length", "host", "cookie", "proxy-authorization",
+    # body 依存/転送エンコーディング系。JSON replay は葉を差し替えて body を再直列化するため、
+    # 元 body 用の checksum/encoding を残すと検証するサーバが全プローブを弾く（Codex #90 R6）。
+    # 再計算しないので落とす。
+    "content-md5", "digest", "content-digest", "content-encoding", "transfer-encoding",
 })
 
 
@@ -168,6 +172,8 @@ def harvest_json_body_targets(
     """
     results: list[dict] = []
     seen: set[tuple[str, str, tuple[str, ...]]] = set()
+    seen_raw: set[tuple[str, str, str]] = set()  # pre-parse 生 body dedup
+    processed = 0  # スコープ通過＋raw-unique な観測数（parse 作業の上限に使う）
 
     try:
         if isinstance(base_netlocs, str):
@@ -186,8 +192,6 @@ def harvest_json_body_targets(
 
         for pair in pairs:
             try:
-                if cap is not None and len(results) >= cap:
-                    break
                 if not isinstance(pair, dict):
                     continue
                 request = pair.get("request") or {}
@@ -223,6 +227,19 @@ def harvest_json_body_targets(
                 post_data = request.get("post_data")
                 if not isinstance(post_data, str):
                     continue
+                method_upper = method.upper()
+                endpoint_url = parsed_url._replace(query="", fragment="").geturl()
+                # pre-parse 生 body dedup: 同一 body の連投(polling/autosave)を json.loads 前に弾く。
+                # post-parse dedup だと重複でも毎回 parse+pointer 列挙され CPU を無制限に消費する（#90 R6）。
+                raw_key = (method_upper, endpoint_url, post_data)
+                if raw_key in seen_raw:
+                    continue
+                seen_raw.add(raw_key)
+                # 処理数（スコープ通過＋raw-unique な観測）を上限に。結果数でなく**処理数**を数えることで、
+                # 大量のユニーク body でも parse 作業を有界化する（結果は semantic dedup 後で processed 以下）。
+                if cap is not None and processed >= cap:
+                    break
+                processed += 1
                 parsed_body = json.loads(post_data)
                 if not isinstance(parsed_body, (dict, list)):
                     continue
@@ -251,8 +268,8 @@ def harvest_json_body_targets(
                         continue
                     headers[name] = value
 
-                method_upper = method.upper()
-                endpoint_url = parsed_url._replace(query="", fragment="").geturl()
+                # method_upper/endpoint_url は pre-parse dedup で算出済み。
+                # semantic dedup（キー順違いの同一エンドポイントを sorted pointer で1つに）。
                 dedup_key = (method_upper, endpoint_url, tuple(sorted(pointers)))
                 if dedup_key in seen:
                     continue

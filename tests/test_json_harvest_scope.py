@@ -47,6 +47,14 @@ class JsonHarvestScopeTests(unittest.TestCase):
         p = _PredicateStub(["https://api.example/v1/users"], [])
         self.assertTrue(p._json_target_in_scope("https://api.example/v1/users?dry_run=1"))
 
+    def test_json_predicate_matches_query_bearing_scope(self):
+        # query 付きで設定された attack scope（例 .../action?op=save）は observed 原文一致で拾う。
+        # query 除去を先に掛けると scope の query が残って一致しないため、原文→除去の順で試す（#90 R6）。
+        p = _PredicateStub(["https://api.example/action?op=save"], [])
+        self.assertTrue(p._json_target_in_scope("https://api.example/action?op=save"))
+        # 別 op は scope 外（原文一致せず、除去版 .../action も scope .../action?op=save と不一致）。
+        self.assertFalse(p._json_target_in_scope("https://api.example/action?op=delete"))
+
     def test_json_predicate_honors_query_specific_exclusion(self):
         # exclusion は observed 原文（query 込み）で判定＝query 固有の除外が効く。
         p = _PredicateStub(

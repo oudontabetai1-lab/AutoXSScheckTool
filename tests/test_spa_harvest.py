@@ -253,13 +253,43 @@ class HarvestJsonBodyTargetsTests(unittest.TestCase):
         )
         self.assertEqual([t["endpoint"] for t in targets], ["https://api.test/v1/ok"])
 
-    def test_max_targets_bounds_after_scope(self):
-        # max_targets はスコープ通過後の materialize 数の上限。除外分は数えない。
+    def test_max_targets_bounds_processed_observations(self):
+        # max_targets は**処理数**（スコープ通過＋raw-unique 観測）の上限。ユニーク body でも有界。
         pairs = [_json_pair(f"https://api.test/v1/x{i}", {"v": i}) for i in range(10)]
         targets = harvest_json_body_targets(
             pairs, base_netlocs={"api.test"}, max_targets=3,
         )
         self.assertEqual(len(targets), 3)
+
+    def test_repeated_identical_body_deduped_before_parse_and_not_counted(self):
+        # 同一 body の連投(polling/autosave)は pre-parse dedup で1つに潰れ、parse 予算を食わない。
+        # 同一 body ×20 + ユニーク3件・cap=3 → 同一は 1 処理、ユニーク3件が残り全部通る。
+        polling = [_json_pair("https://api.test/v1/poll", {"t": 1}) for _ in range(20)]
+        uniques = [_json_pair(f"https://api.test/v1/u{i}", {"v": i}) for i in range(3)]
+        targets = harvest_json_body_targets(
+            polling + uniques, base_netlocs={"api.test"}, max_targets=3,
+        )
+        endpoints = {t["endpoint"] for t in targets}
+        # polling は 1 つだけ（20 連投が重複潰し）＋ ユニークが cap 内で拾える。
+        self.assertIn("https://api.test/v1/poll", endpoints)
+        self.assertLessEqual(len(targets), 3)
+
+    def test_drops_stale_body_integrity_and_encoding_headers(self):
+        # Content-MD5/Digest/Content-Encoding 等は body 再直列化で無効になるため落とす（#90 R6）。
+        pairs = [_json_pair(
+            "https://api.test/v1/x", {"a": 1},
+            headers={
+                "Content-MD5": "abc==", "Digest": "sha-256=xxx",
+                "Content-Encoding": "gzip", "Transfer-Encoding": "chunked",
+                "X-Keep": "yes",
+            },
+        )]
+        headers = harvest_json_body_targets(pairs, base_netlocs={"api.test"})[0]["headers"]
+        self.assertNotIn("Content-MD5", headers)
+        self.assertNotIn("Digest", headers)
+        self.assertNotIn("Content-Encoding", headers)
+        self.assertNotIn("Transfer-Encoding", headers)
+        self.assertEqual(headers.get("X-Keep"), "yes")
 
     def test_caps_pointers_per_body_not_total_targets(self):
         # 1 body の pointer 数は cap（enumerate 側 200）。ただし**総ターゲット数は harvester で

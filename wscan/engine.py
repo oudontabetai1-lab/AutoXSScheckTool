@@ -980,14 +980,18 @@ class ScanEngine:
     def _json_target_in_scope(self, url: str) -> bool:
         """JSON 注入ターゲットのスコープ判定（harvest 用の述語）。
 
-        JSON 注入は body が対象で query は注入対象でないため、**scope 照合は query/fragment を
-        除いた endpoint** で行う（path-scoped target と observed?query 付きを一致させる。#90 R4）。
-        一方 **exclusion は observed 原文（query 込み）** で判定する。exclude_urls には
-        query 固有の full URL やワイルドカード（query を含む）が入り得るため、query を落とすと
-        明示除外が効かなくなり intrusive probe を打ってしまう（#90 R5 P1）。
+        - **exclusion は observed 原文（query 込み）** で判定（exclude_urls の query 固有 full URL /
+          full-URL ワイルドカードを尊重。query を落とすと明示除外が効かない。#90 R5 P1）。
+        - **scope は原文→query 除去の順で試す**。原文一致は query 付きで設定された attack scope
+          （例 --target-url .../action?op=save）を拾い（#90 R6）、query 除去は path-scoped target と
+          observed?query 付きを一致させる（#90 R4。JSON 注入は body 対象で query は注入対象でない）。
         """
+        if self._is_url_excluded(url):
+            return False
+        if self._is_attack_target_url(url):
+            return True
         clean = urlparse(url)._replace(query="", fragment="").geturl()
-        return self._is_attack_target_url(clean) and not self._is_url_excluded(url)
+        return clean != url and self._is_attack_target_url(clean)
 
     def _is_access_allowed_url(self, url: str) -> bool:
         return self._is_attack_target_url(url) or self._url_matches_scope(url, self.access_urls)
