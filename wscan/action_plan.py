@@ -174,6 +174,11 @@ def _review_item_from_finding(f: Finding, idx: int, related: list[Finding] | Non
         "confidence": f.confidence,
         "verified": f.verified,
         "verification_state": getattr(f, "verification_state", ""),
+        # group（代表 f + related）に含まれる全 state。unreproduced と skipped が同 group に
+        # まとまると代表の 1 つだけでは「片方の経路が検証未実行」と分からないため集約する。
+        "verification_states": sorted({
+            getattr(x, "verification_state", "") or "unknown" for x in [f, *related]
+        }),
         "check_type": f.check_type,
         "url": f.url,
         "field_name": f.field_name,
@@ -273,8 +278,9 @@ def _build_markdown(tasks: list[dict], review_items: list[dict]) -> str:
                 f"- Confidence: {item['confidence']}",
                 f"- Verified: {item['verified']}",
                 # unreproduced（再現失敗）と skipped（検証未実行）は verified=False で潰れるため
-                # operator の判断が変わる state を明示する（task 側と同様）。
-                f"- Verification: {item['verification_state'] or 'unknown'}",
+                # operator の判断が変わる state を明示する。group 内に複数 state があれば全て出す
+                # （代表 1 つだと片方の経路の検証状況を見落とす）。
+                f"- Verification: {', '.join(item.get('verification_states') or [item['verification_state'] or 'unknown'])}",
                 f"- URL: `{item['url']}`",
                 f"- Field: `{item['field_name']}`",
                 f"- Evidence type: `{item['evidence_type']}`",

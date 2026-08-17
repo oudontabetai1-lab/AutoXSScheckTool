@@ -65,6 +65,21 @@ class ActionPlanVerificationStateTests(unittest.TestCase):
         self.assertIn("- Verification: unreproduced", md)
         self.assertIn("- Verification: skipped", md)
 
+    def test_grouped_review_aggregates_states(self):
+        # 同一 group（同 field/evidence）で unreproduced と skipped がまとまると、
+        # 代表 1 つでなく group 内の全 state を出す（片方の経路を見落とさない）。
+        from wscan.action_plan import _build_markdown
+        plan = build_action_plan([
+            _finding("unreproduced", verified=False, field_name="q"),
+            _finding("skipped", verified=False, field_name="q"),
+        ])
+        self.assertEqual(len(plan["review_items"]), 1)  # 同 group=1 item
+        self.assertEqual(
+            plan["review_items"][0]["verification_states"], ["skipped", "unreproduced"]
+        )
+        md = _build_markdown(plan["tasks"], plan["review_items"])
+        self.assertIn("- Verification: skipped, unreproduced", md)
+
 
 if __name__ == "__main__":
     unittest.main()

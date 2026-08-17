@@ -1397,7 +1397,7 @@ document.querySelectorAll('.plan-payloads-toggle').forEach(btn => {{
                     / <code>{self._escape(item.get("field_name", ""))}</code>
                     / {self._escape(item.get("confidence", ""))}
                     / verified={self._escape(str(item.get("verified", "")))}
-                    / verify={self._escape(item.get("verification_state", "") or "unknown")}
+                    / verify={self._escape(", ".join(item.get("verification_states") or [item.get("verification_state", "") or "unknown"]))}
                     / related={len(item.get("related_signals", []))}
                     <br>{self._escape(item.get("reason", ""))}
                 </div>"""

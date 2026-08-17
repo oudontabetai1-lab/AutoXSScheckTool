@@ -23,6 +23,13 @@ class DashboardVerificationStateTests(unittest.TestCase):
         self.assertIn("fc-verify-badge", html)
         self.assertIn("state.findingCards", html)
 
+    def test_capped_cards_evicted_from_finding_map(self):
+        # DOM キャップで外したカードは findingCards からも削除する（メモリリーク／detached
+        # カードへの finding_update 適用を防ぐ）。
+        html = Path("templates/dashboard.html").read_text(encoding="utf-8")
+        self.assertIn("state.findingCards.delete", html)
+        self.assertIn("card.dataset.findingKey = key", html)
+
 
 if __name__ == "__main__":
     unittest.main()

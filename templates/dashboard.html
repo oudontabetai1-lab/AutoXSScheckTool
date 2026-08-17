@@ -4473,13 +4473,20 @@ function addFinding(data) {
     ${(detailRows || steps) ? `<details class="fc-details"><summary>Evidence details / reproduction</summary><div class="fc-detail-list">${detailRows}${steps ? '<div style="height:4px"></div>' + steps : ''}</div></details>` : ''}
     ${ssHtml}
   `;
+  card.dataset.findingKey = key;  // eviction 時に map から外すため保持
   panel.insertBefore(card, panel.firstChild);
   state.findingCards.set(key, card);  // finding_update で badge を差し替えるため保持
 
   // Cap findings panel at 300 cards to prevent DOM bloat
   const MAX_CARDS = 300;
   while (panel.children.length > MAX_CARDS) {
-    panel.removeChild(panel.lastChild);
+    const removed = panel.lastChild;
+    // map からも外す（強参照を残すとキャップ後もメモリが増え続け、finding_update が
+    // detached な不可視カードを更新してしまう）。
+    if (removed && removed.dataset && state.findingCards.get(removed.dataset.findingKey) === removed) {
+      state.findingCards.delete(removed.dataset.findingKey);
+    }
+    panel.removeChild(removed);
   }
   return true;
 }
