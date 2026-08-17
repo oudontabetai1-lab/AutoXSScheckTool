@@ -2527,10 +2527,13 @@ class ScanEngine:
                         self.browser.network.pairs,
                         base_netlocs=attack_netlocs,
                     ):
+                        # pointer は harvester のローカル dedup と同じ順序非依存表現
+                        # (sorted) にする。同一エンドポイントを別ページで JSON キーの
+                        # 挿入順違いで観測しても重複キュー化しない（seen はページ跨ぎ）。
                         dedup_key = (
                             target["method"],
                             target["endpoint"],
-                            tuple(target["pointers"]),
+                            tuple(sorted(target["pointers"])),
                         )
                         if dedup_key in self._spa_json_harvest_seen:
                             continue

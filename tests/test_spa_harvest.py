@@ -207,6 +207,25 @@ class HarvestJsonBodyTargetsTests(unittest.TestCase):
         self.assertEqual(targets[0]["url"], "https://api.test/v1/search?page=1")
         self.assertEqual(targets[1]["method"], "PATCH")
 
+    def test_same_endpoint_different_key_order_yields_same_sorted_pointers(self):
+        # engine の大域 dedup キーは pointer を sorted で持つ。JSON キーの挿入順が違うだけの
+        # 同一エンドポイントを別ページで観測しても、sorted 表現が一致し重複キュー化しない。
+        a = harvest_json_body_targets(
+            [_json_pair("https://api.test/v1/u", {"email": "x", "name": "y"})],
+            base_netlocs={"api.test"},
+        )[0]
+        b = harvest_json_body_targets(
+            [_json_pair("https://api.test/v1/u", {"name": "y", "email": "x"})],
+            base_netlocs={"api.test"},
+        )[0]
+        self.assertEqual(a["endpoint"], b["endpoint"])
+        self.assertEqual(sorted(a["pointers"]), sorted(b["pointers"]))
+        # 順序非依存キー（method, endpoint, sorted(pointers)）が一致する。
+        self.assertEqual(
+            (a["method"], a["endpoint"], tuple(sorted(a["pointers"]))),
+            (b["method"], b["endpoint"], tuple(sorted(b["pointers"]))),
+        )
+
     def test_caps_pointers_per_body_and_total_targets(self):
         large_body = {f"field{i}": i for i in range(205)}
         pairs = [
