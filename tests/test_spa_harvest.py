@@ -411,6 +411,19 @@ class HarvestJsonBodyTargetsTests(unittest.TestCase):
         self.assertEqual(len(targets), 2)
         self.assertNotEqual(targets[0]["body_signature"], targets[1]["body_signature"])
 
+    def test_discriminator_not_cut_off_by_earlier_discriminator_leaves(self):
+        # 多数の discriminator 名の葉(type)が先にあっても、後方の operation selector(method)まで走査して
+        # 別 operation を区別する（max_found カットオフ撤去・#90 R14）。
+        base = {f"n{i}": {"type": "x"} for i in range(80)}  # 80 個の nested "type" discriminator
+        bc = dict(base); bc["method"] = "create"
+        bd = dict(base); bd["method"] = "delete"
+        targets = harvest_json_body_targets([
+            _json_pair("https://api.test/rpc", bc),
+            _json_pair("https://api.test/rpc", bd),
+        ], base_netlocs={"api.test"})
+        self.assertEqual(len(targets), 2)
+        self.assertNotEqual(targets[0]["body_signature"], targets[1]["body_signature"])
+
     def test_operation_discriminator_preserves_json_type(self):
         # discriminator が JSON 型で operation を分ける（{"action":1} int vs {"action":"1"} str）場合、
         # str() だと同じ "1" に潰れて片方を未 probe にする。repr で型を保持し別ターゲットに残す（#90 R13）。

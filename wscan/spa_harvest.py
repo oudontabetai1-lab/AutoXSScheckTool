@@ -178,14 +178,17 @@ _OPERATION_DISCRIMINATOR_KEYS = frozenset({
 })
 
 
-def _collect_discriminators(node, tokens, out, *, depth_cap=8, max_found=64) -> None:
+def _collect_discriminators(node, tokens, out, *, depth_cap=8) -> None:
     """full body を DFS し operation discriminator の (path, 値) を集める（純粋・pointer cap 非依存）。
 
     enumerate_leaf_pointers は葉を 200 で打ち切るため、200 葉より後ろにある discriminator
     （例: 大きな body の末尾 method）を pointer 経由で拾うと取りこぼす。ここは parsed_body 全体を
-    直接歩いて discriminator を発見する（#90 R14）。深さ・件数は上限で有界化。
+    直接歩いて discriminator を発見する（#90 R14）。**発見数の上限は設けない** ―― 先に現れた
+    discriminator 名の葉（nested な type 等）でカットオフすると、その後の operation selector（method）
+    を走査せず別 operation を collapse する（#90 R14）。走査は depth_cap＝8 と parse 前の body サイズ
+    上限（_MAX_JSON_BODY_BYTES）で有界。
     """
-    if len(out) >= max_found or len(tokens) > depth_cap:
+    if len(tokens) > depth_cap:
         return
     if isinstance(node, dict):
         for k, v in node.items():
@@ -193,14 +196,10 @@ def _collect_discriminators(node, tokens, out, *, depth_cap=8, max_found=64) -> 
             if key.lower() in _OPERATION_DISCRIMINATOR_KEYS and isinstance(v, (str, int, float, bool)):
                 # repr で JSON 型を保持（{"action":1} と {"action":"1"} を区別・#90 R13）。
                 out.append((tuple(tokens + [key]), repr(v)))
-            _collect_discriminators(v, tokens + [key], out, depth_cap=depth_cap, max_found=max_found)
-            if len(out) >= max_found:
-                return
+            _collect_discriminators(v, tokens + [key], out, depth_cap=depth_cap)
     elif isinstance(node, list):
         for index, v in enumerate(node):
-            _collect_discriminators(v, tokens + [str(index)], out, depth_cap=depth_cap, max_found=max_found)
-            if len(out) >= max_found:
-                return
+            _collect_discriminators(v, tokens + [str(index)], out, depth_cap=depth_cap)
 
 
 def _injection_signature(parsed_body, pointers) -> str:
