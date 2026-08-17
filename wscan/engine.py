@@ -2526,7 +2526,12 @@ class ScanEngine:
                     # 精密スコープ判定と materialize 上限を harvester に渡し、body パース前に
                     # フィルタ/有界化させる（対象外の大きな body を展開しない・飢餓回避。Codex #90 R3）。
                     def _json_in_scope(u: str) -> bool:
-                        return self._is_attack_target_url(u) and not self._is_url_excluded(u)
+                        # JSON 注入は body 対象で query は注入対象でない。_url_matches_scope は
+                        # URL scope を query 込みの full 文字列で照合するため、path-scoped target
+                        # （例 .../v1/users）と observed（.../v1/users?dry_run=1）が一致しない。
+                        # query/fragment を除いた endpoint で判定する（Codex #90 R4）。
+                        clean = urlparse(u)._replace(query="", fragment="").geturl()
+                        return self._is_attack_target_url(clean) and not self._is_url_excluded(clean)
 
                     for target in spa_harvest.harvest_json_body_targets(
                         self.browser.network.pairs,
