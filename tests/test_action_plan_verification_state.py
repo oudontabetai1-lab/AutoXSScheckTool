@@ -24,6 +24,13 @@ class ActionPlanVerificationStateTests(unittest.TestCase):
         # assumed は「消さない（タスクとして残す）が要手動確認」を明示。
         self.assertTrue(task["needs_confirmation"])
 
+    def test_needs_confirmation_spans_grouped_findings(self):
+        # 同一 group（同 check/field/evidence）で reproduced と assumed が混在する場合、
+        # 代表が reproduced でも group にひとつでも assumed があれば needs_confirmation=True。
+        plan = build_action_plan([_finding("reproduced"), _finding("assumed")])
+        self.assertEqual(len(plan["tasks"]), 1)  # 同 group=1タスク（related にまとまる）
+        self.assertTrue(plan["tasks"][0]["needs_confirmation"])
+
     def test_reproduced_not_flagged(self):
         task = build_action_plan([_finding("reproduced")])["tasks"][0]
         self.assertEqual(task["verification_state"], "reproduced")

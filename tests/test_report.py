@@ -68,6 +68,30 @@ class ReportGeneratorTests(unittest.TestCase):
         # この finding を "not reproduced" とは表示しない。
         self.assertNotIn(">not reproduced</div>", html)
 
+    def test_remediation_summary_html_renders_verification_state(self):
+        # HTML レポートの remediation summary が task/review 行に verify state を出す
+        # （JSON/MD だけでなく主レポートでも assumed/reproduced・unreproduced/skipped を保つ）。
+        findings = [
+            Finding(check_type="sqli", severity="high", url="http://h/a",
+                    field_name="q", payload="'", evidence="err",
+                    evidence_type="sqli_error", confidence="confirmed",
+                    verification_state="assumed"),
+            Finding(check_type="xss", severity="high", url="http://h/b",
+                    field_name="r", payload="<x>", evidence="reflected",
+                    evidence_type="xss_reflection", verified=False,
+                    verification_state="skipped"),
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            html = ReportGenerator(Path(tmp)).generate(
+                target="http://h", findings=findings,
+                visited_urls=["http://h/"], checks=["sqli", "xss"],
+            ).read_text(encoding="utf-8")
+        # actionable task（assumed）に verify state と要手動確認バッジ。
+        self.assertIn("verify: assumed", html)
+        self.assertIn("⚠ 要手動確認", html)
+        # review-only（skipped）行に verify state。
+        self.assertIn("verify=skipped", html)
+
     def test_agent_findings_have_origin_and_verification_badges(self):
         findings = [
             Finding(

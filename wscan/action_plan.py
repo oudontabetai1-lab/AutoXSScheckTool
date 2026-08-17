@@ -115,7 +115,11 @@ def _task_from_finding(f: Finding, idx: int, related: list[Finding] | None = Non
         # (assumed)」を消費側が区別できるよう state を出力。assumed は修正前に手動確証が
         # 必要な旨を needs_confirmation で明示する（タスク自体は落とさない＝過検知を消さない）。
         "verification_state": getattr(f, "verification_state", ""),
-        "needs_confirmation": getattr(f, "verification_state", "") == "assumed",
+        # group 内のどれか 1 経路でも assumed（未再検証）なら確認要。代表 f だけでなく
+        # related も見る（reproduced が代表に来て assumed の同 group 経路を見落とさない）。
+        "needs_confirmation": any(
+            getattr(x, "verification_state", "") == "assumed" for x in [f, *related]
+        ),
         "check_type": f.check_type,
         "url": url,
         "field_name": field_name,

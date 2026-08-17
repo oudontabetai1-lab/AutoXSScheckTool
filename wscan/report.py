@@ -1360,17 +1360,26 @@ document.querySelectorAll('.plan-payloads-toggle').forEach(btn => {{
                     f'<div class="remediation-related">Related findings: '
                     f'{len(related)} additional path(s)</div>'
                 )
+            v_state = task.get("verification_state", "") or "reproduced/assumed"
+            confirm_html = (
+                '<span class="badge-unconfirmed" title="group 内に未再検証(assumed)の経路あり。'
+                '修正前に再現を確認">⚠ 要手動確認</span>'
+                if task.get("needs_confirmation")
+                else ""
+            )
             task_cards += f"""
             <div class="remediation-card {priority_class}">
                 <div class="remediation-head">
                     <span class="priority-pill {priority_class}">{priority}</span>
                     <span class="remediation-title">{self._escape(task.get("title", ""))}</span>
+                    {confirm_html}
                 </div>
                 <div class="remediation-meta">
                     <span>{self._escape(task.get("check_type", ""))}</span>
                     <span>{self._escape(task.get("severity", ""))}</span>
                     <span>{self._escape(task.get("confidence", ""))}</span>
                     <span>{self._escape(task.get("evidence_type", ""))}</span>
+                    <span>verify: {self._escape(v_state)}</span>
                 </div>
                 <div><code>{self._escape(task.get("field_name", ""))}</code></div>
                 <div class="remediation-evidence">{self._escape(task.get("evidence", ""))}</div>
@@ -1388,6 +1397,7 @@ document.querySelectorAll('.plan-payloads-toggle').forEach(btn => {{
                     / <code>{self._escape(item.get("field_name", ""))}</code>
                     / {self._escape(item.get("confidence", ""))}
                     / verified={self._escape(str(item.get("verified", "")))}
+                    / verify={self._escape(item.get("verification_state", "") or "unknown")}
                     / related={len(item.get("related_signals", []))}
                     <br>{self._escape(item.get("reason", ""))}
                 </div>"""
