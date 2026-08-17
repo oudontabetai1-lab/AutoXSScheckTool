@@ -406,7 +406,14 @@ class ReportGenerator:
                 extra_badges += '<span class="badge-multi">⚡ MultiParam</span>'
             if "[AdaptiveAI]" in f.evidence:
                 extra_badges += '<span class="badge-ai">🧠 AdaptiveAI</span>'
-            if not getattr(f, "verified", True):
+            # ラベルと同様、明示 state を legacy boolean より優先する。assumed（Agent 仮説等の
+            # 一度も retry していない finding）は ⚠要確認（=検証失敗/未実行の警告）でなく推定バッジに。
+            # ⚠要確認 は unreproduced（再現失敗）/skipped（例外で未実行）と、state 空で verified=False の
+            # 旧 Finding にのみ付ける。
+            f_state = getattr(f, "verification_state", "")
+            if f_state == "assumed":
+                extra_badges += '<span class="badge-assumed">〜 推定（再検証未実行）</span>'
+            elif f_state in ("unreproduced", "skipped") or not getattr(f, "verified", True):
                 note = self._escape(getattr(f, "verification_note", ""))
                 extra_badges += f'<span class="badge-unconfirmed" title="{note}">⚠ 要確認</span>'
             # E: 信頼度バッジ
@@ -577,6 +584,7 @@ body {{ font-family: 'Segoe UI', system-ui, -apple-system, sans-serif; backgroun
 .badge-agent {{ background:#6b46c1; color:#faf5ff; padding:2px 8px; border-radius:10px; font-size:0.72rem; font-weight:700; }}
 .badge-agent-verified {{ background:#276749; color:#f0fff4; padding:2px 8px; border-radius:10px; font-size:0.72rem; font-weight:700; }}
 .badge-unconfirmed {{ background:#d97706; color:#fff; padding:2px 8px; border-radius:10px; font-size:0.72rem; font-weight:700; cursor:help; }}
+.badge-assumed {{ background:#854d0e; color:#fef9c3; padding:2px 8px; border-radius:10px; font-size:0.72rem; font-weight:700; }}
 .badge-confidence {{ color:#fff; padding:2px 8px; border-radius:10px; font-size:0.72rem; font-weight:700; }}
 .badge-diff-new {{ background:#276749; color:#f0fff4; padding:2px 8px; border-radius:10px; font-size:0.72rem; font-weight:700; }}
 .badge-diff-persist {{ background:#2b6cb0; color:#ebf8ff; padding:2px 8px; border-radius:10px; font-size:0.72rem; font-weight:700; }}
@@ -1281,10 +1289,27 @@ document.querySelectorAll('.plan-payloads-toggle').forEach(btn => {{
         if not details and not steps and not evidence_type:
             return ""
 
+        # 明示的な verification_state を legacy boolean より優先する。verified=False でも
+        # state="assumed"（Agent 仮説など一度も retry していない finding）を "not reproduced"
+        # ＝失敗した再現試行、と偽らないため。state 空（旧 Finding）だけ verified に fallback。
+        state = getattr(finding, "verification_state", "")
+        if state == "reproduced":
+            v_label = "reproduced"
+        elif state == "assumed":
+            v_label = "assumed (not re-verified)"
+        elif state == "unreproduced":
+            v_label = "not reproduced"
+        elif state == "skipped":
+            v_label = "skipped (needs review)"
+        elif not getattr(finding, "verified", True):
+            v_label = "not reproduced"
+        else:
+            v_label = "reproduced/assumed"
+
         cells = [
             ("Evidence Type", evidence_type),
             ("Confidence", getattr(finding, "confidence", "tentative")),
-            ("Verification", "reproduced/assumed" if getattr(finding, "verified", True) else "not reproduced"),
+            ("Verification", v_label),
         ]
         for key, value in list(details.items())[:8]:
             cells.append((str(key).replace("_", " ").title(), value))
@@ -1340,17 +1365,26 @@ document.querySelectorAll('.plan-payloads-toggle').forEach(btn => {{
                     f'<div class="remediation-related">Related findings: '
                     f'{len(related)} additional path(s)</div>'
                 )
+            v_state = task.get("verification_state", "") or "reproduced/assumed"
+            confirm_html = (
+                '<span class="badge-unconfirmed" title="group 内に未再検証(assumed)の経路あり。'
+                '修正前に再現を確認">⚠ 要手動確認</span>'
+                if task.get("needs_confirmation")
+                else ""
+            )
             task_cards += f"""
             <div class="remediation-card {priority_class}">
                 <div class="remediation-head">
                     <span class="priority-pill {priority_class}">{priority}</span>
                     <span class="remediation-title">{self._escape(task.get("title", ""))}</span>
+                    {confirm_html}
                 </div>
                 <div class="remediation-meta">
                     <span>{self._escape(task.get("check_type", ""))}</span>
                     <span>{self._escape(task.get("severity", ""))}</span>
                     <span>{self._escape(task.get("confidence", ""))}</span>
                     <span>{self._escape(task.get("evidence_type", ""))}</span>
+                    <span>verify: {self._escape(v_state)}</span>
                 </div>
                 <div><code>{self._escape(task.get("field_name", ""))}</code></div>
                 <div class="remediation-evidence">{self._escape(task.get("evidence", ""))}</div>
@@ -1368,6 +1402,7 @@ document.querySelectorAll('.plan-payloads-toggle').forEach(btn => {{
                     / <code>{self._escape(item.get("field_name", ""))}</code>
                     / {self._escape(item.get("confidence", ""))}
                     / verified={self._escape(str(item.get("verified", "")))}
+                    / verify={self._escape(", ".join(item.get("verification_states") or [item.get("verification_state", "") or "unknown"]))}
                     / related={len(item.get("related_signals", []))}
                     <br>{self._escape(item.get("reason", ""))}
                 </div>"""

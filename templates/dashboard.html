@@ -451,7 +451,8 @@ body {
 .fc-confidence-likely { color:#facc15; background:rgba(210,153,34,.15); border-color:rgba(210,153,34,.35); }
 .fc-confidence-tentative { color:#a5d6ff; background:rgba(56,139,253,.12); border-color:rgba(56,139,253,.3); }
 .fc-verified { font-size:.65rem; color:#86efac; background:rgba(63,185,80,.12); border:1px solid rgba(63,185,80,.25); padding:2px 8px; border-radius:10px; }
-.fc-unverified { font-size:.65rem; color:#facc15; background:rgba(210,153,34,.12); border:1px solid rgba(210,153,34,.35); padding:2px 8px; border-radius:10px; }
+.fc-assumed { font-size:.65rem; color:#facc15; background:rgba(210,153,34,.12); border:1px solid rgba(210,153,34,.35); padding:2px 8px; border-radius:10px; }
+.fc-unverified { font-size:.65rem; color:#fca5a5; background:rgba(248,81,73,.12); border:1px solid rgba(248,81,73,.35); padding:2px 8px; border-radius:10px; }
 .fc-details { margin-top:8px; border-top:1px solid var(--border); padding-top:8px; }
 .fc-details summary { cursor:pointer; color:var(--accent); font-size:.72rem; font-weight:700; }
 .fc-detail-list { margin-top:6px; display:flex; flex-direction:column; gap:3px; font-family:monospace; font-size:.68rem; color:var(--text-muted); }
@@ -2155,6 +2156,9 @@ const state = {
   // WS 再接続時にサーバが直近イベント履歴を再送するため、同一 finding が
   // 重複してカードに積まれるのを防ぐ。安定キー(url|field|check|payload|type)で抑止。
   findingKeys: new Set(),
+  // finding_update（検証フェーズでの state 変化）で該当カードの verification badge を
+  // 差し替えるため、安定キー→カード要素を保持する。
+  findingCards: new Map(),
 };
 
 // スキャン開始時に呼ぶ: config に一意な nonce を刻み、受理確認までは pending に置く。
@@ -2207,10 +2211,31 @@ function _promotePendingScan(data) {
 
 // finding の安定キー。再送・再接続時の重複カードを抑止するために使う。
 function findingKey(d) {
-  return [
+  const base = [
     d.url || '', d.field_name || '', d.check_type || '',
     d.evidence_type || '', d.payload || '',
-  ].join('||');
+  ];
+  // json_body は canonical dedup と同じく method+pointer を含め、pointer 違いの別 finding を
+  // 同一カードに潰さない（finding_update の差し替え先も取り違えない）。null（欠落=corrupt）と
+  // ""（RFC6901 ルート）を `|| ''` で潰すと Python 側 key（None と "" を区別）とずれるため、
+  // JSON 直列化で両者を別値にする。※ json_body finding の生成は PR-b で配線。
+  if (d.injection_location === 'json_body') {
+    base.push(JSON.stringify(d.injection_method ?? null), JSON.stringify(d.injection_pointer ?? null));
+  }
+  return base.join('||');
+}
+
+// verification バッジの class/label を算出（addFinding と finding_update で共有）。
+// 明示 state 優先・state 空の旧 Finding だけ verified boolean に fallback。
+function computeVerification(data) {
+  const verified = data.verified !== false;
+  const st = data.verification_state || '';
+  if (st === 'reproduced') return { cls: 'fc-verified', label: 'reproduced' };
+  if (st === 'assumed') return { cls: 'fc-assumed', label: 'assumed（推定・再検証未実行）' };
+  if (st === 'unreproduced') return { cls: 'fc-unverified', label: 'not reproduced' };
+  if (st === 'skipped') return { cls: 'fc-unverified', label: 'skipped (needs review)' };
+  if (!verified) return { cls: 'fc-unverified', label: 'not reproduced' };
+  return { cls: 'fc-verified', label: 'reproduced/assumed' };
 }
 
 // ─── Config form state ───────────────────────────────────────────
@@ -3988,6 +4013,28 @@ function handleEvent(event) {
       break;
     }
 
+    case 'finding_update': {
+      // 検証フェーズで finding の verification 状態が確定した際、該当カードの badge を差し替える
+      // （初期 assumed のまま残さない）。カード未生成なら通常 finding として追加。
+      const card = state.findingCards.get(findingKey(data));
+      if (card) {
+        const vb = computeVerification(data);
+        const badge = card.querySelector('.fc-verify-badge');
+        if (badge) {
+          badge.className = 'fc-verify-badge ' + vb.cls;
+          badge.textContent = vb.label;
+        }
+      } else {
+        const added = addFinding(data);
+        if (added) {
+          state.findingCount++;
+          document.getElementById('statFindings').textContent = state.findingCount;
+          document.getElementById('findingCount').textContent = state.findingCount;
+        }
+      }
+      break;
+    }
+
     case 'scan_gap': {
       const u = data.url || '';
       if (u) {
@@ -4156,6 +4203,7 @@ function resetLiveScanState() {
   state.eventCount = 0;
   state.findingCount = 0;
   state.findingKeys = new Set();
+  state.findingCards = new Map();
   state.pageCount = 0;
   state.testCount = 0;
   state.scanStartTime = null;
@@ -4361,6 +4409,9 @@ function addFinding(data) {
   const sev = (data.severity || 'medium').toLowerCase();
   const confidence = (data.confidence || 'tentative').toLowerCase();
   const verified = data.verified !== false;
+  const vb = computeVerification(data);
+  const verificationClass = vb.cls;
+  const verificationLabel = vb.label;
   const evidenceType = data.evidence_type || data.check_type || '';
   const details = data.evidence_details || {};
   const detailRows = Object.entries(details).slice(0, 8).map(([k, v]) =>
@@ -4410,7 +4461,7 @@ function addFinding(data) {
     <div class="fc-top">
       <span class="sev-badge sev-${sev}">${sev}</span>
       <span class="fc-confidence fc-confidence-${confidence}">${confidence}</span>
-      <span class="${verified ? 'fc-verified' : 'fc-unverified'}">${verified ? 'reproduced/assumed' : 'not reproduced'}</span>
+      <span class="fc-verify-badge ${verificationClass}">${verificationLabel}</span>
       <span class="fc-type">${escapeHtml(data.check_type?.toUpperCase() || '')}</span>
       <span class="fc-field">Field: ${escapeHtml(data.field_name || '')}</span>
     </div>
@@ -4424,12 +4475,20 @@ function addFinding(data) {
     ${(detailRows || steps) ? `<details class="fc-details"><summary>Evidence details / reproduction</summary><div class="fc-detail-list">${detailRows}${steps ? '<div style="height:4px"></div>' + steps : ''}</div></details>` : ''}
     ${ssHtml}
   `;
+  card.dataset.findingKey = key;  // eviction 時に map から外すため保持
   panel.insertBefore(card, panel.firstChild);
+  state.findingCards.set(key, card);  // finding_update で badge を差し替えるため保持
 
   // Cap findings panel at 300 cards to prevent DOM bloat
   const MAX_CARDS = 300;
   while (panel.children.length > MAX_CARDS) {
-    panel.removeChild(panel.lastChild);
+    const removed = panel.lastChild;
+    // map からも外す（強参照を残すとキャップ後もメモリが増え続け、finding_update が
+    // detached な不可視カードを更新してしまう）。
+    if (removed && removed.dataset && state.findingCards.get(removed.dataset.findingKey) === removed) {
+      state.findingCards.delete(removed.dataset.findingKey);
+    }
+    panel.removeChild(removed);
   }
   return true;
 }
@@ -4438,6 +4497,7 @@ function replaceFindings(findings) {
   const panel = document.getElementById('findingsPanel');
   panel.innerHTML = '';
   state.findingKeys = new Set();  // full re-sync: rebuild dedup index from scratch
+  state.findingCards = new Map();  // カード参照も貼り直す
   state.findingCount = findings.length;
   document.getElementById('statFindings').textContent = state.findingCount;
   document.getElementById('findingCount').textContent = state.findingCount;

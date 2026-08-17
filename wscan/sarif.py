@@ -197,6 +197,10 @@ class SarifExporter:
                 # verified=False でも「実際に再現できず」と「例外で検証未実行(要手動確認)」を
                 # SARIF 消費側が区別できるよう、理由を持つ note も出力する。
                 "verification_note": f.get("verification_note", ""),
+                # assumed は verified=True・note 空なので、reproduced と区別できる唯一の値が
+                # verification_state。SARIF に出さないと CI 消費側で assumed が reproduced に
+                # 見えてしまう（reproduced/assumed/unreproduced/skipped の3(+skip)状態を伝える）。
+                "verification_state": f.get("verification_state", ""),
                 "source":           source,
                 "agent_verified":   f.get("agent_verified", False),
                 "compliance_refs":  f.get("compliance_refs", {}),

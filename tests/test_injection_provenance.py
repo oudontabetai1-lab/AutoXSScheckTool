@@ -87,6 +87,43 @@ class FindingInjectionProvenanceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(restored.injection_method, "POST")
         self.assertEqual(restored.injection_template_id, "login-1")
 
+    def test_direct_finding_construction_gets_state_legacy_stays_empty(self):
+        # record_finding を通らない直接構築（ChainScanner/GraphQL 等）も __post_init__ で
+        # 非空 state を得る。dialog→reproduced／非dialog→assumed。
+        self.assertEqual(
+            Finding(check_type="graphql_dos", severity="high", url="http://h/g",
+                    field_name="q", payload="x", evidence="e").verification_state,
+            "assumed",
+        )
+        self.assertEqual(
+            Finding(check_type="xss", severity="high", url="http://h/x",
+                    field_name="q", payload="<script>", evidence="e",
+                    dialog_confirmed=True).verification_state,
+            "reproduced",
+        )
+        # from_dict の旧 Finding（キー欠落）は空文字のまま＝旧 Finding 専用に予約。
+        legacy = Finding.from_dict({
+            "check_type": "sqli", "severity": "high", "url": "http://h/a",
+            "field_name": "q", "payload": "'", "evidence": "e",
+        })
+        self.assertEqual(legacy.verification_state, "")
+
+    async def test_record_finding_stamps_verification_state(self):
+        # 新規 finding は必ず非空 state（空は旧 Finding 専用）。dialog 発火=reproduced、
+        # それ以外=assumed（検証 phase を通らない finding も曖昧ラベルに落ちない）。
+        scanner = _Scanner(_Engine())
+        pair = {"request": {}, "response": {}}
+        non_dialog = await scanner.record_finding(
+            "http://h/a", "q", "'", "err", pair, screenshot_b64="",
+            evidence_type="sqli_error",
+        )
+        self.assertEqual(non_dialog.verification_state, "assumed")
+        dialog = await scanner.record_finding(
+            "http://h/b", "q", "<script>", "err", pair, screenshot_b64="",
+            evidence_type="xss_dialog", dialog_confirmed=True,
+        )
+        self.assertEqual(dialog.verification_state, "reproduced")
+
     async def test_record_finding_stamps_form_without_pointer_or_method(self):
         scanner = _Scanner(_Engine())
         ip = InjectionPoint.for_form("http://h/form", "email")
@@ -388,7 +425,7 @@ class FindingInjectionProvenanceTests(unittest.IsolatedAsyncioTestCase):
             injection_location="form", injection_form_index=4,
         )
 
-        self.assertTrue(await engine._verify_one(finding))
+        self.assertEqual(await engine._verify_one(finding), "assumed")
         self.assertEqual(len(scanner.applied_ips), 1)
         ip, payload = scanner.applied_ips[0]
         self.assertEqual(ip.location, "form")
@@ -404,7 +441,7 @@ class FindingInjectionProvenanceTests(unittest.IsolatedAsyncioTestCase):
             injection_location="bogus",
         )
 
-        self.assertTrue(await engine._verify_one(finding))
+        self.assertEqual(await engine._verify_one(finding), "assumed")
         self.assertEqual(scanner.applied_ips, [])
         self.assertEqual(engine.browser.navigate_calls, [])
 
@@ -424,7 +461,7 @@ class FindingInjectionProvenanceTests(unittest.IsolatedAsyncioTestCase):
                 self.calls.append(finding.field_name)
                 if finding.field_name == "boom":
                     raise RuntimeError("simulated verify crash")
-                return True
+                return "reproduced"
 
         boom = Finding(check_type="sqli", severity="high", url="http://h/a",
                        field_name="boom", payload="'", evidence="e")
@@ -439,8 +476,10 @@ class FindingInjectionProvenanceTests(unittest.IsolatedAsyncioTestCase):
         # verified を倒し（⚠ 要確認 + note 経路）理由を note に残す。finding は削除しない。
         # 正常確認の ok は無傷（verified=True・skip note なし）。
         self.assertFalse(boom.verified)
+        self.assertEqual(boom.verification_state, "skipped")
         self.assertIn("未再現", boom.verification_note)
         self.assertTrue(ok.verified)
+        self.assertEqual(ok.verification_state, "reproduced")
         self.assertEqual(ok.verification_note, "")
 
     def test_rebuilds_all_locations(self):

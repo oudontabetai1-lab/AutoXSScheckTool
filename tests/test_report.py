@@ -7,6 +7,95 @@ from wscan.scanners.base import Finding
 
 
 class ReportGeneratorTests(unittest.TestCase):
+    def test_verification_states_have_distinct_labels_and_badges(self):
+        def finding(field_name, state, verified=True, note=""):
+            return Finding(
+                check_type="xss",
+                severity="high",
+                url=f"http://fixture.test/{field_name}",
+                field_name=field_name,
+                payload="<svg/onload=alert(1)>",
+                evidence=f"{state or 'legacy'} evidence",
+                verified=verified,
+                verification_state=state,
+                verification_note=note,
+                evidence_type="xss_reflection",
+            )
+
+        findings = [
+            finding("reproduced", "reproduced"),
+            finding("assumed", "assumed"),
+            finding("unreproduced", "unreproduced", verified=False),
+            finding("skipped", "skipped", verified=False, note="要手動確認"),
+            finding("legacy", ""),
+        ]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            report_path = ReportGenerator(Path(tmp)).generate(
+                target="http://fixture.test",
+                findings=findings,
+                visited_urls=["http://fixture.test/"],
+                checks=["xss"],
+            )
+            html = report_path.read_text(encoding="utf-8")
+
+        self.assertIn(">reproduced</div>", html)
+        self.assertIn(">assumed (not re-verified)</div>", html)
+        self.assertIn(">not reproduced</div>", html)
+        self.assertIn(">skipped (needs review)</div>", html)
+        self.assertIn(">reproduced/assumed</div>", html)
+        self.assertIn("〜 推定（再検証未実行）", html)
+        self.assertEqual(html.count('class="badge-assumed"'), 1)
+        self.assertEqual(html.count("⚠ 要確認"), 2)
+
+    def test_assumed_with_verified_false_labeled_assumed_not_unreproduced(self):
+        # Agent 仮説等は verified=False かつ state="assumed"（一度も retry していない）。
+        # legacy boolean を優先すると "not reproduced"＝失敗した再現試行、と偽る。state 優先で
+        # "assumed (not re-verified)" を出す。
+        finding = Finding(
+            check_type="xss", severity="high",
+            url="http://fixture.test/agent", field_name="q",
+            payload="<svg/onload=alert(1)>", evidence="agent hypothesis",
+            verified=False, verification_state="assumed",
+            evidence_type="xss_reflection",
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            html = ReportGenerator(Path(tmp)).generate(
+                target="http://fixture.test", findings=[finding],
+                visited_urls=["http://fixture.test/"], checks=["xss"],
+            ).read_text(encoding="utf-8")
+        self.assertIn(">assumed (not re-verified)</div>", html)
+        # この finding を "not reproduced" とは表示しない。
+        self.assertNotIn(">not reproduced</div>", html)
+        # バッジも state 優先: verified=False+assumed は 推定バッジで、⚠要確認（検証失敗/未実行の
+        # 警告）は付けない（一度も retry していない Agent 仮説等）。
+        self.assertIn('class="badge-assumed"', html)
+        self.assertNotIn("⚠ 要確認", html)
+
+    def test_remediation_summary_html_renders_verification_state(self):
+        # HTML レポートの remediation summary が task/review 行に verify state を出す
+        # （JSON/MD だけでなく主レポートでも assumed/reproduced・unreproduced/skipped を保つ）。
+        findings = [
+            Finding(check_type="sqli", severity="high", url="http://h/a",
+                    field_name="q", payload="'", evidence="err",
+                    evidence_type="sqli_error", confidence="confirmed",
+                    verification_state="assumed"),
+            Finding(check_type="xss", severity="high", url="http://h/b",
+                    field_name="r", payload="<x>", evidence="reflected",
+                    evidence_type="xss_reflection", verified=False,
+                    verification_state="skipped"),
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            html = ReportGenerator(Path(tmp)).generate(
+                target="http://h", findings=findings,
+                visited_urls=["http://h/"], checks=["sqli", "xss"],
+            ).read_text(encoding="utf-8")
+        # actionable task（assumed）に verify state と要手動確認バッジ。
+        self.assertIn("verify: assumed", html)
+        self.assertIn("⚠ 要手動確認", html)
+        # review-only（skipped）行に verify state。
+        self.assertIn("verify=skipped", html)
+
     def test_agent_findings_have_origin_and_verification_badges(self):
         findings = [
             Finding(

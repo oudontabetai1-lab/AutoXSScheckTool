@@ -2,6 +2,7 @@ import unittest
 from unittest.mock import AsyncMock
 
 from wscan.monitor import MonitorServer
+from wscan.scanners.base import Finding
 from wscan.scanners.ldap_injection import LDAPScanner
 from wscan.scanners.xxe import XXEScanner
 
@@ -40,6 +41,76 @@ class _Engine:
 
 
 class MonitorPayloadEventTests(unittest.IsolatedAsyncioTestCase):
+    async def test_finding_payload_includes_verification_state(self):
+        monitor = MonitorServer()
+        finding = Finding(
+            check_type="xss",
+            severity="high",
+            url="http://fixture.test/search?q=x",
+            field_name="q",
+            payload="<svg/onload=alert(1)>",
+            evidence="reflected",
+            verification_state="assumed",
+        )
+
+        await monitor.emit_finding(finding.to_dict())
+
+        self.assertEqual(monitor.api_findings[0]["verification_state"], "assumed")
+        self.assertEqual(
+            monitor.event_history[-1]["data"]["verification_state"],
+            "assumed",
+        )
+
+    async def test_emit_finding_update_replaces_snapshot_and_broadcasts(self):
+        # 検証で state が変わった際、蓄積済み snapshot を安定キーで差し替え update を配信する
+        # （初期 assumed のまま /api・ダッシュボードに残さない）。
+        monitor = MonitorServer()
+        f = Finding(
+            check_type="sqli", severity="high", url="http://h/a", field_name="q",
+            payload="'", evidence="err", evidence_type="sqli_error",
+        )
+        await monitor.emit_finding(f.to_dict())
+        self.assertEqual(monitor.api_findings[0]["verification_state"], "assumed")
+
+        f.verification_state = "reproduced"
+        await monitor.emit_finding_update(f.to_dict())
+
+        # 蓄積は増えず（重複しない）、同一 finding の state が更新される。
+        self.assertEqual(len(monitor.api_findings), 1)
+        self.assertEqual(monitor.api_findings[0]["verification_state"], "reproduced")
+        # finding_update イベントが配信される。
+        self.assertEqual(monitor.event_history[-1]["type"], "finding_update")
+        self.assertEqual(
+            monitor.event_history[-1]["data"]["verification_state"], "reproduced"
+        )
+
+    async def test_emit_finding_update_distinguishes_json_pointers(self):
+        # 同一 URL/leaf/evidence/payload で pointer だけ違う 2 つの json_body finding を
+        # update 時に取り違えない（canonical dedup と同じ identity）。
+        monitor = MonitorServer()
+
+        def jf(pointer):
+            return {
+                "url": "http://h/login", "field_name": "id", "check_type": "sqli",
+                "evidence_type": "sqli_error", "payload": "'",
+                "injection_location": "json_body", "injection_method": "POST",
+                "injection_pointer": pointer, "verification_state": "assumed",
+            }
+
+        await monitor.emit_finding(jf("/profile/id"))
+        await monitor.emit_finding(jf("/billing/id"))
+        self.assertEqual(len(monitor.api_findings), 2)
+
+        updated = jf("/billing/id")
+        updated["verification_state"] = "reproduced"
+        await monitor.emit_finding_update(updated)
+
+        # 2件のまま。/billing/id だけ reproduced、/profile/id は assumed のまま。
+        self.assertEqual(len(monitor.api_findings), 2)
+        by_ptr = {f["injection_pointer"]: f["verification_state"] for f in monitor.api_findings}
+        self.assertEqual(by_ptr["/billing/id"], "reproduced")
+        self.assertEqual(by_ptr["/profile/id"], "assumed")
+
     async def test_dashboard_start_scan_resets_api_state(self):
         monitor = MonitorServer()
         monitor.api_findings = [{"stale": True}]

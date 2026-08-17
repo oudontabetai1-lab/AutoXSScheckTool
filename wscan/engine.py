@@ -4550,8 +4550,9 @@ class ScanEngine:
     async def _phase_verify(self):
         """
         Re-inject each finding's exact payload to confirm the vulnerability
-        is reproducible.  Findings that cannot be reproduced are marked
-        verified=False (kept in report with a ⚠ badge, not deleted).
+        is reproducible.  Findings that cannot be verified are kept as assumed;
+        findings that do not reproduce are marked verified=False (kept in the
+        report with a ⚠ badge, not deleted).
         """
         from urllib.parse import parse_qs, urlparse
 
@@ -4575,9 +4576,9 @@ class ScanEngine:
 
         for i, finding in enumerate(to_verify):
             skipped = False
-            confirmed = False
+            state = ""
             try:
-                confirmed = await self._verify_one(finding)
+                state = await self._verify_one(finding)
             except Exception as exc:
                 # 想定外の例外（破損 provenance の復元失敗など）で verify フェーズ全体を
                 # 止めない。1 件の異常が残り全 finding の検証を巻き込むのを防ぐ。
@@ -4601,31 +4602,50 @@ class ScanEngine:
                 # review 扱いにする（過検知を消さない＝検出力は落とさない）。CONFIRMED
                 # （reproduced）には決して落とさない。
                 finding.verified = False
+                finding.verification_state = "skipped"
                 finding.verification_note = "検証が例外で実行できず未再現（要手動確認）"
-            elif confirmed:
+            elif state == "reproduced":
+                finding.verified = True
+                finding.verification_state = "reproduced"
+                finding.verification_note = ""
                 console.print(
                     f"  [green][CONFIRMED][/green] {finding.check_type.upper()} "
                     f"on [yellow]{finding.field_name}[/yellow]: reproduced"
                 )
+            elif state == "assumed":
+                # 検証不能は finding を落とさない従来方針を維持しつつ、実再現とは分ける。
+                finding.verified = True
+                finding.verification_state = "assumed"
+                finding.verification_note = ""
+                console.print(
+                    f"  [yellow][ASSUMED][/yellow] {finding.check_type.upper()} "
+                    f"on [yellow]{finding.field_name}[/yellow]: kept (not re-verified)"
+                )
             else:
                 finding.verified = False
+                finding.verification_state = "unreproduced"
                 finding.verification_note = "2回目の試行で再現できませんでした (possible false positive)"
                 console.print(
                     f"  [yellow][UNCONFIRMED][/yellow] {finding.check_type.upper()} "
                     f"on [yellow]{finding.field_name}[/yellow]: not reproduced"
                 )
             if self.monitor:
+                # 生成時の初期 state（assumed 等）で積まれた snapshot を検証結果で差し替え、
+                # ライブ（/api・ダッシュボード）が最終 scan_complete を待たず正しく見えるようにする。
+                await self.monitor.emit_finding_update(finding.to_dict())
                 await self.monitor.emit_progress(
                     current=i + 1,
                     total=len(to_verify),
                     message=f"検証 {i+1}/{len(to_verify)}: {finding.check_type}/{finding.field_name}",
                 )
 
-    async def _verify_one(self, f: Finding) -> bool:
+    async def _verify_one(self, f: Finding) -> str:
         """
         Re-inject f.payload into f.field_name on f.url and check if the
-        vulnerability is still reproducible.  Returns True if confirmed,
-        True if verification could not be performed (don't penalise for nav errors).
+        vulnerability is still reproducible.  Returns ``reproduced`` only when
+        the second attempt confirms it, ``unreproduced`` when the second attempt
+        does not, and ``assumed`` when verification cannot be performed and the
+        finding must be kept without penalty.
         """
         from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
         import re as _re
@@ -4640,7 +4660,7 @@ class ScanEngine:
             scanner_key = f.check_type
         scanner = self.scanners.get(scanner_key)
         if scanner is None:
-            return True  # no scanner available → assume confirmed
+            return "assumed"  # no scanner available → keep without claiming reproduction
 
         verifier = getattr(scanner, "verify_finding", None)
         if verifier:
@@ -4653,13 +4673,13 @@ class ScanEngine:
                 if f.check_type == "ssti" and scanner_result is False:
                     pass
                 else:
-                    return bool(scanner_result)
+                    return "reproduced" if scanner_result else "unreproduced"
 
         # scanner 固有 verify で判定不能だった場合も、保存済み provenance を唯一の注入先にする。
         try:
             ip = injection_point_from_finding(f)
         except ProvenanceError:
-            return True  # 壊れた provenance は再送せず、既存慣行どおり penalize しない。
+            return "assumed"  # 壊れた provenance は再送せず、既存慣行どおり penalize しない。
         if ip is None:
             # location が空の旧 Finding だけ、従来の URL クエリ推測へ fallback する。
             is_url_param_guess = f.field_name in parse_qs(
@@ -4711,8 +4731,8 @@ class ScanEngine:
                         if expected in probe_text and (
                             base_count == 0 or probe_text.count(expected) > base_count
                         ):
-                            return True
-                    return False
+                            return "reproduced"
+                    return "unreproduced"
             except Exception:
                 pass
 
@@ -4723,20 +4743,23 @@ class ScanEngine:
             await asyncio.sleep(self._effective_delay)
 
             if f.check_type == "xss":
-                return self.browser.dialog_fired or bool(
+                reproduced = self.browser.dialog_fired or bool(
                     source and scanner._check_reflected(source, f.payload)
                 )
+                return "reproduced" if reproduced else "unreproduced"
 
             elif f.check_type == "sqli":
                 body = pair.get("response", {}).get("body", "") or source or ""
-                return bool(scanner.check_response_for_patterns(body, SQL_ERROR_PATTERNS))
+                reproduced = bool(scanner.check_response_for_patterns(body, SQL_ERROR_PATTERNS))
+                return "reproduced" if reproduced else "unreproduced"
 
             elif f.check_type == "os":
                 OS_OUT_PATTERNS = [r"root:x:", r"uid=\d+\(", r"volume serial", r"directory of"]
-                return any(
+                reproduced = any(
                     _re.search(p, source or "", _re.IGNORECASE)
                     for p in OS_OUT_PATTERNS
                 )
+                return "reproduced" if reproduced else "unreproduced"
 
             elif f.check_type == "ssti":
                 try:
@@ -4747,13 +4770,14 @@ class ScanEngine:
                     ] or [expected for _probe, expected, _engine in SSTI_PROBES]
                 except Exception:
                     expected_values = ["49", "7777777", "7045744422742119121"]
-                return any(expected in (source or "") for expected in expected_values)
+                reproduced = any(expected in (source or "") for expected in expected_values)
+                return "reproduced" if reproduced else "unreproduced"
 
             else:
-                return True  # path_traversal etc. — difficult to re-check, assume confirmed
+                return "assumed"  # path_traversal etc. — difficult to re-check, keep without claiming reproduction
 
         except Exception:
-            return True  # navigation/injection failure → assume confirmed
+            return "assumed"  # navigation/injection failure → keep without claiming reproduction
 
     # =========================================================================
     # Phase 4: Report

@@ -111,6 +111,15 @@ def _task_from_finding(f: Finding, idx: int, related: list[Finding] | None = Non
         "severity": f.severity,
         "confidence": f.confidence,
         "verified": f.verified,
+        # verified=True でも「実際に再現できた(reproduced)」と「検証を再実行できず維持
+        # (assumed)」を消費側が区別できるよう state を出力。assumed は修正前に手動確証が
+        # 必要な旨を needs_confirmation で明示する（タスク自体は落とさない＝過検知を消さない）。
+        "verification_state": getattr(f, "verification_state", ""),
+        # group 内のどれか 1 経路でも assumed（未再検証）なら確認要。代表 f だけでなく
+        # related も見る（reproduced が代表に来て assumed の同 group 経路を見落とさない）。
+        "needs_confirmation": any(
+            getattr(x, "verification_state", "") == "assumed" for x in [f, *related]
+        ),
         "check_type": f.check_type,
         "url": url,
         "field_name": field_name,
@@ -148,6 +157,7 @@ def _related_finding_dict(f: Finding) -> dict:
         "severity": f.severity,
         "confidence": f.confidence,
         "verified": f.verified,
+        "verification_state": getattr(f, "verification_state", ""),
         "url": f.url,
         "field_name": f.field_name,
         "evidence_type": f.evidence_type,
@@ -163,6 +173,12 @@ def _review_item_from_finding(f: Finding, idx: int, related: list[Finding] | Non
         "severity": f.severity,
         "confidence": f.confidence,
         "verified": f.verified,
+        "verification_state": getattr(f, "verification_state", ""),
+        # group（代表 f + related）に含まれる全 state。unreproduced と skipped が同 group に
+        # まとまると代表の 1 つだけでは「片方の経路が検証未実行」と分からないため集約する。
+        "verification_states": sorted({
+            getattr(x, "verification_state", "") or "unknown" for x in [f, *related]
+        }),
         "check_type": f.check_type,
         "url": f.url,
         "field_name": f.field_name,
@@ -226,6 +242,8 @@ def _build_markdown(tasks: list[dict], review_items: list[dict]) -> str:
             f"- Priority: {task['priority']}",
             f"- Severity: {task['severity']}",
             f"- Confidence: {task['confidence']}",
+            f"- Verification: {task['verification_state'] or 'reproduced/assumed'}"
+            + ("（要手動確認：修正前に再現を確認）" if task["needs_confirmation"] else ""),
             f"- URL: `{task['url']}`",
             f"- Field: `{task['field_name']}`",
             f"- Evidence type: `{task['evidence_type']}`",
@@ -259,6 +277,10 @@ def _build_markdown(tasks: list[dict], review_items: list[dict]) -> str:
                 f"- Severity: {item['severity']}",
                 f"- Confidence: {item['confidence']}",
                 f"- Verified: {item['verified']}",
+                # unreproduced（再現失敗）と skipped（検証未実行）は verified=False で潰れるため
+                # operator の判断が変わる state を明示する。group 内に複数 state があれば全て出す
+                # （代表 1 つだと片方の経路の検証状況を見落とす）。
+                f"- Verification: {', '.join(item.get('verification_states') or [item['verification_state'] or 'unknown'])}",
                 f"- URL: `{item['url']}`",
                 f"- Field: `{item['field_name']}`",
                 f"- Evidence type: `{item['evidence_type']}`",

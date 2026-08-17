@@ -35,6 +35,38 @@ class SarifVerificationNoteTests(unittest.TestCase):
             skip_props["verification_note"], genuine_props["verification_note"]
         )
 
+    def test_verification_state_exported_distinguishes_assumed_from_reproduced(self):
+        # assumed は verified=True・note 空なので、SARIF で reproduced と区別できる唯一の値が
+        # verification_state。両者が同一に潰れないことを守る。
+        reproduced = {
+            "check_type": "sqli", "url": "http://h/a", "field_name": "b",
+            "payload": "'", "severity": "high", "verified": True,
+            "verification_state": "reproduced",
+        }
+        assumed = {
+            "check_type": "sqli", "url": "http://h/a", "field_name": "b",
+            "payload": "'", "severity": "high", "verified": True,
+            "verification_state": "assumed",
+        }
+        rprops = SarifExporter._finding_to_result(reproduced)["properties"]
+        aprops = SarifExporter._finding_to_result(assumed)["properties"]
+        self.assertEqual(rprops["verification_state"], "reproduced")
+        self.assertEqual(aprops["verification_state"], "assumed")
+        # verified が同値でも state で区別できる。
+        self.assertEqual(rprops["verified"], aprops["verified"])
+        self.assertNotEqual(
+            rprops["verification_state"], aprops["verification_state"]
+        )
+
+    def test_absent_verification_state_defaults_empty(self):
+        f = {
+            "check_type": "xss", "url": "http://h/x", "field_name": "q",
+            "payload": "<script>", "severity": "high", "verified": True,
+        }
+        self.assertEqual(
+            SarifExporter._finding_to_result(f)["properties"]["verification_state"], ""
+        )
+
     def test_absent_note_defaults_empty(self):
         f = {
             "check_type": "xss", "url": "http://h/x", "field_name": "q",
