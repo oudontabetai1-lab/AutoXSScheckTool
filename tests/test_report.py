@@ -67,6 +67,10 @@ class ReportGeneratorTests(unittest.TestCase):
         self.assertIn(">assumed (not re-verified)</div>", html)
         # この finding を "not reproduced" とは表示しない。
         self.assertNotIn(">not reproduced</div>", html)
+        # バッジも state 優先: verified=False+assumed は 推定バッジで、⚠要確認（検証失敗/未実行の
+        # 警告）は付けない（一度も retry していない Agent 仮説等）。
+        self.assertIn('class="badge-assumed"', html)
+        self.assertNotIn("⚠ 要確認", html)
 
     def test_remediation_summary_html_renders_verification_state(self):
         # HTML レポートの remediation summary が task/review 行に verify state を出す

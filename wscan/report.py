@@ -406,11 +406,16 @@ class ReportGenerator:
                 extra_badges += '<span class="badge-multi">⚡ MultiParam</span>'
             if "[AdaptiveAI]" in f.evidence:
                 extra_badges += '<span class="badge-ai">🧠 AdaptiveAI</span>'
-            if not getattr(f, "verified", True):
+            # ラベルと同様、明示 state を legacy boolean より優先する。assumed（Agent 仮説等の
+            # 一度も retry していない finding）は ⚠要確認（=検証失敗/未実行の警告）でなく推定バッジに。
+            # ⚠要確認 は unreproduced（再現失敗）/skipped（例外で未実行）と、state 空で verified=False の
+            # 旧 Finding にのみ付ける。
+            f_state = getattr(f, "verification_state", "")
+            if f_state == "assumed":
+                extra_badges += '<span class="badge-assumed">〜 推定（再検証未実行）</span>'
+            elif f_state in ("unreproduced", "skipped") or not getattr(f, "verified", True):
                 note = self._escape(getattr(f, "verification_note", ""))
                 extra_badges += f'<span class="badge-unconfirmed" title="{note}">⚠ 要確認</span>'
-            elif getattr(f, "verification_state", "") == "assumed":
-                extra_badges += '<span class="badge-assumed">〜 推定（再検証未実行）</span>'
             # E: 信頼度バッジ
             conf = getattr(f, "confidence", "tentative")
             conf_labels = {"confirmed": ("✔ 確認済", "#276749"), "likely": ("〜 可能性高", "#744210"), "tentative": ("? 暫定", "#4a5568")}
