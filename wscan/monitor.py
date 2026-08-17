@@ -1816,11 +1816,17 @@ class MonitorServer:
 
     @staticmethod
     def _finding_snapshot_key(f: dict) -> tuple:
-        """蓄積 snapshot / ダッシュボードカードと同一の安定キー（verification 変化に不変）。"""
-        return (
+        """蓄積 snapshot の安定キー（verification 変化に不変）。canonical な finding_dedup_key_for
+        と同じく json_body は method+pointer を含める。これを落とすと、同一 URL/leaf/evidence/payload で
+        pointer だけ違う 2 つの json_body finding が衝突し、2件目の検証更新が 1件目の snapshot を
+        差し替えてしまう（dedup は両者を別 finding として残すため identity を揃える必要がある）。"""
+        base = (
             f.get("url", ""), f.get("field_name", ""), f.get("check_type", ""),
             f.get("evidence_type", ""), f.get("payload", ""),
         )
+        if f.get("injection_location") == "json_body":
+            return base + (f.get("injection_method", ""), f.get("injection_pointer", ""))
+        return base
 
     async def emit_finding(self, finding: dict):
         # D: CI/CD API — findings を自動蓄積

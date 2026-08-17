@@ -2211,10 +2211,16 @@ function _promotePendingScan(data) {
 
 // finding の安定キー。再送・再接続時の重複カードを抑止するために使う。
 function findingKey(d) {
-  return [
+  const base = [
     d.url || '', d.field_name || '', d.check_type || '',
     d.evidence_type || '', d.payload || '',
-  ].join('||');
+  ];
+  // json_body は canonical dedup と同じく method+pointer を含め、pointer 違いの別 finding を
+  // 同一カードに潰さない（finding_update の差し替え先も取り違えない）。
+  if (d.injection_location === 'json_body') {
+    base.push(d.injection_method || '', d.injection_pointer || '');
+  }
+  return base.join('||');
 }
 
 // verification バッジの class/label を算出（addFinding と finding_update で共有）。

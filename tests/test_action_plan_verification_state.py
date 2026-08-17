@@ -46,6 +46,18 @@ class ActionPlanVerificationStateTests(unittest.TestCase):
         self.assertEqual(len(plan["review_items"]), 1)
         self.assertEqual(plan["review_items"][0]["verification_state"], "unreproduced")
 
+    def test_markdown_review_section_renders_state(self):
+        # remediation_plan.md の Review-only Signals で unreproduced/skipped を区別できる
+        # （verified=False で潰さない）。
+        from wscan.action_plan import _build_markdown
+        plan = build_action_plan([
+            _finding("unreproduced", verified=False, field_name="a"),
+            _finding("skipped", verified=False, field_name="b"),
+        ])
+        md = _build_markdown(plan["tasks"], plan["review_items"])
+        self.assertIn("- Verification: unreproduced", md)
+        self.assertIn("- Verification: skipped", md)
+
 
 if __name__ == "__main__":
     unittest.main()

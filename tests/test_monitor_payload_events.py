@@ -84,6 +84,33 @@ class MonitorPayloadEventTests(unittest.IsolatedAsyncioTestCase):
             monitor.event_history[-1]["data"]["verification_state"], "reproduced"
         )
 
+    async def test_emit_finding_update_distinguishes_json_pointers(self):
+        # 同一 URL/leaf/evidence/payload で pointer だけ違う 2 つの json_body finding を
+        # update 時に取り違えない（canonical dedup と同じ identity）。
+        monitor = MonitorServer()
+
+        def jf(pointer):
+            return {
+                "url": "http://h/login", "field_name": "id", "check_type": "sqli",
+                "evidence_type": "sqli_error", "payload": "'",
+                "injection_location": "json_body", "injection_method": "POST",
+                "injection_pointer": pointer, "verification_state": "assumed",
+            }
+
+        await monitor.emit_finding(jf("/profile/id"))
+        await monitor.emit_finding(jf("/billing/id"))
+        self.assertEqual(len(monitor.api_findings), 2)
+
+        updated = jf("/billing/id")
+        updated["verification_state"] = "reproduced"
+        await monitor.emit_finding_update(updated)
+
+        # 2件のまま。/billing/id だけ reproduced、/profile/id は assumed のまま。
+        self.assertEqual(len(monitor.api_findings), 2)
+        by_ptr = {f["injection_pointer"]: f["verification_state"] for f in monitor.api_findings}
+        self.assertEqual(by_ptr["/billing/id"], "reproduced")
+        self.assertEqual(by_ptr["/profile/id"], "assumed")
+
     async def test_dashboard_start_scan_resets_api_state(self):
         monitor = MonitorServer()
         monitor.api_findings = [{"stale": True}]

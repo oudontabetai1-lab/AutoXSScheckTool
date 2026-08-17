@@ -268,6 +268,9 @@ def _build_markdown(tasks: list[dict], review_items: list[dict]) -> str:
                 f"- Severity: {item['severity']}",
                 f"- Confidence: {item['confidence']}",
                 f"- Verified: {item['verified']}",
+                # unreproduced（再現失敗）と skipped（検証未実行）は verified=False で潰れるため
+                # operator の判断が変わる state を明示する（task 側と同様）。
+                f"- Verification: {item['verification_state'] or 'unknown'}",
                 f"- URL: `{item['url']}`",
                 f"- Field: `{item['field_name']}`",
                 f"- Evidence type: `{item['evidence_type']}`",
