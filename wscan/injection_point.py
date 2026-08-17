@@ -31,6 +31,50 @@ def build_pointer(tokens: list[str]) -> str:
     return "".join(f"/{escape_token(token)}" for token in tokens)
 
 
+def enumerate_leaf_pointers(
+    doc: Any,
+    *,
+    max_pointers: int = 200,
+    max_depth: int = 8,
+) -> list[str]:
+    """JSON 文書の全スカラ葉への JSON Pointer を深さ優先で列挙する（純粋）。
+
+    ``max_depth`` はルートからのトークン数で数える。空の dict/list は注入先に
+    ならないため列挙せず、上限到達時はそれまでの決定的な順序を保って打ち切る。
+    """
+    pointers: list[str] = []
+    try:
+        pointer_cap = max(0, int(max_pointers))
+        depth_cap = max(0, int(max_depth))
+    except (TypeError, ValueError, OverflowError):
+        return pointers
+    if pointer_cap == 0:
+        return pointers
+
+    def _walk(node: Any, tokens: list[str]) -> None:
+        if len(pointers) >= pointer_cap or len(tokens) > depth_cap:
+            return
+        if isinstance(node, dict):
+            for key, value in node.items():
+                if len(pointers) >= pointer_cap:
+                    break
+                _walk(value, tokens + [str(key)])
+        elif isinstance(node, list):
+            for index, value in enumerate(node):
+                if len(pointers) >= pointer_cap:
+                    break
+                _walk(value, tokens + [str(index)])
+        elif isinstance(node, (str, int, float, bool)) or node is None:
+            pointers.append(build_pointer(tokens))
+
+    try:
+        _walk(doc, [])
+    except Exception:
+        # 観測データが JSON 互換でない場合も、harvest 全体へ例外を漏らさない。
+        pass
+    return pointers
+
+
 def _list_index(token: str) -> int:
     """配列用トークンを添字へ変換する。"""
     if not token.isdigit():

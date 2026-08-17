@@ -1,11 +1,33 @@
+import json
 import unittest
 
-from wscan.spa_harvest import harvest_get_targets, looks_like_spa_shell
+from wscan.spa_harvest import (
+    harvest_get_targets,
+    harvest_json_body_targets,
+    looks_like_spa_shell,
+)
 
 
 def _pair(url: str, method: str = "GET") -> dict:
     return {
         "request": {"url": url, "method": method},
+        "response": {"url": url, "status": 200},
+    }
+
+
+def _json_pair(
+    url: str,
+    body,
+    method: str = "POST",
+    headers: dict | None = None,
+) -> dict:
+    return {
+        "request": {
+            "url": url,
+            "method": method,
+            "post_data": body if isinstance(body, str) else json.dumps(body),
+            "headers": headers or {},
+        },
         "response": {"url": url, "status": 200},
     }
 
@@ -106,6 +128,99 @@ class LooksLikeSpaShellTests(unittest.TestCase):
     def test_empty_and_regular_html_are_not_shells(self):
         self.assertFalse(looks_like_spa_shell(""))
         self.assertFalse(looks_like_spa_shell("<html><body>Regular page</body></html>"))
+
+
+class HarvestJsonBodyTargetsTests(unittest.TestCase):
+    def test_harvests_methods_normalizes_urls_and_filters_headers(self):
+        pairs = [
+            _json_pair(
+                "https://api.test/v1/users?dry_run=1#form",
+                {"profile": {"email": "a@test"}, "roles": ["user", 2]},
+                method="post",
+                headers={
+                    "Content-Type": "application/json; charset=utf-8",
+                    "Authorization": "Bearer secret",
+                    "cookie": "sid=secret",
+                    "X-Api-Key": "secret",
+                    "X-Auth-Token": "secret",
+                    "X-Access-Token": "secret",
+                    "Proxy-Authorization": "secret",
+                    "Content-Length": "99",
+                    "Host": "api.test",
+                    "X-Tenant": "acme",
+                },
+            ),
+            _json_pair("https://api.test/v1/users/1", {"active": True}, method="PUT"),
+            _json_pair("https://api.test/v1/users/1", {"name": None}, method="PATCH"),
+        ]
+
+        targets = harvest_json_body_targets(pairs, base_netlocs="api.test")
+
+        self.assertEqual([target["method"] for target in targets], ["POST", "PUT", "PATCH"])
+        self.assertEqual(targets[0]["url"], "https://api.test/v1/users?dry_run=1")
+        self.assertEqual(targets[0]["endpoint"], "https://api.test/v1/users")
+        self.assertEqual(
+            targets[0]["pointers"],
+            ["/profile/email", "/roles/0", "/roles/1"],
+        )
+        self.assertEqual(targets[0]["content_type"], "application/json; charset=utf-8")
+        self.assertEqual(
+            targets[0]["headers"],
+            {"Content-Type": "application/json; charset=utf-8", "X-Tenant": "acme"},
+        )
+        self.assertEqual(targets[1]["content_type"], "application/json")
+
+    def test_skips_invalid_non_json_static_and_out_of_scope_requests(self):
+        pairs = [
+            _json_pair("https://api.test/v1/search", {"q": "x"}, method="GET"),
+            _json_pair("https://api.test/v1/search", "not-json"),
+            _json_pair("https://api.test/v1/search", "123"),
+            _json_pair("https://api.test/v1/search", "{}"),
+            _json_pair("https://api.test/static/app.js", {"q": "x"}),
+            _json_pair("https://other.test/v1/search", {"q": "x"}),
+            {"request": {
+                "url": "https://api.test/v1/search",
+                "method": "POST",
+                "post_data": {"q": "already-parsed"},
+            }},
+        ]
+
+        self.assertEqual(
+            harvest_json_body_targets(pairs, base_netlocs={"api.test"}),
+            [],
+        )
+
+    def test_deduplicates_method_endpoint_and_pointer_set(self):
+        pairs = [
+            _json_pair("https://api.test/v1/search?page=1", {"q": "x", "limit": 10}),
+            _json_pair("https://api.test/v1/search?page=2", {"limit": 20, "q": "y"}),
+            _json_pair(
+                "https://api.test/v1/search?page=3",
+                {"q": "z", "limit": 30},
+                method="PATCH",
+            ),
+        ]
+
+        targets = harvest_json_body_targets(pairs, base_netlocs={"api.test"})
+
+        self.assertEqual(len(targets), 2)
+        self.assertEqual(targets[0]["url"], "https://api.test/v1/search?page=1")
+        self.assertEqual(targets[1]["method"], "PATCH")
+
+    def test_caps_pointers_per_body_and_total_targets(self):
+        large_body = {f"field{i}": i for i in range(205)}
+        pairs = [
+            _json_pair(f"https://api.test/v1/items/{i}", {"value": i})
+            for i in range(205)
+        ]
+        pairs.insert(0, _json_pair("https://api.test/v1/large", large_body))
+
+        targets = harvest_json_body_targets(pairs, base_netlocs={"api.test"})
+
+        self.assertEqual(len(targets), 200)
+        self.assertEqual(len(targets[0]["pointers"]), 200)
+        self.assertEqual(targets[0]["pointers"][0], "/field0")
+        self.assertEqual(targets[0]["pointers"][-1], "/field199")
 
 
 if __name__ == "__main__":

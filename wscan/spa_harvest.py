@@ -2,8 +2,11 @@
 from __future__ import annotations
 
 import html as _html
+import json
 import re
 from urllib.parse import parse_qsl, urlparse
+
+from .injection_point import enumerate_leaf_pointers
 
 
 _SPA_MARKERS = (
@@ -27,6 +30,14 @@ _STATIC_ASSET_SUFFIXES = (
     ".ico",
     ".map",
 )
+# scanners/base.py::_CREDENTIAL_HEADERS と同期すること。harvest の純粋性と依存方向を
+# 保つため、このモジュールでは認証ヘッダ集合を複製する。
+_CREDENTIAL_HEADERS = frozenset({
+    "authorization", "x-api-key", "x-auth-token", "x-access-token",
+    "proxy-authorization", "cookie",
+})
+_REGENERATED_HEADERS = frozenset({"content-length", "host"})
+_MAX_JSON_BODY_TARGETS = 200
 
 
 def looks_like_spa_shell(html: str) -> bool:
@@ -127,6 +138,98 @@ def harvest_get_targets(
                     "endpoint": endpoint_url,
                     "params": params,
                     "depth_hint": 0,
+                })
+            except Exception:
+                continue
+    except Exception:
+        return []
+
+    return results
+
+
+def harvest_json_body_targets(
+    pairs: list[dict],
+    *,
+    base_netlocs,
+) -> list[dict]:
+    """攻撃スコープ内で観測した JSON body の葉を注入対象として抽出する（純粋）。"""
+    results: list[dict] = []
+    seen: set[tuple[str, str, tuple[str, ...]]] = set()
+
+    try:
+        if isinstance(base_netlocs, str):
+            base_netlocs = {base_netlocs}
+        else:
+            try:
+                base_netlocs = set(base_netlocs or ())
+            except TypeError:
+                return results
+        if not isinstance(pairs, list) or not base_netlocs:
+            return results
+
+        for pair in pairs:
+            try:
+                if len(results) >= _MAX_JSON_BODY_TARGETS:
+                    break
+                if not isinstance(pair, dict):
+                    continue
+                request = pair.get("request") or {}
+                if not isinstance(request, dict):
+                    continue
+
+                method = str(request.get("method") or "").lower()
+                if method not in {"post", "put", "patch"}:
+                    continue
+
+                request_url = request.get("url")
+                if not isinstance(request_url, str) or not request_url:
+                    continue
+                parsed_url = urlparse(request_url)
+                if (
+                    parsed_url.scheme.lower() not in {"http", "https"}
+                    or not parsed_url.netloc
+                    or parsed_url.netloc not in base_netlocs
+                    or parsed_url.path.lower().endswith(_STATIC_ASSET_SUFFIXES)
+                ):
+                    continue
+
+                post_data = request.get("post_data")
+                if not isinstance(post_data, str):
+                    continue
+                parsed_body = json.loads(post_data)
+                if not isinstance(parsed_body, (dict, list)):
+                    continue
+                pointers = enumerate_leaf_pointers(parsed_body)
+                if not pointers:
+                    continue
+
+                request_headers = request.get("headers") or {}
+                if not isinstance(request_headers, dict):
+                    request_headers = {}
+                content_type = "application/json"
+                headers: dict = {}
+                for name, value in request_headers.items():
+                    lowered = str(name).lower()
+                    if lowered == "content-type" and value:
+                        content_type = str(value)
+                    if lowered in _CREDENTIAL_HEADERS or lowered in _REGENERATED_HEADERS:
+                        continue
+                    headers[name] = value
+
+                method_upper = method.upper()
+                endpoint_url = parsed_url._replace(query="", fragment="").geturl()
+                dedup_key = (method_upper, endpoint_url, tuple(sorted(pointers)))
+                if dedup_key in seen:
+                    continue
+                seen.add(dedup_key)
+                results.append({
+                    "method": method_upper,
+                    "url": parsed_url._replace(fragment="").geturl(),
+                    "endpoint": endpoint_url,
+                    "json_body": parsed_body,
+                    "content_type": content_type,
+                    "headers": headers,
+                    "pointers": pointers,
                 })
             except Exception:
                 continue

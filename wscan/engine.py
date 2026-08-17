@@ -530,6 +530,9 @@ class ScanEngine:
         self.spa_crawl = spa_crawl
         # SPA harvest のページ跨ぎ大域 dedup キー集合 (endpoint, param集合)。
         self._spa_harvest_seen: set = set()
+        # JSON body harvest の大域 dedup と、PR-b2 で消費する非永続キュー。
+        self._spa_json_harvest_seen: set = set()
+        self.json_injection_points: list[InjectionPoint] = []
         # ハイブリッドモード用シード URL (Agent偵察で発見したURL)
         self.seed_urls: list = list(seed_urls or [])
         self.additional_report_findings: list[Finding] = list(
@@ -2504,6 +2507,62 @@ class ScanEngine:
                             f"  [dim cyan][SPA][/dim cyan] "
                             f"{harvested_count} 個の API エンドポイントを対象化"
                         )
+
+                except Exception:
+                    pass
+
+            # SPA 観測の JSON body は CrawledPage 化せず、PR-b2 の攻撃ループへ
+            # 引き渡すメモリ内キューにだけ積む（本 PR では誰も消費しない）。
+            if self.spa_crawl:
+                try:
+                    from . import spa_harvest
+
+                    attack_netlocs = {
+                        urlparse(t).netloc
+                        for t in self.target_urls
+                        if urlparse(t).netloc
+                    }
+                    json_ip_cap = max(200, self.depth * 50)
+                    for target in spa_harvest.harvest_json_body_targets(
+                        self.browser.network.pairs,
+                        base_netlocs=attack_netlocs,
+                    ):
+                        dedup_key = (
+                            target["method"],
+                            target["endpoint"],
+                            tuple(target["pointers"]),
+                        )
+                        if dedup_key in self._spa_json_harvest_seen:
+                            continue
+                        if (
+                            not self._is_attack_target_url(target["url"])
+                            or self._is_url_excluded(target["url"])
+                        ):
+                            continue
+                        if len(self.json_injection_points) >= json_ip_cap:
+                            break
+
+                        self._spa_json_harvest_seen.add(dedup_key)
+                        template_id = f"jb-{len(self.injection_templates)}"
+                        self.injection_templates[template_id] = {
+                            "method": target["method"],
+                            "url": target["url"],
+                            "endpoint": target["endpoint"],
+                            "json_body": target["json_body"],
+                            "content_type": target["content_type"],
+                            "headers": target["headers"],
+                        }
+                        for pointer in target["pointers"]:
+                            if len(self.json_injection_points) >= json_ip_cap:
+                                break
+                            self.json_injection_points.append(
+                                InjectionPoint.for_json_body(
+                                    target["method"],
+                                    target["url"],
+                                    pointer,
+                                    template_id=template_id,
+                                )
+                            )
                 except Exception:
                     pass
 
