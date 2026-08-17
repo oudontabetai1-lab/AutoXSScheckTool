@@ -30,6 +30,13 @@ class DashboardVerificationStateTests(unittest.TestCase):
         self.assertIn("state.findingCards.delete", html)
         self.assertIn("card.dataset.findingKey = key", html)
 
+    def test_json_finding_key_preserves_null_vs_root_pointer(self):
+        # findingKey は json_body の null（欠落=corrupt）と ""（RFC6901 ルート）を潰さない
+        # （Python 側 canonical key と同様に区別）。truthiness fallback `|| ''` を使わない。
+        html = Path("templates/dashboard.html").read_text(encoding="utf-8")
+        self.assertIn("JSON.stringify(d.injection_pointer ?? null)", html)
+        self.assertNotIn("d.injection_pointer || ''", html)
+
 
 if __name__ == "__main__":
     unittest.main()

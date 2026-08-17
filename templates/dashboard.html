@@ -2216,9 +2216,11 @@ function findingKey(d) {
     d.evidence_type || '', d.payload || '',
   ];
   // json_body は canonical dedup と同じく method+pointer を含め、pointer 違いの別 finding を
-  // 同一カードに潰さない（finding_update の差し替え先も取り違えない）。
+  // 同一カードに潰さない（finding_update の差し替え先も取り違えない）。null（欠落=corrupt）と
+  // ""（RFC6901 ルート）を `|| ''` で潰すと Python 側 key（None と "" を区別）とずれるため、
+  // JSON 直列化で両者を別値にする。※ json_body finding の生成は PR-b で配線。
   if (d.injection_location === 'json_body') {
-    base.push(d.injection_method || '', d.injection_pointer || '');
+    base.push(JSON.stringify(d.injection_method ?? null), JSON.stringify(d.injection_pointer ?? null));
   }
   return base.join('||');
 }
