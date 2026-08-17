@@ -87,6 +87,27 @@ class FindingInjectionProvenanceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(restored.injection_method, "POST")
         self.assertEqual(restored.injection_template_id, "login-1")
 
+    def test_direct_finding_construction_gets_state_legacy_stays_empty(self):
+        # record_finding を通らない直接構築（ChainScanner/GraphQL 等）も __post_init__ で
+        # 非空 state を得る。dialog→reproduced／非dialog→assumed。
+        self.assertEqual(
+            Finding(check_type="graphql_dos", severity="high", url="http://h/g",
+                    field_name="q", payload="x", evidence="e").verification_state,
+            "assumed",
+        )
+        self.assertEqual(
+            Finding(check_type="xss", severity="high", url="http://h/x",
+                    field_name="q", payload="<script>", evidence="e",
+                    dialog_confirmed=True).verification_state,
+            "reproduced",
+        )
+        # from_dict の旧 Finding（キー欠落）は空文字のまま＝旧 Finding 専用に予約。
+        legacy = Finding.from_dict({
+            "check_type": "sqli", "severity": "high", "url": "http://h/a",
+            "field_name": "q", "payload": "'", "evidence": "e",
+        })
+        self.assertEqual(legacy.verification_state, "")
+
     async def test_record_finding_stamps_verification_state(self):
         # 新規 finding は必ず非空 state（空は旧 Finding 専用）。dialog 発火=reproduced、
         # それ以外=assumed（検証 phase を通らない finding も曖昧ラベルに落ちない）。

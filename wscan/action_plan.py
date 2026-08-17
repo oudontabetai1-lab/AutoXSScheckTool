@@ -111,6 +111,11 @@ def _task_from_finding(f: Finding, idx: int, related: list[Finding] | None = Non
         "severity": f.severity,
         "confidence": f.confidence,
         "verified": f.verified,
+        # verified=True でも「実際に再現できた(reproduced)」と「検証を再実行できず維持
+        # (assumed)」を消費側が区別できるよう state を出力。assumed は修正前に手動確証が
+        # 必要な旨を needs_confirmation で明示する（タスク自体は落とさない＝過検知を消さない）。
+        "verification_state": getattr(f, "verification_state", ""),
+        "needs_confirmation": getattr(f, "verification_state", "") == "assumed",
         "check_type": f.check_type,
         "url": url,
         "field_name": field_name,
@@ -163,6 +168,7 @@ def _review_item_from_finding(f: Finding, idx: int, related: list[Finding] | Non
         "severity": f.severity,
         "confidence": f.confidence,
         "verified": f.verified,
+        "verification_state": getattr(f, "verification_state", ""),
         "check_type": f.check_type,
         "url": f.url,
         "field_name": f.field_name,
@@ -226,6 +232,8 @@ def _build_markdown(tasks: list[dict], review_items: list[dict]) -> str:
             f"- Priority: {task['priority']}",
             f"- Severity: {task['severity']}",
             f"- Confidence: {task['confidence']}",
+            f"- Verification: {task['verification_state'] or 'reproduced/assumed'}"
+            + ("（要手動確認：修正前に再現を確認）" if task["needs_confirmation"] else ""),
             f"- URL: `{task['url']}`",
             f"- Field: `{task['field_name']}`",
             f"- Evidence type: `{task['evidence_type']}`",

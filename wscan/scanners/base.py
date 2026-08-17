@@ -242,7 +242,18 @@ class Finding:
     injection_method: str = ""         # JSON body 送信時の HTTP メソッド
     injection_template_id: str = ""    # 秘匿値を持たないテンプレート識別子
     injection_form_index: int = 0       # form 注入点の index（段階5b で記録）
-    verification_state: str = ""       # reproduced | assumed | unreproduced | skipped（空は旧 Finding）
+    # reproduced | assumed | unreproduced | skipped。既定は None sentinel で、__post_init__ が
+    # 「新規 finding は必ず非空 state」を保証する（空文字は from_dict の旧 Finding 専用に予約）。
+    verification_state: str = None
+
+    def __post_init__(self):
+        # record_finding を通らない直接構築（ChainScanner/GraphQL/JWT/privesc/websocket 等）も
+        # 含め、生成境界で一元的に既定 state を与える（whack-a-mole 防止）。dialog 発火=scan 時点で
+        # 実行確証=reproduced。それ以外=assumed（_phase_verify を通る verifiable finding は後で
+        # reproduced/unreproduced/skipped に上書き）。from_dict は空文字を明示的に渡すため（旧
+        # Finding）ここで上書きされず、"" が旧 Finding 専用として保たれる。
+        if self.verification_state is None:
+            self.verification_state = "reproduced" if self.dialog_confirmed else "assumed"
 
     @classmethod
     def from_dict(cls, data: dict) -> "Finding":
@@ -987,12 +998,8 @@ class BaseScanner(ABC):
             screenshot_b64=screenshot_b64,
             dialog_confirmed=dialog_confirmed,
             dialog_message=dialog_message,
-            # 新規 finding は必ず非空の state を持たせ、空文字を「旧 Finding のみ」に予約する。
-            # dialog 発火は scan 時点で実行確証済み＝reproduced。それ以外は既定 assumed（検証
-            # phase を通らない page-level 系や dialog_confirmed でない finding が
-            # "reproduced/assumed" の曖昧ラベルに落ちるのを防ぐ）。_phase_verify を通る
-            # verifiable finding は後で reproduced/unreproduced/skipped に上書きされる。
-            verification_state=("reproduced" if dialog_confirmed else "assumed"),
+            # verification_state は Finding.__post_init__ が dialog_confirmed から既定を付与する
+            # （新規 finding は必ず非空。_phase_verify を通る verifiable finding は後で上書き）。
             confidence=confidence,
             evidence_type=evidence_type or self.CHECK_TYPE,
             evidence_details=evidence_details or {},
