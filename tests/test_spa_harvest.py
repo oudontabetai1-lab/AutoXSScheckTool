@@ -227,6 +227,27 @@ class HarvestJsonBodyTargetsTests(unittest.TestCase):
         targets = harvest_json_body_targets(pairs, base_netlocs={"api.test"})
         self.assertEqual(len(targets), 1)
 
+    def test_collapsed_observation_refreshes_body_to_newest(self):
+        # 注入 shape 同じ・通常値変化（CSRF nonce 等）は collapse するが、replay body は最新観測へ
+        # 更新する（stale nonce/version で 403/409 にしない・#90 R10）。
+        pairs = [
+            _json_pair("https://api.test/save", {"csrf": "OLD", "id": 1}),
+            _json_pair("https://api.test/save", {"csrf": "NEW", "id": 2}),
+        ]
+        targets = harvest_json_body_targets(pairs, base_netlocs={"api.test"})
+        self.assertEqual(len(targets), 1)
+        self.assertEqual(targets[0]["json_body"]["csrf"], "NEW")
+        self.assertEqual(targets[0]["json_body"]["id"], 2)
+
+    def test_anonymous_graphql_query_differentiates_operations(self):
+        # operationName 省略の匿名 GraphQL は query 本文で operation を識別＝別ターゲットに保つ（#90 R10）。
+        pairs = [
+            _json_pair("https://api.test/graphql", {"query": "{ user { id } }", "variables": {}}),
+            _json_pair("https://api.test/graphql", {"query": "{ admin { id } }", "variables": {}}),
+        ]
+        targets = harvest_json_body_targets(pairs, base_netlocs={"api.test"})
+        self.assertEqual(len(targets), 2)
+
     def test_body_value_differentiated_operations_kept_separate(self):
         # 同 pointer 集合でも body の**値**で operation を多重化する場合（JSON-RPC method /
         # GraphQL operationName）は別ターゲットに保つ（#90 R8）。

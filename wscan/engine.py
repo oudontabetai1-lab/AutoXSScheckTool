@@ -2541,16 +2541,17 @@ class ScanEngine:
                     }
                     json_ip_cap = max(200, self.depth * 50)
                     # 大域キューが満杯なら以降のページで harvest 自体を呼ばない（parse/材料化を避ける・
-                    # Codex #90 R9）。残容量だけを max_targets に渡し、無駄な展開を作らない。
+                    # Codex #90 R9）。max_targets は **parse 作業の上限**（json_ip_cap）として渡す。
+                    # 残容量ではなく parse 上限にするのは、後続ページが先頭で cross-page 重複を出すと
+                    # 残容量ベースの budget を重複が食い潰し、新規 endpoint が未 queue になるため（#90 R10）。
+                    # キューのスロット予算は engine が cross-page dedup **後**に json_ip_cap で掛ける（下）。
                     json_remaining = json_ip_cap - len(self.json_injection_points)
-                    # 精密スコープ判定（scope=query除去/exclusion=原文）と materialize 上限を
-                    # harvester に渡し、body パース前にフィルタ/有界化させる（対象外の大きな
-                    # body を展開しない・飢餓回避。Codex #90 R3/R4/R5）。
+                    # 精密スコープ判定（scope=query除去/exclusion=原文）で body パース前にフィルタ。
                     for target in ([] if json_remaining <= 0 else spa_harvest.harvest_json_body_targets(
                         self.browser.network.pairs,
                         base_netlocs=attack_netlocs,
                         is_in_scope=self._json_target_in_scope,
-                        max_targets=json_remaining,
+                        max_targets=json_ip_cap,
                     )):
                         # dedup identity は **observed url（query 込み）**＋**body_signature**（値まで含む
                         # 正規化 body の署名）。キー順違いは collapse しつつ、query 別 operation

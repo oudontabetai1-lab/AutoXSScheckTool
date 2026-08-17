@@ -163,6 +163,9 @@ _MAX_JSON_BODY_BYTES = 256 * 1024
 # 含め、timestamp/id/nonce 等の通常値は無視して同一注入 shape を 1 つに collapse する（#90 R9）。
 _OPERATION_DISCRIMINATOR_KEYS = frozenset({
     "method", "operationname", "operation", "action", "op", "command", "cmd", "type",
+    # 匿名 GraphQL は operationName を省き、operation を `query` フィールド（クエリ本文）で識別する
+    # ため query も discriminator に含める（#90 R10）。
+    "query",
 })
 
 
@@ -343,10 +346,14 @@ def harvest_json_body_targets(
                 body_signature = _injection_signature(parsed_body, pointers)
                 semantic_key = (method_upper, observed_url, body_signature)
                 if semantic_key in seen_index:
-                    # C2: semantic 重複（キー順違い＝raw は別だが正規化 body 同一）も headers を最新化。
+                    # 注入 shape が同じ collapse（キー順違い or 通常値変化）。headers/content_type に加え、
+                    # **json_body も最新観測へ更新**する。shape signature は値変化を collapse するため、
+                    # 古い body（stale な CSRF nonce/optimistic-lock version/id）を残すと replay が 403/409 に
+                    # なる。pointer 集合は同一なので注入点は不変（#90 R10）。
                     idx = seen_index[semantic_key]
                     results[idx]["headers"] = headers
                     results[idx]["content_type"] = content_type
+                    results[idx]["json_body"] = parsed_body
                     raw_index[raw_key] = idx
                     continue
                 results.append({
