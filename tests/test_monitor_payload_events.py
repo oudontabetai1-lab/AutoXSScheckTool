@@ -61,6 +61,29 @@ class MonitorPayloadEventTests(unittest.IsolatedAsyncioTestCase):
             "assumed",
         )
 
+    async def test_emit_finding_update_replaces_snapshot_and_broadcasts(self):
+        # 検証で state が変わった際、蓄積済み snapshot を安定キーで差し替え update を配信する
+        # （初期 assumed のまま /api・ダッシュボードに残さない）。
+        monitor = MonitorServer()
+        f = Finding(
+            check_type="sqli", severity="high", url="http://h/a", field_name="q",
+            payload="'", evidence="err", evidence_type="sqli_error",
+        )
+        await monitor.emit_finding(f.to_dict())
+        self.assertEqual(monitor.api_findings[0]["verification_state"], "assumed")
+
+        f.verification_state = "reproduced"
+        await monitor.emit_finding_update(f.to_dict())
+
+        # 蓄積は増えず（重複しない）、同一 finding の state が更新される。
+        self.assertEqual(len(monitor.api_findings), 1)
+        self.assertEqual(monitor.api_findings[0]["verification_state"], "reproduced")
+        # finding_update イベントが配信される。
+        self.assertEqual(monitor.event_history[-1]["type"], "finding_update")
+        self.assertEqual(
+            monitor.event_history[-1]["data"]["verification_state"], "reproduced"
+        )
+
     async def test_dashboard_start_scan_resets_api_state(self):
         monitor = MonitorServer()
         monitor.api_findings = [{"stale": True}]

@@ -2156,6 +2156,9 @@ const state = {
   // WS 再接続時にサーバが直近イベント履歴を再送するため、同一 finding が
   // 重複してカードに積まれるのを防ぐ。安定キー(url|field|check|payload|type)で抑止。
   findingKeys: new Set(),
+  // finding_update（検証フェーズでの state 変化）で該当カードの verification badge を
+  // 差し替えるため、安定キー→カード要素を保持する。
+  findingCards: new Map(),
 };
 
 // スキャン開始時に呼ぶ: config に一意な nonce を刻み、受理確認までは pending に置く。
@@ -2212,6 +2215,19 @@ function findingKey(d) {
     d.url || '', d.field_name || '', d.check_type || '',
     d.evidence_type || '', d.payload || '',
   ].join('||');
+}
+
+// verification バッジの class/label を算出（addFinding と finding_update で共有）。
+// 明示 state 優先・state 空の旧 Finding だけ verified boolean に fallback。
+function computeVerification(data) {
+  const verified = data.verified !== false;
+  const st = data.verification_state || '';
+  if (st === 'reproduced') return { cls: 'fc-verified', label: 'reproduced' };
+  if (st === 'assumed') return { cls: 'fc-assumed', label: 'assumed（推定・再検証未実行）' };
+  if (st === 'unreproduced') return { cls: 'fc-unverified', label: 'not reproduced' };
+  if (st === 'skipped') return { cls: 'fc-unverified', label: 'skipped (needs review)' };
+  if (!verified) return { cls: 'fc-unverified', label: 'not reproduced' };
+  return { cls: 'fc-verified', label: 'reproduced/assumed' };
 }
 
 // ─── Config form state ───────────────────────────────────────────
@@ -3989,6 +4005,28 @@ function handleEvent(event) {
       break;
     }
 
+    case 'finding_update': {
+      // 検証フェーズで finding の verification 状態が確定した際、該当カードの badge を差し替える
+      // （初期 assumed のまま残さない）。カード未生成なら通常 finding として追加。
+      const card = state.findingCards.get(findingKey(data));
+      if (card) {
+        const vb = computeVerification(data);
+        const badge = card.querySelector('.fc-verify-badge');
+        if (badge) {
+          badge.className = 'fc-verify-badge ' + vb.cls;
+          badge.textContent = vb.label;
+        }
+      } else {
+        const added = addFinding(data);
+        if (added) {
+          state.findingCount++;
+          document.getElementById('statFindings').textContent = state.findingCount;
+          document.getElementById('findingCount').textContent = state.findingCount;
+        }
+      }
+      break;
+    }
+
     case 'scan_gap': {
       const u = data.url || '';
       if (u) {
@@ -4157,6 +4195,7 @@ function resetLiveScanState() {
   state.eventCount = 0;
   state.findingCount = 0;
   state.findingKeys = new Set();
+  state.findingCards = new Map();
   state.pageCount = 0;
   state.testCount = 0;
   state.scanStartTime = null;
@@ -4362,26 +4401,9 @@ function addFinding(data) {
   const sev = (data.severity || 'medium').toLowerCase();
   const confidence = (data.confidence || 'tentative').toLowerCase();
   const verified = data.verified !== false;
-  const verificationState = data.verification_state || '';
-  // 明示的な state を legacy boolean より優先（verified=False でも state=assumed の Agent 仮説等を
-  // "not reproduced"=失敗した再現試行と偽らない）。state 空（旧 Finding）だけ verified に fallback。
-  let verificationClass = 'fc-verified';
-  let verificationLabel = 'reproduced/assumed';
-  if (verificationState === 'reproduced') {
-    verificationLabel = 'reproduced';
-  } else if (verificationState === 'assumed') {
-    verificationClass = 'fc-assumed';
-    verificationLabel = 'assumed（推定・再検証未実行）';
-  } else if (verificationState === 'unreproduced') {
-    verificationClass = 'fc-unverified';
-    verificationLabel = 'not reproduced';
-  } else if (verificationState === 'skipped') {
-    verificationClass = 'fc-unverified';
-    verificationLabel = 'skipped (needs review)';
-  } else if (!verified) {
-    verificationClass = 'fc-unverified';
-    verificationLabel = 'not reproduced';
-  }
+  const vb = computeVerification(data);
+  const verificationClass = vb.cls;
+  const verificationLabel = vb.label;
   const evidenceType = data.evidence_type || data.check_type || '';
   const details = data.evidence_details || {};
   const detailRows = Object.entries(details).slice(0, 8).map(([k, v]) =>
@@ -4431,7 +4453,7 @@ function addFinding(data) {
     <div class="fc-top">
       <span class="sev-badge sev-${sev}">${sev}</span>
       <span class="fc-confidence fc-confidence-${confidence}">${confidence}</span>
-      <span class="${verificationClass}">${verificationLabel}</span>
+      <span class="fc-verify-badge ${verificationClass}">${verificationLabel}</span>
       <span class="fc-type">${escapeHtml(data.check_type?.toUpperCase() || '')}</span>
       <span class="fc-field">Field: ${escapeHtml(data.field_name || '')}</span>
     </div>
@@ -4446,6 +4468,7 @@ function addFinding(data) {
     ${ssHtml}
   `;
   panel.insertBefore(card, panel.firstChild);
+  state.findingCards.set(key, card);  // finding_update で badge を差し替えるため保持
 
   // Cap findings panel at 300 cards to prevent DOM bloat
   const MAX_CARDS = 300;
@@ -4459,6 +4482,7 @@ function replaceFindings(findings) {
   const panel = document.getElementById('findingsPanel');
   panel.innerHTML = '';
   state.findingKeys = new Set();  // full re-sync: rebuild dedup index from scratch
+  state.findingCards = new Map();  // カード参照も貼り直す
   state.findingCount = findings.length;
   document.getElementById('statFindings').textContent = state.findingCount;
   document.getElementById('findingCount').textContent = state.findingCount;

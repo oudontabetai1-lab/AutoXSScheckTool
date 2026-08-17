@@ -1814,10 +1814,37 @@ class MonitorServer:
             self.api_scan_status = "scanning"
         await self.emit("status", {"message": message, "state": state})
 
+    @staticmethod
+    def _finding_snapshot_key(f: dict) -> tuple:
+        """蓄積 snapshot / ダッシュボードカードと同一の安定キー（verification 変化に不変）。"""
+        return (
+            f.get("url", ""), f.get("field_name", ""), f.get("check_type", ""),
+            f.get("evidence_type", ""), f.get("payload", ""),
+        )
+
     async def emit_finding(self, finding: dict):
         # D: CI/CD API — findings を自動蓄積
         self.api_findings.append(finding)
         await self.emit("finding", finding)
+
+    async def emit_finding_update(self, finding: dict):
+        """検証フェーズ等で finding の状態（verified/verification_state 等）が変わった際に、
+        蓄積済み snapshot を差し替え、ライブに update を配信する。
+
+        emit_finding は生成時点の detached snapshot を api_findings に積むため、_phase_verify の
+        in-place 更新が /api/v1/scan/findings とダッシュボードに反映されず、Phase 4.5 の間ずっと
+        初期 assumed のまま見えてしまう。安定キー（verification を含まない）で既存 snapshot を
+        差し替え、finding_update を broadcast して最終 scan_complete を待たずに正す。
+        """
+        key = self._finding_snapshot_key(finding)
+        for i, existing in enumerate(self.api_findings):
+            if self._finding_snapshot_key(existing) == key:
+                self.api_findings[i] = finding
+                break
+        else:
+            # 未蓄積（emit_finding を経ていない）なら通常追加＝取りこぼし防止。
+            self.api_findings.append(finding)
+        await self.emit("finding_update", finding)
 
     async def emit_screenshot(self, screenshot_b64: str, label: str = ""):
         await self.emit("screenshot", {"image": screenshot_b64, "label": label})

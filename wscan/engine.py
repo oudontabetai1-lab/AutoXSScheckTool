@@ -4630,6 +4630,9 @@ class ScanEngine:
                     f"on [yellow]{finding.field_name}[/yellow]: not reproduced"
                 )
             if self.monitor:
+                # 生成時の初期 state（assumed 等）で積まれた snapshot を検証結果で差し替え、
+                # ライブ（/api・ダッシュボード）が最終 scan_complete を待たず正しく見えるようにする。
+                await self.monitor.emit_finding_update(finding.to_dict())
                 await self.monitor.emit_progress(
                     current=i + 1,
                     total=len(to_verify),
