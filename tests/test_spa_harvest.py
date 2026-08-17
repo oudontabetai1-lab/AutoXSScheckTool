@@ -164,11 +164,23 @@ class HarvestJsonBodyTargetsTests(unittest.TestCase):
             ["/profile/email", "/roles/0", "/roles/1"],
         )
         self.assertEqual(targets[0]["content_type"], "application/json; charset=utf-8")
-        # content-type は content_type へ抽出し headers には残さない（transport の
-        # `{"Content-Type": ...}` と大小違いで重複しないように）。非認証は残る。
-        self.assertEqual(targets[0]["headers"], {"X-Tenant": "acme"})
+        # content-type/cookie/proxy-auth/content-length/host は落とす。Authorization 等の
+        # JS 取得トークンは replay 認証のため残す（Codex #90 R3・merge_template_headers が
+        # configured を優先し、Finding では redact される）。非認証(X-Tenant)も残る。
+        self.assertEqual(
+            targets[0]["headers"],
+            {
+                "Authorization": "Bearer secret",
+                "X-Api-Key": "secret",
+                "X-Auth-Token": "secret",
+                "X-Access-Token": "secret",
+                "X-Tenant": "acme",
+            },
+        )
         self.assertNotIn("Content-Type", targets[0]["headers"])
-        self.assertNotIn("content-type", targets[0]["headers"])
+        self.assertNotIn("cookie", targets[0]["headers"])
+        self.assertNotIn("Proxy-Authorization", targets[0]["headers"])
+        self.assertNotIn("Host", targets[0]["headers"])
         self.assertEqual(targets[1]["content_type"], "application/json")
 
     def test_skips_invalid_non_json_static_and_out_of_scope_requests(self):
@@ -226,6 +238,28 @@ class HarvestJsonBodyTargetsTests(unittest.TestCase):
             (a["method"], a["endpoint"], tuple(sorted(a["pointers"]))),
             (b["method"], b["endpoint"], tuple(sorted(b["pointers"]))),
         )
+
+    def test_scope_predicate_filters_before_materializing(self):
+        # is_in_scope を渡すと、対象外 URL は body を parse/materialize せずに落ちる。
+        # 有効ターゲットのみ残り、除外パスが有効を飢餓させない。
+        pairs = [
+            _json_pair("https://api.test/v1/excluded", {"a": 1}),
+            _json_pair("https://api.test/v1/ok", {"b": 2}),
+        ]
+        targets = harvest_json_body_targets(
+            pairs,
+            base_netlocs={"api.test"},
+            is_in_scope=lambda u: "/v1/ok" in u,
+        )
+        self.assertEqual([t["endpoint"] for t in targets], ["https://api.test/v1/ok"])
+
+    def test_max_targets_bounds_after_scope(self):
+        # max_targets はスコープ通過後の materialize 数の上限。除外分は数えない。
+        pairs = [_json_pair(f"https://api.test/v1/x{i}", {"v": i}) for i in range(10)]
+        targets = harvest_json_body_targets(
+            pairs, base_netlocs={"api.test"}, max_targets=3,
+        )
+        self.assertEqual(len(targets), 3)
 
     def test_caps_pointers_per_body_not_total_targets(self):
         # 1 body の pointer 数は cap（enumerate 側 200）。ただし**総ターゲット数は harvester で

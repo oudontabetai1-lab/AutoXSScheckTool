@@ -30,17 +30,18 @@ _STATIC_ASSET_SUFFIXES = (
     ".ico",
     ".map",
 )
-# scanners/base.py::_CREDENTIAL_HEADERS と同期すること。harvest の純粋性と依存方向を
-# 保つため、このモジュールでは認証ヘッダ集合を複製する。
-_CREDENTIAL_HEADERS = frozenset({
-    "authorization", "x-api-key", "x-auth-token", "x-access-token",
-    "proxy-authorization", "cookie",
+# replay 時にテンプレートから**落とす**ヘッダ（小文字）。
+# - content-length/host: 送信時に再生成されるため残さない。
+# - cookie: `auth_headers_for_url` が cookie jar から再同期するため、観測時の stale cookie を残さない。
+# - proxy-authorization: プロキシ認証は httpx_client_kwargs 側の設定に委ねる。
+# **Authorization / X-Api-Key / X-Auth-Token / X-Access-Token は敢えて残す**：SPA が JS でログイン後に
+# localStorage 等から付与する bearer/API トークンは `--header` でも cookie でもないため、落とすと
+# `auth_headers_for_url` が再構築できず、認証済み JSON エンドポイントが 401 で未スキャンになる（Codex #90 R3, P1）。
+# テンプレは in-memory・非永続で、送信時は merge_template_headers が configured --header を優先し、
+# 永続/配信は record_finding=_redact_json_evidence_pair が _CREDENTIAL_HEADERS をマスクする（平文非保存）。
+_REPLAY_DROP_HEADERS = frozenset({
+    "content-length", "host", "cookie", "proxy-authorization",
 })
-_REGENERATED_HEADERS = frozenset({"content-length", "host"})
-# 攻撃対象数の**実質的な上限は engine 側**が精密スコープ判定（_is_attack_target_url /
-# _is_url_excluded）**の後**に json_ip_cap で掛ける。harvester は粗い netloc/JSON フィルタしか
-# 持たないため、ここで打ち切ると除外パスばかりの観測が有効ターゲットを飢餓させる（Codex #90 R2）。
-# よって harvester 側には attack-surface cap を置かない（1 body の pointer 数は enumerate 側で cap）。
 
 
 def looks_like_spa_shell(html: str) -> bool:
@@ -154,8 +155,17 @@ def harvest_json_body_targets(
     pairs: list[dict],
     *,
     base_netlocs,
+    is_in_scope=None,
+    max_targets=None,
 ) -> list[dict]:
-    """攻撃スコープ内で観測した JSON body の葉を注入対象として抽出する（純粋）。"""
+    """攻撃スコープ内で観測した JSON body の葉を注入対象として抽出する（純粋）。
+
+    ``is_in_scope`` は呼び出し側（engine）の精密スコープ判定（_is_attack_target_url かつ
+    not _is_url_excluded）を url→bool で受け取る述語。body を parse/materialize する**前**に適用し、
+    対象外の大きな body を無駄に展開しない（CPU/メモリ保護・Codex #90 R3）。``max_targets`` は
+    スコープ通過後の materialize 数の上限。両者を engine から渡すことで、除外パスばかりの観測が
+    有効ターゲットを飢餓させず（cap はスコープ後に数える）、かつ untrusted な大量観測でも展開が有界になる。
+    """
     results: list[dict] = []
     seen: set[tuple[str, str, tuple[str, ...]]] = set()
 
@@ -169,9 +179,15 @@ def harvest_json_body_targets(
                 return results
         if not isinstance(pairs, list) or not base_netlocs:
             return results
+        try:
+            cap = int(max_targets) if max_targets is not None else None
+        except (TypeError, ValueError):
+            cap = None
 
         for pair in pairs:
             try:
+                if cap is not None and len(results) >= cap:
+                    break
                 if not isinstance(pair, dict):
                     continue
                 request = pair.get("request") or {}
@@ -193,6 +209,16 @@ def harvest_json_body_targets(
                     or parsed_url.path.lower().endswith(_STATIC_ASSET_SUFFIXES)
                 ):
                     continue
+
+                observed_url = parsed_url._replace(fragment="").geturl()
+                # 精密スコープ判定（engine の述語）を body パース**前**に適用し、対象外の
+                # 大きな body を parse/展開しない（CPU/メモリ保護・飢餓回避）。
+                if is_in_scope is not None:
+                    try:
+                        if not is_in_scope(observed_url):
+                            continue
+                    except Exception:
+                        continue
 
                 post_data = request.get("post_data")
                 if not isinstance(post_data, str):
@@ -220,7 +246,8 @@ def harvest_json_body_targets(
                         if value:
                             content_type = str(value)
                         continue
-                    if lowered in _CREDENTIAL_HEADERS or lowered in _REGENERATED_HEADERS:
+                    # cookie/proxy-auth/再生成は落とし、Authorization 等の JS 取得トークンは残す。
+                    if lowered in _REPLAY_DROP_HEADERS:
                         continue
                     headers[name] = value
 
@@ -232,7 +259,7 @@ def harvest_json_body_targets(
                 seen.add(dedup_key)
                 results.append({
                     "method": method_upper,
-                    "url": parsed_url._replace(fragment="").geturl(),
+                    "url": observed_url,
                     "endpoint": endpoint_url,
                     "json_body": parsed_body,
                     "content_type": content_type,

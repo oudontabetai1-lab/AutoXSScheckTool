@@ -2523,9 +2523,16 @@ class ScanEngine:
                         if urlparse(t).netloc
                     }
                     json_ip_cap = max(200, self.depth * 50)
+                    # 精密スコープ判定と materialize 上限を harvester に渡し、body パース前に
+                    # フィルタ/有界化させる（対象外の大きな body を展開しない・飢餓回避。Codex #90 R3）。
+                    def _json_in_scope(u: str) -> bool:
+                        return self._is_attack_target_url(u) and not self._is_url_excluded(u)
+
                     for target in spa_harvest.harvest_json_body_targets(
                         self.browser.network.pairs,
                         base_netlocs=attack_netlocs,
+                        is_in_scope=_json_in_scope,
+                        max_targets=json_ip_cap,
                     ):
                         # pointer は harvester のローカル dedup と同じ順序非依存表現
                         # (sorted) にする。同一エンドポイントを別ページで JSON キーの
@@ -2537,11 +2544,8 @@ class ScanEngine:
                         )
                         if dedup_key in self._spa_json_harvest_seen:
                             continue
-                        if (
-                            not self._is_attack_target_url(target["url"])
-                            or self._is_url_excluded(target["url"])
-                        ):
-                            continue
+                        # スコープ判定は harvester 側で済むが、cross-page dedup 後の
+                        # point 数上限はここで担保（defense-in-depth）。
                         if len(self.json_injection_points) >= json_ip_cap:
                             break
 
