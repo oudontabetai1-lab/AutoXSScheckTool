@@ -133,6 +133,20 @@ class MergeTemplateHeadersTests(unittest.TestCase):
         out = merge_template_headers({"X-API-Version": "v1"}, {"X-API-Version": "v2"})
         self.assertEqual(out["X-API-Version"], "v2")
 
+    def test_merge_normalizes_template_vs_base_case(self):
+        # 大小違いの同名ヘッダを重複させず、非認証はテンプレ値で単一キーにする（#90 R14）。
+        from wscan.scanners.base import merge_template_headers
+        out = merge_template_headers({"X-API-Version": "v1"}, {"x-api-version": "v2"})
+        vals = [v for k, v in out.items() if k.lower() == "x-api-version"]
+        self.assertEqual(vals, ["v2"])
+
+    def test_merge_dedupes_case_variants_within_base(self):
+        # base 自体が大小違いの同名キーを持っても単一化する（後勝ち・#90 R14）。
+        from wscan.scanners.base import merge_template_headers
+        out = merge_template_headers({"Authorization": "first", "authorization": "last"}, {})
+        vals = [v for k, v in out.items() if k.lower() == "authorization"]
+        self.assertEqual(vals, ["last"])
+
     def test_api_key_alias_spellings_treated_as_credential(self):
         # Api-Key/ApiKey（x- 無し綴り）も request_logger の機密集合と同期し、base の実キーを
         # 観測/テンプレ値で上書きしない・evidence で redact する（#90 R13）。
@@ -149,21 +163,30 @@ class MergeTemplateHeadersTests(unittest.TestCase):
         self.assertEqual(red["request"]["headers"]["Api-Key"], "***")
         self.assertEqual(red["request"]["headers"]["ApiKey"], "***")
 
-    def test_credential_judgment_delegates_to_request_logger_canon(self):
-        # base は独自集合を持たず request_logger の正典（静的＋runtime）へ委譲する（#90 R13）。
+    def test_evidence_redaction_uses_broad_canon_but_merge_uses_narrow(self):
+        # 2 概念を分ける（#90 R13-2）: evidence redaction は broad（静的＋runtime）、
+        # merge の「上書き禁止」は静的な認証情報のみ（runtime redaction ヘッダは含めない）。
         from wscan.scanners.base import merge_template_headers, _mask_credential_headers
         from wscan import request_logger
-        # set-cookie（旧 base 集合に無かった）と x-access-token（旧 logger 集合に無かった）を
-        # 双方向で同期し、base 側 evidence redaction で伏せる。
-        masked = _mask_credential_headers({"Set-Cookie": "sid=abc", "X-Access-Token": "t"})
-        self.assertEqual(masked["Set-Cookie"], "***")
-        self.assertEqual(masked["X-Access-Token"], "***")
-        # runtime 登録したカスタム認証ヘッダも保護（テンプレで上書きしない）。
-        request_logger.register_sensitive_headers(["X-Company-Auth"])
+        request_logger.register_sensitive_headers(["X-Company-Auth", "X-API-Version"])
         try:
-            out = merge_template_headers({"X-Company-Auth": "real"},
-                                         {"X-Company-Auth": "tmpl"})
-            self.assertEqual(out["X-Company-Auth"], "real")
+            # (2) redaction は broad: set-cookie・x-access-token・runtime 登録すべて伏せる。
+            masked = _mask_credential_headers({
+                "Set-Cookie": "sid=abc", "X-Access-Token": "t",
+                "X-Company-Auth": "c", "X-API-Version": "v2",
+            })
+            self.assertEqual(masked["Set-Cookie"], "***")
+            self.assertEqual(masked["X-Access-Token"], "***")
+            self.assertEqual(masked["X-Company-Auth"], "***")
+            self.assertEqual(masked["X-API-Version"], "***")
+            # (1) merge の上書き禁止は静的認証のみ: Authorization は保護、
+            #     runtime 登録の非認証ヘッダ（X-API-Version）はテンプレで上書きできる。
+            out = merge_template_headers(
+                {"Authorization": "Bearer real", "X-API-Version": "v1"},
+                {"Authorization": "Bearer tmpl", "X-API-Version": "v2"},
+            )
+            self.assertEqual(out["Authorization"], "Bearer real")   # 認証は保護
+            self.assertEqual(out["X-API-Version"], "v2")            # 非認証はテンプレ優先
         finally:
             request_logger.clear_sensitive_headers()
 

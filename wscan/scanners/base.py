@@ -95,13 +95,37 @@ def _cvss_for(check_type: str) -> tuple[str, float]:
     return _CVSS_TABLE.get(check_type) or _CVSS_TABLE.get(base, ("", 0.0))
 
 
-# spec（OpenAPI/Postman）由来のテンプレヘッダで上書きしてはいけない認証情報ヘッダ、および
-# Finding evidence で伏せる機密ヘッダの判定。**独自集合を持たず** request_logger の正典
-# （静的 `_SENSITIVE_HEADERS` ＋ runtime 登録ヘッダ）へ委譲する（#90 R13）。二重管理だと
-# x-access-token/set-cookie/カスタム認証ヘッダの同期漏れで、テンプレ上書きや evidence 平文残りが
-# 起きるため、単一の正典（request_logger.is_sensitive_header）に一本化する。
+# **2 つの別概念を分ける（#90 R13-2）**:
+#  (1) 資格情報ヘッダ = spec/観測テンプレで上書きしてはいけない認証系（利用者の実値が常に優先）。
+#      merge_template_headers の「上書き禁止」判定に使う **静的な狭い集合**。runtime 登録ヘッダ
+#      （engine が redaction 用に登録する X-API-Version/X-Tenant 等の非認証ヘッダ）は**含めない**
+#      ―― 含めると operation 固有の必須ヘッダをテンプレで補完できず、誤 version/tenant で送信して
+#      当該 operation を正しく検査できなくなる。
+#  (2) 機密ヘッダ = Finding evidence で値を伏せる対象。redaction は広く倒すべきなので request_logger
+#      の正典（静的 `_SENSITIVE_HEADERS` ＋ runtime 登録）へ委譲する（x-access-token/set-cookie/
+#      カスタム認証ヘッダの同期漏れ防止）。
+# 上書き禁止の認証情報ヘッダ（well-known・小文字完全一致）。**名前の部分一致はしない** ――
+# "auth"/"token" 部分一致は X-Auth-Mode/X-Token-Bucket 等の routing を誤保護し、逆に
+# Ocp-Apim-Subscription-Key 等の認証を取りこぼす（#90 R14）。カスタム名の認証ヘッダを正確に
+# 扱うには spec の securitySchemes で宣言された名前を明示的に渡す必要がある（→ backlog・b1 スコープ外）。
+_CREDENTIAL_HEADERS = frozenset({
+    "authorization", "x-api-key", "api-key", "apikey", "x-auth-token",
+    "x-access-token", "proxy-authorization", "cookie", "authentication",
+    "x-csrf-token", "x-xsrf-token", "x-amz-security-token",
+})
+
+
 def _is_credential_header(name) -> bool:
-    """ヘッダ名が認証情報/機密か（request_logger の正典へ委譲・runtime 登録も拾う）。"""
+    """(1) 上書き禁止の認証情報ヘッダか（well-known 集合の case-insensitive 完全一致）。
+
+    runtime redaction 集合には委譲しない ―― engine は非認証の --header（X-API-Version 等）も
+    redaction 用に登録するため、それで上書き禁止を判定すると operation 固有ヘッダを潰す（#90 R14）。
+    """
+    return str(name).lower() in _CREDENTIAL_HEADERS
+
+
+def _is_sensitive_for_evidence(name) -> bool:
+    """(2) evidence で伏せる機密ヘッダか（request_logger の正典＝静的＋runtime へ委譲）。"""
     from wscan.request_logger import is_sensitive_header
     return is_sensitive_header(name)
 
@@ -116,12 +140,28 @@ def merge_template_headers(base: dict, tmpl_headers: dict) -> dict:
     脆弱性を取りこぼすため。認証情報以外（必須の X-API-Version/tenant 等）はテンプレ値
     で上書きしてよい（operation 固有の必須ヘッダを補完する）。
     """
-    out = dict(base or {})
-    present = {k.lower() for k in out}
-    for k, v in (tmpl_headers or {}).items():
-        if _is_credential_header(k) and k.lower() in present:
-            continue
+    # base 自体に大小違いの同名キー（Authorization と authorization）があっても単一化する
+    # （後勝ち）。小文字名 -> 実キーの map を作りながら重複を落とす（#90 R14）。
+    out: dict = {}
+    lower_to_key: dict = {}
+    for k, v in (base or {}).items():
+        lk = str(k).lower()
+        prev = lower_to_key.get(lk)
+        if prev is not None and prev != k:
+            out.pop(prev, None)
         out[k] = v
+        lower_to_key[lk] = k
+    for k, v in (tmpl_headers or {}).items():
+        lk = str(k).lower()
+        # 認証情報は base（利用者）の実値を維持。テンプレの placeholder で上書きしない。
+        if _is_credential_header(k) and lk in lower_to_key:
+            continue
+        # 非認証はテンプレ値で上書き。既存の大小違いキーを消してから設定し、重複を残さない。
+        existing_key = lower_to_key.get(lk)
+        if existing_key is not None and existing_key != k:
+            out.pop(existing_key, None)
+        out[k] = v
+        lower_to_key[lk] = k
     return out
 
 
@@ -162,9 +202,9 @@ def _redact_json_evidence_pair(pair: dict, injection_pointer: str) -> dict:
 
 
 def _mask_credential_headers(headers: dict) -> dict:
-    """認証情報/機密ヘッダ値を伏せた新 dict を返す（純粋・判定は正典へ委譲）。"""
+    """機密ヘッダ値を伏せた新 dict を返す（純粋・evidence 用に broad な正典で判定）。"""
     return {
-        k: ("***" if _is_credential_header(k) else v)
+        k: ("***" if _is_sensitive_for_evidence(k) else v)
         for k, v in headers.items()
     }
 

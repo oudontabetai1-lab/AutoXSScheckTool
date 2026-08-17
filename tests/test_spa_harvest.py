@@ -403,10 +403,9 @@ class HarvestJsonBodyTargetsTests(unittest.TestCase):
             sum(1 for t in targets if t["endpoint"] == "https://api.test/v1/save"), 1
         )
 
-    def test_churn_giveup_frees_parse_budget_for_later_endpoint(self):
-        # 1 url の値churn（tsだけ違う collapse）が連続無駄 parse で give-up され、以降その url を
-        # skip して global parse 予算を後続の別 endpoint に残す（#90 R13）。give-up 無しなら
-        # churn が cap を食い潰し /b が未 parse になる。
+    def test_round_robin_parse_prevents_churn_starving_later_endpoint(self):
+        # 1 url の値churn（tsだけ違う 50 body）が別 endpoint /b を飢餓させない。バケツ間 round-robin
+        # なので /a と /b が最初の pass で 1 body ずつ parse され、churn が予算を独占しない（#90 R14）。
         churn = [
             _json_pair("https://api.test/v1/a", {"doc": "d", "ts": i})
             for i in range(50)
@@ -419,9 +418,51 @@ class HarvestJsonBodyTargetsTests(unittest.TestCase):
         self.assertIn("https://api.test/v1/a", endpoints)
         self.assertIn("https://api.test/v1/b", endpoints)
 
-    def test_many_operations_same_url_not_gived_up(self):
-        # 同一 url が別 operation（method 値違い）を出し続ける場合は新規 target 毎に churn カウンタが
-        # リセットされ give-up されない（JSON-RPC 多 method endpoint を取りこぼさない・#90 R13）。
+    def test_new_operation_after_churn_still_discovered(self):
+        # churn の後に来る genuine な新 operation（同一 url・別 method 値）も parse される。
+        # round-robin は url を blacklist しないため、8 collapse 後の新 method も取りこぼさない（#90 R14）。
+        churn = [
+            _json_pair("https://api.test/rpc", {"method": "poll", "ts": i})
+            for i in range(8)
+        ]
+        new_op = [_json_pair("https://api.test/rpc", {"method": "danger", "params": "x"})]
+        targets = harvest_json_body_targets(
+            churn + new_op, base_netlocs={"api.test"}, max_targets=50,
+        )
+        sigs = {t["body_signature"] for t in targets}
+        # poll（1 collapse target）＋ danger（別 method）の 2 operation が残る。
+        self.assertEqual(len(targets), 2)
+        self.assertEqual(len(sigs), 2)
+
+    def test_deep_json_body_does_not_wipe_earlier_targets(self):
+        # 深いネスト JSON が RecursionError を起こしても per-entry 隔離で正常 target を巻き添えにしない
+        # （#90 R14・旧 rewrite は外側 except で全消去する回帰があった）。
+        deep = "[" * 20000 + "]" * 20000  # balanced だが過度にネスト（40KB<256KB・RecursionError誘発）
+        pairs = [
+            _json_pair("https://api.test/v1/ok", {"q": "x"}),
+            _json_pair("https://api.test/v1/deep", deep),
+        ]
+        targets = harvest_json_body_targets(pairs, base_netlocs={"api.test"})
+        endpoints = {t["endpoint"] for t in targets}
+        self.assertIn("https://api.test/v1/ok", endpoints)
+
+    def test_semantic_collapse_keeps_latest_observation_headers(self):
+        # A(H1) -> B(H2) -> A(H3)（A/B は同一注入 shape に collapse）。round-robin は観測順に並ばないが
+        # order で守り、最新観測 H3 を保つ（古い H2 で上書きしない・#90 R14）。
+        a = {"doc": "d", "ts": 1}
+        b = {"doc": "e", "ts": 2}
+        pairs = [
+            _json_pair("https://api.test/v1/x", a, headers={"Authorization": "H1"}),
+            _json_pair("https://api.test/v1/x", b, headers={"Authorization": "H2"}),
+            _json_pair("https://api.test/v1/x", a, headers={"Authorization": "H3"}),
+        ]
+        targets = harvest_json_body_targets(pairs, base_netlocs={"api.test"})
+        self.assertEqual(len(targets), 1)
+        self.assertEqual(targets[0]["headers"]["Authorization"], "H3")
+
+    def test_many_operations_same_url_all_discovered(self):
+        # 同一 url が別 operation（method 値違い）を出し続けても round-robin で全て parse される
+        # （JSON-RPC 多 method endpoint を blacklist で取りこぼさない・#90 R14）。
         pairs = [
             _json_pair("https://api.test/rpc", {"method": f"m{i}", "params": "x"})
             for i in range(15)

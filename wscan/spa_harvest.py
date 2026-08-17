@@ -163,10 +163,6 @@ def harvest_get_targets(
 
 # 1 body の parse/保持サイズ上限（target 支配下の巨大 JSON で CPU/メモリを食わせない・#90 R8）。
 _MAX_JSON_BODY_BYTES = 256 * 1024
-# 1 observed_url が連続でこの回数だけ「無駄 parse」（collapse or reject）を出したら churn 判定し、
-# 以降その url の body を parse せず skip する。新規 target が出るたびリセットされるため、
-# 正当に別 operation を出し続ける url（JSON-RPC の多 method 等）は give-up しない（#90 R13）。
-_CHURN_GIVEUP_WASTED_PARSES = 8
 
 # 値で operation を多重化する既知の discriminator キー（小文字）。これらの葉の**値**だけを identity に
 # 含め、timestamp/id/nonce 等の通常値は無視して同一注入 shape を 1 つに collapse する（#90 R9）。
@@ -252,25 +248,15 @@ def harvest_json_body_targets(
     ``is_in_scope`` は呼び出し側（engine）の精密スコープ判定（_is_attack_target_url かつ
     not _is_url_excluded）を url→bool で受け取る述語。body を parse/materialize する**前**に適用し、
     対象外の大きな body を無駄に展開しない（CPU/メモリ保護・Codex #90 R3）。``max_targets`` は
-    スコープ通過後の materialize 数の上限。両者を engine から渡すことで、除外パスばかりの観測が
-    有効ターゲットを飢餓させず（cap はスコープ後に数える）、かつ untrusted な大量観測でも展開が有界になる。
+    実 parse 数（グローバル parse 作業）の上限。**endpoint バケツ間 round-robin で parse する**ため、
+    1 endpoint の値churn がこの予算を独占して他 endpoint を飢餓させない（#90 R14）。両者を engine から
+    渡すことで、除外パスばかりの観測が有効ターゲットを飢餓させず、untrusted な大量観測でも parse が有界になる。
     """
     results: list[dict] = []
     # semantic identity (method, observed_url, body_signature) -> result idx。値まで含む正規化 body で、
     # JSON-RPC/GraphQL のように**値で** operation を多重化する場合も別ターゲットに保つ（#90 R8）。
     seen_index: dict[tuple[str, str, str], int] = {}
-    # (method, observed_url, post_data) -> result idx。生 body dedup＋同一観測の headers 最新化に使う。
-    raw_index: dict[tuple[str, str, str], int] = {}
-    # 拒否した生 body の負キャッシュ。malformed/非container/pointer 空は raw_index に載らないため、
-    # 同一 body の連投を毎回 parse し processed 予算を食い潰す（有効 JSON を飢餓させる・#90 R12）。
-    # 拒否 raw_key を記録し、重複は最大 1 回だけ parse させる。
-    rejected: set[tuple[str, str, str]] = set()
-    processed = 0  # スコープ通過＋JSON 候補の観測数（グローバル parse 作業の上限に使う）
-    # observed_url 単位の「無駄 parse」連続数（collapse or reject＝新規 target を生まない parse）。
-    # 新規 target が出たら 0 リセット。一定回連続で churn 判定し以降その url を skip して、
-    # 1 endpoint の値churn が global parse 予算を独占して他 endpoint を飢餓させないようにする（#90 R13）。
-    # JSON-RPC 等で同一 url が別 method を出し続ける場合は毎回リセットされ give-up しない。
-    wasted_parses: dict[str, int] = {}
+    processed = 0  # 実 parse 数（グローバル parse 作業の上限＝max_targets）
 
     try:
         if isinstance(base_netlocs, str):
@@ -287,6 +273,14 @@ def harvest_json_body_targets(
         except (TypeError, ValueError):
             cap = None
 
+        # --- Phase 1: フィルタ＋endpoint 単位のバケツ化（parse 前・#90 R14）---
+        # pairs を観測順に走査し cheap なフィルタ（method/scope/size/content-type）だけを適用。
+        # 同一生 body（method,url,post_data）の連投は 1 entry に潰し、headers は最新観測へ更新する
+        # （malformed の連投も生 body dedup で 1 回に潰れる＝負キャッシュ不要）。生き残った候補を
+        # endpoint_url でバケツ化し順序を保つ。実 parse は Phase 2 で round-robin に行う。
+        buckets: dict[str, list] = {}
+        raw_first: dict[tuple[str, str, str], dict] = {}
+        obs_seq = 0  # 候補観測の通し番号。collapse 時に最新観測（order 最大）だけ template を更新する。
         for pair in pairs:
             try:
                 if not isinstance(pair, dict):
@@ -327,9 +321,8 @@ def harvest_json_body_targets(
                 # C3: 1 body のサイズ上限（parse 前）。巨大 body でメモリ/CPU を食わせない。
                 if len(post_data) > _MAX_JSON_BODY_BYTES:
                     continue
-                # C4: content-type が明示的に非 JSON（form 等）なら budget を消費せず skip。
-                # content-type 無しは JSON かもしれないので parse を試みる。form 大量送信が JSON
-                # 予算(processed)を飢餓させないため、非 JSON は数える前に弾く。
+                # C4: content-type が明示的に非 JSON（form 等）なら skip。content-type 無しは JSON かも
+                # しれないので候補に残す（Phase 2 で parse を試みる）。form 大量送信を候補から弾く。
                 raw_ct = _raw_content_type(request.get("headers"))
                 if raw_ct and not _is_jsonish_content_type(raw_ct):
                     continue
@@ -337,80 +330,94 @@ def harvest_json_body_targets(
                 method_upper = method.upper()
                 endpoint_url = parsed_url._replace(query="", fragment="").geturl()
                 request_headers = request.get("headers")
-                # identity は **observed_url（query 込み）**を使う（?op=create/?op=delete を別扱い・#90 R7）。
-                # pre-parse 生 body dedup: 同一 (method,url,body) の連投(polling/autosave)を json.loads 前に
-                # 弾く。ただし headers（refresh された Authorization/CSRF）は最新観測で更新する（#90 R7）。
+                # 生 body dedup: 同一 (method,url,body) の連投(polling/autosave)は 1 entry に潰し、
+                # headers（refresh された Authorization/CSRF）だけ最新観測へ更新する（#90 R7）。
                 raw_key = (method_upper, observed_url, post_data)
-                # 既知の拒否 body（malformed/非container/pointer 空）は再 parse せず budget も消費しない。
-                # 同一の壊れた body の連投で有効 JSON を飢餓させないため（#90 R12）。
-                if raw_key in rejected:
+                obs_seq += 1
+                existing = raw_first.get(raw_key)
+                if existing is not None:
+                    # 同一生 body の再観測: headers を最新に、order も最新観測へ進める（A/B/A で
+                    # 古い collapse に上書きされて stale 認証を残さない・#90 R14）。
+                    existing["request_headers"] = request_headers
+                    existing["order"] = obs_seq
                     continue
-                if raw_key in raw_index:
-                    content_type, headers = _extract_replay_headers(request_headers)
-                    results[raw_index[raw_key]]["headers"] = headers
-                    results[raw_index[raw_key]]["content_type"] = content_type
-                    continue
-                # churn give-up: この url が連続で無駄 parse（collapse/reject）を出し続けたら
-                # 以降 parse せず skip し、global parse 予算を他 endpoint に残す（#90 R13）。
-                if wasted_parses.get(observed_url, 0) >= _CHURN_GIVEUP_WASTED_PARSES:
-                    continue
-                # 処理数（スコープ通過＋JSON 候補の観測）を上限に。ユニーク大量でも parse を有界化。
-                if cap is not None and processed >= cap:
-                    break
-                processed += 1
-                try:
-                    parsed_body = json.loads(post_data)
-                except (ValueError, TypeError):
-                    rejected.add(raw_key)
-                    wasted_parses[observed_url] = wasted_parses.get(observed_url, 0) + 1
-                    continue
-                if not isinstance(parsed_body, (dict, list)):
-                    rejected.add(raw_key)
-                    wasted_parses[observed_url] = wasted_parses.get(observed_url, 0) + 1
-                    continue
-                pointers = enumerate_leaf_pointers(parsed_body)
-                if not pointers:
-                    rejected.add(raw_key)
-                    wasted_parses[observed_url] = wasted_parses.get(observed_url, 0) + 1
-                    continue
-
-                content_type, headers = _extract_replay_headers(request_headers)
-                # 注入 shape の signature を identity に。pointer 集合＋operation discriminator の値のみで、
-                # JSON-RPC method/GraphQL operationName 等の operation は区別しつつ、timestamp/id/nonce 等の
-                # 通常値変化は collapse する（同一注入点の重複 probe で cap を食い潰さない・#90 R9）。
-                body_signature = _injection_signature(parsed_body, pointers)
-                semantic_key = (method_upper, observed_url, body_signature)
-                if semantic_key in seen_index:
-                    # 注入 shape が同じ collapse（キー順違い or 通常値変化）。headers/content_type に加え、
-                    # **json_body も最新観測へ更新**する。shape signature は値変化を collapse するため、
-                    # 古い body（stale な CSRF nonce/optimistic-lock version/id）を残すと replay が 403/409 に
-                    # なる。pointer 集合は同一なので注入点は不変（#90 R10）。
-                    idx = seen_index[semantic_key]
-                    results[idx]["headers"] = headers
-                    results[idx]["content_type"] = content_type
-                    results[idx]["json_body"] = parsed_body
-                    raw_index[raw_key] = idx
-                    # collapse＝新規 target を生まない無駄 parse。churn 判定用に加算。
-                    wasted_parses[observed_url] = wasted_parses.get(observed_url, 0) + 1
-                    continue
-                results.append({
-                    "method": method_upper,
-                    "url": observed_url,
-                    "endpoint": endpoint_url,
-                    "json_body": parsed_body,
-                    "content_type": content_type,
-                    "headers": headers,
-                    "pointers": pointers,
-                    "body_signature": body_signature,
-                })
-                idx = len(results) - 1
-                seen_index[semantic_key] = idx
-                raw_index[raw_key] = idx
-                # 新規 target が出た＝この url はまだ有効な operation を出している。churn カウンタを
-                # リセットし、JSON-RPC 等の多 method endpoint を give-up で取りこぼさない（#90 R13）。
-                wasted_parses[observed_url] = 0
+                entry = {
+                    "method_upper": method_upper,
+                    "observed_url": observed_url,
+                    "endpoint_url": endpoint_url,
+                    "post_data": post_data,
+                    "request_headers": request_headers,
+                    "order": obs_seq,
+                }
+                raw_first[raw_key] = entry
+                buckets.setdefault(endpoint_url, []).append(entry)
             except Exception:
                 continue
+
+        # --- Phase 2: バケツ間 round-robin parse（#90 R14）---
+        # 各 endpoint バケツから 1 body ずつ順に parse し、global parse 予算(cap)まで繰り返す。
+        # これにより 1 endpoint の値churn（多数の distinct body）が予算を独占して他 endpoint を
+        # 飢餓させず（fair）、かつ churn endpoint の後続の genuine な新 operation も予算内で parse
+        # される（blacklist しない＝#90 R14 で give-up を撤去）。
+        bucket_lists = list(buckets.values())
+        result_order: dict[int, int] = {}  # result idx -> 採用済み観測の order（最新のみ更新するため）
+        depth = 0
+        stop = False
+        while not stop:
+            progressed = False
+            for blist in bucket_lists:
+                if depth >= len(blist):
+                    continue
+                progressed = True
+                if cap is not None and processed >= cap:
+                    stop = True
+                    break
+                entry = blist[depth]
+                processed += 1
+                # per-entry 隔離: json.loads の RecursionError（深いネスト）や pointer 列挙の想定外
+                # 例外が 1 entry で起きても、それ以前の正常 target を巻き添えにしない（#90 R14）。
+                try:
+                    parsed_body = json.loads(entry["post_data"])
+                    if not isinstance(parsed_body, (dict, list)):
+                        continue
+                    pointers = enumerate_leaf_pointers(parsed_body)
+                    if not pointers:
+                        continue
+                    content_type, headers = _extract_replay_headers(entry["request_headers"])
+                    # 注入 shape の signature を identity に。pointer 集合＋operation discriminator の値のみで、
+                    # JSON-RPC method/GraphQL operationName 等の operation は区別しつつ、timestamp/id/nonce 等の
+                    # 通常値変化は collapse する（同一注入点の重複 probe で cap を食い潰さない・#90 R9）。
+                    body_signature = _injection_signature(parsed_body, pointers)
+                    semantic_key = (entry["method_upper"], entry["observed_url"], body_signature)
+                    if semantic_key in seen_index:
+                        # 注入 shape が同じ collapse（キー順違い or 通常値変化）。**最新観測（order 最大）
+                        # だけ** headers/content_type/json_body を更新する。round-robin は観測順に並ばない
+                        # ため、order で守らないと古い body（stale な CSRF nonce/version/id）で上書きして
+                        # replay が 403/409 になる（#90 R10/R14）。pointer 集合は同一なので注入点は不変。
+                        idx = seen_index[semantic_key]
+                        if entry["order"] >= result_order.get(idx, -1):
+                            results[idx]["headers"] = headers
+                            results[idx]["content_type"] = content_type
+                            results[idx]["json_body"] = parsed_body
+                            result_order[idx] = entry["order"]
+                        continue
+                    results.append({
+                        "method": entry["method_upper"],
+                        "url": entry["observed_url"],
+                        "endpoint": entry["endpoint_url"],
+                        "json_body": parsed_body,
+                        "content_type": content_type,
+                        "headers": headers,
+                        "pointers": pointers,
+                        "body_signature": body_signature,
+                    })
+                    seen_index[semantic_key] = len(results) - 1
+                    result_order[len(results) - 1] = entry["order"]
+                except Exception:
+                    continue
+            if not progressed:
+                break
+            depth += 1
     except Exception:
         return []
 
