@@ -977,6 +977,18 @@ class ScanEngine:
     def _is_attack_target_url(self, url: str) -> bool:
         return self._url_matches_scope(url, self.target_urls)
 
+    def _json_target_in_scope(self, url: str) -> bool:
+        """JSON 注入ターゲットのスコープ判定（harvest 用の述語）。
+
+        JSON 注入は body が対象で query は注入対象でないため、**scope 照合は query/fragment を
+        除いた endpoint** で行う（path-scoped target と observed?query 付きを一致させる。#90 R4）。
+        一方 **exclusion は observed 原文（query 込み）** で判定する。exclude_urls には
+        query 固有の full URL やワイルドカード（query を含む）が入り得るため、query を落とすと
+        明示除外が効かなくなり intrusive probe を打ってしまう（#90 R5 P1）。
+        """
+        clean = urlparse(url)._replace(query="", fragment="").geturl()
+        return self._is_attack_target_url(clean) and not self._is_url_excluded(url)
+
     def _is_access_allowed_url(self, url: str) -> bool:
         return self._is_attack_target_url(url) or self._url_matches_scope(url, self.access_urls)
 
@@ -2523,20 +2535,13 @@ class ScanEngine:
                         if urlparse(t).netloc
                     }
                     json_ip_cap = max(200, self.depth * 50)
-                    # 精密スコープ判定と materialize 上限を harvester に渡し、body パース前に
-                    # フィルタ/有界化させる（対象外の大きな body を展開しない・飢餓回避。Codex #90 R3）。
-                    def _json_in_scope(u: str) -> bool:
-                        # JSON 注入は body 対象で query は注入対象でない。_url_matches_scope は
-                        # URL scope を query 込みの full 文字列で照合するため、path-scoped target
-                        # （例 .../v1/users）と observed（.../v1/users?dry_run=1）が一致しない。
-                        # query/fragment を除いた endpoint で判定する（Codex #90 R4）。
-                        clean = urlparse(u)._replace(query="", fragment="").geturl()
-                        return self._is_attack_target_url(clean) and not self._is_url_excluded(clean)
-
+                    # 精密スコープ判定（scope=query除去/exclusion=原文）と materialize 上限を
+                    # harvester に渡し、body パース前にフィルタ/有界化させる（対象外の大きな
+                    # body を展開しない・飢餓回避。Codex #90 R3/R4/R5）。
                     for target in spa_harvest.harvest_json_body_targets(
                         self.browser.network.pairs,
                         base_netlocs=attack_netlocs,
-                        is_in_scope=_json_in_scope,
+                        is_in_scope=self._json_target_in_scope,
                         max_targets=json_ip_cap,
                     ):
                         # pointer は harvester のローカル dedup と同じ順序非依存表現
