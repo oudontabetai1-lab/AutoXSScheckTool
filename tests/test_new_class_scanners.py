@@ -170,11 +170,13 @@ class MergeTemplateHeadersTests(unittest.TestCase):
         from wscan import request_logger
         request_logger.register_sensitive_headers(["X-Company-Auth", "X-API-Version"])
         try:
-            # (2) redaction は broad: set-cookie・x-access-token・runtime 登録すべて伏せる。
+            # (2) redaction は broad: cookie/set-cookie・x-access-token・runtime 登録すべて伏せる。
+            # cookie は replay 用に harvest template で温存するが（#90 R14）、evidence では必ず redact。
             masked = _mask_credential_headers({
-                "Set-Cookie": "sid=abc", "X-Access-Token": "t",
+                "cookie": "sid=secret", "Set-Cookie": "sid=abc", "X-Access-Token": "t",
                 "X-Company-Auth": "c", "X-API-Version": "v2",
             })
+            self.assertEqual(masked["cookie"], "***")
             self.assertEqual(masked["Set-Cookie"], "***")
             self.assertEqual(masked["X-Access-Token"], "***")
             self.assertEqual(masked["X-Company-Auth"], "***")

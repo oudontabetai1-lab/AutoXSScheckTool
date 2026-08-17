@@ -165,13 +165,14 @@ class HarvestJsonBodyTargetsTests(unittest.TestCase):
             ["/profile/email", "/roles/0", "/roles/1"],
         )
         self.assertEqual(targets[0]["content_type"], "application/json; charset=utf-8")
-        # content-type/cookie/proxy-auth/content-length/host は落とす。Authorization 等の
-        # JS 取得トークンは replay 認証のため残す（Codex #90 R3・merge_template_headers が
-        # configured を優先し、Finding では redact される）。非認証(X-Tenant)も残る。
+        # content-type/proxy-auth/content-length/host は落とす。Authorization 等の JS 取得トークンと
+        # **Cookie** は replay 認証のため残す（Cookie は #90 R14 で温存＝唯一の資格情報のことがある。
+        # Finding では redact される）。非認証(X-Tenant)も残る。
         self.assertEqual(
             targets[0]["headers"],
             {
                 "Authorization": "Bearer secret",
+                "cookie": "sid=secret",
                 "X-Api-Key": "secret",
                 "X-Auth-Token": "secret",
                 "X-Access-Token": "secret",
@@ -179,7 +180,6 @@ class HarvestJsonBodyTargetsTests(unittest.TestCase):
             },
         )
         self.assertNotIn("Content-Type", targets[0]["headers"])
-        self.assertNotIn("cookie", targets[0]["headers"])
         self.assertNotIn("Proxy-Authorization", targets[0]["headers"])
         self.assertNotIn("Host", targets[0]["headers"])
         self.assertEqual(targets[1]["content_type"], "application/json")

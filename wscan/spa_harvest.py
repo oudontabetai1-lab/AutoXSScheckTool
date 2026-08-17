@@ -41,7 +41,12 @@ _STATIC_ASSET_SUFFIXES = (
 # テンプレは in-memory・非永続で、送信時は merge_template_headers が configured --header を優先し、
 # 永続/配信は record_finding=_redact_json_evidence_pair が _CREDENTIAL_HEADERS をマスクする（平文非保存）。
 _REPLAY_DROP_HEADERS = frozenset({
-    "content-length", "host", "cookie", "proxy-authorization",
+    "content-length", "host", "proxy-authorization",
+    # 注: Cookie は落とさず温存する。ブラウザ取得の host/path スコープ Cookie が唯一の有効な
+    # 資格情報のことがあり、engine の単一 self.cookies（別ページ URL 同期の可能性）だけに頼ると
+    # replay が 401/403 になる。captured Cookie を fallback として温存し、evidence では redact される
+    # （cookie は sensitive 集合）。configured Cookie 優先や template URL 向け jar 同期は replay を持つ
+    # b2 の領分＝バックログ（#90 R14）。
     # body 依存/転送エンコーディング系。JSON replay は葉を差し替えて body を再直列化するため、
     # 元 body 用の checksum/encoding を残すと検証するサーバが全プローブを弾く（Codex #90 R6）。
     # 再計算しないので落とす。
