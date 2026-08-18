@@ -202,26 +202,64 @@ def _collect_discriminators(node, tokens, out, *, depth_cap=8) -> None:
     if isinstance(node, dict):
         for k, v in node.items():
             key = str(k)
-            if key.lower() in _OPERATION_DISCRIMINATOR_KEYS and isinstance(v, (str, int, float, bool)):
-                # repr で JSON 型を保持（{"action":1} と {"action":"1"} を区別・#90 R13）。
-                out.append((tuple(tokens + [key]), repr(v)))
+            if key.lower() in _OPERATION_DISCRIMINATOR_KEYS:
+                if isinstance(v, (str, int, float, bool)):
+                    # repr で JSON 型を保持（{"action":1} と {"action":"1"} を区別・#90 R13）。
+                    out.append((tuple(tokens + [key]), repr(v)))
+                elif isinstance(v, (dict, list)):
+                    # discriminator 値が非スカラ（{"type":{"name":"create"}} 等）でも別 operation を
+                    # 区別する。正規化 body の bounded hash を署名に含め collapse を防ぐ（#90 FN-F）。
+                    out.append((tuple(tokens + [key]), _canon_nonscalar(v)))
             _collect_discriminators(v, tokens + [key], out, depth_cap=depth_cap)
     elif isinstance(node, list):
         for index, v in enumerate(node):
             _collect_discriminators(v, tokens + [str(index)], out, depth_cap=depth_cap)
 
 
-def _injection_signature(parsed_body, pointers) -> str:
-    """注入 shape の識別子（純粋）。pointer 集合（構造）＋既知 operation discriminator の値だけを
-    署名する。JSON-RPC method / GraphQL operationName / APQ sha256Hash 等の operation は区別しつつ、
-    timestamp/resource id/CSRF nonce/autosave 等の通常値変化は collapse して重複 probe を防ぐ。
-    discriminator は **full body から**収集し、200 葉上限を超えた位置の discriminator も拾う（#90 R14）。"""
+def _canon_nonscalar(value) -> str:
+    """非スカラ discriminator 値の bounded 正規化ハッシュ（純粋・署名用）。"""
+    try:
+        s = json.dumps(value, sort_keys=True, ensure_ascii=False, default=str)
+    except Exception:
+        s = repr(value)
+    if len(s) > 2048:
+        s = s[:2048]
+    return "ns:" + hashlib.sha1(s.encode("utf-8")).hexdigest()
+
+
+# 値ではなく**ヘッダ**で operation を選択する API のヘッダ名（小文字）。body/url が同一でも
+# これらの値が違えば別 operation なので、値を signature に含め collapse を防ぐ（#90 FN-E）。
+# 例: AWS JSON プロトコル(X-Amz-Target)、SOAP(SOAPAction)、method override、GraphQL operation 名。
+_OPERATION_DISPATCH_HEADERS = frozenset({
+    "x-amz-target", "soapaction", "x-http-method-override", "x-graphql-operationname",
+})
+
+
+def _dispatch_header_values(headers) -> list:
+    """observed ヘッダから operation-dispatch ヘッダの (name, value) を集める（純粋・小文字名）。"""
+    if not isinstance(headers, dict):
+        return []
+    out = []
+    for name, value in headers.items():
+        lname = str(name).lower()
+        if lname in _OPERATION_DISPATCH_HEADERS:
+            out.append((lname, str(value)))
+    return out
+
+
+def _injection_signature(parsed_body, pointers, headers=None) -> str:
+    """注入 shape の識別子（純粋）。pointer 集合（構造）＋既知 operation discriminator の値
+    ＋operation-dispatch ヘッダの値を署名する。JSON-RPC method / GraphQL operationName /
+    APQ sha256Hash / X-Amz-Target 等の operation は区別しつつ、timestamp/resource id/CSRF nonce/
+    autosave 等の通常値変化は collapse して重複 probe を防ぐ。discriminator は **full body から**収集し、
+    200 葉上限を超えた位置の discriminator も拾う（#90 R14）。非スカラ discriminator 値も区別する（#90 FN-F）。"""
     disc: list[tuple] = []
     try:
         _collect_discriminators(parsed_body, [], disc)
     except Exception:
         disc = []
-    payload = repr((tuple(sorted(pointers)), tuple(sorted(disc))))
+    hdr_disc = _dispatch_header_values(headers)
+    payload = repr((tuple(sorted(pointers)), tuple(sorted(disc)), tuple(sorted(hdr_disc))))
     return hashlib.sha1(payload.encode("utf-8")).hexdigest()
 
 
@@ -239,6 +277,27 @@ def _is_jsonish_content_type(ct: str) -> bool:
     """JSON 系 content-type か（application/json / +json / text/json）。"""
     c = (ct or "").lower()
     return "application/json" in c or "+json" in c or "text/json" in c
+
+
+# 明示的に「非 JSON の構造化 form / バイナリ」な content-type。budget を消費する前に弾く。
+# ※ text/plain は含めない ―― fetch() が Content-Type 未指定のとき、および navigator.sendBeacon は
+#   JSON 文字列を `text/plain;charset=UTF-8` で送る（CORS simple-request 回避パターン）。これを弾くと
+#   modern SPA の JSON API を丸ごと見逃す（偽陰性）。text/plain・content-type 無し・未知の text/* は
+#   Phase 2 の json.loads に最終判定を委ねる（#90 FN-A）。
+_NON_JSON_BODY_CT_MARKERS = (
+    "application/x-www-form-urlencoded",
+    "multipart/form-data",
+    "application/octet-stream",
+    "image/", "audio/", "video/", "font/",
+    "application/pdf", "application/zip", "application/gzip",
+    "application/x-protobuf", "application/grpc",
+)
+
+
+def _is_non_json_body_ct(ct: str) -> bool:
+    """content-type が明示的に非 JSON（form/multipart/バイナリ）か。True なら harvest 候補から除外。"""
+    c = (ct or "").lower()
+    return any(marker in c for marker in _NON_JSON_BODY_CT_MARKERS)
 
 
 def _extract_replay_headers(request_headers) -> tuple:
@@ -317,7 +376,9 @@ def harvest_json_body_targets(
                     continue
 
                 method = str(request.get("method") or "").lower()
-                if method not in {"post", "put", "patch"}:
+                # DELETE も body を持てる（bulk-delete: `axios.delete(url,{data:{ids,reason}})`）。
+                # body 無し DELETE は下の post_data チェックで自然に落ちる（#90 FN-B）。
+                if method not in {"post", "put", "patch", "delete"}:
                     continue
 
                 request_url = request.get("url")
@@ -348,10 +409,12 @@ def harvest_json_body_targets(
                 # C3: 1 body のサイズ上限（parse 前）。巨大 body でメモリ/CPU を食わせない。
                 if len(post_data) > _MAX_JSON_BODY_BYTES:
                     continue
-                # C4: content-type が明示的に非 JSON（form 等）なら skip。content-type 無しは JSON かも
-                # しれないので候補に残す（Phase 2 で parse を試みる）。form 大量送信を候補から弾く。
+                # C4: content-type が**明示的に非 JSON（form/multipart/バイナリ）**なら budget 消費前に skip。
+                # content-type 無し・text/plain（fetch 既定/sendBeacon）・未知 text/* は JSON かもしれないので
+                # 候補に残し Phase 2 の json.loads に委ねる。text/plain を弾くと modern SPA の JSON API を
+                # 丸ごと見逃す（#90 FN-A）。form 大量送信は _is_non_json_body_ct で従来どおり弾く。
                 raw_ct = _raw_content_type(request.get("headers"))
-                if raw_ct and not _is_jsonish_content_type(raw_ct):
+                if raw_ct and _is_non_json_body_ct(raw_ct):
                     continue
 
                 method_upper = method.upper()
@@ -359,7 +422,12 @@ def harvest_json_body_targets(
                 request_headers = request.get("headers")
                 # 生 body dedup: 同一 (method,url,body) の連投(polling/autosave)は 1 entry に潰し、
                 # headers（refresh された Authorization/CSRF）だけ最新観測へ更新する（#90 R7）。
-                raw_key = (method_upper, observed_url, post_data)
+                # ただし operation-dispatch ヘッダ(X-Amz-Target 等)の値まで含める ―― body が同一でも
+                # ヘッダで別 operation を選ぶ API を Phase 1 の raw dedup で潰さないため（#90 FN-E）。
+                raw_key = (
+                    method_upper, observed_url, post_data,
+                    tuple(sorted(_dispatch_header_values(request_headers))),
+                )
                 obs_seq += 1
                 existing = raw_first.get(raw_key)
                 if existing is not None:
@@ -417,10 +485,12 @@ def harvest_json_body_targets(
                     if not pointers:
                         continue
                     content_type, headers = _extract_replay_headers(entry["request_headers"])
-                    # 注入 shape の signature を identity に。pointer 集合＋operation discriminator の値のみで、
-                    # JSON-RPC method/GraphQL operationName 等の operation は区別しつつ、timestamp/id/nonce 等の
-                    # 通常値変化は collapse する（同一注入点の重複 probe で cap を食い潰さない・#90 R9）。
-                    body_signature = _injection_signature(parsed_body, pointers)
+                    # 注入 shape の signature を identity に。pointer 集合＋operation discriminator の値
+                    # ＋operation-dispatch ヘッダ(X-Amz-Target 等)の値で、JSON-RPC method/GraphQL/AWS JSON 等の
+                    # operation は区別しつつ、timestamp/id/nonce 等の通常値変化は collapse する（#90 R9/FN-E）。
+                    body_signature = _injection_signature(
+                        parsed_body, pointers, entry["request_headers"]
+                    )
                     semantic_key = (entry["method_upper"], entry["observed_url"], body_signature)
                     if semantic_key in seen_index:
                         # 注入 shape が同じ collapse（キー順違い or 通常値変化）。**最新観測（order 最大）

@@ -371,6 +371,61 @@ class HarvestJsonBodyTargetsTests(unittest.TestCase):
         self.assertIn("https://api.test/v1/poll", endpoints)
         self.assertLessEqual(len(targets), 3)
 
+    def test_text_plain_json_body_is_harvested(self):
+        # fetch() 既定/sendBeacon の text/plain で送られた valid JSON も harvest する（#90 FN-A）。
+        pairs = [_json_pair("https://api.test/v1/search", {"q": "x"},
+                            headers={"Content-Type": "text/plain;charset=UTF-8"})]
+        targets = harvest_json_body_targets(pairs, base_netlocs={"api.test"})
+        self.assertEqual(len(targets), 1)
+        self.assertEqual(targets[0]["pointers"], ["/q"])
+
+    def test_form_urlencoded_content_type_still_skipped(self):
+        # 明示的 form/multipart は従来どおり budget 消費前に弾く（#90 FN-A の非退行）。
+        pairs = [_json_pair("https://api.test/v1/x", {"q": "x"},
+                            headers={"Content-Type": "application/x-www-form-urlencoded"})]
+        self.assertEqual(harvest_json_body_targets(pairs, base_netlocs={"api.test"}), [])
+
+    def test_delete_with_json_body_is_harvested(self):
+        # bulk-delete: DELETE + JSON body も注入点として harvest（#90 FN-B）。
+        pairs = [_json_pair("https://api.test/v1/items", {"ids": [1, 2], "reason": "x"},
+                            method="DELETE")]
+        targets = harvest_json_body_targets(pairs, base_netlocs={"api.test"})
+        self.assertEqual(len(targets), 1)
+        self.assertEqual(targets[0]["method"], "DELETE")
+
+    def test_delete_without_body_not_harvested(self):
+        pairs = [{"request": {"url": "https://api.test/v1/items/1", "method": "DELETE"},
+                  "response": {"status": 200}}]
+        self.assertEqual(harvest_json_body_targets(pairs, base_netlocs={"api.test"}), [])
+
+    def test_big_first_field_does_not_starve_later_pointer(self):
+        # 先頭に大きな配列があっても、後続の浅いフィールドが pointer 化される（BFS・#90 FN-C）。
+        body = {"items": [{"n": i} for i in range(250)], "promo_code": "x"}
+        targets = harvest_json_body_targets([_json_pair("https://api.test/v1/cart", body)],
+                                            base_netlocs={"api.test"})
+        self.assertEqual(len(targets), 1)
+        self.assertIn("/promo_code", targets[0]["pointers"])
+
+    def test_operation_dispatch_header_distinguishes_targets(self):
+        # X-Amz-Target 等ヘッダで operation を分ける API は body/url 同一でも別ターゲット（#90 FN-E）。
+        pairs = [
+            _json_pair("https://api.test/", {"TableName": "t", "Key": {"id": "1"}},
+                       headers={"X-Amz-Target": "DynamoDB_20120810.GetItem"}),
+            _json_pair("https://api.test/", {"TableName": "t", "Key": {"id": "1"}},
+                       headers={"X-Amz-Target": "DynamoDB_20120810.DeleteItem"}),
+        ]
+        targets = harvest_json_body_targets(pairs, base_netlocs={"api.test"})
+        self.assertEqual(len(targets), 2)
+
+    def test_nonscalar_discriminator_value_distinguishes_targets(self):
+        # discriminator 値が非スカラ({"type":{"name":...}})でも別 operation を区別（#90 FN-F）。
+        targets = harvest_json_body_targets([
+            _json_pair("https://api.test/rpc", {"type": {"name": "create"}, "payload": {"id": "1"}}),
+            _json_pair("https://api.test/rpc", {"type": {"name": "delete"}, "payload": {"id": "1"}}),
+        ], base_netlocs={"api.test"})
+        self.assertEqual(len(targets), 2)
+        self.assertNotEqual(targets[0]["body_signature"], targets[1]["body_signature"])
+
     def test_persisted_graphql_query_hash_is_discriminator(self):
         # Apollo APQ は query/operationName を省き extensions.persistedQuery.sha256Hash で operation を
         # 識別する。別 hash（同一 pointer 集合）を別ターゲットに保つ（#90 R14）。

@@ -37,10 +37,13 @@ def enumerate_leaf_pointers(
     max_pointers: int = 200,
     max_depth: int = 8,
 ) -> list[str]:
-    """JSON 文書の全スカラ葉への JSON Pointer を深さ優先で列挙する（純粋）。
+    """JSON 文書の全スカラ葉への JSON Pointer を**幅優先**で列挙する（純粋）。
 
     ``max_depth`` はルートからのトークン数で数える。空の dict/list は注入先に
     ならないため列挙せず、上限到達時はそれまでの決定的な順序を保って打ち切る。
+    **幅優先**にするのは、深さ優先だと先頭キーが巨大な部分木（例: 250 要素の配列）だと
+    pointer_cap を使い切って後続の浅い攻撃対象フィールド（例: 末尾の promo_code）が丸ごと
+    列挙されないため（#90 FN-C）。幅優先なら浅い葉が先に確保される。
     """
     pointers: list[str] = []
     try:
@@ -51,24 +54,22 @@ def enumerate_leaf_pointers(
     if pointer_cap == 0:
         return pointers
 
-    def _walk(node: Any, tokens: list[str]) -> None:
-        if len(pointers) >= pointer_cap or len(tokens) > depth_cap:
-            return
-        if isinstance(node, dict):
-            for key, value in node.items():
-                if len(pointers) >= pointer_cap:
-                    break
-                _walk(value, tokens + [str(key)])
-        elif isinstance(node, list):
-            for index, value in enumerate(node):
-                if len(pointers) >= pointer_cap:
-                    break
-                _walk(value, tokens + [str(index)])
-        elif isinstance(node, (str, int, float, bool)) or node is None:
-            pointers.append(build_pointer(tokens))
-
     try:
-        _walk(doc, [])
+        from collections import deque
+        queue: deque = deque()
+        queue.append((doc, []))
+        while queue and len(pointers) < pointer_cap:
+            node, tokens = queue.popleft()
+            if len(tokens) > depth_cap:
+                continue
+            if isinstance(node, dict):
+                for key, value in node.items():
+                    queue.append((value, tokens + [str(key)]))
+            elif isinstance(node, list):
+                for index, value in enumerate(node):
+                    queue.append((value, tokens + [str(index)]))
+            elif isinstance(node, (str, int, float, bool)) or node is None:
+                pointers.append(build_pointer(tokens))
     except Exception:
         # 観測データが JSON 互換でない場合も、harvest 全体へ例外を漏らさない。
         pass
