@@ -95,24 +95,44 @@ def test_non_dict_and_missing_payload_rows_are_skipped():
     assert block.count(" succeeded") == 1
 
 
-def test_roundtrip_success_only_recording_is_not_double_counted(tmp_path):
-    """本番相当（success のみ・global 集計）で 1 回の成功が 1/1 として出ることを保証。
+def test_domain_scoped_stats_are_not_double_counted(tmp_path):
+    """G4 が使う domain 限定・非二重計上バケツ（include_global=False）を固定する。
 
-    domain 付きで stats を取ると 2/2 に二重計上されるため、呼び出し側は domain=None を使う。
-    ここではその前提（global 集計は二重計上しない）を固定する。
+    本番の唯一経路（engine._record_finding）は success=True・domain 付きで記録し、record は
+    global と domain の両バケツへ書く。したがって:
+      - stats(domain=X)                    … global+domain を加算＝二重計上（tries 2 → 4）
+      - stats(domain=X, include_global=False) … domain 単体＝正確な per-target カウント
+    G4 は後者を使う。
     """
     lf = tmp_path / "learn.json"
     learner = PayloadLearner(learning_file=str(lf))
-    # 本番の唯一経路と同じく success=True・domain 付きで 2 回記録。
-    learner.record("xss", "<svg onload=x>", success=True, domain="target.test")
-    learner.record("xss", "<svg onload=x>", success=True, domain="target.test")
+    learner.record("xss", "<svg onload=x>", success=True, domain="a.test")
+    learner.record("xss", "<svg onload=x>", success=True, domain="a.test")
 
-    rows_global = learner.stats("xss", domain=None)
-    block = format_learning_for_prompt(rows_global)
-    # global 集計は 2 回の成功をそのまま 2/2 として表す（二重計上なし）。
+    # 既定（include_global=True）は二重計上（回帰ガード）。
+    row_merged = next(r for r in learner.stats("xss", domain="a.test")
+                      if r["payload"] == "<svg onload=x>")
+    assert row_merged["tries"] == 4
+
+    # G4 経路: domain 単体は二重計上しない。
+    rows_scoped = learner.stats("xss", domain="a.test", include_global=False)
+    block = format_learning_for_prompt(rows_scoped)
     assert "- `<svg onload=x>` -> 2/2 succeeded" in block
 
-    # domain 付きだと global+domain を加算し 4/4 に膨れる（＝呼び出し側が使ってはいけない形）。
-    rows_domain = learner.stats("xss", domain="target.test")
-    row = next(r for r in rows_domain if r["payload"] == "<svg onload=x>")
-    assert row["tries"] == 4
+
+def test_domain_scoped_stats_do_not_leak_other_targets(tmp_path):
+    """別ターゲットの成功 payload が現ターゲットのサマリへ漏れないこと（クロスターゲット漏洩防止）。"""
+    lf = tmp_path / "learn.json"
+    learner = PayloadLearner(learning_file=str(lf))
+    # target A 固有のコールバックを含む payload（2 回成功で永続化条件を満たす）。
+    learner.record("xss", "<img src=//a-secret.example/cb>", success=True, domain="a.test")
+    learner.record("xss", "<img src=//a-secret.example/cb>", success=True, domain="a.test")
+    # target B の別 payload。
+    learner.record("xss", "<svg onload=b>", success=True, domain="b.test")
+    learner.record("xss", "<svg onload=b>", success=True, domain="b.test")
+
+    # B をスキャン中のサマリ（domain=b.test 限定）には A の秘密 payload が現れない。
+    rows_b = learner.stats("xss", domain="b.test", include_global=False)
+    block_b = format_learning_for_prompt(rows_b)
+    assert "a-secret.example" not in block_b
+    assert "- `<svg onload=b>` -> 2/2 succeeded" in block_b

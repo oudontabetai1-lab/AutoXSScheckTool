@@ -760,12 +760,19 @@ class BaseScanner(ABC):
             # 要約構築は **LLM 生成パスに入った時だけ** generate 内で遅延実行する。
             # custom payloads 指定 / provider=none / template 無し / LLM 不在では generate は
             # サマリを使わず即 return するため、その場合に全 field で学習履歴を走査する無駄を避ける。
-            def _build_learning_summary(_learner=learner, _check=self.CHECK_TYPE):
+            def _build_learning_summary(_learner=learner, _check=self.CHECK_TYPE, _dom=_domain):
                 from wscan.payload_learning import format_learning_for_prompt
-                # stats は domain=None（global 集計）で取る。record は global と domain の両
-                # バケツへ書き、stats(domain=X) はそれらを加算するため、domain 付きだと 1 回の
-                # 観測が二重計上され min_tries を素通りする。global は全観測を既に含む。
-                rows = _learner.stats(_check, domain=None)
+                # このターゲット（_dom）の学習だけを使う（include_global=False）。理由は2つ:
+                # (1) global 集計は「別ターゲットの成功 payload」も注入してしまう。target A の
+                #     コールバック URL/トークンを含む payload が global に記録され、target B の
+                #     プロンプト＝クラウド LLM 送信へ混入する情報漏洩になる（G4 以前は学習は
+                #     並べ替えのみで注入しなかった）。ドメイン限定なら他ターゲットへ漏れない。
+                # (2) domain バケツ単体は record が各観測を書くので正確な per-target カウント
+                #     （二重計上なし）。global を混ぜると加算で二重計上になる。
+                # _dom が無い（hostname 無し）ときは domain バケツ空＝サマリ無し（安全側）。
+                if not _dom:
+                    return None
+                rows = _learner.stats(_check, domain=_dom, include_global=False)
                 return format_learning_for_prompt(rows) or None
 
             learning_summary_provider = _build_learning_summary

@@ -258,13 +258,29 @@ class PayloadLearner:
     # Stats helper
     # ------------------------------------------------------------------
 
-    def stats(self, check_type: str, domain: Optional[str] = None) -> list[dict]:
+    def stats(
+        self,
+        check_type: str,
+        domain: Optional[str] = None,
+        include_global: bool = True,
+    ) -> list[dict]:
         """
         Return sorted list of {payload, hits, tries, rate} for a check type.
 
-        If *domain* is given, returns merged global + domain stats.
+        If *domain* is given and *include_global* is True (既定), returns merged
+        global + domain stats.  ``record`` writes each domain observation into
+        **both** the global and domain buckets, so this merge double-counts a
+        domain-scoped observation (1 obs → tries 2).
+
+        Set *include_global* to False with a *domain* to get **domain-only**
+        stats: accurate per-target counts (no double-count) that never leak
+        other targets' payloads.  ここは 1 学習ファイルを複数ターゲットで共有する際に
+        重要で、あるターゲット固有のコールバック URL / トークンを含む成功 payload を
+        別ターゲットのプロンプト（＝クラウド LLM へ送信）へ混入させないために使う。
         """
-        global_ct = self._data["global"].get(check_type, {})
+        global_ct: dict = {}
+        if include_global:
+            global_ct = self._data["global"].get(check_type, {})
         domain_ct: dict = {}
         if domain:
             domain_ct = self._data["domains"].get(domain, {}).get(check_type, {})
