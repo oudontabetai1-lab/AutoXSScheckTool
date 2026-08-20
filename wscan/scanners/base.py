@@ -758,7 +758,10 @@ class BaseScanner(ABC):
             _domain = _up(getattr(self.engine, "target_url", "")).hostname or None
             try:
                 from wscan.payload_learning import format_learning_for_prompt
-                _rows = learner.stats(self.CHECK_TYPE, domain=_domain)
+                # stats は domain=None（global 集計）で取る。record は global と domain の両
+                # バケツへ書き、stats(domain=X) はそれらを加算するため、domain 付きだと 1 回の
+                # 観測が二重計上され min_tries を素通りする。global は全観測を既に含む。
+                _rows = learner.stats(self.CHECK_TYPE, domain=None)
                 learning_summary = format_learning_for_prompt(_rows) or None
             except Exception:
                 learning_summary = None

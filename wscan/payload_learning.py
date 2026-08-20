@@ -42,22 +42,27 @@ def format_learning_for_prompt(
     rows: list[dict],
     *,
     max_success: int = 5,
-    max_fail: int = 3,
     min_tries: int = 2,
     max_payload_len: int = 120,
 ) -> str:
-    """学習済み per-payload 成功率を LLM プロンプト用の観測ブロックへ整形する純粋関数。
+    """学習済みで「効いた」payload を LLM プロンプト用の観測ブロックへ整形する純粋関数。
 
-    `rows` は `PayloadLearner.stats()` が返す {payload, hits, tries, rate} の列（rate 降順前提だが
-    本関数内でも安全に扱う）。`min_tries` 未満の行はノイズとして除外。高成功群（rate>=0.5）と
-    頻敗群（rate<=0.1）を要約する。有意なデータが無ければ空文字を返す（呼び出し側は
-    「壊れたら安全側」を維持）。
+    `rows` は `PayloadLearner.stats()` が返す {payload, hits, tries, rate} の列。
+    **本番は finding を出した payload のみ success=True で記録する**（engine `_record_finding`）ため、
+    保存済み行の rate は実質 100%（tries==hits）である。したがって本関数は「過去に効いた（＝
+    finding を生んだ）払い」の要約に徹し、`min_tries` 未満（＝1回きり）の行はノイズとして除外する。
+    失敗を記録するようになれば rate<1 の行も現れ、下の rate>=0.5 フィルタが意味を持つ（前方互換）。
+
+    有意なデータが無ければ空文字を返す（呼び出し側は「壊れたら安全側」を維持）。
+
+    注意: 呼び出し側は `stats(domain=None)`（global 集計）を渡すこと。`record` が global と
+    domain の両バケツへ書き、`stats(domain=X)` はそれらを加算するため、domain 付きで渡すと
+    1 回の観測が 2 回に二重計上され `min_tries` を素通りしてしまう（global は全観測を既に含む）。
     """
     if not rows:
         return ""
 
     effective_candidates = []
-    blocked_candidates = []
     for row in rows:
         if not isinstance(row, dict):
             continue
@@ -74,21 +79,14 @@ def format_learning_for_prompt(
                 rate = hits / tries
             if rate >= 0.5:
                 effective_candidates.append((payload, hits, tries, rate))
-            if rate <= 0.1:
-                blocked_candidates.append((payload, hits, tries, rate))
         except (TypeError, ZeroDivisionError):
             continue
 
+    # rate 降順（同率は tries 降順＝観測が多い方が信頼できる）
     effective_candidates.sort(key=lambda item: (-item[3], -item[2]))
     effective = effective_candidates[:max(0, max_success)]
-    effective_payloads = {item[0] for item in effective}
-    blocked_candidates = [
-        item for item in blocked_candidates if item[0] not in effective_payloads
-    ]
-    blocked_candidates.sort(key=lambda item: -item[2])
-    blocked = blocked_candidates[:max(0, max_fail)]
 
-    if not effective and not blocked:
+    if not effective:
         return ""
 
     def _shorten(payload: str) -> str:
@@ -97,21 +95,13 @@ def format_learning_for_prompt(
         return payload[:max_payload_len - 3] + "..."
 
     lines = [
-        "LEARNED payload effectiveness on this host/globally from prior scans",
-        "(bias generation toward what worked; avoid regenerating what was consistently blocked):",
+        "LEARNED payloads that produced findings on prior scans",
+        "(bias generation toward these proven-effective inputs and craft targeted variations):",
     ]
-    if effective:
-        lines.append("EFFECTIVE (worked before):")
-        lines.extend(
-            f"- `{_shorten(payload)}` -> {hits}/{tries} succeeded"
-            for payload, hits, tries, _rate in effective
-        )
-    if blocked:
-        lines.append("CONSISTENTLY BLOCKED/INEFFECTIVE:")
-        lines.extend(
-            f"- `{_shorten(payload)}` -> {hits}/{tries} (blocked/ineffective)"
-            for payload, hits, tries, _rate in blocked
-        )
+    lines.extend(
+        f"- `{_shorten(payload)}` -> {hits}/{tries} succeeded"
+        for payload, hits, tries, _rate in effective
+    )
     return "\n".join(lines)
 
 
