@@ -20,7 +20,9 @@ from typing import Any, Iterator, Optional
 
 _THINK_BLOCK = re.compile(r"<think\b[^>]*>.*?</think\s*>", re.DOTALL | re.IGNORECASE)
 _THINK_OPEN = re.compile(r"<think\b[^>]*>.*", re.DOTALL | re.IGNORECASE)
-_FENCE = re.compile(r"```[^\n`]*\n?|```", re.IGNORECASE)
+# 言語タグ付きの ``` は**改行で終わる開始フェンス行**のときだけタグごと除去する。
+# 改行が無い1行フェンス（```json["a"]```）でタグ扱いして中身まで飲み込まないため。
+_FENCE = re.compile(r"```[^\n`]*\r?\n|```", re.IGNORECASE)
 
 
 def strip_reasoning(text: str) -> str:
@@ -39,12 +41,29 @@ def strip_code_fences(text: str) -> str:
     return _FENCE.sub("", text)
 
 
-def _iter_balanced(text: str, opener: str, closer: str) -> Iterator[str]:
-    """文字列リテラルを認識しつつ、平衡した opener..closer 部分文字列を列挙する。
+def _reasoning_spans(text: str) -> list:
+    """`<think>...</think>` 推論ブロックの (start, end) 範囲を返す。
 
-    JSON 文字列内の括弧やエスケープ（`\\"`）で深さを誤らないよう、`"` の内外を
-    追跡する。外側から順に、最初に釣り合った塊を1件ずつ yield する。
+    候補 JSON が推論ブロックに**完全内包**されるか判定するために使う。閉じられた
+    ブロックに加え、閉じ忘れの `<think>` は以降を末尾まで推論として扱う。
     """
+    spans = [(m.start(), m.end()) for m in _THINK_BLOCK.finditer(text)]
+    for m in re.finditer(r"<think\b[^>]*>", text, re.IGNORECASE):
+        if any(s <= m.start() < e for s, e in spans):
+            continue
+        if not re.search(r"</think\s*>", text[m.end():], re.IGNORECASE):
+            spans.append((m.start(), len(text)))
+            break
+    return spans
+
+
+def _fully_inside(start: int, end: int, spans: list) -> bool:
+    """[start, end) が いずれかの推論スパンに完全内包されるか。"""
+    return any(s <= start and end <= e for s, e in spans)
+
+
+def _iter_balanced_pos(text: str, opener: str, closer: str) -> Iterator[tuple]:
+    """平衡した opener..closer を (開始位置, 部分文字列) で列挙する。"""
     depth = 0
     start = -1
     in_str = False
@@ -75,27 +94,38 @@ def _iter_balanced(text: str, opener: str, closer: str) -> Iterator[str]:
         elif ch == closer:
             depth -= 1
             if depth == 0 and start >= 0:
-                yield text[start : i + 1]
+                yield start, text[start : i + 1]
                 start = -1
+
+
+def _iter_balanced(text: str, opener: str, closer: str) -> Iterator[str]:
+    """平衡した opener..closer 部分文字列を列挙する（位置を捨てた薄いラッパ）。"""
+    for _start, chunk in _iter_balanced_pos(text, opener, closer):
+        yield chunk
 
 
 def _candidates(text: str, opener: str, closer: str) -> Iterator[str]:
     """候補を「壊しにくい順」に出す。
 
     1. 直接パース（そのまま）
-    2. コードフェンス除去のみで平衡スキャン（**reasoning は除去しない**）
-    3. 最後の手段として reasoning(`<think>`) も除去して平衡スキャン
+    2. **推論ブロックの外側**にある平衡候補（reasoning は除去しない＝payload 文字列内の
+       `<think>` を保つ）。`<think>...</think>` に**完全内包**される候補（思考モデルが
+       出す下書き JSON）は除外し、最終回答や `<think>` を含む payload を優先採用する。
+    3. 最後の手段として reasoning も除去して平衡スキャン（2 で何も取れないときだけ）。
 
-    reasoning 除去を最後に回すのは、payload 文字列内に正規の `<think ...>` を含む攻撃
-    （例 `["<think onmouseover=alert(1)>x</think>"]`）を、reasoning とみなして握りつぶす
-    事故を避けるため。2 で無傷の候補が取れればそれを採用し、3 は本当に外側が推論ブロックの
-    ときだけ効く。各候補は json.loads を通すので誤採用は起きない。
+    これで2つの要求を両立する: (a) `["<think onmouseover=alert(1)>x</think>"]` の payload
+    は配列ブラケットが推論スパン外なので保持、(b) `<think>{下書き}</think> {最終}` の
+    下書きは推論スパン内なので無視して最終を採用。各候補は json.loads を通すので
+    誤採用は起きない。
     """
     if text:
         yield text.strip()
-    for chunk in _iter_balanced(strip_code_fences(text), opener, closer):
-        yield chunk
-    cleaned = strip_code_fences(strip_reasoning(text))
+    base = strip_code_fences(text)
+    spans = _reasoning_spans(base)
+    for start, chunk in _iter_balanced_pos(base, opener, closer):
+        if not _fully_inside(start, start + len(chunk), spans):
+            yield chunk
+    cleaned = strip_reasoning(base)
     for chunk in _iter_balanced(cleaned, opener, closer):
         yield chunk
 

@@ -79,6 +79,18 @@ class ArrayExtractionTests(unittest.TestCase):
         text = 'Use a literal " here:\n["a", "b"]'
         self.assertEqual(extract_json_array_of_strings(text), ["a", "b"])
 
+    def test_ignores_draft_array_inside_think(self):
+        # <think> 内の下書き配列は無視し、最終の配列を採る。
+        text = '<think>["draft"]</think>\n["final1", "final2"]'
+        self.assertEqual(
+            extract_json_array_of_strings(text), ["final1", "final2"]
+        )
+
+    def test_single_line_fence_preserved(self):
+        # Codex #92 r2 指摘2(P2): 1行フェンスの中身を空にしない。
+        self.assertEqual(extract_json_array_of_strings('```json["a", "b"]```'), ["a", "b"])
+        self.assertEqual(extract_json_array_of_strings('```["x"]```'), ["x"])
+
     def test_broken_returns_none(self):
         self.assertIsNone(extract_json_array_of_strings("no json here at all"))
         self.assertIsNone(extract_json_array_of_strings("[unterminated"))
@@ -114,6 +126,15 @@ class ObjectExtractionTests(unittest.TestCase):
         # 指摘2 の object 版: 前置き prose の孤立クオートに影響されない。
         text = 'Say " to me:\n{"page_purpose": "login"}'
         self.assertEqual(extract_json_object(text), {"page_purpose": "login"})
+
+    def test_ignores_draft_object_inside_think(self):
+        # Codex #92 r2 指摘1(P1): <think> 内の下書きJSONを拾わず、最終回答を採る。
+        text = ('<think>{"page_purpose":"draft","fields":[]}</think> '
+                '{"page_purpose":"login","fields":[{"name":"user"}]}')
+        self.assertEqual(
+            extract_json_object(text),
+            {"page_purpose": "login", "fields": [{"name": "user"}]},
+        )
 
     def test_broken_returns_none(self):
         self.assertIsNone(extract_json_object("no object"))
