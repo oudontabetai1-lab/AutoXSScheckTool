@@ -859,6 +859,11 @@ class ScanEngine:
         # A-3: Payload continuous learning
         self.payload_learner = PayloadLearner(learning_file=learning_file)
 
+        # D5/G1/G2: 波状層を横断する試行台帳（(注入点, check) 単位で payload→応答メタを一次データ化）。
+        # baseline LLM 生成へ履歴を戻し（0006 G1）、層間の重複再送を観測可能にする（0007 D5）。
+        from wscan.attempt_ledger import AttemptLedger
+        self.attempt_ledger = AttemptLedger()
+
         # Adaptive AI payload refinement — runs a second pass per field
         # using LLM analysis of the page's filtering behavior
         self.adaptive_engine = AdaptivePayloadEngine(self.payload_gen)
@@ -4264,6 +4269,23 @@ class ScanEngine:
             plan_payloads = field_plan.custom_payloads.get(check_name, []) if field_plan else []
             defaults = self.payload_gen.default_payloads.get(check_name, [])
             tried = plan_payloads + [p for p in defaults if p not in plan_payloads]
+            # G3/D5: 再構成した静的 list だけでなく、試行台帳に実際に記録された payload
+            # （evolution/mutation wave 由来を含む）を先頭に加える。これで adaptive(LLM) が
+            # 「本当に送った変種」を観測でき、既に弾かれた形の再提案を避けられる。壊れても
+            # 従来の静的 tried に安全側フォールバック。
+            try:
+                _ledger = getattr(self, "attempt_ledger", None)
+                if _ledger is not None:
+                    _seen = set(tried)
+                    _real = [
+                        a.payload
+                        for a in _ledger.history(ip.stable_key_parts(), check_name)
+                        if a.payload and a.payload not in _seen
+                    ]
+                    if _real:
+                        tried = _real + tried
+            except Exception:
+                pass
 
             # Ask LLM for bypass payloads (include detected WAF for targeted evasion)
             adaptive_payloads, generation_status = await self.adaptive_engine.generate(

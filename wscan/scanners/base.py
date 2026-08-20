@@ -489,14 +489,35 @@ class BaseScanner(ABC):
         if ip.location == "json_body":
             if not self.SUPPORTS_JSON_BODY:
                 return "", {}
-            return await self._apply_json_payload(ip, payload)
-        return await self._apply_payload(
-            ip.url,
-            ip.form_index,
-            ip.parameter_id,
-            payload,
-            ip.legacy_is_url_param(),
-        )
+            source, pair = await self._apply_json_payload(ip, payload)
+        else:
+            source, pair = await self._apply_payload(
+                ip.url,
+                ip.form_index,
+                ip.parameter_id,
+                payload,
+                ip.legacy_is_url_param(),
+            )
+        # D5/G2: 波状層横断の試行台帳へ応答メタを記録する。判定には関与せず、観測の
+        # 記録のみ（例外は絶対に scan を止めない＝加算的・安全側）。
+        self._record_attempt(ip, payload, source, pair)
+        return source, pair
+
+    def _record_attempt(self, ip: "InjectionPoint", payload, source: str, pair: dict) -> None:
+        """(注入点, check) 単位で payload→応答メタを試行台帳へ蓄積する（best-effort）。"""
+        ledger = getattr(getattr(self, "engine", None), "attempt_ledger", None)
+        if ledger is None:
+            return
+        try:
+            from wscan.attempt_ledger import attempt_from_pair
+            ledger.record(
+                ip.stable_key_parts(),
+                self.CHECK_TYPE,
+                attempt_from_pair(payload, source, pair),
+            )
+        except Exception:
+            # 観測の記録失敗で本来のスキャンを壊さない。
+            pass
 
     def _verify_injection_point(
         self,
@@ -594,8 +615,17 @@ class BaseScanner(ABC):
         if monitor:
             await monitor.emit_payload_test(field_name, payload, check_type, url)
 
-    async def get_payloads(self, field_name: str, url: str) -> list[str]:
-        """Get payloads for this scanner's check type, sorted by learning data."""
+    async def get_payloads(
+        self,
+        field_name: str,
+        url: str,
+        ip: "Optional[InjectionPoint]" = None,
+    ) -> list[str]:
+        """Get payloads for this scanner's check type, sorted by learning data.
+
+        ``ip`` を渡すと、その (注入点, check) の試行台帳（過去 payload→応答メタ）を
+        baseline 生成プロンプトへ供給する（0006 G1）。未指定なら従来どおり履歴なし。
+        """
         # Check per-task ContextVar override first (set by engine for parallel isolation),
         # fall back to the engine-level custom_payloads dict.
         from wscan.engine import _FIELD_PAYLOAD_OVERRIDES
@@ -605,11 +635,21 @@ class BaseScanner(ABC):
             if _overrides
             else self.engine.custom_payloads.get(self.CHECK_TYPE)
         )
+        # G1: 試行台帳から当該注入点の履歴を取り出し、生成へ戻す（evaluator-optimizer）。
+        attempt_history = None
+        if ip is not None:
+            ledger = getattr(getattr(self, "engine", None), "attempt_ledger", None)
+            if ledger is not None:
+                try:
+                    attempt_history = ledger.history(ip.stable_key_parts(), self.CHECK_TYPE)
+                except Exception:
+                    attempt_history = None
         payloads = await self.payload_gen.generate(
             check_type=self.CHECK_TYPE,
             field_name=field_name,
             url=url,
             custom_payloads=_custom,
+            attempt_history=attempt_history,
         )
         # A-3 / ⑩: re-order by historical success rate (domain-aware)
         learner = getattr(self.engine, "payload_learner", None)

@@ -1,0 +1,126 @@
+"""波状層を横断する「試行台帳」— (InjectionPoint, check) 単位の一次データ。
+
+default → evolution → mutation → adaptive の各波が同じ注入点へ投げた payload と
+その応答メタ（status/len/reflected/timing/error）を1箇所へ蓄積する。層内 dedup しか
+持たなかった従来（0007-D5）を横断台帳へ引き上げ、baseline LLM 生成のステートレス性
+（0006-G1）と応答の捨て置き（0006-G2）を解消する共通基盤。
+
+判定ロジックではなく**観測の記録**に徹する純粋データ構造（CLAUDE.md: 判定は決定論
+スキャナが握る／検出ロジックは純粋関数に分離）。プロンプト整形も純粋関数に切り出し、
+ブラウザ非依存でテストできる。
+"""
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Optional
+
+
+# 1 注入点×1 check あたりの保持上限（長時間スキャンのメモリ有界化）。
+_MAX_ATTEMPTS_PER_KEY = 40
+
+
+@dataclass(frozen=True)
+class Attempt:
+    """1 回の payload 投入とその応答メタ。"""
+
+    payload: str
+    status: Optional[int] = None      # HTTP status（取得不能は None）
+    body_len: Optional[int] = None    # 応答本文長（transport 失敗は None）
+    reflected: bool = False           # payload 文字列が応答本文に現れたか
+    error: bool = False               # transport が失敗した（空 pair）
+    elapsed: Optional[float] = None    # 応答所要秒（計測不能は None）
+
+
+def attempt_from_pair(payload, source: str, pair: dict) -> Attempt:
+    """`_apply_ip` の返り値 (source, pair) から Attempt を組み立てる純粋関数。
+
+    - transport 失敗（空 pair）は error=True・status/len を None のままにする
+      （「エラーした攻撃」と「何も起きなかった攻撃」を区別＝CLAUDE.md 原則7）。
+    - reflected は「payload 文字列が本文に現れたか」の安価な観測のみ。反射 vs 実行の
+      厳密判定はスキャナ側が握るため、ここでは grounding 用ヒントに留める。
+    """
+    payload_str = "" if payload is None else str(payload)
+    resp = (pair or {}).get("response") or {}
+    has_pair = bool(pair) and bool(resp)
+
+    status = resp.get("status") if has_pair else None
+    body = source or ""
+    body_len = len(body) if has_pair else None
+    reflected = bool(payload_str) and payload_str in body
+    elapsed = _elapsed_from_pair(pair) if has_pair else None
+    return Attempt(
+        payload=payload_str,
+        status=status if isinstance(status, int) else None,
+        body_len=body_len,
+        reflected=reflected,
+        error=not has_pair,
+        elapsed=elapsed,
+    )
+
+
+def _elapsed_from_pair(pair: dict) -> Optional[float]:
+    """pair のタイムスタンプ差から所要秒を求める（base.response_elapsed と同一定義）。"""
+    req = (pair or {}).get("request") or {}
+    resp = (pair or {}).get("response") or {}
+    req_ts = req.get("timestamp", 0)
+    resp_ts = resp.get("timestamp", 0)
+    if req_ts and resp_ts:
+        return resp_ts - req_ts
+    return None
+
+
+class AttemptLedger:
+    """`(stable_key_parts, check_type)` 単位で Attempt 列を蓄積する。"""
+
+    def __init__(self, max_per_key: int = _MAX_ATTEMPTS_PER_KEY):
+        self._store: dict[tuple, list[Attempt]] = {}
+        self._max_per_key = max(1, int(max_per_key))
+
+    @staticmethod
+    def _key(ip_key: tuple, check_type: str) -> tuple:
+        return (tuple(ip_key), str(check_type))
+
+    def record(self, ip_key: tuple, check_type: str, attempt: Attempt) -> None:
+        """1 件の Attempt を追加する（上限超過時は最古を捨てる）。"""
+        key = self._key(ip_key, check_type)
+        bucket = self._store.setdefault(key, [])
+        bucket.append(attempt)
+        if len(bucket) > self._max_per_key:
+            del bucket[: len(bucket) - self._max_per_key]
+
+    def history(self, ip_key: tuple, check_type: str) -> list[Attempt]:
+        """当該 (注入点, check) の試行履歴（時系列）を返す。無ければ空。"""
+        return list(self._store.get(self._key(ip_key, check_type), []))
+
+
+def format_history_for_prompt(attempts: list[Attempt], max_items: int = 12) -> str:
+    """試行履歴を LLM プロンプト用の簡潔な観測ブロックへ整形する純粋関数。
+
+    直近 `max_items` 件のみを載せ（attention budget）、payload と結果の対応を1行ずつ
+    要約する。空なら空文字を返す（呼び出し側は「壊れたら安全側」を維持できる）。
+    """
+    if not attempts:
+        return ""
+    recent = attempts[-max_items:]
+    lines = []
+    for a in recent:
+        parts = []
+        if a.error:
+            parts.append("transport-error")
+        else:
+            if a.status is not None:
+                parts.append(f"status={a.status}")
+            if a.body_len is not None:
+                parts.append(f"len={a.body_len}")
+            parts.append("reflected" if a.reflected else "not-reflected")
+            if a.elapsed is not None:
+                parts.append(f"{a.elapsed:.1f}s")
+        result = ", ".join(parts) if parts else "no-response"
+        payload = a.payload if len(a.payload) <= 120 else a.payload[:117] + "..."
+        lines.append(f"- `{payload}` -> {result}")
+    header = (
+        "PREVIOUSLY TRIED payloads on this exact field and their results "
+        "(do NOT repeat these verbatim; learn from what was blocked/reflected/errored "
+        "and craft different, more targeted bypasses):"
+    )
+    return header + "\n" + "\n".join(lines)
