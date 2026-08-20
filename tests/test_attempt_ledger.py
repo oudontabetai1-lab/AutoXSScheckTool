@@ -333,6 +333,26 @@ class GetPayloadsHistoryTests(unittest.IsolatedAsyncioTestCase):
         hist_b = engine.payload_gen.captured_history
         assert any(a.payload == "<b-secret>" for a in hist_b)
 
+    async def test_record_form_url_attempt_threads_target_origin(self):
+        """直送 probe 記録（_record_form_url_attempt）が target_origin を台帳キーへ反映する（F8）。
+
+        cross-origin form の equivalence probe 履歴が origin 別読み出しに現れることを固定。"""
+        engine = _GenEngine()
+        scanner = _PlainScanner(engine)
+        ip_b = InjectionPoint.for_form("http://a.test/p", "q", target_origin="http://b.test")
+        pair = {"request": {}, "response": {"status": 200, "body": "x"}}
+        scanner._record_form_url_attempt(
+            "http://a.test/p", 0, "q", False, "<probe>", "x", pair,
+            target_origin="http://b.test",
+        )
+        # origin B の台帳キーで履歴が取れる。
+        hist_b = engine.attempt_ledger.history(ip_b.ledger_key_parts(), "xss")
+        assert any(a.payload == "<probe>" for a in hist_b)
+        # legacy(origin無し)キーには入っていない＝別 origin へ漏れない。
+        ip_legacy = InjectionPoint.for_form("http://a.test/p", "q")
+        hist_legacy = engine.attempt_ledger.history(ip_legacy.ledger_key_parts(), "xss")
+        assert all(a.payload != "<probe>" for a in hist_legacy)
+
     async def test_no_ip_means_no_history(self):
         engine = _GenEngine()
         engine.payload_gen = _CapturingPayloadGen()

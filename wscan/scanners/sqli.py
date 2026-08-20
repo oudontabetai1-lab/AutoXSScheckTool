@@ -459,6 +459,7 @@ class SQLiScanner(BaseScanner):
                 ip.parameter_id,
                 ip.legacy_is_url_param(),
                 context="sql",
+                target_origin=ip.target_origin,
             )
             if probe:
                 verdict, pair = probe
@@ -639,7 +640,8 @@ class SQLiScanner(BaseScanner):
         if etype == "sqli_concat_equivalence":
             # Re-run the concatenation-equivalence probe; injectable again ⇒ verified.
             result = await self.run_equivalence_probe(
-                finding.url, 0, finding.field_name, is_url_param, context="sql"
+                finding.url, 0, finding.field_name, is_url_param, context="sql",
+                target_origin=getattr(finding, "injection_target_origin", ""),
             )
             return result is not None
         return None

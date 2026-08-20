@@ -344,6 +344,7 @@ class XSSScanner(BaseScanner):
                     ip.parameter_id,
                     ip.legacy_is_url_param(),
                     context=ctx,
+                    target_origin=ip.target_origin,
                 )
                 if not probe:
                     continue

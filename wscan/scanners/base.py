@@ -618,16 +618,23 @@ class BaseScanner(ABC):
         payload,
         source: str,
         pair: dict,
+        target_origin: str = "",
     ) -> None:
         """`_apply_ip` を経由しない form/URL 直送（DOMXSS・equivalence probe 等）でも
         試行台帳へ記録するためのヘルパー。座標から注入点キーを組み立てて `_record_attempt`
-        へ委譲し、adaptive が受け取る履歴の欠落を防ぐ（best-effort）。"""
+        へ委譲し、adaptive が受け取る履歴の欠落を防ぐ（best-effort）。
+
+        form の `target_origin` を渡すと台帳キー（ledger_key_parts）が origin 対応になり、
+        cross-origin form の直送 probe 履歴が `_adaptive_attack_field` の origin 別読み出しに
+        現れる（渡さないと legacy キーに落ちて別 origin の履歴から欠落する・F8）。"""
         try:
             from wscan.injection_point import InjectionPoint
             ip = (
                 InjectionPoint.for_url_param(url, field_name)
                 if is_url_param
-                else InjectionPoint.for_form(url, field_name, form_index)
+                else InjectionPoint.for_form(
+                    url, field_name, form_index, target_origin=target_origin
+                )
             )
             self._record_attempt(ip, payload, source, pair)
         except Exception:
@@ -920,6 +927,7 @@ class BaseScanner(ABC):
         is_url_param: bool,
         *,
         context: str = "sql",
+        target_origin: str = "",
     ) -> "Optional[tuple]":
         """文字列結合の等価性プローブを 1 フィールドに対して実行する。
 
@@ -958,7 +966,8 @@ class BaseScanner(ABC):
                 continue
             # `_apply_ip` を通らない直送のため、ここで試行台帳へ記録する。
             self._record_form_url_attempt(
-                url, form_index, field_name, is_url_param, probe.value, source, pair
+                url, form_index, field_name, is_url_param, probe.value, source, pair,
+                target_origin=target_origin,
             )
             pairs[probe.name] = pair or {}
             body = (pair.get("response", {}) or {}).get("body") or source or ""
