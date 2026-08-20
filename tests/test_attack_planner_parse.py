@@ -45,6 +45,20 @@ class ParseLlmResponseTests(unittest.TestCase):
         self.assertIsNotNone(plan)
         self.assertEqual([f.name for f in plan.fields], ["user"])
 
+    def test_malformed_collection_values_do_not_crash(self):
+        # Codex #92 r7: null priority_checks / null custom_payloads / 非数値 form_index/risk_score
+        # でも例外にせず parse し切る（malformed 値耐性）。
+        planner = self._planner()
+        raw = ('{"page_purpose":"x","fields":[{"name":"user","priority_checks":null,'
+               '"custom_payloads":null,"form_index":"nope","risk_score":"high"}]}')
+        plan = planner._parse_llm_response("http://t/login", raw)
+        self.assertIsNotNone(plan)
+        self.assertEqual([f.name for f in plan.fields], ["user"])
+        self.assertEqual(plan.fields[0].form_index, 0)      # 非数値→default
+        self.assertEqual(plan.fields[0].risk_score, 5)      # 非数値→default(範囲内)
+        # priority_checks が null でも heuristic fallback で埋まる
+        self.assertTrue(plan.fields[0].priority_checks)
+
     def test_object_without_fields_list_returns_none(self):
         planner = self._planner()
         raw = 'Note: {"page_purpose":"login"}'

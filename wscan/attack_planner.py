@@ -133,6 +133,14 @@ class PageAttackPlan:
 # Planner
 # ---------------------------------------------------------------------------
 
+def _safe_int(value, default: int) -> int:
+    """LLM 由来の値を安全に int 化する（None/非数値/範囲外文字列は default・#92 r7）。"""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def _is_complete_plan(d) -> bool:
     """LLM 応答 object が完全な attack-plan か（純粋・#92 r4/r5/r6）。
 
@@ -540,24 +548,32 @@ Consider stored / second-order attacks carefully:
             name = str(fd.get("name", ""))
             if not name:
                 continue
-            priority_checks = [
-                c for c in fd.get("priority_checks", [])
-                if c in self.enabled_checks
-            ]
+            # collection-valued メンバは **malformed 値耐性** で読む（#92 r7）。LLM は
+            # priority_checks:null / custom_payloads:null / 非 list を返しうる。dict.get の
+            # default は「キー欠落時のみ」効き値が None のときは None を返すため、型を明示
+            # 検査して None/非コレクションは空扱いにする。1 フィールドの型崩れで analyze_page
+            # を突き抜け heuristic fallback を失わないための防御。
+            raw_checks = fd.get("priority_checks")
+            priority_checks = (
+                [c for c in raw_checks if c in self.enabled_checks]
+                if isinstance(raw_checks, list) else []
+            )
             # Fallback: if LLM gave no valid checks, use heuristic
             if not priority_checks:
                 priority_checks = self._heuristic_checks_for(name)
 
             custom_payloads = {}
-            for check_type, payloads in fd.get("custom_payloads", {}).items():
-                if check_type in self.enabled_checks and isinstance(payloads, list):
-                    custom_payloads[check_type] = [str(p) for p in payloads if p]
+            raw_custom = fd.get("custom_payloads")
+            if isinstance(raw_custom, dict):
+                for check_type, payloads in raw_custom.items():
+                    if check_type in self.enabled_checks and isinstance(payloads, list):
+                        custom_payloads[check_type] = [str(p) for p in payloads if p]
 
             field_plans.append(FieldAttackPlan(
                 name=name,
-                form_index=int(fd.get("form_index") or 0),
+                form_index=_safe_int(fd.get("form_index"), 0),
                 is_url_param=bool(fd.get("is_url_param", False)),
-                risk_score=max(1, min(10, int(fd.get("risk_score") or 5))),
+                risk_score=max(1, min(10, _safe_int(fd.get("risk_score"), 5))),
                 priority_checks=priority_checks,
                 rationale=str(fd.get("rationale", "")),
                 custom_payloads=custom_payloads,
