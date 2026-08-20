@@ -102,10 +102,12 @@ def _iter_balanced_pos(text: str, opener: str, closer: str) -> Iterator[tuple]:
                     break
         if end >= 0:
             yield i, text[i : end + 1]
-            i = end + 1
-        else:
-            # この opener からは閉じられない。次の opener から復帰する。
-            i += 1
+        # 閉じた外側チャンクが json.loads で無効でも、内側に有効な入れ子候補
+        # （`Use [ ... ["payload"] ... ]` の内側配列）があり得るため、end の先へ
+        # 飛ばさず**次の opener へ +1 前進**して内側も候補に出す（#92 r8）。閉じない
+        # 場合も同様に次の opener から復帰する。消費側は最初に json.loads 成功した
+        # 候補を採るので、外側が有効ならそれが先に採られる（大きい方優先は保たれる）。
+        i += 1
 
 
 def _iter_balanced(text: str, opener: str, closer: str) -> Iterator[str]:

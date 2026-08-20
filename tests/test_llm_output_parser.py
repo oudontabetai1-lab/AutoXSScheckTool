@@ -83,6 +83,15 @@ class ArrayExtractionTests(unittest.TestCase):
         text = 'Consider { as an example, then: {"fields": ["x"]}'
         self.assertEqual(extract_json_object(text), {"fields": ["x"]})
 
+    def test_recovers_inner_array_when_outer_chunk_invalid(self):
+        # Codex #92 r8: 閉じるが無効な外側チャンクが内側の有効配列を隠さない。
+        text = 'Use [ literally, then return ["payload"] and close ]'
+        self.assertEqual(extract_json_array_of_strings(text), ["payload"])
+
+    def test_prefers_valid_outer_when_outer_is_valid(self):
+        # 外側が有効なら大きい方（外側）が先に採られる（順序保持）。
+        self.assertEqual(extract_json_array_of_strings('["a", "b"]'), ["a", "b"])
+
     def test_stray_prose_quote_before_array(self):
         # Codex #92 指摘2: prose 中の孤立クオートで有効な配列を取り逃さない。
         text = 'Use a literal " here:\n["a", "b"]'
