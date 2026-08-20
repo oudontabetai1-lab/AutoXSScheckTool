@@ -50,6 +50,15 @@ def _iter_balanced(text: str, opener: str, closer: str) -> Iterator[str]:
     in_str = False
     escaped = False
     for i, ch in enumerate(text):
+        # 候補（opener）開始前は文字列追跡をしない。prose 中の孤立した `"` で string
+        # mode に入り、後続の opener を握りつぶして有効な JSON を取り逃す事故を防ぐ。
+        if depth == 0:
+            if ch == opener:
+                depth = 1
+                start = i
+                in_str = False
+                escaped = False
+            continue
         if in_str:
             if escaped:
                 escaped = False
@@ -62,10 +71,8 @@ def _iter_balanced(text: str, opener: str, closer: str) -> Iterator[str]:
             in_str = True
             continue
         if ch == opener:
-            if depth == 0:
-                start = i
             depth += 1
-        elif ch == closer and depth > 0:
+        elif ch == closer:
             depth -= 1
             if depth == 0 and start >= 0:
                 yield text[start : i + 1]
@@ -73,9 +80,21 @@ def _iter_balanced(text: str, opener: str, closer: str) -> Iterator[str]:
 
 
 def _candidates(text: str, opener: str, closer: str) -> Iterator[str]:
-    """直接パース→sanitize後の平衡スキャンの順に候補を出す。"""
+    """候補を「壊しにくい順」に出す。
+
+    1. 直接パース（そのまま）
+    2. コードフェンス除去のみで平衡スキャン（**reasoning は除去しない**）
+    3. 最後の手段として reasoning(`<think>`) も除去して平衡スキャン
+
+    reasoning 除去を最後に回すのは、payload 文字列内に正規の `<think ...>` を含む攻撃
+    （例 `["<think onmouseover=alert(1)>x</think>"]`）を、reasoning とみなして握りつぶす
+    事故を避けるため。2 で無傷の候補が取れればそれを採用し、3 は本当に外側が推論ブロックの
+    ときだけ効く。各候補は json.loads を通すので誤採用は起きない。
+    """
     if text:
         yield text.strip()
+    for chunk in _iter_balanced(strip_code_fences(text), opener, closer):
+        yield chunk
     cleaned = strip_code_fences(strip_reasoning(text))
     for chunk in _iter_balanced(cleaned, opener, closer):
         yield chunk

@@ -65,6 +65,20 @@ class ArrayExtractionTests(unittest.TestCase):
         # 数値配列は payload list でない＝採らない（安全側）
         self.assertIsNone(extract_json_array_of_strings("[1, 2, 3]"))
 
+    def test_think_inside_payload_preserved_with_prose_prefix(self):
+        # Codex #92 指摘1: prose前置き付きで payload 文字列内に <think> を含む攻撃を
+        # reasoning とみなして [" "] に破壊しない。
+        text = 'Here are payloads:\n["<think onmouseover=alert(1)>x</think>"]'
+        self.assertEqual(
+            extract_json_array_of_strings(text),
+            ["<think onmouseover=alert(1)>x</think>"],
+        )
+
+    def test_stray_prose_quote_before_array(self):
+        # Codex #92 指摘2: prose 中の孤立クオートで有効な配列を取り逃さない。
+        text = 'Use a literal " here:\n["a", "b"]'
+        self.assertEqual(extract_json_array_of_strings(text), ["a", "b"])
+
     def test_broken_returns_none(self):
         self.assertIsNone(extract_json_array_of_strings("no json here at all"))
         self.assertIsNone(extract_json_array_of_strings("[unterminated"))
@@ -95,6 +109,11 @@ class ObjectExtractionTests(unittest.TestCase):
     def test_trailing_prose_after_object(self):
         text = '{"a": {"b": 1}} and that is the answer.'
         self.assertEqual(extract_json_object(text), {"a": {"b": 1}})
+
+    def test_stray_prose_quote_before_object(self):
+        # 指摘2 の object 版: 前置き prose の孤立クオートに影響されない。
+        text = 'Say " to me:\n{"page_purpose": "login"}'
+        self.assertEqual(extract_json_object(text), {"page_purpose": "login"})
 
     def test_broken_returns_none(self):
         self.assertIsNone(extract_json_object("no object"))
