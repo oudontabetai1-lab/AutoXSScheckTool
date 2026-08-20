@@ -32,6 +32,16 @@ def test_origin_key_variants():
     assert origin_key("http://example.com:bad/?q=x") is None
 
 
+def test_origin_key_normalizes_default_ports():
+    # デフォルトポートは省いて同一 origin を1つのキーにする（R12）。
+    assert origin_key("https://example.com:443/path") == "https://example.com"
+    assert origin_key("https://example.com/path") == "https://example.com"
+    assert origin_key("http://example.com:80/x") == "http://example.com"
+    # 非デフォルトポートは保持する。
+    assert origin_key("https://example.com:8443/x") == "https://example.com:8443"
+    assert origin_key("http://example.com:80/x") == origin_key("http://example.com/x")
+
+
 def test_prompt_carries_untrusted_data_guard():
     rows = [{"payload": "<x>", "hits": 2, "tries": 2, "rate": 1.0}]
     block = format_learning_for_prompt(rows)

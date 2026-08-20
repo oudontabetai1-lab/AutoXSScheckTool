@@ -64,6 +64,12 @@ def origin_key(url: str) -> Optional[str]:
         return None
     if not scheme or not host:
         return None
+    # scheme のデフォルトポート（http=80 / https=443 / ws=80 / wss=443）は省く。
+    # https://h:443 と https://h はブラウザ的に同一 origin なのに別キーになると、片方で記録した
+    # 学習がもう片方のスキャンで引けず domain 別重み付けも失われる（R12）。
+    _DEFAULT_PORTS = {"http": 80, "https": 443, "ws": 80, "wss": 443}
+    if port is not None and _DEFAULT_PORTS.get(scheme.lower()) == port:
+        port = None
     if ":" in host:  # IPv6 リテラルは角括弧で包む
         host = f"[{host}]"
     netloc = host if port is None else f"{host}:{port}"
