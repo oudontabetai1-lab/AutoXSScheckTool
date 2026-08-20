@@ -496,13 +496,11 @@ Consider stored / second-order attacks carefully:
 
     def _parse_llm_response(self, url: str, raw: str) -> Optional[PageAttackPlan]:
         """Parse the LLM's JSON response into a PageAttackPlan."""
-        # Extract the first JSON object from the response
-        match = re.search(r'\{.*\}', raw, re.DOTALL)
-        if not match:
-            return None
-        try:
-            data = json.loads(match.group())
-        except json.JSONDecodeError:
+        # D7: フォールバック連鎖で JSON オブジェクトを頑健に抽出（`<think>`/フェンス/
+        # 前置き/貪欲マッチの取りこぼしを解消）。壊れたら None＝ヒューリスティックへ安全側。
+        from .llm_output_parser import extract_json_object
+        data = extract_json_object(raw)
+        if data is None:
             return None
 
         page_purpose = data.get("page_purpose", "unknown")

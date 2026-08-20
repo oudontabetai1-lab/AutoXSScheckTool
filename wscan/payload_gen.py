@@ -173,16 +173,14 @@ class PayloadGenerator:
     # ------------------------------------------------------------------
 
     def _extract_json_list(self, text: str) -> Optional[list[str]]:
-        """Extract a JSON array from LLM response text."""
-        match = re.search(r'\[.*?\]', text, re.DOTALL)
-        if match:
-            try:
-                data = json.loads(match.group())
-                if isinstance(data, list) and all(isinstance(x, str) for x in data):
-                    return data
-            except json.JSONDecodeError:
-                pass
-        return None
+        """Extract a JSON array of strings from LLM response text (D7 頑健版)。
+
+        素朴な非貪欲 regex は配列内 `]`／前置き／コードフェンス／`<think>` で途中終了し、
+        良質 payload を取りこぼしていた。フォールバック連鎖の純粋関数へ委譲する。
+        壊れたら None＝呼び出し側は既定 payload へ安全側フォールバック。
+        """
+        from .llm_output_parser import extract_json_array_of_strings
+        return extract_json_array_of_strings(text)
 
     # ------------------------------------------------------------------
     # Public API
