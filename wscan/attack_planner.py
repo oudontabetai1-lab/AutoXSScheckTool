@@ -133,6 +133,30 @@ class PageAttackPlan:
 # Planner
 # ---------------------------------------------------------------------------
 
+def _safe_int(value, default: int) -> int:
+    """LLM 由来の値を安全に int 化する（None/非数値/範囲外文字列は default・#92 r7）。"""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _is_complete_plan(d) -> bool:
+    """LLM 応答 object が完全な attack-plan か（純粋・#92 r4/r5/r6）。
+
+    list 値の fields を持ち、その中に **dict でかつ非空 name を持つ要素が最低 1 つ** ある
+    ことを要求する。page_purpose だけの metadata・空 fields 下書き・文字列要素だけの
+    `{"fields":["username"]}` を plan と誤認せず、本物か heuristic fallback を採らせる。
+    """
+    fields = d.get("fields")
+    if not isinstance(fields, list):
+        return False
+    return any(
+        isinstance(f, dict) and str(f.get("name", "")).strip()
+        for f in fields
+    )
+
+
 class AttackPlanner:
     """
     Analyses a page and produces a PageAttackPlan.
@@ -496,40 +520,60 @@ Consider stored / second-order attacks carefully:
 
     def _parse_llm_response(self, url: str, raw: str) -> Optional[PageAttackPlan]:
         """Parse the LLM's JSON response into a PageAttackPlan."""
-        # Extract the first JSON object from the response
-        match = re.search(r'\{.*\}', raw, re.DOTALL)
-        if not match:
-            return None
-        try:
-            data = json.loads(match.group())
-        except json.JSONDecodeError:
+        # D7: フォールバック連鎖で JSON オブジェクトを頑健に抽出（`<think>`/フェンス/
+        # 前置き/貪欲マッチの取りこぼしを解消）。前置きに無関係な object があっても、
+        # **attack-plan スキーマ（fields/page_purpose を持つ）** に合う候補まで探索する。
+        # 合致無し/壊れは None＝ヒューリスティックへ安全側フォールバック。
+        from .llm_output_parser import extract_json_object
+        # 完全な plan スキーマ（**非空** list 値の fields を持つ）を要求する。page_purpose
+        # だけの前置き metadata や、下書きの zero-field object（{"fields":[]}）を採用して
+        # heuristic を握りつぶさないため（Codex #92 r4/r5）。_llm_plan は入力ゼロなら
+        # _parse 前に return するので、このパスでは有効 plan は必ず 1 つ以上の field を持つ。
+        # 空 fields なら候補探索を続け、無ければ None＝heuristic fallback。
+        data = extract_json_object(
+            raw,
+            predicate=lambda d: _is_complete_plan(d),
+        )
+        if data is None:
             return None
 
         page_purpose = data.get("page_purpose", "unknown")
         field_plans: list[FieldAttackPlan] = []
 
         for fd in data.get("fields", []):
+            # 非 dict 要素（{"fields":["username"]} のような文字列）は skip する。
+            # predicate ですり抜けても fd.get(...) の AttributeError を出さない防御（#92 r6）。
+            if not isinstance(fd, dict):
+                continue
             name = str(fd.get("name", ""))
             if not name:
                 continue
-            priority_checks = [
-                c for c in fd.get("priority_checks", [])
-                if c in self.enabled_checks
-            ]
+            # collection-valued メンバは **malformed 値耐性** で読む（#92 r7）。LLM は
+            # priority_checks:null / custom_payloads:null / 非 list を返しうる。dict.get の
+            # default は「キー欠落時のみ」効き値が None のときは None を返すため、型を明示
+            # 検査して None/非コレクションは空扱いにする。1 フィールドの型崩れで analyze_page
+            # を突き抜け heuristic fallback を失わないための防御。
+            raw_checks = fd.get("priority_checks")
+            priority_checks = (
+                [c for c in raw_checks if c in self.enabled_checks]
+                if isinstance(raw_checks, list) else []
+            )
             # Fallback: if LLM gave no valid checks, use heuristic
             if not priority_checks:
                 priority_checks = self._heuristic_checks_for(name)
 
             custom_payloads = {}
-            for check_type, payloads in fd.get("custom_payloads", {}).items():
-                if check_type in self.enabled_checks and isinstance(payloads, list):
-                    custom_payloads[check_type] = [str(p) for p in payloads if p]
+            raw_custom = fd.get("custom_payloads")
+            if isinstance(raw_custom, dict):
+                for check_type, payloads in raw_custom.items():
+                    if check_type in self.enabled_checks and isinstance(payloads, list):
+                        custom_payloads[check_type] = [str(p) for p in payloads if p]
 
             field_plans.append(FieldAttackPlan(
                 name=name,
-                form_index=int(fd.get("form_index") or 0),
+                form_index=_safe_int(fd.get("form_index"), 0),
                 is_url_param=bool(fd.get("is_url_param", False)),
-                risk_score=max(1, min(10, int(fd.get("risk_score") or 5))),
+                risk_score=max(1, min(10, _safe_int(fd.get("risk_score"), 5))),
                 priority_checks=priority_checks,
                 rationale=str(fd.get("rationale", "")),
                 custom_payloads=custom_payloads,
