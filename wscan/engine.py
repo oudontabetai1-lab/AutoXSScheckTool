@@ -561,6 +561,9 @@ class ScanEngine:
         self.api_seed_requests: list = []
         # JSON body の実値を含み得るため、永続化しないメモリ内レジストリ。
         self.injection_templates: dict[str, dict] = {}
+        # form action の送信先 origin。注入点の URL はページ URL のまま保ち、学習キーだけを
+        # 実送信先へ分離する（checkpoint の stable key 互換性は変えない）。
+        self._form_target_origins: dict[tuple[str, int], str] = {}
         # API スペック由来 URL の集合（GraphQL の具体 URL probe を API/GraphQL 系のみへ
         # 限定するために参照。全クロールページへ probe を撒かないためのゲート）。
         self.api_seed_urls: set = set()
@@ -1414,7 +1417,30 @@ class ScanEngine:
         """従来 form/URL parameter から InjectionPoint を一意に生成する。"""
         if is_url_param:
             return InjectionPoint.for_url_param(url, field_name)
-        return InjectionPoint.for_form(url, field_name, form_index)
+        target = getattr(self, "_form_target_origins", {}).get(
+            (url.rstrip("/"), form_index), ""
+        )
+        return InjectionPoint.for_form(
+            url,
+            field_name,
+            form_index,
+            target_origin=target,
+        )
+
+    def _register_form_target_origins(self, page: CrawledPage) -> None:
+        """ページ上の各 form を実送信先 origin と対応付ける。"""
+        normalized_url = page.url.rstrip("/")
+        # 同じ URL を再クロールした場合、消えた form や解決不能になった action の古い値を
+        # 残さない。origin_key が失敗した form は未登録にしてページ origin へフォールバックする。
+        stale_keys = [
+            key for key in self._form_target_origins if key[0] == normalized_url
+        ]
+        for key in stale_keys:
+            del self._form_target_origins[key]
+        for form_index, form in enumerate(page.forms):
+            target = origin_key(self._form_action_url(form, page.url))
+            if target is not None:
+                self._form_target_origins[(normalized_url, form_index)] = target
 
     def _checkpoint_is_done_ip(self, ip, check: str) -> bool:
         if not self.enable_checkpoint or self.checkpoint is None:
@@ -2689,6 +2715,9 @@ class ScanEngine:
         """Build per-page attack plans with cross-page awareness, then confirm with user."""
         console.print(Rule("[bold cyan] Phase 2 / 4  ·  Attack Planning [/bold cyan]", style="cyan"))
 
+        for page in pages:
+            self._register_form_target_origins(page)
+
         plans: dict = {}
 
         if not self.use_planner:
@@ -3723,6 +3752,8 @@ class ScanEngine:
         Uses ``self.browser`` which transparently returns the worker's browser
         when called from inside a concurrent worker task.
         """
+        # login seed 等、plan を経ず直接攻撃されるページも含めて全 form を登録する。
+        self._register_form_target_origins(page)
         # ── セッション失効チェック（全検査の前に一度）────────────────────
         # 長時間スキャンでセッションが切れると以降が全てログイン画面/401 に化け、
         # 検出力が静かにゼロになる。ページ単位検査（graphql/cache/proto/mass 等）も
@@ -4652,13 +4683,10 @@ class ScanEngine:
             f"    [bold red][FINDING][/bold red] {label}{loc} — {f.evidence[:80]}"
         )
         if f.payload and self.enable_payload_learning:
-            # 記録の鍵は finding 自身の url の origin（scheme://host[:port]・primary target_url
-            # ではない）。マルチオリジンスキャン（target_urls）で origin B の finding を primary
-            # バケツへ入れると、B 固有のトークン/コールバックを含む payload が origin A の
-            # プロンプトへ漏れ、統計が誤ターゲットを誘導する。host だけだと同一ホスト別
-            # scheme/port を取り違える。origin_key は userinfo を除外するので、埋め込み資格情報
-            # を永続学習ファイルへ書かない。参照側（base.get_payloads）も同じ origin_key で揃える。
-            _domain = origin_key(f.url)
+            # form は実送信先 action の origin を優先し、参照側（base.get_payloads の
+            # InjectionPoint.target_origin）と同じ文字列へ記録する。旧 Finding や URL parameter
+            # 等は従来どおり finding.url の origin へフォールバックする。
+            _domain = f.injection_target_origin or origin_key(f.url)
             self.payload_learner.record(f.check_type, f.payload, success=True, domain=_domain)
         if self.flag_finder:
             self._check_page_for_flags(f.evidence, f.url)

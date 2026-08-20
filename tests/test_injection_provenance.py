@@ -126,7 +126,11 @@ class FindingInjectionProvenanceTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_record_finding_stamps_form_without_pointer_or_method(self):
         scanner = _Scanner(_Engine())
-        ip = InjectionPoint.for_form("http://h/form", "email")
+        ip = InjectionPoint.for_form(
+            "http://h/form",
+            "email",
+            target_origin="http://action.test",
+        )
         finding = await scanner.record_finding(
             "http://h/form",
             "email",
@@ -139,6 +143,7 @@ class FindingInjectionProvenanceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(finding.injection_location, "form")
         self.assertEqual(finding.injection_pointer, "")
         self.assertEqual(finding.injection_method, "")
+        self.assertEqual(finding.injection_target_origin, "http://action.test")
 
     async def test_record_finding_stamps_json_body(self):
         scanner = _Scanner(_Engine())

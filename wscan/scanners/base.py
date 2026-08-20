@@ -320,6 +320,7 @@ class Finding:
     injection_method: str = ""         # JSON body 送信時の HTTP メソッド
     injection_template_id: str = ""    # 秘匿値を持たないテンプレート識別子
     injection_form_index: int = 0       # form 注入点の index（段階5b で記録）
+    injection_target_origin: str = ""   # form action の送信先 origin（学習キー）
     # reproduced | assumed | unreproduced | skipped。既定は None sentinel で、__post_init__ が
     # 「新規 finding は必ず非空 state」を保証する（空文字は from_dict の旧 Finding 専用に予約）。
     verification_state: str = None
@@ -374,6 +375,7 @@ class Finding:
             injection_method=data.get("injection_method", ""),
             injection_template_id=data.get("injection_template_id", ""),
             injection_form_index=int(data.get("injection_form_index", 0) or 0),
+            injection_target_origin=data.get("injection_target_origin", ""),
         )
 
     @property
@@ -425,6 +427,7 @@ class Finding:
             "injection_method": self.injection_method,
             "injection_template_id": self.injection_template_id,
             "injection_form_index": self.injection_form_index,
+            "injection_target_origin": self.injection_target_origin,
             "compliance_refs": get_refs(self.check_type),
         }
 
@@ -755,14 +758,15 @@ class BaseScanner(ABC):
         learning_summary_provider = None
         if _learning_on:
             from wscan.payload_learning import origin_key
-            # 学習の鍵は **いま注入している url の origin（scheme://host[:port]）**（primary
-            # target_url ではない）。マルチオリジンスキャン（engine.target_urls）では origin
-            # ごとに分離しないと、origin B の payload（B 固有のトークン/コールバック含む）が
-            # origin A のプロンプト＝クラウド LLM 送信へ混入し、統計も誤ターゲットを誘導する。
-            # host だけだと同一ホスト別 scheme/port（http://a:3000 と :4000、http と https）を
-            # 取り違える。origin_key は userinfo を除外し、記録側（engine._record_finding）と
-            # 同一キーを使う。
-            _domain = origin_key(url)
+            # form は実送信先 action の origin、それ以外は注入 URL の origin を学習キーにする。
+            # action origin は engine のレジストリで解決済みの値を使い、Finding にも同じ文字列を
+            # 引き継ぐため、記録側（engine._record_finding）との不一致を起こさない。未指定・
+            # 解決失敗時は origin_key(url) へ戻し、従来 Finding/URL parameter の挙動を保つ。
+            _domain = (
+                ip.target_origin
+                if ip is not None and getattr(ip, "target_origin", "")
+                else origin_key(url)
+            )
 
             # 要約構築は **LLM 生成パスに入った時だけ** generate 内で遅延実行する。
             # custom payloads 指定 / provider=none / template 無し / LLM 不在では generate は
@@ -1206,6 +1210,9 @@ class BaseScanner(ABC):
                 injection_point.form_index
                 if injection_point and injection_point.location == "form"
                 else 0
+            ),
+            injection_target_origin=(
+                injection_point.target_origin if injection_point else ""
             ),
         )
         self.findings.append(finding)

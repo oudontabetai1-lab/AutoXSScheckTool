@@ -236,6 +236,7 @@ class InjectionPoint:
     form_index: int = 0
     template_id: str = ""
     source: str = ""
+    target_origin: str = ""
 
     def legacy_is_url_param(self) -> bool:
         """form/url_param のみ bool を返す。json_body は例外（form 経路への暗黙落ちを封じる）。"""
@@ -268,6 +269,7 @@ class InjectionPoint:
         field_name: str,
         form_index: int = 0,
         source: str = "crawl",
+        target_origin: str = "",
     ) -> "InjectionPoint":
         """従来フォーム用の注入点を作る。"""
         return cls(
@@ -277,6 +279,7 @@ class InjectionPoint:
             display_name=field_name,
             form_index=form_index,
             source=source,
+            target_origin=target_origin,
         )
 
     @classmethod

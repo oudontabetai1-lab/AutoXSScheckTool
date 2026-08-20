@@ -345,6 +345,39 @@ class GetPayloadsHistoryTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("<svg onload=b>", summary)
             self.assertNotIn("a-secret", summary)
 
+    async def test_form_learning_summary_uses_action_origin(self):
+        """form はページ origin でなく action origin の学習バケツを参照する。"""
+        import tempfile
+        from wscan.payload_learning import PayloadLearner
+
+        with tempfile.TemporaryDirectory() as d:
+            learner = PayloadLearner(learning_file=f"{d}/learn.json")
+            for _ in range(2):
+                learner.record(
+                    "xss", "<a-only>", success=True, domain="http://a.test"
+                )
+                learner.record(
+                    "xss", "<b-only>", success=True, domain="http://b.test"
+                )
+
+            engine = _GenEngine()
+            engine.payload_gen = _CapturingPayloadGen()
+            engine.payload_learner = learner
+            engine.enable_payload_learning = True
+            scanner = _PlainScanner(engine)
+            ip = InjectionPoint.for_form(
+                "http://a.test/page",
+                "q",
+                target_origin="http://b.test",
+            )
+
+            await scanner.get_payloads("q", ip.url, ip=ip)
+            provider = engine.payload_gen.captured_summary_provider
+            self.assertIsNotNone(provider)
+            summary = provider()
+            self.assertIn("<b-only>", summary)
+            self.assertNotIn("<a-only>", summary)
+
     async def test_learning_summary_distinguishes_scheme_and_port(self):
         """同一ホスト別 port/scheme を別 origin として分離する（host だけでは取り違える）。"""
         import tempfile

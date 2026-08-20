@@ -8,6 +8,20 @@ from wscan.scanners.base import BaseScanner, Finding
 
 
 class InjectionPointLegacyAdapterTests(unittest.TestCase):
+    def test_form_target_origin_does_not_change_stable_key(self):
+        legacy = InjectionPoint.for_form(
+            "http://a.test/form/", "q", 2
+        )
+        cross_origin = InjectionPoint.for_form(
+            "http://a.test/form/",
+            "q",
+            2,
+            target_origin="http://b.test",
+        )
+        self.assertEqual(cross_origin.target_origin, "http://b.test")
+        self.assertEqual(cross_origin.stable_key_parts(), legacy.stable_key_parts())
+        self.assertNotIn("http://b.test", cross_origin.stable_key_parts())
+
     def test_legacy_is_url_param_is_tri_state_safe(self):
         self.assertTrue(
             InjectionPoint.for_url_param("https://example.test/search", "q")
@@ -167,6 +181,16 @@ class FindingRoundTripTests(unittest.TestCase):
         data = self._finding().to_dict()
         data.pop("injection_form_index")
         self.assertEqual(Finding.from_dict(data).injection_form_index, 0)
+
+    def test_injection_target_origin_round_trip_and_legacy_default(self):
+        restored = Finding.from_dict(
+            self._finding(injection_target_origin="http://b.test").to_dict()
+        )
+        self.assertEqual(restored.injection_target_origin, "http://b.test")
+
+        data = self._finding().to_dict()
+        data.pop("injection_target_origin")
+        self.assertEqual(Finding.from_dict(data).injection_target_origin, "")
 
 
 if __name__ == "__main__":
