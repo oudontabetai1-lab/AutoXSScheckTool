@@ -133,6 +133,133 @@ class MergeTemplateHeadersTests(unittest.TestCase):
         out = merge_template_headers({"X-API-Version": "v1"}, {"X-API-Version": "v2"})
         self.assertEqual(out["X-API-Version"], "v2")
 
+    def test_merge_normalizes_template_vs_base_case(self):
+        # 大小違いの同名ヘッダを重複させず、非認証はテンプレ値で単一キーにする（#90 R14）。
+        from wscan.scanners.base import merge_template_headers
+        out = merge_template_headers({"X-API-Version": "v1"}, {"x-api-version": "v2"})
+        vals = [v for k, v in out.items() if k.lower() == "x-api-version"]
+        self.assertEqual(vals, ["v2"])
+
+    def test_merge_dedupes_case_variants_within_base(self):
+        # base 自体が大小違いの同名キーを持っても単一化する（後勝ち・#90 R14）。
+        from wscan.scanners.base import merge_template_headers
+        out = merge_template_headers({"Authorization": "first", "authorization": "last"}, {})
+        vals = [v for k, v in out.items() if k.lower() == "authorization"]
+        self.assertEqual(vals, ["last"])
+
+    def test_api_key_alias_spellings_treated_as_credential(self):
+        # Api-Key/ApiKey（x- 無し綴り）も request_logger の機密集合と同期し、base の実キーを
+        # 観測/テンプレ値で上書きしない・evidence で redact する（#90 R13）。
+        from wscan.scanners.base import (
+            merge_template_headers, _redact_json_evidence_pair,
+        )
+        base = {"Api-Key": "user-real", "ApiKey": "user-real2"}
+        out = merge_template_headers(base, {"Api-Key": "captured", "ApiKey": "captured2"})
+        self.assertEqual(out["Api-Key"], "user-real")
+        self.assertEqual(out["ApiKey"], "user-real2")
+        # evidence redaction も綴り違いを伏せる
+        pair = {"request": {"headers": {"Api-Key": "live", "ApiKey": "live2"}}}
+        red = _redact_json_evidence_pair(pair, "")
+        self.assertEqual(red["request"]["headers"]["Api-Key"], "***")
+        self.assertEqual(red["request"]["headers"]["ApiKey"], "***")
+
+    def test_reflected_credential_header_value_redacted_from_response_body(self):
+        # #90 R21b: reflect された認証ヘッダ値が response body にエコーされても evidence へ
+        # 残さない。ヘッダ dict のマスクだけでなく body 内の値も伏せる。
+        from wscan.scanners.base import _redact_json_evidence_pair
+        pair = {
+            "request": {
+                "headers": {"Authorization": "Bearer SECRET-TOKEN-123"},
+                "post_data": '{"q": "x"}',
+            },
+            "response": {
+                "body": 'echo: Bearer SECRET-TOKEN-123 for /q',
+                "headers": {"Authorization": "Bearer SECRET-TOKEN-123"},
+            },
+        }
+        red = _redact_json_evidence_pair(pair, "/q")
+        self.assertNotIn("SECRET-TOKEN-123", red["response"]["body"])
+        self.assertEqual(red["request"]["headers"]["Authorization"], "***")
+
+    def test_response_issued_credential_redacted_from_response_body(self):
+        # #90 R21e: サーバ発行の機密レスポンスヘッダ値(X-Access-Token)が body にも repeat
+        # されても evidence へ残さない（request 側だけでなく response 側ヘッダも集める）。
+        from wscan.scanners.base import _redact_json_evidence_pair
+        pair = {
+            "request": {"headers": {}, "post_data": '{"q": "x"}'},
+            "response": {
+                "body": 'rotated token: FRESH-ACCESS-9xy for session',
+                "headers": {"X-Access-Token": "FRESH-ACCESS-9xy"},
+            },
+        }
+        red = _redact_json_evidence_pair(pair, "/q")
+        self.assertNotIn("FRESH-ACCESS-9xy", red["response"]["body"])
+        self.assertEqual(red["response"]["headers"]["X-Access-Token"], "***")
+
+    def test_ordinary_short_header_value_not_substring_redacted(self):
+        # #90 R21f: 通常設定ヘッダ（X-Tenant:a 等の短い値）を body から無制限 substring 置換
+        # しない（`database payload`→`d***t***b***se...` の evidence 破壊を防ぐ）。
+        from wscan.scanners.base import _redact_json_evidence_pair
+        pair = {
+            "request": {"headers": {"X-Tenant": "a"}, "post_data": '{"q": "x"}'},
+            "response": {"body": "database payload leaked", "headers": {"X-Tenant": "a"}},
+        }
+        red = _redact_json_evidence_pair(pair, "/q")
+        self.assertEqual(red["response"]["body"], "database payload leaked")  # 無傷
+
+    def test_short_credential_value_not_substring_redacted(self):
+        # 短い credential 値（<8）も body substring には回さない（collateral 回避）。
+        from wscan.scanners.base import _redact_json_evidence_pair
+        pair = {
+            "request": {"headers": {"Authorization": "ab"}, "post_data": '{"q": "x"}'},
+            "response": {"body": "a grab bag of abbreviations", "headers": {}},
+        }
+        red = _redact_json_evidence_pair(pair, "/q")
+        self.assertEqual(red["response"]["body"], "a grab bag of abbreviations")
+
+    def test_set_cookie_value_redacted_from_response_body(self):
+        # #90 R21g: narrow 化で漏れた Set-Cookie（確実な credential）を body 伏字に含める。
+        from wscan.scanners.base import _redact_json_evidence_pair
+        pair = {
+            "request": {"headers": {}, "post_data": '{"q": "x"}'},
+            "response": {
+                "body": 'welcome; sid=SESSIONVALUE-abcdef123456 issued',
+                "headers": {"Set-Cookie": "sid=SESSIONVALUE-abcdef123456; HttpOnly"},
+            },
+        }
+        red = _redact_json_evidence_pair(pair, "/q")
+        self.assertNotIn("SESSIONVALUE-abcdef123456", red["response"]["body"])
+        self.assertEqual(red["response"]["headers"]["Set-Cookie"], "***")
+
+    def test_evidence_redaction_uses_broad_canon_but_merge_uses_narrow(self):
+        # 2 概念を分ける（#90 R13-2）: evidence redaction は broad（静的＋runtime）、
+        # merge の「上書き禁止」は静的な認証情報のみ（runtime redaction ヘッダは含めない）。
+        from wscan.scanners.base import merge_template_headers, _mask_credential_headers
+        from wscan import request_logger
+        request_logger.register_sensitive_headers(["X-Company-Auth", "X-API-Version"])
+        try:
+            # (2) redaction は broad: cookie/set-cookie・x-access-token・runtime 登録すべて伏せる。
+            # cookie は replay 用に harvest template で温存するが（#90 R14）、evidence では必ず redact。
+            masked = _mask_credential_headers({
+                "cookie": "sid=secret", "Set-Cookie": "sid=abc", "X-Access-Token": "t",
+                "X-Company-Auth": "c", "X-API-Version": "v2",
+            })
+            self.assertEqual(masked["cookie"], "***")
+            self.assertEqual(masked["Set-Cookie"], "***")
+            self.assertEqual(masked["X-Access-Token"], "***")
+            self.assertEqual(masked["X-Company-Auth"], "***")
+            self.assertEqual(masked["X-API-Version"], "***")
+            # (1) merge の上書き禁止は静的認証のみ: Authorization は保護、
+            #     runtime 登録の非認証ヘッダ（X-API-Version）はテンプレで上書きできる。
+            out = merge_template_headers(
+                {"Authorization": "Bearer real", "X-API-Version": "v1"},
+                {"Authorization": "Bearer tmpl", "X-API-Version": "v2"},
+            )
+            self.assertEqual(out["Authorization"], "Bearer real")   # 認証は保護
+            self.assertEqual(out["X-API-Version"], "v2")            # 非認証はテンプレ優先
+        finally:
+            request_logger.clear_sensitive_headers()
+
 
 class CachePoisoningTests(unittest.TestCase):
     def test_is_cacheable_public(self):

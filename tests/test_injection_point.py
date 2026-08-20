@@ -5,6 +5,7 @@ from dataclasses import FrozenInstanceError
 from wscan.injection_point import (
     InjectionPoint,
     build_pointer,
+    enumerate_leaf_pointers,
     escape_token,
     parse_pointer,
     pointer_get,
@@ -28,6 +29,35 @@ class JsonPointerTests(unittest.TestCase):
         self.assertEqual(pointer, "/profile/a~1b/tilde~0key/")
         self.assertEqual(parse_pointer(pointer), tokens)
         self.assertEqual(parse_pointer(""), [])
+
+    def test_enumerate_leaf_pointers_nested_arrays_and_escaped_keys(self):
+        doc = {
+            "a": "root",
+            "b": [1, {"c": True}],
+            "a~/b": None,
+            "empty_dict": {},
+            "empty_list": [],
+        }
+        # 幅優先（#90 FN-C）: 浅い葉（/a, /a~0~1b）が深い b の子より先に列挙される。
+        self.assertEqual(
+            enumerate_leaf_pointers(doc),
+            ["/a", "/a~0~1b", "/b/0", "/b/1/c"],
+        )
+        self.assertEqual(enumerate_leaf_pointers(["x", 2]), ["/0", "/1"])
+
+    def test_enumerate_leaf_pointers_caps_depth_and_count(self):
+        doc = {"a": 1, "b": {"c": 2, "d": 3}, "e": 4}
+        self.assertEqual(
+            enumerate_leaf_pointers(doc, max_depth=1),
+            ["/a", "/e"],
+        )
+        # 幅優先（#90 FN-C）: cap=2 でも浅い /a と /e を確保（DFS だと b の子 /b/c で埋まり /e を飢餓）。
+        self.assertEqual(
+            enumerate_leaf_pointers(doc, max_pointers=2),
+            ["/a", "/e"],
+        )
+        self.assertEqual(enumerate_leaf_pointers({}, max_pointers=2), [])
+        self.assertEqual(enumerate_leaf_pointers([], max_pointers=2), [])
 
     def test_pointer_get_dict_array_and_nested(self):
         doc = {"profile": {"email": "a@example.test"}, "items": [{"id": 7}]}

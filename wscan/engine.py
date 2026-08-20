@@ -530,6 +530,10 @@ class ScanEngine:
         self.spa_crawl = spa_crawl
         # SPA harvest のページ跨ぎ大域 dedup キー集合 (endpoint, param集合)。
         self._spa_harvest_seen: set = set()
+        # JSON body harvest の大域 dedup（dedup_key→template_id・再観測で template を最新化）と、
+        # PR-b2 で消費する非永続キュー。
+        self._spa_json_harvest_seen: dict = {}
+        self.json_injection_points: list[InjectionPoint] = []
         # ハイブリッドモード用シード URL (Agent偵察で発見したURL)
         self.seed_urls: list = list(seed_urls or [])
         self.additional_report_findings: list[Finding] = list(
@@ -978,6 +982,22 @@ class ScanEngine:
 
     def _is_attack_target_url(self, url: str) -> bool:
         return self._url_matches_scope(url, self.target_urls)
+
+    def _json_target_in_scope(self, url: str) -> bool:
+        """JSON 注入ターゲットのスコープ判定（harvest 用の述語）。
+
+        - **exclusion は observed 原文（query 込み）** で判定（exclude_urls の query 固有 full URL /
+          full-URL ワイルドカードを尊重。query を落とすと明示除外が効かない。#90 R5 P1）。
+        - **scope は原文→query 除去の順で試す**。原文一致は query 付きで設定された attack scope
+          （例 --target-url .../action?op=save）を拾い（#90 R6）、query 除去は path-scoped target と
+          observed?query 付きを一致させる（#90 R4。JSON 注入は body 対象で query は注入対象でない）。
+        """
+        if self._is_url_excluded(url):
+            return False
+        if self._is_attack_target_url(url):
+            return True
+        clean = urlparse(url)._replace(query="", fragment="").geturl()
+        return clean != url and self._is_attack_target_url(clean)
 
     def _is_access_allowed_url(self, url: str) -> bool:
         return self._is_attack_target_url(url) or self._url_matches_scope(url, self.access_urls)
@@ -2522,6 +2542,103 @@ class ScanEngine:
                         console.print(
                             f"  [dim cyan][SPA][/dim cyan] "
                             f"{harvested_count} 個の API エンドポイントを対象化"
+                        )
+
+                except Exception:
+                    pass
+
+            # SPA 観測の JSON body は CrawledPage 化せず、PR-b2 の攻撃ループへ
+            # 引き渡すメモリ内キューにだけ積む（本 PR では誰も消費しない）。
+            if self.spa_crawl:
+                try:
+                    from . import spa_harvest
+
+                    attack_netlocs = {
+                        urlparse(t).netloc
+                        for t in self.target_urls
+                        if urlparse(t).netloc
+                    }
+                    json_ip_cap = max(200, self.depth * 50)
+                    # 2 予算を分離する（#90 R13）。**キュー予算**＝json_ip_cap は engine が cross-page
+                    # dedup **後**に json_injection_points へ掛ける（下）。**parse 作業予算**は harvester の
+                    # max_targets で、キュー予算より広くとる（×4）。両者を等値にすると、1 endpoint の
+                    # 値churn（autosave/polling で timestamp/nonce だけ変わる distinct body 群）が
+                    # semantic collapse する前に parse 予算を食い潰し、後続の別 endpoint が未 parse＝
+                    # 未 queue になる（#90 R13）。headroom を与えて churn を吸収する。
+                    # 残容量ではなく固定上限にするのは、後続ページが先頭で cross-page 重複を出すと
+                    # 残容量ベースの budget を重複が食い潰し新規 endpoint が未 queue になるため（#90 R10）。
+                    json_parse_budget = json_ip_cap * 4
+                    # キュー満杯でも harvest は続ける（#90 R14）。既出 endpoint の再観測は下の
+                    # existing_tid 分岐で template の headers/body を最新化するため、満杯を理由に harvest を
+                    # 止めると、後続ページで token/nonce/version/resource-id が rotate しても stale なまま
+                    # attack replay して 401/403/409 を招く。**新規 point の追加**だけを容量で抑える
+                    # （下の round-robin 配分が残容量 0 で空を返す）。
+                    # 精密スコープ判定（scope=query除去/exclusion=原文）で body パース前にフィルタ。
+                    # 新規 target を一旦集め、pointer 配分は target 間 round-robin で行う（#90 R13）。
+                    accepted_targets: list = []
+                    for target in spa_harvest.harvest_json_body_targets(
+                        self.browser.network.pairs,
+                        base_netlocs=attack_netlocs,
+                        is_in_scope=self._json_target_in_scope,
+                        max_targets=json_parse_budget,
+                    ):
+                        # dedup identity は **observed url（query 込み）**＋**body_signature**（値まで含む
+                        # 正規化 body の署名）。キー順違いは collapse しつつ、query 別 operation
+                        # （?op=create/delete）や値で多重化する operation（JSON-RPC method/GraphQL
+                        # operationName）を別扱いにする（#90 R7/R8）。body_signature が無い旧形式は
+                        # sorted pointer に fallback。
+                        dedup_key = (
+                            target["method"],
+                            target["url"],
+                            target.get("body_signature")
+                            or tuple(sorted(target["pointers"])),
+                            # media type で版/operation を分ける API（vnd.acme.v1+json vs v2+json）を
+                            # page 跨ぎの engine dedup でも collapse しない（#90 R21d・harvest 側の
+                            # raw/semantic 識別子と一貫）。
+                            spa_harvest._norm_content_type(target.get("content_type")),
+                        )
+                        existing_tid = self._spa_json_harvest_seen.get(dedup_key)
+                        if existing_tid is not None:
+                            # 再観測: point は追加せず、template を最新観測の headers/body で更新して
+                            # refresh された Authorization/CSRF を attack 時に最新へ保つ（#90 R7）。
+                            tmpl = self.injection_templates.get(existing_tid)
+                            if isinstance(tmpl, dict):
+                                tmpl["headers"] = target["headers"]
+                                tmpl["content_type"] = target["content_type"]
+                                tmpl["json_body"] = target["json_body"]
+                            continue
+                        # 新規 target は一旦集める（template 登録と pointer 配分は下で round-robin）。
+                        accepted_targets.append((dedup_key, target))
+
+                    # 公平配分（#90 R13）: 1 endpoint（多 pointer body）が global キューを独占して
+                    # 後続 endpoint を全廃しないよう、残容量を target 間 round-robin で配る（純粋関数）。
+                    # スロットを得た target のみ template 登録＋dedup mark する（0 slot の dead template を作らない）。
+                    json_remaining_slots = json_ip_cap - len(self.json_injection_points)
+                    tid_by_index: dict = {}
+                    for ti, pointer in spa_harvest.allocate_pointers_round_robin(
+                        [t for _, t in accepted_targets], json_remaining_slots
+                    ):
+                        dedup_key, target = accepted_targets[ti]
+                        template_id = tid_by_index.get(ti)
+                        if template_id is None:
+                            template_id = f"jb-{len(self.injection_templates)}"
+                            self._spa_json_harvest_seen[dedup_key] = template_id
+                            self.injection_templates[template_id] = {
+                                "method": target["method"],
+                                "url": target["url"],
+                                "endpoint": target["endpoint"],
+                                "json_body": target["json_body"],
+                                "content_type": target["content_type"],
+                                "headers": target["headers"],
+                            }
+                            tid_by_index[ti] = template_id
+                        self.json_injection_points.append(
+                            InjectionPoint.for_json_body(
+                                target["method"],
+                                target["url"],
+                                pointer,
+                                template_id=template_id,
+                            )
                         )
                 except Exception:
                     pass

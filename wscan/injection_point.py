@@ -31,6 +31,51 @@ def build_pointer(tokens: list[str]) -> str:
     return "".join(f"/{escape_token(token)}" for token in tokens)
 
 
+def enumerate_leaf_pointers(
+    doc: Any,
+    *,
+    max_pointers: int = 200,
+    max_depth: int = 8,
+) -> list[str]:
+    """JSON 文書の全スカラ葉への JSON Pointer を**幅優先**で列挙する（純粋）。
+
+    ``max_depth`` はルートからのトークン数で数える。空の dict/list は注入先に
+    ならないため列挙せず、上限到達時はそれまでの決定的な順序を保って打ち切る。
+    **幅優先**にするのは、深さ優先だと先頭キーが巨大な部分木（例: 250 要素の配列）だと
+    pointer_cap を使い切って後続の浅い攻撃対象フィールド（例: 末尾の promo_code）が丸ごと
+    列挙されないため（#90 FN-C）。幅優先なら浅い葉が先に確保される。
+    """
+    pointers: list[str] = []
+    try:
+        pointer_cap = max(0, int(max_pointers))
+        depth_cap = max(0, int(max_depth))
+    except (TypeError, ValueError, OverflowError):
+        return pointers
+    if pointer_cap == 0:
+        return pointers
+
+    try:
+        from collections import deque
+        queue: deque = deque()
+        queue.append((doc, []))
+        while queue and len(pointers) < pointer_cap:
+            node, tokens = queue.popleft()
+            if len(tokens) > depth_cap:
+                continue
+            if isinstance(node, dict):
+                for key, value in node.items():
+                    queue.append((value, tokens + [str(key)]))
+            elif isinstance(node, list):
+                for index, value in enumerate(node):
+                    queue.append((value, tokens + [str(index)]))
+            elif isinstance(node, (str, int, float, bool)) or node is None:
+                pointers.append(build_pointer(tokens))
+    except Exception:
+        # 観測データが JSON 互換でない場合も、harvest 全体へ例外を漏らさない。
+        pass
+    return pointers
+
+
 def _list_index(token: str) -> int:
     """配列用トークンを添字へ変換する。"""
     if not token.isdigit():
