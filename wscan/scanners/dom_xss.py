@@ -162,7 +162,7 @@ class DOMXSSScanner(BaseScanner):
 
             source, pair = await self._apply_payload(
                 ip.url, ip.parameter_id, payload,
-                ip.form_index, ip.legacy_is_url_param(),
+                ip.submit_index, ip.legacy_is_url_param(),
             )
             # DOMXSS は独自シグネチャの _apply_payload 直送で _apply_ip を通らないため、
             # ここで試行台帳へ記録する（adaptive 履歴の欠落防止）。
@@ -249,6 +249,7 @@ class DOMXSSScanner(BaseScanner):
                 ip.form_index,
                 ip.parameter_id,
                 ip.legacy_is_url_param(),
+                dom_index=ip.submit_index,
             )
             for raw_payload in extra_payloads:
                 payload = marker + raw_payload
@@ -260,7 +261,7 @@ class DOMXSSScanner(BaseScanner):
                     await self.browser.page.add_init_script(_HOOK_SCRIPT)
                     source, pair = await self._apply_payload(
                         ip.url, ip.parameter_id, payload,
-                        ip.form_index, ip.legacy_is_url_param(),
+                        ip.submit_index, ip.legacy_is_url_param(),
                     )
                     self._record_attempt(ip, payload, source, pair)
                     await asyncio.sleep(2.0 * self.sleep_factor)
@@ -311,6 +312,8 @@ class DOMXSSScanner(BaseScanner):
         form_index: int,
         field_name: str,
         is_url_param: bool,
+        *,
+        dom_index: int | None = None,
     ) -> tuple[str, set[str], dict]:
         """文脈 probe の判定を保ち、非標準 3 引数 transport で送信する。"""
         try:
@@ -325,7 +328,11 @@ class DOMXSSScanner(BaseScanner):
                 url,
             )
             source, pair = await self._apply_payload(
-                url, field_name, probe, form_index, is_url_param
+                url,
+                field_name,
+                probe,
+                form_index if dom_index is None else dom_index,
+                is_url_param,
             )
             response_source = (
                 (pair.get("response", {}) or {}).get("body") or source or ""

@@ -234,8 +234,14 @@ class InjectionPoint:
     display_name: str = ""
     method: str = ""
     form_index: int = 0
+    dom_index: int = -1
     template_id: str = ""
     source: str = ""
+
+    @property
+    def submit_index(self) -> int:
+        """ブラウザ DOM 参照に渡す実 form index。未指定なら form_index を使う。"""
+        return self.dom_index if self.dom_index >= 0 else self.form_index
 
     def legacy_is_url_param(self) -> bool:
         """form/url_param のみ bool を返す。json_body は例外（form 経路への暗黙落ちを封じる）。"""
@@ -268,6 +274,7 @@ class InjectionPoint:
         field_name: str,
         form_index: int = 0,
         source: str = "crawl",
+        dom_index: int = -1,
     ) -> "InjectionPoint":
         """従来フォーム用の注入点を作る。"""
         return cls(
@@ -276,6 +283,7 @@ class InjectionPoint:
             parameter_id=field_name,
             display_name=field_name,
             form_index=form_index,
+            dom_index=dom_index,
             source=source,
         )
 

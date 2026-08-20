@@ -43,6 +43,9 @@ from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse
 EXPECTED_FINDINGS = [
     {"check": "xss", "path": "/search", "field": "q",
      "note": "reflected, unescaped query echoed into HTML body"},
+    {"check": "xss", "path": "/feedback", "field": "msg",
+     "note": "reflected via POST form; a preceding input-less form shifts DOM "
+             "index (dom vs enumerate)"},
     {"check": "xss", "path": "/track", "field": "ref",
      "note": "attribute-breakout: angle brackets stripped but quote passes; "
              "onmouseover handler fires only via the active event-trigger layer"},
@@ -110,6 +113,7 @@ SAFE_ENDPOINTS = [
 _NAV = [
     ('/', 'Home'),
     ('/search?q=jacket', 'Search'),
+    ('/feedback', 'Feedback'),
     ('/help?query=returns', 'Help'),
     ('/products?category=outerwear', 'Products'),
     ('/catalog?sort=price', 'Catalog'),
@@ -226,6 +230,25 @@ def create_app() -> FastAPI:
             <p>No products matched. Try a broader term.</p>
             """,
         )
+
+    # ── Reflected form XSS with shifted DOM form index (INTENTIONAL) ─────
+    @app.get("/feedback", response_class=HTMLResponse)
+    async def feedback_form():
+        body = """
+          <form action="/logout" method="post">
+            <button type="submit">Logout</button>
+          </form>
+          <form method="post" action="/feedback">
+            <input name="msg" type="text">
+            <button type="submit">Send</button>
+          </form>
+        """
+        return _layout("Feedback", body)
+
+    @app.post("/feedback", response_class=HTMLResponse)
+    async def feedback_submit(msg: str = Form("")):
+        # VULNERABLE: msg is reflected into the HTML body without escaping.
+        return _layout("Feedback", f"<p>Received: {msg}</p>")
 
     # ── Safe search twin: query is HTML-escaped ───────────────────────────
     @app.get("/help", response_class=HTMLResponse)

@@ -223,6 +223,7 @@ class OSInjectionScanner(BaseScanner):
                 ip.form_index,
                 ip.parameter_id,
                 ip.legacy_is_url_param(),
+                dom_index=ip.submit_index,
             )
             # evolved_payloads は内部で marker 付き probe を投入する。stored 系では
             # この probe が一覧へ永続化されるため、probe 後の状態を baseline 化して

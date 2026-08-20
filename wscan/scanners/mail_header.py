@@ -404,7 +404,7 @@ class MailHeaderInjectionScanner(BaseScanner):
             # raw transport は共有 dispatch に混ぜず、legacy 引数を明示して呼ぶ。
             raw = await self._apply_payload_raw(
                 ip.url,
-                ip.form_index,
+                ip.submit_index,
                 ip.parameter_id,
                 payload,
                 ip.legacy_is_url_param(),
