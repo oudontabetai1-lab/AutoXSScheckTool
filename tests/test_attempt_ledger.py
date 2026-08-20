@@ -281,6 +281,15 @@ class _GenEngine:
         self.target_url = "http://fixture.test"
         self.attempt_ledger = AttemptLedger()
 
+    @staticmethod
+    def _origin_for(url):
+        # 本番 ScanEngine._origin_for と同じ scheme://netloc 正規化（test double）。
+        from urllib.parse import urlparse
+        p = urlparse(url)
+        if p.scheme and p.netloc:
+            return f"{p.scheme}://{p.netloc}"
+        return url.rstrip("/")
+
 
 class _PlainScanner(BaseScanner):
     CHECK_TYPE = "xss"
@@ -310,17 +319,17 @@ class GetPayloadsHistoryTests(unittest.IsolatedAsyncioTestCase):
         await scanner.get_payloads("q", "http://fixture.test/p")
         self.assertIsNone(engine.payload_gen.captured_history)
 
-    async def test_learning_summary_keyed_by_injection_url_not_primary(self):
-        """マルチオリジン: 学習サマリは注入 url の host で分離され、別 origin の payload を漏らさない。"""
+    async def test_learning_summary_keyed_by_injection_origin_not_primary(self):
+        """マルチオリジン: 学習サマリは注入 url の origin で分離され、別 origin の payload を漏らさない。"""
         import tempfile
         from wscan.payload_learning import PayloadLearner
 
         with tempfile.TemporaryDirectory() as d:
             learner = PayloadLearner(learning_file=f"{d}/learn.json")
-            # origin A / B それぞれの成功 payload（min_tries=2 を満たすよう 2 回）。
+            # origin A / B それぞれの成功 payload（min_tries=2 を満たすよう 2 回）。鍵は origin。
             for _ in range(2):
-                learner.record("xss", "<img src=//a-secret/cb>", success=True, domain="a.test")
-                learner.record("xss", "<svg onload=b>", success=True, domain="b.test")
+                learner.record("xss", "<img src=//a-secret/cb>", success=True, domain="http://a.test")
+                learner.record("xss", "<svg onload=b>", success=True, domain="http://b.test")
 
             engine = _GenEngine()
             engine.payload_gen = _CapturingPayloadGen()
@@ -338,6 +347,30 @@ class GetPayloadsHistoryTests(unittest.IsolatedAsyncioTestCase):
             # B の payload だけが載り、A の秘密 payload は載らない（primary=A に引っ張られない）。
             self.assertIn("<svg onload=b>", summary)
             self.assertNotIn("a-secret", summary)
+
+    async def test_learning_summary_distinguishes_scheme_and_port(self):
+        """同一ホスト別 port/scheme を別 origin として分離する（host だけでは取り違える）。"""
+        import tempfile
+        from wscan.payload_learning import PayloadLearner
+
+        with tempfile.TemporaryDirectory() as d:
+            learner = PayloadLearner(learning_file=f"{d}/learn.json")
+            for _ in range(2):
+                learner.record("xss", "<x port3000-secret>", success=True, domain="http://app.test:3000")
+                learner.record("xss", "<x port4000>", success=True, domain="http://app.test:4000")
+
+            engine = _GenEngine()
+            engine.payload_gen = _CapturingPayloadGen()
+            engine.payload_learner = learner
+            engine.enable_payload_learning = True
+            engine.target_url = "http://app.test:3000"
+            scanner = _PlainScanner(engine)
+
+            # :4000 を注入対象に。:3000 の秘密 payload は載らない。
+            await scanner.get_payloads("q", "http://app.test:4000/p")
+            summary = engine.payload_gen.captured_summary_provider()
+            self.assertIn("port4000", summary)
+            self.assertNotIn("port3000-secret", summary)
 
 
 # ---------------------------------------------------------------------------

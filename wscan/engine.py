@@ -4652,13 +4652,13 @@ class ScanEngine:
             f"    [bold red][FINDING][/bold red] {label}{loc} — {f.evidence[:80]}"
         )
         if f.payload and self.enable_payload_learning:
-            from urllib.parse import urlparse as _up
-            # 記録の鍵は finding 自身の url の host（primary target_url ではない）。
-            # マルチオリジンスキャン（target_urls）で origin B の finding を primary バケツへ
-            # 入れると、B 固有のトークン/コールバックを含む payload が origin A のプロンプトへ
-            # 漏れ、統計が誤ターゲットを誘導する。参照側（base.get_payloads）も注入 url の
-            # host で分離しているので、両者を actual url の host で揃える。
-            _domain = _up(f.url or "").hostname or None
+            # 記録の鍵は finding 自身の url の origin（scheme://netloc・primary target_url では
+            # ない）。マルチオリジンスキャン（target_urls）で origin B の finding を primary
+            # バケツへ入れると、B 固有のトークン/コールバックを含む payload が origin A の
+            # プロンプトへ漏れ、統計が誤ターゲットを誘導する。host だけだと同一ホスト別
+            # scheme/port を取り違えるため、target_urls と同じ _origin_for で刻み、参照側
+            # （base.get_payloads）も同じ _origin_for で揃える。
+            _domain = self._origin_for(f.url or "") or None
             self.payload_learner.record(f.check_type, f.payload, success=True, domain=_domain)
         if self.flag_finder:
             self._check_page_for_flags(f.evidence, f.url)
