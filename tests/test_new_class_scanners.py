@@ -181,6 +181,21 @@ class MergeTemplateHeadersTests(unittest.TestCase):
         self.assertNotIn("SECRET-TOKEN-123", red["response"]["body"])
         self.assertEqual(red["request"]["headers"]["Authorization"], "***")
 
+    def test_response_issued_credential_redacted_from_response_body(self):
+        # #90 R21e: サーバ発行の機密レスポンスヘッダ値(X-Access-Token)が body にも repeat
+        # されても evidence へ残さない（request 側だけでなく response 側ヘッダも集める）。
+        from wscan.scanners.base import _redact_json_evidence_pair
+        pair = {
+            "request": {"headers": {}, "post_data": '{"q": "x"}'},
+            "response": {
+                "body": 'rotated token: FRESH-ACCESS-9xy for session',
+                "headers": {"X-Access-Token": "FRESH-ACCESS-9xy"},
+            },
+        }
+        red = _redact_json_evidence_pair(pair, "/q")
+        self.assertNotIn("FRESH-ACCESS-9xy", red["response"]["body"])
+        self.assertEqual(red["response"]["headers"]["X-Access-Token"], "***")
+
     def test_evidence_redaction_uses_broad_canon_but_merge_uses_narrow(self):
         # 2 概念を分ける（#90 R13-2）: evidence redaction は broad（静的＋runtime）、
         # merge の「上書き禁止」は静的な認証情報のみ（runtime redaction ヘッダは含めない）。

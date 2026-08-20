@@ -192,11 +192,14 @@ def _redact_json_evidence_pair(pair: dict, injection_pointer: str) -> dict:
     # reflected な認証ヘッダ値（Authorization/Cookie/API-token 等）が response body に
     # エコーされても evidence（checkpoint/report/monitor）へ残さないため、機密ヘッダの
     # **値**も伏字対象に含める（#90 R21b）。ヘッダ dict のマスク前の生値を使う。
-    orig_req_headers = (pair.get("request", {}) or {}).get("headers")
-    if isinstance(orig_req_headers, dict):
-        for hk, hv in orig_req_headers.items():
-            if _is_sensitive_for_evidence(hk) and isinstance(hv, str) and hv:
-                secrets.append(hv)
+    # request 側（reflect）と response 側（サーバ発行の X-Access-Token 等を body にも repeat）の
+    # 双方を集める（#90 R21e）。
+    for _side in ("request", "response"):
+        side_headers = (pair.get(_side, {}) or {}).get("headers")
+        if isinstance(side_headers, dict):
+            for hk, hv in side_headers.items():
+                if _is_sensitive_for_evidence(hk) and isinstance(hv, str) and hv:
+                    secrets.append(hv)
     # request/response 双方の認証ヘッダ値をマスク（サーバが X-Access-Token 等を応答で
     # 返す場合も to_dict→checkpoint/report/monitor へ流さない）。
     if isinstance(req.get("headers"), dict):
