@@ -146,6 +146,14 @@ class ObjectExtractionTests(unittest.TestCase):
         text = '{"a": 1} {"b": 2}'
         self.assertEqual(extract_json_object(text), {"a": 1})
 
+    def test_predicate_requires_complete_plan_skips_partial(self):
+        # Codex #92 r4: page_purpose だけの前置き object を飛ばし、list 値 fields を持つ
+        # 完全な plan まで探索する（attack_planner の述語 semantics）。
+        text = ('Metadata: {"page_purpose":"login"}\n'
+                '{"page_purpose":"login","fields":[{"name":"u"}]}')
+        got = extract_json_object(text, predicate=lambda d: isinstance(d.get("fields"), list))
+        self.assertEqual(got, {"page_purpose": "login", "fields": [{"name": "u"}]})
+
     def test_ignores_draft_object_inside_think(self):
         # Codex #92 r2 指摘1(P1): <think> 内の下書きJSONを拾わず、最終回答を採る。
         text = ('<think>{"page_purpose":"draft","fields":[]}</think> '
