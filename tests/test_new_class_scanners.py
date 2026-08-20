@@ -196,6 +196,27 @@ class MergeTemplateHeadersTests(unittest.TestCase):
         self.assertNotIn("FRESH-ACCESS-9xy", red["response"]["body"])
         self.assertEqual(red["response"]["headers"]["X-Access-Token"], "***")
 
+    def test_ordinary_short_header_value_not_substring_redacted(self):
+        # #90 R21f: 通常設定ヘッダ（X-Tenant:a 等の短い値）を body から無制限 substring 置換
+        # しない（`database payload`→`d***t***b***se...` の evidence 破壊を防ぐ）。
+        from wscan.scanners.base import _redact_json_evidence_pair
+        pair = {
+            "request": {"headers": {"X-Tenant": "a"}, "post_data": '{"q": "x"}'},
+            "response": {"body": "database payload leaked", "headers": {"X-Tenant": "a"}},
+        }
+        red = _redact_json_evidence_pair(pair, "/q")
+        self.assertEqual(red["response"]["body"], "database payload leaked")  # 無傷
+
+    def test_short_credential_value_not_substring_redacted(self):
+        # 短い credential 値（<8）も body substring には回さない（collateral 回避）。
+        from wscan.scanners.base import _redact_json_evidence_pair
+        pair = {
+            "request": {"headers": {"Authorization": "ab"}, "post_data": '{"q": "x"}'},
+            "response": {"body": "a grab bag of abbreviations", "headers": {}},
+        }
+        red = _redact_json_evidence_pair(pair, "/q")
+        self.assertEqual(red["response"]["body"], "a grab bag of abbreviations")
+
     def test_evidence_redaction_uses_broad_canon_but_merge_uses_narrow(self):
         # 2 概念を分ける（#90 R13-2）: evidence redaction は broad（静的＋runtime）、
         # merge の「上書き禁止」は静的な認証情報のみ（runtime redaction ヘッダは含めない）。

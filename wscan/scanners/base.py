@@ -193,12 +193,21 @@ def _redact_json_evidence_pair(pair: dict, injection_pointer: str) -> dict:
     # エコーされても evidence（checkpoint/report/monitor）へ残さないため、機密ヘッダの
     # **値**も伏字対象に含める（#90 R21b）。ヘッダ dict のマスク前の生値を使う。
     # request 側（reflect）と response 側（サーバ発行の X-Access-Token 等を body にも repeat）の
-    # 双方を集める（#90 R21e）。
+    # 双方を集める（#90 R21e）。ただし body への **無制限 substring 置換**は、broad な evidence
+    # redaction 集合（X-Tenant/X-API-Version 等の通常設定ヘッダを含む）や短い値を対象にすると
+    # `database payload`→`d***t***b***se...` のように evidence を破壊する（#90 R21f）。そこで
+    # body 伏字に回す値は **実 credential ヘッダ（narrow 集合）**かつ **十分長い値（>=8）**に
+    # 限定する。ヘッダ dict 自体の masking は従来どおり broad（表示だけ伏せるのは無害）。
+    _MIN_BODY_SECRET_LEN = 8
     for _side in ("request", "response"):
         side_headers = (pair.get(_side, {}) or {}).get("headers")
         if isinstance(side_headers, dict):
             for hk, hv in side_headers.items():
-                if _is_sensitive_for_evidence(hk) and isinstance(hv, str) and hv:
+                if (
+                    _is_credential_header(hk)
+                    and isinstance(hv, str)
+                    and len(hv) >= _MIN_BODY_SECRET_LEN
+                ):
                     secrets.append(hv)
     # request/response 双方の認証ヘッダ値をマスク（サーバが X-Access-Token 等を応答で
     # 返す場合も to_dict→checkpoint/report/monitor へ流さない）。

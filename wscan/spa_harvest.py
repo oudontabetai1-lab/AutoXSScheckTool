@@ -172,6 +172,11 @@ def harvest_get_targets(
 
 # 1 body の parse/保持サイズ上限（target 支配下の巨大 JSON で CPU/メモリを食わせない・#90 R8）。
 _MAX_JSON_BODY_BYTES = 256 * 1024
+# Phase 1（parse 前）のメモリ/CPU 上限。noisy/hostile な SPA が大量の distinct JSON body を
+# 出しても、raw_first/buckets が無制限に post_data（各最大 256KiB）を保持しないよう有界化する
+# （#90 R21f）。max_targets は Phase 2 の parse 数のみを縛り Phase 1 は縛らないため別途必要。
+_MAX_PER_BUCKET = 64          # 1 endpoint バケツが保持する distinct body の上限（最古を evict）
+_MAX_TOTAL_CANDIDATES = 1024  # 全体で保持する distinct body の上限（Phase2 parse 予算に十分な余裕）
 
 # 値で operation を多重化する既知の discriminator キー（小文字）。これらの葉の**値**だけを identity に
 # 含め、timestamp/id/nonce 等の通常値は無視して同一注入 shape を 1 つに collapse する（#90 R9）。
@@ -459,6 +464,20 @@ def harvest_json_body_targets(
                     existing["request_headers"] = request_headers
                     existing["order"] = obs_seq
                     continue
+                # バケツキーは (method, observed_url)。queryless endpoint で束ねると ?op=create/
+                # ?op=delete や別 HTTP method の operation が同一バケツに入り、round-robin 公平配分が
+                # それらを区別できず片方を未 parse にする（#90 R14）。値churn は同一 observed_url なので
+                # 引き続き 1 バケツに束ねられ、fairness は保たれる。
+                bkey = (method_upper, observed_url)
+                bucket = buckets.setdefault(bkey, [])
+                # Phase 1 有界化（#90 R21f）: バケツ満杯なら最古 distinct を evict（最新観測を保持）、
+                # そうでなく全体上限に達していれば新規 distinct をこれ以上増やさない（既存の再観測
+                # 更新は上の existing 分岐で継続＝template refresh は保たれる）。
+                if len(bucket) >= _MAX_PER_BUCKET:
+                    evicted = bucket.pop(0)
+                    raw_first.pop(evicted.get("raw_key"), None)
+                elif len(raw_first) >= _MAX_TOTAL_CANDIDATES:
+                    continue
                 entry = {
                     "method_upper": method_upper,
                     "observed_url": observed_url,
@@ -466,13 +485,10 @@ def harvest_json_body_targets(
                     "post_data": post_data,
                     "request_headers": request_headers,
                     "order": obs_seq,
+                    "raw_key": raw_key,
                 }
                 raw_first[raw_key] = entry
-                # バケツキーは (method, observed_url)。queryless endpoint で束ねると ?op=create/
-                # ?op=delete や別 HTTP method の operation が同一バケツに入り、round-robin 公平配分が
-                # それらを区別できず片方を未 parse にする（#90 R14）。値churn は同一 observed_url なので
-                # 引き続き 1 バケツに束ねられ、fairness は保たれる。
-                buckets.setdefault((method_upper, observed_url), []).append(entry)
+                bucket.append(entry)
             except Exception:
                 continue
 

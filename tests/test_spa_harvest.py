@@ -426,6 +426,23 @@ class HarvestJsonBodyTargetsTests(unittest.TestCase):
         self.assertEqual(len(targets), 2)
         self.assertNotEqual(targets[0]["body_signature"], targets[1]["body_signature"])
 
+    def test_phase1_bounded_evicts_oldest_preserves_latest(self):
+        # #90 R21f: 1 endpoint に大量の distinct body を出しても Phase 1 を有界化し、最古を
+        # evict して最新観測を保つ。_MAX_PER_BUCKET=64 なので v0..v35 は落ち v99 は残る。
+        from wscan.spa_harvest import _MAX_PER_BUCKET
+        n = _MAX_PER_BUCKET + 36
+        pairs = [
+            _json_pair("https://api.test/rpc", {"op": f"v{i}", "payload": {"id": "1"}})
+            for i in range(n)
+        ]
+        targets = harvest_json_body_targets(pairs, base_netlocs={"api.test"}, max_targets=10_000)
+        ops = set()
+        for t in targets:
+            ops.add(t["json_body"]["op"])
+        self.assertIn(f"v{n-1}", ops)      # 最新は保持
+        self.assertNotIn("v0", ops)        # 最古は evict
+        self.assertLessEqual(len(targets), _MAX_PER_BUCKET)  # バケツ上限で有界
+
     def test_vendor_media_type_distinguishes_operations(self):
         # #90 R21c: 同一 method/url/body でも vendor media type（版/operation 選択）が違えば別 target。
         body = {"payload": {"id": "1"}}
