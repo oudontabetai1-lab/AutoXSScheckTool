@@ -407,3 +407,27 @@ class IoTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AttemptLedgerPersistenceTests(unittest.TestCase):
+    def test_ledger_survives_save_load(self):
+        from wscan.attempt_ledger import AttemptLedger, Attempt
+        led = AttemptLedger()
+        key = ("http://t/p", "q", "0", "u", "")
+        led.record(key, "xss", Attempt("<svg/onload=1>", status=200, reflected=True))
+        state = CheckpointState(target_url="http://t/p", checks=["xss"])
+        state.attempt_ledger = led.to_dict()
+        with tempfile.TemporaryDirectory() as d:
+            save_checkpoint(d, state)
+            loaded = load_checkpoint(checkpoint_path(d))
+        back = AttemptLedger.from_dict(loaded.attempt_ledger)
+        h = back.history(key, "xss")
+        self.assertEqual(len(h), 1)
+        self.assertEqual(h[0].payload, "<svg/onload=1>")
+        self.assertTrue(h[0].reflected)
+
+    def test_missing_ledger_key_defaults_empty(self):
+        # 旧 checkpoint（attempt_ledger キー無し）でも壊れない。
+        state = CheckpointState.from_dict({"version": 4, "target_url": "http://t",
+                                           "checks": ["xss"], "completed_units": []})
+        self.assertEqual(state.attempt_ledger, {})

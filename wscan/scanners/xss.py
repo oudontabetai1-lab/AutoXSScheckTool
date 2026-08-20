@@ -138,7 +138,7 @@ class XSSScanner(BaseScanner):
 
         findings = []
         field_name = ip.parameter_id
-        payloads = await self.get_payloads(field_name, ip.url)
+        payloads = await self.get_payloads(field_name, ip.url, ip=ip)
 
         if self.monitor:
             await self.monitor.emit_status(f"XSS testing: {field_name} on {ip.url}")

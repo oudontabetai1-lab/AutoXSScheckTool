@@ -859,6 +859,11 @@ class ScanEngine:
         # A-3: Payload continuous learning
         self.payload_learner = PayloadLearner(learning_file=learning_file)
 
+        # D5/G1/G2: 波状層を横断する試行台帳（(注入点, check) 単位で payload→応答メタを一次データ化）。
+        # baseline LLM 生成へ履歴を戻し（0006 G1）、層間の重複再送を観測可能にする（0007 D5）。
+        from wscan.attempt_ledger import AttemptLedger
+        self.attempt_ledger = AttemptLedger()
+
         # Adaptive AI payload refinement — runs a second pass per field
         # using LLM analysis of the page's filtering behavior
         self.adaptive_engine = AdaptivePayloadEngine(self.payload_gen)
@@ -1183,6 +1188,16 @@ class ScanEngine:
                     f"  [green][Resume] {len(state.completed_units)} 済み単位 / "
                     f"{restored} 件の既出 Finding を復元しました。[/green]"
                 )
+                # D5: 試行台帳を復元し、resume 後の adaptive が実履歴（status/reflection/
+                # timing/evolved payload）を失って静的 list へ退化するのを防ぐ。
+                try:
+                    from wscan.attempt_ledger import AttemptLedger
+                    if state.attempt_ledger:
+                        self.attempt_ledger = AttemptLedger.from_dict(state.attempt_ledger)
+                except Exception as exc:
+                    self.wave_errors.append(
+                        f"attempt_ledger_restore: {type(exc).__name__}: {exc}"
+                    )
 
         if state is None:
             state = cp.CheckpointState(target_url=self.target_url, checks=list(self.checks))
@@ -1198,6 +1213,10 @@ class ScanEngine:
         try:
             # Finding は all_findings から都度スナップショット（最新を保存）
             self.checkpoint.findings = [f.to_dict() for f in self.all_findings]
+            # D5: 試行台帳も保存（resume で adaptive 履歴を維持）。台帳未配線でも安全。
+            ledger = getattr(self, "attempt_ledger", None)
+            if ledger is not None:
+                self.checkpoint.attempt_ledger = ledger.to_dict()
             cp.save_checkpoint(self.output_dir, self.checkpoint)
         except Exception as exc:
             self.wave_errors.append(f"checkpoint_save: {type(exc).__name__}: {exc}")
@@ -4264,6 +4283,32 @@ class ScanEngine:
             plan_payloads = field_plan.custom_payloads.get(check_name, []) if field_plan else []
             defaults = self.payload_gen.default_payloads.get(check_name, [])
             tried = plan_payloads + [p for p in defaults if p not in plan_payloads]
+            # G3/D5: 再構成した静的 list だけでなく、試行台帳に実際に記録された payload
+            # （evolution/mutation wave 由来を含む）を先頭に加える。これで adaptive(LLM) が
+            # 「本当に送った変種」を観測でき、既に弾かれた形の再提案を避けられる。壊れても
+            # 従来の静的 tried に安全側フォールバック。
+            # G1/G2/G3: 試行台帳の rich metadata（payload→status/len/reflected/timing/
+            # error）を adaptive(LLM) の観測へ実際に供給する。adaptive は「最初の掃射の後」に
+            # 走るため、ここが履歴が確実に埋まっている history-aware 生成ステップになる
+            # （baseline generate の履歴節は初回パスでは台帳が空で不発になりうるのを補う）。
+            history_note = ""
+            try:
+                _ledger = getattr(self, "attempt_ledger", None)
+                if _ledger is not None:
+                    _entries = _ledger.history(ip.stable_key_parts(), check_name)
+                    # 台帳内の重複（SQL boolean のペア payload・反復 probe 等）も除去する。
+                    # adaptive は先頭30件しか消費しないため、重複を放置すると本来 expose
+                    # したい evolution/mutation payload を押し出してしまう。順序保持で一意化。
+                    from wscan.attempt_ledger import (
+                        format_history_for_prompt,
+                        unique_payloads,
+                    )
+                    _real = unique_payloads(_entries, set(tried))
+                    if _real:
+                        tried = _real + tried
+                    history_note = format_history_for_prompt(_entries)
+            except Exception:
+                history_note = ""
 
             # Ask LLM for bypass payloads (include detected WAF for targeted evasion)
             adaptive_payloads, generation_status = await self.adaptive_engine.generate(
@@ -4273,6 +4318,7 @@ class ScanEngine:
                 payloads_tried=tried,
                 page_html=page_html,
                 waf_name=self.waf_detector._detected,
+                extra_observations=history_note,
                 return_status=True,
             )
 

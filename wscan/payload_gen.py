@@ -194,6 +194,7 @@ class PayloadGenerator:
         field_name: str,
         url: str,
         custom_payloads: Optional[list[str]] = None,
+        attempt_history: Optional[list] = None,
     ) -> list[str]:
         """
         Generate payloads for a specific check type and field.
@@ -220,6 +221,18 @@ class PayloadGenerator:
                 )
                 if encoding_hint:
                     prompt = encoding_hint + "\n" + prompt
+
+                # G1: これまで同じフィールドへ投げた payload と結果（status/len/反射/timing/
+                # error）をプロンプトへ戻す（evaluator-optimizer ループの復元）。壊れたら
+                # 安全側＝履歴節を足さないだけで従来生成に戻す。
+                if attempt_history:
+                    try:
+                        from .attempt_ledger import format_history_for_prompt
+                        history_block = format_history_for_prompt(attempt_history)
+                        if history_block:
+                            prompt = prompt + "\n\n" + history_block
+                    except Exception:
+                        pass
 
                 # ── Web intelligence enrichment ──────────────────────────
                 if self.enable_web_browsing:

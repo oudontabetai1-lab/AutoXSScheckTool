@@ -215,7 +215,7 @@ class SQLiScanner(BaseScanner):
         """Scan a form field or URL parameter for SQL injection."""
         findings = []
         field_name = ip.display_name or ip.parameter_id
-        payloads = await self.get_payloads(field_name, ip.url)
+        payloads = await self.get_payloads(field_name, ip.url, ip=ip)
         payloads = self._prioritize_login_payloads(field_name, payloads)
 
         if self.monitor:

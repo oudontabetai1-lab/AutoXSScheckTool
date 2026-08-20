@@ -48,7 +48,7 @@ class PathTraversalScanner(BaseScanner):
         """Scan a form field or URL parameter for path traversal."""
         findings = []
         field_name = field.get("name", "unknown")
-        payloads = await self.get_payloads(field_name, ip.url)
+        payloads = await self.get_payloads(field_name, ip.url, ip=ip)
 
         if self.monitor:
             await self.monitor.emit_status(
