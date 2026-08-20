@@ -231,26 +231,31 @@ class PayloadLearner:
     # Prioritisation
     # ------------------------------------------------------------------
 
-    def _resolve_domain_ct(self, check_type: str, domain: Optional[str]) -> dict:
-        """domain の per-check バケツを返す。origin キー（scheme://netloc）のときは、
-        後方互換で**旧 hostname キー**のバケツも取り込む（純粋な読み取り）。
+    def _resolve_domain_ct(
+        self, check_type: str, domain: Optional[str], include_legacy: bool = True
+    ) -> dict:
+        """domain の per-check バケツを返す。origin キー（scheme://netloc）かつ
+        *include_legacy* のときは、後方互換で**旧 hostname キー**のバケツも取り込む（純粋な読み取り）。
 
         学習キーは 0006 G4 で hostname→origin へ移行したが、既存の学習ファイルは
         hostname（例 ``example.com``）で記録されている。origin（``https://example.com``）
-        で引くと旧データが丸ごと迷子になり、アップグレード直後にサマリ／並べ替えの
-        重み付けが両方失われる。そこで origin ルックアップ時は hostname 由来の旧バケツも
-        合算する（同一 observation を二重書きしていないので二重計上ではない＝実観測の合算）。
+        で引くと旧データが丸ごと迷子になり、アップグレード直後に並べ替えの重み付けが失われる。
+        そこで origin ルックアップ時は hostname 由来の旧バケツも合算する（同一 observation を
+        二重書きしていないので二重計上ではない＝実観測の合算）。
 
-        注意: 同一ホスト別 scheme/port が複数あると、旧 hostname データはそれら全てに現れる。
-        だが旧データは origin 区別が無かった時代のもので、かつ soft な最適化ヒントに過ぎず、
-        新規記録は origin 単位で正しく分離される（許容できる有界の後方互換挙動）。
+        **プロンプト経路（stats→format→クラウド LLM 送信）は include_legacy=False で呼ぶこと。**
+        旧 hostname データは同一ホストの全 scheme/port に現れるため、legacy をプロンプトへ混ぜると
+        ある origin で記録した origin 固有トークン/コールバックを含む payload が別 origin の
+        プロンプト＝外部送信へ漏れる（R4〜R7 のクロスオリジン漏洩が R8 経路で再燃）。
+        一方 **並べ替え（sort_payloads・ローカル）は include_legacy=True** でよい：既存候補の順序を
+        変えるだけで新 payload を注入も外部送信もしないため、legacy 由来の継続性を安全に活かせる。
         """
         if not domain:
             return {}
         domains = self._data["domains"]
         primary = domains.get(domain, {}).get(check_type, {})
         legacy_key = None
-        if "://" in domain:
+        if include_legacy and "://" in domain:
             from urllib.parse import urlparse
             host = urlparse(domain).hostname
             if host and host != domain and host in domains:
@@ -339,7 +344,11 @@ class PayloadLearner:
         global_ct: dict = {}
         if include_global:
             global_ct = self._data["global"].get(check_type, {})
-        domain_ct: dict = self._resolve_domain_ct(check_type, domain)
+        # stats はプロンプト経路（get_payloads→format→クラウド LLM 送信）専用のため、
+        # legacy hostname バケツは混ぜない（strict origin-only）。旧データを全 scheme/port へ
+        # 広げると別 origin のプロンプトへ payload が漏れる（R13）。並べ替えは sort_payloads が
+        # include_legacy=True で別途 legacy を活かす。
+        domain_ct: dict = self._resolve_domain_ct(check_type, domain, include_legacy=False)
 
         merged: dict[str, dict] = {}
         for payload, e in global_ct.items():
