@@ -27,6 +27,24 @@ class ParseLlmResponseTests(unittest.TestCase):
         self.assertIsNotNone(plan)
         self.assertEqual([f.name for f in plan.fields], ["user"])
 
+    def test_string_field_entries_draft_falls_back_to_real_plan(self):
+        # Codex #92 r6: {"fields":["username"]}（文字列要素）を plan 誤認せず AttributeError も
+        # 出さない。本物の dict-field plan を採る。
+        planner = self._planner()
+        raw = ('{"fields":["username"]}\n'
+               '{"page_purpose":"login","fields":[{"name":"user","priority_checks":["xss"]}]}')
+        plan = planner._parse_llm_response("http://t/login", raw)
+        self.assertIsNotNone(plan)
+        self.assertEqual([f.name for f in plan.fields], ["user"])
+
+    def test_mixed_field_entries_skips_non_dict(self):
+        # 非 dict 要素が混ざっても例外にせず skip、dict 要素のみ採用。
+        planner = self._planner()
+        raw = '{"page_purpose":"x","fields":["junk", {"name":"user","priority_checks":["xss"]}]}'
+        plan = planner._parse_llm_response("http://t/login", raw)
+        self.assertIsNotNone(plan)
+        self.assertEqual([f.name for f in plan.fields], ["user"])
+
     def test_object_without_fields_list_returns_none(self):
         planner = self._planner()
         raw = 'Note: {"page_purpose":"login"}'

@@ -133,6 +133,22 @@ class PageAttackPlan:
 # Planner
 # ---------------------------------------------------------------------------
 
+def _is_complete_plan(d) -> bool:
+    """LLM 応答 object が完全な attack-plan か（純粋・#92 r4/r5/r6）。
+
+    list 値の fields を持ち、その中に **dict でかつ非空 name を持つ要素が最低 1 つ** ある
+    ことを要求する。page_purpose だけの metadata・空 fields 下書き・文字列要素だけの
+    `{"fields":["username"]}` を plan と誤認せず、本物か heuristic fallback を採らせる。
+    """
+    fields = d.get("fields")
+    if not isinstance(fields, list):
+        return False
+    return any(
+        isinstance(f, dict) and str(f.get("name", "")).strip()
+        for f in fields
+    )
+
+
 class AttackPlanner:
     """
     Analyses a page and produces a PageAttackPlan.
@@ -508,7 +524,7 @@ Consider stored / second-order attacks carefully:
         # 空 fields なら候補探索を続け、無ければ None＝heuristic fallback。
         data = extract_json_object(
             raw,
-            predicate=lambda d: isinstance(d.get("fields"), list) and len(d["fields"]) > 0,
+            predicate=lambda d: _is_complete_plan(d),
         )
         if data is None:
             return None
@@ -517,6 +533,10 @@ Consider stored / second-order attacks carefully:
         field_plans: list[FieldAttackPlan] = []
 
         for fd in data.get("fields", []):
+            # 非 dict 要素（{"fields":["username"]} のような文字列）は skip する。
+            # predicate ですり抜けても fd.get(...) の AttributeError を出さない防御（#92 r6）。
+            if not isinstance(fd, dict):
+                continue
             name = str(fd.get("name", ""))
             if not name:
                 continue
