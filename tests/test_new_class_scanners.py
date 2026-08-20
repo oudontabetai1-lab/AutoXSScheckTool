@@ -163,6 +163,24 @@ class MergeTemplateHeadersTests(unittest.TestCase):
         self.assertEqual(red["request"]["headers"]["Api-Key"], "***")
         self.assertEqual(red["request"]["headers"]["ApiKey"], "***")
 
+    def test_reflected_credential_header_value_redacted_from_response_body(self):
+        # #90 R21b: reflect された認証ヘッダ値が response body にエコーされても evidence へ
+        # 残さない。ヘッダ dict のマスクだけでなく body 内の値も伏せる。
+        from wscan.scanners.base import _redact_json_evidence_pair
+        pair = {
+            "request": {
+                "headers": {"Authorization": "Bearer SECRET-TOKEN-123"},
+                "post_data": '{"q": "x"}',
+            },
+            "response": {
+                "body": 'echo: Bearer SECRET-TOKEN-123 for /q',
+                "headers": {"Authorization": "Bearer SECRET-TOKEN-123"},
+            },
+        }
+        red = _redact_json_evidence_pair(pair, "/q")
+        self.assertNotIn("SECRET-TOKEN-123", red["response"]["body"])
+        self.assertEqual(red["request"]["headers"]["Authorization"], "***")
+
     def test_evidence_redaction_uses_broad_canon_but_merge_uses_narrow(self):
         # 2 概念を分ける（#90 R13-2）: evidence redaction は broad（静的＋runtime）、
         # merge の「上書き禁止」は静的な認証情報のみ（runtime redaction ヘッダは含めない）。

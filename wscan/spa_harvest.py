@@ -187,33 +187,41 @@ _OPERATION_DISCRIMINATOR_KEYS = frozenset({
 })
 
 
-def _collect_discriminators(node, tokens, out, *, depth_cap=8) -> None:
-    """full body を DFS し operation discriminator の (path, 値) を集める（純粋・pointer cap 非依存）。
+def _collect_discriminators(node, tokens, out, *, depth_cap=None) -> None:
+    """full body を**反復 DFS** し operation discriminator の (path, 値) を集める（純粋・pointer cap 非依存）。
 
     enumerate_leaf_pointers は葉を 200 で打ち切るため、200 葉より後ろにある discriminator
     （例: 大きな body の末尾 method）を pointer 経由で拾うと取りこぼす。ここは parsed_body 全体を
     直接歩いて discriminator を発見する（#90 R14）。**発見数の上限は設けない** ―― 先に現れた
     discriminator 名の葉（nested な type 等）でカットオフすると、その後の operation selector（method）
-    を走査せず別 operation を collapse する（#90 R14）。走査は depth_cap＝8 と parse 前の body サイズ
-    上限（_MAX_JSON_BODY_BYTES）で有界。
+    を走査せず別 operation を collapse する（#90 R14）。
+
+    深さ上限は設けない（#90 R21b）: injectable な葉が浅くても discriminator（例: JSON-RPC method）が
+    8 段より深いと以前の depth_cap=8 で識別子を取りこぼし collapse していた。署名は
+    ``tuple(sorted(disc))`` で順序非依存（_injection_signature）なので、明示スタックの反復 DFS で
+    全走査してよい。json.loads 済み構造を歩くだけで深いネストでも RecursionError にならず、コストは
+    parse 前 body サイズ上限（_MAX_JSON_BODY_BYTES）で有界。depth_cap は後方互換で残すが既定 None。
     """
-    if len(tokens) > depth_cap:
-        return
-    if isinstance(node, dict):
-        for k, v in node.items():
-            key = str(k)
-            if key.lower() in _OPERATION_DISCRIMINATOR_KEYS:
-                if isinstance(v, (str, int, float, bool)):
-                    # repr で JSON 型を保持（{"action":1} と {"action":"1"} を区別・#90 R13）。
-                    out.append((tuple(tokens + [key]), repr(v)))
-                elif isinstance(v, (dict, list)):
-                    # discriminator 値が非スカラ（{"type":{"name":"create"}} 等）でも別 operation を
-                    # 区別する。正規化 body の bounded hash を署名に含め collapse を防ぐ（#90 FN-F）。
-                    out.append((tuple(tokens + [key]), _canon_nonscalar(v)))
-            _collect_discriminators(v, tokens + [key], out, depth_cap=depth_cap)
-    elif isinstance(node, list):
-        for index, v in enumerate(node):
-            _collect_discriminators(v, tokens + [str(index)], out, depth_cap=depth_cap)
+    stack = [(node, tuple(tokens))]
+    while stack:
+        cur, path = stack.pop()
+        if depth_cap is not None and len(path) > depth_cap:
+            continue
+        if isinstance(cur, dict):
+            for k, v in cur.items():
+                key = str(k)
+                if key.lower() in _OPERATION_DISCRIMINATOR_KEYS:
+                    if isinstance(v, (str, int, float, bool)):
+                        # repr で JSON 型を保持（{"action":1} と {"action":"1"} を区別・#90 R13）。
+                        out.append((path + (key,), repr(v)))
+                    elif isinstance(v, (dict, list)):
+                        # discriminator 値が非スカラ（{"type":{"name":"create"}} 等）でも別 operation を
+                        # 区別する。正規化 body の hash を署名に含め collapse を防ぐ（#90 FN-F）。
+                        out.append((path + (key,), _canon_nonscalar(v)))
+                stack.append((v, path + (key,)))
+        elif isinstance(cur, list):
+            for index, v in enumerate(cur):
+                stack.append((v, path + (str(index),)))
 
 
 def _canon_nonscalar(value) -> str:

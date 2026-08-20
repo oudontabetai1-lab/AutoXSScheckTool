@@ -189,6 +189,14 @@ def _redact_json_evidence_pair(pair: dict, injection_pointer: str) -> dict:
     if isinstance(parsed, (dict, list)):
         secrets = sibling_string_values(parsed, injection_pointer)
         req["post_data"] = json.dumps(redact_body_except(parsed, injection_pointer))
+    # reflected な認証ヘッダ値（Authorization/Cookie/API-token 等）が response body に
+    # エコーされても evidence（checkpoint/report/monitor）へ残さないため、機密ヘッダの
+    # **値**も伏字対象に含める（#90 R21b）。ヘッダ dict のマスク前の生値を使う。
+    orig_req_headers = (pair.get("request", {}) or {}).get("headers")
+    if isinstance(orig_req_headers, dict):
+        for hk, hv in orig_req_headers.items():
+            if _is_sensitive_for_evidence(hk) and isinstance(hv, str) and hv:
+                secrets.append(hv)
     # request/response 双方の認証ヘッダ値をマスク（サーバが X-Access-Token 等を応答で
     # 返す場合も to_dict→checkpoint/report/monitor へ流さない）。
     if isinstance(req.get("headers"), dict):

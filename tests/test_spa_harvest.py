@@ -426,6 +426,22 @@ class HarvestJsonBodyTargetsTests(unittest.TestCase):
         self.assertEqual(len(targets), 2)
         self.assertNotEqual(targets[0]["body_signature"], targets[1]["body_signature"])
 
+    def test_discriminator_below_depth_eight_still_distinguishes(self):
+        # #90 R21b: injectable な葉(/payload/id)が浅くても discriminator(method)が8段より
+        # 深いと旧 depth_cap=8 で識別子を取りこぼし collapse していた。反復DFSで全走査し区別する。
+        # 包む鍵(wrapper/lvl)は discriminator でなく、深い method のみが差分＝深さ走査を検証。
+        def deep(method_value):
+            node = {"method": method_value}          # discriminator は深い位置に1つだけ
+            for _ in range(10):                       # 10 段ネスト（>8）
+                node = {"lvl": node}
+            return {"payload": {"id": "1"}, "wrapper": node}
+        targets = harvest_json_body_targets([
+            _json_pair("https://api.test/rpc", deep("create")),
+            _json_pair("https://api.test/rpc", deep("delete")),
+        ], base_netlocs={"api.test"})
+        self.assertEqual(len(targets), 2)
+        self.assertNotEqual(targets[0]["body_signature"], targets[1]["body_signature"])
+
     def test_nonscalar_discriminator_differs_only_after_2048_chars(self):
         # 2048 字以降だけ異なる非スカラ discriminator でも別 operation を区別する（#90 R21）。
         # ハッシュ前 prefix 切り詰めだと同一署名へ collapse して一方が未探索になる。
