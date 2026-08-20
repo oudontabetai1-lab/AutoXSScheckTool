@@ -353,6 +353,19 @@ class GetPayloadsHistoryTests(unittest.IsolatedAsyncioTestCase):
         hist_legacy = engine.attempt_ledger.history(ip_legacy.ledger_key_parts(), "xss")
         assert all(a.payload != "<probe>" for a in hist_legacy)
 
+    async def test_record_attempt_keys_ledger_by_actual_submission_origin(self):
+        """F7: crawl 予測 B の form でも、pair の実 URL A で台帳を刻む（実送信先へ帰属）。"""
+        engine = _GenEngine()
+        scanner = _PlainScanner(engine)
+        ip = InjectionPoint.for_form("http://a.test/p", "q", target_origin="http://b.test")
+        pair = {"request": {"url": "http://actual.test/submit"}, "response": {"status": 200}}
+        scanner._record_attempt(ip, "<p>", "x", pair)
+        # 実送信先 actual.test のキーで取れる。
+        key_actual = ip.stable_key_parts() + ("http://actual.test",)
+        assert any(a.payload == "<p>" for a in engine.attempt_ledger.history(key_actual, "xss"))
+        # crawl 予測 B のキーには入っていない。
+        assert all(a.payload != "<p>" for a in engine.attempt_ledger.history(ip.ledger_key_parts(), "xss"))
+
     async def test_no_ip_means_no_history(self):
         engine = _GenEngine()
         engine.payload_gen = _CapturingPayloadGen()

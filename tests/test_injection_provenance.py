@@ -145,6 +145,19 @@ class FindingInjectionProvenanceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(finding.injection_method, "")
         self.assertEqual(finding.injection_target_origin, "http://action.test")
 
+    async def test_form_finding_uses_actual_submission_origin(self):
+        """F7: crawl 予測(ip.target_origin=B)でも、pair の実リクエスト URL(A)で finding を刻む。"""
+        scanner = _Scanner(_Engine())
+        ip = InjectionPoint.for_form("http://h/form", "id", target_origin="http://b.test")
+        # 実際に飛んだリクエストは A（動的 routing / formaction 書換を想定）。
+        pair = {"request": {"url": "http://a.test/submit"}, "response": {}}
+        f = await scanner.record_finding(
+            "http://h/form", "id", "'", "err", pair, screenshot_b64="",
+            evidence_type="sqli_error", injection_point=ip,
+        )
+        # crawl 予測 B ではなく実送信先 A で帰属。
+        self.assertEqual(f.injection_target_origin, "http://a.test")
+
     async def test_record_finding_stamps_json_body(self):
         scanner = _Scanner(_Engine())
         ip = InjectionPoint.for_json_body(

@@ -593,6 +593,22 @@ class BaseScanner(ABC):
         self._record_attempt(ip, payload, source, pair)
         return source, pair
 
+    @staticmethod
+    def _actual_action_origin(pair: dict) -> str:
+        """送信後の pair の**実リクエスト URL**から実送信先 origin を得る（純粋）。
+
+        crawl 時 snapshot（ip.target_origin）は、fill_and_submit_form が送信前に発火する
+        input/change/blur ハンドラが form.action / submitter の formaction を書き換えると
+        実送信先とずれる（F7）。DOM の introspection でなく**実際に飛んだリクエスト**の URL を
+        使うことで、動的 routing でも学習を実送信先 origin へ正しく帰属させる。取得不能は ""。
+        """
+        try:
+            from wscan.payload_learning import origin_key
+            url = ((pair or {}).get("request") or {}).get("url", "") or ""
+            return origin_key(url) or ""
+        except Exception:
+            return ""
+
     def _record_attempt(self, ip: "InjectionPoint", payload, source: str, pair: dict) -> None:
         """(注入点, check) 単位で payload→応答メタを試行台帳へ蓄積する（best-effort）。"""
         ledger = getattr(getattr(self, "engine", None), "attempt_ledger", None)
@@ -600,8 +616,15 @@ class BaseScanner(ABC):
             return
         try:
             from wscan.attempt_ledger import attempt_from_pair
+            # 記録は **実送信先 origin**（pair の実 URL）で刻む（F7）。form で実 origin が取れた
+            # ときは stable_key + 実 origin、取れないときは ip の（crawl 予測）ledger_key へ戻す。
+            actual = self._actual_action_origin(pair)
+            if ip.location == "form" and actual:
+                key = ip.stable_key_parts() + (actual,)
+            else:
+                key = ip.ledger_key_parts()
             ledger.record(
-                ip.ledger_key_parts(),
+                key,
                 self.CHECK_TYPE,
                 attempt_from_pair(payload, source, pair),
             )
@@ -1230,8 +1253,13 @@ class BaseScanner(ABC):
                 if injection_point and injection_point.location == "form"
                 else 0
             ),
+            # form の学習キーは **実送信先 origin**（pair の実 URL）を優先し、取れなければ ip の
+            # crawl 予測へ戻す（F7: 動的 routing でも実送信先へ帰属）。url_param/json は従来どおり ""。
             injection_target_origin=(
-                injection_point.target_origin if injection_point else ""
+                (self._actual_action_origin(pair)
+                 or (injection_point.target_origin if injection_point else ""))
+                if (injection_point is not None and injection_point.location == "form")
+                else ""
             ),
         )
         self.findings.append(finding)
