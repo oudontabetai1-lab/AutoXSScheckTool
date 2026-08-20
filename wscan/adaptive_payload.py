@@ -452,6 +452,7 @@ class AdaptivePayloadEngine:
         page_html: str,
         waf_name: Optional[str] = None,
         *,
+        extra_observations: str = "",
         return_status: bool = False,
     ) -> Optional[list[str]] | tuple[Optional[list[str]], llm_client.CompletionStatus]:
         """
@@ -466,6 +467,10 @@ class AdaptivePayloadEngine:
 
         cheatsheet = _get_cheatsheet(check_type)
         observations = _build_observations(page_html, payloads_tried)
+        # G1/G2: 試行台帳の rich metadata（payload→status/len/reflected/timing/error）を
+        # 観測へ合流。engine が最初の掃射後に整形済み文字列を渡す。空なら従来どおり。
+        if extra_observations:
+            observations = observations + "\n" + extra_observations
         payloads_list = "\n".join(f"  {p}" for p in payloads_tried[:30]) or "  (none recorded)"
         # Sanitize attacker-controlled HTML before injecting into the LLM prompt
         # so that crafted pages cannot exfiltrate the system prompt or redirect

@@ -4273,19 +4273,28 @@ class ScanEngine:
             # （evolution/mutation wave 由来を含む）を先頭に加える。これで adaptive(LLM) が
             # 「本当に送った変種」を観測でき、既に弾かれた形の再提案を避けられる。壊れても
             # 従来の静的 tried に安全側フォールバック。
+            # G1/G2/G3: 試行台帳の rich metadata（payload→status/len/reflected/timing/
+            # error）を adaptive(LLM) の観測へ実際に供給する。adaptive は「最初の掃射の後」に
+            # 走るため、ここが履歴が確実に埋まっている history-aware 生成ステップになる
+            # （baseline generate の履歴節は初回パスでは台帳が空で不発になりうるのを補う）。
+            history_note = ""
             try:
                 _ledger = getattr(self, "attempt_ledger", None)
                 if _ledger is not None:
-                    _seen = set(tried)
-                    _real = [
-                        a.payload
-                        for a in _ledger.history(ip.stable_key_parts(), check_name)
-                        if a.payload and a.payload not in _seen
-                    ]
+                    _entries = _ledger.history(ip.stable_key_parts(), check_name)
+                    # 台帳内の重複（SQL boolean のペア payload・反復 probe 等）も除去する。
+                    # adaptive は先頭30件しか消費しないため、重複を放置すると本来 expose
+                    # したい evolution/mutation payload を押し出してしまう。順序保持で一意化。
+                    from wscan.attempt_ledger import (
+                        format_history_for_prompt,
+                        unique_payloads,
+                    )
+                    _real = unique_payloads(_entries, set(tried))
                     if _real:
                         tried = _real + tried
+                    history_note = format_history_for_prompt(_entries)
             except Exception:
-                pass
+                history_note = ""
 
             # Ask LLM for bypass payloads (include detected WAF for targeted evasion)
             adaptive_payloads, generation_status = await self.adaptive_engine.generate(
@@ -4295,6 +4304,7 @@ class ScanEngine:
                 payloads_tried=tried,
                 page_html=page_html,
                 waf_name=self.waf_detector._detected,
+                extra_observations=history_note,
                 return_status=True,
             )
 

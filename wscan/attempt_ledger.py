@@ -44,9 +44,14 @@ def attempt_from_pair(payload, source: str, pair: dict) -> Attempt:
     has_pair = bool(pair) and bool(resp)
 
     status = resp.get("status") if has_pair else None
-    body = source or ""
-    body_len = len(body) if has_pair else None
-    reflected = bool(payload_str) and payload_str in body
+    # 反射/長さは **HTTP 応答本文** を優先する。form/URL の `source` は page.content()
+    # の DOM 直列化で、エスケープ済み `<`/`>` が生に見えるなど正規化され、反射の偽陽性・
+    # 長さのズレを生む（base._evolution_probe も応答本文を優先する既存前例に合わせる）。
+    # 応答本文が無い場合のみ source へフォールバックする。
+    resp_body = resp.get("body")
+    observed = resp_body if resp_body is not None else (source or "")
+    body_len = len(observed) if has_pair else None
+    reflected = bool(payload_str) and payload_str in observed
     elapsed = _elapsed_from_pair(pair) if has_pair else None
     return Attempt(
         payload=payload_str,
@@ -91,6 +96,21 @@ class AttemptLedger:
     def history(self, ip_key: tuple, check_type: str) -> list[Attempt]:
         """当該 (注入点, check) の試行履歴（時系列）を返す。無ければ空。"""
         return list(self._store.get(self._key(ip_key, check_type), []))
+
+
+def unique_payloads(attempts: list[Attempt], already: set) -> list[str]:
+    """台帳の Attempt 列から、`already` に無い payload を順序保持で一意化して返す純粋関数。
+
+    adaptive は先頭数十件しか消費しないため、同一 payload の重複（SQL boolean のペア・
+    反復 probe 等）が本来 expose したい evolution/mutation payload を押し出すのを防ぐ。
+    """
+    seen = set(already)
+    out: list[str] = []
+    for a in attempts:
+        if a.payload and a.payload not in seen:
+            seen.add(a.payload)
+            out.append(a.payload)
+    return out
 
 
 def format_history_for_prompt(attempts: list[Attempt], max_items: int = 12) -> str:

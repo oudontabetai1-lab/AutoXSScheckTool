@@ -15,6 +15,7 @@ from wscan.attempt_ledger import (
     AttemptLedger,
     attempt_from_pair,
     format_history_for_prompt,
+    unique_payloads,
 )
 from wscan.injection_point import InjectionPoint
 from wscan.scanners.base import BaseScanner
@@ -58,6 +59,46 @@ class AttemptFromPairTests(unittest.TestCase):
         a = attempt_from_pair(None, "", {})
         self.assertEqual(a.payload, "")
         self.assertTrue(a.error)
+
+
+class ResponseBodyPreferenceTests(unittest.TestCase):
+    """Codex #91 指摘2: 反射/長さは DOM(source) でなく HTTP 応答本文を優先。"""
+
+    def test_prefers_response_body_over_dom_source(self):
+        # DOM(source) は payload を正規化して反射しているが、実 HTTP 本文には無い場合、
+        # response body 側（反射なし）を採る＝DOM正規化由来の偽陽性を避ける。
+        pair = {
+            "request": {"timestamp": 1.0},
+            "response": {"status": 200, "body": "escaped &lt;x&gt;", "timestamp": 1.2},
+        }
+        dom_source = "raw <x> reflected"
+        a = attempt_from_pair("<x>", dom_source, pair)
+        self.assertFalse(a.reflected)               # 応答本文には <x> 生では無い
+        self.assertEqual(a.body_len, len("escaped &lt;x&gt;"))
+
+    def test_falls_back_to_source_when_no_body(self):
+        # 応答本文が無い（body キー欠落）ときは source を使う。
+        pair = {
+            "request": {"timestamp": 1.0},
+            "response": {"status": 200, "timestamp": 1.2},
+        }
+        a = attempt_from_pair("<x>", "raw <x> here", pair)
+        self.assertTrue(a.reflected)
+        self.assertEqual(a.body_len, len("raw <x> here"))
+
+
+class UniquePayloadsTests(unittest.TestCase):
+    """Codex #91 指摘3: 台帳 payload を順序保持で重複除去（truncation前）。"""
+
+    def test_order_preserving_dedup_and_excludes_already(self):
+        attempts = [
+            Attempt("a"), Attempt("b"), Attempt("a"),  # 重複 a
+            Attempt("c"), Attempt("b"),                # 重複 b
+        ]
+        self.assertEqual(unique_payloads(attempts, {"c"}), ["a", "b"])
+
+    def test_empty_payload_skipped(self):
+        self.assertEqual(unique_payloads([Attempt(""), Attempt("x")], set()), ["x"])
 
 
 class LedgerTests(unittest.TestCase):
@@ -237,6 +278,42 @@ class GetPayloadsHistoryTests(unittest.IsolatedAsyncioTestCase):
         scanner = _PlainScanner(engine)
         await scanner.get_payloads("q", "http://fixture.test/p")
         self.assertIsNone(engine.payload_gen.captured_history)
+
+
+# ---------------------------------------------------------------------------
+# 指摘1: adaptive generate が rich metadata 履歴(extra_observations)をプロンプトへ載せる
+# ---------------------------------------------------------------------------
+class AdaptiveExtraObservationsTests(unittest.IsolatedAsyncioTestCase):
+    async def test_extra_observations_reaches_prompt(self):
+        import wscan.adaptive_payload as ap
+        from wscan.payload_gen import PayloadGenerator
+
+        captured = {}
+
+        async def fake_complete_text(pg, prompt, **kwargs):
+            captured["prompt"] = prompt
+            return ('["<svg/onload=1>"]', "ok")
+
+        pg = PayloadGenerator(provider="ollama")
+        # LLM 可用性チェックや実呼び出しを避けるため complete_text を差し替え。
+        orig = ap.llm_client.complete_text
+        ap.llm_client.complete_text = fake_complete_text
+        try:
+            engine = ap.AdaptivePayloadEngine(pg)
+            note = "PREVIOUSLY TRIED payloads ...\n- `<script>` -> status=403, not-reflected"
+            await engine.generate(
+                check_type="xss",
+                field_name="q",
+                url="http://t/",
+                payloads_tried=["<script>"],
+                page_html="<html></html>",
+                extra_observations=note,
+                return_status=True,
+            )
+        finally:
+            ap.llm_client.complete_text = orig
+        self.assertIn("PREVIOUSLY TRIED", captured.get("prompt", ""))
+        self.assertIn("status=403", captured["prompt"])
 
 
 if __name__ == "__main__":
