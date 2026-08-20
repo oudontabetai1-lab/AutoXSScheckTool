@@ -561,9 +561,6 @@ class ScanEngine:
         self.api_seed_requests: list = []
         # JSON body の実値を含み得るため、永続化しないメモリ内レジストリ。
         self.injection_templates: dict[str, dict] = {}
-        # form action の送信先 origin。注入点の URL はページ URL のまま保ち、学習キーだけを
-        # 実送信先へ分離する（checkpoint の stable key 互換性は変えない）。
-        self._form_target_origins: dict[tuple[str, int], str] = {}
         # API スペック由来 URL の集合（GraphQL の具体 URL probe を API/GraphQL 系のみへ
         # 限定するために参照。全クロールページへ probe を撒かないためのゲート）。
         self.api_seed_urls: set = set()
@@ -1413,34 +1410,17 @@ class ScanEngine:
         field_name: str,
         form_index: int,
         is_url_param: bool,
+        target_origin: str = "",
     ):
         """従来 form/URL parameter から InjectionPoint を一意に生成する。"""
         if is_url_param:
             return InjectionPoint.for_url_param(url, field_name)
-        target = getattr(self, "_form_target_origins", {}).get(
-            (url.rstrip("/"), form_index), ""
-        )
         return InjectionPoint.for_form(
             url,
             field_name,
             form_index,
-            target_origin=target,
+            target_origin=target_origin,
         )
-
-    def _register_form_target_origins(self, page: CrawledPage) -> None:
-        """ページ上の各 form を実送信先 origin と対応付ける。"""
-        normalized_url = page.url.rstrip("/")
-        # 同じ URL を再クロールした場合、消えた form や解決不能になった action の古い値を
-        # 残さない。origin_key が失敗した form は未登録にしてページ origin へフォールバックする。
-        stale_keys = [
-            key for key in self._form_target_origins if key[0] == normalized_url
-        ]
-        for key in stale_keys:
-            del self._form_target_origins[key]
-        for form_index, form in enumerate(page.forms):
-            target = origin_key(self._form_action_url(form, page.url))
-            if target is not None:
-                self._form_target_origins[(normalized_url, form_index)] = target
 
     def _checkpoint_is_done_ip(self, ip, check: str) -> bool:
         if not self.enable_checkpoint or self.checkpoint is None:
@@ -2715,9 +2695,6 @@ class ScanEngine:
         """Build per-page attack plans with cross-page awareness, then confirm with user."""
         console.print(Rule("[bold cyan] Phase 2 / 4  ·  Attack Planning [/bold cyan]", style="cyan"))
 
-        for page in pages:
-            self._register_form_target_origins(page)
-
         plans: dict = {}
 
         if not self.use_planner:
@@ -3752,8 +3729,6 @@ class ScanEngine:
         Uses ``self.browser`` which transparently returns the worker's browser
         when called from inside a concurrent worker task.
         """
-        # login seed 等、plan を経ず直接攻撃されるページも含めて全 form を登録する。
-        self._register_form_target_origins(page)
         # ── セッション失効チェック（全検査の前に一度）────────────────────
         # 長時間スキャンでセッションが切れると以降が全てログイン画面/401 に化け、
         # 検出力が静かにゼロになる。ページ単位検査（graphql/cache/proto/mass 等）も
@@ -3924,21 +3899,22 @@ class ScanEngine:
         # Build ordered field list
         field_queue: list = []
         for fi, form in enumerate(forms):
+            form_target = self._form_effective_action_origin(form, page.url)
             for inp in form.get("inputs", []):
-                field_queue.append((fi, inp, False))
+                field_queue.append((fi, inp, False, form_target))
         for param in page.url_params:
-            field_queue.append((0, {"name": param, "type": "text"}, True))
+            field_queue.append((0, {"name": param, "type": "text"}, True, ""))
 
         # Sort by risk score from the plan
         if plan:
             def _sort_key(item):
-                fi, inp, is_url = item
+                fi, inp, is_url, _target = item
                 fp = plan.get_field_plan(inp.get("name", ""), fi, is_url)
                 return -(fp.risk_score if fp else 5)
             field_queue.sort(key=_sort_key)
 
         skipped = sum(
-            1 for _, inp, _ in field_queue
+            1 for _, inp, _, _ in field_queue
             if inp.get("name", "").lower() in self.exclude_fields
         )
         console.print(
@@ -3951,7 +3927,7 @@ class ScanEngine:
         # This prevents overcounting when multiple concurrent workers process
         # pages with overlapping URL params.
 
-        for fi, field, is_url_param in field_queue:
+        for fi, field, is_url_param, target_origin in field_queue:
             field_name = field.get("name", f"field_{fi}")
             key = (f"{page.url}||url_param||{field_name}" if is_url_param
                    else f"{page.url}||{fi}||{field_name}")
@@ -3980,7 +3956,14 @@ class ScanEngine:
 
             field_plan = plan.get_field_plan(field_name, fi, is_url_param) if plan else None
             try:
-                await self._scan_field(page.url, fi, field, is_url_param, field_plan)
+                await self._scan_field(
+                    page.url,
+                    fi,
+                    field,
+                    is_url_param,
+                    field_plan,
+                    target_origin=target_origin,
+                )
             except (AbortScan, SkipPage):
                 raise
             except Exception as e:
@@ -4034,6 +4017,7 @@ class ScanEngine:
         sqli_scanner = self.scanners.get("sqli")
 
         for fi, form in forms_to_test:
+            form_target = self._form_effective_action_origin(form, page.url)
             inputs = [
                 inp for inp in form.get("inputs", [])
                 if inp.get("name", "").lower() not in self.exclude_fields
@@ -4093,10 +4077,17 @@ class ScanEngine:
 
                 # ── XSS detection ──────────────────────────────────────
                 if check_name == "xss" and xss_scanner:
+                    finding_field = f"multi[{','.join(field_payloads)}]"
+                    injection_point = InjectionPoint.for_form(
+                        page.url,
+                        finding_field,
+                        fi,
+                        target_origin=form_target,
+                    )
                     if self.browser.dialog_fired:
                         f = await xss_scanner.record_finding(
                             url=page.url,
-                            field_name=f"multi[{','.join(field_payloads)}]",
+                            field_name=finding_field,
                             payload=str(field_payloads),
                             evidence=(
                                 f"[MultiParam] XSS dialog triggered with simultaneous "
@@ -4106,6 +4097,7 @@ class ScanEngine:
                             severity="critical",
                             dialog_confirmed=True,
                             dialog_message=self.browser.dialog_message,
+                            injection_point=injection_point,
                         )
                         self._record_finding(f, source="multi-param")
                     elif source:
@@ -4114,7 +4106,7 @@ class ScanEngine:
                             if reflected:
                                 f = await xss_scanner.record_finding(
                                     url=page.url,
-                                    field_name=f"multi[{','.join(field_payloads)}]",
+                                    field_name=finding_field,
                                     payload=str(field_payloads),
                                     evidence=(
                                         f"[MultiParam] XSS reflected in combined submission "
@@ -4122,6 +4114,7 @@ class ScanEngine:
                                     ),
                                     pair=pair,
                                     severity="high",
+                                    injection_point=injection_point,
                                 )
                                 self._record_finding(f, source="multi-param")
                                 break
@@ -4138,9 +4131,10 @@ class ScanEngine:
                     ]
                     matched = sqli_scanner.check_response_for_patterns(source, sqli_patterns)
                     if matched:
+                        finding_field = f"multi[{','.join(field_payloads)}]"
                         f = await sqli_scanner.record_finding(
                             url=page.url,
-                            field_name=f"multi[{','.join(field_payloads)}]",
+                            field_name=finding_field,
                             payload=str(field_payloads),
                             evidence=(
                                 f"[MultiParam] SQLi error in combined submission: "
@@ -4148,6 +4142,12 @@ class ScanEngine:
                             ),
                             pair=pair,
                             severity="high",
+                            injection_point=InjectionPoint.for_form(
+                                page.url,
+                                finding_field,
+                                fi,
+                                target_origin=form_target,
+                            ),
                         )
                         self._record_finding(f, source="multi-param")
 
@@ -4183,10 +4183,17 @@ class ScanEngine:
         field: dict,
         is_url_param: bool = False,
         field_plan: Optional[FieldAttackPlan] = None,
+        target_origin: str = "",
     ):
         """Run enabled scanners on a single field, guided by the attack plan."""
         field_name = field.get("name", "unknown")
-        ip = self._injection_point_for(url, field_name, form_index, is_url_param)
+        ip = self._injection_point_for(
+            url,
+            field_name,
+            form_index,
+            is_url_param,
+            target_origin=target_origin,
+        )
         location = "URL param" if is_url_param else "form field"
 
         if field_plan and field_plan.priority_checks:
@@ -4331,7 +4338,13 @@ class ScanEngine:
             and (checks_executed > 0 or checks_skipped_done > 0)
         ):
             adaptive_payloads = await self._adaptive_attack_field(
-                url, form_index, field, is_url_param, ordered_checks, field_plan
+                url,
+                form_index,
+                field,
+                is_url_param,
+                ordered_checks,
+                field_plan,
+                target_origin=target_origin,
             )
             # None はいずれかの check が未完、list は今回対象がすべて完了。
             # 完了記録自体は check_type ごとに _adaptive_attack_field が行う。
@@ -4359,6 +4372,7 @@ class ScanEngine:
         is_url_param: bool,
         check_names: list,
         field_plan: Optional[FieldAttackPlan],
+        target_origin: str = "",
     ) -> Optional[list[str]]:
         """
         Phase 3b: Adaptive AI round.
@@ -4366,7 +4380,13 @@ class ScanEngine:
         context-aware bypass payloads, then run the scanner again with those payloads.
         """
         field_name = field.get("name", "unknown")
-        ip = self._injection_point_for(url, field_name, form_index, is_url_param)
+        ip = self._injection_point_for(
+            url,
+            field_name,
+            form_index,
+            is_url_param,
+            target_origin=target_origin,
+        )
 
         # provider 自体が使えない場合はフォールバック完了として収束させる。
         # 個別 generate() の一時失敗とは分離し、可用性 probe は scan 中に一度だけ行う。
@@ -4618,6 +4638,12 @@ class ScanEngine:
             return urljoin(page_url, action)
         except Exception:
             return page_url
+
+    def _form_effective_action_origin(self, form: dict, page_url: str) -> str:
+        """form の実送信先 origin。submit の formaction override を優先し、
+        無ければ form.action を絶対化して origin_key へ通す。取れなければ空文字。"""
+        action = form.get("submit_action") or self._form_action_url(form, page_url)
+        return origin_key(action) or ""
 
     def _is_registration_url(self, url: str) -> bool:
         """Return True if the URL path looks like a new-account registration page."""

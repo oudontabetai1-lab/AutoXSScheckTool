@@ -1310,9 +1310,18 @@ class BrowserManager:
                             });
                         });
                         if (inputs.length > 0) {
+                            // 実効 action: fill_and_submit_form は最初の submit/button を
+                            // クリックするため、その control の formaction 属性が form.action を
+                            // 上書きする。学習キーは実送信先で刻む必要があるので効な action を拾う。
+                            let submitAction = form.action || window.location.href;
+                            const submitEl = form.querySelector('[type=submit], button');
+                            if (submitEl && submitEl.formAction) {
+                                submitAction = submitEl.formAction;
+                            }
                             results.push({
                                 index: fi,
                                 action: form.action || window.location.href,
+                                submit_action: submitAction,
                                 method: (form.method || 'GET').toUpperCase(),
                                 inputs: inputs,
                             });

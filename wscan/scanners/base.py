@@ -759,8 +759,8 @@ class BaseScanner(ABC):
         if _learning_on:
             from wscan.payload_learning import origin_key
             # form は実送信先 action の origin、それ以外は注入 URL の origin を学習キーにする。
-            # action origin は engine のレジストリで解決済みの値を使い、Finding にも同じ文字列を
-            # 引き継ぐため、記録側（engine._record_finding）との不一致を起こさない。未指定・
+            # action origin は form から InjectionPoint へ載せて運んだ値を使い、Finding にも
+            # 同じ文字列を引き継ぐため、記録側（engine._record_finding）との不一致を起こさない。未指定・
             # 解決失敗時は origin_key(url) へ戻し、従来 Finding/URL parameter の挙動を保つ。
             _domain = (
                 ip.target_origin
