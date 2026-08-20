@@ -752,19 +752,23 @@ class BaseScanner(ABC):
         learner = getattr(self.engine, "payload_learner", None)
         _learning_on = bool(learner) and getattr(self.engine, "enable_payload_learning", True)
         _domain = None
-        learning_summary = None
+        learning_summary_provider = None
         if _learning_on:
             from urllib.parse import urlparse as _up
             _domain = _up(getattr(self.engine, "target_url", "")).hostname or None
-            try:
+
+            # 要約構築は **LLM 生成パスに入った時だけ** generate 内で遅延実行する。
+            # custom payloads 指定 / provider=none / template 無し / LLM 不在では generate は
+            # サマリを使わず即 return するため、その場合に全 field で学習履歴を走査する無駄を避ける。
+            def _build_learning_summary(_learner=learner, _check=self.CHECK_TYPE):
                 from wscan.payload_learning import format_learning_for_prompt
                 # stats は domain=None（global 集計）で取る。record は global と domain の両
                 # バケツへ書き、stats(domain=X) はそれらを加算するため、domain 付きだと 1 回の
                 # 観測が二重計上され min_tries を素通りする。global は全観測を既に含む。
-                _rows = learner.stats(self.CHECK_TYPE, domain=None)
-                learning_summary = format_learning_for_prompt(_rows) or None
-            except Exception:
-                learning_summary = None
+                rows = _learner.stats(_check, domain=None)
+                return format_learning_for_prompt(rows) or None
+
+            learning_summary_provider = _build_learning_summary
 
         payloads = await self.payload_gen.generate(
             check_type=self.CHECK_TYPE,
@@ -772,7 +776,7 @@ class BaseScanner(ABC):
             url=url,
             custom_payloads=_custom,
             attempt_history=attempt_history,
-            learning_summary=learning_summary,
+            learning_summary_provider=learning_summary_provider,
         )
         # A-3 / ⑩: re-order by historical success rate (domain-aware)
         if _learning_on:

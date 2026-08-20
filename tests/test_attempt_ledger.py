@@ -233,7 +233,7 @@ class _CapturingPayloadGen:
         self.captured_history = "unset"
 
     async def generate(self, *, check_type, field_name, url, custom_payloads=None,
-                       attempt_history=None, learning_summary=None):
+                       attempt_history=None, learning_summary_provider=None):
         self.captured_history = attempt_history
         return ["default1"]
 

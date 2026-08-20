@@ -82,11 +82,17 @@ class PayloadGenerationRetryTests(unittest.TestCase):
         self.assertEqual(client.post.await_count, 1)
         sleep.assert_not_awaited()
 
-    def test_learning_summary_is_included_in_prompt(self):
+    def test_learning_summary_provider_is_invoked_and_included_in_prompt(self):
         summary = (
-            "LEARNED payload effectiveness on this host/globally from prior scans\n"
-            "EFFECTIVE (worked before):"
+            "LEARNED payloads that produced findings on prior scans\n"
+            "- `<svg onload=x>` -> 2/2 succeeded"
         )
+        calls = []
+
+        def _provider():
+            calls.append(1)
+            return summary
+
         with patch.dict(os.environ, {"OPENAI_API_KEY": "test-key"}, clear=False):
             generator = self._generator()
         with patch.object(
@@ -98,11 +104,34 @@ class PayloadGenerationRetryTests(unittest.TestCase):
                 "xss",
                 "query",
                 "https://target.test/",
-                learning_summary=summary,
+                learning_summary_provider=_provider,
             ))
 
+        # LLM 生成パスに入ったので provider は 1 度だけ呼ばれ、要約が prompt に載る。
+        self.assertEqual(len(calls), 1)
         prompt = call_llm.await_args.args[0]
         self.assertIn(summary, prompt)
+
+    def test_learning_summary_provider_not_invoked_when_custom_payloads(self):
+        """custom payloads 指定時は generate が即 return し、provider は呼ばれない（遅延の要）。"""
+        calls = []
+
+        def _provider():
+            calls.append(1)
+            return "should-not-appear"
+
+        with patch.dict(os.environ, {"OPENAI_API_KEY": "test-key"}, clear=False):
+            generator = self._generator()
+        payloads = asyncio.run(generator.generate(
+            "xss",
+            "query",
+            "https://target.test/",
+            custom_payloads=["only-this"],
+            learning_summary_provider=_provider,
+        ))
+
+        self.assertEqual(payloads, ["only-this"])
+        self.assertEqual(calls, [])
 
 
 if __name__ == "__main__":
