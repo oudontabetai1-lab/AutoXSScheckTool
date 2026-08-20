@@ -38,6 +38,83 @@ from typing import Optional
 _DEFAULT_LEARNING_FILE = Path(__file__).parent.parent / "config" / "payload_learning.json"
 
 
+def format_learning_for_prompt(
+    rows: list[dict],
+    *,
+    max_success: int = 5,
+    max_fail: int = 3,
+    min_tries: int = 2,
+    max_payload_len: int = 120,
+) -> str:
+    """学習済み per-payload 成功率を LLM プロンプト用の観測ブロックへ整形する純粋関数。
+
+    `rows` は `PayloadLearner.stats()` が返す {payload, hits, tries, rate} の列（rate 降順前提だが
+    本関数内でも安全に扱う）。`min_tries` 未満の行はノイズとして除外。高成功群（rate>=0.5）と
+    頻敗群（rate<=0.1）を要約する。有意なデータが無ければ空文字を返す（呼び出し側は
+    「壊れたら安全側」を維持）。
+    """
+    if not rows:
+        return ""
+
+    effective_candidates = []
+    blocked_candidates = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        payload = row.get("payload")
+        tries = row.get("tries", 0)
+        hits = row.get("hits", 0)
+        if not isinstance(payload, str) or not payload:
+            continue
+        try:
+            if tries < min_tries or tries <= 0:
+                continue
+            rate = row.get("rate")
+            if rate is None:
+                rate = hits / tries
+            if rate >= 0.5:
+                effective_candidates.append((payload, hits, tries, rate))
+            if rate <= 0.1:
+                blocked_candidates.append((payload, hits, tries, rate))
+        except (TypeError, ZeroDivisionError):
+            continue
+
+    effective_candidates.sort(key=lambda item: (-item[3], -item[2]))
+    effective = effective_candidates[:max(0, max_success)]
+    effective_payloads = {item[0] for item in effective}
+    blocked_candidates = [
+        item for item in blocked_candidates if item[0] not in effective_payloads
+    ]
+    blocked_candidates.sort(key=lambda item: -item[2])
+    blocked = blocked_candidates[:max(0, max_fail)]
+
+    if not effective and not blocked:
+        return ""
+
+    def _shorten(payload: str) -> str:
+        if len(payload) <= max_payload_len:
+            return payload
+        return payload[:max_payload_len - 3] + "..."
+
+    lines = [
+        "LEARNED payload effectiveness on this host/globally from prior scans",
+        "(bias generation toward what worked; avoid regenerating what was consistently blocked):",
+    ]
+    if effective:
+        lines.append("EFFECTIVE (worked before):")
+        lines.extend(
+            f"- `{_shorten(payload)}` -> {hits}/{tries} succeeded"
+            for payload, hits, tries, _rate in effective
+        )
+    if blocked:
+        lines.append("CONSISTENTLY BLOCKED/INEFFECTIVE:")
+        lines.extend(
+            f"- `{_shorten(payload)}` -> {hits}/{tries} (blocked/ineffective)"
+            for payload, hits, tries, _rate in blocked
+        )
+    return "\n".join(lines)
+
+
 class PayloadLearner:
     """
     Tracks which payloads succeed/fail per check type and prioritises

@@ -746,18 +746,33 @@ class BaseScanner(ABC):
                     attempt_history = ledger.history(ip.stable_key_parts(), self.CHECK_TYPE)
                 except Exception:
                     attempt_history = None
+
+        # G4: 学習済み成功率サマリを生成プロンプトへ供給（既存 learning データの再利用）。
+        # learner/domain は下の並べ替えでも使うため先に解決する。
+        learner = getattr(self.engine, "payload_learner", None)
+        _learning_on = bool(learner) and getattr(self.engine, "enable_payload_learning", True)
+        _domain = None
+        learning_summary = None
+        if _learning_on:
+            from urllib.parse import urlparse as _up
+            _domain = _up(getattr(self.engine, "target_url", "")).hostname or None
+            try:
+                from wscan.payload_learning import format_learning_for_prompt
+                _rows = learner.stats(self.CHECK_TYPE, domain=_domain)
+                learning_summary = format_learning_for_prompt(_rows) or None
+            except Exception:
+                learning_summary = None
+
         payloads = await self.payload_gen.generate(
             check_type=self.CHECK_TYPE,
             field_name=field_name,
             url=url,
             custom_payloads=_custom,
             attempt_history=attempt_history,
+            learning_summary=learning_summary,
         )
         # A-3 / ⑩: re-order by historical success rate (domain-aware)
-        learner = getattr(self.engine, "payload_learner", None)
-        if learner and getattr(self.engine, "enable_payload_learning", True):
-            from urllib.parse import urlparse as _up
-            _domain = _up(getattr(self.engine, "target_url", "")).hostname or None
+        if _learning_on:
             payloads = learner.sort_payloads(self.CHECK_TYPE, payloads, domain=_domain)
         # Fast mode: cap payload count (highest-priority payloads are already first)
         cap = getattr(self.engine, "max_payloads", 0)

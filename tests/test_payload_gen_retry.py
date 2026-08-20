@@ -82,6 +82,28 @@ class PayloadGenerationRetryTests(unittest.TestCase):
         self.assertEqual(client.post.await_count, 1)
         sleep.assert_not_awaited()
 
+    def test_learning_summary_is_included_in_prompt(self):
+        summary = (
+            "LEARNED payload effectiveness on this host/globally from prior scans\n"
+            "EFFECTIVE (worked before):"
+        )
+        with patch.dict(os.environ, {"OPENAI_API_KEY": "test-key"}, clear=False):
+            generator = self._generator()
+        with patch.object(
+            generator, "_check_llm_available", new=AsyncMock(return_value=True)
+        ), patch.object(
+            generator, "_call_llm", new=AsyncMock(return_value=["generated"])
+        ) as call_llm:
+            asyncio.run(generator.generate(
+                "xss",
+                "query",
+                "https://target.test/",
+                learning_summary=summary,
+            ))
+
+        prompt = call_llm.await_args.args[0]
+        self.assertIn(summary, prompt)
+
 
 if __name__ == "__main__":
     unittest.main()

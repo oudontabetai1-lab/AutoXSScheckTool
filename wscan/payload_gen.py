@@ -193,6 +193,7 @@ class PayloadGenerator:
         url: str,
         custom_payloads: Optional[list[str]] = None,
         attempt_history: Optional[list] = None,
+        learning_summary: Optional[str] = None,
     ) -> list[str]:
         """
         Generate payloads for a specific check type and field.
@@ -231,6 +232,11 @@ class PayloadGenerator:
                             prompt = prompt + "\n\n" + history_block
                     except Exception:
                         pass
+
+                # G4: このホスト/全体で学習済みの payload 成功率をプロンプトへ注入（既存学習
+                # データの再利用）。壊れたら安全側＝節を足さないだけ。
+                if learning_summary:
+                    prompt = prompt + "\n\n" + learning_summary
 
                 # ── Web intelligence enrichment ──────────────────────────
                 if self.enable_web_browsing:
