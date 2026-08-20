@@ -754,16 +754,15 @@ class BaseScanner(ABC):
         _domain = None
         learning_summary_provider = None
         if _learning_on:
-            from urllib.parse import urlparse as _up
-            # 学習の鍵は **いま注入している url の origin（scheme://netloc）**（primary
+            from wscan.payload_learning import origin_key
+            # 学習の鍵は **いま注入している url の origin（scheme://host[:port]）**（primary
             # target_url ではない）。マルチオリジンスキャン（engine.target_urls）では origin
             # ごとに分離しないと、origin B の payload（B 固有のトークン/コールバック含む）が
             # origin A のプロンプト＝クラウド LLM 送信へ混入し、統計も誤ターゲットを誘導する。
             # host だけだと同一ホスト別 scheme/port（http://a:3000 と :4000、http と https）を
-            # 取り違える。engine._origin_for（target_urls と同じ scheme://netloc 正規化）で刻み、
-            # 記録側（engine._record_finding）も同じ _origin_for で揃える。
-            _origin_fn = getattr(self.engine, "_origin_for", None)
-            _domain = (_origin_fn(url) if callable(_origin_fn) else _up(url).hostname) or None
+            # 取り違える。origin_key は userinfo を除外し、記録側（engine._record_finding）と
+            # 同一キーを使う。
+            _domain = origin_key(url)
 
             # 要約構築は **LLM 生成パスに入った時だけ** generate 内で遅延実行する。
             # custom payloads 指定 / provider=none / template 無し / LLM 不在では generate は
