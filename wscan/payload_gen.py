@@ -8,7 +8,7 @@ import os
 import re
 import httpx
 from contextlib import contextmanager
-from typing import Optional
+from typing import Callable, Optional
 
 from rich.console import Console
 
@@ -193,6 +193,7 @@ class PayloadGenerator:
         url: str,
         custom_payloads: Optional[list[str]] = None,
         attempt_history: Optional[list] = None,
+        learning_summary_provider: "Optional[Callable[[], Optional[str]]]" = None,
     ) -> list[str]:
         """
         Generate payloads for a specific check type and field.
@@ -229,6 +230,19 @@ class PayloadGenerator:
                         history_block = format_history_for_prompt(attempt_history)
                         if history_block:
                             prompt = prompt + "\n\n" + history_block
+                    except Exception:
+                        pass
+
+                # G4: 学習済みで効いた payload の要約をプロンプトへ注入（既存学習データの
+                # 再利用）。ここは LLM 生成パス（provider!=none・LLM 可用・template あり・
+                # custom 未指定）に入った後なので、要約構築を遅延実行させることで、消費され
+                # ないケース（custom/none/template 無し/LLM 不在）での学習履歴の無駄な走査を
+                # 避ける。壊れたら安全側＝節を足さないだけ。
+                if learning_summary_provider is not None:
+                    try:
+                        learning_summary = learning_summary_provider()
+                        if learning_summary:
+                            prompt = prompt + "\n\n" + learning_summary
                     except Exception:
                         pass
 

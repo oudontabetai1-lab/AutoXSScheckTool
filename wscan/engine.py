@@ -191,7 +191,7 @@ from .scanners.graphql import GraphQLScanner
 from .scanners.jwt_scanner import JWTScanner
 from .scanners.cms import CmsScanner
 from .waf_detector import WAFDetector
-from .payload_learning import PayloadLearner
+from .payload_learning import PayloadLearner, origin_key
 from .flow_runner import ScanFlow, FlowRunner
 from .oob_email import OOBEmailConfig, EmailSink, make_oob_token, oob_address
 
@@ -4652,8 +4652,13 @@ class ScanEngine:
             f"    [bold red][FINDING][/bold red] {label}{loc} — {f.evidence[:80]}"
         )
         if f.payload and self.enable_payload_learning:
-            from urllib.parse import urlparse as _up
-            _domain = _up(self.target_url).hostname or None
+            # 記録の鍵は finding 自身の url の origin（scheme://host[:port]・primary target_url
+            # ではない）。マルチオリジンスキャン（target_urls）で origin B の finding を primary
+            # バケツへ入れると、B 固有のトークン/コールバックを含む payload が origin A の
+            # プロンプトへ漏れ、統計が誤ターゲットを誘導する。host だけだと同一ホスト別
+            # scheme/port を取り違える。origin_key は userinfo を除外するので、埋め込み資格情報
+            # を永続学習ファイルへ書かない。参照側（base.get_payloads）も同じ origin_key で揃える。
+            _domain = origin_key(f.url)
             self.payload_learner.record(f.check_type, f.payload, success=True, domain=_domain)
         if self.flag_finder:
             self._check_page_for_flags(f.evidence, f.url)

@@ -746,18 +746,54 @@ class BaseScanner(ABC):
                     attempt_history = ledger.history(ip.stable_key_parts(), self.CHECK_TYPE)
                 except Exception:
                     attempt_history = None
+
+        # G4: 学習済み成功率サマリを生成プロンプトへ供給（既存 learning データの再利用）。
+        # learner/domain は下の並べ替えでも使うため先に解決する。
+        learner = getattr(self.engine, "payload_learner", None)
+        _learning_on = bool(learner) and getattr(self.engine, "enable_payload_learning", True)
+        _domain = None
+        learning_summary_provider = None
+        if _learning_on:
+            from wscan.payload_learning import origin_key
+            # 学習の鍵は **いま注入している url の origin（scheme://host[:port]）**（primary
+            # target_url ではない）。マルチオリジンスキャン（engine.target_urls）では origin
+            # ごとに分離しないと、origin B の payload（B 固有のトークン/コールバック含む）が
+            # origin A のプロンプト＝クラウド LLM 送信へ混入し、統計も誤ターゲットを誘導する。
+            # host だけだと同一ホスト別 scheme/port（http://a:3000 と :4000、http と https）を
+            # 取り違える。origin_key は userinfo を除外し、記録側（engine._record_finding）と
+            # 同一キーを使う。
+            _domain = origin_key(url)
+
+            # 要約構築は **LLM 生成パスに入った時だけ** generate 内で遅延実行する。
+            # custom payloads 指定 / provider=none / template 無し / LLM 不在では generate は
+            # サマリを使わず即 return するため、その場合に全 field で学習履歴を走査する無駄を避ける。
+            def _build_learning_summary(_learner=learner, _check=self.CHECK_TYPE, _dom=_domain):
+                from wscan.payload_learning import format_learning_for_prompt
+                # このターゲット（_dom）の学習だけを使う（include_global=False）。理由は2つ:
+                # (1) global 集計は「別ターゲットの成功 payload」も注入してしまう。target A の
+                #     コールバック URL/トークンを含む payload が global に記録され、target B の
+                #     プロンプト＝クラウド LLM 送信へ混入する情報漏洩になる（G4 以前は学習は
+                #     並べ替えのみで注入しなかった）。ドメイン限定なら他ターゲットへ漏れない。
+                # (2) domain バケツ単体は record が各観測を書くので正確な per-target カウント
+                #     （二重計上なし）。global を混ぜると加算で二重計上になる。
+                # _dom が無い（hostname 無し）ときは domain バケツ空＝サマリ無し（安全側）。
+                if not _dom:
+                    return None
+                rows = _learner.stats(_check, domain=_dom, include_global=False)
+                return format_learning_for_prompt(rows) or None
+
+            learning_summary_provider = _build_learning_summary
+
         payloads = await self.payload_gen.generate(
             check_type=self.CHECK_TYPE,
             field_name=field_name,
             url=url,
             custom_payloads=_custom,
             attempt_history=attempt_history,
+            learning_summary_provider=learning_summary_provider,
         )
         # A-3 / ⑩: re-order by historical success rate (domain-aware)
-        learner = getattr(self.engine, "payload_learner", None)
-        if learner and getattr(self.engine, "enable_payload_learning", True):
-            from urllib.parse import urlparse as _up
-            _domain = _up(getattr(self.engine, "target_url", "")).hostname or None
+        if _learning_on:
             payloads = learner.sort_payloads(self.CHECK_TYPE, payloads, domain=_domain)
         # Fast mode: cap payload count (highest-priority payloads are already first)
         cap = getattr(self.engine, "max_payloads", 0)
