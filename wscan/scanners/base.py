@@ -601,7 +601,7 @@ class BaseScanner(ABC):
         try:
             from wscan.attempt_ledger import attempt_from_pair
             ledger.record(
-                ip.stable_key_parts(),
+                ip.ledger_key_parts(),
                 self.CHECK_TYPE,
                 attempt_from_pair(payload, source, pair),
             )
@@ -755,7 +755,7 @@ class BaseScanner(ABC):
             ledger = getattr(getattr(self, "engine", None), "attempt_ledger", None)
             if ledger is not None:
                 try:
-                    attempt_history = ledger.history(ip.stable_key_parts(), self.CHECK_TYPE)
+                    attempt_history = ledger.history(ip.ledger_key_parts(), self.CHECK_TYPE)
                 except Exception:
                     attempt_history = None
 

@@ -309,6 +309,30 @@ class GetPayloadsHistoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(engine.payload_gen.captured_history)
         self.assertEqual(engine.payload_gen.captured_history[0].payload, "<script>")
 
+    async def test_form_history_partitioned_by_action_origin(self):
+        """同一 (url, form_index) でも action origin が違えば台帳履歴を混ぜない（F6）。
+
+        action が B→C に変わったとき、B で記録した payload/応答メタが C のプロンプトへ
+        供給されないこと（ledger_key_parts が target_origin を含む）を固定する。
+        """
+        engine = _GenEngine()
+        engine.payload_gen = _CapturingPayloadGen()
+        scanner = _PlainScanner(engine)
+        ip_b = InjectionPoint.for_form("http://a.test/p", "q", target_origin="http://b.test")
+        ip_c = InjectionPoint.for_form("http://a.test/p", "q", target_origin="http://c.test")
+        # origin B で試行を記録。
+        engine.attempt_ledger.record(
+            ip_b.ledger_key_parts(), "xss", Attempt("<b-secret>", status=200)
+        )
+        # origin C で get_payloads → C の履歴に B の payload は現れない。
+        await scanner.get_payloads("q", ip_c.url, ip=ip_c)
+        hist_c = engine.payload_gen.captured_history
+        assert not hist_c or all(a.payload != "<b-secret>" for a in hist_c)
+        # origin B で引けば B の履歴が取れる（分離しても自 origin は保持）。
+        await scanner.get_payloads("q", ip_b.url, ip=ip_b)
+        hist_b = engine.payload_gen.captured_history
+        assert any(a.payload == "<b-secret>" for a in hist_b)
+
     async def test_no_ip_means_no_history(self):
         engine = _GenEngine()
         engine.payload_gen = _CapturingPayloadGen()

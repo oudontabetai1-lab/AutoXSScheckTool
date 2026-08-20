@@ -4463,7 +4463,7 @@ class ScanEngine:
             try:
                 _ledger = getattr(self, "attempt_ledger", None)
                 if _ledger is not None:
-                    _entries = _ledger.history(ip.stable_key_parts(), check_name)
+                    _entries = _ledger.history(ip.ledger_key_parts(), check_name)
                     # 台帳内の重複（SQL boolean のペア payload・反復 probe 等）も除去する。
                     # adaptive は先頭30件しか消費しないため、重複を放置すると本来 expose
                     # したい evolution/mutation payload を押し出してしまう。順序保持で一意化。

@@ -262,6 +262,20 @@ class InjectionPoint:
             pointer = self.parameter_id
         return norm_url, field_name, str(self.form_index), location_token, pointer
 
+    def ledger_key_parts(self) -> tuple:
+        """試行台帳（AttemptLedger）用のキー部品。
+
+        stable_key_parts（checkpoint キー）に **target_origin を付与**して origin を識別する。
+        stable_key_parts は target_origin を意図的に含まないため、同一 (url, form_index) で
+        実送信 action が B→C に変わると、台帳に残った B の payload/応答メタが C のプロンプトへ
+        供給され、クロスオリジン分離が破れる（学習サマリ側は origin 対応済だが台帳経路が穴だった）。
+        target_origin が空（url_param / 未解決 form / 従来）のときは stable_key_parts のまま＝
+        既存キー・checkpoint 台帳との互換を保つ（別 origin の form のみ分離）。
+        checkpoint の stable_key_parts 自体は変えない。
+        """
+        base = self.stable_key_parts()
+        return base + (self.target_origin,) if self.target_origin else base
+
     @classmethod
     def for_form(
         cls,
