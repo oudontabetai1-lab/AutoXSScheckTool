@@ -222,8 +222,9 @@ def _canon_nonscalar(value) -> str:
         s = json.dumps(value, sort_keys=True, ensure_ascii=False, default=str)
     except Exception:
         s = repr(value)
-    if len(s) > 2048:
-        s = s[:2048]
+    # ハッシュ前に切り詰めない。SHA1 は任意長を扱え、正規化文字列は既に materialize 済み
+    # なので prefix 切り詰めはコスト削減にならず、2048 字以降だけ異なる 2 operation が同一署名へ
+    # collapse して一方が未探索になる偽陰性を生む（#90 R21）。全文をハッシュする。
     return "ns:" + hashlib.sha1(s.encode("utf-8")).hexdigest()
 
 

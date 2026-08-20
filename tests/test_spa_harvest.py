@@ -426,6 +426,19 @@ class HarvestJsonBodyTargetsTests(unittest.TestCase):
         self.assertEqual(len(targets), 2)
         self.assertNotEqual(targets[0]["body_signature"], targets[1]["body_signature"])
 
+    def test_nonscalar_discriminator_differs_only_after_2048_chars(self):
+        # 2048 字以降だけ異なる非スカラ discriminator でも別 operation を区別する（#90 R21）。
+        # ハッシュ前 prefix 切り詰めだと同一署名へ collapse して一方が未探索になる。
+        shared = {f"k{i}": "v" * 8 for i in range(200)}  # 共通で長い前半（>2048字）
+        op_a = {"type": dict(shared, sel="create"), "payload": {"id": "1"}}
+        op_b = {"type": dict(shared, sel="delete"), "payload": {"id": "1"}}
+        targets = harvest_json_body_targets([
+            _json_pair("https://api.test/rpc", op_a),
+            _json_pair("https://api.test/rpc", op_b),
+        ], base_netlocs={"api.test"})
+        self.assertEqual(len(targets), 2)
+        self.assertNotEqual(targets[0]["body_signature"], targets[1]["body_signature"])
+
     def test_persisted_graphql_query_hash_is_discriminator(self):
         # Apollo APQ は query/operationName を省き extensions.persistedQuery.sha256Hash で operation を
         # 識別する。別 hash（同一 pointer 集合）を別ターゲットに保つ（#90 R14）。
