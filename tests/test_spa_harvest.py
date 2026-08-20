@@ -426,6 +426,30 @@ class HarvestJsonBodyTargetsTests(unittest.TestCase):
         self.assertEqual(len(targets), 2)
         self.assertNotEqual(targets[0]["body_signature"], targets[1]["body_signature"])
 
+    def test_vendor_media_type_distinguishes_operations(self):
+        # #90 R21c: 同一 method/url/body でも vendor media type（版/operation 選択）が違えば別 target。
+        body = {"payload": {"id": "1"}}
+        targets = harvest_json_body_targets([
+            _json_pair("https://api.test/rpc", body,
+                       headers={"Content-Type": "application/vnd.acme.v1+json"}),
+            _json_pair("https://api.test/rpc", body,
+                       headers={"Content-Type": "application/vnd.acme.v2+json; charset=utf-8"}),
+        ], base_netlocs={"api.test"})
+        self.assertEqual(len(targets), 2)
+        cts = sorted(t["content_type"].split(";")[0] for t in targets)
+        self.assertEqual(cts, ["application/vnd.acme.v1+json", "application/vnd.acme.v2+json"])
+
+    def test_same_media_type_still_collapses(self):
+        # charset 等パラメータ違いだけなら collapse（無用な分裂を防ぐ）。
+        body = {"payload": {"id": "1"}}
+        targets = harvest_json_body_targets([
+            _json_pair("https://api.test/rpc", body,
+                       headers={"Content-Type": "application/json"}),
+            _json_pair("https://api.test/rpc", body,
+                       headers={"Content-Type": "application/json; charset=utf-8"}),
+        ], base_netlocs={"api.test"})
+        self.assertEqual(len(targets), 1)
+
     def test_discriminator_below_depth_eight_still_distinguishes(self):
         # #90 R21b: injectable な葉(/payload/id)が浅くても discriminator(method)が8段より
         # 深いと旧 depth_cap=8 で識別子を取りこぼし collapse していた。反復DFSで全走査し区別する。

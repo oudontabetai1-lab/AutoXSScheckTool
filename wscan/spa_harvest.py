@@ -282,6 +282,18 @@ def _raw_content_type(request_headers) -> str | None:
     return None
 
 
+def _norm_content_type(ct) -> str:
+    """Content-Type を正規化（小文字・パラメータ除去）。operation identity 用（#90 R21c）。
+
+    vendor media type（application/vnd.acme.v1+json vs v2+json）で版/operation を分ける API を、
+    同一 method/url/body でも別 operation として identity に反映するため、raw/semantic 双方の
+    キーへ含める。charset 等のパラメータは落として無用な分裂を防ぐ。
+    """
+    if not ct:
+        return ""
+    return str(ct).split(";", 1)[0].strip().lower()
+
+
 def _is_jsonish_content_type(ct: str) -> bool:
     """JSON 系 content-type か（application/json / +json / text/json）。"""
     c = (ct or "").lower()
@@ -436,6 +448,8 @@ def harvest_json_body_targets(
                 raw_key = (
                     method_upper, observed_url, post_data,
                     tuple(sorted(_dispatch_header_values(request_headers))),
+                    # 同一 body でも media type で operation/版を分ける API を区別（#90 R21c）。
+                    _norm_content_type(raw_ct),
                 )
                 obs_seq += 1
                 existing = raw_first.get(raw_key)
@@ -500,7 +514,10 @@ def harvest_json_body_targets(
                     body_signature = _injection_signature(
                         parsed_body, pointers, entry["request_headers"]
                     )
-                    semantic_key = (entry["method_upper"], entry["observed_url"], body_signature)
+                    semantic_key = (
+                        entry["method_upper"], entry["observed_url"], body_signature,
+                        _norm_content_type(content_type),  # media type で版/operation を分ける API を区別（#90 R21c）
+                    )
                     if semantic_key in seen_index:
                         # 注入 shape が同じ collapse（キー順違い or 通常値変化）。**最新観測（order 最大）
                         # だけ** headers/content_type/json_body を更新する。round-robin は観測順に並ばない
