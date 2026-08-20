@@ -391,8 +391,13 @@ class XSSScanner(BaseScanner):
         is_url_param: bool,
         *,
         context: str = "sql",
+        target_origin: str = "",
     ) -> tuple | None:
-        """等価性 probe の判定を保ち、送信だけ InjectionPoint 経由にする。"""
+        """等価性 probe の判定を保ち、送信だけ InjectionPoint 経由にする。
+
+        base の同名メソッドと引数互換にする（`target_origin` を受けないと呼び出し側で
+        TypeError になり、通常の陰性 XSS スキャンで probe が走らず未完了になる）。form の
+        実送信先 origin を InjectionPoint へ載せ、台帳が origin 対応キーで記録されるようにする。"""
         from wscan import equivalence_probe as eqp
 
         builders = {
@@ -407,7 +412,7 @@ class XSSScanner(BaseScanner):
         ip = (
             InjectionPoint.for_url_param(url, field_name)
             if is_url_param
-            else InjectionPoint.for_form(url, field_name, form_index)
+            else InjectionPoint.for_form(url, field_name, form_index, target_origin=target_origin)
         )
         probe_set = builder()
         responses: dict[str, str] = {}

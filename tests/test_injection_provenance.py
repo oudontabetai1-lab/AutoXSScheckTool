@@ -302,6 +302,18 @@ class FindingInjectionProvenanceTests(unittest.IsolatedAsyncioTestCase):
                      injection_method="POST", injection_pointer="/billing/id")
         self.assertNotEqual(finding_dedup_key_for(f1), finding_dedup_key_for(f2))
 
+    def test_run_equivalence_probe_overrides_accept_target_origin(self):
+        # base に target_origin を足したら、全 override（XSS 等）も引数互換でなければ
+        # 呼び出し側で TypeError → 通常の陰性スキャンで probe が未実行・未完了になる（F9）。
+        import inspect
+        from wscan.scanners.xss import XSSScanner
+        for cls in (BaseScanner, XSSScanner):
+            self.assertIn(
+                "target_origin",
+                inspect.signature(cls.run_equivalence_probe).parameters,
+                cls.__name__,
+            )
+
     def test_shared_dedup_helper_form_unchanged(self):
         # form/url_param は従来の4部品キーのまま（回帰ゼロ）。
         f = Finding(
