@@ -120,6 +120,40 @@ def test_domain_scoped_stats_are_not_double_counted(tmp_path):
     assert "- `<svg onload=x>` -> 2/2 succeeded" in block
 
 
+def test_legacy_hostname_bucket_is_read_for_origin_lookup(tmp_path):
+    """アップグレード後方互換: 旧 hostname キーの学習を origin ルックアップで拾う（消失させない）。"""
+    lf = tmp_path / "learn.json"
+    learner = PayloadLearner(learning_file=str(lf))
+    # 旧スキーマ相当: hostname キーで記録された過去の成功。
+    learner.record("xss", "<old>", success=True, domain="example.com")
+    learner.record("xss", "<old>", success=True, domain="example.com")
+
+    # 新ルックアップは origin（https://example.com）で引くが、旧 hostname バケツを合算する。
+    rows = learner.stats("xss", domain="https://example.com", include_global=False)
+    block = format_learning_for_prompt(rows)
+    assert "- `<old>` -> 2/2 succeeded" in block
+
+    # sort_payloads の重み付けも旧 hostname バケツを使う。
+    ordered = learner.sort_payloads("xss", ["<other>", "<old>"], domain="https://example.com")
+    assert ordered[0] == "<old>"
+
+
+def test_origin_and_legacy_buckets_merge_without_global(tmp_path):
+    """新 origin バケツと旧 hostname バケツは合算されるが、global は混ざらない。"""
+    lf = tmp_path / "learn.json"
+    learner = PayloadLearner(learning_file=str(lf))
+    learner.record("xss", "<p>", success=True, domain="example.com")            # 旧 hostname
+    learner.record("xss", "<p>", success=True, domain="https://example.com")    # 新 origin
+    # 別 origin の payload は global には入るが、この origin のサマリには漏れない。
+    learner.record("xss", "<other-origin>", success=True, domain="https://elsewhere.test")
+    learner.record("xss", "<other-origin>", success=True, domain="https://elsewhere.test")
+
+    rows = learner.stats("xss", domain="https://example.com", include_global=False)
+    row = next(r for r in rows if r["payload"] == "<p>")
+    assert row["tries"] == 2  # 旧1 + 新1（global は含めない）
+    assert all(r["payload"] != "<other-origin>" for r in rows)
+
+
 def test_domain_scoped_stats_do_not_leak_other_targets(tmp_path):
     """別ターゲットの成功 payload が現ターゲットのサマリへ漏れないこと（クロスターゲット漏洩防止）。"""
     lf = tmp_path / "learn.json"

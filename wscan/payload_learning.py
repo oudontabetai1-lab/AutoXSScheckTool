@@ -57,9 +57,11 @@ def format_learning_for_prompt(
 
     有意なデータが無ければ空文字を返す（呼び出し側は「壊れたら安全側」を維持）。
 
-    注意: 呼び出し側は `stats(domain=None)`（global 集計）を渡すこと。`record` が global と
-    domain の両バケツへ書き、`stats(domain=X)` はそれらを加算するため、domain 付きで渡すと
-    1 回の観測が 2 回に二重計上され `min_tries` を素通りしてしまう（global は全観測を既に含む）。
+    注意: 呼び出し側は当該 origin 限定の非二重計上バケツ
+    （`stats(domain=<origin>, include_global=False)`）を渡すこと。`record` が global と domain の
+    両バケツへ書くため、`include_global=True` の既定（global+domain 加算）で domain 付きを渡すと
+    1 回の観測が二重計上され `min_tries` を素通りする。global 集計（`domain=None`）は他 origin の
+    payload まで混ぜてしまう（クロスオリジン漏洩）。両方を避けるのが origin 限定・非二重計上。
     """
     if not rows:
         return ""
@@ -190,6 +192,46 @@ class PayloadLearner:
     # Prioritisation
     # ------------------------------------------------------------------
 
+    def _resolve_domain_ct(self, check_type: str, domain: Optional[str]) -> dict:
+        """domain の per-check バケツを返す。origin キー（scheme://netloc）のときは、
+        後方互換で**旧 hostname キー**のバケツも取り込む（純粋な読み取り）。
+
+        学習キーは 0006 G4 で hostname→origin へ移行したが、既存の学習ファイルは
+        hostname（例 ``example.com``）で記録されている。origin（``https://example.com``）
+        で引くと旧データが丸ごと迷子になり、アップグレード直後にサマリ／並べ替えの
+        重み付けが両方失われる。そこで origin ルックアップ時は hostname 由来の旧バケツも
+        合算する（同一 observation を二重書きしていないので二重計上ではない＝実観測の合算）。
+
+        注意: 同一ホスト別 scheme/port が複数あると、旧 hostname データはそれら全てに現れる。
+        だが旧データは origin 区別が無かった時代のもので、かつ soft な最適化ヒントに過ぎず、
+        新規記録は origin 単位で正しく分離される（許容できる有界の後方互換挙動）。
+        """
+        if not domain:
+            return {}
+        domains = self._data["domains"]
+        primary = domains.get(domain, {}).get(check_type, {})
+        legacy_key = None
+        if "://" in domain:
+            from urllib.parse import urlparse
+            host = urlparse(domain).hostname
+            if host and host != domain and host in domains:
+                legacy_key = host
+        if not legacy_key:
+            return primary
+        legacy = domains.get(legacy_key, {}).get(check_type, {})
+        if not legacy:
+            return primary
+        merged: dict[str, dict] = {p: dict(e) for p, e in primary.items()}
+        for p, e in legacy.items():
+            if p in merged:
+                merged[p] = {
+                    "hits": merged[p]["hits"] + e["hits"],
+                    "tries": merged[p]["tries"] + e["tries"],
+                }
+            else:
+                merged[p] = {"hits": e["hits"], "tries": e["tries"]}
+        return merged
+
     def sort_payloads(
         self,
         check_type: str,
@@ -206,9 +248,7 @@ class PayloadLearner:
         Unknown payloads retain their original relative order at the end.
         """
         global_ct = self._data["global"].get(check_type, {})
-        domain_ct: dict = {}
-        if domain:
-            domain_ct = self._data["domains"].get(domain, {}).get(check_type, {})
+        domain_ct: dict = self._resolve_domain_ct(check_type, domain)
 
         if not global_ct and not domain_ct:
             return payloads
@@ -260,9 +300,7 @@ class PayloadLearner:
         global_ct: dict = {}
         if include_global:
             global_ct = self._data["global"].get(check_type, {})
-        domain_ct: dict = {}
-        if domain:
-            domain_ct = self._data["domains"].get(domain, {}).get(check_type, {})
+        domain_ct: dict = self._resolve_domain_ct(check_type, domain)
 
         merged: dict[str, dict] = {}
         for payload, e in global_ct.items():
