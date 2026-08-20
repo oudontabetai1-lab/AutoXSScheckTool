@@ -164,6 +164,9 @@ class DOMXSSScanner(BaseScanner):
                 ip.url, ip.parameter_id, payload,
                 ip.form_index, ip.legacy_is_url_param(),
             )
+            # DOMXSS は独自シグネチャの _apply_payload 直送で _apply_ip を通らないため、
+            # ここで試行台帳へ記録する（adaptive 履歴の欠落防止）。
+            self._record_attempt(ip, payload, source, pair)
 
             await asyncio.sleep(2.0 * self.sleep_factor)  # Allow JS to settle
 
@@ -259,6 +262,7 @@ class DOMXSSScanner(BaseScanner):
                         ip.url, ip.parameter_id, payload,
                         ip.form_index, ip.legacy_is_url_param(),
                     )
+                    self._record_attempt(ip, payload, source, pair)
                     await asyncio.sleep(2.0 * self.sleep_factor)
                     log = await self.browser.page.evaluate(
                         "() => window.__wscan_domxss_log || []"

@@ -519,6 +519,30 @@ class BaseScanner(ABC):
             # 観測の記録失敗で本来のスキャンを壊さない。
             pass
 
+    def _record_form_url_attempt(
+        self,
+        url: str,
+        form_index: int,
+        field_name: str,
+        is_url_param: bool,
+        payload,
+        source: str,
+        pair: dict,
+    ) -> None:
+        """`_apply_ip` を経由しない form/URL 直送（DOMXSS・equivalence probe 等）でも
+        試行台帳へ記録するためのヘルパー。座標から注入点キーを組み立てて `_record_attempt`
+        へ委譲し、adaptive が受け取る履歴の欠落を防ぐ（best-effort）。"""
+        try:
+            from wscan.injection_point import InjectionPoint
+            ip = (
+                InjectionPoint.for_url_param(url, field_name)
+                if is_url_param
+                else InjectionPoint.for_form(url, field_name, form_index)
+            )
+            self._record_attempt(ip, payload, source, pair)
+        except Exception:
+            pass
+
     def _verify_injection_point(
         self,
         finding: "Finding",
@@ -805,6 +829,10 @@ class BaseScanner(ABC):
                 )
             except Exception:
                 continue
+            # `_apply_ip` を通らない直送のため、ここで試行台帳へ記録する。
+            self._record_form_url_attempt(
+                url, form_index, field_name, is_url_param, probe.value, source, pair
+            )
             pairs[probe.name] = pair or {}
             body = (pair.get("response", {}) or {}).get("body") or source or ""
             responses[probe.name] = body

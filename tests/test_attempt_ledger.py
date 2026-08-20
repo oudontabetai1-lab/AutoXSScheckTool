@@ -281,6 +281,30 @@ class GetPayloadsHistoryTests(unittest.IsolatedAsyncioTestCase):
 
 
 # ---------------------------------------------------------------------------
+# Codex #91 r2: _apply_ip を通らない直送(form/URL)でも記録される
+# ---------------------------------------------------------------------------
+class DirectPathRecordingTests(unittest.IsolatedAsyncioTestCase):
+    async def test_record_form_url_attempt_builds_key_and_records(self):
+        engine = _GenEngine()
+        engine.payload_gen = _CapturingPayloadGen()
+        scanner = _PlainScanner(engine)  # CHECK_TYPE = "xss"
+        pair = {
+            "request": {"timestamp": 1.0},
+            "response": {"status": 200, "body": "echo <script>", "timestamp": 1.1},
+        }
+        scanner._record_form_url_attempt(
+            "http://t/p", 0, "q", True, "<script>", "dom-source", pair
+        )
+        from wscan.injection_point import InjectionPoint
+        key = InjectionPoint.for_url_param("http://t/p", "q").stable_key_parts()
+        hist = engine.attempt_ledger.history(key, "xss")
+        self.assertEqual(len(hist), 1)
+        self.assertEqual(hist[0].payload, "<script>")
+        self.assertTrue(hist[0].reflected)   # 応答本文に <script> 反射
+        self.assertEqual(hist[0].status, 200)
+
+
+# ---------------------------------------------------------------------------
 # 指摘1: adaptive generate が rich metadata 履歴(extra_observations)をプロンプトへ載せる
 # ---------------------------------------------------------------------------
 class AdaptiveExtraObservationsTests(unittest.IsolatedAsyncioTestCase):
