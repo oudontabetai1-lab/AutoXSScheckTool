@@ -27,6 +27,9 @@ def test_origin_key_variants():
     assert origin_key("not-a-url") is None
     # scheme はあるが host が無い（相対/データ）→ None（安全側＝domain 無しで global 記録）。
     assert origin_key("mailto:x@y") is None
+    # 非数値ポートは urlparse の .port が ValueError を投げるが、例外を飲んで None を返す
+    # （get_payloads が payload 生成前に呼ぶため、スキャン中断でなく domain 別学習を無効化）。
+    assert origin_key("http://example.com:bad/?q=x") is None
 
 
 def test_prompt_carries_untrusted_data_guard():

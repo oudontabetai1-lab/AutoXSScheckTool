@@ -51,17 +51,23 @@ def origin_key(url: str) -> Optional[str]:
     （base.get_payloads）が同じキーを使うために共有する。
     """
     from urllib.parse import urlparse
+    # urlparse は遅延解析で、非数値ポート（例 http://h:bad/）でも成功し、`.port` アクセス時に
+    # 初めて ValueError を投げる。get_payloads は payload 生成前に本関数を呼ぶため、例外が
+    # 注入点のスキャンを中断させないよう scheme/host/port の取得を丸ごと try で囲む
+    # （失敗時は None＝domain 別学習を安全に無効化するだけ）。
     try:
         p = urlparse(url or "")
+        scheme = p.scheme
+        host = p.hostname
+        port = p.port  # 非数値ポートはここで ValueError
     except Exception:
         return None
-    if not p.scheme or not p.hostname:
+    if not scheme or not host:
         return None
-    host = p.hostname
     if ":" in host:  # IPv6 リテラルは角括弧で包む
         host = f"[{host}]"
-    netloc = host if p.port is None else f"{host}:{p.port}"
-    return f"{p.scheme}://{netloc}"
+    netloc = host if port is None else f"{host}:{port}"
+    return f"{scheme}://{netloc}"
 
 
 def format_learning_for_prompt(
