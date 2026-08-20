@@ -30,7 +30,7 @@ if TYPE_CHECKING:
 # v3: adaptive を "(adaptive:<check_type>)" 単位へ細分化。旧 "(adaptive)" は
 # engine が「全 adaptive check 完了」として尊重するため、旧 checkpoint も読める。
 # v4: JSON body 注入点用の6部品キーを加算。従来キーは5部品のまま保持する。
-CHECKPOINT_VERSION = 4
+CHECKPOINT_VERSION = 5
 CHECKPOINT_FILENAME = "checkpoint.json"
 
 
@@ -75,6 +75,8 @@ class CheckpointState:
     checks: list[str] = field(default_factory=list)
     completed_units: set[str] = field(default_factory=set)
     findings: list[dict] = field(default_factory=list)
+    # D5: 試行台帳のシリアライズ（resume 時に adaptive の実履歴を失わないため）。
+    attempt_ledger: dict = field(default_factory=dict)
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
     # 読み込んだデータのスキーマ版（新規作成は現行版）。情報用。v1→v2 の差分
@@ -135,6 +137,7 @@ class CheckpointState:
             "checks": list(self.checks),
             "completed_units": sorted(self.completed_units),
             "findings": self.findings,
+            "attempt_ledger": self.attempt_ledger,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
         }
@@ -152,6 +155,7 @@ class CheckpointState:
             checks=list(data.get("checks", []) or []),
             completed_units=set(data.get("completed_units", []) or []),
             findings=list(data.get("findings", []) or []),
+            attempt_ledger=data.get("attempt_ledger", {}) or {},
             created_at=data.get("created_at", time.time()),
             updated_at=data.get("updated_at", time.time()),
             source_version=source_version,

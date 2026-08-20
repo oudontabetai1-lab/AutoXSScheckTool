@@ -97,6 +97,58 @@ class AttemptLedger:
         """当該 (注入点, check) の試行履歴（時系列）を返す。無ければ空。"""
         return list(self._store.get(self._key(ip_key, check_type), []))
 
+    def to_dict(self) -> dict:
+        """checkpoint 永続化用のシリアライズ（純粋・応答本文は保持しない compact 形）。
+
+        resume 時に adaptive が実履歴（status/reflection/timing/evolved payload）を失って
+        静的 list へ退化するのを防ぐため、台帳を checkpoint と一緒に保存する。
+        """
+        records = []
+        for (ip_key, check_type), attempts in self._store.items():
+            records.append({
+                "key": list(ip_key),
+                "check": check_type,
+                "attempts": [
+                    {
+                        "payload": a.payload,
+                        "status": a.status,
+                        "body_len": a.body_len,
+                        "reflected": a.reflected,
+                        "error": a.error,
+                        "elapsed": a.elapsed,
+                    }
+                    for a in attempts
+                ],
+            })
+        return {"max_per_key": self._max_per_key, "records": records}
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "AttemptLedger":
+        """to_dict の逆。壊れたエントリは飛ばして best-effort に復元する。"""
+        if not isinstance(data, dict):
+            return cls()
+        led = cls(max_per_key=int(data.get("max_per_key") or _MAX_ATTEMPTS_PER_KEY))
+        for rec in data.get("records", []) or []:
+            try:
+                ip_key = tuple(rec.get("key") or [])
+                check_type = str(rec.get("check", ""))
+                for ad in rec.get("attempts", []) or []:
+                    led.record(
+                        ip_key,
+                        check_type,
+                        Attempt(
+                            payload=str(ad.get("payload", "")),
+                            status=ad.get("status"),
+                            body_len=ad.get("body_len"),
+                            reflected=bool(ad.get("reflected", False)),
+                            error=bool(ad.get("error", False)),
+                            elapsed=ad.get("elapsed"),
+                        ),
+                    )
+            except Exception:
+                continue
+        return led
+
 
 def unique_payloads(attempts: list[Attempt], already: set) -> list[str]:
     """台帳の Attempt 列から、`already` に無い payload を順序保持で一意化して返す純粋関数。

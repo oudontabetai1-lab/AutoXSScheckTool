@@ -1188,6 +1188,16 @@ class ScanEngine:
                     f"  [green][Resume] {len(state.completed_units)} 済み単位 / "
                     f"{restored} 件の既出 Finding を復元しました。[/green]"
                 )
+                # D5: 試行台帳を復元し、resume 後の adaptive が実履歴（status/reflection/
+                # timing/evolved payload）を失って静的 list へ退化するのを防ぐ。
+                try:
+                    from wscan.attempt_ledger import AttemptLedger
+                    if state.attempt_ledger:
+                        self.attempt_ledger = AttemptLedger.from_dict(state.attempt_ledger)
+                except Exception as exc:
+                    self.wave_errors.append(
+                        f"attempt_ledger_restore: {type(exc).__name__}: {exc}"
+                    )
 
         if state is None:
             state = cp.CheckpointState(target_url=self.target_url, checks=list(self.checks))
@@ -1203,6 +1213,10 @@ class ScanEngine:
         try:
             # Finding は all_findings から都度スナップショット（最新を保存）
             self.checkpoint.findings = [f.to_dict() for f in self.all_findings]
+            # D5: 試行台帳も保存（resume で adaptive 履歴を維持）。台帳未配線でも安全。
+            ledger = getattr(self, "attempt_ledger", None)
+            if ledger is not None:
+                self.checkpoint.attempt_ledger = ledger.to_dict()
             cp.save_checkpoint(self.output_dir, self.checkpoint)
         except Exception as exc:
             self.wave_errors.append(f"checkpoint_save: {type(exc).__name__}: {exc}")

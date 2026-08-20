@@ -281,6 +281,35 @@ class GetPayloadsHistoryTests(unittest.IsolatedAsyncioTestCase):
 
 
 # ---------------------------------------------------------------------------
+# Codex #91 r3: checkpoint 永続化（resume で adaptive 履歴を失わない）
+# ---------------------------------------------------------------------------
+class LedgerSerializationTests(unittest.TestCase):
+    def test_roundtrip_preserves_entries(self):
+        led = AttemptLedger()
+        key = ("http://t", "q", "0", "u", "")
+        led.record(key, "xss", Attempt("<script>", status=403, body_len=10,
+                                        reflected=False, error=False, elapsed=0.2))
+        led.record(key, "xss", Attempt("<svg>", status=200, reflected=True))
+        led.record(("k2",), "sqli", Attempt("' OR 1=1", error=True))
+        data = led.to_dict()
+        # JSON 直列化可能であること
+        json.dumps(data)
+        back = AttemptLedger.from_dict(data)
+        h = back.history(key, "xss")
+        self.assertEqual([a.payload for a in h], ["<script>", "<svg>"])
+        self.assertEqual(h[0].status, 403)
+        self.assertTrue(h[1].reflected)
+        self.assertTrue(back.history(("k2",), "sqli")[0].error)
+
+    def test_from_dict_tolerates_garbage(self):
+        self.assertEqual(AttemptLedger.from_dict({}).history(("k",), "x"), [])
+        self.assertEqual(AttemptLedger.from_dict("nope").history(("k",), "x"), [])
+        # 壊れたレコードは飛ばす
+        led = AttemptLedger.from_dict({"records": [{"bad": 1}, {"key": ["k"], "check": "x", "attempts": [{"payload": "p"}]}]})
+        self.assertEqual([a.payload for a in led.history(("k",), "x")], ["p"])
+
+
+# ---------------------------------------------------------------------------
 # Codex #91 r2: _apply_ip を通らない直送(form/URL)でも記録される
 # ---------------------------------------------------------------------------
 class DirectPathRecordingTests(unittest.IsolatedAsyncioTestCase):
