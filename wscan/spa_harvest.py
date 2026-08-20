@@ -469,15 +469,23 @@ def harvest_json_body_targets(
                 # それらを区別できず片方を未 parse にする（#90 R14）。値churn は同一 observed_url なので
                 # 引き続き 1 バケツに束ねられ、fairness は保たれる。
                 bkey = (method_upper, observed_url)
-                bucket = buckets.setdefault(bkey, [])
-                # Phase 1 有界化（#90 R21f）: バケツ満杯なら最古 distinct を evict（最新観測を保持）、
-                # そうでなく全体上限に達していれば新規 distinct をこれ以上増やさない（既存の再観測
-                # 更新は上の existing 分岐で継続＝template refresh は保たれる）。
-                if len(bucket) >= _MAX_PER_BUCKET:
+                bucket = buckets.get(bkey)
+                # Phase 1 有界化（#90 R21f/R21g）: バケツ満杯なら**このバケツの**最古 distinct を
+                # evict（最新観測を保持）。全体上限に達したら**破棄でなく最大バケツから evict**して
+                # この候補を受け入れる ―― global cap を新規 distinct の一律 drop にすると、先行の
+                # high-churn バケツが予算を食い潰し**後発の別 endpoint が丸ごと未 bucket 化**して
+                # two-phase の endpoint fairness を壊す（#90 R21g）。endpoint-aware に最大バケツを
+                # 削って後発 endpoint に foothold を与える。既存の再観測更新は上の existing 分岐で継続。
+                if bucket is not None and len(bucket) >= _MAX_PER_BUCKET:
                     evicted = bucket.pop(0)
                     raw_first.pop(evicted.get("raw_key"), None)
                 elif len(raw_first) >= _MAX_TOTAL_CANDIDATES:
-                    continue
+                    largest = max(buckets.values(), key=len, default=None)
+                    if not largest:
+                        continue
+                    evicted = largest.pop(0)
+                    raw_first.pop(evicted.get("raw_key"), None)
+                bucket = buckets.setdefault(bkey, [])
                 entry = {
                     "method_upper": method_upper,
                     "observed_url": observed_url,

@@ -198,17 +198,32 @@ def _redact_json_evidence_pair(pair: dict, injection_pointer: str) -> dict:
     # `database payload`→`d***t***b***se...` のように evidence を破壊する（#90 R21f）。そこで
     # body 伏字に回す値は **実 credential ヘッダ（narrow 集合）**かつ **十分長い値（>=8）**に
     # 限定する。ヘッダ dict 自体の masking は従来どおり broad（表示だけ伏せるのは無害）。
+    # 対象は **確実な credential ヘッダ**（narrow）に限定するが、`Set-Cookie`（レスポンス発行の
+    # cookie）も確実な credential なので明示的に含める（narrow 集合は request 用の "cookie" のみで
+    # "set-cookie" を欠くため・#90 R21g）。
     _MIN_BODY_SECRET_LEN = 8
+
+    def _add_secret(val):
+        if isinstance(val, str) and len(val) >= _MIN_BODY_SECRET_LEN:
+            secrets.append(val)
+
     for _side in ("request", "response"):
         side_headers = (pair.get(_side, {}) or {}).get("headers")
-        if isinstance(side_headers, dict):
-            for hk, hv in side_headers.items():
-                if (
-                    _is_credential_header(hk)
-                    and isinstance(hv, str)
-                    and len(hv) >= _MIN_BODY_SECRET_LEN
-                ):
-                    secrets.append(hv)
+        if not isinstance(side_headers, dict):
+            continue
+        for hk, hv in side_headers.items():
+            if not isinstance(hv, str):
+                continue
+            if str(hk).lower() == "set-cookie":
+                # Set-Cookie は "name=value; Attr; ..." 形。body へ漏れるのは cookie 本体
+                # （name=value / value 単体）なので属性を落として抽出する（全体値は body の
+                # 部分エコーと一致しないため）。
+                cookie_pair = hv.split(";", 1)[0].strip()
+                _add_secret(cookie_pair)
+                if "=" in cookie_pair:
+                    _add_secret(cookie_pair.split("=", 1)[1])
+            elif _is_credential_header(hk):
+                _add_secret(hv)
     # request/response 双方の認証ヘッダ値をマスク（サーバが X-Access-Token 等を応答で
     # 返す場合も to_dict→checkpoint/report/monitor へ流さない）。
     if isinstance(req.get("headers"), dict):

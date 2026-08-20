@@ -217,6 +217,20 @@ class MergeTemplateHeadersTests(unittest.TestCase):
         red = _redact_json_evidence_pair(pair, "/q")
         self.assertEqual(red["response"]["body"], "a grab bag of abbreviations")
 
+    def test_set_cookie_value_redacted_from_response_body(self):
+        # #90 R21g: narrow 化で漏れた Set-Cookie（確実な credential）を body 伏字に含める。
+        from wscan.scanners.base import _redact_json_evidence_pair
+        pair = {
+            "request": {"headers": {}, "post_data": '{"q": "x"}'},
+            "response": {
+                "body": 'welcome; sid=SESSIONVALUE-abcdef123456 issued',
+                "headers": {"Set-Cookie": "sid=SESSIONVALUE-abcdef123456; HttpOnly"},
+            },
+        }
+        red = _redact_json_evidence_pair(pair, "/q")
+        self.assertNotIn("SESSIONVALUE-abcdef123456", red["response"]["body"])
+        self.assertEqual(red["response"]["headers"]["Set-Cookie"], "***")
+
     def test_evidence_redaction_uses_broad_canon_but_merge_uses_narrow(self):
         # 2 概念を分ける（#90 R13-2）: evidence redaction は broad（静的＋runtime）、
         # merge の「上書き禁止」は静的な認証情報のみ（runtime redaction ヘッダは含めない）。

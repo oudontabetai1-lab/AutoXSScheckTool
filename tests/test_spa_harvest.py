@@ -426,6 +426,23 @@ class HarvestJsonBodyTargetsTests(unittest.TestCase):
         self.assertEqual(len(targets), 2)
         self.assertNotEqual(targets[0]["body_signature"], targets[1]["body_signature"])
 
+    def test_phase1_global_cap_preserves_later_endpoint_fairness(self):
+        # #90 R21g: 先行 high-churn endpoint が global cap を食い潰しても、後発の別 endpoint が
+        # 丸ごと drop されない（最大バケツから evict して foothold を与える）。
+        from wscan.spa_harvest import _MAX_PER_BUCKET, _MAX_TOTAL_CANDIDATES
+        pairs = []
+        # 先行: global cap を満たすだけの distinct body を churn する endpoint 群。
+        n_early = _MAX_TOTAL_CANDIDATES + _MAX_PER_BUCKET
+        for i in range(n_early):
+            ep = i // _MAX_PER_BUCKET  # 64 ごとに別 endpoint
+            pairs.append(_json_pair(f"https://api.test/churn{ep}",
+                                    {"op": f"v{i}", "payload": {"id": "1"}}))
+        # 後発: まったく別の valid endpoint（1 body だけ）。
+        pairs.append(_json_pair("https://api.test/late-valid", {"payload": {"id": "9"}}))
+        targets = harvest_json_body_targets(pairs, base_netlocs={"api.test"}, max_targets=10_000)
+        urls = {t["url"] for t in targets}
+        self.assertIn("https://api.test/late-valid", urls)  # 後発 endpoint が生き残る
+
     def test_phase1_bounded_evicts_oldest_preserves_latest(self):
         # #90 R21f: 1 endpoint に大量の distinct body を出しても Phase 1 を有界化し、最古を
         # evict して最新観測を保つ。_MAX_PER_BUCKET=64 なので v0..v35 は落ち v99 は残る。
