@@ -63,39 +63,49 @@ def _fully_inside(start: int, end: int, spans: list) -> bool:
 
 
 def _iter_balanced_pos(text: str, opener: str, closer: str) -> Iterator[tuple]:
-    """平衡した opener..closer を (開始位置, 部分文字列) で列挙する。"""
-    depth = 0
-    start = -1
-    in_str = False
-    escaped = False
-    for i, ch in enumerate(text):
-        # 候補（opener）開始前は文字列追跡をしない。prose 中の孤立した `"` で string
-        # mode に入り、後続の opener を握りつぶして有効な JSON を取り逃す事故を防ぐ。
-        if depth == 0:
+    """平衡した opener..closer を (開始位置, 部分文字列) で列挙する。
+
+    各 opener を候補の起点として試し、閉じなければ**次の opener から再試行**する
+    （prose の未閉じ括弧 `Use [ literally ... ["payload"]` が後続の本物を飲み込んで
+    何も yield しない事故を防ぐ・#92 r5）。opener を見つけるまでの prose 中の `"` は
+    文字列として追跡しない（候補開始後のみ in_str 追跡）。閉じた候補の後ろから走査を続ける。
+    """
+    n = len(text)
+    i = 0
+    while i < n:
+        if text[i] != opener:
+            i += 1
+            continue
+        depth = 0
+        in_str = False
+        escaped = False
+        end = -1
+        for j in range(i, n):
+            ch = text[j]
+            if in_str:
+                if escaped:
+                    escaped = False
+                elif ch == "\\":
+                    escaped = True
+                elif ch == '"':
+                    in_str = False
+                continue
+            if ch == '"':
+                in_str = True
+                continue
             if ch == opener:
-                depth = 1
-                start = i
-                in_str = False
-                escaped = False
-            continue
-        if in_str:
-            if escaped:
-                escaped = False
-            elif ch == "\\":
-                escaped = True
-            elif ch == '"':
-                in_str = False
-            continue
-        if ch == '"':
-            in_str = True
-            continue
-        if ch == opener:
-            depth += 1
-        elif ch == closer:
-            depth -= 1
-            if depth == 0 and start >= 0:
-                yield start, text[start : i + 1]
-                start = -1
+                depth += 1
+            elif ch == closer:
+                depth -= 1
+                if depth == 0:
+                    end = j
+                    break
+        if end >= 0:
+            yield i, text[i : end + 1]
+            i = end + 1
+        else:
+            # この opener からは閉じられない。次の opener から復帰する。
+            i += 1
 
 
 def _iter_balanced(text: str, opener: str, closer: str) -> Iterator[str]:

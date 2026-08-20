@@ -501,12 +501,14 @@ Consider stored / second-order attacks carefully:
         # **attack-plan スキーマ（fields/page_purpose を持つ）** に合う候補まで探索する。
         # 合致無し/壊れは None＝ヒューリスティックへ安全側フォールバック。
         from .llm_output_parser import extract_json_object
-        # 完全な plan スキーマ（list 値の fields を持つ）を要求する。page_purpose だけの
-        # 前置き metadata（Metadata: {"page_purpose":"login"}）を採用して zero-field plan で
-        # heuristic を握りつぶさないため（Codex #92 r4）。fields が list でなければ読み飛ばす。
+        # 完全な plan スキーマ（**非空** list 値の fields を持つ）を要求する。page_purpose
+        # だけの前置き metadata や、下書きの zero-field object（{"fields":[]}）を採用して
+        # heuristic を握りつぶさないため（Codex #92 r4/r5）。_llm_plan は入力ゼロなら
+        # _parse 前に return するので、このパスでは有効 plan は必ず 1 つ以上の field を持つ。
+        # 空 fields なら候補探索を続け、無ければ None＝heuristic fallback。
         data = extract_json_object(
             raw,
-            predicate=lambda d: isinstance(d.get("fields"), list),
+            predicate=lambda d: isinstance(d.get("fields"), list) and len(d["fields"]) > 0,
         )
         if data is None:
             return None

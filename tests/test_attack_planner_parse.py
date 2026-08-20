@@ -18,6 +18,15 @@ class ParseLlmResponseTests(unittest.TestCase):
         self.assertIsNotNone(plan)
         self.assertEqual([f.name for f in plan.fields], ["user"])
 
+    def test_empty_fields_draft_falls_back_to_real_plan(self):
+        # Codex #92 r5: {"fields":[]} 下書きを plan と誤認せず、非空の本物を採る。
+        planner = self._planner()
+        raw = ('{"page_purpose":"draft","fields":[]}\n'
+               '{"page_purpose":"login","fields":[{"name":"user","priority_checks":["xss"]}]}')
+        plan = planner._parse_llm_response("http://t/login", raw)
+        self.assertIsNotNone(plan)
+        self.assertEqual([f.name for f in plan.fields], ["user"])
+
     def test_object_without_fields_list_returns_none(self):
         planner = self._planner()
         raw = 'Note: {"page_purpose":"login"}'

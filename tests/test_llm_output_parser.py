@@ -74,6 +74,15 @@ class ArrayExtractionTests(unittest.TestCase):
             ["<think onmouseover=alert(1)>x</think>"],
         )
 
+    def test_recovers_after_unmatched_prose_opener(self):
+        # Codex #92 r5: prose の未閉じ `[` が後続の本物を飲み込まず、次の opener から復帰。
+        text = 'Use [ literally, then return:\n["payload"]'
+        self.assertEqual(extract_json_array_of_strings(text), ["payload"])
+
+    def test_recovers_object_after_unmatched_brace(self):
+        text = 'Consider { as an example, then: {"fields": ["x"]}'
+        self.assertEqual(extract_json_object(text), {"fields": ["x"]})
+
     def test_stray_prose_quote_before_array(self):
         # Codex #92 指摘2: prose 中の孤立クオートで有効な配列を取り逃さない。
         text = 'Use a literal " here:\n["a", "b"]'
@@ -145,6 +154,13 @@ class ObjectExtractionTests(unittest.TestCase):
     def test_predicate_none_returns_first_object(self):
         text = '{"a": 1} {"b": 2}'
         self.assertEqual(extract_json_object(text), {"a": 1})
+
+    def test_predicate_rejects_empty_fields_draft(self):
+        # Codex #92 r5: {"fields":[]} 下書きを飛ばし、非空 fields の本物を採る。
+        text = ('{"page_purpose":"draft","fields":[]}\n'
+                '{"page_purpose":"login","fields":[{"name":"u"}]}')
+        got = extract_json_object(text, predicate=lambda d: isinstance(d.get("fields"), list) and len(d["fields"]) > 0)
+        self.assertEqual(got, {"page_purpose": "login", "fields": [{"name": "u"}]})
 
     def test_predicate_requires_complete_plan_skips_partial(self):
         # Codex #92 r4: page_purpose だけの前置き object を飛ばし、list 値 fields を持つ
