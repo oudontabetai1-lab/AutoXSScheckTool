@@ -254,6 +254,7 @@ class _CapturingPayloadGen:
     async def generate(self, *, check_type, field_name, url, custom_payloads=None,
                        attempt_history=None, learning_summary_provider=None):
         self.captured_history = attempt_history
+        self.captured_summary_provider = learning_summary_provider
         return ["default1"]
 
 
@@ -297,6 +298,35 @@ class GetPayloadsHistoryTests(unittest.IsolatedAsyncioTestCase):
         scanner = _PlainScanner(engine)
         await scanner.get_payloads("q", "http://fixture.test/p")
         self.assertIsNone(engine.payload_gen.captured_history)
+
+    async def test_learning_summary_keyed_by_injection_url_not_primary(self):
+        """マルチオリジン: 学習サマリは注入 url の host で分離され、別 origin の payload を漏らさない。"""
+        import tempfile
+        from wscan.payload_learning import PayloadLearner
+
+        with tempfile.TemporaryDirectory() as d:
+            learner = PayloadLearner(learning_file=f"{d}/learn.json")
+            # origin A / B それぞれの成功 payload（min_tries=2 を満たすよう 2 回）。
+            for _ in range(2):
+                learner.record("xss", "<img src=//a-secret/cb>", success=True, domain="a.test")
+                learner.record("xss", "<svg onload=b>", success=True, domain="b.test")
+
+            engine = _GenEngine()
+            engine.payload_gen = _CapturingPayloadGen()
+            engine.payload_learner = learner
+            engine.enable_payload_learning = True
+            engine.target_url = "http://a.test"  # primary は A
+            scanner = _PlainScanner(engine)
+
+            # origin B の url を注入対象にして get_payloads を呼ぶ。
+            await scanner.get_payloads("q", "http://b.test/p")
+            provider = engine.payload_gen.captured_summary_provider
+            self.assertIsNotNone(provider)
+            summary = provider()
+
+            # B の payload だけが載り、A の秘密 payload は載らない（primary=A に引っ張られない）。
+            self.assertIn("<svg onload=b>", summary)
+            self.assertNotIn("a-secret", summary)
 
 
 # ---------------------------------------------------------------------------

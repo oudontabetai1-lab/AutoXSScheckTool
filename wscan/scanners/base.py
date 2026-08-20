@@ -755,7 +755,12 @@ class BaseScanner(ABC):
         learning_summary_provider = None
         if _learning_on:
             from urllib.parse import urlparse as _up
-            _domain = _up(getattr(self.engine, "target_url", "")).hostname or None
+            # 学習の鍵は **いま注入している url の host**（primary target_url ではない）。
+            # マルチオリジンスキャン（engine.target_urls）では origin ごとに分離しないと、
+            # origin B の payload（B 固有のトークン/コールバック含む）が origin A のプロンプト
+            # ＝クラウド LLM 送信へ混入し、統計も誤ターゲットを誘導する。記録側
+            # （engine._record_finding）も f.url の host で分けている。
+            _domain = _up(url).hostname or None
 
             # 要約構築は **LLM 生成パスに入った時だけ** generate 内で遅延実行する。
             # custom payloads 指定 / provider=none / template 無し / LLM 不在では generate は
