@@ -120,12 +120,15 @@ def _candidates(text: str, opener: str, closer: str) -> Iterator[str]:
     """
     if text:
         yield text.strip()
-    base = strip_code_fences(text)
-    spans = _reasoning_spans(base)
-    for start, chunk in _iter_balanced_pos(base, opener, closer):
+    # 生テキストをそのまま平衡スキャンする。フェンス(```)は括弧の外なので prose として
+    # スキップされ、JSON 文字列内の ``` は in_str 追跡で保持される（Markdown-injection
+    # payload を壊さない）。推論ブロックに完全内包される候補（思考モデルの下書き）は除外。
+    spans = _reasoning_spans(text)
+    for start, chunk in _iter_balanced_pos(text, opener, closer):
         if not _fully_inside(start, start + len(chunk), spans):
             yield chunk
-    cleaned = strip_reasoning(base)
+    # 最終フォールバック: 上で何も取れないときだけ reasoning とフェンスを除去して再走査。
+    cleaned = strip_code_fences(strip_reasoning(text))
     for chunk in _iter_balanced(cleaned, opener, closer):
         yield chunk
 
@@ -152,12 +155,17 @@ def extract_json_array_of_strings(text: str) -> Optional[list[str]]:
     return None
 
 
-def extract_json_object(text: str) -> Optional[dict]:
-    """JSON オブジェクトを頑健に取り出す。見つからなければ None。"""
+def extract_json_object(text: str, predicate=None) -> Optional[dict]:
+    """JSON オブジェクトを頑健に取り出す。見つからなければ None。
+
+    ``predicate`` を渡すと、それを満たす最初の dict まで候補探索を続ける。前置きに別の
+    無関係なオブジェクト（例 `Metadata: {"note":"draft"}`）があっても、本命のスキーマに
+    合う候補まで読み飛ばせる（合致が無ければ None＝呼び出し側は安全側へフォールバック）。
+    """
     if not text:
         return None
     for chunk in _candidates(text, "{", "}"):
         data = _loads(chunk)
-        if isinstance(data, dict):
+        if isinstance(data, dict) and (predicate is None or predicate(data)):
             return data
     return None

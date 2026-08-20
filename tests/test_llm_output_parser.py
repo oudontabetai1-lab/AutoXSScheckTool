@@ -79,6 +79,15 @@ class ArrayExtractionTests(unittest.TestCase):
         text = 'Use a literal " here:\n["a", "b"]'
         self.assertEqual(extract_json_array_of_strings(text), ["a", "b"])
 
+    def test_triple_backticks_inside_payload_preserved(self):
+        # Codex #92 r3 指摘2(P2): JSON文字列内の ``` を消さない（Markdown-injection payload）。
+        # 改行は有効 JSON では \\n（エスケープ）である点に注意。
+        text = 'Payloads: ["```\\n<script>alert(1)</script>"]'
+        self.assertEqual(
+            extract_json_array_of_strings(text),
+            ["```\n<script>alert(1)</script>"],
+        )
+
     def test_ignores_draft_array_inside_think(self):
         # <think> 内の下書き配列は無視し、最終の配列を採る。
         text = '<think>["draft"]</think>\n["final1", "final2"]'
@@ -126,6 +135,16 @@ class ObjectExtractionTests(unittest.TestCase):
         # 指摘2 の object 版: 前置き prose の孤立クオートに影響されない。
         text = 'Say " to me:\n{"page_purpose": "login"}'
         self.assertEqual(extract_json_object(text), {"page_purpose": "login"})
+
+    def test_predicate_skips_unrelated_leading_object(self):
+        # Codex #92 r3 指摘1(P2): 前置きの無関係 object を飛ばし、述語に合う本命を採る。
+        text = 'Metadata: {"note":"draft"}\n{"page_purpose":"login","fields":[{"name":"u"}]}'
+        got = extract_json_object(text, predicate=lambda d: "fields" in d or "page_purpose" in d)
+        self.assertEqual(got, {"page_purpose": "login", "fields": [{"name": "u"}]})
+
+    def test_predicate_none_returns_first_object(self):
+        text = '{"a": 1} {"b": 2}'
+        self.assertEqual(extract_json_object(text), {"a": 1})
 
     def test_ignores_draft_object_inside_think(self):
         # Codex #92 r2 指摘1(P1): <think> 内の下書きJSONを拾わず、最終回答を採る。
