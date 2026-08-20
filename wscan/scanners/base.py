@@ -265,16 +265,24 @@ def _augment_dedup_key(
     injection_location: str,
     injection_method: str,
     injection_pointer: str,
+    injection_target_origin: str = "",
 ) -> tuple:
-    """JSON body 注入点の dedup identity を method+pointer で拡張する（純粋）。
+    """JSON body / form 注入点の dedup identity を拡張する（純粋）。
 
-    同一 leaf 名(例 /profile/id と /billing/id が共に field_name="id")でも別入力
-    なので取りこぼさない。form/url_param は base のまま(4-tuple)。record_finding・
-    finding_dedup_key_for(engine の _record_finding/_init_checkpoint 経由)の**全 dedup
-    地点で同一キー**になるよう、この 1 箇所に集約する。
+    - json_body: 同一 leaf 名(例 /profile/id と /billing/id が共に field_name="id")でも
+      別入力なので method+pointer で識別する。
+    - form: 同一ページ・同一 field 名・同一 evidence でも **別 origin へ送信する** form は
+      別入力＝別 finding／別学習バケツ。target_origin で識別しないと 2 つ目が dedup で潰され、
+      その origin の学習が記録されない。target_origin が空(未解決/従来)なら base のまま＝回帰ゼロ、
+      同一 origin の form は従来どおり dedup（別 origin のみ分離）。
+
+    record_finding・finding_dedup_key_for(engine の _record_finding/_init_checkpoint 経由)の
+    **全 dedup 地点で同一キー**になるよう、この 1 箇所に集約する。
     """
     if injection_location == "json_body":
         return base + (injection_method, injection_pointer)
+    if injection_location == "form" and injection_target_origin:
+        return base + (injection_target_origin,)
     return base
 
 
@@ -289,6 +297,7 @@ def finding_dedup_key_for(finding: "Finding") -> tuple:
         getattr(finding, "injection_location", ""),
         getattr(finding, "injection_method", ""),
         getattr(finding, "injection_pointer", ""),
+        getattr(finding, "injection_target_origin", ""),
     )
 
 
@@ -1150,6 +1159,7 @@ class BaseScanner(ABC):
             injection_point.location if injection_point is not None else "",
             injection_point.method if injection_point is not None else "",
             injection_point.parameter_id if injection_point is not None else "",
+            injection_point.target_origin if injection_point is not None else "",
         )
         if dedup_key in self.engine._finding_dedup:
             return None  # duplicate

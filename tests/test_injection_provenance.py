@@ -204,6 +204,29 @@ class FindingInjectionProvenanceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(f1)
         self.assertIsNone(f2)
 
+    async def test_form_dedup_distinguishes_target_origin(self):
+        # 同一ページ・同一 field・同一 evidence でも別 origin へ送る form は別 finding／別学習。
+        scanner = _Scanner(_Engine())
+        pair = {"request": {}, "response": {}}
+        ip_b = InjectionPoint.for_form("http://h/form", "id", target_origin="http://b.test")
+        ip_c = InjectionPoint.for_form("http://h/form", "id", target_origin="http://c.test")
+        f_b = await scanner.record_finding(
+            "http://h/form", "id", "'", "err", pair, screenshot_b64="",
+            evidence_type="sqli_error", injection_point=ip_b,
+        )
+        f_c = await scanner.record_finding(
+            "http://h/form", "id", "'", "err", pair, screenshot_b64="",
+            evidence_type="sqli_error", injection_point=ip_c,
+        )
+        # 別 origin なので 2 件目は dedup で潰されない。
+        self.assertIsNotNone(f_b)
+        self.assertIsNotNone(f_c)
+        self.assertNotEqual(
+            finding_dedup_key_for(f_b), finding_dedup_key_for(f_c)
+        )
+        self.assertEqual(f_b.injection_target_origin, "http://b.test")
+        self.assertEqual(f_c.injection_target_origin, "http://c.test")
+
     async def test_record_finding_redacts_json_evidence(self):
         # 検出用 transport は生 pair を返し、伏字はこの永続境界で行う。
         scanner = _Scanner(_Engine())
