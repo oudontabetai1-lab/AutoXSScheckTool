@@ -30,6 +30,7 @@ Back-compat: legacy files written with the old flat schema
 """
 import json
 import os
+import re
 import tempfile
 from pathlib import Path
 from typing import Optional
@@ -89,20 +90,37 @@ def format_learning_for_prompt(
     if not effective:
         return ""
 
-    def _shorten(payload: str) -> str:
-        if len(payload) <= max_payload_len:
-            return payload
-        return payload[:max_payload_len - 3] + "..."
-
     lines = [
         "LEARNED payloads that produced findings on prior scans",
         "(bias generation toward these proven-effective inputs and craft targeted variations):",
     ]
     lines.extend(
-        f"- `{_shorten(payload)}` -> {hits}/{tries} succeeded"
+        f"- `{_neutralize_payload_for_prompt(payload, max_payload_len)}` -> {hits}/{tries} succeeded"
         for payload, hits, tries, _rate in effective
     )
     return "\n".join(lines)
+
+
+def _neutralize_payload_for_prompt(payload: str, max_len: int) -> str:
+    """学習 payload を LLM プロンプト表示用に無害化する純粋関数。
+
+    学習 payload は**本質的に攻撃文字列**である（community 由来＝外部起源、かつ
+    markdown/改行注入を意図的に温存している）。`` `...` `` のコードスパンへ verbatim 補間すると、
+    内部の backtick でスパンを脱出し、改行で新しい命令行を注入してプロンプトインジェクション
+    （将来の payload 生成の乗っ取り）に転用されうる。切り詰めだけでは中和にならない。
+
+    そこで inert-data の明示区切りである**コードスパンは保ったまま**、脱出・命令行注入を可能に
+    する文字だけを潰す: 内部 backtick を除去し、改行・タブ・制御文字を単一空白へ畳み、長さを
+    切り詰める。payload はプロンプトでは「効いた入力のヒント」に過ぎず、byte 完全一致は不要。
+    """
+    # 改行・タブ・制御文字（行構造・命令行注入の起点）を単一空白へ
+    cleaned = re.sub(r"[\x00-\x1f\x7f]+", " ", payload)
+    # コードスパンを閉じてしまう backtick を除去（スパン脱出の防止）
+    cleaned = cleaned.replace("`", "")
+    cleaned = cleaned.strip()
+    if len(cleaned) > max_len:
+        cleaned = cleaned[:max_len - 3] + "..."
+    return cleaned
 
 
 class PayloadLearner:
