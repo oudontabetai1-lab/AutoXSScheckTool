@@ -2573,6 +2573,10 @@ class ScanEngine:
                             target["url"],
                             target.get("body_signature")
                             or tuple(sorted(target["pointers"])),
+                            # media type で版/operation を分ける API（vnd.acme.v1+json vs v2+json）を
+                            # page 跨ぎの engine dedup でも collapse しない（#90 R21d・harvest 側の
+                            # raw/semantic 識別子と一貫）。
+                            spa_harvest._norm_content_type(target.get("content_type")),
                         )
                         existing_tid = self._spa_json_harvest_seen.get(dedup_key)
                         if existing_tid is not None:
