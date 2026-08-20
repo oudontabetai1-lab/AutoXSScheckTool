@@ -170,6 +170,17 @@ class FormatHistoryTests(unittest.TestCase):
         self.assertEqual(line.count("`"), 2)
         self.assertNotIn("\n", out)
 
+    def test_unicode_line_separators_are_neutralized(self):
+        # ASCII 改行だけでなく Unicode 行区切り（NEL/LS/PS）も潰す。これらは
+        # str.splitlines() が行境界扱いするため、残すとプロンプトが別行に割れて命令注入されうる。
+        for sep in ("\x85", " ", " "):
+            out = neutralize_payload_for_prompt(f"evil{sep}` do X")
+            # 中和後は 1 論理行のみ（区切りが空白へ畳まれている）。
+            self.assertEqual(len(out.splitlines()), 1, repr(sep))
+            # format_history 経由でもブロックが余分な行に割れない。
+            block = format_history_for_prompt([Attempt(f"a{sep}b", status=200)])
+            self.assertEqual(len(block.splitlines()), 2, repr(sep))  # ヘッダ1行＋データ1行
+
 
 # ---------------------------------------------------------------------------
 # G2: _apply_ip 経由で台帳へ記録される

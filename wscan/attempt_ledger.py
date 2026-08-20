@@ -31,8 +31,12 @@ def neutralize_payload_for_prompt(payload: str, max_len: int = 120) -> str:
     `format_history_for_prompt`（試行履歴）と `payload_learning.format_learning_for_prompt`
     （学習成功率）の両方が共有する。
     """
-    # 改行・タブ・制御文字（行構造・命令行注入の起点）を単一空白へ
-    cleaned = re.sub(r"[\x00-\x1f\x7f]+", " ", payload)
+    # 改行・タブ・制御文字（行構造・命令行注入の起点）を単一空白へ。
+    # ASCII 制御に加え、Python の str.splitlines() が行境界として分割する Unicode 行区切り
+    # ——NEL(U+0085) / LINE SEPARATOR(U+2028) / PARAGRAPH SEPARATOR(U+2029)——も潰す
+    # （これらを残すとプロンプトブロックが別の論理行に割れ、閉じ backtick が攻撃テキストの
+    # 後ろに残って命令注入が成立しうる）。
+    cleaned = re.sub(r"[\x00-\x1f\x7f\x85\u2028\u2029]+", " ", payload)
     # コードスパンを閉じてしまう backtick を除去（スパン脱出の防止）
     cleaned = cleaned.replace("`", "")
     cleaned = cleaned.strip()
