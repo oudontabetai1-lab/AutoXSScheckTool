@@ -105,9 +105,10 @@ def truncated_regex_literal(next_char: str) -> bool:
 # JS で正規表現リテラルを導く（`/` の直前に来うる）文脈文字。文字列リテラルの直前は引用符
 # や識別子なので、これらと区別できる。空白は読み飛ばして直前の非空白文字を見る。
 _REGEX_CONTEXT_PREV = frozenset("=(,:[!&|?{;<>~^*%")
-# 閉じた正規表現リテラルの形 `/…/flags`（flags は g/i/m/s/u/y）。url_re 文字だけで構成される
-# `/foo.bar/` `/foo$/` `/foo+/` `/foo*/` 等は切り詰められないので、この形＋文脈で判定する。
-_REGEX_LITERAL_SHAPE = re.compile(r"^/.+/[gimsuy]*$")
+# 閉じた正規表現リテラルの形 `/…/flags`。flags は現行の全 JS フラグ（d/g/i/m/s/u/v/y）。
+# url_re 文字だけで構成される `/foo.bar/` `/foo$/` `/foo+/` `/foo*/` `/foo/d` 等は切り詰められない
+# ので、この形＋文脈で判定する。
+_REGEX_LITERAL_SHAPE = re.compile(r"^/.+/[dgimsuvy]*$")
 
 
 def preceding_nonspace(body: str, index: int) -> str:

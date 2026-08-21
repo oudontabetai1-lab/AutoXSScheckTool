@@ -114,6 +114,10 @@ class PlausibleRouteCandidateTests(unittest.TestCase):
                 self.assertTrue(is_regex_literal_extraction(prev, "/foo.bar/"))
         self.assertTrue(is_regex_literal_extraction("=", "/foo$/"))
         self.assertTrue(is_regex_literal_extraction("(", "/foo+/g"))
+        # 現行の全 JS フラグ（d/v を含む）を認識する（Codex #100 R5）。
+        for flags in ("d", "v", "gd", "dgimsuvy"):
+            with self.subTest(flags=flags):
+                self.assertTrue(is_regex_literal_extraction("=", f"/foo/{flags}"))
         # 文字列リテラル由来（引用符/識別子が直前）→ 実ルートとして残す。
         self.assertFalse(is_regex_literal_extraction("'", "/foo.bar/"))
         self.assertFalse(is_regex_literal_extraction('"', "/api/v1/"))
