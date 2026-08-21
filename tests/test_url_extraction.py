@@ -29,6 +29,10 @@ class PlausibleRouteCandidateTests(unittest.TestCase):
         "http://odata.test/Categories(1)/Products",              # OData: 括弧の後にセグメント継続
         "http://juice-shop.test/search?pattern=.*",              # クエリ値の regex 片は path 無関係で許容
         "http://juice-shop.test/rest/x?re=(?:a|b)",              # クエリの regex は path を汚さない
+        "http://juice-shop.test/languages/C++",                  # + は path の正当な文字（Codex #100 R2）
+        "http://juice-shop.test/rest/tags/a*b",                  # * も path で正当
+        "http://odata.test/odata/GetDefault()/value",            # parameterless 関数ルート（識別子直後の()）
+        "https://api.example.test/",                             # origin-root（別オリジンで実ルートになりうる）
     ]
 
     # minified JS の regex リテラル/式片の誤抽出（すべて除去されるべき）。
@@ -39,11 +43,10 @@ class PlausibleRouteCandidateTests(unittest.TestCase):
         "http://juice-shop.test/(?:foo|bar)",
         "http://juice-shop.test/[^a-z]+",
         "http://juice-shop.test/a.*b",
-        "http://juice-shop.test/x+y",
         "http://juice-shop.test/{n}",
         "http://juice-shop.test/foo|bar",
         "http://juice-shop.test/a^b",
-        "http://juice-shop.test/",   # ルート直下のみ（資産抽出のゴミ崩壊）
+        "http://juice-shop.test/(a|b)",       # 区切り直後の開き括弧＝regex リテラル片
     ]
 
     def test_real_routes_are_kept(self):
@@ -70,10 +73,10 @@ class PlausibleRouteCandidateTests(unittest.TestCase):
     def test_filter_dedups_and_preserves_order(self):
         cands = [
             "http://h/rest/a",
-            "http://h/(?:",        # ゴミ
+            "http://h/(?:",        # ゴミ（regex 群）
             "http://h/rest/b",
             "http://h/rest/a",     # 重複
-            "http://h/x*y",        # ゴミ
+            "http://h/a|b",        # ゴミ（| は URL 不正）
         ]
         self.assertEqual(
             filter_route_candidates(cands),
@@ -133,7 +136,7 @@ class CollectUrlsFromAssetsIntegrationTests(unittest.TestCase):
         # regex 由来のゴミ（メタ文字）は 1 件も残らない。
         for u in found:
             self.assertFalse(
-                any(c in u for c in "()*+[]{}|^`\\"),
+                any(c in u for c in "[]{}|^`\\<>"),  # URL として不正な文字（*+() は正当なので除く）
                 f"ゴミ URL が残った: {u}",
             )
 

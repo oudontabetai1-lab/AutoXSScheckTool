@@ -15,27 +15,34 @@ from __future__ import annotations
 import re
 from urllib.parse import urlparse
 
-# 実 URL の path にはまず生では現れない、正規表現/式の**強い**メタ文字。JS バンドルの
-# regex リテラル（`/(?:...)/`）や式片（`16*(a.flipX)`）を強く示唆する。
-# 注1: `?`/`;`/`=`/`&` はクエリで正当なので path 判定には使わない（urlparse で path から除かれる）。
-# 注2: 丸括弧 `()` は OData の `/Products(1)` 等で**正当**なので一律には弾かず、`_parens_look_like_regex`
-#      で「regex らしい括弧」だけを別途判定する。`~ . - _ % @ , ! $ ' :` 等は実 path でも使われうる。
-_STRONG_METACHARS = re.compile(r"[*+\\|^{}<>`\[\]]")
+# URL の path として **RFC 上そもそも不正**な文字（gen-delim/式メタ文字）。実ルートには
+# 生では現れず、minified JS の regex リテラルや式片を強く示唆する。
+# 除外理由: `* + ( )` は path の sub-delim として**正当**（`/languages/C++`・OData `/Products(1)`・
+#   parameterless `/GetDefault()`）なのでここには入れない。regex らしい括弧だけ `_parens_look_like_regex`
+#   で別途弾く。`?;=&` はクエリで正当（path から除かれる）。`~ . - _ % @ , ! $ ' :` 等も path で正当。
+_STRONG_METACHARS = re.compile(r"[\\|^{}<>`\[\]]")
 
-# path に残る regex 由来シーケンス（`?:`/`(?` は括弧判定、`[^` は上のメタ文字で拾えるので、
-# ここは `.*`/`.+` を主に見る）。**クエリではなく path** にのみ適用する（実ルートの
-# `?pattern=.*` のようなクエリ値で誤除去しないため）。
+# path に残る regex 由来シーケンス。`.*`/`.+`（任意文字の量指定）は実 path にまず出ない強い
+# 正規表現シグナル。**クエリではなく path** にのみ適用する（実ルートの `?pattern=.*` のような
+# クエリ値で誤除去しないため）。
 _PATH_REGEX_HINTS = (".*", ".+")
 
 
 def _parens_look_like_regex(path: str) -> bool:
     """path 中の丸括弧が正規表現片らしいかを返す（純粋）。
 
-    OData の `/Products(1)` のような**バランスした非空の括弧**は実ルートとして許容し、
-    非キャプチャ/先読み群 `(?` ・空括弧 `()` ・バランス崩れ（切れた regex／`/(` 等）だけを弾く。
+    実ルートの括弧（OData `/Products(1)`・parameterless `/GetDefault()/value`）は許容し、
+    **regex 特有の形だけ**を弾く: 非キャプチャ/先読み群 `(?` ／ バランス崩れ（切れた regex・
+    `/16*(a` や `/(` 等）／ **識別子直後でない `(`**（`/(...)` のように区切り直後で始まる括弧＝
+    regex リテラル片。関数呼び出し様の `\\w(` は残す）。
     """
-    if "(?" in path or "()" in path:
+    if "(?" in path:
         return True
+    # 関数/コレクション様（識別子・数字・`)` の直後の `(` ）以外の開き括弧は式/regex 片寄り。
+    for m in re.finditer(r"\(", path):
+        prev = path[m.start() - 1] if m.start() > 0 else ""
+        if not (prev.isalnum() or prev in "_)"):
+            return True
     depth = 0
     for ch in path:
         if ch == "(":
@@ -50,9 +57,10 @@ def _parens_look_like_regex(path: str) -> bool:
 def is_plausible_route_candidate(resolved_url: str) -> bool:
     """解決済み URL が「実在しうるルート/API」の体裁かを返す（純粋）。
 
-    False = JS 由来のゴミ（regex/式片）と判定。判定は path 部のコードメタ文字を主軸に
-    し、誤って実ルートを落とさないよう保守的（迷ったら True）。OData の括弧やクエリの
-    メタ文字は実ルートとして残す。
+    False = JS 由来のゴミ（regex/式片）と判定。判定は「URL として不正な文字」＋「regex 特有の
+    形」に絞り、誤って実ルートを落とさないよう保守的（迷ったら True）。OData/関数様の括弧・
+    `+`/`*` を含む path・クエリのメタ文字・origin-root は実ルートとして残す。曖昧な候補は残し、
+    実在しなければ下流の crawl が 404 で落とす（到達性維持を優先）。
     """
     if not resolved_url:
         return False
@@ -62,15 +70,14 @@ def is_plausible_route_candidate(resolved_url: str) -> bool:
         return False
     if parsed.scheme not in {"http", "https"}:
         return False
-    path = parsed.path or ""
-    # path が空/ルート直下だけの候補は資産抽出のゴミ崩壊であることが多く、実ルートは
-    # 通常の crawl/リンク収集で拾える。ここでは資産由来のゴミ抑制に集中し候補にしない。
-    if not path or path == "/":
+    if not parsed.netloc:
         return False
-    # 本丸: path に強いコードメタ文字が混ざる候補は regex/式の誤抽出として除去。
+    path = parsed.path or ""
+    # 本丸: path に URL として不正な文字が混ざる候補は regex/式の誤抽出として除去。
+    # （origin-root `https://host/` はスコープ内の別オリジン等で実ルートになりうるので残す。）
     if _STRONG_METACHARS.search(path):
         return False
-    # 丸括弧は OData 等で正当。regex らしい括弧（`(?`/空/不均衡）だけ弾く。
+    # 丸括弧は OData/関数様で正当。regex 特有の括弧だけ弾く。
     if _parens_look_like_regex(path):
         return False
     # regex 由来シーケンスは **path にのみ** 適用（クエリ値の `.*` 等で実ルートを落とさない）。
