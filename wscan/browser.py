@@ -24,6 +24,7 @@ from .url_extraction import (
     regex_literal_end,
     is_regex_literal_extraction,
     preceding_is_regex_context,
+    advance_string_state,
     extend_query_bracket_tail,
     strip_trailing_noise,
 )
@@ -1804,7 +1805,17 @@ class BrowserManager:
                 continue
             scan_body = body[:200000]
             skip_until = 0
+            # JS 文字列/テンプレートの開閉状態を本文先頭から漸進的に持ち越す（窓では字句状態を
+            # 復元できないため）。url_re の match は引用符を含まないので、状態変化は match 間の
+            # gap のみ＝全体で O(n)。これで「match が文字列/テンプレート内か」を正確に判定する。
+            string_quote = None
+            state_pos = 0
             for m in url_re.finditer(scan_body):
+                string_quote = advance_string_state(
+                    scan_body, state_pos, m.start(), string_quote
+                )
+                state_pos = m.end()
+                in_string = string_quote is not None
                 # 直前に切り詰めた regex リテラルの内部（escaped slash 後の再抽出片など）は飛ばす。
                 if m.start() < skip_until:
                     continue
@@ -1817,7 +1828,7 @@ class BrowserManager:
                 # 読み飛ばして escaped slash 後の後半片（`/subpat/`）の再抽出を防ぐ。除算式
                 # （`a/b[c]`）を regex と誤認して後続の実ルートを飛ばさないよう、skip は文脈で gate する。
                 if truncated_regex_literal(scan_body[m.end():m.end() + 1]):
-                    if preceding_is_regex_context(preceding):
+                    if preceding_is_regex_context(preceding, in_string):
                         # regex 文脈のみ「切り詰めた regex 片」として捨て、リテラルの残りも飛ばす。
                         skip_until = regex_literal_end(scan_body, m.end())
                         continue
@@ -1834,7 +1845,7 @@ class BrowserManager:
                 # content で実ルートと区別できないため、直前の文脈（regex を導く演算子/式キーワード）
                 # ＋`/…/flags`（もしくはメンバ呼び出し）の形で判定して弾く。文字列リテラル由来の
                 # 実ルートは残る。直前の式キーワード検出のため 1 文字でなくテキスト窓を渡す。
-                if is_regex_literal_extraction(preceding, candidate):
+                if is_regex_literal_extraction(preceding, candidate, in_string):
                     continue
                 try:
                     resolved = urljoin(base_url, candidate)

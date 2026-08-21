@@ -32,8 +32,10 @@ def _parens_look_like_regex(path: str) -> bool:
     """
     if "(?" in path:
         return True
-    # 関数/コレクション様（識別子・数字・`)` の直後の `(` ）以外の開き括弧は式/regex 片寄り。
-    for m in re.finditer(r"\(", path):
+    # **空**括弧 `()` は関数呼び出し様（識別子・数字・`)` の直後）のみ許容。区切り直後の bare
+    # `()` は regex/式片。非空の均衡括弧（`/Products(1)`・`/docs/(archived)/index`）は前置文字を
+    # 問わず実ルートとして残す（Codex #100 R13）。
+    for m in re.finditer(r"\(\)", path):
         prev = path[m.start() - 1] if m.start() > 0 else ""
         if not (prev.isalnum() or prev in "_)"):
             return True
@@ -166,13 +168,44 @@ _REGEX_MEMBER_CALL = re.compile(r"^/.+?/[dgimsuvy]*\.")
 _IDENTIFIER_TAIL = re.compile(r"[A-Za-z_$][A-Za-z0-9_$]*$")
 
 
-def preceding_is_regex_context(preceding_text: str) -> bool:
+def advance_string_state(body: str, start: int, end: int, quote):
+    """`body[start:end]` を走査して JS 文字列/テンプレートの開閉状態を更新して返す（純粋）。
+
+    `quote` は現在開いている引用符（`'`/`"`/`` ` ``）または None。escape（`\\x`）を考慮。
+    `'`/`"` は同一行のみ（改行で閉じ扱い）、`` ` ``（テンプレート）は改行を跨ぐ。呼び出し側
+    （`browser._collect_urls_from_loaded_assets`）が finditer の各 match 間の gap を順に渡すと、
+    本文先頭からの正確な文字列状態を O(n) で持ち越せる（url_re の match は引用符を含まないため
+    状態変化は gap のみ）。これにより「match が文字列/テンプレート内か」を窓に頼らず判定できる。
+    """
+    i = start
+    n = min(end, len(body))
+    while i < n:
+        c = body[i]
+        if c == "\\":
+            i += 2
+            continue
+        if quote is None:
+            if c in "'\"`":
+                quote = c
+        elif c == quote:
+            quote = None
+        elif c in "\r\n" and quote in ("'", '"'):
+            quote = None  # 通常の文字列は行を跨がない
+        i += 1
+    return quote
+
+
+def preceding_is_regex_context(preceding_text: str, in_string: bool = False) -> bool:
     """match 直前のテキストが JS 正規表現を導く文脈かを返す（純粋）。
 
     末尾空白を読み飛ばし、(1) 直前文字が regex 文脈演算子 `_REGEX_CONTEXT_PREV`、または
     (2) 直前トークンが `return`/`throw`/`yield` 等の式キーワード、または (3) 行頭/式先頭
-    （空）なら True。文字列リテラル由来（直前が引用符や通常の識別子）は False。
+    （空）なら True。``in_string`` True（文字列/テンプレートリテラル内）や直前が引用符/通常の
+    識別子は False。``in_string`` は呼び出し側が `advance_string_state` で持ち越した状態。
     """
+    # 文字列/テンプレートリテラル内は regex 文脈ではない（Codex #100 R13）。
+    if in_string:
+        return False
     stripped = preceding_text.rstrip(" \t\r\n")
     if not stripped:
         return True
@@ -211,7 +244,9 @@ def preceding_nonspace(body: str, index: int) -> str:
     return body[i] if i >= 0 else ""
 
 
-def is_regex_literal_extraction(preceding_text: str, match_text: str) -> bool:
+def is_regex_literal_extraction(
+    preceding_text: str, match_text: str, in_string: bool = False
+) -> bool:
     """抽出 match が JS 正規表現リテラルらしいかを、直前文脈と形で判定する（純粋）。
 
     切り詰められない完全な regex リテラル（`/foo.bar/` 等、url_re 文字のみ）は content だけでは
@@ -221,9 +256,10 @@ def is_regex_literal_extraction(preceding_text: str, match_text: str) -> bool:
     は除外される。完全な判別には JS 字句解析が要るため保守的で、取りこぼした regex は下流 crawl
     が 404 で落とす（実ルートを誤除去しないことを優先）。
 
-    ``preceding_text`` は match 直前のテキスト（末尾数十文字で十分）。後方互換で単一文字も可。
+    ``preceding_text`` は match 直前のテキスト（末尾数十文字で十分）。``in_string`` は呼び出し側が
+    `advance_string_state` で持ち越した「文字列/テンプレート内か」の状態。後方互換で単一文字も可。
     """
-    if not preceding_is_regex_context(preceding_text):
+    if not preceding_is_regex_context(preceding_text, in_string):
         return False
     return bool(
         _REGEX_LITERAL_SHAPE.match(match_text)

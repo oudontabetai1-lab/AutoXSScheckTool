@@ -10,6 +10,7 @@ from wscan.url_extraction import (
     truncated_regex_literal,
     regex_literal_end,
     is_regex_literal_extraction,
+    advance_string_state,
     preceding_nonspace,
     strip_trailing_noise,
     extend_query_bracket_tail,
@@ -41,6 +42,7 @@ class PlausibleRouteCandidateTests(unittest.TestCase):
         "http://juice-shop.test/packages/.+",                    # .+ も path で合法
         "http://juice-shop.test/a.*b",                           # bare .* も content では弾かない
         "http://odata.test/odata/GetDefault()/value",            # parameterless 関数ルート（識別子直後の()）
+        "http://juice-shop.test/docs/(archived)/index",          # 均衡した非空括弧は前置文字不問で残す（R13）
         "https://api.example.test/",                             # origin-root（別オリジンで実ルートになりうる）
     ]
 
@@ -139,6 +141,36 @@ class PlausibleRouteCandidateTests(unittest.TestCase):
         self.assertTrue(is_regex_literal_extraction("return", "/foo/g.match(s)"))
         # 行頭（式先頭）も regex 文脈。
         self.assertTrue(is_regex_literal_extraction("", "/foo/"))
+        # 文字列/テンプレートリテラル内（in_string=True）は regex 文脈でない → 実ルート維持（R13）。
+        self.assertFalse(is_regex_literal_extraction("const r = `name: ", "/api/users/", True))
+        self.assertFalse(is_regex_literal_extraction("x = 'prefix: ", "/api/users/", True))
+
+    def test_advance_string_state_tracks_quotes(self):
+        def st(s, q=None):
+            return advance_string_state(s, 0, len(s), q)
+        # 開くと状態が残る。
+        self.assertEqual(st("const r = `name: "), "`")
+        self.assertEqual(st("x = 'abc"), "'")
+        self.assertEqual(st('y = "abc'), '"')
+        # 閉じるとクリア。
+        self.assertIsNone(st("x = 'abc' + "))
+        self.assertIsNone(st("plain = "))
+        # escape された引用符は開閉に数えない。
+        self.assertIsNone(st("x = 'a\\'b' "))
+        # 通常文字列は改行で閉じ扱い、テンプレートは跨ぐ。
+        self.assertIsNone(st("x = 'open\nnext"))
+        self.assertEqual(st("t = `open\nnext"), "`")
+        # 状態の持ち越し（前の gap の quote を継続）。
+        self.assertIsNone(advance_string_state("abc`", 0, 4, "`"))  # 開いていた ` を閉じる
+
+    def test_balanced_nonempty_parens_kept_regardless_of_prefix(self):
+        # 区切り直後でも均衡した非空括弧は実ルート（R13）。
+        self.assertTrue(is_plausible_route_candidate("http://h/docs/(archived)/index"))
+        # bare 空 () と (? は引き続き弾く。
+        self.assertFalse(is_plausible_route_candidate("http://h/()"))
+        self.assertFalse(is_plausible_route_candidate("http://h/(?:x)"))
+        # 識別子直後の空 () は残す。
+        self.assertTrue(is_plausible_route_candidate("http://h/GetDefault()"))
         # escaped slash 後に再抽出される regex 片（/foo\/bar/ → /bar/）も、直前 \ を文脈として弾く。
         self.assertTrue(is_regex_literal_extraction("\\", "/bar/"))
         # 制御ヘッダの `)` 直後の regex は文脈として認識（Codex #100 R8）。
@@ -223,6 +255,10 @@ class CollectUrlsFromAssetsIntegrationTests(unittest.TestCase):
             "// docs: /foo[bar]\nfetch('/cmtok/list');"
             # array/object query（url_re が [ で止まる）。route と query を復元して残す。
             "fetch('/bq/search?filters[]=active');"
+            # テンプレートリテラル内のルート（: の後でも文字列内なので regex 扱いしない）。
+            "const routes = `name: /tmpl/users/`;"
+            # 均衡した非空括弧を持つ実ルート（区切り直後の ( ）。
+            "fetch('/docs/(archived)/index');"
             # OData/関数の末尾括弧を持つ実ルート（文字列リテラル由来 → 残す）。
             "fetch('/Products(1)'); fetch('/odata/GetDefault()');"
         )
@@ -267,6 +303,9 @@ class CollectUrlsFromAssetsIntegrationTests(unittest.TestCase):
             any(u.startswith("http://juice-shop.test/bq/search") for u in found),
             f"bracket-query route が失われた: {found}",
         )
+        # テンプレートリテラル内のルート・均衡括弧ルートも残す（R13）。
+        self.assertIn("http://juice-shop.test/tmpl/users/", found)
+        self.assertIn("http://juice-shop.test/docs/(archived)/index", found)
         # OData/関数の末尾括弧を持つ実ルートは残る（C1-g）。
         self.assertIn("http://juice-shop.test/Products(1)", found)
         self.assertIn("http://juice-shop.test/odata/GetDefault()", found)
