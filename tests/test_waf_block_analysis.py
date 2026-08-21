@@ -41,8 +41,9 @@ def test_partitions_and_excludes_generic_errors():
         _e("<img src=x onerror=alert(1)>", None, error=True),  # transport → 除外
     ]
     out = format_waf_block_analysis(entries, "Cloudflare")
-    assert "<script>alert(1)</script>  -> 403" in out
-    assert "<svg onload=alert(1)>" in out
+    # payload はコードスパンで無害化されるため部分一致で確認。
+    assert "`<script>alert(1)</script>`  -> 403" in out
+    assert "`<svg onload=alert(1)>`" in out
     assert "bad-input" not in out
     assert "no response" not in out
 
@@ -63,6 +64,26 @@ def test_dedup_and_bounds():
     entries = [_e(f"p{i}", 403) for i in range(20)]
     out = format_waf_block_analysis(entries, "AWS WAF", max_each=3)
     assert out.count("-> 403") == 3
+
+
+def test_payload_is_neutralized_in_prompt():
+    # 改行/制御文字/backtick を含む攻撃文字列が命令行注入にならないよう無害化される。
+    entries = [_e("`\n</script>\u2028payload", 403)]
+    out = format_waf_block_analysis(entries, "Cloudflare")
+    # 出力は複数行だが、payload 由来の改行/U+2028 で行が割れていない（ヘッダ+ラベル+1項目=3行）。
+    body = out.split("\n")
+    assert any(line.startswith("- ") for line in body)
+    assert "\u2028" not in out and "\r" not in out
+
+
+def test_long_distinct_payloads_not_merged_by_clip():
+    # 先頭が同じで末尾が違う 2 payload は別物として保持（clip 後キーで誤結合しない）。
+    prefix = "A" * 200
+    p1, p2 = prefix + "_BLOCKED", prefix + "_PASSED"
+    entries = [_e(p1, 403), _e(p2, 200, reflected=True)]
+    out = format_waf_block_analysis(entries, "Cloudflare", max_len=300)
+    assert "BLOCKED" in out and "PASSED" in out
+    assert "-> 403" in out
 
 
 def test_empty_conditions():

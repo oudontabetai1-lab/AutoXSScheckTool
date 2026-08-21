@@ -239,21 +239,24 @@ def is_waf_block_attempt(status, error: bool = False) -> bool:
 
 
 def format_waf_block_analysis(entries, waf_name, *, max_each: int = 6, max_len: int = 120) -> str:
-    """試行台帳エントリ（.payload/.status/.error を持つ）を passed/blocked に分け、
-    adaptive プロンプト用の WAF フィードバック節へ整形する（純粋・bounded）。全空なら ""。"""
+    """試行台帳エントリ（.payload/.status/.reflected を持つ）を passed/blocked に分け、
+    adaptive プロンプト用の WAF フィードバック節へ整形する（純粋・bounded）。全空なら ""。
+
+    - blocked: WAF 固有 signal（403/406）。汎用エラー/transport 失敗は含めない。
+    - passed: 2xx かつ reflected（アプリが処理した確証）。それ以外の 2xx は含めない。
+    - 同一 payload は **原文をキー** に最新結果へ集約（clip 後キーだと先頭一致の別 payload を誤結合）。
+    - payload は外部由来の攻撃文字列。描画時に neutralize_payload_for_prompt で無害化し
+      コードスパンに収める（NEL/行区切り/制御文字による命令行注入を防ぐ）。
+    """
     if not waf_name or not entries:
         return ""
+    from wscan.attempt_ledger import neutralize_payload_for_prompt
 
-    def _clip(p) -> str:
-        return str(p or "").replace("\r", " ").replace("\n", " ")[:max_len]
-
-    # 同一 payload が retry で 403 と 2xx の両方を受けることがあるため、payload ごとに
-    # **最新の試行結果**へ集約してから分類する（両リストへの二重掲載を防ぐ・後勝ち）。
-    # dict は挿入順を保つので、value を上書きしても初出順で列挙できる。
+    # 原文 payload をキーに最新結果へ集約（後勝ち・挿入順保持）。
     last_by_payload: dict = {}
     for e in entries:
         try:
-            payload = _clip(getattr(e, "payload", ""))
+            payload = str(getattr(e, "payload", "") or "")
         except Exception:
             continue
         if payload:
@@ -268,11 +271,15 @@ def format_waf_block_analysis(entries, waf_name, *, max_each: int = 6, max_len: 
             blocked.append((payload, status))
         elif isinstance(status, int) and 200 <= status < 300 and reflected:
             # 2xx だけでは不十分（WAF のソフトブロック/CAPTCHA/challenge も 200 になり得る）。
-            # payload が本文に反射した＝アプリが実際に処理した確証があるときだけ passed とする。
+            # payload が本文に反射した＝アプリが実際に処理した確証があるときだけ passed。
             passed.append(payload)
 
     if not blocked and not passed:
         return ""
+
+    def _render(p: str) -> str:
+        # 外部由来の攻撃文字列を無害化し inert-data のコードスパンに収める。
+        return "`" + neutralize_payload_for_prompt(p, max_len) + "`"
 
     lines: list[str] = [
         f"## WAF ({str(waf_name)[:60]}) response analysis "
@@ -281,9 +288,9 @@ def format_waf_block_analysis(entries, waf_name, *, max_each: int = 6, max_len: 
     if blocked:
         lines.append("Payloads BLOCKED by the WAF (HTTP 403/406):")
         for p, code in blocked[:max_each]:
-            lines.append(f"- {p}  -> {code}")
+            lines.append(f"- {_render(p)}  -> {code}")
     if passed:
         lines.append("Payloads that PASSED to the application (HTTP 2xx and reflected):")
         for p in passed[:max_each]:
-            lines.append(f"- {p}")
+            lines.append(f"- {_render(p)}")
     return "\n".join(lines)

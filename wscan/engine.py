@@ -3967,24 +3967,30 @@ class ScanEngine:
             forms = kept
 
         # Build ordered field list
+        # req_origin: その注入点の**実際のリクエスト先 origin**（正規化）。form は action の
+        # origin（別 origin へ POST するフォームがある）、url_param はページ origin。WAF 応答の
+        # origin 帰属（G6）に使う。
+        from wscan.attack_planner import canonical_origin as _canon_origin
         field_queue: list = []
         for fi, form in enumerate(forms):
             dom_idx = form.get("index", fi)
+            req_origin = _canon_origin(self._form_action_url(form, page.url))
             for inp in form.get("inputs", []):
-                field_queue.append((fi, dom_idx, inp, False))
+                field_queue.append((fi, dom_idx, req_origin, inp, False))
+        _page_origin = _canon_origin(page.url)
         for param in page.url_params:
-            field_queue.append((0, 0, {"name": param, "type": "text"}, True))
+            field_queue.append((0, 0, _page_origin, {"name": param, "type": "text"}, True))
 
         # Sort by risk score from the plan
         if plan:
             def _sort_key(item):
-                fi, _dom, inp, is_url = item
+                fi, _dom, _req, inp, is_url = item
                 fp = plan.get_field_plan(inp.get("name", ""), fi, is_url)
                 return -(fp.risk_score if fp else 5)
             field_queue.sort(key=_sort_key)
 
         skipped = sum(
-            1 for _, _, inp, _ in field_queue
+            1 for _, _, _, inp, _ in field_queue
             if inp.get("name", "").lower() in self.exclude_fields
         )
         console.print(
@@ -3997,7 +4003,7 @@ class ScanEngine:
         # This prevents overcounting when multiple concurrent workers process
         # pages with overlapping URL params.
 
-        for fi, dom, field, is_url_param in field_queue:
+        for fi, dom, req_origin, field, is_url_param in field_queue:
             field_name = field.get("name", f"field_{fi}")
             key = (f"{page.url}||url_param||{field_name}" if is_url_param
                    else f"{page.url}||{fi}||{field_name}")
@@ -4035,6 +4041,7 @@ class ScanEngine:
                     dom_index=dom,
                     crawl_html=page.html,
                     external_scripts=page.external_scripts,
+                    req_origin=req_origin,
                 )
             except (AbortScan, SkipPage):
                 raise
@@ -4244,6 +4251,7 @@ class ScanEngine:
         dom_index: int = -1,
         crawl_html: str = "",
         external_scripts: Optional[dict] = None,
+        req_origin: str = "",
     ):
         """Run enabled scanners on a single field, guided by the attack plan."""
         field_name = field.get("name", "unknown")
@@ -4403,6 +4411,7 @@ class ScanEngine:
                 dom_index=dom_index,
                 crawl_html=crawl_html,
                 external_scripts=external_scripts,
+                req_origin=req_origin,
             )
             # None はいずれかの check が未完、list は今回対象がすべて完了。
             # 完了記録自体は check_type ごとに _adaptive_attack_field が行う。
@@ -4460,6 +4469,7 @@ class ScanEngine:
         dom_index: int = -1,
         crawl_html: str = "",
         external_scripts: Optional[dict] = None,
+        req_origin: str = "",
     ) -> Optional[list[str]]:
         """
         Phase 3b: Adaptive AI round.
@@ -4590,13 +4600,14 @@ class ScanEngine:
                 # 一致した origin。multi-origin では、このフィールドの origin が WAF probe
                 # origin と一致するときだけ WAF フィードバックを付ける（別 origin の履歴を
                 # primary の WAF 応答と誤帰属しない。G5 planner と同方針）。
-                if _waf and _waf_origin and _ledger2 is not None:
-                    from wscan.attack_planner import canonical_origin
-                    if canonical_origin(url) == _waf_origin:
-                        from wscan.waf_detector import format_waf_block_analysis
-                        waf_note = format_waf_block_analysis(
-                            _ledger2.history(ip.stable_key_parts(), check_name), _waf
-                        )
+                # req_origin は実際のリクエスト先 origin（form は action origin）。url ではなく
+                # これで判定する（別 origin へ POST するフォームの 403 を primary WAF に誤帰属しない）。
+                _inj_origin = req_origin or ""
+                if _waf and _waf_origin and _ledger2 is not None and _inj_origin == _waf_origin:
+                    from wscan.waf_detector import format_waf_block_analysis
+                    waf_note = format_waf_block_analysis(
+                        _ledger2.history(ip.stable_key_parts(), check_name), _waf
+                    )
             except Exception:
                 waf_note = ""
 
