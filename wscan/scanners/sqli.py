@@ -641,7 +641,8 @@ class SQLiScanner(BaseScanner):
         if etype == "sqli_concat_equivalence":
             # Re-run the concatenation-equivalence probe; injectable again ⇒ verified.
             result = await self.run_equivalence_probe(
-                finding.url, 0, finding.field_name, is_url_param, context="sql"
+                finding.url, ip.form_index, finding.field_name, is_url_param,
+                context="sql", dom_index=ip.submit_index,
             )
             return result is not None
         return None

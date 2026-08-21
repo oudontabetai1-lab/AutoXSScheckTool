@@ -385,9 +385,14 @@ class DOMXSSScanner(BaseScanner):
             await self.log_payload_test(
                 finding.field_name, finding.payload, "dom_xss_verify", finding.url
             )
+            # provenance に dom_index があれば実 DOM 位置で再送する（未指定は form_index に
+            # フォールバック＝submit_index と同じ意味論）。これが無いと入力欄なしフォーム先行時に
+            # 別 DOM フォームへ再送し、本物の DOM-XSS を「未再現」と誤判定する。
+            _dom = getattr(finding, "injection_dom_index", -1)
+            _submit_index = _dom if _dom >= 0 else finding.injection_form_index
             await self._apply_payload(
                 finding.url, finding.field_name, finding.payload,
-                finding.injection_form_index, is_url_param,
+                _submit_index, is_url_param,
             )
             await asyncio.sleep(0.5 * self.sleep_factor)
             log = await self.browser.page.evaluate(
