@@ -160,6 +160,8 @@ class PlausibleRouteCandidateTests(unittest.TestCase):
         self.assertEqual(body2[regex_literal_end(body2, 2)], ";")
         # 閉じが無ければ pos を返す（安全側）。
         self.assertEqual(regex_literal_end("/nope", 1), 1)
+        # 改行を跨がない（regex は改行不可）→ コメント内 regex 様は pos を返し skip しない。
+        self.assertEqual(regex_literal_end("/foo[bar]\nfetch('/api')", 1), 1)
 
     def test_truncated_regex_literal_detects_continuation_chars(self):
         # regex 継続文字（url_re が手前で切る）→ 切り詰めと判定。
@@ -206,6 +208,8 @@ class CollectUrlsFromAssetsIntegrationTests(unittest.TestCase):
             "var e=/escpat\\/subpat/;"
             # 除算＋計算アクセス（a/b[c]）。regex ではないので後続の実ルートを飛ばさない。
             "const ratio=a/b[c];fetch('/divok/users');"
+            # コメント内の regex 様テキスト（改行後の実ルートを飛ばさない）。
+            "// docs: /foo[bar]\nfetch('/cmtok/list');"
             # OData/関数の末尾括弧を持つ実ルート（文字列リテラル由来 → 残す）。
             "fetch('/Products(1)'); fetch('/odata/GetDefault()');"
         )
@@ -243,6 +247,8 @@ class CollectUrlsFromAssetsIntegrationTests(unittest.TestCase):
         self.assertFalse(any("subpat" in u for u in found), f"escaped-slash 片が残った: {found}")
         # 除算式 a/b[c] を regex と誤認して後続の実ルートを飛ばさない（到達性の後退を防ぐ）。
         self.assertIn("http://juice-shop.test/divok/users", found)
+        # コメント内 regex 様テキストの後（改行後）の実ルートも飛ばさない。
+        self.assertIn("http://juice-shop.test/cmtok/list", found)
         # OData/関数の末尾括弧を持つ実ルートは残る（C1-g）。
         self.assertIn("http://juice-shop.test/Products(1)", found)
         self.assertIn("http://juice-shop.test/odata/GetDefault()", found)

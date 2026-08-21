@@ -98,7 +98,9 @@ def regex_literal_end(body: str, pos: int) -> int:
 
     切り詰められた regex 片（`/escpat\\/subpat/` の escaped slash 等）を後続の finditer が
     再抽出しないよう、切り詰め検知後にリテラルの残りを読み飛ばすために使う。escaped char
-    （`\\x`）と文字クラス `[...]`（内部の `/` は閉じでない）を考慮する。閉じが見つからなければ
+    （`\\x`）と文字クラス `[...]`（内部の `/` は閉じでない）を考慮する。**改行に達したら `pos` を
+    返す**（JS の regex リテラルは改行を跨げないので、それはコメント等の regex 様テキストであり、
+    後続行の文字列の `/` を終端と誤認して実ルートを飛ばさないため）。閉じが見つからなくても
     `pos` を返す（読み飛ばさない＝安全側）。
     """
     i = pos
@@ -106,6 +108,8 @@ def regex_literal_end(body: str, pos: int) -> int:
     in_class = False
     while i < n:
         c = body[i]
+        if c in "\r\n":
+            return pos
         if c == "\\":
             i += 2
             continue
