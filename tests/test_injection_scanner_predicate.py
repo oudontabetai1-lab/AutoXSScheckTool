@@ -7,7 +7,7 @@ probe は marker を field へ注入するため、動かしてよいのは evol
 """
 import unittest
 
-from wscan.engine import _EVOLUTION_PROBE_CHECKS, _NON_PROBE_INPUT_TYPES
+from wscan.engine import _EVOLUTION_PROBE_CHECKS, _PROBE_ALLOWED_INPUT_TYPES
 
 
 class EvolutionProbeChecksTests(unittest.TestCase):
@@ -21,15 +21,18 @@ class EvolutionProbeChecksTests(unittest.TestCase):
             self.assertNotIn(c, _EVOLUTION_PROBE_CHECKS)
 
 
-class NonProbeInputTypesTests(unittest.TestCase):
-    def test_non_text_input_types_are_excluded_from_probing(self):
-        # 注入系スキャナが攻撃対象外とする型は probe しない（nosql の type ガードと一致）。
-        for t in ("file", "checkbox", "radio", "submit", "button", "image", "reset", "hidden"):
-            self.assertIn(t, _NON_PROBE_INPUT_TYPES)
+class ProbeAllowedInputTypesTests(unittest.TestCase):
+    def test_text_like_types_can_hold_marker_and_are_allowed(self):
+        # marker(特殊文字列)を typed value に保持できる text 系のみ許可。
+        for t in ("", "text", "textarea", "search", "url", "email", "tel", "password"):
+            self.assertIn(t, _PROBE_ALLOWED_INPUT_TYPES)
 
-    def test_text_like_types_are_probed(self):
-        for t in ("text", "textarea", "email", "search", "url", "password"):
-            self.assertNotIn(t, _NON_PROBE_INPUT_TYPES)
+    def test_constrained_and_noninjectable_types_are_excluded(self):
+        # 制約付き型（ブラウザ正規化で marker が消える）と非注入コントロールは除外。
+        for t in ("number", "range", "date", "datetime-local", "time", "month",
+                  "week", "color", "file", "checkbox", "radio", "submit",
+                  "button", "image", "reset", "hidden"):
+            self.assertNotIn(t, _PROBE_ALLOWED_INPUT_TYPES)
 
 
 if __name__ == "__main__":

@@ -360,12 +360,14 @@ _DOM_OBS_CHECKS = frozenset({"xss", "dom_xss"})
 _EVOLUTION_PROBE_CHECKS = frozenset({
     "xss", "dom_xss", "sqli", "ssti", "os", "nosql", "ldap", "path_traversal",
 })
-# 注入系スキャナが scan_injection_point で一律に攻撃対象外とする入力タイプ
-# （nosql_injection 等の type ガードと一致）。反射 probe もこれらの field では
-# 動かさない（その check が攻撃しない field へ marker を注入し、意図しない
-# 状態変更や無関係な観測を生まないため）。
-_NON_PROBE_INPUT_TYPES = frozenset({
-    "file", "checkbox", "radio", "submit", "button", "image", "reset", "hidden",
+# 反射 probe の marker（特殊文字列）を **typed value に保持できる** 入力タイプの
+# positive allowlist。number/range/date/datetime-local/time/month/week/color は
+# ブラウザが無効値を空/既定へ正規化するため、fill_and_submit_form が代入しても
+# marker が実送信されず（監査は「送信済み」と記録してしまう）、file/checkbox 等は
+# そもそも注入系が攻撃対象外。allowlist にすることで将来の制約付き型にも安全側に倒す。
+# 空文字/未指定は HTML 既定の text 扱い。
+_PROBE_ALLOWED_INPUT_TYPES = frozenset({
+    "", "text", "textarea", "search", "url", "email", "tel", "password",
 })
 
 
@@ -4454,18 +4456,24 @@ class ScanEngine:
         #     navigate 失敗時のスキップも `_evolution_probe` 内で処理される。
         context: dict = {}
         surviving: set = set()
-        # form field は、注入系スキャナが一律に攻撃対象外とする入力タイプ（file/checkbox 等）
-        # では probe しない。url_param には type の概念が無いので従来どおり。
-        _probe_field_ok = is_url_param or (field_type not in _NON_PROBE_INPUT_TYPES)
+        # form field は、marker を typed value に保持できる text 系タイプのみ probe する
+        # （url_param には type の概念が無いので従来どおり）。制約付き型（number/date/color 等）は
+        # ブラウザ正規化で marker が実送信されないため除外する。
+        _probe_field_ok = is_url_param or (field_type in _PROBE_ALLOWED_INPUT_TYPES)
         if getattr(self, "enable_payload_evolution", True) and _probe_field_ok:
-            # probe は generic 注入系 check（evolution wave 配線・任意 field を攻撃）に限定する。
-            # 受動スキャナ（js_static 等）や field-selective な注入系（ssrf/open_redirect）を
-            # 選ぶと、無関係な field へ marker を注入し受動監査/意図しない状態変更を招く。
+            # probe は generic 注入系 check（evolution wave 配線・任意 field を攻撃）で、かつ
+            # **この resume でまだ未完了（adaptive checkpoint pending）** の check に限定する。
+            # 受動/field-selective な check を避けるだけでなく、完了済み check への再 marker 送信
+            # （resume が失敗 check だけ再試行する不変条件の破壊）も防ぐ。
             probe_scanner = next(
                 (
                     self.scanners[c]
                     for c in check_names
-                    if c in self.scanners and c in _EVOLUTION_PROBE_CHECKS
+                    if c in self.scanners
+                    and c in _EVOLUTION_PROBE_CHECKS
+                    and not self._checkpoint_is_done_ip(
+                        ip, _adaptive_checkpoint_check(c)
+                    )
                 ),
                 None,
             )
