@@ -32,6 +32,129 @@ if TYPE_CHECKING:
 console = Console()
 
 
+# planner に渡す技術フィンガープリント用ヘッダ（小文字比較）。
+_TECH_HEADER_KEYS = (
+    "server", "x-powered-by", "via", "x-aspnet-version", "x-aspnetmvc-version",
+    "x-generator", "x-runtime", "x-drupal-cache", "x-varnish", "x-turbo-charged-by",
+)
+
+
+def _sanitize_header_value(value: str, *, max_len: int = 120) -> str:
+    """応答ヘッダ値をプロンプト埋め込み用に無害化（純粋）。改行/バッククォート除去・長さ制限。"""
+    try:
+        s = str(value or "")
+    except Exception:
+        return ""
+    s = s.replace("`", "").replace("\r", " ").replace("\n", " ").strip()
+    try:
+        return s[:max(0, int(max_len))]
+    except (TypeError, ValueError, OverflowError):
+        return ""
+
+
+def extract_tech_headers(headers: dict) -> dict:
+    """応答ヘッダから技術を示す主要項目だけを大小無視で抽出する（純粋）。"""
+    out: dict = {}
+    if not isinstance(headers, dict):
+        return out
+    for k, v in headers.items():
+        try:
+            lk = str(k).lower().strip()
+        except Exception:
+            continue
+        if lk in _TECH_HEADER_KEYS and lk not in out:
+            val = _sanitize_header_value(v)
+            if val:
+                out[lk] = val
+    return out
+
+
+def summarize_api_schema(json_points, api_seed_requests=None, *, max_lines: int = 8) -> list[str]:
+    """JSON body 注入点を代表的な ``METHOD path — pointers`` 行に要約する（純粋）。"""
+    from urllib.parse import urlparse
+
+    grouped: dict = {}
+    order: list = []
+    try:
+        points = iter(json_points or [])
+    except (TypeError, ValueError):
+        return []
+    for ip in points:
+        try:
+            if getattr(ip, "location", "") != "json_body":
+                continue
+            method = str(getattr(ip, "method", "") or "").upper()
+            path = urlparse(str(getattr(ip, "url", "") or "")).path or "/"
+            pointer = str(getattr(ip, "parameter_id", "") or "")
+            key = (method, path)
+            if key not in grouped:
+                grouped[key] = []
+                order.append(key)
+            if pointer and pointer not in grouped[key]:
+                grouped[key].append(pointer)
+        except Exception:
+            continue
+    try:
+        limit = max(0, int(max_lines))
+    except (TypeError, ValueError, OverflowError):
+        return []
+    lines: list[str] = []
+    for key in order[:limit]:
+        method, path = key
+        ptrs = ", ".join(grouped[key][:6]) if grouped[key] else "(root)"
+        lines.append(f"{method} {path} — JSON fields: {ptrs}")
+    return lines
+
+
+def build_planner_fingerprint(
+    *, waf=None, cms=None, tech_headers=None, api_schema=None
+) -> str:
+    """検出済み技術情報を planner プロンプト用の一節に整形する（純粋）。"""
+    lines: list[str] = []
+    if waf:
+        waf_value = _sanitize_header_value(waf)
+        if waf_value:
+            lines.append(f"- WAF: {waf_value}")
+    try:
+        cms_is_known = cms is not None and getattr(cms, "is_known", False)
+    except Exception:
+        cms_is_known = False
+    if cms_is_known:
+        try:
+            name = _sanitize_header_value(getattr(cms, "name", "") or "")
+            ver = _sanitize_header_value(getattr(cms, "version", "") or "")
+            conf = _sanitize_header_value(getattr(cms, "confidence", "") or "")
+        except Exception:
+            name = ver = conf = ""
+        if name:
+            extra = "".join([
+                f" v{ver}" if ver else "",
+                f" (confidence: {conf})" if conf else "",
+            ])
+            lines.append(f"- CMS: {name}{extra}")
+    if isinstance(tech_headers, dict):
+        for k, v in tech_headers.items():
+            key = _sanitize_header_value(k)
+            value = _sanitize_header_value(v)
+            if key and value:
+                lines.append(f"- Response header {key}: {value}")
+    try:
+        schema_lines = iter(api_schema or [])
+    except (TypeError, ValueError):
+        schema_lines = iter(())
+    for line in schema_lines:
+        value = _sanitize_header_value(line, max_len=200)
+        if value:
+            lines.append(f"- API: {value}")
+    if not lines:
+        return ""
+    body = "\n".join(lines)
+    return (
+        "## Detected server fingerprint (from this scan — use to prioritise checks)\n"
+        f"{body}\n"
+    )
+
+
 def _thinking_header(provider: str, model: str) -> None:
     console.print(Rule(f"[bold cyan] AI AttackPlanner ({provider}: {model}) ", style="cyan"))
     console.print()
@@ -179,6 +302,7 @@ Page purpose (your initial guess): {purpose_hint}
 ## Discovered Inputs
 {inputs_desc}
 
+{fingerprint}
 ## Cross-page attack awareness
 Consider stored / second-order attacks carefully:
 - If this page ACCEPTS input that could be DISPLAYED on another page (e.g., a comment that
@@ -234,6 +358,7 @@ Consider stored / second-order attacks carefully:
         forms: list[dict],
         url_params: list[str],
         site_map: str = "",
+        fingerprint: str = "",
     ) -> PageAttackPlan:
         """
         Build a PageAttackPlan for the given page.
@@ -241,7 +366,9 @@ Consider stored / second-order attacks carefully:
         Tries LLM first; falls back to heuristic analysis.
         """
         if self.payload_gen.provider != "none" and await self.payload_gen._check_llm_available():
-            plan = await self._llm_plan(url, page_html, forms, url_params, site_map)
+            plan = await self._llm_plan(
+                url, page_html, forms, url_params, site_map, fingerprint
+            )
             if plan:
                 self._print_plan_summary(plan)
                 return plan
@@ -295,6 +422,7 @@ Consider stored / second-order attacks carefully:
         forms: list[dict],
         url_params: list[str],
         site_map: str = "",
+        fingerprint: str = "",
     ) -> Optional[PageAttackPlan]:
         """Ask the LLM to produce a structured attack plan with cross-page awareness."""
         inputs_lines: list[str] = []
@@ -322,6 +450,7 @@ Consider stored / second-order attacks carefully:
             inputs_desc="\n".join(inputs_lines),
             all_checks=", ".join(sorted(self.enabled_checks)),
             site_map=site_map or "  (only this page was crawled)",
+            fingerprint=fingerprint or "",
         )
 
         # ── Web intelligence enrichment (optional) ───────────────────────

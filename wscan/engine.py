@@ -588,6 +588,7 @@ class ScanEngine:
             self._notifier = None
         # C: CMS 検出結果 (crawl時に設定)
         self.detected_cms = None
+        self.detected_tech_headers: dict = {}
 
         self.use_planner = use_planner
         self.interactive_plan = interactive_plan
@@ -2311,6 +2312,17 @@ class ScanEngine:
             except Exception:
                 html = ""
 
+            # 技術フィンガープリント用の主要応答ヘッダを一度だけ捕捉（plan フェーズでは
+            # network がクリアされ取得不能なため、ここで engine に保持する）。best-effort。
+            if not self.detected_tech_headers:
+                try:
+                    from wscan.attack_planner import extract_tech_headers
+                    _pair = self.browser.network.best_pair_for_page(url)
+                    _resp_headers = ((_pair or {}).get("response", {}) or {}).get("headers", {}) or {}
+                    self.detected_tech_headers = extract_tech_headers(_resp_headers)
+                except Exception:
+                    pass
+
             # A: 重複ページスキップ (DOM構造フィンガープリント)
             if html:
                 if self.flag_finder:
@@ -2753,6 +2765,16 @@ class ScanEngine:
         for p in pages_no_inputs:
             console.print(f"  [dim]No inputs on {p.url}, skipping[/dim]")
 
+        from wscan.attack_planner import build_planner_fingerprint, summarize_api_schema
+        planner_fingerprint = build_planner_fingerprint(
+            waf=getattr(self.waf_detector, "_detected", None),
+            cms=self.detected_cms,
+            tech_headers=self.detected_tech_headers,
+            api_schema=summarize_api_schema(
+                self.json_injection_points, self.api_seed_requests
+            ),
+        )
+
         async def _plan_one(page):
             console.print(f"  [dim cyan]Planning:[/dim cyan] {page.url}")
             plan = await self.attack_planner.analyze_page(
@@ -2761,6 +2783,7 @@ class ScanEngine:
                 forms=page.forms[:self.max_forms],
                 url_params=page.url_params,
                 site_map=site_map,
+                fingerprint=planner_fingerprint,
             )
             if self.monitor:
                 await self.monitor.emit_status(f"Plan: {plan.page_purpose[:60]}")
