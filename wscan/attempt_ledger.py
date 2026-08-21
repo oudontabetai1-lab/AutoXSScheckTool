@@ -62,16 +62,23 @@ class Attempt:
     req_url: Optional[str] = None      # 実際に記録した応答/リクエスト URL（origin 帰属用）
 
 
-def _same_origin(a: str, b: str) -> bool:
-    """2 URL が同一 origin(scheme+host+port) か（純粋・大小無視）。判定不能は False。"""
+def _same_endpoint(a: str, b: str) -> bool:
+    """2 URL が同一エンドポイント（正規化 origin＋path＋query の一致）か（純粋）。判定不能は False。
+
+    非リダイレクトなら request.url と最終 response.url は同一エンドポイントになる。異なれば
+    （同一 origin でも path が変わる 301/302/303 等）リダイレクトが起きており、最終 status は
+    payload を運んだリクエストのものではない。origin 正規化（既定ポート除去・IDNA・大小）は
+    リポジトリ共通の header_scope._url_origin に委譲する。"""
     from urllib.parse import urlparse
     try:
+        from wscan.header_scope import _url_origin
+        oa, ob = _url_origin(a or ""), _url_origin(b or "")
+        if not oa or oa != ob:
+            return False
         pa, pb = urlparse(a or ""), urlparse(b or "")
-    except (TypeError, ValueError):
+        return pa.path == pb.path and pa.query == pb.query
+    except Exception:
         return False
-    if not pa.netloc or not pb.netloc:
-        return False
-    return (pa.scheme.lower(), pa.netloc.lower()) == (pb.scheme.lower(), pb.netloc.lower())
 
 
 def attempt_from_pair(payload, source: str, pair: dict) -> Attempt:
@@ -96,16 +103,16 @@ def attempt_from_pair(payload, source: str, pair: dict) -> Attempt:
     body_len = len(observed) if has_pair else None
     reflected = bool(payload_str) and payload_str in observed
     elapsed = _elapsed_from_pair(pair) if has_pair else None
-    # WAF 帰属用の URL を決める。payload を運んだ request.url と最終 response.url の origin が
-    # 食い違う（クロス origin リダイレクト）場合、request は payload を運んだが最終 status は
-    # 別 origin 由来で、どちらへ帰属させても不正確。この場合は req_url=None で WAF 帰属を
-    # unknown にする（origin フィルタが除外）。同一 origin/非リダイレクトは request.url を使う。
+    # WAF 帰属用の URL を決める。リダイレクト（同一 origin 含む）が起きると最終 status は
+    # payload を運んだリクエストのものでなくなるため、request.url と最終 response.url が同一
+    # エンドポイントでない試行は req_url=None（WAF 帰属 unknown＝origin フィルタで除外）。
+    # 非リダイレクト（同一エンドポイント）のみ payload を運んだ request.url を採る。
     req = (pair or {}).get("request") or {}
     req_u = req.get("url")
     resp_u = resp.get("url")
     if not has_pair:
         req_url = None
-    elif req_u and resp_u and not _same_origin(req_u, resp_u):
+    elif req_u and resp_u and not _same_endpoint(req_u, resp_u):
         req_url = None
     else:
         req_url = req_u or resp_u
