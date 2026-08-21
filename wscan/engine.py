@@ -2317,7 +2317,12 @@ class ScanEngine:
             if not self.detected_tech_headers:
                 try:
                     from wscan.attack_planner import extract_tech_headers
-                    _pair = self.browser.network.best_pair_for_page(url)
+                    # リダイレクトで最終到達した URL の応答を選ぶ。キュー URL のままだと
+                    # best_pair_for_page がリダイレクト応答（例: プロキシの Server ヘッダ）を
+                    # 掴み、最初の非空結果が globally 固定されるため、以後全 planner プロンプトへ
+                    # 誤った技術情報が刷り込まれてしまう。
+                    _landed = self.browser.page.url or url
+                    _pair = self.browser.network.best_pair_for_page(_landed)
                     _resp_headers = ((_pair or {}).get("response", {}) or {}).get("headers", {}) or {}
                     self.detected_tech_headers = extract_tech_headers(_resp_headers)
                 except Exception:

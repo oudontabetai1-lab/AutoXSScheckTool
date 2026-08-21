@@ -60,6 +60,43 @@ def test_summarize_api_schema_handles_empty_and_broken_input():
     ]
 
 
+def test_summarize_api_schema_includes_api_seed_requests():
+    # --api-spec の API-first では json_injection_points が空でも、api_seed_requests
+    # のテンプレート（method/path/json_body キー）を fingerprint に反映する。
+    seeds = [
+        SimpleNamespace(
+            method="post",
+            url="https://example.test/api/orders?draft=1",
+            json_body={"item": "x", "qty": 1},
+        ),
+        SimpleNamespace(
+            method="PUT",
+            url="https://example.test/api/orders",
+            json_body={"status": "paid"},
+        ),
+        SimpleNamespace(method="get", url="https://example.test/api/ping", json_body=None),
+    ]
+    assert summarize_api_schema([], seeds) == [
+        "POST /api/orders — JSON fields: /item, /qty",
+        "PUT /api/orders — JSON fields: /status",
+        "GET /api/ping — JSON fields: (root)",
+    ]
+
+
+def test_summarize_api_schema_merges_points_and_seeds_by_endpoint():
+    # 同一 (method, path) は json_points と api_seed_requests をまたいで pointer 集約。
+    points = [
+        InjectionPoint.for_json_body("POST", "https://example.test/api/orders", "/item"),
+    ]
+    seeds = [
+        SimpleNamespace(method="post", url="https://example.test/api/orders",
+                        json_body={"item": "x", "qty": 2}),
+    ]
+    assert summarize_api_schema(points, seeds) == [
+        "POST /api/orders — JSON fields: /item, /qty",
+    ]
+
+
 def test_build_planner_fingerprint_includes_detected_context_and_sanitizes():
     cms = SimpleNamespace(
         name="Word`Press",

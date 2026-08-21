@@ -94,6 +94,26 @@ def summarize_api_schema(json_points, api_seed_requests=None, *, max_lines: int 
                 grouped[key].append(pointer)
         except Exception:
             continue
+    # API スペック由来テンプレート（--api-spec）も集約する。API-first スキャンでは
+    # ブラウザ traffic が harvest されず json_injection_points が空になり得るため、
+    # これを読まないと OpenAPI/Postman の method/path/JSON fields が planner から欠落する。
+    for tmpl in (api_seed_requests or []):
+        try:
+            method = str(getattr(tmpl, "method", "") or "").upper()
+            path = urlparse(str(getattr(tmpl, "url", "") or "")).path or "/"
+            body = getattr(tmpl, "json_body", None)
+            key = (method, path)
+            if key not in grouped:
+                grouped[key] = []
+                order.append(key)
+            if isinstance(body, dict):
+                for bkey in body.keys():
+                    pointer = "/" + str(bkey)
+                    if pointer not in grouped[key]:
+                        grouped[key].append(pointer)
+        except Exception:
+            continue
+
     try:
         limit = max(0, int(max_lines))
     except (TypeError, ValueError, OverflowError):
