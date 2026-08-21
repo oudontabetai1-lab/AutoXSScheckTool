@@ -5107,9 +5107,12 @@ class ScanEngine:
             self._api_auth_failed = False
             self._json_probe_failed = False
             scanner_result = await verifier(f)
-            if scanner_result is None and (
-                self._api_auth_failed or self._json_probe_failed
-            ):
+            # 結果値(None/False/True)に関わらず、verify 中に失効/transport 失敗が起きたら
+            # 判定を信頼せず terminal な "assumed" にする。scanner の verify は transport 失敗
+            # 時に False を返す経路（error-based の空 body・boolean の空 baseline）があり、
+            # None だけを見ると「検証リクエストが失敗しただけ」で unreproduced に誤格下げ
+            # してしまうため、結果値より前に flag を確認する（Codex #99 R7）。
+            if self._api_auth_failed or self._json_probe_failed:
                 return "assumed"
             if scanner_result is not None:
                 # SSTI has an HTTP-level fallback below for URL parameters. Use

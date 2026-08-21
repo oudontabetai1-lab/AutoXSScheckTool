@@ -399,7 +399,8 @@ retry/失敗種別/エンドポイント処理を変えるときは同種の全 
 
 ## 触るときの不変条件・落とし穴
 
-- SPA 由来 JSON body の実スキャンは**通常層（確実性）**で、既存 SQLi 判定を再利用する。template 不在時は送信不能なので scan の checkpoint を完了にせず、verify は `None`（unexecutable）へ倒す。JSON body の checkpoint/試行台帳キーだけは `template_id` を operation identity として含め、form/URL parameter の既存キーは変えない。
+- SPA 由来 JSON body の実スキャンは**通常層（確実性）**で、既存 SQLi 判定を再利用する。送信成功・認証の**肯定的証拠**があるときだけ checkpoint を完了にする：`_run_json_injection_checks` は template 不在（送信不能）・再認証失敗・実 POST 失効（`_api_auth_failed`）・transport 失敗（`_json_probe_failed`）のいずれかなら mark せず resume に残す。verify も同様で、失効/transport 失敗時は scanner が `None` を返し、`_verify_one`（scanner verify・汎用フォールバックの json 再送の両方）が terminal な `assumed`（penalize しない）へ倒す（401/空応答を脆弱性応答と誤評価しない）。
+- **checkpoint/試行台帳キー（`InjectionPoint.stable_key_parts`）は resume 安定性のため揮発値を含めない**（`template_id` を**含めない**）：json 用 `template_id` は harvest の値敏感 identity と 1:1 で、URL クエリ/body の nonce 等で run 跨ぎに変わるため、永続キーに入れると完了済み状態変更 POST の再送・検証不能 finding を招く。`template_id` は **template dict と finding-dedup（run 内の operation 識別）専用のランタイム識別子**として使う（決定論生成だが永続キー非採用）。form/URL parameter の既存キーは変えない。根本の揮発値正規化（`norm_url` 自体の揮発含む・全注入点共通）は別課題（vault Task 0013）。
 
 - **ターゲット URL は `url.strip()` で保持**（末尾 `/` を勝手に除去しない）。スコープ照合は
   比較時に両辺 `rstrip("/")` する前提。`engine.py` の正規化を変えないこと。

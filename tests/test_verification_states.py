@@ -121,6 +121,22 @@ class VerificationStateTests(unittest.IsolatedAsyncioTestCase):
         )
         return await _FbEngine(mode)._verify_one(finding)
 
+    async def test_verify_one_false_result_with_transport_failure_is_assumed(self):
+        # scanner verify が transport 失敗時に False を返す経路（error-based の空 body・
+        # boolean の空 baseline 等）でも、flag が立っていれば結果値より前に assumed にする
+        # （「検証リクエストが失敗しただけ」で unreproduced に誤格下げしない。Codex #99 R7）。
+        class _FalseWithFailScanner:
+            def __init__(self, engine):
+                self.engine = engine
+
+            async def verify_finding(self, finding):
+                self.engine._json_probe_failed = True
+                return False
+
+        engine = _VerifyOneEngine()
+        engine.scanners = {"sqli": _FalseWithFailScanner(engine)}
+        self.assertEqual(await engine._verify_one(_finding()), "assumed")
+
     async def test_verify_one_json_auth_failure_is_assumed_not_unreproduced(self):
         self.assertEqual(await self._run_fallback_engine("auth"), "assumed")
 
