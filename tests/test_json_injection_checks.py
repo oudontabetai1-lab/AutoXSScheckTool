@@ -4,7 +4,7 @@ import unittest
 from wscan.engine import ScanEngine, _stable_json_template_id
 from wscan.intervention import SkipPage
 from wscan.injection_point import InjectionPoint
-from wscan.scanners.base import finding_dedup_key_for
+from wscan.scanners.base import finding_dedup_key_for, refresh_idempotency_headers
 from wscan.report import Finding
 
 
@@ -32,9 +32,13 @@ class _Scanner:
 
     def __init__(self):
         self.calls = []
+        self._engine = None
 
     async def scan_injection_point(self, ip, field):
         self.calls.append((ip, field))
+        # 実 transport が応答を受けた＝送信成功、をモデルする。
+        if self._engine is not None:
+            self._engine._json_probe_sent = True
         return []
 
 
@@ -48,6 +52,9 @@ class _Engine:
         self.controller = controller or _Controller()
         self.browser = object()
         self.scanner = scanner or _Scanner()
+        # transport double が送信成功フラグを立てられるよう engine 参照を配線する。
+        if getattr(self.scanner, "_engine", "missing") is None:
+            self.scanner._engine = self
         self.scanners = {"sqli": self.scanner}
         self.done = set()
         self.marked = []
@@ -55,6 +62,7 @@ class _Engine:
         self._expired = expired
         self._relogin_ok = relogin_ok
         self._api_auth_failed = False
+        self._json_probe_sent = False
 
     async def _maybe_relogin_for_page(self, url):
         return None
@@ -161,7 +169,9 @@ class JsonInjectionCheckTests(unittest.IsolatedAsyncioTestCase):
 
             async def scan_injection_point(self, ip, field):
                 self.calls.append((ip, field))
-                self._engine._api_auth_failed = True  # 実 POST が 401 を観測した想定
+                # 401 は「送信成功だが未認証」＝sent=True かつ auth_failed=True。
+                self._engine._json_probe_sent = True
+                self._engine._api_auth_failed = True
                 return []
 
         engine = _Engine.__new__(_Engine)
@@ -177,6 +187,31 @@ class JsonInjectionCheckTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(scanner.calls), 1)   # probe は走る
         self.assertEqual(engine.marked, [])       # が「済み」にはしない
+
+    async def test_transport_failure_does_not_mark_done(self):
+        # transport 失敗（timeout/TLS/DNS/proxy）で 1 度も送れなかったケース。
+        # scan は正常終了するが _json_probe_sent が立たない＝送信成功の証拠なし。
+        # 送れなかった probe を「済み」記録して resume 恒久スキップする偽陰性を防ぐ。
+        class _NoSendScanner:
+            SUPPORTS_JSON_BODY = True
+
+            def __init__(self):
+                self.calls = []
+                self._engine = None  # engine 参照は配線されるが sent は立てない
+
+            async def scan_injection_point(self, ip, field):
+                self.calls.append((ip, field))
+                return []  # _json_probe_sent を立てない＝送信不成立
+
+        ip = InjectionPoint.for_json_body(
+            "POST", "http://h/api/login", "/email", template_id="login"
+        )
+        engine = _Engine([ip], {"login": {}}, scanner=_NoSendScanner())
+
+        await engine._run_json_injection_checks()
+
+        self.assertEqual(len(engine.scanner.calls), 1)  # scan は走る
+        self.assertEqual(engine.marked, [])             # が「済み」にはしない
 
     async def test_skip_page_skips_remaining_points_of_same_url(self):
         # 同一 URL に 2 pointer、別 URL に 1 pointer。1つ目(url A)で skip_page すると
@@ -228,6 +263,26 @@ class JsonInjectionCheckTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotEqual(_stable_json_template_id(key_a), _stable_json_template_id(key_b))
         # 連番と違い観測順に依存しない（値だけで決まる）。
         self.assertTrue(_stable_json_template_id(key_a).startswith("jb-"))
+
+    def test_refresh_idempotency_headers_regenerates_value_preserves_name(self):
+        headers = {
+            "Content-Type": "application/json",
+            "Idempotency-Key": "captured-123",
+            "X-Idempotency-Token": "captured-456",
+            "Authorization": "Bearer t",
+        }
+        out1 = refresh_idempotency_headers(headers)
+        out2 = refresh_idempotency_headers(headers)
+        # 値は毎回 fresh（連投で冪等 API がキャッシュ応答を返さない）。
+        self.assertNotEqual(out1["Idempotency-Key"], "captured-123")
+        self.assertNotEqual(out1["Idempotency-Key"], out2["Idempotency-Key"])
+        self.assertNotEqual(out1["X-Idempotency-Token"], "captured-456")
+        # ヘッダ名（表記含む）は温存、非 idempotency ヘッダは不変。
+        self.assertIn("Idempotency-Key", out1)
+        self.assertEqual(out1["Content-Type"], "application/json")
+        self.assertEqual(out1["Authorization"], "Bearer t")
+        # 入力 dict は破壊しない（純粋）。
+        self.assertEqual(headers["Idempotency-Key"], "captured-123")
 
     def test_form_finding_dedup_key_unchanged_by_json_augmentation(self):
         # form/url_param の dedup キーは json 拡張の影響を受けない（4-tuple のまま）。

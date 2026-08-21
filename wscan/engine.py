@@ -601,6 +601,10 @@ class ScanEngine:
         # mass_assignment 等がベースライン応答で検知し、_run_api_template_checks が
         # 「済み」記録を抑止して resume での恒久スキップを防ぐ。
         self._api_auth_failed: bool = False
+        # JSON body 注入 transport(_apply_json_payload)が実応答を 1 度でも受信したら立つ。
+        # _run_json_injection_checks が「送信成功の証拠」として mark 前に確認し、transport
+        # 失敗(timeout/TLS/DNS/proxy)で空振りした probe の恒久スキップ(偽陰性)を防ぐ。
+        self._json_probe_sent: bool = False
         # 再開可能スキャン
         self.resume_dir: str = resume_dir
         self.enable_checkpoint: bool = enable_checkpoint
@@ -1423,10 +1427,11 @@ class ScanEngine:
                 if self._checkpoint_is_done_ip(ip, check_name):
                     continue
                 field = {"name": ip.display_name or ip.parameter_id}
-                # 実 POST での失効検知（メソッド限定保護＝GET プレフライトでは分からない）を
-                # 拾えるようリセットする。transport(_apply_json_payload) が logout を見たら
-                # True を立て、下の mark 判定で「済み」記録を抑止する。
+                # scan 前にリセット。transport(_apply_json_payload) が実応答を受けたら
+                # _json_probe_sent、logout を見たら _api_auth_failed を立てる。下の mark
+                # 判定は「送信成功の証拠あり かつ 未認証でない」ときだけ「済み」にする。
                 self._api_auth_failed = False
+                self._json_probe_sent = False
                 try:
                     findings = await scanner.scan_injection_point(ip, field)
                     for finding in findings or []:
@@ -1439,11 +1444,13 @@ class ScanEngine:
                         f"  [yellow]JSON injection ({check_name}) on {ip.url}: {exc}[/yellow]"
                     )
                 else:
-                    # 再認証失敗（GET で検知）・実 POST での失効（_api_auth_failed）・template
-                    # 不在（送信不能）は、いずれも未認証/送信不能の空振りなので陰性として
-                    # 完了記録しない（resume で再試行できるよう残す）。
+                    # transport 失敗（timeout/TLS/DNS/proxy で 1 度も送れず＝_json_probe_sent
+                    # False）・再認証失敗（GET で検知）・実 POST での失効（_api_auth_failed）・
+                    # template 不在は、いずれも未認証/送信不能の空振りなので陰性として完了
+                    # 記録しない（resume で再試行できるよう残す）。
                     if (
-                        not auth_failed
+                        self._json_probe_sent
+                        and not auth_failed
                         and not self._api_auth_failed
                         and ip.template_id in (
                             getattr(self, "injection_templates", {}) or {}

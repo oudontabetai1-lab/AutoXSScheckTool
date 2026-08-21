@@ -5,6 +5,7 @@ Provides common utilities for all vulnerability scanners.
 import json
 import re
 import time
+import uuid
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Optional, TYPE_CHECKING
@@ -128,6 +129,31 @@ def _is_sensitive_for_evidence(name) -> bool:
     """(2) evidence で伏せる機密ヘッダか（request_logger の正典＝静的＋runtime へ委譲）。"""
     from wscan.request_logger import is_sensitive_header
     return is_sensitive_header(name)
+
+
+_IDEMPOTENCY_HEADER_NAMES = frozenset({
+    "idempotency-key",
+    "x-idempotency-key",
+    "idempotency-token",
+    "x-idempotency-token",
+})
+
+
+def refresh_idempotency_headers(headers: dict) -> dict:
+    """replay 毎に idempotency キーの**値だけ**を新規 uuid へ置換する（純粋）。
+
+    b1 が template に温存した捕捉キーをそのまま連投すると、冪等 API はブラウザ原本の
+    キャッシュ応答を返す/変異 body を弾くため SQLi payload が実行されず偽陰性になる
+    （B2-2）。ヘッダ名は温存（必須キー API を満たす）しつつ、present かつ unique にして
+    dedup/required-key の双方を満たす。元ヘッダの表記(大文字小文字)は保つ。
+    """
+    if not headers:
+        return headers
+    result = dict(headers)
+    for name in list(result.keys()):
+        if str(name).lower() in _IDEMPOTENCY_HEADER_NAMES:
+            result[name] = uuid.uuid4().hex
+    return result
 
 
 def merge_template_headers(base: dict, tmpl_headers: dict) -> dict:
@@ -867,6 +893,9 @@ class BaseScanner(ABC):
                 headers,
                 template.get("headers") or {},
             )
+            # idempotency キーはプローブ毎に fresh 値へ（B2-2）。捕捉値を連投すると冪等
+            # API がキャッシュ応答を返し SQLi payload が実行されず偽陰性になる。
+            headers = refresh_idempotency_headers(headers)
             kwargs = {
                 "timeout": getattr(self.engine, "timeout", 15),
                 "follow_redirects": True,
@@ -892,6 +921,13 @@ class BaseScanner(ABC):
             async with httpx.AsyncClient(**kwargs) as client:
                 response = await client.request(method, url, content=post_data)
             response_timestamp = time.time()
+            # 実応答を受信できた＝送信成功。呼び出し側ループはこの証拠が無いと「済み」に
+            # しない（transport 失敗〈timeout/TLS/DNS/proxy〉で空振りした probe を resume
+            # 恒久スキップする偽陰性を防ぐ）。ステータス不問（401/500 も送信自体は成立）。
+            try:
+                self.engine._json_probe_sent = True
+            except Exception:
+                pass
             pair = {
                 "request": {
                     "url": url,
