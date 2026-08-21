@@ -111,6 +111,24 @@ def test_summarize_api_schema_enumerates_nested_and_array_leaves():
     ]
 
 
+def test_summarize_api_schema_filters_by_origin():
+    # multi-origin スキャンで、指定 origin のエンドポイントだけ要約する。
+    points = [
+        InjectionPoint.for_json_body("POST", "https://a.test/api/x", "/f1"),
+        InjectionPoint.for_json_body("POST", "https://b.test/api/y", "/f2"),
+    ]
+    seeds = [
+        SimpleNamespace(method="PUT", url="https://a.test/api/z", json_body={"g": 1}),
+        SimpleNamespace(method="PUT", url="https://b.test/api/w", json_body={"h": 1}),
+    ]
+    assert summarize_api_schema(points, seeds, origin="https://a.test") == [
+        "POST /api/x — JSON fields: /f1",
+        "PUT /api/z — JSON fields: /g",
+    ]
+    # origin 未指定なら全 origin を含む（後方互換）。
+    assert len(summarize_api_schema(points, seeds)) == 4
+
+
 def test_json_leaf_pointers_bounds_depth_and_count():
     from wscan.attack_planner import _json_leaf_pointers
     # 深さ上限を超える枝は leaf ではなくその時点のノードで打ち切る（bounded）。

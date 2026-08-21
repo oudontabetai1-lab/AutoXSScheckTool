@@ -69,6 +69,18 @@ def extract_tech_headers(headers: dict) -> dict:
     return out
 
 
+def _origin_of_url(url: str) -> str:
+    """URL から scheme://netloc（origin）を返す純粋関数。壊れた入力は ""。"""
+    from urllib.parse import urlparse
+    try:
+        p = urlparse(str(url or ""))
+        if p.scheme and p.netloc:
+            return f"{p.scheme}://{p.netloc}"
+    except Exception:
+        pass
+    return ""
+
+
 def _escape_ptr_token(token) -> str:
     """RFC6901 の JSON Pointer トークンをエスケープ（~→~0, /→~1）。純粋。"""
     return str(token).replace("~", "~0").replace("/", "~1")
@@ -102,7 +114,7 @@ def _json_leaf_pointers(obj, *, max_pointers: int = 12, max_depth: int = 4) -> l
     return out
 
 
-def summarize_api_schema(json_points, api_seed_requests=None, *, max_lines: int = 8) -> list[str]:
+def summarize_api_schema(json_points, api_seed_requests=None, *, max_lines: int = 8, origin: str = "") -> list[str]:
     """JSON body 注入点を代表的な ``METHOD path — pointers`` 行に要約する（純粋）。"""
     from urllib.parse import urlparse
 
@@ -116,8 +128,11 @@ def summarize_api_schema(json_points, api_seed_requests=None, *, max_lines: int 
         try:
             if getattr(ip, "location", "") != "json_body":
                 continue
+            ip_url = str(getattr(ip, "url", "") or "")
+            if origin and _origin_of_url(ip_url) != origin:
+                continue
             method = str(getattr(ip, "method", "") or "").upper()
-            path = urlparse(str(getattr(ip, "url", "") or "")).path or "/"
+            path = urlparse(ip_url).path or "/"
             pointer = str(getattr(ip, "parameter_id", "") or "")
             key = (method, path)
             if key not in grouped:
@@ -132,8 +147,11 @@ def summarize_api_schema(json_points, api_seed_requests=None, *, max_lines: int 
     # これを読まないと OpenAPI/Postman の method/path/JSON fields が planner から欠落する。
     for tmpl in (api_seed_requests or []):
         try:
+            tmpl_url = str(getattr(tmpl, "url", "") or "")
+            if origin and _origin_of_url(tmpl_url) != origin:
+                continue
             method = str(getattr(tmpl, "method", "") or "").upper()
-            path = urlparse(str(getattr(tmpl, "url", "") or "")).path or "/"
+            path = urlparse(tmpl_url).path or "/"
             body = getattr(tmpl, "json_body", None)
             key = (method, path)
             if key not in grouped:
