@@ -20,13 +20,22 @@ def format_deterministic_observations(
     ranked = tainted or risks  # tainted 無ければ全 risk を控えめに
     for r in ranked[:max_flows]:
         try:
-            src = str(getattr(r, "source", "") or "user-controlled input")
             sink = str(getattr(r, "sink", "") or "?")
             line = getattr(r, "line", "")
-            tag = "tainted flow" if getattr(r, "tainted", False) else "sink"
-            lines.append(
-                f"- Static JS analysis: {tag} {src} -> {sink} (line {line}) - likely DOM XSS"
-            )
+            if getattr(r, "tainted", False):
+                # 汚染フローが辿れたものだけ source と likelihood を主張する。
+                src = str(getattr(r, "source", "") or "user-controlled input")
+                lines.append(
+                    f"- Static JS analysis: tainted flow {src} -> {sink} "
+                    f"(line {line}) - likely DOM XSS"
+                )
+            else:
+                # source 未追跡の単独 sink は、汚染フローを捏造せず「存在」だけ伝える
+                # （grounding を偽らない）。
+                lines.append(
+                    f"- Static JS analysis: DOM sink {sink} present (line {line}) "
+                    f"- source not traced; verify reachability"
+                )
         except Exception:
             continue
 

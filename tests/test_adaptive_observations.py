@@ -26,6 +26,16 @@ def test_static_js_tainted_flow_is_prioritised_and_bounded():
     assert "document.write" not in output
 
 
+def test_untainted_sink_is_not_presented_as_tainted_flow():
+    # source を辿れない単独 sink は、汚染フロー/likelihood を捏造せず「存在」だけ伝える。
+    risks = [SimpleNamespace(sink="innerHTML", tainted=False, source="", line=3)]
+    output = format_deterministic_observations(risks)
+    assert "DOM sink innerHTML present" in output
+    assert "source not traced" in output
+    assert "user-controlled input" not in output
+    assert "likely DOM XSS" not in output
+
+
 def test_reflection_context_is_formatted():
     output = format_deterministic_observations(
         context={

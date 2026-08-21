@@ -4431,7 +4431,13 @@ class ScanEngine:
             )
             if probe_scanner is not None:
                 try:
-                    _src, surviving, context = await probe_scanner._evolution_probe(
+                    # 明示的に base 実装を呼ぶ。XSS/DOMXSS の override 版は navigate() の
+                    # 失敗を無視する _apply_payload 経由で残存ページへ注入し得るため、
+                    # navigate ガード付きの guarded base transport を強制する（観測目的には
+                    # 汎用 transport で十分＝反射文脈と生存文字だけ得られればよい）。
+                    from wscan.scanners.base import BaseScanner
+                    _src, surviving, context = await BaseScanner._evolution_probe(
+                        probe_scanner,
                         url,
                         form_index,
                         field_name,
