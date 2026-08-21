@@ -157,6 +157,20 @@ def test_summarize_api_schema_origin_filter_uses_canonical_form():
     ]
 
 
+def test_summarize_api_schema_traverses_root_array_body():
+    # トップレベル配列 body（root-array スキーマ）でも leaf pointer を展開する。
+    seeds = [
+        SimpleNamespace(
+            method="POST",
+            url="https://example.test/api/bulk",
+            json_body=[{"email": "x", "role": "admin"}],
+        ),
+    ]
+    assert summarize_api_schema([], seeds) == [
+        "POST /api/bulk — JSON fields: /0/email, /0/role",
+    ]
+
+
 def test_json_leaf_pointers_bounds_depth_and_count():
     from wscan.attack_planner import _json_leaf_pointers
     # 深さ上限を超える枝は leaf ではなくその時点のノードで打ち切る（bounded）。

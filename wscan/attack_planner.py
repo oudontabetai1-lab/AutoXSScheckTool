@@ -162,7 +162,10 @@ def summarize_api_schema(json_points, api_seed_requests=None, *, max_lines: int 
             if key not in grouped:
                 grouped[key] = []
                 order.append(key)
-            if isinstance(body, dict):
+            # dict だけでなくトップレベル配列 body（例: [{"email": "x"}]）も leaf 展開する。
+            # _example_from_schema は root-array スキーマを list で表現するため、ここで
+            # 弾くと /0/email 等の注入可能 leaf が (root) に潰れてしまう。
+            if isinstance(body, (dict, list)):
                 for pointer in _json_leaf_pointers(body):
                     if pointer not in grouped[key]:
                         grouped[key].append(pointer)
