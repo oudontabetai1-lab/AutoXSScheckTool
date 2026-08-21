@@ -673,6 +673,14 @@ class BaseScanner(ABC):
         if ip is not None and ip.location == "json_body":
             templates = getattr(self.engine, "injection_templates", {}) or {}
             if not ip.template_id or ip.template_id not in templates:
+                # 登録テンプレ不在＝replay 不能（resume で nonce 変化/cap 到達により
+                # 再生成されなかった等）。呼び出し側(_verify_one)が「検証リクエスト失敗」と
+                # 同じく terminal な assumed へ倒せるよう probe 失敗を記録する（None のままだと
+                # 汎用フォールバックへ落ち unreproduced に誤格下げされる。Codex #99 R8）。
+                try:
+                    self.engine._json_probe_failed = True
+                except Exception:
+                    pass
                 return None
         if ip is not None:
             return ip
@@ -873,6 +881,13 @@ class BaseScanner(ABC):
             getattr(self.engine, "injection_templates", {}) or {}
         ).get(ip.template_id)
         if not isinstance(template, dict):
+            # テンプレ不在＝送信不能。呼び出し側が「送れなかった」を陰性(完了/unreproduced)と
+            # 誤記録しないよう probe 失敗を記録する（scan は既に template 実在も別途確認・
+            # 冪等。verify の汎用フォールバックはこの flag で assumed に倒す。Codex #99 R8）。
+            try:
+                self.engine._json_probe_failed = True
+            except Exception:
+                pass
             return "", {}
 
         try:

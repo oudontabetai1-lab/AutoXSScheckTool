@@ -608,9 +608,11 @@ class ScanEngine:
         # _run_json_injection_checks が「送信成功の証拠」として mark 前に確認し、transport
         # 失敗(timeout/TLS/DNS/proxy)で空振りした probe の恒久スキップ(偽陰性)を防ぐ。
         self._json_probe_sent: bool = False
-        # JSON body 注入 transport が通信失敗（timeout/TLS/DNS/proxy 等の例外）したら立つ。
-        # baseline は通っても後続の攻撃 payload が落ちた場合に、attack 未実行の点を「済み」に
-        # しないための証跡（_json_probe_sent だけでは baseline 成功で誤 mark しうる）。
+        # JSON body 注入 probe が**有効な結果を出せなかった**ら立つ：通信失敗（timeout/TLS/
+        # DNS/proxy 等の例外）または replay 不能（テンプレ不在＝resume で nonce 変化/cap 到達に
+        # より再生成されなかった等）。scan は「済み」記録を抑止し、verify は terminal な assumed
+        # へ倒すのに使う（_json_probe_sent だけでは baseline 成功で誤 mark／None だけでは verify が
+        # 汎用フォールバックへ落ち unreproduced 誤格下げ、を防ぐ）。
         self._json_probe_failed: bool = False
         # 再開可能スキャン
         self.resume_dir: str = resume_dir

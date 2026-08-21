@@ -285,7 +285,9 @@ class FindingInjectionProvenanceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ip.template_id, "t")
 
     def test_verify_injection_point_json_without_template_is_unexecutable(self):
-        scanner = _Scanner(_Engine())
+        engine = _Engine()
+        engine._json_probe_failed = False
+        scanner = _Scanner(engine)
         finding = Finding(
             check_type="sqli", severity="high", url="http://h/login",
             field_name="email", payload="'", evidence="e",
@@ -296,6 +298,9 @@ class FindingInjectionProvenanceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(
             scanner._verify_injection_point(finding, is_url_param=False)
         )
+        # replay 不能を probe 失敗として記録し、_verify_one が terminal な assumed に倒せる
+        # ようにする（None のままだと汎用フォールバックで unreproduced 誤格下げ。Codex #99 R8）。
+        self.assertTrue(engine._json_probe_failed)
 
     def test_verify_injection_point_form_uses_form_index(self):
         scanner = _Scanner(_Engine())
