@@ -4402,11 +4402,12 @@ class ScanEngine:
             )
 
     async def _deterministic_field_observations(
-        self, page_html: str, url: str, field_name: str, is_url_param: bool, ip
+        self, page_html: str, url: str, form_index: int, field_name: str,
+        is_url_param: bool, ip, check_names: list
     ) -> str:
         """G7: js_analysis(純粋)＋context_mutator(marker probe)の決定論観測を整形して返す。
         失敗しても "" を返し adaptive を壊さない（加算的・例外保護）。"""
-        from wscan import context_mutator, js_analysis
+        from wscan import js_analysis
         from wscan.adaptive_observations import format_deterministic_observations
 
         # (a) js_analysis: page_html のインライン script を静的解析（注入不要・純粋）
@@ -4417,33 +4418,28 @@ class ScanEngine:
         except Exception:
             risks = []
 
-        # (b) context_mutator: marker probe で反射文脈・生存文字を観測（注入 1 回）。
-        #     enable_payload_evolution が有効なときだけ（同じ probe 機構の追加コストを尊重）。
+        # (b) 反射文脈/生存文字は marker probe（注入 1 回）で観測する。probe は
+        #     scanner の `_evolution_probe` を再利用する＝`log_payload_test` を必ず通す
+        #     ため、abort 要求時は注入前に停止し、payloads.jsonl の監査にも残る
+        #     （engine から browser を直叩きするとこのゲートを迂回してしまう）。
+        #     navigate 失敗時のスキップも `_evolution_probe` 内で処理される。
         context: dict = {}
         surviving: set = set()
         if getattr(self, "enable_payload_evolution", True):
-            try:
-                marker = context_mutator.make_marker()
-                probe = context_mutator.make_char_probe(marker)
-                if is_url_param:
-                    src, pair = await self.browser.test_url_param(url, field_name, probe)
-                else:
-                    await self.browser.navigate(url)
-                    submit_index = getattr(ip, "submit_index", 0)
-                    src, pair = await self.browser.fill_and_submit_form(
-                        submit_index, field_name, probe
-                    )
-                body = (pair.get("response", {}) or {}).get("body") or src or ""
-                surviving = context_mutator.surviving_chars(body, marker)
-                context = context_mutator.detect_context(body, marker)
-                # probe でページ状態が変わるため、後続の adaptive 検査のため元 URL へ戻す
-                # （best-effort。scanner 側も navigate するが安全側で復帰）。
+            probe_scanner = next(
+                (self.scanners[c] for c in check_names if c in self.scanners), None
+            )
+            if probe_scanner is not None:
                 try:
-                    await self.browser.navigate(url)
+                    _src, surviving, context = await probe_scanner._evolution_probe(
+                        url,
+                        form_index,
+                        field_name,
+                        is_url_param,
+                        dom_index=getattr(ip, "submit_index", None),
+                    )
                 except Exception:
-                    pass
-            except Exception:
-                context, surviving = {}, set()
+                    context, surviving = {}, set()
 
         try:
             return format_deterministic_observations(risks, context, surviving)
@@ -4510,7 +4506,7 @@ class ScanEngine:
         det_obs = ""
         try:
             det_obs = await self._deterministic_field_observations(
-                page_html, url, field_name, is_url_param, ip
+                page_html, url, form_index, field_name, is_url_param, ip, check_names
             )
         except Exception:
             det_obs = ""

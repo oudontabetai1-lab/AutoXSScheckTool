@@ -995,7 +995,11 @@ class BaseScanner(ABC):
             if is_url_param:
                 source, pair = await self.browser.test_url_param(url, field_name, probe)
             else:
-                await self.browser.navigate(url)
+                # navigate 失敗（timeout/HTTP エラー）時に前 scanner の残存ページへ
+                # probe を送ると別フォーム/別 action へ注入し、観測を誤ったフィールドに
+                # 帰属してしまう。復帰できなければ観測を諦めて空値を返す（安全側）。
+                if not await self.browser.navigate(url):
+                    return "", set(), {}
                 source, pair = await self.browser.fill_and_submit_form(
                     dom,
                     field_name,
