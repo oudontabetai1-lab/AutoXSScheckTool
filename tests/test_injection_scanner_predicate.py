@@ -24,13 +24,14 @@ class EvolutionProbeChecksTests(unittest.TestCase):
 class ProbeAllowedInputTypesTests(unittest.TestCase):
     def test_text_like_types_can_hold_marker_and_are_allowed(self):
         # marker(特殊文字列)を typed value に保持できる text 系のみ許可。
-        for t in ("", "text", "textarea", "search", "url", "email", "tel", "password"):
+        for t in ("", "text", "textarea", "search", "tel", "password"):
             self.assertIn(t, _PROBE_ALLOWED_INPUT_TYPES)
 
     def test_constrained_and_noninjectable_types_are_excluded(self):
         # 制約付き型（ブラウザ正規化で marker が消える）と非注入コントロールは除外。
-        for t in ("number", "range", "date", "datetime-local", "time", "month",
-                  "week", "color", "file", "checkbox", "radio", "submit",
+        # url/email は値は保持するが native constraint validation で送信がブロックされる。
+        for t in ("url", "email", "number", "range", "date", "datetime-local", "time",
+                  "month", "week", "color", "file", "checkbox", "radio", "submit",
                   "button", "image", "reset", "hidden"):
             self.assertNotIn(t, _PROBE_ALLOWED_INPUT_TYPES)
 

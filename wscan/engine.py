@@ -360,14 +360,17 @@ _DOM_OBS_CHECKS = frozenset({"xss", "dom_xss"})
 _EVOLUTION_PROBE_CHECKS = frozenset({
     "xss", "dom_xss", "sqli", "ssti", "os", "nosql", "ldap", "path_traversal",
 })
-# 反射 probe の marker（特殊文字列）を **typed value に保持できる** 入力タイプの
-# positive allowlist。number/range/date/datetime-local/time/month/week/color は
-# ブラウザが無効値を空/既定へ正規化するため、fill_and_submit_form が代入しても
-# marker が実送信されず（監査は「送信済み」と記録してしまう）、file/checkbox 等は
-# そもそも注入系が攻撃対象外。allowlist にすることで将来の制約付き型にも安全側に倒す。
-# 空文字/未指定は HTML 既定の text 扱い。
+# 反射 probe の marker（特殊文字列）を **typed value に保持し、かつ実際に送信できる**
+# 入力タイプの positive allowlist。除外理由:
+#  - number/range/date/datetime-local/time/month/week/color … 無効値を空/既定へ正規化し
+#    marker が値に残らない。
+#  - url/email … 値は保持するが制約検証（native constraint validation）があり、marker は
+#    無効なので submit ボタン click 時に送信がブロックされる（値保持≠送信）。
+#  - file/checkbox/radio/submit/button/image/reset/hidden … そもそも注入系が攻撃対象外。
+# いずれも「監査に記録されるのに実送信されない/観測が空」を避ける。allowlist なので将来の
+# 制約付き型にも安全側に倒れる。空文字/未指定は HTML 既定の text 扱い。tel は既定で書式検証なし。
 _PROBE_ALLOWED_INPUT_TYPES = frozenset({
-    "", "text", "textarea", "search", "url", "email", "tel", "password",
+    "", "text", "textarea", "search", "tel", "password",
 })
 
 
