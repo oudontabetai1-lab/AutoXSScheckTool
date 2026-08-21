@@ -605,6 +605,10 @@ class ScanEngine:
         # _run_json_injection_checks が「送信成功の証拠」として mark 前に確認し、transport
         # 失敗(timeout/TLS/DNS/proxy)で空振りした probe の恒久スキップ(偽陰性)を防ぐ。
         self._json_probe_sent: bool = False
+        # JSON body 注入 transport が通信失敗（timeout/TLS/DNS/proxy 等の例外）したら立つ。
+        # baseline は通っても後続の攻撃 payload が落ちた場合に、attack 未実行の点を「済み」に
+        # しないための証跡（_json_probe_sent だけでは baseline 成功で誤 mark しうる）。
+        self._json_probe_failed: bool = False
         # 再開可能スキャン
         self.resume_dir: str = resume_dir
         self.enable_checkpoint: bool = enable_checkpoint
@@ -1412,6 +1416,12 @@ class ScanEngine:
                 except SkipPage:
                     skipped_urls.add(ip.url)
                     break
+                # 再開: 済み単位は auth/network 操作の**前**に飛ばす。完了済み JSON 点で
+                # _maybe_relogin_for_page（browser 遷移）や _api_session_looks_expired
+                # （HTTP GET）を再実行すると、resume で完了エンドポイントを無駄に再訪し
+                # GET 副作用/ログインを繰り返すため（Codex #99 R4）。
+                if self._checkpoint_is_done_ip(ip, check_name):
+                    continue
                 await self._maybe_relogin_for_page(ip.url)
                 try:
                     await self._sync_cookies_from_browser(self.browser, for_url=ip.url)
@@ -1424,14 +1434,16 @@ class ScanEngine:
                 if await self._api_session_looks_expired(ip.url):
                     if not await self._force_relogin(for_url=ip.url):
                         auth_failed = True
-                if self._checkpoint_is_done_ip(ip, check_name):
-                    continue
                 field = {"name": ip.display_name or ip.parameter_id}
                 # scan 前にリセット。transport(_apply_json_payload) が実応答を受けたら
-                # _json_probe_sent、logout を見たら _api_auth_failed を立てる。下の mark
-                # 判定は「送信成功の証拠あり かつ 未認証でない」ときだけ「済み」にする。
+                # _json_probe_sent、通信失敗（timeout/TLS/DNS/proxy）で _json_probe_failed、
+                # logout で _api_auth_failed を立てる。mark は「送信成功あり・失敗なし・
+                # 未認証でない」の全条件を満たすときだけ。baseline は通ったが後続の攻撃
+                # payload が落ちたケースも _json_probe_failed で捕らえ、attack 未実行の点を
+                # 「済み」にしない（Codex #99 R4）。
                 self._api_auth_failed = False
                 self._json_probe_sent = False
+                self._json_probe_failed = False
                 try:
                     findings = await scanner.scan_injection_point(ip, field)
                     for finding in findings or []:
@@ -1444,12 +1456,12 @@ class ScanEngine:
                         f"  [yellow]JSON injection ({check_name}) on {ip.url}: {exc}[/yellow]"
                     )
                 else:
-                    # transport 失敗（timeout/TLS/DNS/proxy で 1 度も送れず＝_json_probe_sent
-                    # False）・再認証失敗（GET で検知）・実 POST での失効（_api_auth_failed）・
+                    # 送信成功の証拠が無い/途中で通信失敗した・再認証失敗・実 POST 失効・
                     # template 不在は、いずれも未認証/送信不能の空振りなので陰性として完了
                     # 記録しない（resume で再試行できるよう残す）。
                     if (
                         self._json_probe_sent
+                        and not self._json_probe_failed
                         and not auth_failed
                         and not self._api_auth_failed
                         and ip.template_id in (

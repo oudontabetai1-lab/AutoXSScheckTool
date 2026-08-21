@@ -63,8 +63,11 @@ class _Engine:
         self._relogin_ok = relogin_ok
         self._api_auth_failed = False
         self._json_probe_sent = False
+        self._json_probe_failed = False
+        self.relogin_calls = []
 
     async def _maybe_relogin_for_page(self, url):
+        self.relogin_calls.append(url)
         return None
 
     async def _sync_cookies_from_browser(self, browser, *, for_url):
@@ -212,6 +215,46 @@ class JsonInjectionCheckTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(engine.scanner.calls), 1)  # scan は走る
         self.assertEqual(engine.marked, [])             # が「済み」にはしない
+
+    async def test_probe_failure_after_baseline_does_not_mark_done(self):
+        # baseline は通ったが後続の攻撃 payload が transport 失敗したケース
+        # （_json_probe_sent=True だが _json_probe_failed=True）。attack 未実行の点を
+        # 「済み」記録して resume 恒久スキップする偽陰性を防ぐ。
+        class _PartialFailScanner:
+            SUPPORTS_JSON_BODY = True
+
+            def __init__(self):
+                self.calls = []
+                self._engine = None
+
+            async def scan_injection_point(self, ip, field):
+                self.calls.append((ip, field))
+                self._engine._json_probe_sent = True    # baseline は成功
+                self._engine._json_probe_failed = True  # 後続 payload が通信失敗
+                return []
+
+        ip = InjectionPoint.for_json_body(
+            "POST", "http://h/api/login", "/email", template_id="login"
+        )
+        engine = _Engine([ip], {"login": {}}, scanner=_PartialFailScanner())
+
+        await engine._run_json_injection_checks()
+
+        self.assertEqual(len(engine.scanner.calls), 1)
+        self.assertEqual(engine.marked, [])
+
+    async def test_completed_point_skips_relogin_and_network(self):
+        # 再開: 済み単位は auth/network の前に飛ばす（完了点で browser nav/GET を再訪しない）。
+        ip = InjectionPoint.for_json_body(
+            "POST", "http://h/api/login", "/email", template_id="login"
+        )
+        engine = _Engine([ip], {"login": {}}, expired=True, relogin_ok=True)
+        engine.done.add((ip.stable_key_parts(), "sqli"))  # 事前に完了済み
+
+        await engine._run_json_injection_checks()
+
+        self.assertEqual(engine.scanner.calls, [])   # scan されない
+        self.assertEqual(engine.relogin_calls, [])   # relogin/network も呼ばれない
 
     async def test_skip_page_skips_remaining_points_of_same_url(self):
         # 同一 URL に 2 pointer、別 URL に 1 pointer。1つ目(url A)で skip_page すると

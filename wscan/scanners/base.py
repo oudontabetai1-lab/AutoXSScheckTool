@@ -962,6 +962,13 @@ class BaseScanner(ABC):
                 pass
             return response.text, pair
         except Exception:
+            # 通信失敗（timeout/TLS/DNS/proxy 等）。baseline が通った後に個々の攻撃
+            # payload が落ちたケースでも、呼び出し側が「済み」記録して attack 未実行の
+            # 点を resume 恒久スキップしないよう、失敗を engine に記録する（Codex #99 R4）。
+            try:
+                self.engine._json_probe_failed = True
+            except Exception:
+                pass
             return "", {}
 
     async def run_equivalence_probe(

@@ -322,6 +322,29 @@ class InjectionPointRoutingTests(unittest.IsolatedAsyncioTestCase):
         restored_ip = sqli._apply_json_payload.await_args.args[0]
         self.assertEqual(restored_ip.parameter_id, "/profile/target")
 
+    async def test_json_verify_auth_failure_returns_indeterminate(self):
+        # verify 中に session 失効(401)して transport が _api_auth_failed を立てたら、
+        # 401/login 本文を脆弱性応答と誤評価して unreproduced に格下げせず None を返す。
+        engine = _Engine()
+        engine.injection_templates["stage5b2"] = {}
+        engine._api_auth_failed = False
+        sqli = SQLiScanner(engine)
+
+        async def _expired_replay(ip, payload):
+            engine._api_auth_failed = True  # 実 POST が 401 を観測した想定
+            return ("<html>login required</html>",
+                    {"response": {"status": 401, "body": "<html>login required</html>"}})
+
+        sqli._apply_json_payload = _expired_replay
+        finding = Finding(
+            check_type="sqli", severity="high", url="https://example.test/api",
+            field_name="target", payload="'", evidence="test",
+            evidence_type="sqli_error", injection_location="json_body",
+            injection_pointer="/profile/target", injection_method="POST",
+            injection_template_id="stage5b2",
+        )
+        self.assertIsNone(await sqli.verify_finding(finding))
+
 
 class ProvenanceAndCompatibilityTests(unittest.IsolatedAsyncioTestCase):
     def test_transport_signatures_remain_engine_verify_compatible(self):

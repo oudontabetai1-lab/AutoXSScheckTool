@@ -588,7 +588,18 @@ class SQLiScanner(BaseScanner):
         await self.log_payload_test(
             finding.field_name, finding.payload, "sqli_verify", finding.url
         )
+        # verify 中に session 失効(401)すると、transport(_apply_json_payload)が
+        # _api_auth_failed を立てる。401/login 本文を脆弱性応答として評価し real finding を
+        # unreproduced に誤格下げしないよう、失効を検知したら indeterminate(None)を返す
+        # （Codex #99 R4）。json_body 限定（httpx replay 経路のみ flag を立てる）。
+        if ip.location == "json_body":
+            try:
+                self.engine._api_auth_failed = False
+            except Exception:
+                pass
         source, pair = await self._apply_ip(ip, finding.payload)
+        if ip.location == "json_body" and getattr(self.engine, "_api_auth_failed", False):
+            return None
         body = pair.get("response", {}).get("body", "") or source or ""
         etype = getattr(finding, "evidence_type", "")
         if etype == "sqli_error":
