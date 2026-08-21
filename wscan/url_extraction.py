@@ -126,6 +126,20 @@ def regex_literal_end(body: str, pos: int) -> int:
     return pos
 
 
+# url_re が許容する文字＋`[` `]`。array/object query（`?filters[]=x`）は url_re が `[` の手前で
+# 止まるため、非 regex（文字列）文脈での切り詰め時にクエリ末尾を取り戻すのに使う。
+_QUERY_TAIL_RE = re.compile(r"[A-Za-z0-9_~!$&()*+,;=:@.%/?\[\]-]*")
+
+
+def extend_query_bracket_tail(body: str, pos: int) -> str:
+    """`body[pos]` 以降の、`[` `]` を含む url_re 相当のクエリ末尾を返す（純粋）。
+
+    `/search?filters` が `[` の手前で切り詰められたとき、`[]=active` を取り戻して完全な
+    ルート（path＋query）を復元するために使う。引用符/空白等の終端で止まる。
+    """
+    return _QUERY_TAIL_RE.match(body, pos).group(0)
+
+
 def truncated_regex_literal(next_char: str) -> bool:
     """抽出 match の直後の1文字が regex リテラルの継続を示すかを返す（純粋）。
 

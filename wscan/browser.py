@@ -24,6 +24,7 @@ from .url_extraction import (
     regex_literal_end,
     is_regex_literal_extraction,
     preceding_is_regex_context,
+    extend_query_bracket_tail,
     strip_trailing_noise,
 )
 
@@ -1817,8 +1818,15 @@ class BrowserManager:
                 # （`a/b[c]`）を regex と誤認して後続の実ルートを飛ばさないよう、skip は文脈で gate する。
                 if truncated_regex_literal(scan_body[m.end():m.end() + 1]):
                     if preceding_is_regex_context(preceding):
+                        # regex 文脈のみ「切り詰めた regex 片」として捨て、リテラルの残りも飛ばす。
                         skip_until = regex_literal_end(scan_body, m.end())
-                    continue
+                        continue
+                    # 非 regex（文字列）文脈では継続文字 `[` 等は array/object query 構文
+                    # （`/search?filters[]=x`）。捨てずに `[]` を含むクエリ末尾を取り戻して
+                    # 完全なルートを残す（route も injectable な query param も失わない）。
+                    match_text = match_text + extend_query_bracket_tail(
+                        scan_body, m.end()
+                    )
                 # 末尾ノイズだけ剥がす（均衡した OData/関数の閉じ括弧は残す）。url_re は `;`
                 # 等も取り込むため、regex 形判定の前に剥がしておく（`/re/g;`→`/re/g`）。
                 candidate = strip_trailing_noise(match_text)

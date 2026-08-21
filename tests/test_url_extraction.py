@@ -12,6 +12,7 @@ from wscan.url_extraction import (
     is_regex_literal_extraction,
     preceding_nonspace,
     strip_trailing_noise,
+    extend_query_bracket_tail,
 )
 
 
@@ -147,6 +148,14 @@ class PlausibleRouteCandidateTests(unittest.TestCase):
         self.assertFalse(is_regex_literal_extraction("'", "/api/.well-known/x"))
         self.assertFalse(is_regex_literal_extraction("compute()", "/api/.well-known/x"))
 
+    def test_extend_query_bracket_tail_recovers_array_query(self):
+        body = "fetch('/search?filters[]=active')"
+        # url_re は '?filters' の後 '[' で止まる。'[' 位置から末尾を取り戻す。
+        pos = body.index("[")
+        self.assertEqual(extend_query_bracket_tail(body, pos), "[]=active")
+        # 引用符で止まる（次の URL を食わない）。
+        self.assertEqual(extend_query_bracket_tail("x[]=1'/next", 1), "[]=1")
+
     def test_regex_literal_end_skips_escaped_slash_and_class(self):
         # /escpat\/subpat/ : 切り詰めは escpat の後（\ の位置）。閉じ / まで読み飛ばす。
         body = "var e=/escpat\\/subpat/;fetch(x)"
@@ -210,6 +219,8 @@ class CollectUrlsFromAssetsIntegrationTests(unittest.TestCase):
             "const ratio=a/b[c];fetch('/divok/users');"
             # コメント内の regex 様テキスト（改行後の実ルートを飛ばさない）。
             "// docs: /foo[bar]\nfetch('/cmtok/list');"
+            # array/object query（url_re が [ で止まる）。route と query を復元して残す。
+            "fetch('/bq/search?filters[]=active');"
             # OData/関数の末尾括弧を持つ実ルート（文字列リテラル由来 → 残す）。
             "fetch('/Products(1)'); fetch('/odata/GetDefault()');"
         )
@@ -249,14 +260,22 @@ class CollectUrlsFromAssetsIntegrationTests(unittest.TestCase):
         self.assertIn("http://juice-shop.test/divok/users", found)
         # コメント内 regex 様テキストの後（改行後）の実ルートも飛ばさない。
         self.assertIn("http://juice-shop.test/cmtok/list", found)
+        # array/object query の route を（query 込みで）残す。
+        self.assertTrue(
+            any(u.startswith("http://juice-shop.test/bq/search") for u in found),
+            f"bracket-query route が失われた: {found}",
+        )
         # OData/関数の末尾括弧を持つ実ルートは残る（C1-g）。
         self.assertIn("http://juice-shop.test/Products(1)", found)
         self.assertIn("http://juice-shop.test/odata/GetDefault()", found)
-        # regex 由来のゴミ（メタ文字）は 1 件も残らない。
+        # regex 由来のゴミ（path のメタ文字）は 1 件も残らない。query の [] は array-query で
+        # 正当なので、path 部のみを検査する（*+() も path で正当なので除く）。
+        from urllib.parse import urlparse as _up
         for u in found:
+            path = _up(u).path
             self.assertFalse(
-                any(c in u for c in "[]{}|^`\\<>"),  # URL として不正な文字（*+() は正当なので除く）
-                f"ゴミ URL が残った: {u}",
+                any(c in path for c in "[]{}|^`\\<>"),
+                f"ゴミ URL が残った(path): {u}",
             )
 
 
