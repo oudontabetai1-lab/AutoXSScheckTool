@@ -639,6 +639,10 @@ class BaseScanner(ABC):
             ip = injection_point_from_finding(finding)
         except ProvenanceError:
             return None
+        if ip is not None and ip.location == "json_body":
+            templates = getattr(self.engine, "injection_templates", {}) or {}
+            if not ip.template_id or ip.template_id not in templates:
+                return None
         if ip is not None:
             return ip
         if is_url_param:

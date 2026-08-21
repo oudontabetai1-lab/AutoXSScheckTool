@@ -92,6 +92,11 @@ _AUTO_ENABLED_CHECKS: frozenset[str] = frozenset({"cms", "privesc"})
 # する（状態変更系プローブの二重送信・resume 重複を防ぐ）。
 _API_TEMPLATE_ONLY_CHECKS: frozenset[str] = frozenset({"mass_assignment"})
 
+# SPA 収穫の JSON body を実攻撃するチェック。capability 判定に加えて明示的な
+# ホワイトリストを置き、将来の対応拡大が意図せず攻撃範囲を広げるのを防ぐ。
+_JSON_INJECTION_CHECKS = ("sqli",)
+
+
 def _page_check_cp_url(check_name: str, url: str) -> str:
     """page-level チェックポイントの url 成分を返す（exact URL）。
 
@@ -1365,6 +1370,50 @@ class ScanEngine:
             # URL 単位で進捗＋Finding スナップショットを保存（クラッシュ耐性）。
             self._save_checkpoint()
 
+    async def _run_json_injection_checks(self) -> None:
+        """SPA が収穫した JSON body 注入点を対応スキャナで実スキャンする。"""
+        if not self.json_injection_points:
+            return
+        for ip in self.json_injection_points:
+            for check_name in _JSON_INJECTION_CHECKS:
+                scanner = self.scanners.get(check_name)
+                if scanner is None or not getattr(scanner, "SUPPORTS_JSON_BODY", False):
+                    continue
+                try:
+                    await self.controller.checkpoint()
+                except SkipField:
+                    continue
+                except SkipPage:
+                    break
+                await self._maybe_relogin_for_page(ip.url)
+                try:
+                    await self._sync_cookies_from_browser(self.browser, for_url=ip.url)
+                except Exception:
+                    pass
+                if await self._api_session_looks_expired(ip.url):
+                    await self._force_relogin(for_url=ip.url)
+                if self._checkpoint_is_done_ip(ip, check_name):
+                    continue
+                field = {"name": ip.display_name or ip.parameter_id}
+                try:
+                    findings = await scanner.scan_injection_point(ip, field)
+                    for finding in findings or []:
+                        self._record_finding(finding, source="json-body")
+                except AbortScan:
+                    self._save_checkpoint()
+                    raise
+                except Exception as exc:
+                    console.print(
+                        f"  [yellow]JSON injection ({check_name}) on {ip.url}: {exc}[/yellow]"
+                    )
+                else:
+                    # template 不在は送信不能であり、陰性として完了記録しない。
+                    if ip.template_id in (
+                        getattr(self, "injection_templates", {}) or {}
+                    ):
+                        self._checkpoint_mark_done_ip(ip, check_name)
+            self._save_checkpoint()
+
     def _check_type_in_scope(self, check_type: str) -> bool:
         """Finding の check_type が今回有効なチェック集合に属するか。
 
@@ -1821,15 +1870,17 @@ class ScanEngine:
                     "Generating partial report …"
                 )
 
-            # ── Phase 3b: API スペック由来の本文検査（クロール非依存）──────
+            # ── Phase 3b: API スペック／SPA 観測由来の本文検査 ───────────
             # JSON API は GET に 404/405 を返してページ化されないことが多く、
             # その場合 page-level の scan_page が一度も呼ばれず mass_assignment 等が
-            # 空振りする。クロール結果に依存せず api_seed_requests を直接検査する。
+            # 空振りする。クロール結果に依存せず api_seed_requests を直接検査し、
+            # SPA クロールが収穫した JSON body 注入点も専用ループで消費する。
             # 既に Abort 済みなら、状態変更系（POST/PUT/PATCH）を新たに送らないため
             # この後続フェーズは実行しない（abort 制御の信頼性を保つ）。
             if not scan_aborted:
                 try:
                     await self._run_api_template_checks()
+                    await self._run_json_injection_checks()
                 except AbortScan:
                     scan_aborted = True
 
@@ -2594,8 +2645,8 @@ class ScanEngine:
                 except Exception:
                     pass
 
-            # SPA 観測の JSON body は CrawledPage 化せず、PR-b2 の攻撃ループへ
-            # 引き渡すメモリ内キューにだけ積む（本 PR では誰も消費しない）。
+            # SPA 観測の JSON body は CrawledPage 化せず、専用の攻撃ループへ
+            # 引き渡すメモリ内キューにだけ積む。
             if self.spa_crawl:
                 try:
                     from . import spa_harvest

@@ -304,7 +304,9 @@ class InjectionPointRoutingTests(unittest.IsolatedAsyncioTestCase):
             "injection_template_id": "stage5b2",
         }
 
-        sqli = SQLiScanner(_Engine())
+        engine = _Engine()
+        engine.injection_templates["stage5b2"] = {}
+        sqli = SQLiScanner(engine)
         sqli._apply_json_payload = AsyncMock(
             return_value=(
                 "You have an error in your SQL syntax",

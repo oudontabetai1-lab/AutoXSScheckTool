@@ -264,7 +264,11 @@ class InjectionPoint:
             location_token, pointer = "u", ""
         else:
             location_token = f"j:{self.method.upper()}"
-            pointer = self.parameter_id
+            pointer = (
+                f"{self.parameter_id}#{self.template_id}"
+                if self.template_id
+                else self.parameter_id
+            )
         return norm_url, field_name, str(self.form_index), location_token, pointer
 
     @classmethod

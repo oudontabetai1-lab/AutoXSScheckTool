@@ -25,6 +25,7 @@ class _Engine:
         self.payload_gen = None
         self._finding_dedup = set()
         self.all_findings = []
+        self.injection_templates = {"t": {}}
 
 
 class _Scanner(BaseScanner):
@@ -283,6 +284,19 @@ class FindingInjectionProvenanceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ip.parameter_id, "/email")
         self.assertEqual(ip.template_id, "t")
 
+    def test_verify_injection_point_json_without_template_is_unexecutable(self):
+        scanner = _Scanner(_Engine())
+        finding = Finding(
+            check_type="sqli", severity="high", url="http://h/login",
+            field_name="email", payload="'", evidence="e",
+            injection_location="json_body", injection_pointer="/email",
+            injection_method="POST", injection_template_id="missing",
+        )
+
+        self.assertIsNone(
+            scanner._verify_injection_point(finding, is_url_param=False)
+        )
+
     def test_verify_injection_point_form_uses_form_index(self):
         scanner = _Scanner(_Engine())
         finding = Finding(
@@ -423,7 +437,7 @@ class FindingInjectionProvenanceTests(unittest.IsolatedAsyncioTestCase):
             check_type="sqli", severity="high", url="http://h/api",
             field_name="body", payload="'", evidence="e",
             injection_location="json_body", injection_pointer="",
-            injection_method="POST",
+            injection_method="POST", injection_template_id="t",
         )
         ip = scanner._verify_injection_point(finding, is_url_param=False)
         self.assertIsNotNone(ip)

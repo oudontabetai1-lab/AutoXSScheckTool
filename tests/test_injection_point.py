@@ -217,7 +217,7 @@ class InjectionPointTests(unittest.TestCase):
         self.assertEqual(ip.source, "spa")
         self.assertEqual(
             ip.stable_key_parts(),
-            ("http://h/login", "email", "0", "j:POST", "/profile/email"),
+            ("http://h/login", "email", "0", "j:POST", "/profile/email#login-1"),
         )
 
     def test_json_constructor_honours_display_name(self):

@@ -144,7 +144,7 @@ python main.py scan http://127.0.0.1:8000 --checks xss sqli --no-monitor --llm n
 ### 主要モジュール（`wscan/`）
 | モジュール | 役割 |
 |---|---|
-| `engine.py` | 4フェーズの中枢。設定・スコープ・スキャナ実行を統括 |
+| `engine.py` | 4フェーズの中枢。設定・スコープ・スキャナ実行を統括。SPA の JSON body は harvest→`json_injection_points`→`_run_json_injection_checks` で SQLi 検査 |
 | `browser.py` | Playwright 操作。`NetworkCapture` が全 HTTP を捕捉（`request_logger` へ送る） |
 | `monitor.py` | FastAPI+WebSocket ダッシュボード（`MonitorServer`）。**`None` でも動く**（`--no-monitor`/バッチ） |
 | `attack_planner.py` / `action_plan.py` | 攻撃計画とデータ構造 |
@@ -398,6 +398,8 @@ retry/失敗種別/エンドポイント処理を変えるときは同種の全 
 - LLM 構造化出力の信頼性（JSON mode 5–10% 失敗 vs schema 強制 <0.1%、フォールバック連鎖、Instructor 流 retry）。
 
 ## 触るときの不変条件・落とし穴
+
+- SPA 由来 JSON body の実スキャンは**通常層（確実性）**で、既存 SQLi 判定を再利用する。template 不在時は送信不能なので scan の checkpoint を完了にせず、verify は `None`（unexecutable）へ倒す。JSON body の checkpoint/試行台帳キーだけは `template_id` を operation identity として含め、form/URL parameter の既存キーは変えない。
 
 - **ターゲット URL は `url.strip()` で保持**（末尾 `/` を勝手に除去しない）。スコープ照合は
   比較時に両辺 `rstrip("/")` する前提。`engine.py` の正規化を変えないこと。
