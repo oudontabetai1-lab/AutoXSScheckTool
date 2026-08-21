@@ -350,6 +350,18 @@ _ADAPTIVE_PAGE_LEVEL_CHECKS = frozenset({"csrf", "session", "clickjacking"})
 _DOM_OBS_CHECKS = frozenset({"xss", "dom_xss"})
 
 
+def _is_injection_scanner(scanner) -> bool:
+    """scanner が注入系か（フィールドへ payload を送るか）を判定する。
+
+    ``scan_injection_point`` を override しているものだけを注入系とみなす（base の
+    互換アダプタのままなら受動＝ページ単位の静的監査等で注入しない）。G7 の反射観測
+    probe を **注入可能な check がある場合にだけ** 動かし、``--checks js_static`` 等の
+    受動スキャンを能動的な状態変更攻撃に変えないための default-safe な判定。
+    """
+    from wscan.scanners.base import BaseScanner
+    return type(scanner).scan_injection_point is not BaseScanner.scan_injection_point
+
+
 def _adaptive_checkpoint_check(check_name: str) -> str:
     """adaptive の完了単位を check_type ごとに生成する。"""
     return f"(adaptive:{check_name})"
@@ -4436,8 +4448,15 @@ class ScanEngine:
         context: dict = {}
         surviving: set = set()
         if getattr(self, "enable_payload_evolution", True):
+            # 注入系 check のみを probe 対象にする。js_static 等の受動スキャナを選ぶと
+            # base evolution probe が marker を注入し、受動監査を能動攻撃に変えてしまう。
             probe_scanner = next(
-                (self.scanners[c] for c in check_names if c in self.scanners), None
+                (
+                    self.scanners[c]
+                    for c in check_names
+                    if c in self.scanners and _is_injection_scanner(self.scanners[c])
+                ),
+                None,
             )
             if probe_scanner is not None:
                 try:
