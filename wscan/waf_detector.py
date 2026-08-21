@@ -278,8 +278,17 @@ def format_waf_block_analysis(entries, waf_name, *, max_each: int = 6, max_len: 
         return ""
 
     def _render(p: str) -> str:
-        # 外部由来の攻撃文字列を無害化し inert-data のコードスパンに収める。
-        return "`" + neutralize_payload_for_prompt(p, max_len) + "`"
+        # 外部由来の攻撃文字列を無害化し inert-data のコードスパンに収める。切り詰めで
+        # 末尾の識別情報が消えると、先頭 max_len が一致する別 payload が同じ表示になり
+        # 「避けろ/寄せろ」が衝突する。truncate 時は残り長＋全文の short digest を付して
+        # 表示を一意にする（digest は原文全体から算出＝末尾違いを識別）。
+        body = neutralize_payload_for_prompt(p, max_len)
+        marker = ""
+        if len(p) > max_len:
+            import hashlib
+            digest = hashlib.sha1(p.encode("utf-8", "replace")).hexdigest()[:8]
+            marker = f" (+{len(p) - max_len} more chars, sha1:{digest})"
+        return "`" + body + "`" + marker
 
     lines: list[str] = [
         f"## WAF ({str(waf_name)[:60]}) response analysis "

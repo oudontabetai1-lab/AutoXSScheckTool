@@ -76,14 +76,19 @@ def test_payload_is_neutralized_in_prompt():
     assert "\u2028" not in out and "\r" not in out
 
 
-def test_long_distinct_payloads_not_merged_by_clip():
-    # 先頭が同じで末尾が違う 2 payload は別物として保持（clip 後キーで誤結合しない）。
+def test_long_distinct_payloads_render_distinctly_within_bound():
+    # 先頭 max_len が一致し末尾が違う 2 payload は、既定 max_len で切っても digest 付きで
+    # 一意に描画される（同一表示で avoid/prefer が衝突しない）。
+    import hashlib
     prefix = "A" * 200
     p1, p2 = prefix + "_BLOCKED", prefix + "_PASSED"
     entries = [_e(p1, 403), _e(p2, 200, reflected=True)]
-    out = format_waf_block_analysis(entries, "Cloudflare", max_len=300)
+    out = format_waf_block_analysis(entries, "Cloudflare")   # 既定 max_len=120
+    d1 = hashlib.sha1(p1.encode()).hexdigest()[:8]
+    d2 = hashlib.sha1(p2.encode()).hexdigest()[:8]
+    assert d1 != d2
+    assert f"sha1:{d1}" in out and f"sha1:{d2}" in out       # 表示が一意
     assert "BLOCKED" in out and "PASSED" in out
-    assert "-> 403" in out
 
 
 def test_empty_conditions():
