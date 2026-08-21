@@ -360,6 +360,13 @@ _DOM_OBS_CHECKS = frozenset({"xss", "dom_xss"})
 _EVOLUTION_PROBE_CHECKS = frozenset({
     "xss", "dom_xss", "sqli", "ssti", "os", "nosql", "ldap", "path_traversal",
 })
+# 注入系スキャナが scan_injection_point で一律に攻撃対象外とする入力タイプ
+# （nosql_injection 等の type ガードと一致）。反射 probe もこれらの field では
+# 動かさない（その check が攻撃しない field へ marker を注入し、意図しない
+# 状態変更や無関係な観測を生まないため）。
+_NON_PROBE_INPUT_TYPES = frozenset({
+    "file", "checkbox", "radio", "submit", "button", "image", "reset", "hidden",
+})
 
 
 def _adaptive_checkpoint_check(check_name: str) -> str:
@@ -4421,7 +4428,7 @@ class ScanEngine:
 
     async def _deterministic_field_observations(
         self, crawl_html: str, url: str, form_index: int, field_name: str,
-        is_url_param: bool, ip, check_names: list
+        is_url_param: bool, ip, check_names: list, field_type: str = "text"
     ) -> tuple:
         """G7: js_analysis(純粋)＋context_mutator(marker probe)の決定論観測を返す。
         失敗しても空値を返し adaptive を壊さない（加算的・例外保護）。"""
@@ -4447,7 +4454,10 @@ class ScanEngine:
         #     navigate 失敗時のスキップも `_evolution_probe` 内で処理される。
         context: dict = {}
         surviving: set = set()
-        if getattr(self, "enable_payload_evolution", True):
+        # form field は、注入系スキャナが一律に攻撃対象外とする入力タイプ（file/checkbox 等）
+        # では probe しない。url_param には type の概念が無いので従来どおり。
+        _probe_field_ok = is_url_param or (field_type not in _NON_PROBE_INPUT_TYPES)
+        if getattr(self, "enable_payload_evolution", True) and _probe_field_ok:
             # probe は generic 注入系 check（evolution wave 配線・任意 field を攻撃）に限定する。
             # 受動スキャナ（js_static 等）や field-selective な注入系（ssrf/open_redirect）を
             # 選ぶと、無関係な field へ marker を注入し受動監査/意図しない状態変更を招く。
@@ -4548,7 +4558,8 @@ class ScanEngine:
             det_js_risks, det_context, det_surviving = (
                 await self._deterministic_field_observations(
                     crawl_html or page_html, url, form_index, field_name,
-                    is_url_param, ip, check_names
+                    is_url_param, ip, check_names,
+                    field_type=str(field.get("type", "text")).lower(),
                 )
             )
         except Exception:

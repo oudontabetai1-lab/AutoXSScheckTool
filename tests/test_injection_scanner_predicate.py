@@ -7,7 +7,7 @@ probe は marker を field へ注入するため、動かしてよいのは evol
 """
 import unittest
 
-from wscan.engine import _EVOLUTION_PROBE_CHECKS
+from wscan.engine import _EVOLUTION_PROBE_CHECKS, _NON_PROBE_INPUT_TYPES
 
 
 class EvolutionProbeChecksTests(unittest.TestCase):
@@ -19,6 +19,17 @@ class EvolutionProbeChecksTests(unittest.TestCase):
         for c in ("js_static", "security_headers", "csrf", "session", "clickjacking",
                   "ssrf", "open_redirect"):
             self.assertNotIn(c, _EVOLUTION_PROBE_CHECKS)
+
+
+class NonProbeInputTypesTests(unittest.TestCase):
+    def test_non_text_input_types_are_excluded_from_probing(self):
+        # 注入系スキャナが攻撃対象外とする型は probe しない（nosql の type ガードと一致）。
+        for t in ("file", "checkbox", "radio", "submit", "button", "image", "reset", "hidden"):
+            self.assertIn(t, _NON_PROBE_INPUT_TYPES)
+
+    def test_text_like_types_are_probed(self):
+        for t in ("text", "textarea", "email", "search", "url", "password"):
+            self.assertNotIn(t, _NON_PROBE_INPUT_TYPES)
 
 
 if __name__ == "__main__":
