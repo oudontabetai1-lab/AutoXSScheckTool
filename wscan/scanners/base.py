@@ -908,6 +908,22 @@ class BaseScanner(ABC):
                     "timestamp": response_timestamp,
                 },
             }
+            # 実 POST の応答で認証失効を検知したらエンジンへ通知する。GET プレフライト
+            # (_api_session_looks_expired) では検知できない「メソッド限定保護」エンドポイント
+            # (GET=404/405, POST=401) の失効で、空 Finding を「済み」記録するのを防ぐ
+            # (呼び出し側ループが未マークにして resume 対象に残す)。mass_assignment と同型。
+            try:
+                from wscan import session_guard
+                if session_guard.looks_logged_out(
+                    status=response.status_code,
+                    final_url=str(response.url),
+                    body=response.text,
+                    login_url=getattr(self.engine, "login_url", ""),
+                    logged_in_marker=getattr(self.engine, "logged_in_marker", ""),
+                ):
+                    self.engine._api_auth_failed = True
+            except Exception:
+                pass
             return response.text, pair
         except Exception:
             return "", {}

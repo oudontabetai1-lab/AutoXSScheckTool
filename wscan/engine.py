@@ -23,6 +23,7 @@ Phase 4: Report   — Save evidence JSON and generate HTML report.
 import asyncio
 import datetime
 import fnmatch
+import hashlib
 import json
 import os
 import re
@@ -95,6 +96,20 @@ _API_TEMPLATE_ONLY_CHECKS: frozenset[str] = frozenset({"mass_assignment"})
 # SPA 収穫の JSON body を実攻撃するチェック。capability 判定に加えて明示的な
 # ホワイトリストを置き、将来の対応拡大が意図せず攻撃範囲を広げるのを防ぐ。
 _JSON_INJECTION_CHECKS = ("sqli",)
+
+
+def _stable_json_template_id(dedup_key: tuple) -> str:
+    """JSON 注入テンプレートの**決定論的**な識別子を dedup_key から生成する。
+
+    `jb-{len(injection_templates)}` のような観測順依存の連番は resume で不安定
+    （テンプレートは checkpoint に永続化されず再生成される／SPA の XHR 観測順は
+    タイミング依存）。checkpoint/dedup キーへ operation identity として織り込むには、
+    同一 operation が run/resume を跨いで**同じ ID**になる必要がある。dedup_key
+    （method, observed_url, body_signature, content_type）は値まで含む安定な識別子
+    なので、その正規化表現の hash を ID にする（衝突は sha1 先頭で実質無視できる）。
+    """
+    raw = repr(dedup_key).encode("utf-8", "replace")
+    return "jb-" + hashlib.sha1(raw).hexdigest()[:12]
 
 
 def _page_check_cp_url(check_name: str, url: str) -> str:
@@ -1408,6 +1423,10 @@ class ScanEngine:
                 if self._checkpoint_is_done_ip(ip, check_name):
                     continue
                 field = {"name": ip.display_name or ip.parameter_id}
+                # 実 POST での失効検知（メソッド限定保護＝GET プレフライトでは分からない）を
+                # 拾えるようリセットする。transport(_apply_json_payload) が logout を見たら
+                # True を立て、下の mark 判定で「済み」記録を抑止する。
+                self._api_auth_failed = False
                 try:
                     findings = await scanner.scan_injection_point(ip, field)
                     for finding in findings or []:
@@ -1420,10 +1439,15 @@ class ScanEngine:
                         f"  [yellow]JSON injection ({check_name}) on {ip.url}: {exc}[/yellow]"
                     )
                 else:
-                    # 再認証失敗（未認証空振り）や template 不在（送信不能）は陰性として
+                    # 再認証失敗（GET で検知）・実 POST での失効（_api_auth_failed）・template
+                    # 不在（送信不能）は、いずれも未認証/送信不能の空振りなので陰性として
                     # 完了記録しない（resume で再試行できるよう残す）。
-                    if not auth_failed and ip.template_id in (
-                        getattr(self, "injection_templates", {}) or {}
+                    if (
+                        not auth_failed
+                        and not self._api_auth_failed
+                        and ip.template_id in (
+                            getattr(self, "injection_templates", {}) or {}
+                        )
                     ):
                         self._checkpoint_mark_done_ip(ip, check_name)
             self._save_checkpoint()
@@ -2733,7 +2757,11 @@ class ScanEngine:
                         dedup_key, target = accepted_targets[ti]
                         template_id = tid_by_index.get(ti)
                         if template_id is None:
-                            template_id = f"jb-{len(self.injection_templates)}"
+                            # 決定論的 ID: 同一 operation が run/resume を跨いで同じ ID に
+                            # なるよう、安定な dedup_key から生成する（連番 jb-N は観測順
+                            # 依存で resume 不安定＝checkpoint/dedup キーの operation identity
+                            # に使えない。Codex #99 R3）。
+                            template_id = _stable_json_template_id(dedup_key)
                             self._spa_json_harvest_seen[dedup_key] = template_id
                             self.injection_templates[template_id] = {
                                 "method": target["method"],

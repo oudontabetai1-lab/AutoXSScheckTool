@@ -1,7 +1,7 @@
 """SPA 収穫 JSON body の攻撃ループと再開キーのテスト。"""
 import unittest
 
-from wscan.engine import ScanEngine
+from wscan.engine import ScanEngine, _stable_json_template_id
 from wscan.intervention import SkipPage
 from wscan.injection_point import InjectionPoint
 from wscan.scanners.base import finding_dedup_key_for
@@ -41,18 +41,20 @@ class _Scanner:
 class _Engine:
     _run_json_injection_checks = ScanEngine._run_json_injection_checks
 
-    def __init__(self, points, templates, *, expired=False, relogin_ok=True, controller=None):
+    def __init__(self, points, templates, *, expired=False, relogin_ok=True,
+                 controller=None, scanner=None):
         self.json_injection_points = list(points)
         self.injection_templates = dict(templates)
         self.controller = controller or _Controller()
         self.browser = object()
-        self.scanner = _Scanner()
+        self.scanner = scanner or _Scanner()
         self.scanners = {"sqli": self.scanner}
         self.done = set()
         self.marked = []
         self.saved = 0
         self._expired = expired
         self._relogin_ok = relogin_ok
+        self._api_auth_failed = False
 
     async def _maybe_relogin_for_page(self, url):
         return None
@@ -146,6 +148,36 @@ class JsonInjectionCheckTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(engine.marked), 1)
 
+    async def test_transport_detected_auth_failure_does_not_mark_done(self):
+        # GET プレフライトでは失効を検知できない（expired=False）が、実 POST 中に
+        # transport が logout を検知して engine._api_auth_failed を立てたケース。
+        # 未認証空振りを「済み」記録して resume 恒久スキップする偽陰性を防ぐ。
+        class _AuthFailScanner:
+            SUPPORTS_JSON_BODY = True
+
+            def __init__(self, engine):
+                self._engine = engine
+                self.calls = []
+
+            async def scan_injection_point(self, ip, field):
+                self.calls.append((ip, field))
+                self._engine._api_auth_failed = True  # 実 POST が 401 を観測した想定
+                return []
+
+        engine = _Engine.__new__(_Engine)
+        scanner = _AuthFailScanner(engine)
+        ip = InjectionPoint.for_json_body(
+            "POST", "http://h/api/orders", "/note", template_id="orders"
+        )
+        _Engine.__init__(
+            engine, [ip], {"orders": {}}, expired=False, scanner=scanner
+        )
+
+        await engine._run_json_injection_checks()
+
+        self.assertEqual(len(scanner.calls), 1)   # probe は走る
+        self.assertEqual(engine.marked, [])       # が「済み」にはしない
+
     async def test_skip_page_skips_remaining_points_of_same_url(self):
         # 同一 URL に 2 pointer、別 URL に 1 pointer。1つ目(url A)で skip_page すると
         # url A の残り pointer も飛ばし、url B は通常どおり scan される。
@@ -186,6 +218,16 @@ class JsonInjectionCheckTests(unittest.IsolatedAsyncioTestCase):
             finding_dedup_key_for(_f("op-a")),
             finding_dedup_key_for(_f("op-a")),
         )
+
+    def test_stable_template_id_is_deterministic_and_operation_scoped(self):
+        # 同一 dedup_key（method,url,body_signature,content_type）→ 同一 ID（resume 安定）。
+        key_a = ("POST", "http://h/api/rpc", ("sig-a",), "application/json")
+        key_b = ("POST", "http://h/api/rpc", ("sig-b",), "application/json")
+        self.assertEqual(_stable_json_template_id(key_a), _stable_json_template_id(key_a))
+        # 別 operation（body_signature 違い）→ 別 ID（衝突による偽陰性/誤 executable を防ぐ）。
+        self.assertNotEqual(_stable_json_template_id(key_a), _stable_json_template_id(key_b))
+        # 連番と違い観測順に依存しない（値だけで決まる）。
+        self.assertTrue(_stable_json_template_id(key_a).startswith("jb-"))
 
     def test_form_finding_dedup_key_unchanged_by_json_augmentation(self):
         # form/url_param の dedup キーは json 拡張の影響を受けない（4-tuple のまま）。
