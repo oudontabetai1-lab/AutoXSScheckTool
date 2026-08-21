@@ -345,6 +345,9 @@ def _crawl_review_wants_recrawl(command: str) -> bool:
 
 
 _ADAPTIVE_PAGE_LEVEL_CHECKS = frozenset({"csrf", "session", "clickjacking"})
+# G7: js_analysis の DOM sink 観測（ページ全体）を付与する check。DOM XSS 系のみ。
+# SQLi/OS 等の無関係 check に DOM XSS flow を grounded 証拠として渡さない。
+_DOM_OBS_CHECKS = frozenset({"xss", "dom_xss"})
 
 
 def _adaptive_checkpoint_check(check_name: str) -> str:
@@ -4404,13 +4407,14 @@ class ScanEngine:
     async def _deterministic_field_observations(
         self, page_html: str, url: str, form_index: int, field_name: str,
         is_url_param: bool, ip, check_names: list
-    ) -> str:
+    ) -> tuple:
         """G7: js_analysis(純粋)＋context_mutator(marker probe)の決定論観測を整形して返す。
         失敗しても "" を返し adaptive を壊さない（加算的・例外保護）。"""
         from wscan import js_analysis
-        from wscan.adaptive_observations import format_deterministic_observations
 
-        # (a) js_analysis: page_html のインライン script を静的解析（注入不要・純粋）
+        # (a) js_analysis: page_html のインライン script を静的解析（注入不要・純粋）。
+        #     これは **ページ全体** の観測で、この入力からの到達性は保証しない
+        #     （呼び出し側が DOM 系 check にだけ、page-level ラベルで付与する）。
         risks: list = []
         try:
             for body in js_analysis.extract_inline_scripts(page_html or ""):
@@ -4447,10 +4451,7 @@ class ScanEngine:
                 except Exception:
                     context, surviving = {}, set()
 
-        try:
-            return format_deterministic_observations(risks, context, surviving)
-        except Exception:
-            return ""
+        return risks, context, surviving
 
     async def _adaptive_attack_field(
         self,
@@ -4509,13 +4510,17 @@ class ScanEngine:
         except Exception:
             return None
 
-        det_obs = ""
+        det_js_risks: list = []
+        det_context: dict = {}
+        det_surviving: set = set()
         try:
-            det_obs = await self._deterministic_field_observations(
-                page_html, url, form_index, field_name, is_url_param, ip, check_names
+            det_js_risks, det_context, det_surviving = (
+                await self._deterministic_field_observations(
+                    page_html, url, form_index, field_name, is_url_param, ip, check_names
+                )
             )
         except Exception:
-            det_obs = ""
+            det_js_risks, det_context, det_surviving = [], {}, set()
 
         generated_payloads: list[str] = []
         generation_failed = False
@@ -4570,6 +4575,14 @@ class ScanEngine:
             except Exception:
                 history_note = ""
 
+            # 反射観測(field 固有)は全 check に、JS の DOM sink(page 全体)は DOM 系 check
+            # にだけ付与する（SQLi 等の無関係 check に DOM XSS flow を grounded として
+            # 提示し生成を誤誘導しないため）。
+            from wscan.adaptive_observations import format_deterministic_observations
+            _js_for_check = det_js_risks if check_name in _DOM_OBS_CHECKS else None
+            det_obs = format_deterministic_observations(
+                _js_for_check, det_context, det_surviving
+            )
             extra = "\n".join(x for x in (history_note, det_obs) if x)
 
             # Ask LLM for bypass payloads (include detected WAF for targeted evasion)
