@@ -61,18 +61,6 @@ class EvolutionProbeNavigateGuardTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(engine.browser.submitted)
 
 
-    async def test_browser_override_is_used_instead_of_scanner_browser(self):
-        # concurrency>1 では scanner.browser は main(stale)。呼び出し側が現 worker の
-        # browser を渡せば、そちらへ probe が入る（self.browser は使われない）。
-        engine = _FakeEngine(navigate_ok=True)   # scanner.browser = engine.browser
-        scanner = _Scanner(engine)
-        worker_browser = _FakeBrowser(navigate_ok=True)
-        await scanner._evolution_probe(
-            "http://x/", 0, "q", is_url_param=False, browser=worker_browser
-        )
-        self.assertTrue(worker_browser.submitted)       # worker へ入った
-        self.assertFalse(engine.browser.submitted)      # main(stale) には入らない
-
 
 if __name__ == "__main__":
     unittest.main()

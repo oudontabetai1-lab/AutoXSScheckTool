@@ -357,21 +357,7 @@ _DOM_OBS_CHECKS = frozenset({"xss", "dom_xss"})
 #  - field-selective な注入系（ssrf/open_redirect＝URL/redirect っぽい field 以外は無送信）も
 #    入れない＝username/password 等の無関係 field へ marker を注入しない。
 # default-safe（未収録/未知 check では probe しない）。CLAUDE.md の evolution 配線と一致。
-_EVOLUTION_PROBE_CHECKS = frozenset({
-    "xss", "dom_xss", "sqli", "ssti", "os", "nosql", "ldap", "path_traversal",
-})
-# 反射 probe の marker（特殊文字列）を **typed value に保持し、かつ実際に送信できる**
-# 入力タイプの positive allowlist。除外理由:
-#  - number/range/date/datetime-local/time/month/week/color … 無効値を空/既定へ正規化し
-#    marker が値に残らない。
-#  - url/email … 値は保持するが制約検証（native constraint validation）があり、marker は
-#    無効なので submit ボタン click 時に送信がブロックされる（値保持≠送信）。
-#  - file/checkbox/radio/submit/button/image/reset/hidden … そもそも注入系が攻撃対象外。
-# いずれも「監査に記録されるのに実送信されない/観測が空」を避ける。allowlist なので将来の
-# 制約付き型にも安全側に倒れる。空文字/未指定は HTML 既定の text 扱い。tel は既定で書式検証なし。
-_PROBE_ALLOWED_INPUT_TYPES = frozenset({
-    "", "text", "textarea", "search", "tel", "password",
-})
+
 
 
 def _adaptive_checkpoint_check(check_name: str) -> str:
@@ -616,6 +602,8 @@ class ScanEngine:
         # C: CMS 検出結果 (crawl時に設定)
         self.detected_cms = None
         self._cms_origin: str = ""
+        # G7: ページ単位の js_analysis risk キャッシュ（url -> list[JsRisk]）。
+        self._js_risks_cache: dict = {}
         # origin(scheme://netloc) → 主要応答ヘッダ dict。multi-origin(--target-url)で
         # planner fingerprint を origin 別に出すため origin キーで保持する。
         self.detected_tech_headers: dict = {}
@@ -4434,22 +4422,21 @@ class ScanEngine:
                 message=f"{field_name} ({url})",
             )
 
-    async def _deterministic_field_observations(
-        self, crawl_html: str, url: str, form_index: int, field_name: str,
-        is_url_param: bool, ip, check_names: list, field_type: str = "text",
-        external_scripts: Optional[dict] = None,
-    ) -> tuple:
-        """G7: js_analysis(純粋)＋context_mutator(marker probe)の決定論観測を返す。
-        失敗しても空値を返し adaptive を壊さない（加算的・例外保護）。"""
-        from wscan import js_analysis
+    def _page_js_risks(self, url, crawl_html, external_scripts, check_names) -> list:
+        """G7: クロール時スナップショット（インライン＋外部 script）を静的解析し、
+        DOM source→sink risk を返す（純粋・注入不要・**ページ単位でキャッシュ**）。
 
-        # (a) js_analysis: **クロール時のページ HTML** のインライン script ＋クロール時に
-        #     スナップショットした **外部 script 本文**（external_scripts）を静的解析する
-        #     （注入不要・純粋）。攻撃後の現在タブではなく url に対応するクロール文書/資産を
-        #     解析し、無関係な sink の誤帰属を避ける（JsStaticScanner と同方針）。バンドル
-        #     アプリの source→sink は外部 script に載るため、これを含めないと DOM 系
-        #     grounding を取りこぼす。**ページ全体** の観測で、この入力からの到達性は保証
-        #     しない（呼び出し側が DOM 系 check にだけ page-level ラベルで付与する）。
+        観測を消費するのは DOM 系 check（_DOM_OBS_CHECKS）だけなので、それが check_names に
+        無ければ解析しない（例: --checks sqli では無駄に解析しない）。crawl_html/
+        external_scripts はページ単位なので url をキーに 1 度だけ解析し、同一ページの各
+        フィールドで使い回す（大きなバンドル script × 多入力での再解析を避ける）。
+        """
+        if not (_DOM_OBS_CHECKS & set(check_names or [])):
+            return []
+        cache = self._js_risks_cache
+        if url in cache:
+            return cache[url]
+        from wscan import js_analysis
         risks: list = []
         try:
             for body in js_analysis.extract_inline_scripts(crawl_html or ""):
@@ -4459,58 +4446,8 @@ class ScanEngine:
                     risks.extend(js_analysis.analyze_js(body))
         except Exception:
             risks = []
-
-        # (b) 反射文脈/生存文字は marker probe（注入 1 回）で観測する。probe は
-        #     scanner の `_evolution_probe` を再利用する＝`log_payload_test` を必ず通す
-        #     ため、abort 要求時は注入前に停止し、payloads.jsonl の監査にも残る
-        #     （engine から browser を直叩きするとこのゲートを迂回してしまう）。
-        #     navigate 失敗時のスキップも `_evolution_probe` 内で処理される。
-        context: dict = {}
-        surviving: set = set()
-        # form field は、marker を typed value に保持できる text 系タイプのみ probe する
-        # （url_param には type の概念が無いので従来どおり）。制約付き型（number/date/color 等）は
-        # ブラウザ正規化で marker が実送信されないため除外する。
-        _probe_field_ok = is_url_param or (field_type in _PROBE_ALLOWED_INPUT_TYPES)
-        if getattr(self, "enable_payload_evolution", True) and _probe_field_ok:
-            # probe は generic 注入系 check（evolution wave 配線・任意 field を攻撃）で、かつ
-            # **この resume でまだ未完了（adaptive checkpoint pending）** の check に限定する。
-            # 受動/field-selective な check を避けるだけでなく、完了済み check への再 marker 送信
-            # （resume が失敗 check だけ再試行する不変条件の破壊）も防ぐ。
-            probe_scanner = next(
-                (
-                    self.scanners[c]
-                    for c in check_names
-                    if c in self.scanners
-                    and c in _EVOLUTION_PROBE_CHECKS
-                    and not self._checkpoint_is_done_ip(
-                        ip, _adaptive_checkpoint_check(c)
-                    )
-                ),
-                None,
-            )
-            if probe_scanner is not None:
-                try:
-                    # 明示的に base 実装を呼ぶ。XSS/DOMXSS の override 版は navigate() の
-                    # 失敗を無視する _apply_payload 経由で残存ページへ注入し得るため、
-                    # navigate ガード付きの guarded base transport を強制する（観測目的には
-                    # 汎用 transport で十分＝反射文脈と生存文字だけ得られればよい）。
-                    from wscan.scanners.base import BaseScanner
-                    _src, surviving, context = await BaseScanner._evolution_probe(
-                        probe_scanner,
-                        url,
-                        form_index,
-                        field_name,
-                        is_url_param,
-                        dom_index=getattr(ip, "submit_index", None),
-                        # 現 worker の browser を明示的に渡す（scanner.browser は構築時
-                        # キャッシュで concurrency>1 では main を指すため）。self は engine
-                        # なので self.browser は _CURRENT_WORKER を解決する動的プロパティ。
-                        browser=self.browser,
-                    )
-                except Exception:
-                    context, surviving = {}, set()
-
-        return risks, context, surviving
+        cache[url] = risks
+        return risks
 
     async def _adaptive_attack_field(
         self,
@@ -4571,20 +4508,16 @@ class ScanEngine:
         except Exception:
             return None
 
+        # G7: DOM source→sink 観測（ページ単位・キャッシュ・注入なし）。反射 probe は
+        # 注入を伴い際限のないエッジ（validation/並行/監査/resume/型）を生むため本 PR では
+        # 導入しない。反射文脈は初回 evolution wave の観測を保持・再利用する別タスクで扱う。
         det_js_risks: list = []
-        det_context: dict = {}
-        det_surviving: set = set()
         try:
-            det_js_risks, det_context, det_surviving = (
-                await self._deterministic_field_observations(
-                    crawl_html or page_html, url, form_index, field_name,
-                    is_url_param, ip, check_names,
-                    field_type=str(field.get("type", "text")).lower(),
-                    external_scripts=external_scripts,
-                )
+            det_js_risks = self._page_js_risks(
+                url, crawl_html or page_html, external_scripts, check_names
             )
         except Exception:
-            det_js_risks, det_context, det_surviving = [], {}, set()
+            det_js_risks = []
 
         generated_payloads: list[str] = []
         generation_failed = False
@@ -4644,9 +4577,7 @@ class ScanEngine:
             # 提示し生成を誤誘導しないため）。
             from wscan.adaptive_observations import format_deterministic_observations
             _js_for_check = det_js_risks if check_name in _DOM_OBS_CHECKS else None
-            det_obs = format_deterministic_observations(
-                _js_for_check, det_context, det_surviving
-            )
+            det_obs = format_deterministic_observations(_js_for_check)
             extra = "\n".join(x for x in (history_note, det_obs) if x)
 
             # Ask LLM for bypass payloads (include detected WAF for targeted evasion)
