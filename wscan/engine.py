@@ -4447,6 +4447,10 @@ class ScanEngine:
                         field_name,
                         is_url_param,
                         dom_index=getattr(ip, "submit_index", None),
+                        # 現 worker の browser を明示的に渡す（scanner.browser は構築時
+                        # キャッシュで concurrency>1 では main を指すため）。self は engine
+                        # なので self.browser は _CURRENT_WORKER を解決する動的プロパティ。
+                        browser=self.browser,
                     )
                 except Exception:
                     context, surviving = {}, set()
