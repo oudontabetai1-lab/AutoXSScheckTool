@@ -18,7 +18,7 @@ from rich.console import Console
 
 from .header_scope import headers_allowed_for_url
 from .tls_config import TLSConfig
-from .url_extraction import is_plausible_route_candidate
+from .url_extraction import is_plausible_route_candidate, truncated_regex_literal
 
 
 console = Console()
@@ -1794,8 +1794,15 @@ class BrowserManager:
             )
             if not is_text_asset:
                 continue
-            for match in url_re.findall(body[:200000]):
-                candidate = match.rstrip(" \t\r\n\"'`<>)}],;")
+            scan_body = body[:200000]
+            for m in url_re.finditer(scan_body):
+                # 0009 C1: url_re は regex メタ文字（| [ ] \ ^ { }）の手前で match を
+                # 打ち切るため、`/foo|bar/`→`/foo` のように切り詰めた regex 片が一見正常な
+                # path に見えて通過する。match 直後の1文字が regex 継続文字なら、regex
+                # リテラルの切り詰めとして抽出時に弾く（切り詰め前の証拠を見る）。
+                if truncated_regex_literal(scan_body[m.end():m.end() + 1]):
+                    continue
+                candidate = m.group(0).rstrip(" \t\r\n\"'`<>)}],;")
                 try:
                     resolved = urljoin(base_url, candidate)
                     parsed = urlparse(resolved)
@@ -1804,9 +1811,9 @@ class BrowserManager:
                     if ignored_ext.search(parsed.path):
                         continue
                     cleaned = resolved.split("#")[0]
-                    # 0009 C1: minified JS の regex リテラル/式片を `/…` ルートとして
-                    # 誤抽出したゴミを純粋関数で除去する（無駄クロール＋planner LLM 浪費＋
-                    # 実ルート到達阻害を防ぐ）。判定は保守的で実ルートは落とさない。
+                    # 切り詰め後の候補も、regex リテラル/式片の誤抽出を純粋関数で除去する
+                    # （無駄クロール＋planner LLM 浪費＋実ルート到達阻害を防ぐ）。判定は
+                    # 保守的で実ルートは落とさない。
                     if not is_plausible_route_candidate(cleaned):
                         continue
                     discovered.append(cleaned)

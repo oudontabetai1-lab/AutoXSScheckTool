@@ -86,6 +86,22 @@ def is_plausible_route_candidate(resolved_url: str) -> bool:
     return True
 
 
+# url_re が URL 候補として許容しない一方、正規表現リテラルでは**継続**に使われる文字。
+# 抽出器はこれらの手前で match を打ち切るため、切り詰め後の候補（`/foo|bar/`→`/foo`、
+# `/abc[0-9]/`→`/abc`）は一見正常な path に見えて post-filter を通過してしまう。match の
+# **直後の文字**がこれらなら、regex リテラルの途中で切れた証拠として抽出時に弾く（0009 C1）。
+_REGEX_CONTINUATION_CHARS = frozenset("|[]\\^{}")
+
+
+def truncated_regex_literal(next_char: str) -> bool:
+    """抽出 match の直後の1文字が regex リテラルの継続を示すかを返す（純粋）。
+
+    `browser._collect_urls_from_loaded_assets` が `url_re.finditer` の各 match について
+    `body[end:end+1]` を渡す。True なら候補は regex リテラルの切り詰めなので採用しない。
+    """
+    return bool(next_char) and next_char in _REGEX_CONTINUATION_CHARS
+
+
 def filter_route_candidates(resolved_urls) -> list[str]:
     """URL 候補列から実在ルートらしいものだけを順序保持で返す（純粋）。"""
     seen: set[str] = set()

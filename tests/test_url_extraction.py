@@ -7,6 +7,7 @@ import unittest
 from wscan.url_extraction import (
     is_plausible_route_candidate,
     filter_route_candidates,
+    truncated_regex_literal,
 )
 
 
@@ -87,6 +88,16 @@ class PlausibleRouteCandidateTests(unittest.TestCase):
         self.assertEqual(filter_route_candidates([]), [])
         self.assertEqual(filter_route_candidates(None), [])
 
+    def test_truncated_regex_literal_detects_continuation_chars(self):
+        # regex 継続文字（url_re が手前で切る）→ 切り詰めと判定。
+        for ch in "|[]\\^{}":
+            with self.subTest(ch=ch):
+                self.assertTrue(truncated_regex_literal(ch))
+        # 文字列/式の正常終端や空 → 切り詰めではない。
+        for ch in ("'", '"', "`", ";", ")", " ", "", "/", "?"):
+            with self.subTest(ch=ch):
+                self.assertFalse(truncated_regex_literal(ch))
+
 
 class CollectUrlsFromAssetsIntegrationTests(unittest.TestCase):
     """`_collect_urls_from_loaded_assets` がゴミを除去し実ルートを残すことを、
@@ -111,6 +122,9 @@ class CollectUrlsFromAssetsIntegrationTests(unittest.TestCase):
             "var re=/(?:foo|bar)/g; var x=/16*(a.flipX?-1:1/;"
             "if(s.match(/[^a-z]+/)){} var p='/rest/user/whoami';"
             "n.route('/()?;=');"
+            # url_re が | や [ の手前で切り詰める regex リテラル。切り詰め後は /foo /abc に
+            # 見えるが、直後の regex 継続文字で抽出時に弾く。
+            "var a=/foo|bar/; var b=/abc[0-9]/;"
         )
         pairs = [{
             "request": {"url": "http://juice-shop.test/main.js"},
@@ -133,6 +147,9 @@ class CollectUrlsFromAssetsIntegrationTests(unittest.TestCase):
                 any(u.startswith(real) for u in found),
                 f"実ルートが抽出されなかった: {real} / got={found}",
             )
+        # 切り詰められた regex リテラル（/foo|bar/→/foo, /abc[0-9]/→/abc）は抽出されない。
+        self.assertNotIn("http://juice-shop.test/foo", found)
+        self.assertNotIn("http://juice-shop.test/abc", found)
         # regex 由来のゴミ（メタ文字）は 1 件も残らない。
         for u in found:
             self.assertFalse(
