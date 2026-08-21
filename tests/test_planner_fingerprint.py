@@ -138,6 +138,15 @@ def test_canonical_origin_normalizes_port_and_case():
     assert canonical_origin("") == ""
 
 
+def test_canonical_origin_idna_matches_punycode():
+    # Unicode ホストと Chromium が landed に使う punycode が同一 origin キーへ正規化される。
+    puny = "ドメイン.example".encode("idna").decode("ascii")
+    uni_origin = canonical_origin("https://ドメイン.example/path")
+    puny_origin = canonical_origin(f"https://{puny}/path")
+    assert uni_origin == puny_origin
+    assert uni_origin.startswith("https://xn--")
+
+
 def test_summarize_api_schema_origin_filter_uses_canonical_form():
     # capture(landed 正規化)と lookup(生 URL:ポート付) が canonical で一致する。
     points = [

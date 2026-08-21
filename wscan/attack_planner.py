@@ -69,31 +69,18 @@ def extract_tech_headers(headers: dict) -> dict:
     return out
 
 
-_DEFAULT_PORTS = {"http": 80, "https": 443, "ws": 80, "wss": 443}
-
-
 def canonical_origin(url: str) -> str:
     """URL から正規化した origin(scheme://host[:port]) を返す純粋関数。
 
-    scheme/host を小文字化し、既定ポート(80/443 等)を除去する。Chromium は landed
-    ``page.url`` を正規化する（``https://EXAMPLE.test:443/`` → ``https://example.test/``）
-    ため、capture 側(landed)と lookup 側(CrawledPage.url=キュー URL)で表現を揃えないと
-    キーが食い違い、捕捉したヘッダを取りこぼす。壊れた入力は ""。
+    IDNA(punycode)・IPv6・既定ポート除去・大小正規化はリポジトリ共通の
+    ``header_scope._url_origin`` に委譲する。Chromium は landed ``page.url`` を
+    正規化（``https://EXAMPLE.test:443/`` → ``https://example.test/``、Unicode ホストは
+    punycode 化）するため、capture 側(landed)と lookup 側(CrawledPage.url=キュー URL)で
+    同一表現に揃えないとキーが食い違い、捕捉したヘッダを取りこぼす。壊れた入力は ""。
     """
-    from urllib.parse import urlparse
     try:
-        p = urlparse(str(url or ""))
-        scheme = (p.scheme or "").lower()
-        host = (p.hostname or "").lower()
-        if not scheme or not host:
-            return ""
-        try:
-            port = p.port
-        except (ValueError, TypeError):
-            port = None
-        if port is None or port == _DEFAULT_PORTS.get(scheme):
-            return f"{scheme}://{host}"
-        return f"{scheme}://{host}:{port}"
+        from wscan.header_scope import _url_origin
+        return _url_origin(url)
     except Exception:
         return ""
 

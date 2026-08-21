@@ -2794,8 +2794,15 @@ class ScanEngine:
             # ページに origin A のスタックを渡さない）。WAF は target 単位の単一検出のため共通。
             # capture 側と同じ canonical_origin でキーを揃える（default port/host 大小の食い違い回避）。
             _origin = canonical_origin(page.url)
+            # WAF は primary target のみを probe しているため、その origin のページに限り含める
+            # （multi-origin で origin B のページに origin A の WAF を告げない）。
+            _waf = (
+                getattr(self.waf_detector, "_detected", None)
+                if _origin and _origin == canonical_origin(self.target_url)
+                else None
+            )
             planner_fingerprint = build_planner_fingerprint(
-                waf=getattr(self.waf_detector, "_detected", None),
+                waf=_waf,
                 cms=(self.detected_cms if self._cms_origin and self._cms_origin == _origin else None),
                 tech_headers=self.detected_tech_headers.get(_origin, {}),
                 api_schema=summarize_api_schema(
