@@ -5,12 +5,22 @@ WAF フィードバックの origin 帰属は、静的予測でなく台帳が�
 from wscan.attempt_ledger import AttemptLedger, Attempt, attempt_from_pair
 
 
-def test_attempt_from_pair_prefers_payload_carrying_request_url():
-    # payload を運んだ request.url を優先（応答 URL はリダイレクト後の最終 origin になり得る）。
+def test_same_origin_uses_request_url():
+    # 同一 origin（非リダイレクト or 同一 origin リダイレクト）は request.url を使う。
+    pair = {"response": {"status": 403, "url": "https://a.test/final", "body": ""},
+            "request": {"url": "https://a.test/post"}}
+    a = attempt_from_pair("p", "", pair)
+    assert a.req_url == "https://a.test/post"
+    assert a.status == 403
+
+
+def test_cross_origin_redirect_marks_url_unknown():
+    # request(A)と final response(B)の origin が食い違う＝クロス origin リダイレクト。
+    # payload を運んだ A と final status(B) が別 origin なので WAF 帰属は unknown（None）。
     pair = {"response": {"status": 403, "url": "https://b.test/final", "body": ""},
             "request": {"url": "https://a.test/post"}}
     a = attempt_from_pair("p", "", pair)
-    assert a.req_url == "https://a.test/post"   # request.url 優先
+    assert a.req_url is None
     assert a.status == 403
 
 

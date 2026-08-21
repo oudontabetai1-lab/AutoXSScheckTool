@@ -62,6 +62,18 @@ class Attempt:
     req_url: Optional[str] = None      # 実際に記録した応答/リクエスト URL（origin 帰属用）
 
 
+def _same_origin(a: str, b: str) -> bool:
+    """2 URL が同一 origin(scheme+host+port) か（純粋・大小無視）。判定不能は False。"""
+    from urllib.parse import urlparse
+    try:
+        pa, pb = urlparse(a or ""), urlparse(b or "")
+    except (TypeError, ValueError):
+        return False
+    if not pa.netloc or not pb.netloc:
+        return False
+    return (pa.scheme.lower(), pa.netloc.lower()) == (pb.scheme.lower(), pb.netloc.lower())
+
+
 def attempt_from_pair(payload, source: str, pair: dict) -> Attempt:
     """`_apply_ip` の返り値 (source, pair) から Attempt を組み立てる純粋関数。
 
@@ -84,11 +96,19 @@ def attempt_from_pair(payload, source: str, pair: dict) -> Attempt:
     body_len = len(observed) if has_pair else None
     reflected = bool(payload_str) and payload_str in observed
     elapsed = _elapsed_from_pair(pair) if has_pair else None
-    # payload を実際に運んだ**リクエスト URL**を優先する。応答 URL はリダイレクト後の最終
-    # origin になり得る（JSON body が 301/302/303 で bodyless GET され別 origin へ飛ぶ等）。
-    # その最終 origin の 403 を payload のブロックと誤帰属しないため、request.url を先に見る。
+    # WAF 帰属用の URL を決める。payload を運んだ request.url と最終 response.url の origin が
+    # 食い違う（クロス origin リダイレクト）場合、request は payload を運んだが最終 status は
+    # 別 origin 由来で、どちらへ帰属させても不正確。この場合は req_url=None で WAF 帰属を
+    # unknown にする（origin フィルタが除外）。同一 origin/非リダイレクトは request.url を使う。
     req = (pair or {}).get("request") or {}
-    req_url = (req.get("url") or resp.get("url")) if has_pair else None
+    req_u = req.get("url")
+    resp_u = resp.get("url")
+    if not has_pair:
+        req_url = None
+    elif req_u and resp_u and not _same_origin(req_u, resp_u):
+        req_url = None
+    else:
+        req_url = req_u or resp_u
     return Attempt(
         payload=payload_str,
         status=status if isinstance(status, int) else None,
