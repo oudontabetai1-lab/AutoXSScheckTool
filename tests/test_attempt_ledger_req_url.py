@@ -59,6 +59,26 @@ def test_req_url_round_trips_through_serialization():
     assert hist and hist[0].req_url == "https://b.test/api"
 
 
+def test_reflected_in_body_only_from_http_body():
+    # 本文に現れれば reflected_in_body=True。本文が無く source のみは False（DOM echo 相当）。
+    p_body = {"response": {"status": 200, "url": "https://a.test/x", "body": "hello P mark"},
+              "request": {"url": "https://a.test/x"}}
+    a = attempt_from_pair("P", "", p_body)
+    assert a.reflected_in_body is True and a.reflected is True
+    p_src = {"response": {"status": 200, "url": "https://a.test/x"}, "request": {"url": "https://a.test/x"}}
+    a2 = attempt_from_pair("P", "P in source only", p_src)
+    assert a2.reflected is True and a2.reflected_in_body is False
+
+
+def test_reflected_in_body_round_trips():
+    led = AttemptLedger()
+    key = ("http://x", "q", "0", "f", "")
+    led.record(key, "xss", Attempt(payload="p", status=200, reflected_in_body=True,
+                                   req_url="https://a.test/x"))
+    hist = AttemptLedger.from_dict(led.to_dict()).history(key, "xss")
+    assert hist and hist[0].reflected_in_body is True
+
+
 if __name__ == "__main__":
     import unittest
     unittest.main()

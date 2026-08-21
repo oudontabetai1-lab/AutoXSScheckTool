@@ -56,7 +56,8 @@ class Attempt:
     payload: str
     status: Optional[int] = None      # HTTP status（取得不能は None）
     body_len: Optional[int] = None    # 応答本文長（transport 失敗は None）
-    reflected: bool = False           # payload 文字列が応答本文に現れたか
+    reflected: bool = False           # payload 文字列が応答本文 or DOM に現れたか（安価な観測）
+    reflected_in_body: bool = False   # **HTTP 応答本文**に現れたか（source/DOM fallback を除く強シグナル）
     error: bool = False               # transport が失敗した（空 pair）
     elapsed: Optional[float] = None    # 応答所要秒（計測不能は None）
     req_url: Optional[str] = None      # 実際に記録した応答/リクエスト URL（origin 帰属用）
@@ -102,6 +103,9 @@ def attempt_from_pair(payload, source: str, pair: dict) -> Attempt:
     observed = resp_body if resp_body is not None else (source or "")
     body_len = len(observed) if has_pair else None
     reflected = bool(payload_str) and payload_str in observed
+    # HTTP 応答本文由来の反射だけを強シグナルとする。source/DOM は client-side が submit 値を
+    # 保持/描画しただけで「アプリが受理した」ことを意味しない（WAF challenge 200 でも起き得る）。
+    reflected_in_body = bool(payload_str) and resp_body is not None and payload_str in resp_body
     elapsed = _elapsed_from_pair(pair) if has_pair else None
     # WAF 帰属用の URL を決める。リダイレクト（同一 origin 含む）が起きると最終 status は
     # payload を運んだリクエストのものでなくなるため、request.url と最終 response.url が同一
@@ -121,6 +125,7 @@ def attempt_from_pair(payload, source: str, pair: dict) -> Attempt:
         status=status if isinstance(status, int) else None,
         body_len=body_len,
         reflected=reflected,
+        reflected_in_body=reflected_in_body,
         error=not has_pair,
         elapsed=elapsed,
         req_url=req_url if isinstance(req_url, str) else None,
@@ -178,6 +183,7 @@ class AttemptLedger:
                         "status": a.status,
                         "body_len": a.body_len,
                         "reflected": a.reflected,
+                        "reflected_in_body": a.reflected_in_body,
                         "error": a.error,
                         "elapsed": a.elapsed,
                         "req_url": a.req_url,
@@ -206,6 +212,7 @@ class AttemptLedger:
                             status=ad.get("status"),
                             body_len=ad.get("body_len"),
                             reflected=bool(ad.get("reflected", False)),
+                            reflected_in_body=bool(ad.get("reflected_in_body", False)),
                             error=bool(ad.get("error", False)),
                             elapsed=ad.get("elapsed"),
                             req_url=ad.get("req_url"),

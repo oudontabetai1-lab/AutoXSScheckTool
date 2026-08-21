@@ -13,8 +13,12 @@ from wscan.waf_detector import (
 )
 
 
-def _e(payload, status=None, error=False, reflected=False):
-    return SimpleNamespace(payload=payload, status=status, error=error, reflected=reflected)
+def _e(payload, status=None, error=False, reflected=False, reflected_in_body=None):
+    # passed 判定は reflected_in_body を見る。未指定なら reflected を流用（本文反射とみなす）。
+    if reflected_in_body is None:
+        reflected_in_body = reflected
+    return SimpleNamespace(payload=payload, status=status, error=error,
+                           reflected=reflected, reflected_in_body=reflected_in_body)
 
 
 def test_is_waf_block_only_waf_specific_statuses():
@@ -31,6 +35,14 @@ def test_passed_requires_reflection():
     assert out_no_refl == ""
     out_refl = format_waf_block_analysis([_e("<svg onload=x>", 200, reflected=True)], "Cloudflare")
     assert "PASSED" in out_refl and "<svg onload=x>" in out_refl
+
+
+def test_passed_requires_body_reflection_not_dom_echo():
+    # 2xx でも DOM/source 由来の反射（reflected=True, reflected_in_body=False）は passed にしない。
+    dom_only = _e("<svg onload=x>", 200, reflected=True, reflected_in_body=False)
+    assert format_waf_block_analysis([dom_only], "Cloudflare") == ""
+    body_refl = _e("<svg onload=x>", 200, reflected=True, reflected_in_body=True)
+    assert "PASSED" in format_waf_block_analysis([body_refl], "Cloudflare")
 
 
 def test_partitions_and_excludes_generic_errors():

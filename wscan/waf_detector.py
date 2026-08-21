@@ -268,12 +268,12 @@ def format_waf_block_analysis(entries, waf_name, *, max_each: int = 6, max_len: 
     passed: list[str] = []
     for payload, e in last_by_payload.items():
         status = getattr(e, "status", None)
-        reflected = bool(getattr(e, "reflected", False))
+        # PASSED は **HTTP 応答本文**由来の反射のみを到達確証とする（source/DOM の反射は
+        # client-side echo で WAF challenge 200 でも起き得るため信頼しない）。
+        reflected_in_body = bool(getattr(e, "reflected_in_body", False))
         if is_waf_block_attempt(status):
             blocked.append((payload, status))
-        elif isinstance(status, int) and 200 <= status < 300 and reflected:
-            # 2xx だけでは不十分（WAF のソフトブロック/CAPTCHA/challenge も 200 になり得る）。
-            # payload が本文に反射した＝アプリが実際に処理した確証があるときだけ passed。
+        elif isinstance(status, int) and 200 <= status < 300 and reflected_in_body:
             passed.append(payload)
 
     if not blocked and not passed:

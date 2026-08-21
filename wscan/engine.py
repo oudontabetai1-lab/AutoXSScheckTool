@@ -348,6 +348,9 @@ _ADAPTIVE_PAGE_LEVEL_CHECKS = frozenset({"csrf", "session", "clickjacking"})
 # G7: js_analysis の DOM sink 観測（ページ全体）を付与する check。DOM XSS 系のみ。
 # SQLi/OS 等の無関係 check に DOM XSS flow を grounded 証拠として渡さない。
 _DOM_OBS_CHECKS = frozenset({"xss", "dom_xss"})
+# WAF フィードバック（G6）から除外する check。scanner が payload を wire 上で別形へ変換し、
+# 台帳の原文と実送信が食い違うもの（nosql は URL param を field[$ne]=... に変換）。
+_WAF_FEEDBACK_EXCLUDED_CHECKS = frozenset({"nosql"})
 
 
 # G7 の反射/生存文字 probe を動かしてよい check。evolution wave（evolved_payloads）が
@@ -4586,7 +4589,11 @@ class ScanEngine:
                 _waf = getattr(self.waf_detector, "_detected", None)
                 _waf_origin = getattr(self.waf_detector, "_detected_origin", None)
                 _ledger2 = getattr(self, "attempt_ledger", None)
-                if _waf and _waf_origin and _ledger2 is not None:
+                # nosql の URL param 等、scanner が payload を wire 上で別形へ変換する check は、
+                # 台帳の原文と実送信 payload が食い違うため WAF フィードバックから除外する
+                # （変換で複数原文が同一 request に潰れ、blocked/passed を誤って多数報告する）。
+                if _waf and _waf_origin and _ledger2 is not None \
+                        and check_name not in _WAF_FEEDBACK_EXCLUDED_CHECKS:
                     from wscan.attack_planner import canonical_origin
                     from wscan.waf_detector import format_waf_block_analysis
                     # WAF は primary target のみ probe し _detected_origin が実際に一致した
