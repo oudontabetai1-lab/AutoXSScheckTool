@@ -69,16 +69,33 @@ def extract_tech_headers(headers: dict) -> dict:
     return out
 
 
-def _origin_of_url(url: str) -> str:
-    """URL から scheme://netloc（origin）を返す純粋関数。壊れた入力は ""。"""
+_DEFAULT_PORTS = {"http": 80, "https": 443, "ws": 80, "wss": 443}
+
+
+def canonical_origin(url: str) -> str:
+    """URL から正規化した origin(scheme://host[:port]) を返す純粋関数。
+
+    scheme/host を小文字化し、既定ポート(80/443 等)を除去する。Chromium は landed
+    ``page.url`` を正規化する（``https://EXAMPLE.test:443/`` → ``https://example.test/``）
+    ため、capture 側(landed)と lookup 側(CrawledPage.url=キュー URL)で表現を揃えないと
+    キーが食い違い、捕捉したヘッダを取りこぼす。壊れた入力は ""。
+    """
     from urllib.parse import urlparse
     try:
         p = urlparse(str(url or ""))
-        if p.scheme and p.netloc:
-            return f"{p.scheme}://{p.netloc}"
+        scheme = (p.scheme or "").lower()
+        host = (p.hostname or "").lower()
+        if not scheme or not host:
+            return ""
+        try:
+            port = p.port
+        except (ValueError, TypeError):
+            port = None
+        if port is None or port == _DEFAULT_PORTS.get(scheme):
+            return f"{scheme}://{host}"
+        return f"{scheme}://{host}:{port}"
     except Exception:
-        pass
-    return ""
+        return ""
 
 
 def _escape_ptr_token(token) -> str:
@@ -124,12 +141,13 @@ def summarize_api_schema(json_points, api_seed_requests=None, *, max_lines: int 
         points = iter(json_points or [])
     except (TypeError, ValueError):
         return []
+    origin_norm = canonical_origin(origin) if origin else ""
     for ip in points:
         try:
             if getattr(ip, "location", "") != "json_body":
                 continue
             ip_url = str(getattr(ip, "url", "") or "")
-            if origin and _origin_of_url(ip_url) != origin:
+            if origin_norm and canonical_origin(ip_url) != origin_norm:
                 continue
             method = str(getattr(ip, "method", "") or "").upper()
             path = urlparse(ip_url).path or "/"
@@ -148,7 +166,7 @@ def summarize_api_schema(json_points, api_seed_requests=None, *, max_lines: int 
     for tmpl in (api_seed_requests or []):
         try:
             tmpl_url = str(getattr(tmpl, "url", "") or "")
-            if origin and _origin_of_url(tmpl_url) != origin:
+            if origin_norm and canonical_origin(tmpl_url) != origin_norm:
                 continue
             method = str(getattr(tmpl, "method", "") or "").upper()
             path = urlparse(tmpl_url).path or "/"

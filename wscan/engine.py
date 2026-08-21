@@ -2318,12 +2318,13 @@ class ScanEngine:
             # 技術フィンガープリント用の主要応答ヘッダを一度だけ捕捉（plan フェーズでは
             # network がクリアされ取得不能なため、ここで engine に保持する）。best-effort。
             try:
-                from wscan.attack_planner import extract_tech_headers
+                from wscan.attack_planner import extract_tech_headers, canonical_origin
                 # リダイレクトで最終到達した URL の応答を選ぶ（キュー URL だとリダイレクト
                 # 応答＝プロキシの Server 等を掴む）。fingerprint を origin 別に出すため
                 # origin ごとに一度だけ捕捉する（multi-origin --target-url でスタックを取り違えない）。
+                # origin は canonical_origin で正規化し、lookup 側(CrawledPage.url)と表現を揃える。
                 _landed = self.browser.page.url or url
-                _origin = self._origin_for(_landed)
+                _origin = canonical_origin(_landed)
                 if _origin and _origin not in self.detected_tech_headers:
                     _pair = self.browser.network.best_pair_for_page(_landed)
                     _resp_headers = ((_pair or {}).get("response", {}) or {}).get("headers", {}) or {}
@@ -2371,8 +2372,13 @@ class ScanEngine:
                 try:
                     from wscan.cms_detect import detect_cms
                     # HTTP ヘッダはブラウザ経由では取得困難なため空辞書で渡す
-                    self.detected_cms = detect_cms(html, {}, url)
-                    self._cms_origin = self._origin_for(url)
+                    # html は landed ページのものなので、CMS 検出 URL と origin も
+                    # landed(page.url) から導く（リダイレクトで pre-redirect URL と
+                    # 食い違い、別 origin に CMS を誤帰属しないため）。
+                    from wscan.attack_planner import canonical_origin as _canon_origin
+                    _cms_landed = self.browser.page.url or url
+                    self.detected_cms = detect_cms(html, {}, _cms_landed)
+                    self._cms_origin = _canon_origin(_cms_landed)
                     if self.detected_cms.is_known:
                         console.print(
                             f"  [cyan][CMS] 検出:[/cyan] {self.detected_cms.name}"
@@ -2776,13 +2782,18 @@ class ScanEngine:
         for p in pages_no_inputs:
             console.print(f"  [dim]No inputs on {p.url}, skipping[/dim]")
 
-        from wscan.attack_planner import build_planner_fingerprint, summarize_api_schema
+        from wscan.attack_planner import (
+            build_planner_fingerprint,
+            summarize_api_schema,
+            canonical_origin,
+        )
 
         async def _plan_one(page):
             console.print(f"  [dim cyan]Planning:[/dim cyan] {page.url}")
             # fingerprint はページの origin 別に構築する（multi-origin スキャンで origin B の
             # ページに origin A のスタックを渡さない）。WAF は target 単位の単一検出のため共通。
-            _origin = self._origin_for(page.url)
+            # capture 側と同じ canonical_origin でキーを揃える（default port/host 大小の食い違い回避）。
+            _origin = canonical_origin(page.url)
             planner_fingerprint = build_planner_fingerprint(
                 waf=getattr(self.waf_detector, "_detected", None),
                 cms=(self.detected_cms if self._cms_origin and self._cms_origin == _origin else None),

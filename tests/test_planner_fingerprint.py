@@ -4,6 +4,7 @@ from wscan.attack_planner import (
     AttackPlanner,
     _sanitize_header_value,
     build_planner_fingerprint,
+    canonical_origin,
     extract_tech_headers,
     summarize_api_schema,
 )
@@ -127,6 +128,24 @@ def test_summarize_api_schema_filters_by_origin():
     ]
     # origin 未指定なら全 origin を含む（後方互換）。
     assert len(summarize_api_schema(points, seeds)) == 4
+
+
+def test_canonical_origin_normalizes_port_and_case():
+    assert canonical_origin("https://EXAMPLE.test:443/x?y=1") == "https://example.test"
+    assert canonical_origin("http://Example.test:80/") == "http://example.test"
+    assert canonical_origin("https://example.test:8443/") == "https://example.test:8443"
+    assert canonical_origin("not a url") == ""
+    assert canonical_origin("") == ""
+
+
+def test_summarize_api_schema_origin_filter_uses_canonical_form():
+    # capture(landed 正規化)と lookup(生 URL:ポート付) が canonical で一致する。
+    points = [
+        InjectionPoint.for_json_body("POST", "https://EXAMPLE.test:443/api/x", "/f1"),
+    ]
+    assert summarize_api_schema(points, origin="https://example.test") == [
+        "POST /api/x — JSON fields: /f1",
+    ]
 
 
 def test_json_leaf_pointers_bounds_depth_and_count():
