@@ -18,7 +18,13 @@ from rich.console import Console
 
 from .header_scope import headers_allowed_for_url
 from .tls_config import TLSConfig
-from .url_extraction import is_plausible_route_candidate, truncated_regex_literal
+from .url_extraction import (
+    is_plausible_route_candidate,
+    truncated_regex_literal,
+    is_regex_literal_extraction,
+    preceding_nonspace,
+    strip_trailing_noise,
+)
 
 
 console = Console()
@@ -1796,13 +1802,23 @@ class BrowserManager:
                 continue
             scan_body = body[:200000]
             for m in url_re.finditer(scan_body):
+                match_text = m.group(0)
                 # 0009 C1: url_re は regex メタ文字（| [ ] \ ^ { }）の手前で match を
                 # 打ち切るため、`/foo|bar/`→`/foo` のように切り詰めた regex 片が一見正常な
                 # path に見えて通過する。match 直後の1文字が regex 継続文字なら、regex
                 # リテラルの切り詰めとして抽出時に弾く（切り詰め前の証拠を見る）。
                 if truncated_regex_literal(scan_body[m.end():m.end() + 1]):
                     continue
-                candidate = m.group(0).rstrip(" \t\r\n\"'`<>)}],;")
+                # 末尾ノイズだけ剥がす（均衡した OData/関数の閉じ括弧は残す）。url_re は `;`
+                # 等も取り込むため、regex 形判定の前に剥がしておく（`/re/g;`→`/re/g`）。
+                candidate = strip_trailing_noise(match_text)
+                # 切り詰められない完全な regex リテラル（`/foo.bar/` 等、url_re 文字のみ）は
+                # content で実ルートと区別できないため、直前の文脈（regex を導く演算子）＋
+                # `/…/flags` の形で判定して弾く。文字列リテラル由来の実ルートは残る。
+                if is_regex_literal_extraction(
+                    preceding_nonspace(scan_body, m.start()), candidate
+                ):
+                    continue
                 try:
                     resolved = urljoin(base_url, candidate)
                     parsed = urlparse(resolved)

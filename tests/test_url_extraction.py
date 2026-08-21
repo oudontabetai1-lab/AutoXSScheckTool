@@ -8,6 +8,9 @@ from wscan.url_extraction import (
     is_plausible_route_candidate,
     filter_route_candidates,
     truncated_regex_literal,
+    is_regex_literal_extraction,
+    preceding_nonspace,
+    strip_trailing_noise,
 )
 
 
@@ -88,6 +91,36 @@ class PlausibleRouteCandidateTests(unittest.TestCase):
         self.assertEqual(filter_route_candidates([]), [])
         self.assertEqual(filter_route_candidates(None), [])
 
+    def test_strip_trailing_noise_keeps_balanced_parens(self):
+        # OData/関数の均衡した末尾括弧は残す（Codex #100 R4）。
+        self.assertEqual(strip_trailing_noise("/Products(1)"), "/Products(1)")
+        self.assertEqual(strip_trailing_noise("/odata/GetDefault()"), "/odata/GetDefault()")
+        # 余分な閉じ（外側の () を取り込んだ）だけ剥がす。
+        self.assertEqual(strip_trailing_noise("/api/x)"), "/api/x")
+        self.assertEqual(strip_trailing_noise("/api/x]"), "/api/x")
+        # 空白・引用符・区切りは常に剥がす。
+        self.assertEqual(strip_trailing_noise("/api/x'"), "/api/x")
+        self.assertEqual(strip_trailing_noise("/api/x , "), "/api/x")
+
+    def test_preceding_nonspace_skips_whitespace(self):
+        self.assertEqual(preceding_nonspace("x =  /foo/", 5), "=")
+        self.assertEqual(preceding_nonspace("'/foo'", 1), "'")
+        self.assertEqual(preceding_nonspace("/foo", 0), "")
+
+    def test_is_regex_literal_extraction_uses_context_and_shape(self):
+        # regex を導く文脈 + 閉じた /…/flags 形 → regex リテラル。
+        for prev in "=(,:[!&|?{;":
+            with self.subTest(prev=prev):
+                self.assertTrue(is_regex_literal_extraction(prev, "/foo.bar/"))
+        self.assertTrue(is_regex_literal_extraction("=", "/foo$/"))
+        self.assertTrue(is_regex_literal_extraction("(", "/foo+/g"))
+        # 文字列リテラル由来（引用符/識別子が直前）→ 実ルートとして残す。
+        self.assertFalse(is_regex_literal_extraction("'", "/foo.bar/"))
+        self.assertFalse(is_regex_literal_extraction('"', "/api/v1/"))
+        self.assertFalse(is_regex_literal_extraction("o", "/foo/"))  # 識別子直後
+        # 形が /…/ でない（末尾が / でない実ルート）→ 文脈が regex でも対象外。
+        self.assertFalse(is_regex_literal_extraction("=", "/rest/products/search"))
+
     def test_truncated_regex_literal_detects_continuation_chars(self):
         # regex 継続文字（url_re が手前で切る）→ 切り詰めと判定。
         for ch in "|[]\\^{}":
@@ -125,6 +158,10 @@ class CollectUrlsFromAssetsIntegrationTests(unittest.TestCase):
             # url_re が | や [ の手前で切り詰める regex リテラル。切り詰め後は /foo /abc に
             # 見えるが、直後の regex 継続文字で抽出時に弾く。
             "var a=/foo|bar/; var b=/abc[0-9]/;"
+            # 切り詰められない完全な regex リテラル（url_re 文字のみ）。直前の文脈で弾く。
+            "var c=/zab.qux/g; if(s.match(/quux$/)){}"
+            # OData/関数の末尾括弧を持つ実ルート（文字列リテラル由来 → 残す）。
+            "fetch('/Products(1)'); fetch('/odata/GetDefault()');"
         )
         pairs = [{
             "request": {"url": "http://juice-shop.test/main.js"},
@@ -150,6 +187,12 @@ class CollectUrlsFromAssetsIntegrationTests(unittest.TestCase):
         # 切り詰められた regex リテラル（/foo|bar/→/foo, /abc[0-9]/→/abc）は抽出されない。
         self.assertNotIn("http://juice-shop.test/foo", found)
         self.assertNotIn("http://juice-shop.test/abc", found)
+        # 切り詰められない完全な regex リテラル（/zab.qux/・/quux$/）も文脈で弾く。
+        self.assertFalse(any("zab.qux" in u for u in found), f"regex /zab.qux/ が残った: {found}")
+        self.assertFalse(any("quux" in u for u in found), f"regex /quux$/ が残った: {found}")
+        # OData/関数の末尾括弧を持つ実ルートは残る（C1-g）。
+        self.assertIn("http://juice-shop.test/Products(1)", found)
+        self.assertIn("http://juice-shop.test/odata/GetDefault()", found)
         # regex 由来のゴミ（メタ文字）は 1 件も残らない。
         for u in found:
             self.assertFalse(

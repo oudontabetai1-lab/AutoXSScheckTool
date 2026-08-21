@@ -102,6 +102,55 @@ def truncated_regex_literal(next_char: str) -> bool:
     return bool(next_char) and next_char in _REGEX_CONTINUATION_CHARS
 
 
+# JS で正規表現リテラルを導く（`/` の直前に来うる）文脈文字。文字列リテラルの直前は引用符
+# や識別子なので、これらと区別できる。空白は読み飛ばして直前の非空白文字を見る。
+_REGEX_CONTEXT_PREV = frozenset("=(,:[!&|?{;<>~^*%")
+# 閉じた正規表現リテラルの形 `/…/flags`（flags は g/i/m/s/u/y）。url_re 文字だけで構成される
+# `/foo.bar/` `/foo$/` `/foo+/` `/foo*/` 等は切り詰められないので、この形＋文脈で判定する。
+_REGEX_LITERAL_SHAPE = re.compile(r"^/.+/[gimsuy]*$")
+
+
+def preceding_nonspace(body: str, index: int) -> str:
+    """`body[index]` の手前で最初に現れる非空白文字を返す（無ければ空文字。純粋）。"""
+    i = index - 1
+    while i >= 0 and body[i] in " \t\r\n":
+        i -= 1
+    return body[i] if i >= 0 else ""
+
+
+def is_regex_literal_extraction(prev_context: str, match_text: str) -> bool:
+    """抽出 match が JS 正規表現リテラルらしいかを、直前文脈と形で判定する（純粋）。
+
+    切り詰められない完全な regex リテラル（`/foo.bar/` 等、url_re 文字のみ）は content だけでは
+    実ルートと区別できないため、**直前が regex を導く文脈**（`= ( , : [ ! & | ? { ; < > ~ ^ * %`／
+    行頭）で、かつ match が閉じた `/…/flags` の形のときに regex と見なす。文字列リテラル由来
+    （直前が引用符/識別子）は除外される。完全な判別には JS 字句解析が要るため保守的で、
+    取りこぼした regex は下流 crawl が 404 で落とす（実ルートを誤除去しないことを優先）。
+    """
+    if prev_context and prev_context not in _REGEX_CONTEXT_PREV:
+        return False
+    return bool(_REGEX_LITERAL_SHAPE.match(match_text))
+
+
+def strip_trailing_noise(candidate: str) -> str:
+    """url_re が過剰に取り込んだ末尾のノイズだけを剥がす（純粋）。
+
+    空白・引用符・`<>`・`,`・`;` は常に剥がす。末尾の閉じ括弧 `)]}` は、**釣り合わない
+    余分な閉じ**（`(/api/x)`→`/api/x)` のような外側の閉じを取り込んだ場合）だけ剥がし、
+    釣り合っている閉じ（OData `/Products(1)`・関数 `/GetDefault()`）は**残す**。旧実装は
+    `)]}` を無条件 rstrip して OData/関数ルートを不均衡化し誤除去していた（0009 C1・Codex #100）。
+    """
+    candidate = candidate.rstrip(" \t\r\n\"'`<>,;")
+    while candidate and candidate[-1] in ")]}":
+        opens = sum(candidate.count(c) for c in "([{")
+        closes = sum(candidate.count(c) for c in ")]}")
+        if closes > opens:
+            candidate = candidate[:-1]
+        else:
+            break
+    return candidate
+
+
 def filter_route_candidates(resolved_urls) -> list[str]:
     """URL 候補列から実在ルートらしいものだけを順序保持で返す（純粋）。"""
     seen: set[str] = set()
