@@ -154,7 +154,7 @@ _REGEX_MEMBER_CALL = re.compile(r"^/.+?/[dgimsuvy]*\.")
 _IDENTIFIER_TAIL = re.compile(r"[A-Za-z_$][A-Za-z0-9_$]*$")
 
 
-def _preceding_is_regex_context(preceding_text: str) -> bool:
+def preceding_is_regex_context(preceding_text: str) -> bool:
     """match 直前のテキストが JS 正規表現を導く文脈かを返す（純粋）。
 
     末尾空白を読み飛ばし、(1) 直前文字が regex 文脈演算子 `_REGEX_CONTEXT_PREV`、または
@@ -211,7 +211,7 @@ def is_regex_literal_extraction(preceding_text: str, match_text: str) -> bool:
 
     ``preceding_text`` は match 直前のテキスト（末尾数十文字で十分）。後方互換で単一文字も可。
     """
-    if not _preceding_is_regex_context(preceding_text):
+    if not preceding_is_regex_context(preceding_text):
         return False
     return bool(
         _REGEX_LITERAL_SHAPE.match(match_text)

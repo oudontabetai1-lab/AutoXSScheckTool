@@ -23,6 +23,7 @@ from .url_extraction import (
     truncated_regex_literal,
     regex_literal_end,
     is_regex_literal_extraction,
+    preceding_is_regex_context,
     strip_trailing_noise,
 )
 
@@ -1807,13 +1808,16 @@ class BrowserManager:
                 if m.start() < skip_until:
                     continue
                 match_text = m.group(0)
+                preceding = scan_body[max(0, m.start() - 64):m.start()]
                 # 0009 C1: url_re は regex メタ文字（| [ ] \ ^ { }）の手前で match を
                 # 打ち切るため、`/foo|bar/`→`/foo` のように切り詰めた regex 片が一見正常な
-                # path に見えて通過する。match 直後の1文字が regex 継続文字なら、regex
-                # リテラルの切り詰めとして弾き、さらにリテラルの閉じ `/` まで読み飛ばして
-                # escaped slash 後の後半片（`/subpat/`）の再抽出も防ぐ。
+                # path に見えて通過する。match 直後の1文字が regex 継続文字なら切り詰めとして
+                # 現候補を捨てる。さらに **regex 文脈が確定したときだけ** リテラルの閉じ `/` まで
+                # 読み飛ばして escaped slash 後の後半片（`/subpat/`）の再抽出を防ぐ。除算式
+                # （`a/b[c]`）を regex と誤認して後続の実ルートを飛ばさないよう、skip は文脈で gate する。
                 if truncated_regex_literal(scan_body[m.end():m.end() + 1]):
-                    skip_until = regex_literal_end(scan_body, m.end())
+                    if preceding_is_regex_context(preceding):
+                        skip_until = regex_literal_end(scan_body, m.end())
                     continue
                 # 末尾ノイズだけ剥がす（均衡した OData/関数の閉じ括弧は残す）。url_re は `;`
                 # 等も取り込むため、regex 形判定の前に剥がしておく（`/re/g;`→`/re/g`）。
@@ -1822,9 +1826,7 @@ class BrowserManager:
                 # content で実ルートと区別できないため、直前の文脈（regex を導く演算子/式キーワード）
                 # ＋`/…/flags`（もしくはメンバ呼び出し）の形で判定して弾く。文字列リテラル由来の
                 # 実ルートは残る。直前の式キーワード検出のため 1 文字でなくテキスト窓を渡す。
-                if is_regex_literal_extraction(
-                    scan_body[max(0, m.start() - 64):m.start()], candidate
-                ):
+                if is_regex_literal_extraction(preceding, candidate):
                     continue
                 try:
                     resolved = urljoin(base_url, candidate)

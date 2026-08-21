@@ -204,6 +204,8 @@ class CollectUrlsFromAssetsIntegrationTests(unittest.TestCase):
             "function f(){return /retpat.x/;} var q=/membpat.x/.test(z);"
             # escaped slash を含む regex（/escpat\/subpat/）。/subpat/ が再抽出されるが \ 文脈で弾く。
             "var e=/escpat\\/subpat/;"
+            # 除算＋計算アクセス（a/b[c]）。regex ではないので後続の実ルートを飛ばさない。
+            "const ratio=a/b[c];fetch('/divok/users');"
             # OData/関数の末尾括弧を持つ実ルート（文字列リテラル由来 → 残す）。
             "fetch('/Products(1)'); fetch('/odata/GetDefault()');"
         )
@@ -239,6 +241,8 @@ class CollectUrlsFromAssetsIntegrationTests(unittest.TestCase):
         self.assertFalse(any("membpat" in u for u in found), f"/re/.method() が残った: {found}")
         # escaped slash の後半片（/subpat/）も残らない。
         self.assertFalse(any("subpat" in u for u in found), f"escaped-slash 片が残った: {found}")
+        # 除算式 a/b[c] を regex と誤認して後続の実ルートを飛ばさない（到達性の後退を防ぐ）。
+        self.assertIn("http://juice-shop.test/divok/users", found)
         # OData/関数の末尾括弧を持つ実ルートは残る（C1-g）。
         self.assertIn("http://juice-shop.test/Products(1)", found)
         self.assertIn("http://juice-shop.test/odata/GetDefault()", found)
