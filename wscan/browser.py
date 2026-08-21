@@ -1823,7 +1823,7 @@ class BrowserManager:
                 # ＋`/…/flags`（もしくはメンバ呼び出し）の形で判定して弾く。文字列リテラル由来の
                 # 実ルートは残る。直前の式キーワード検出のため 1 文字でなくテキスト窓を渡す。
                 if is_regex_literal_extraction(
-                    scan_body[max(0, m.start() - 24):m.start()], candidate
+                    scan_body[max(0, m.start() - 64):m.start()], candidate
                 ):
                     continue
                 try:

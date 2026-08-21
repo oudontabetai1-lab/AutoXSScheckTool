@@ -138,6 +138,14 @@ class PlausibleRouteCandidateTests(unittest.TestCase):
         self.assertTrue(is_regex_literal_extraction("", "/foo/"))
         # escaped slash 後に再抽出される regex 片（/foo\/bar/ → /bar/）も、直前 \ を文脈として弾く。
         self.assertTrue(is_regex_literal_extraction("\\", "/bar/"))
+        # 制御ヘッダの `)` 直後の regex は文脈として認識（Codex #100 R8）。
+        self.assertTrue(is_regex_literal_extraction("if (ready)", "/foo/.test(value)"))
+        self.assertTrue(is_regex_literal_extraction("while (x > 0)", "/foo/"))
+        # 関数呼び出しの `)` は除算文脈 → regex 扱いしない。
+        self.assertFalse(is_regex_literal_extraction("compute(a, b)", "/foo/"))
+        # 実パスの /.well-known 等（member-call 形だが文脈が regex でない）は残す。
+        self.assertFalse(is_regex_literal_extraction("'", "/api/.well-known/x"))
+        self.assertFalse(is_regex_literal_extraction("compute()", "/api/.well-known/x"))
 
     def test_regex_literal_end_skips_escaped_slash_and_class(self):
         # /escpat\/subpat/ : 切り詰めは escpat の後（\ の位置）。閉じ / まで読み飛ばす。

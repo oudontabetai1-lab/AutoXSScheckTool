@@ -141,6 +141,9 @@ _REGEX_PRECEDING_KEYWORDS = frozenset({
     "return", "throw", "yield", "typeof", "case", "delete", "void",
     "in", "of", "new", "do", "else", "instanceof",
 })
+# 条件の `)` の直後に文（regex リテラル）が来る制御ヘッダ。`if (x) /re/.test(y)` は regex だが
+# 関数呼び出し `f() /2/` は除算なので、`)` は対応する `(` の前トークンで区別する。
+_CONTROL_HEADER_KEYWORDS = frozenset({"if", "while", "for", "switch", "catch"})
 # 閉じた正規表現リテラルの形 `/…/flags`。flags は現行の全 JS フラグ（d/g/i/m/s/u/v/y）。
 # url_re 文字だけで構成される `/foo.bar/` `/foo$/` `/foo+/` `/foo*/` `/foo/d` 等は切り詰められない
 # ので、この形＋文脈で判定する。
@@ -167,6 +170,24 @@ def _preceding_is_regex_context(preceding_text: str) -> bool:
     m = _IDENTIFIER_TAIL.search(stripped)
     if m and m.group(0) in _REGEX_PRECEDING_KEYWORDS:
         return True
+    # `)` は制御ヘッダ（if/while/for/switch/catch）の条件閉じなら文が続く＝regex 文脈。
+    # 関数呼び出しの `)` の後は除算なので、対応する `(` の直前トークンで区別する。
+    if last == ")":
+        depth = 0
+        i = len(stripped) - 1
+        while i >= 0:
+            if stripped[i] == ")":
+                depth += 1
+            elif stripped[i] == "(":
+                depth -= 1
+                if depth == 0:
+                    break
+            i -= 1
+        if depth == 0 and i > 0:
+            before = stripped[:i].rstrip(" \t\r\n")
+            km = _IDENTIFIER_TAIL.search(before)
+            if km and km.group(0) in _CONTROL_HEADER_KEYWORDS:
+                return True
     return False
 
 
