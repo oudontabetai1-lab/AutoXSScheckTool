@@ -391,6 +391,8 @@ python3 main.py agent URL [options]
 | `--port PORT` | `8765` | モニターポート |
 | `--no-monitor`, `--no-open-report` | 無効 | モニター/自動表示を無効化 |
 
+> 初期化や実行がハードエラー（LLM プロバイダ不在、`browser-use` 未導入など）で失敗した場合、Agent は「0 findings の正常完了」とは表示せず **FAILED を表示して終了コードを非0** にします（CI で失敗を検知できます）。設定ディレクトリ（`~/.config` 系）が書込み不可のときは起動前に案内を出します（`export XDG_CONFIG_HOME=/書込み可能な場所` で解消。案内は警告で、実行自体は継続し、実際に失敗すれば上記のとおり FAILED になります）。
+
 ### `triage` — ペイロード非投入の高速評価
 
 ```bash
@@ -724,7 +726,7 @@ output/<timestamp>/
 
 | 出力 | 用途 |
 | --- | --- |
-| `report.html` | 自己完結型 HTML。Finding、証拠、Agent バッジ、実行条件 |
+| `report.html` | 自己完結型 HTML。Finding、証拠、Agent バッジ、実行条件、**観測性メトリクス**（劣化・脱落した probe/wave の件数とカテゴリ内訳）。0 findings が「安全」を意味するとは限らないため、脱落数を明示します |
 | `report_executive.html` | 管理層向けサマリー |
 | `report_developer.html` | 開発者向け詳細・修正観点 |
 | `evidence.json` | Finding と証跡の機械可読 JSON |

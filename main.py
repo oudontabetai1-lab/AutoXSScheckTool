@@ -1713,6 +1713,11 @@ def _effective_open_report(args) -> bool:
     return True
 
 
+def _agent_exit_code(result) -> int:
+    """Agent 結果だけを対象に CLI 終了コードを決める純粋関数。"""
+    return 1 if result is not None and getattr(result, "error", None) else 0
+
+
 def _llm_model_display(args) -> str:
     """Return a short model info string for the startup banner."""
     role_models = getattr(args, "role_models", {}) or {}
@@ -1873,8 +1878,7 @@ async def run_agent(args):
             port=args.port,
             extra_headers=_agent_headers,
         )
-        await engine.run()
-        return
+        return await engine.run()
 
     # With monitoring dashboard
     monitor = MonitorServer(port=args.port)
@@ -1913,9 +1917,12 @@ async def run_agent(args):
                 port=args.port,
                 extra_headers=_agent_headers,
             )
-            await engine.run()
+            result = await engine.run()
+            if result.error:
+                return result
             console.print("[dim]Dashboard is still running — press Ctrl+C to stop.[/dim]")
             await asyncio.sleep(3600)
+            return result
         except asyncio.CancelledError:
             pass
         except Exception as exc:
@@ -1924,7 +1931,8 @@ async def run_agent(args):
         finally:
             server.should_exit = True
 
-    await asyncio.gather(server.serve(), run_agent_task())
+    _, result = await asyncio.gather(server.serve(), run_agent_task())
+    return result
 
 
 async def run_scan(args):
@@ -3323,7 +3331,10 @@ def main():
         elif args.command == "manual-crawl":
             asyncio.run(run_manual_crawl(args))
         elif args.command == "agent":
-            asyncio.run(run_agent(args))
+            agent_result = asyncio.run(run_agent(args))
+            agent_exit_code = _agent_exit_code(agent_result)
+            if agent_exit_code:
+                sys.exit(agent_exit_code)
         elif args.command == "record":
             asyncio.run(run_record(args))
         elif args.command == "batch":

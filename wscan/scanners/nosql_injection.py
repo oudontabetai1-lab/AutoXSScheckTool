@@ -223,6 +223,9 @@ class NoSQLInjectionScanner(BaseScanner):
                     return True
 
             except Exception as exc:
+                self._record_scan_note(
+                    f"probe_error:{self.CHECK_TYPE}:{type(exc).__name__}"
+                )
                 if self.monitor:
                     await self.monitor.emit_status(
                         f"[warn] nosql: probe failed on {field_name} @ {ip.url}: {exc}"
@@ -323,7 +326,10 @@ class NoSQLInjectionScanner(BaseScanner):
                     )
                     findings.append(finding)
                     break
-            except Exception:
+            except Exception as exc:
+                self._record_scan_note(
+                    f"probe_error:{self.CHECK_TYPE}:{type(exc).__name__}"
+                )
                 continue
 
         return findings

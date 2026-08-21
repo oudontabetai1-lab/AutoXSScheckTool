@@ -194,7 +194,10 @@ class InfoDisclosureScanner(BaseScanner):
                     )
                     findings.append(finding)
 
-                except Exception:
+                except Exception as exc:
+                    self._record_scan_note(
+                        f"probe_error:{self.CHECK_TYPE}:{type(exc).__name__}"
+                    )
                     continue
 
         return findings

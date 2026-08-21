@@ -48,6 +48,23 @@ _CURRENT_WORKER: ContextVar = ContextVar("wscan_worker", default=None)
 _FIELD_PAYLOAD_OVERRIDES: ContextVar = ContextVar("wscan_payload_overrides", default=None)
 
 
+def _observability_warning_text(summary: dict) -> str:
+    """観測性サマリから console 警告文を組み立てる（表示判断を含む純粋関数）。"""
+    total = int(summary.get("total", 0) or 0)
+    if total <= 0:
+        return ""
+    categories = summary.get("by_category", {}) or {}
+    breakdown = ", ".join(
+        f"{category}={count}"
+        for category, count in sorted(categories.items())
+    )
+    detail = f"（{breakdown}）" if breakdown else ""
+    return (
+        f"⚠ 観測性: {total} 件の probe/wave が劣化・脱落{detail}。"
+        "0 findings は「安全」を意味しない可能性"
+    )
+
+
 def _coerce_header_scope_enforce(value, default: bool = True) -> bool:
     """設定値/env を bool 化する。明示的な false 値だけが逃げ道を有効にする。"""
     if isinstance(value, bool):
@@ -977,6 +994,26 @@ class ScanEngine:
         # Auto-login landing page. Seeded into the normal crawl so authenticated
         # pages are not missed when the scan target itself is the login URL.
         self.auth_landing_url: str = ""
+
+    def observability_summary(self) -> dict:
+        """``wave_errors`` をカテゴリ別に集計して返す（純粋・レポート/サマリ用）。"""
+        by_category: dict[str, int] = {}
+        for raw_note in self.wave_errors:
+            note = str(raw_note)
+            category = note.split(":", 1)[0].strip() if ":" in note else "other"
+            category = category or "other"
+            by_category[category] = by_category.get(category, 0) + 1
+        return {
+            "total": len(self.wave_errors),
+            "by_category": by_category,
+        }
+
+    def _observability_report_data(self, sample_limit: int = 5) -> dict:
+        """レポート用に集計と代表サンプルを同じデータ源から返す。"""
+        return {
+            **self.observability_summary(),
+            "samples": [str(note) for note in self.wave_errors[:sample_limit]],
+        }
 
     def new_oob_address(self) -> Optional[tuple[str, str]]:
         """OOB 受信用の一意トークンとメールアドレスを返す。
@@ -5328,6 +5365,7 @@ class ScanEngine:
             "llm_summary": llm_summary,
             "findings": findings_dicts,
             "scan_matrix": self.scan_matrix,
+            "observability": self._observability_report_data(),
             "ctf_flags": [{"flag": flag, "source": src} for flag, src in self.ctf_found_flags],
             "diff": diff_data,
             "attack_plans": [
@@ -5446,6 +5484,7 @@ class ScanEngine:
             page_graph=self.page_graph,
             scan_matrix=self.scan_matrix,
             llm_summary=self._llm_runtime_summary(),
+            observability=self._observability_report_data(),
             template="audit",
             diff_result=diff_result,
         )
@@ -5462,6 +5501,7 @@ class ScanEngine:
                     page_graph=self.page_graph,
                     scan_matrix=self.scan_matrix,
                     llm_summary=self._llm_runtime_summary(),
+                    observability=self._observability_report_data(),
                     template=tmpl,
                     diff_result=diff_result,
                 )
@@ -5846,6 +5886,11 @@ class ScanEngine:
         console.print(f"  Plans    : [cyan]{len(self.attack_plans)}[/cyan]")
         color = "red" if self.all_findings else "green"
         console.print(f"  Findings : [{color}]{len(self.all_findings)}[/{color}]")
+        observability_warning = _observability_warning_text(
+            self.observability_summary()
+        )
+        if observability_warning:
+            console.print(f"  [yellow]{observability_warning}[/yellow]")
         adaptive_count = sum(1 for f in self.all_findings if "[AdaptiveAI]" in f.evidence)
         if adaptive_count:
             console.print(

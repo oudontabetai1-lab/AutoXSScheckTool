@@ -425,7 +425,10 @@ class XSSScanner(BaseScanner):
             )
             try:
                 source, pair = await self._apply_ip(ip, probe.value)
-            except Exception:
+            except Exception as exc:
+                self._record_scan_note(
+                    f"probe_error:{self.CHECK_TYPE}:{type(exc).__name__}"
+                )
                 continue
             pairs[probe.name] = pair or {}
             body = (pair.get("response", {}) or {}).get("body") or source or ""
@@ -824,8 +827,10 @@ class XSSScanner(BaseScanner):
                     return
             if await self.browser.trigger_injected_handlers(payload, baseline_handlers):
                 await asyncio.sleep(0.3 * self.sleep_factor)
-        except Exception:
-            pass
+        except Exception as exc:
+            self._record_scan_note(
+                f"probe_error:{self.CHECK_TYPE}:{type(exc).__name__}"
+            )
 
     async def verify_finding(self, finding: Finding) -> bool | None:
         from urllib.parse import parse_qs, urlparse
@@ -901,6 +906,9 @@ class XSSScanner(BaseScanner):
                     form_index, field_name, payload
                 )
         except Exception as exc:
+            self._record_scan_note(
+                f"transport_error:{self.CHECK_TYPE}:{type(exc).__name__}"
+            )
             if self.monitor:
                 await self.monitor.emit_status(
                     f"[warn] xss: _apply_payload failed on {field_name} @ {url}: {exc}"

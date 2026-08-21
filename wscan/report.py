@@ -326,6 +326,7 @@ class ReportGenerator:
         llm_summary: "Optional[dict]" = None,
         template: str = "audit",
         diff_result=None,
+        observability: "Optional[dict]" = None,
     ):
         """
         Generate HTML report and save to output directory.
@@ -340,17 +341,18 @@ class ReportGenerator:
         if template == "executive":
             html = self._build_executive_html(target, sorted_findings, visited_urls, checks,
                                                attack_plans or [], ctf_flags or [], page_graph or {},
-                                               diff_result, scan_matrix or [])
+                                               diff_result, scan_matrix or [], observability or {})
             report_path = self.output_dir / "report_executive.html"
         elif template == "developer":
             html = self._build_developer_html(target, sorted_findings, visited_urls, checks,
                                                attack_plans or [], ctf_flags or [], page_graph or {},
-                                               diff_result, scan_matrix or [])
+                                               diff_result, scan_matrix or [], observability or {})
             report_path = self.output_dir / "report_developer.html"
         else:
             html = self._build_html(target, sorted_findings, visited_urls, checks,
                                     attack_plans or [], ctf_flags or [], page_graph or {},
-                                    diff_result, scan_matrix or [], llm_summary or {})
+                                    diff_result, scan_matrix or [], llm_summary or {},
+                                    observability or {})
             report_path = self.output_dir / "report.html"
 
         report_path.write_text(html, encoding="utf-8")
@@ -368,12 +370,14 @@ class ReportGenerator:
         diff_result=None,
         scan_matrix: list = None,
         llm_summary: dict = None,
+        observability: dict = None,
     ) -> str:
         attack_plans = attack_plans or []
         ctf_flags = ctf_flags or []
         page_graph = page_graph or {}
         scan_matrix = scan_matrix or []
         llm_summary = llm_summary or {}
+        observability = observability or {}
         scan_date = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         total = len(findings)
         counts = {}
@@ -545,6 +549,7 @@ class ReportGenerator:
         checklist_html = self._build_scan_checklist_html(scan_matrix)
         remediation_summary_html = self._build_remediation_summary_html(findings)
         llm_summary_html = self._build_llm_summary_html(llm_summary)
+        observability_html = self._build_observability_html(observability)
 
         return f"""<!DOCTYPE html>
 <html lang="ja">
@@ -834,6 +839,9 @@ body {{ font-family: 'Segoe UI', system-ui, -apple-system, sans-serif; backgroun
 
     <!-- LLM Runtime Summary -->
     {llm_summary_html}
+
+    <!-- Observability -->
+    {observability_html}
 
     <!-- Attack Plans -->
     {attack_plan_html}
@@ -1477,6 +1485,36 @@ document.querySelectorAll('.plan-payloads-toggle').forEach(btn => {{
             {truncated}
         </div>"""
 
+    def _build_observability_html(self, observability: dict) -> str:
+        """劣化・脱落した probe/wave を Finding と分離して明示する。"""
+        total = int(observability.get("total", 0) or 0)
+        categories = observability.get("by_category", {}) or {}
+        samples = observability.get("samples", []) or []
+        category_html = "".join(
+            f"<li><code>{self._escape(category)}</code>: {count}</li>"
+            for category, count in sorted(categories.items())
+        ) or "<li>なし</li>"
+        sample_html = "".join(
+            f"<li><code>{self._escape(str(sample))}</code></li>"
+            for sample in samples
+        ) or "<li>なし</li>"
+        warning = ""
+        if total:
+            warning = (
+                '<p style="color:#975a16;font-weight:600;margin-top:10px">'
+                '0 findings は「安全」を意味しない可能性があります。</p>'
+            )
+        return f"""
+        <div class="section observability-section">
+            <h2>Observability（観測性メトリクス）</h2>
+            <p>劣化・脱落した probe/wave: <strong>{total}</strong> 件</p>
+            {warning}
+            <h3 style="margin-top:14px">by_category</h3>
+            <ul>{category_html}</ul>
+            <h3 style="margin-top:14px">代表サンプル</h3>
+            <ul>{sample_html}</ul>
+        </div>"""
+
     def _build_llm_summary_html(self, summary: dict) -> str:
         if not summary:
             return ""
@@ -1550,6 +1588,7 @@ document.querySelectorAll('.plan-payloads-toggle').forEach(btn => {{
     def _build_executive_html(
         self, target, findings, visited_urls, checks,
         attack_plans, ctf_flags, page_graph, diff_result=None, scan_matrix=None,
+        observability=None,
     ) -> str:
         """経営層向け: サマリーカード・リスク分布・コンプライアンス適合率・推奨事項。"""
         scan_date = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -1623,6 +1662,7 @@ document.querySelectorAll('.plan-payloads-toggle').forEach(btn => {{
             recs.append("セキュリティヘッダ (CSP, HSTS, X-Frame-Options) の設定を確認してください。")
         recs.append("定期的なペネトレーションテストの実施を推奨します。")
         rec_html = "".join(f"<li>{self._escape(r)}</li>" for r in recs)
+        observability_html = self._build_observability_html(observability or {})
 
         return f"""<!DOCTYPE html>
 <html lang="ja"><head><meta charset="UTF-8">
@@ -1685,6 +1725,7 @@ ul li{{margin:4px 0;font-size:.9rem}} .footer{{text-align:center;color:#a0aec0;f
     <h2>推奨事項</h2>
     <ul>{rec_html}</ul>
   </div>
+  {observability_html}
   <div class="section">
     <h2>スキャン範囲</h2>
     <p style="font-size:.9rem">{len(visited_urls)} ページを検査 / 検査項目: {", ".join(checks)}</p>
@@ -1700,6 +1741,7 @@ ul li{{margin:4px 0;font-size:.9rem}} .footer{{text-align:center;color:#a0aec0;f
     def _build_developer_html(
         self, target, findings, visited_urls, checks,
         attack_plans, ctf_flags, page_graph, diff_result=None, scan_matrix=None,
+        observability=None,
     ) -> str:
         """開発者向け: チェックリスト形式・修正コード例・重要度別ソート。"""
         scan_date = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -1760,6 +1802,7 @@ ul li{{margin:4px 0;font-size:.9rem}} .footer{{text-align:center;color:#a0aec0;f
             <div class="diff-bar">
                 🆕 新規 {len(diff_result.new_findings)} / ✅ 修正済 {len(diff_result.fixed_findings)} / 🔄 継続 {len(diff_result.persistent_findings)}
             </div>"""
+        observability_html = self._build_observability_html(observability or {})
 
         return f"""<!DOCTYPE html>
 <html lang="ja"><head><meta charset="UTF-8">
@@ -1797,6 +1840,7 @@ body{{font-family:'Segoe UI',system-ui,sans-serif;background:#f7f8fa;color:#1a20
 </div>
 <div class="container">
   {diff_summary}
+  {observability_html}
   <p style="font-size:.85rem;color:#4a5568;margin-bottom:12px">各項目をクリックして詳細を展開してください。チェックボックスで修正完了を記録できます。</p>
   {items_html if items_html else '<p style="color:#38a169;font-weight:600">✓ 検出された脆弱性はありません。</p>'}
 </div>

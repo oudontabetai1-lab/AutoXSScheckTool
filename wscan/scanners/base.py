@@ -599,18 +599,26 @@ class BaseScanner(ABC):
         capability を明示したスキャナだけ共有 transport を使う。未対応の JSON を
         form へ暗黙に落とさないことで tri-state を維持する。
         """
-        if ip.location == "json_body":
-            if not self.SUPPORTS_JSON_BODY:
-                return "", {}
-            source, pair = await self._apply_json_payload(ip, payload)
-        else:
-            source, pair = await self._apply_payload(
-                ip.url,
-                ip.submit_index,
-                ip.parameter_id,
-                payload,
-                ip.legacy_is_url_param(),
+        try:
+            if ip.location == "json_body":
+                if not self.SUPPORTS_JSON_BODY:
+                    return "", {}
+                source, pair = await self._apply_json_payload(ip, payload)
+            else:
+                source, pair = await self._apply_payload(
+                    ip.url,
+                    ip.submit_index,
+                    ip.parameter_id,
+                    payload,
+                    ip.legacy_is_url_param(),
+                )
+        except Exception as exc:
+            # scanner ごとの transport が例外を返す版でも、従来の空応答フォールバックを
+            # 保ったまま脱落を共通地点で観測する。
+            self._record_scan_note(
+                f"transport_error:{self.CHECK_TYPE}:{type(exc).__name__}"
             )
+            return "", {}
         # D5/G2: 波状層横断の試行台帳へ応答メタを記録する。判定には関与せず、観測の
         # 記録のみ（例外は絶対に scan を止めない＝加算的・安全側）。
         self._record_attempt(ip, payload, source, pair)
@@ -888,6 +896,7 @@ class BaseScanner(ABC):
                 self.engine._json_probe_failed = True
             except Exception:
                 pass
+            self._record_scan_note(f"unexecutable_template:{self.CHECK_TYPE}")
             return "", {}
 
         try:
@@ -920,7 +929,10 @@ class BaseScanner(ABC):
                 kwargs = self.engine.httpx_client_kwargs(**kwargs)
             elif getattr(self.engine, "proxy", ""):
                 kwargs["proxy"] = self.engine.proxy
-        except Exception:
+        except Exception as exc:
+            self._record_scan_note(
+                f"transport_error:{self.CHECK_TYPE}:{type(exc).__name__}"
+            )
             return "", {}
 
         # 監査ログ(payloads.jsonl / monitor)と abort 判定は**呼び出し側(scanner)が
@@ -976,7 +988,7 @@ class BaseScanner(ABC):
             except Exception:
                 pass
             return response.text, pair
-        except Exception:
+        except Exception as exc:
             # 通信失敗（timeout/TLS/DNS/proxy 等）。baseline が通った後に個々の攻撃
             # payload が落ちたケースでも、呼び出し側が「済み」記録して attack 未実行の
             # 点を resume 恒久スキップしないよう、失敗を engine に記録する（Codex #99 R4）。
@@ -984,6 +996,9 @@ class BaseScanner(ABC):
                 self.engine._json_probe_failed = True
             except Exception:
                 pass
+            self._record_scan_note(
+                f"transport_error:{self.CHECK_TYPE}:{type(exc).__name__}"
+            )
             return "", {}
 
     async def run_equivalence_probe(

@@ -213,6 +213,15 @@ class AgentEngine:
             summary_path = self.output_dir / "agent_summary.md"
             summary_path.write_text(result.final_summary, encoding="utf-8")
 
+        # 初期化・実行のハードエラーを「0 finding の正常完了」に見せない。
+        # evidence は残すが、成功レポートと完了イベントは生成しない。
+        if result.error:
+            if self.monitor:
+                await self.monitor.emit_status(
+                    f"Agent scan FAILED: {result.error}", "error"
+                )
+            return result
+
         # Generate HTML report
         gen = ReportGenerator(self.output_dir)
         report_path = gen.generate(
