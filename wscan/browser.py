@@ -1816,10 +1816,23 @@ class BrowserManager:
                 )
                 state_pos = m.end()
                 in_string = string_quote is not None
+                match_text = m.group(0)
+                # コメント（`//`・`/* */`）は url_re の match として現れる。文字列外の
+                # コメントは終端まで読み飛ばし、内部の引用符/バッククォートが文字列状態を
+                # 汚染して後続の実ルートを隠すのを防ぐ（Codex #100 R14）。
+                if not in_string and match_text[:2] in ("//", "/*"):
+                    if match_text[:2] == "//":
+                        j = scan_body.find("\n", m.end())
+                    else:
+                        j = scan_body.find("*/", m.end())
+                        j = j + 2 if j >= 0 else -1
+                    comment_end = len(scan_body) if j < 0 else j
+                    state_pos = comment_end
+                    skip_until = max(skip_until, comment_end)
+                    continue
                 # 直前に切り詰めた regex リテラルの内部（escaped slash 後の再抽出片など）は飛ばす。
                 if m.start() < skip_until:
                     continue
-                match_text = m.group(0)
                 preceding = scan_body[max(0, m.start() - 64):m.start()]
                 # 0009 C1: url_re は regex メタ文字（| [ ] \ ^ { }）の手前で match を
                 # 打ち切るため、`/foo|bar/`→`/foo` のように切り詰めた regex 片が一見正常な

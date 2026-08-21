@@ -259,6 +259,8 @@ class CollectUrlsFromAssetsIntegrationTests(unittest.TestCase):
             "const routes = `name: /tmpl/users/`;"
             # 均衡した非空括弧を持つ実ルート（区切り直後の ( ）。
             "fetch('/docs/(archived)/index');"
+            # ブロックコメント内のバッククォートが後続のテンプレートルートを隠さない（R14）。
+            "/* note ` x */ const t = `p: /cmtbq/list/`;"
             # OData/関数の末尾括弧を持つ実ルート（文字列リテラル由来 → 残す）。
             "fetch('/Products(1)'); fetch('/odata/GetDefault()');"
         )
@@ -306,6 +308,8 @@ class CollectUrlsFromAssetsIntegrationTests(unittest.TestCase):
         # テンプレートリテラル内のルート・均衡括弧ルートも残す（R13）。
         self.assertIn("http://juice-shop.test/tmpl/users/", found)
         self.assertIn("http://juice-shop.test/docs/(archived)/index", found)
+        # コメント内バッククォートの後のテンプレートルートも残す（R14）。
+        self.assertIn("http://juice-shop.test/cmtbq/list/", found)
         # OData/関数の末尾括弧を持つ実ルートは残る（C1-g）。
         self.assertIn("http://juice-shop.test/Products(1)", found)
         self.assertIn("http://juice-shop.test/odata/GetDefault()", found)

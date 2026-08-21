@@ -176,6 +176,8 @@ def advance_string_state(body: str, start: int, end: int, quote):
     （`browser._collect_urls_from_loaded_assets`）が finditer の各 match 間の gap を順に渡すと、
     本文先頭からの正確な文字列状態を O(n) で持ち越せる（url_re の match は引用符を含まないため
     状態変化は gap のみ）。これにより「match が文字列/テンプレート内か」を窓に頼らず判定できる。
+    コメント（`//`・`/* */`）は url_re の match として現れるため、呼び出し側が match ごとに読み飛ばす
+    （内部の引用符/バッククォートを文字列状態に混入させない）。
     """
     i = start
     n = min(end, len(body))
