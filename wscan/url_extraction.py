@@ -105,10 +105,38 @@ def truncated_regex_literal(next_char: str) -> bool:
 # JS で正規表現リテラルを導く（`/` の直前に来うる）文脈文字。文字列リテラルの直前は引用符
 # や識別子なので、これらと区別できる。空白は読み飛ばして直前の非空白文字を見る。
 _REGEX_CONTEXT_PREV = frozenset("=(,:[!&|?{;<>~^*%")
+# `return /re/` のように regex を導く式キーワード。直前トークンがこれらでも regex 文脈。
+_REGEX_PRECEDING_KEYWORDS = frozenset({
+    "return", "throw", "yield", "typeof", "case", "delete", "void",
+    "in", "of", "new", "do", "else", "instanceof",
+})
 # 閉じた正規表現リテラルの形 `/…/flags`。flags は現行の全 JS フラグ（d/g/i/m/s/u/v/y）。
 # url_re 文字だけで構成される `/foo.bar/` `/foo$/` `/foo+/` `/foo*/` `/foo/d` 等は切り詰められない
 # ので、この形＋文脈で判定する。
 _REGEX_LITERAL_SHAPE = re.compile(r"^/.+/[dgimsuvy]*$")
+# メソッド呼び出しで使う regex（`/foo/.test(x)`）は url_re が suffix まで取り込み末尾一致しない。
+# 「閉じた `/…/flags` の直後にメンバアクセス `.`」の形も regex リテラルとして扱う。
+_REGEX_MEMBER_CALL = re.compile(r"^/.+?/[dgimsuvy]*\.")
+_IDENTIFIER_TAIL = re.compile(r"[A-Za-z_$][A-Za-z0-9_$]*$")
+
+
+def _preceding_is_regex_context(preceding_text: str) -> bool:
+    """match 直前のテキストが JS 正規表現を導く文脈かを返す（純粋）。
+
+    末尾空白を読み飛ばし、(1) 直前文字が regex 文脈演算子 `_REGEX_CONTEXT_PREV`、または
+    (2) 直前トークンが `return`/`throw`/`yield` 等の式キーワード、または (3) 行頭/式先頭
+    （空）なら True。文字列リテラル由来（直前が引用符や通常の識別子）は False。
+    """
+    stripped = preceding_text.rstrip(" \t\r\n")
+    if not stripped:
+        return True
+    last = stripped[-1]
+    if last in _REGEX_CONTEXT_PREV:
+        return True
+    m = _IDENTIFIER_TAIL.search(stripped)
+    if m and m.group(0) in _REGEX_PRECEDING_KEYWORDS:
+        return True
+    return False
 
 
 def preceding_nonspace(body: str, index: int) -> str:
@@ -119,18 +147,24 @@ def preceding_nonspace(body: str, index: int) -> str:
     return body[i] if i >= 0 else ""
 
 
-def is_regex_literal_extraction(prev_context: str, match_text: str) -> bool:
+def is_regex_literal_extraction(preceding_text: str, match_text: str) -> bool:
     """抽出 match が JS 正規表現リテラルらしいかを、直前文脈と形で判定する（純粋）。
 
     切り詰められない完全な regex リテラル（`/foo.bar/` 等、url_re 文字のみ）は content だけでは
-    実ルートと区別できないため、**直前が regex を導く文脈**（`= ( , : [ ! & | ? { ; < > ~ ^ * %`／
-    行頭）で、かつ match が閉じた `/…/flags` の形のときに regex と見なす。文字列リテラル由来
-    （直前が引用符/識別子）は除外される。完全な判別には JS 字句解析が要るため保守的で、
-    取りこぼした regex は下流 crawl が 404 で落とす（実ルートを誤除去しないことを優先）。
+    実ルートと区別できないため、**直前が regex を導く文脈**（演算子・式キーワード `return`/`throw`
+    等・行頭）で、かつ match が (a) 閉じた `/…/flags` の形、または (b) その直後にメンバ呼び出し
+    `.`（`/foo/.test(x)`）のときに regex と見なす。文字列リテラル由来（直前が引用符/通常の識別子）
+    は除外される。完全な判別には JS 字句解析が要るため保守的で、取りこぼした regex は下流 crawl
+    が 404 で落とす（実ルートを誤除去しないことを優先）。
+
+    ``preceding_text`` は match 直前のテキスト（末尾数十文字で十分）。後方互換で単一文字も可。
     """
-    if prev_context and prev_context not in _REGEX_CONTEXT_PREV:
+    if not _preceding_is_regex_context(preceding_text):
         return False
-    return bool(_REGEX_LITERAL_SHAPE.match(match_text))
+    return bool(
+        _REGEX_LITERAL_SHAPE.match(match_text)
+        or _REGEX_MEMBER_CALL.match(match_text)
+    )
 
 
 def strip_trailing_noise(candidate: str) -> str:

@@ -22,7 +22,6 @@ from .url_extraction import (
     is_plausible_route_candidate,
     truncated_regex_literal,
     is_regex_literal_extraction,
-    preceding_nonspace,
     strip_trailing_noise,
 )
 
@@ -1812,11 +1811,12 @@ class BrowserManager:
                 # 末尾ノイズだけ剥がす（均衡した OData/関数の閉じ括弧は残す）。url_re は `;`
                 # 等も取り込むため、regex 形判定の前に剥がしておく（`/re/g;`→`/re/g`）。
                 candidate = strip_trailing_noise(match_text)
-                # 切り詰められない完全な regex リテラル（`/foo.bar/` 等、url_re 文字のみ）は
-                # content で実ルートと区別できないため、直前の文脈（regex を導く演算子）＋
-                # `/…/flags` の形で判定して弾く。文字列リテラル由来の実ルートは残る。
+                # 切り詰められない完全な regex リテラル（`/foo.bar/`・`return /re/`・`/re/.test(x)`）は
+                # content で実ルートと区別できないため、直前の文脈（regex を導く演算子/式キーワード）
+                # ＋`/…/flags`（もしくはメンバ呼び出し）の形で判定して弾く。文字列リテラル由来の
+                # 実ルートは残る。直前の式キーワード検出のため 1 文字でなくテキスト窓を渡す。
                 if is_regex_literal_extraction(
-                    preceding_nonspace(scan_body, m.start()), candidate
+                    scan_body[max(0, m.start() - 24):m.start()], candidate
                 ):
                     continue
                 try:

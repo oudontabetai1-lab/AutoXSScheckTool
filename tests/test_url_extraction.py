@@ -124,6 +124,17 @@ class PlausibleRouteCandidateTests(unittest.TestCase):
         self.assertFalse(is_regex_literal_extraction("o", "/foo/"))  # 識別子直後
         # 形が /…/ でない（末尾が / でない実ルート）→ 文脈が regex でも対象外。
         self.assertFalse(is_regex_literal_extraction("=", "/rest/products/search"))
+        # 式キーワード直後の regex（return/throw/yield 等）も文脈として認識（Codex #100 R6）。
+        for kw in ("return", "throw ", "yield", "typeof", "x=case", "instanceof"):
+            with self.subTest(kw=kw):
+                self.assertTrue(is_regex_literal_extraction(kw, "/foo/"))
+        # 通常の識別子直後（メソッド名等）は regex 文脈ではない → 実ルート扱い。
+        self.assertFalse(is_regex_literal_extraction("myfunc", "/foo/"))
+        # メンバ呼び出しで使う regex（/foo/.method(x)）も形として認識（Codex #100 R6）。
+        self.assertTrue(is_regex_literal_extraction("=", "/foo/.test(value)"))
+        self.assertTrue(is_regex_literal_extraction("return", "/foo/g.match(s)"))
+        # 行頭（式先頭）も regex 文脈。
+        self.assertTrue(is_regex_literal_extraction("", "/foo/"))
 
     def test_truncated_regex_literal_detects_continuation_chars(self):
         # regex 継続文字（url_re が手前で切る）→ 切り詰めと判定。
@@ -164,6 +175,8 @@ class CollectUrlsFromAssetsIntegrationTests(unittest.TestCase):
             "var a=/foo|bar/; var b=/abc[0-9]/;"
             # 切り詰められない完全な regex リテラル（url_re 文字のみ）。直前の文脈で弾く。
             "var c=/zab.qux/g; if(s.match(/quux$/)){}"
+            # 式キーワード直後・メンバ呼び出しの regex も文脈で弾く。
+            "function f(){return /retpat.x/;} var q=/membpat.x/.test(z);"
             # OData/関数の末尾括弧を持つ実ルート（文字列リテラル由来 → 残す）。
             "fetch('/Products(1)'); fetch('/odata/GetDefault()');"
         )
@@ -194,6 +207,9 @@ class CollectUrlsFromAssetsIntegrationTests(unittest.TestCase):
         # 切り詰められない完全な regex リテラル（/zab.qux/・/quux$/）も文脈で弾く。
         self.assertFalse(any("zab.qux" in u for u in found), f"regex /zab.qux/ が残った: {found}")
         self.assertFalse(any("quux" in u for u in found), f"regex /quux$/ が残った: {found}")
+        # 式キーワード直後・メンバ呼び出しの regex も弾く。
+        self.assertFalse(any("retpat" in u for u in found), f"return /re/ が残った: {found}")
+        self.assertFalse(any("membpat" in u for u in found), f"/re/.method() が残った: {found}")
         # OData/関数の末尾括弧を持つ実ルートは残る（C1-g）。
         self.assertIn("http://juice-shop.test/Products(1)", found)
         self.assertIn("http://juice-shop.test/odata/GetDefault()", found)
