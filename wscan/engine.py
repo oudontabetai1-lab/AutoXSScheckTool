@@ -5099,7 +5099,18 @@ class ScanEngine:
 
         verifier = getattr(scanner, "verify_finding", None)
         if verifier:
+            # json verify 中に失効/transport 失敗が起きたら、汎用フォールバック
+            # （下の _apply_ip 再送）へ落とさず terminal な "assumed"（penalize しない
+            # indeterminate）にする。scanner の verify が None を返しても _verify_one は
+            # 既定でフォールバックを実行し、401/空応答を脆弱性応答として評価して
+            # unreproduced にしてしまうため（Codex #99 R6）。
+            self._api_auth_failed = False
+            self._json_probe_failed = False
             scanner_result = await verifier(f)
+            if scanner_result is None and (
+                self._api_auth_failed or self._json_probe_failed
+            ):
+                return "assumed"
             if scanner_result is not None:
                 # SSTI has an HTTP-level fallback below for URL parameters. Use
                 # it when browser-based scanner verification could not reproduce
@@ -5174,8 +5185,17 @@ class ScanEngine:
         try:
             await self.browser.navigate(f.url, retries=self.navigation_retries)
             self.browser.reset_dialog()
+            self._api_auth_failed = False
+            self._json_probe_failed = False
             source, pair = await scanner._apply_ip(ip, f.payload)
             await asyncio.sleep(self._effective_delay)
+
+            # 汎用フォールバックの json 再送でも失効/transport 失敗を拾い、401/空応答を
+            # 脆弱性応答として評価せず terminal な "assumed" へ倒す（Codex #99 R6）。
+            if ip.location == "json_body" and (
+                self._api_auth_failed or self._json_probe_failed
+            ):
+                return "assumed"
 
             if f.check_type == "xss":
                 reproduced = self.browser.dialog_fired or bool(

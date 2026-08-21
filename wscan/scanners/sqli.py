@@ -623,9 +623,25 @@ class SQLiScanner(BaseScanner):
             # ことを要求する。恒常的に遅いだけのエンドポイント（対照との差が小さい）を
             # time-based 陽性と誤判定しないため（注入 SLEEP は約3秒なので 2 秒の差を要求）。
             await self.log_payload_test(finding.field_name, "1", "sqli_verify_control", finding.url)
+            if ip.location == "json_body":
+                try:
+                    self.engine._api_auth_failed = False
+                    self.engine._json_probe_failed = False
+                except Exception:
+                    pass
             _, control_pair = await self._apply_ip(ip, "1")
+            # 対照リクエストが transport 失敗/失効したら、有効な対照を測れない。恒常的に
+            # 遅いだけの endpoint を「対照が無いから」reproduced と誤確認しないよう、
+            # indeterminate(None)を返す（_verify_one が terminal な assumed にする。Codex #99 R6）。
+            if ip.location == "json_body" and (
+                getattr(self.engine, "_api_auth_failed", False)
+                or getattr(self.engine, "_json_probe_failed", False)
+            ):
+                return None
             control_elapsed = self.response_elapsed(control_pair)
-            if control_elapsed is not None and (sleep_elapsed - control_elapsed) < 2.0:
+            if control_elapsed is None:
+                return None  # 対照を測れない＝confirm できない（偽陽性回避）
+            if (sleep_elapsed - control_elapsed) < 2.0:
                 return False
             return True
         if etype == "sqli_auth_bypass":

@@ -373,6 +373,35 @@ class InjectionPointRoutingTests(unittest.IsolatedAsyncioTestCase):
         findings = await sqli.scan_injection_point(ip, {"name": "name", "type": "text"})
         self.assertEqual(findings, [])
 
+    async def test_json_time_control_failure_returns_none(self):
+        # time-based verify: 対照(control)リクエストが transport 失敗したら、有効な対照を
+        # 測れないので reproduced と誤確認せず None（→ _verify_one が assumed）にする。
+        engine = _Engine()
+        engine.injection_templates["t"] = {}
+        engine._api_auth_failed = False
+        engine._json_probe_failed = False
+        sqli = SQLiScanner(engine)
+
+        calls = {"n": 0}
+
+        async def _ai(ip, payload, **kw):
+            calls["n"] += 1
+            if calls["n"] == 1:  # 初回 SLEEP replay: 十分に遅い
+                return "slow", {"request": {"timestamp": 100.0},
+                                "response": {"timestamp": 103.0, "body": "slow"}}
+            engine._json_probe_failed = True  # control が transport 失敗
+            return "", {}
+
+        sqli._apply_ip = _ai
+        finding = Finding(
+            check_type="sqli", severity="high", url="https://example.test/api",
+            field_name="target", payload="1' AND SLEEP(3)--", evidence="t",
+            evidence_type="sqli_time", injection_location="json_body",
+            injection_pointer="/x", injection_method="POST", injection_template_id="t",
+            evidence_details={"threshold_seconds": 2.5},
+        )
+        self.assertIsNone(await sqli.verify_finding(finding))
+
     async def test_json_boolean_verify_auth_failure_midsequence_returns_none(self):
         # boolean verify は初回 replay の後に baseline/true/false と複数回 replay する。
         # 途中(true/false)で失効しても、login/401 本文を SQL 応答と比較せず None を返す。
