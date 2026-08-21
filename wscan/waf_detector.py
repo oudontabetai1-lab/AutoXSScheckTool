@@ -133,12 +133,6 @@ class WAFDetector:
             ) as client:
                 # First: normal request (collect always-present WAF headers)
                 resp = await client.get(url)
-                # follow_redirects により最終到達した origin を記録（WAF 帰属用）。
-                try:
-                    from wscan.header_scope import _url_origin
-                    self._detected_origin = _url_origin(str(resp.url)) or None
-                except Exception:
-                    self._detected_origin = None
                 normal_headers = {k.lower(): v.lower() for k, v in resp.headers.items()}
                 normal_body = resp.text[:5000].lower()
 
@@ -152,6 +146,14 @@ class WAFDetector:
                 resp2 = await client.get(probe_url)
                 waf_headers = {k.lower(): v.lower() for k, v in resp2.headers.items()}
                 waf_body = resp2.text[:5000].lower()
+                # 一致した応答の origin を帰属に使う（normal と probe が別 origin に
+                # 到達し得るため、どちらで当たったかで記録を分ける）。
+                try:
+                    from wscan.header_scope import _url_origin
+                    normal_origin = _url_origin(str(resp.url)) or None
+                    probe_origin = _url_origin(str(resp2.url)) or None
+                except Exception:
+                    normal_origin = probe_origin = None
         except Exception:
             return None
 
@@ -160,9 +162,11 @@ class WAFDetector:
             header_str = " ".join(f"{k}: {v}" for k, v in waf_headers.items())
             if header_pat and re.search(header_pat, header_str, re.IGNORECASE):
                 self._detected = name
+                self._detected_origin = probe_origin
                 return name
             if body_pat and re.search(body_pat, waf_body, re.IGNORECASE):
                 self._detected = name
+                self._detected_origin = probe_origin
                 return name
 
         # Check normal response headers too (some WAFs add headers always)
@@ -172,6 +176,7 @@ class WAFDetector:
             header_str = " ".join(f"{k}: {v}" for k, v in normal_headers.items())
             if re.search(header_pat, header_str, re.IGNORECASE):
                 self._detected = name
+                self._detected_origin = normal_origin
                 return name
 
         return None
