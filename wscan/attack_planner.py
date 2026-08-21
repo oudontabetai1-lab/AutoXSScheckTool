@@ -69,6 +69,39 @@ def extract_tech_headers(headers: dict) -> dict:
     return out
 
 
+def _escape_ptr_token(token) -> str:
+    """RFC6901 の JSON Pointer トークンをエスケープ（~→~0, /→~1）。純粋。"""
+    return str(token).replace("~", "~0").replace("/", "~1")
+
+
+def _json_leaf_pointers(obj, *, max_pointers: int = 12, max_depth: int = 4) -> list[str]:
+    """JSON body を RFC6901 の leaf pointer 群へ平坦化する（純粋・bounded）。
+
+    dict は各キー、list は先頭要素へ再帰。深さ/件数の上限で肥大・DoS を防ぐ。
+    harvest 済み JSON 注入点（例 ``/profile/email``）と表現を一致させる。
+    """
+    out: list[str] = []
+
+    def rec(node, prefix: str, depth: int) -> None:
+        if len(out) >= max_pointers:
+            return
+        if isinstance(node, dict) and node and depth < max_depth:
+            for k in node.keys():
+                if len(out) >= max_pointers:
+                    return
+                rec(node[k], prefix + "/" + _escape_ptr_token(k), depth + 1)
+        elif isinstance(node, list) and node and depth < max_depth:
+            rec(node[0], prefix + "/0", depth + 1)
+        else:
+            out.append(prefix or "/")
+
+    try:
+        rec(obj, "", 0)
+    except Exception:
+        return out
+    return out
+
+
 def summarize_api_schema(json_points, api_seed_requests=None, *, max_lines: int = 8) -> list[str]:
     """JSON body 注入点を代表的な ``METHOD path — pointers`` 行に要約する（純粋）。"""
     from urllib.parse import urlparse
@@ -107,8 +140,7 @@ def summarize_api_schema(json_points, api_seed_requests=None, *, max_lines: int 
                 grouped[key] = []
                 order.append(key)
             if isinstance(body, dict):
-                for bkey in body.keys():
-                    pointer = "/" + str(bkey)
+                for pointer in _json_leaf_pointers(body):
                     if pointer not in grouped[key]:
                         grouped[key].append(pointer)
         except Exception:

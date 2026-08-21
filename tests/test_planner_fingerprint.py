@@ -97,6 +97,31 @@ def test_summarize_api_schema_merges_points_and_seeds_by_endpoint():
     ]
 
 
+def test_summarize_api_schema_enumerates_nested_and_array_leaves():
+    # ネスト dict/配列は harvest 側の leaf pointer 表現（/profile/email, /tags/0）に揃える。
+    seeds = [
+        SimpleNamespace(
+            method="POST",
+            url="https://example.test/api/users",
+            json_body={"profile": {"email": "x"}, "tags": ["a", "b"], "id": 1},
+        ),
+    ]
+    assert summarize_api_schema([], seeds) == [
+        "POST /api/users — JSON fields: /profile/email, /tags/0, /id",
+    ]
+
+
+def test_json_leaf_pointers_bounds_depth_and_count():
+    from wscan.attack_planner import _json_leaf_pointers
+    # 深さ上限を超える枝は leaf ではなくその時点のノードで打ち切る（bounded）。
+    deep = {"a": {"b": {"c": {"d": {"e": 1}}}}}
+    ptrs = _json_leaf_pointers(deep, max_depth=2)
+    assert ptrs == ["/a/b"]
+    # 件数上限。
+    wide = {f"k{i}": i for i in range(20)}
+    assert len(_json_leaf_pointers(wide, max_pointers=5)) == 5
+
+
 def test_build_planner_fingerprint_includes_detected_context_and_sanitizes():
     cms = SimpleNamespace(
         name="Word`Press",
