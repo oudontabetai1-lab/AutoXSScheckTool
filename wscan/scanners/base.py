@@ -265,16 +265,20 @@ def _augment_dedup_key(
     injection_location: str,
     injection_method: str,
     injection_pointer: str,
+    injection_template_id: str = "",
 ) -> tuple:
-    """JSON body 注入点の dedup identity を method+pointer で拡張する（純粋）。
+    """JSON body 注入点の dedup identity を method+pointer+operation で拡張する（純粋）。
 
     同一 leaf 名(例 /profile/id と /billing/id が共に field_name="id")でも別入力
-    なので取りこぼさない。form/url_param は base のまま(4-tuple)。record_finding・
-    finding_dedup_key_for(engine の _record_finding/_init_checkpoint 経由)の**全 dedup
-    地点で同一キー**になるよう、この 1 箇所に集約する。
+    なので取りこぼさない。さらに同一 (method,url,pointer) でも body 構造の異なる別
+    operation(別 template)は別脆弱性なので、operation identity(`template_id`)も含めて
+    2 件目が重複として捨てられるのを防ぐ(checkpoint キーの B2-1 と対で揃える)。
+    form/url_param は base のまま(4-tuple)。record_finding・finding_dedup_key_for
+    (engine の _record_finding/_init_checkpoint 経由)の**全 dedup 地点で同一キー**に
+    なるよう、この 1 箇所に集約する。template_id 空なら従来どおり(後方互換)。
     """
     if injection_location == "json_body":
-        return base + (injection_method, injection_pointer)
+        return base + (injection_method, injection_pointer, injection_template_id)
     return base
 
 
@@ -289,6 +293,7 @@ def finding_dedup_key_for(finding: "Finding") -> tuple:
         getattr(finding, "injection_location", ""),
         getattr(finding, "injection_method", ""),
         getattr(finding, "injection_pointer", ""),
+        getattr(finding, "injection_template_id", ""),
     )
 
 
@@ -1165,6 +1170,7 @@ class BaseScanner(ABC):
             injection_point.location if injection_point is not None else "",
             injection_point.method if injection_point is not None else "",
             injection_point.parameter_id if injection_point is not None else "",
+            injection_point.template_id if injection_point is not None else "",
         )
         if dedup_key in self.engine._finding_dedup:
             return None  # duplicate

@@ -1374,7 +1374,14 @@ class ScanEngine:
         """SPA が収穫した JSON body 注入点を対応スキャナで実スキャンする。"""
         if not self.json_injection_points:
             return
+        # operator が skip_page したら、その URL に属する残り全 pointer を飛ばす。
+        # 1 endpoint = 複数 pointer(注入点)なので、inner break だけでは同一 URL の別
+        # pointer に侵襲リクエストが続いてしまう（_run_api_template_checks は URL 単位
+        # ループなので continue で足りるが、こちらは pointer 単位ループのため URL で括る）。
+        skipped_urls: set[str] = set()
         for ip in self.json_injection_points:
+            if ip.url in skipped_urls:
+                continue
             for check_name in _JSON_INJECTION_CHECKS:
                 scanner = self.scanners.get(check_name)
                 if scanner is None or not getattr(scanner, "SUPPORTS_JSON_BODY", False):
@@ -1384,14 +1391,20 @@ class ScanEngine:
                 except SkipField:
                     continue
                 except SkipPage:
+                    skipped_urls.add(ip.url)
                     break
                 await self._maybe_relogin_for_page(ip.url)
                 try:
                     await self._sync_cookies_from_browser(self.browser, for_url=ip.url)
                 except Exception:
                     pass
+                # 再認証に失敗したまま probe を送ると、保護エンドポイントの 401/redirect を
+                # 「陰性」と誤記録し resume で恒久スキップしてしまう。api-template と同じく
+                # 認証失敗単位は完了記録しない（送信不能と同格の偽陰性防止）。
+                auth_failed = False
                 if await self._api_session_looks_expired(ip.url):
-                    await self._force_relogin(for_url=ip.url)
+                    if not await self._force_relogin(for_url=ip.url):
+                        auth_failed = True
                 if self._checkpoint_is_done_ip(ip, check_name):
                     continue
                 field = {"name": ip.display_name or ip.parameter_id}
@@ -1407,8 +1420,9 @@ class ScanEngine:
                         f"  [yellow]JSON injection ({check_name}) on {ip.url}: {exc}[/yellow]"
                     )
                 else:
-                    # template 不在は送信不能であり、陰性として完了記録しない。
-                    if ip.template_id in (
+                    # 再認証失敗（未認証空振り）や template 不在（送信不能）は陰性として
+                    # 完了記録しない（resume で再試行できるよう残す）。
+                    if not auth_failed and ip.template_id in (
                         getattr(self, "injection_templates", {}) or {}
                     ):
                         self._checkpoint_mark_done_ip(ip, check_name)
