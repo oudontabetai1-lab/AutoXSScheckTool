@@ -295,6 +295,20 @@ class FindingInjectionProvenanceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ip.location, "form")
         self.assertEqual(ip.form_index, 3)
 
+    def test_verify_injection_point_form_restores_dom_index(self):
+        # verify 再送は復元 ip の submit_index で正しい DOM フォームへ送る。
+        # form_index(checkpoint/plan/台帳)は据え置き、dom_index が別なら submit_index は dom 側。
+        scanner = _Scanner(_Engine())
+        finding = Finding(
+            check_type="xss", severity="high", url="http://h/feedback",
+            field_name="msg", payload="<b>x</b>", evidence="e",
+            injection_location="form", injection_form_index=0, injection_dom_index=1,
+        )
+        ip = scanner._verify_injection_point(finding, is_url_param=False)
+        self.assertIsNotNone(ip)
+        self.assertEqual(ip.form_index, 0)
+        self.assertEqual(ip.submit_index, 1)
+
     def test_verify_injection_point_url_param_from_provenance(self):
         scanner = _Scanner(_Engine())
         finding = Finding(

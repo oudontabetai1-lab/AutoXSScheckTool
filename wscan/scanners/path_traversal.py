@@ -117,6 +117,7 @@ class PathTraversalScanner(BaseScanner):
                 ip.form_index,
                 ip.parameter_id,
                 ip.legacy_is_url_param(),
+                dom_index=ip.submit_index,
             )
             for payload in extra_payloads:
                 if await _test_payload(payload, "path_traversal_evolved"):

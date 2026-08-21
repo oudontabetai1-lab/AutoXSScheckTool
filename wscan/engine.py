@@ -1410,11 +1410,14 @@ class ScanEngine:
         field_name: str,
         form_index: int,
         is_url_param: bool,
+        dom_index: int = -1,
     ):
         """従来 form/URL parameter から InjectionPoint を一意に生成する。"""
         if is_url_param:
             return InjectionPoint.for_url_param(url, field_name)
-        return InjectionPoint.for_form(url, field_name, form_index)
+        return InjectionPoint.for_form(
+            url, field_name, form_index, dom_index=dom_index
+        )
 
     def _checkpoint_is_done_ip(self, ip, check: str) -> bool:
         if not self.enable_checkpoint or self.checkpoint is None:
@@ -3893,21 +3896,22 @@ class ScanEngine:
         # Build ordered field list
         field_queue: list = []
         for fi, form in enumerate(forms):
+            dom_idx = form.get("index", fi)
             for inp in form.get("inputs", []):
-                field_queue.append((fi, inp, False))
+                field_queue.append((fi, dom_idx, inp, False))
         for param in page.url_params:
-            field_queue.append((0, {"name": param, "type": "text"}, True))
+            field_queue.append((0, 0, {"name": param, "type": "text"}, True))
 
         # Sort by risk score from the plan
         if plan:
             def _sort_key(item):
-                fi, inp, is_url = item
+                fi, _dom, inp, is_url = item
                 fp = plan.get_field_plan(inp.get("name", ""), fi, is_url)
                 return -(fp.risk_score if fp else 5)
             field_queue.sort(key=_sort_key)
 
         skipped = sum(
-            1 for _, inp, _ in field_queue
+            1 for _, _, inp, _ in field_queue
             if inp.get("name", "").lower() in self.exclude_fields
         )
         console.print(
@@ -3920,7 +3924,7 @@ class ScanEngine:
         # This prevents overcounting when multiple concurrent workers process
         # pages with overlapping URL params.
 
-        for fi, field, is_url_param in field_queue:
+        for fi, dom, field, is_url_param in field_queue:
             field_name = field.get("name", f"field_{fi}")
             key = (f"{page.url}||url_param||{field_name}" if is_url_param
                    else f"{page.url}||{fi}||{field_name}")
@@ -3949,7 +3953,14 @@ class ScanEngine:
 
             field_plan = plan.get_field_plan(field_name, fi, is_url_param) if plan else None
             try:
-                await self._scan_field(page.url, fi, field, is_url_param, field_plan)
+                await self._scan_field(
+                    page.url,
+                    fi,
+                    field,
+                    is_url_param,
+                    field_plan,
+                    dom_index=dom,
+                )
             except (AbortScan, SkipPage):
                 raise
             except Exception as e:
@@ -4003,6 +4014,7 @@ class ScanEngine:
         sqli_scanner = self.scanners.get("sqli")
 
         for fi, form in forms_to_test:
+            dom_idx = form.get("index", fi)
             inputs = [
                 inp for inp in form.get("inputs", [])
                 if inp.get("name", "").lower() not in self.exclude_fields
@@ -4053,7 +4065,9 @@ class ScanEngine:
                     continue
                 self.browser.reset_dialog()
 
-                source, pair = await self.browser.fill_and_submit_form_multi(fi, field_payloads)
+                source, pair = await self.browser.fill_and_submit_form_multi(
+                    dom_idx, field_payloads
+                )
                 await asyncio.sleep(self._effective_delay)
 
                 # CTF flag check on combined result
@@ -4152,10 +4166,13 @@ class ScanEngine:
         field: dict,
         is_url_param: bool = False,
         field_plan: Optional[FieldAttackPlan] = None,
+        dom_index: int = -1,
     ):
         """Run enabled scanners on a single field, guided by the attack plan."""
         field_name = field.get("name", "unknown")
-        ip = self._injection_point_for(url, field_name, form_index, is_url_param)
+        ip = self._injection_point_for(
+            url, field_name, form_index, is_url_param, dom_index
+        )
         location = "URL param" if is_url_param else "form field"
 
         if field_plan and field_plan.priority_checks:
@@ -4300,7 +4317,13 @@ class ScanEngine:
             and (checks_executed > 0 or checks_skipped_done > 0)
         ):
             adaptive_payloads = await self._adaptive_attack_field(
-                url, form_index, field, is_url_param, ordered_checks, field_plan
+                url,
+                form_index,
+                field,
+                is_url_param,
+                ordered_checks,
+                field_plan,
+                dom_index=dom_index,
             )
             # None はいずれかの check が未完、list は今回対象がすべて完了。
             # 完了記録自体は check_type ごとに _adaptive_attack_field が行う。
@@ -4328,6 +4351,7 @@ class ScanEngine:
         is_url_param: bool,
         check_names: list,
         field_plan: Optional[FieldAttackPlan],
+        dom_index: int = -1,
     ) -> Optional[list[str]]:
         """
         Phase 3b: Adaptive AI round.
@@ -4335,7 +4359,9 @@ class ScanEngine:
         context-aware bypass payloads, then run the scanner again with those payloads.
         """
         field_name = field.get("name", "unknown")
-        ip = self._injection_point_for(url, field_name, form_index, is_url_param)
+        ip = self._injection_point_for(
+            url, field_name, form_index, is_url_param, dom_index
+        )
 
         # provider 自体が使えない場合はフォールバック完了として収束させる。
         # 個別 generate() の一時失敗とは分離し、可用性 probe は scan 中に一度だけ行う。

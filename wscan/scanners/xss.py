@@ -319,6 +319,7 @@ class XSSScanner(BaseScanner):
                 ip.form_index,
                 ip.parameter_id,
                 ip.legacy_is_url_param(),
+                dom_index=ip.submit_index,
             )
             # 発火トリガで投入するペイロードには一意トークンを埋め、注入ハンドラ値を
             # payload 固有にする（ページ本来の alert(1) 等を発火・確証しないため）。
@@ -344,6 +345,7 @@ class XSSScanner(BaseScanner):
                     ip.parameter_id,
                     ip.legacy_is_url_param(),
                     context=ctx,
+                    dom_index=ip.submit_index,
                 )
                 if not probe:
                     continue
@@ -390,6 +392,7 @@ class XSSScanner(BaseScanner):
         is_url_param: bool,
         *,
         context: str = "sql",
+        dom_index: int | None = None,
     ) -> tuple | None:
         """等価性 probe の判定を保ち、送信だけ InjectionPoint 経由にする。"""
         from wscan import equivalence_probe as eqp
@@ -406,7 +409,12 @@ class XSSScanner(BaseScanner):
         ip = (
             InjectionPoint.for_url_param(url, field_name)
             if is_url_param
-            else InjectionPoint.for_form(url, field_name, form_index)
+            else InjectionPoint.for_form(
+                url,
+                field_name,
+                form_index,
+                dom_index=form_index if dom_index is None else dom_index,
+            )
         )
         probe_set = builder()
         responses: dict[str, str] = {}
@@ -434,6 +442,8 @@ class XSSScanner(BaseScanner):
         form_index: int,
         field_name: str,
         is_url_param: bool,
+        *,
+        dom_index: int | None = None,
     ) -> tuple[str, set[str], dict]:
         """文脈 probe の判定を保ち、送信だけ InjectionPoint 経由にする。"""
         try:
@@ -450,7 +460,12 @@ class XSSScanner(BaseScanner):
             ip = (
                 InjectionPoint.for_url_param(url, field_name)
                 if is_url_param
-                else InjectionPoint.for_form(url, field_name, form_index)
+                else InjectionPoint.for_form(
+                    url,
+                    field_name,
+                    form_index,
+                    dom_index=form_index if dom_index is None else dom_index,
+                )
             )
             source, pair = await self._apply_ip(ip, probe)
             response_source = (

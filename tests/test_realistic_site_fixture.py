@@ -48,6 +48,10 @@ class RealisticSiteFixtureTests(unittest.IsolatedAsyncioTestCase):
         resp = await self.client.get("/search", params={"q": "<script>alert(1)</script>"})
         self.assertIn("<script>alert(1)</script>", resp.text)
 
+    async def test_feedback_post_reflects_html_raw(self):
+        resp = await self.client.post("/feedback", data={"msg": "<b>x</b>"})
+        self.assertIn("<p>Received: <b>x</b></p>", resp.text)
+
     # ── インタラクション必須XSS（属性ブレイクアウト）───────────────────────
     async def test_track_strips_tags_but_keeps_quote_breakout(self):
         """アングルブラケットは除去されるが、クォートによる属性ブレイクアウトで

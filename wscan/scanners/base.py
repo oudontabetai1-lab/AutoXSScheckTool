@@ -320,6 +320,7 @@ class Finding:
     injection_method: str = ""         # JSON body 送信時の HTTP メソッド
     injection_template_id: str = ""    # 秘匿値を持たないテンプレート識別子
     injection_form_index: int = 0       # form 注入点の index（段階5b で記録）
+    injection_dom_index: int = -1       # DOM 上の実 form 位置。verify 再送の submit_index 復元用。-1=未指定→form_index にフォールバック
     # reproduced | assumed | unreproduced | skipped。既定は None sentinel で、__post_init__ が
     # 「新規 finding は必ず非空 state」を保証する（空文字は from_dict の旧 Finding 専用に予約）。
     verification_state: str = None
@@ -374,6 +375,7 @@ class Finding:
             injection_method=data.get("injection_method", ""),
             injection_template_id=data.get("injection_template_id", ""),
             injection_form_index=int(data.get("injection_form_index", 0) or 0),
+            injection_dom_index=int(data.get("injection_dom_index", -1)),
         )
 
     @property
@@ -425,6 +427,7 @@ class Finding:
             "injection_method": self.injection_method,
             "injection_template_id": self.injection_template_id,
             "injection_form_index": self.injection_form_index,
+            "injection_dom_index": self.injection_dom_index,
             "compliance_refs": get_refs(self.check_type),
         }
 
@@ -443,6 +446,7 @@ def injection_point_from_finding(finding: Finding) -> Optional[InjectionPoint]:
             finding.url,
             finding.field_name,
             finding.injection_form_index,
+            dom_index=getattr(finding, "injection_dom_index", -1),
         )
     if location == "url_param":
         return InjectionPoint.for_url_param(finding.url, finding.field_name)
@@ -571,7 +575,7 @@ class BaseScanner(ABC):
         else:
             source, pair = await self._apply_payload(
                 ip.url,
-                ip.form_index,
+                ip.submit_index,
                 ip.parameter_id,
                 payload,
                 ip.legacy_is_url_param(),
@@ -907,6 +911,7 @@ class BaseScanner(ABC):
         is_url_param: bool,
         *,
         context: str = "sql",
+        dom_index: int | None = None,
     ) -> "Optional[tuple]":
         """文字列結合の等価性プローブを 1 フィールドに対して実行する。
 
@@ -929,6 +934,7 @@ class BaseScanner(ABC):
             return None
 
         probe_set = builder()
+        dom = form_index if dom_index is None else dom_index
         responses: dict[str, str] = {}
         pairs: dict[str, dict] = {}
         for probe in probe_set.probes:
@@ -939,7 +945,7 @@ class BaseScanner(ABC):
             )
             try:
                 source, pair = await self._apply_payload(
-                    url, form_index, field_name, probe.value, is_url_param
+                    url, dom, field_name, probe.value, is_url_param
                 )
             except Exception:
                 continue
@@ -966,6 +972,8 @@ class BaseScanner(ABC):
         form_index: int,
         field_name: str,
         is_url_param: bool,
+        *,
+        dom_index: int | None = None,
     ) -> tuple[str, set[str], dict]:
         """文脈適応 payload 用の特殊文字生存 probe を投入する。
 
@@ -975,6 +983,7 @@ class BaseScanner(ABC):
         try:
             from wscan import context_mutator
 
+            dom = form_index if dom_index is None else dom_index
             marker = context_mutator.make_marker()
             probe = context_mutator.make_char_probe(marker)
             await self.log_payload_test(
@@ -988,7 +997,7 @@ class BaseScanner(ABC):
             else:
                 await self.browser.navigate(url)
                 source, pair = await self.browser.fill_and_submit_form(
-                    form_index,
+                    dom,
                     field_name,
                     probe,
                 )
@@ -1009,6 +1018,8 @@ class BaseScanner(ABC):
         form_index: int,
         field_name: str,
         is_url_param: bool,
+        *,
+        dom_index: int | None = None,
     ) -> list[str]:
         """追加 wave 用の決定論的 payload 候補を返す。
 
@@ -1025,6 +1036,7 @@ class BaseScanner(ABC):
                 form_index,
                 field_name,
                 is_url_param,
+                dom_index=dom_index,
             )
             marker = context.get("marker") or context_mutator.make_marker()
             payloads = context_mutator.mutate(
@@ -1206,6 +1218,11 @@ class BaseScanner(ABC):
                 injection_point.form_index
                 if injection_point and injection_point.location == "form"
                 else 0
+            ),
+            injection_dom_index=(
+                injection_point.dom_index
+                if injection_point and injection_point.location == "form"
+                else -1
             ),
         )
         self.findings.append(finding)
