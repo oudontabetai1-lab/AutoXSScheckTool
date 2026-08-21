@@ -320,6 +320,7 @@ class Finding:
     injection_method: str = ""         # JSON body 送信時の HTTP メソッド
     injection_template_id: str = ""    # 秘匿値を持たないテンプレート識別子
     injection_form_index: int = 0       # form 注入点の index（段階5b で記録）
+    injection_dom_index: int = -1       # DOM 上の実 form 位置。verify 再送の submit_index 復元用。-1=未指定→form_index にフォールバック
     # reproduced | assumed | unreproduced | skipped。既定は None sentinel で、__post_init__ が
     # 「新規 finding は必ず非空 state」を保証する（空文字は from_dict の旧 Finding 専用に予約）。
     verification_state: str = None
@@ -374,6 +375,7 @@ class Finding:
             injection_method=data.get("injection_method", ""),
             injection_template_id=data.get("injection_template_id", ""),
             injection_form_index=int(data.get("injection_form_index", 0) or 0),
+            injection_dom_index=int(data.get("injection_dom_index", -1)),
         )
 
     @property
@@ -425,6 +427,7 @@ class Finding:
             "injection_method": self.injection_method,
             "injection_template_id": self.injection_template_id,
             "injection_form_index": self.injection_form_index,
+            "injection_dom_index": self.injection_dom_index,
             "compliance_refs": get_refs(self.check_type),
         }
 
@@ -443,6 +446,7 @@ def injection_point_from_finding(finding: Finding) -> Optional[InjectionPoint]:
             finding.url,
             finding.field_name,
             finding.injection_form_index,
+            dom_index=getattr(finding, "injection_dom_index", -1),
         )
     if location == "url_param":
         return InjectionPoint.for_url_param(finding.url, finding.field_name)
@@ -1214,6 +1218,11 @@ class BaseScanner(ABC):
                 injection_point.form_index
                 if injection_point and injection_point.location == "form"
                 else 0
+            ),
+            injection_dom_index=(
+                injection_point.dom_index
+                if injection_point and injection_point.location == "form"
+                else -1
             ),
         )
         self.findings.append(finding)
