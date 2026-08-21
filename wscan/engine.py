@@ -4578,7 +4578,22 @@ class ScanEngine:
             from wscan.adaptive_observations import format_deterministic_observations
             _js_for_check = det_js_risks if check_name in _DOM_OBS_CHECKS else None
             det_obs = format_deterministic_observations(_js_for_check)
-            extra = "\n".join(x for x in (history_note, det_obs) if x)
+
+            # G6: WAF 検出時、試行台帳の per-payload status から passed/blocked を分けて
+            # WAF バイパス生成へ供給する（狙いを絞らせる）。best-effort・観測のみ。
+            waf_note = ""
+            try:
+                _waf = getattr(self.waf_detector, "_detected", None)
+                _ledger2 = getattr(self, "attempt_ledger", None)
+                if _waf and _ledger2 is not None:
+                    from wscan.waf_detector import format_waf_block_analysis
+                    waf_note = format_waf_block_analysis(
+                        _ledger2.history(ip.stable_key_parts(), check_name), _waf
+                    )
+            except Exception:
+                waf_note = ""
+
+            extra = "\n".join(x for x in (history_note, det_obs, waf_note) if x)
 
             # Ask LLM for bypass payloads (include detected WAF for targeted evasion)
             adaptive_payloads, generation_status = await self.adaptive_engine.generate(

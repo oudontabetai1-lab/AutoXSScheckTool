@@ -216,3 +216,72 @@ class WAFDetector:
         if self._detected:
             return f"WAF detected: {self._detected}"
         return "No WAF detected"
+
+
+# ── G6: WAF ブロック応答フィードバック（純関数・テスト可能） ──────────────
+# 生きた WAF バイパス経路は adaptive（AdaptivePayloadEngine.generate の waf_name 節）。
+# 試行台帳（G1/G2/G3）の per-payload status を使い、passed（アプリ到達）/ blocked
+# （WAF が弾いた）に分けて adaptive プロンプトへ供給し、狙いを絞らせる。
+# 判定はせず観測の整形のみ（通常層＝確実性、LLM は攻撃入力生成だけ）。
+
+def is_waf_block_attempt(status, error: bool = False) -> bool:
+    """1 試行が WAF ブロックらしいか（純粋）。WAF 検出済み前提で、payload 投入への
+    4xx/5xx 応答、または transport 失敗（接続 reset 等）をブロック扱いにする。"""
+    if error:
+        return True
+    if isinstance(status, int) and status >= 400:
+        return True
+    return False
+
+
+def _attempt_passed(status) -> bool:
+    return isinstance(status, int) and 200 <= status < 300
+
+
+def format_waf_block_analysis(entries, waf_name, *, max_each: int = 6, max_len: int = 120) -> str:
+    """試行台帳エントリ（.payload/.status/.error を持つ）を passed/blocked に分け、
+    adaptive プロンプト用の WAF フィードバック節へ整形する（純粋・bounded）。全空なら ""。"""
+    if not waf_name or not entries:
+        return ""
+
+    def _clip(p) -> str:
+        return str(p or "").replace("\r", " ").replace("\n", " ")[:max_len]
+
+    blocked: list[tuple[str, object]] = []
+    passed: list[str] = []
+    seen_b: set = set()
+    seen_p: set = set()
+    for e in entries:
+        try:
+            payload = _clip(getattr(e, "payload", ""))
+            status = getattr(e, "status", None)
+            error = bool(getattr(e, "error", False))
+        except Exception:
+            continue
+        if not payload:
+            continue
+        if is_waf_block_attempt(status, error):
+            if payload not in seen_b:
+                seen_b.add(payload)
+                blocked.append((payload, status if isinstance(status, int) else "no response"))
+        elif _attempt_passed(status):
+            if payload not in seen_p:
+                seen_p.add(payload)
+                passed.append(payload)
+
+    if not blocked and not passed:
+        return ""
+
+    lines: list[str] = [
+        f"## WAF ({str(waf_name)[:60]}) response analysis "
+        f"(prefer shapes that PASSED, avoid the BLOCKED ones)"
+    ]
+    if blocked:
+        lines.append("Payloads BLOCKED by the WAF (HTTP 4xx/5xx or dropped):")
+        for p, code in blocked[:max_each]:
+            lines.append(f"- {p}  -> {code}")
+    if passed:
+        lines.append("Payloads that PASSED to the application (HTTP 2xx):")
+        for p in passed[:max_each]:
+            lines.append(f"- {p}")
+    return "\n".join(lines)
