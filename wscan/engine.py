@@ -4401,6 +4401,55 @@ class ScanEngine:
                 message=f"{field_name} ({url})",
             )
 
+    async def _deterministic_field_observations(
+        self, page_html: str, url: str, field_name: str, is_url_param: bool, ip
+    ) -> str:
+        """G7: js_analysis(純粋)＋context_mutator(marker probe)の決定論観測を整形して返す。
+        失敗しても "" を返し adaptive を壊さない（加算的・例外保護）。"""
+        from wscan import context_mutator, js_analysis
+        from wscan.adaptive_observations import format_deterministic_observations
+
+        # (a) js_analysis: page_html のインライン script を静的解析（注入不要・純粋）
+        risks: list = []
+        try:
+            for body in js_analysis.extract_inline_scripts(page_html or ""):
+                risks.extend(js_analysis.analyze_js(body))
+        except Exception:
+            risks = []
+
+        # (b) context_mutator: marker probe で反射文脈・生存文字を観測（注入 1 回）。
+        #     enable_payload_evolution が有効なときだけ（同じ probe 機構の追加コストを尊重）。
+        context: dict = {}
+        surviving: set = set()
+        if getattr(self, "enable_payload_evolution", True):
+            try:
+                marker = context_mutator.make_marker()
+                probe = context_mutator.make_char_probe(marker)
+                if is_url_param:
+                    src, pair = await self.browser.test_url_param(url, field_name, probe)
+                else:
+                    await self.browser.navigate(url)
+                    submit_index = getattr(ip, "submit_index", 0)
+                    src, pair = await self.browser.fill_and_submit_form(
+                        submit_index, field_name, probe
+                    )
+                body = (pair.get("response", {}) or {}).get("body") or src or ""
+                surviving = context_mutator.surviving_chars(body, marker)
+                context = context_mutator.detect_context(body, marker)
+                # probe でページ状態が変わるため、後続の adaptive 検査のため元 URL へ戻す
+                # （best-effort。scanner 側も navigate するが安全側で復帰）。
+                try:
+                    await self.browser.navigate(url)
+                except Exception:
+                    pass
+            except Exception:
+                context, surviving = {}, set()
+
+        try:
+            return format_deterministic_observations(risks, context, surviving)
+        except Exception:
+            return ""
+
     async def _adaptive_attack_field(
         self,
         url: str,
@@ -4458,6 +4507,14 @@ class ScanEngine:
         except Exception:
             return None
 
+        det_obs = ""
+        try:
+            det_obs = await self._deterministic_field_observations(
+                page_html, url, field_name, is_url_param, ip
+            )
+        except Exception:
+            det_obs = ""
+
         generated_payloads: list[str] = []
         generation_failed = False
         for check_name in check_names:
@@ -4511,6 +4568,8 @@ class ScanEngine:
             except Exception:
                 history_note = ""
 
+            extra = "\n".join(x for x in (history_note, det_obs) if x)
+
             # Ask LLM for bypass payloads (include detected WAF for targeted evasion)
             adaptive_payloads, generation_status = await self.adaptive_engine.generate(
                 check_type=check_name,
@@ -4519,7 +4578,7 @@ class ScanEngine:
                 payloads_tried=tried,
                 page_html=page_html,
                 waf_name=self.waf_detector._detected,
-                extra_observations=history_note,
+                extra_observations=extra,
                 return_status=True,
             )
 
