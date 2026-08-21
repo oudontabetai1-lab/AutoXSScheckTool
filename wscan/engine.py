@@ -4584,12 +4584,19 @@ class ScanEngine:
             waf_note = ""
             try:
                 _waf = getattr(self.waf_detector, "_detected", None)
+                _waf_origin = getattr(self.waf_detector, "_detected_origin", None)
                 _ledger2 = getattr(self, "attempt_ledger", None)
-                if _waf and _ledger2 is not None:
-                    from wscan.waf_detector import format_waf_block_analysis
-                    waf_note = format_waf_block_analysis(
-                        _ledger2.history(ip.stable_key_parts(), check_name), _waf
-                    )
+                # WAF は primary target のみ probe しており _detected_origin が実際に
+                # 一致した origin。multi-origin では、このフィールドの origin が WAF probe
+                # origin と一致するときだけ WAF フィードバックを付ける（別 origin の履歴を
+                # primary の WAF 応答と誤帰属しない。G5 planner と同方針）。
+                if _waf and _waf_origin and _ledger2 is not None:
+                    from wscan.attack_planner import canonical_origin
+                    if canonical_origin(url) == _waf_origin:
+                        from wscan.waf_detector import format_waf_block_analysis
+                        waf_note = format_waf_block_analysis(
+                            _ledger2.history(ip.stable_key_parts(), check_name), _waf
+                        )
             except Exception:
                 waf_note = ""
 

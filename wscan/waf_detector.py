@@ -224,14 +224,18 @@ class WAFDetector:
 # （WAF が弾いた）に分けて adaptive プロンプトへ供給し、狙いを絞らせる。
 # 判定はせず観測の整形のみ（通常層＝確実性、LLM は攻撃入力生成だけ）。
 
+# WAF ブロックに特徴的な HTTP ステータス。403/406 は WAF が拒否する際の代表値。
+# 400/401/404/422/500 等はアプリ由来（バリデーション/認証/NotFound/サーバエラー）なので
+# ここに含めない（アプリに到達した payload を誤って「WAF に弾かれた」と扱わないため）。
+# body/一致ルールは試行台帳が非保持なので status ベースに留める（過剰ラベルより取りこぼし側）。
+_WAF_BLOCK_STATUSES = frozenset({403, 406})
+
+
 def is_waf_block_attempt(status, error: bool = False) -> bool:
-    """1 試行が WAF ブロックらしいか（純粋）。WAF 検出済み前提で、payload 投入への
-    4xx/5xx 応答、または transport 失敗（接続 reset 等）をブロック扱いにする。"""
-    if error:
-        return True
-    if isinstance(status, int) and status >= 400:
-        return True
-    return False
+    """1 試行が **WAF 固有の signal** でブロックされたか（純粋）。WAF 検出済み前提でも、
+    汎用のアプリエラー（400/401/404/422/500 等）や無関係な transport 失敗はブロックと
+    みなさない（unknown 扱い）。WAF 代表ステータス（403/406）のみ True。"""
+    return isinstance(status, int) and status in _WAF_BLOCK_STATUSES
 
 
 def _attempt_passed(status) -> bool:
@@ -247,7 +251,7 @@ def format_waf_block_analysis(entries, waf_name, *, max_each: int = 6, max_len: 
     def _clip(p) -> str:
         return str(p or "").replace("\r", " ").replace("\n", " ")[:max_len]
 
-    blocked: list[tuple[str, object]] = []
+    blocked: list[tuple[str, int]] = []
     passed: list[str] = []
     seen_b: set = set()
     seen_p: set = set()
@@ -255,15 +259,14 @@ def format_waf_block_analysis(entries, waf_name, *, max_each: int = 6, max_len: 
         try:
             payload = _clip(getattr(e, "payload", ""))
             status = getattr(e, "status", None)
-            error = bool(getattr(e, "error", False))
         except Exception:
             continue
         if not payload:
             continue
-        if is_waf_block_attempt(status, error):
+        if is_waf_block_attempt(status):
             if payload not in seen_b:
                 seen_b.add(payload)
-                blocked.append((payload, status if isinstance(status, int) else "no response"))
+                blocked.append((payload, status))
         elif _attempt_passed(status):
             if payload not in seen_p:
                 seen_p.add(payload)
@@ -277,7 +280,7 @@ def format_waf_block_analysis(entries, waf_name, *, max_each: int = 6, max_len: 
         f"(prefer shapes that PASSED, avoid the BLOCKED ones)"
     ]
     if blocked:
-        lines.append("Payloads BLOCKED by the WAF (HTTP 4xx/5xx or dropped):")
+        lines.append("Payloads BLOCKED by the WAF (HTTP 403/406):")
         for p, code in blocked[:max_each]:
             lines.append(f"- {p}  -> {code}")
     if passed:
