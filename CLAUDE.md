@@ -153,6 +153,7 @@ python main.py scan http://127.0.0.1:8000 --checks xss sqli --no-monitor --llm n
 | `payload_mutator.py` | **LLM不要**の決定論的ペイロード変異（シード→バイパス変種：二重エンコード/NULLバイト/バックスラッシュ/コメント挿入、純粋関数）。LLM版は `adaptive_payload.AdaptivePayloadEngine.mutate_payload` |
 | `waf_bypass.py` | **LLM不要**の純粋関数。WAF/入力フィルタ回避の種を生成。`crlf_bypass_variants`（メールヘッダ用の多様な改行表現：生CR/LF・%エンコード・二重エンコード・Unicode行区切り・オーバーロングUTF-8）と `upload_bypass_probes`（ファイルアップロード用：代替拡張子/大小混在/末尾ドット・空白/画像マジックバイトpolyglot/Content-Type偽装）。`mail_header`・`file_upload` スキャナが共有 |
 | `js_analysis.py` | **LLM不要**の純粋関数。JS ソースを静的解析し危険シンク×汚染ソースの source→sink を抽出（`js_static` スキャナの実体）。HTMLからのインラインscript抽出も提供 |
+| `url_extraction.py` | **LLM不要**の純粋関数。JS/JSON 資産から抽出した URL 候補のゴミ判定（0009 C1）。minified JS の regex リテラル/式片（`/(?:` `/16*(...` 等）を `/…` ルートと誤抽出したものを path 部のコードメタ文字で除去（`is_plausible_route_candidate`/`filter_route_candidates`）。`browser._collect_urls_from_loaded_assets` が使用。**保守側判定＝実ルートは落とさない**（到達性維持） |
 | `auth_detect.py` | ログイン成否判定の純粋関数（フォーム残存/失敗文言/ログインページ離脱/MFA を統合）。`browser.auto_login` の判定を集約 |
 | `payload_importer.py` | 公開ペイロード集(PaTT/SecLists)の取込ツール（`import-payloads` サブコマンドの実体） |
 | `equivalence_probe.py` | 文字列結合の等価性プローブ（SQLi/XSS 共通の純粋判定ロジック） |

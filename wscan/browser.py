@@ -18,6 +18,7 @@ from rich.console import Console
 
 from .header_scope import headers_allowed_for_url
 from .tls_config import TLSConfig
+from .url_extraction import is_plausible_route_candidate
 
 
 console = Console()
@@ -1802,7 +1803,13 @@ class BrowserManager:
                         continue
                     if ignored_ext.search(parsed.path):
                         continue
-                    discovered.append(resolved.split("#")[0])
+                    cleaned = resolved.split("#")[0]
+                    # 0009 C1: minified JS の regex リテラル/式片を `/…` ルートとして
+                    # 誤抽出したゴミを純粋関数で除去する（無駄クロール＋planner LLM 浪費＋
+                    # 実ルート到達阻害を防ぐ）。判定は保守的で実ルートは落とさない。
+                    if not is_plausible_route_candidate(cleaned):
+                        continue
+                    discovered.append(cleaned)
                 except Exception:
                     continue
         return discovered
