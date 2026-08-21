@@ -238,10 +238,6 @@ def is_waf_block_attempt(status, error: bool = False) -> bool:
     return isinstance(status, int) and status in _WAF_BLOCK_STATUSES
 
 
-def _attempt_passed(status) -> bool:
-    return isinstance(status, int) and 200 <= status < 300
-
-
 def format_waf_block_analysis(entries, waf_name, *, max_each: int = 6, max_len: int = 120) -> str:
     """試行台帳エントリ（.payload/.status/.error を持つ）を passed/blocked に分け、
     adaptive プロンプト用の WAF フィードバック節へ整形する（純粋・bounded）。全空なら ""。"""
@@ -251,26 +247,29 @@ def format_waf_block_analysis(entries, waf_name, *, max_each: int = 6, max_len: 
     def _clip(p) -> str:
         return str(p or "").replace("\r", " ").replace("\n", " ")[:max_len]
 
-    blocked: list[tuple[str, int]] = []
-    passed: list[str] = []
-    seen_b: set = set()
-    seen_p: set = set()
+    # 同一 payload が retry で 403 と 2xx の両方を受けることがあるため、payload ごとに
+    # **最新の試行結果**へ集約してから分類する（両リストへの二重掲載を防ぐ・後勝ち）。
+    # dict は挿入順を保つので、value を上書きしても初出順で列挙できる。
+    last_by_payload: dict = {}
     for e in entries:
         try:
             payload = _clip(getattr(e, "payload", ""))
-            status = getattr(e, "status", None)
         except Exception:
             continue
-        if not payload:
-            continue
+        if payload:
+            last_by_payload[payload] = e
+
+    blocked: list[tuple[str, int]] = []
+    passed: list[str] = []
+    for payload, e in last_by_payload.items():
+        status = getattr(e, "status", None)
+        reflected = bool(getattr(e, "reflected", False))
         if is_waf_block_attempt(status):
-            if payload not in seen_b:
-                seen_b.add(payload)
-                blocked.append((payload, status))
-        elif _attempt_passed(status):
-            if payload not in seen_p:
-                seen_p.add(payload)
-                passed.append(payload)
+            blocked.append((payload, status))
+        elif isinstance(status, int) and 200 <= status < 300 and reflected:
+            # 2xx だけでは不十分（WAF のソフトブロック/CAPTCHA/challenge も 200 になり得る）。
+            # payload が本文に反射した＝アプリが実際に処理した確証があるときだけ passed とする。
+            passed.append(payload)
 
     if not blocked and not passed:
         return ""
@@ -284,7 +283,7 @@ def format_waf_block_analysis(entries, waf_name, *, max_each: int = 6, max_len: 
         for p, code in blocked[:max_each]:
             lines.append(f"- {p}  -> {code}")
     if passed:
-        lines.append("Payloads that PASSED to the application (HTTP 2xx):")
+        lines.append("Payloads that PASSED to the application (HTTP 2xx and reflected):")
         for p in passed[:max_each]:
             lines.append(f"- {p}")
     return "\n".join(lines)
