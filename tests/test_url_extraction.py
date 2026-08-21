@@ -37,6 +37,9 @@ class PlausibleRouteCandidateTests(unittest.TestCase):
         "http://juice-shop.test/rest/x?re=(?:a|b)",              # クエリの regex は path を汚さない
         "http://juice-shop.test/languages/C++",                  # + は path の正当な文字（Codex #100 R2）
         "http://juice-shop.test/rest/tags/a*b",                  # * も path で正当
+        "http://juice-shop.test/files/.*",                       # .* は path で合法（Codex #100 R12）
+        "http://juice-shop.test/packages/.+",                    # .+ も path で合法
+        "http://juice-shop.test/a.*b",                           # bare .* も content では弾かない
         "http://odata.test/odata/GetDefault()/value",            # parameterless 関数ルート（識別子直後の()）
         "https://api.example.test/",                             # origin-root（別オリジンで実ルートになりうる）
     ]
@@ -48,7 +51,6 @@ class PlausibleRouteCandidateTests(unittest.TestCase):
         "http://juice-shop.test/()",
         "http://juice-shop.test/(?:foo|bar)",
         "http://juice-shop.test/[^a-z]+",
-        "http://juice-shop.test/a.*b",
         "http://juice-shop.test/{n}",
         "http://juice-shop.test/foo|bar",
         "http://juice-shop.test/a^b",

@@ -22,12 +22,6 @@ from urllib.parse import urlparse
 #   で別途弾く。`?;=&` はクエリで正当（path から除かれる）。`~ . - _ % @ , ! $ ' :` 等も path で正当。
 _STRONG_METACHARS = re.compile(r"[\\|^{}<>`\[\]]")
 
-# path に残る regex 由来シーケンス。`.*`/`.+`（任意文字の量指定）は実 path にまず出ない強い
-# 正規表現シグナル。**クエリではなく path** にのみ適用する（実ルートの `?pattern=.*` のような
-# クエリ値で誤除去しないため）。
-_PATH_REGEX_HINTS = (".*", ".+")
-
-
 def _parens_look_like_regex(path: str) -> bool:
     """path 中の丸括弧が正規表現片らしいかを返す（純粋）。
 
@@ -57,10 +51,11 @@ def _parens_look_like_regex(path: str) -> bool:
 def is_plausible_route_candidate(resolved_url: str) -> bool:
     """解決済み URL が「実在しうるルート/API」の体裁かを返す（純粋）。
 
-    False = JS 由来のゴミ（regex/式片）と判定。判定は「URL として不正な文字」＋「regex 特有の
-    形」に絞り、誤って実ルートを落とさないよう保守的（迷ったら True）。OData/関数様の括弧・
-    `+`/`*` を含む path・クエリのメタ文字・origin-root は実ルートとして残す。曖昧な候補は残し、
-    実在しなければ下流の crawl が 404 で落とす（到達性維持を優先）。
+    False = URL として不正な文字（`_STRONG_METACHARS`）または regex 特有の括弧を含む候補のみ。
+    誤って実ルートを落とさないよう保守的（迷ったら True）。OData/関数様の括弧・`+`/`*`/`.` を
+    含む path（`/files/.*`）・クエリのメタ文字・origin-root は実ルートとして残す。regex リテラル
+    の判定は content ではなく**抽出時の lexical context**（is_regex_literal_extraction）が担う。
+    曖昧な候補は残し、実在しなければ下流の crawl が 404 で落とす（到達性維持を優先）。
     """
     if not resolved_url:
         return False
@@ -80,9 +75,8 @@ def is_plausible_route_candidate(resolved_url: str) -> bool:
     # 丸括弧は OData/関数様で正当。regex 特有の括弧だけ弾く。
     if _parens_look_like_regex(path):
         return False
-    # regex 由来シーケンスは **path にのみ** 適用（クエリ値の `.*` 等で実ルートを落とさない）。
-    if any(hint in path for hint in _PATH_REGEX_HINTS):
-        return False
+    # ※ `.*`/`.+` 等は path で合法（`/files/.*`）なので content では弾かない。regex リテラルの
+    #   判定は抽出時の lexical context（is_regex_literal_extraction）へ集約している。
     return True
 
 
