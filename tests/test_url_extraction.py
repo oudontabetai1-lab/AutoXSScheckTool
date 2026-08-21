@@ -24,6 +24,11 @@ class PlausibleRouteCandidateTests(unittest.TestCase):
         "http://juice-shop.test/rest/products/search?q=apple",  # クエリのメタ文字は許容
         "http://juice-shop.test/api/BasketItems;matrix=1",       # matrix param(;) は path で許容
         "http://juice-shop.test/%E3%83%86%E3%82%B9%E3%83%88/route",  # percent-encoded
+        "http://odata.test/Products(1)",                         # OData: 括弧は実ルート（Codex #100）
+        "http://odata.test/Users('alice')",                      # OData: 引用キー付き括弧
+        "http://odata.test/Categories(1)/Products",              # OData: 括弧の後にセグメント継続
+        "http://juice-shop.test/search?pattern=.*",              # クエリ値の regex 片は path 無関係で許容
+        "http://juice-shop.test/rest/x?re=(?:a|b)",              # クエリの regex は path を汚さない
     ]
 
     # minified JS の regex リテラル/式片の誤抽出（すべて除去されるべき）。
