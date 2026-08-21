@@ -84,8 +84,11 @@ def attempt_from_pair(payload, source: str, pair: dict) -> Attempt:
     body_len = len(observed) if has_pair else None
     reflected = bool(payload_str) and payload_str in observed
     elapsed = _elapsed_from_pair(pair) if has_pair else None
+    # payload を実際に運んだ**リクエスト URL**を優先する。応答 URL はリダイレクト後の最終
+    # origin になり得る（JSON body が 301/302/303 で bodyless GET され別 origin へ飛ぶ等）。
+    # その最終 origin の 403 を payload のブロックと誤帰属しないため、request.url を先に見る。
     req = (pair or {}).get("request") or {}
-    req_url = (resp.get("url") or req.get("url")) if has_pair else None
+    req_url = (req.get("url") or resp.get("url")) if has_pair else None
     return Attempt(
         payload=payload_str,
         status=status if isinstance(status, int) else None,

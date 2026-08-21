@@ -5,16 +5,17 @@ WAF フィードバックの origin 帰属は、静的予測でなく台帳が�
 from wscan.attempt_ledger import AttemptLedger, Attempt, attempt_from_pair
 
 
-def test_attempt_from_pair_extracts_response_url():
-    pair = {"response": {"status": 403, "url": "https://b.test/api", "body": ""},
+def test_attempt_from_pair_prefers_payload_carrying_request_url():
+    # payload を運んだ request.url を優先（応答 URL はリダイレクト後の最終 origin になり得る）。
+    pair = {"response": {"status": 403, "url": "https://b.test/final", "body": ""},
             "request": {"url": "https://a.test/post"}}
     a = attempt_from_pair("p", "", pair)
-    assert a.req_url == "https://b.test/api"   # 応答 URL 優先
+    assert a.req_url == "https://a.test/post"   # request.url 優先
     assert a.status == 403
 
 
-def test_attempt_from_pair_falls_back_to_request_url():
-    pair = {"response": {"status": 200, "body": "p"}, "request": {"url": "https://a.test/x"}}
+def test_attempt_from_pair_falls_back_to_response_url():
+    pair = {"response": {"status": 200, "url": "https://a.test/x", "body": "p"}, "request": {}}
     a = attempt_from_pair("p", "", pair)
     assert a.req_url == "https://a.test/x"
 
