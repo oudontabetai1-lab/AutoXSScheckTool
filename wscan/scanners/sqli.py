@@ -297,6 +297,14 @@ class SQLiScanner(BaseScanner):
                 partner_source, _ = await self._apply_ip(ip, partner)
                 true_src = source if payload == true_payload else partner_source
                 false_src = partner_source if payload == true_payload else source
+                # transport 失敗（json_body の timeout/TLS/DNS/proxy 等）は空応答("")を返す。
+                # 空を「false 条件の相違」と誤認して高 severity の偽陽性を出さないよう、
+                # どちらかが空なら比較不能としてこの pair をスキップする（Codex #99 R5）。
+                if not true_src or not false_src:
+                    continue
+                # transport 失敗（json_body の timeout/TLS/DNS/proxy 等）は空応答("")を返す。
+                # 空を「false 条件の相違」と誤認して高 severity の偽陽性を出さないよう、
+                # どちらかが空なら比較不能としてこの pair をスキップする（Codex #99 R5）。
                 sim_true_base = self._body_similarity(true_src, baseline_source)
                 sim_false_base = self._body_similarity(false_src, baseline_source)
                 # True condition should resemble baseline; false should differ significantly.
@@ -632,11 +640,22 @@ class SQLiScanner(BaseScanner):
             false_payload = details.get("false_payload")
             if not true_payload or not false_payload:
                 return None
+            if ip.location == "json_body":
+                try:
+                    self.engine._api_auth_failed = False
+                except Exception:
+                    pass
             baseline_source, _ = await self._get_baseline(ip)
             await self.log_payload_test(finding.field_name, true_payload, "sqli_verify_boolean", finding.url)
             true_src, _ = await self._apply_ip(ip, true_payload)
             await self.log_payload_test(finding.field_name, false_payload, "sqli_verify_boolean", finding.url)
             false_src, _ = await self._apply_ip(ip, false_payload)
+            # boolean verify は初回 replay 後に baseline/true/false と複数回 replay する。
+            # その途中で session 失効(401)しても _api_auth_failed が立つので、いずれかで
+            # 失効したら login/401 本文を SQL 応答と比較せず indeterminate(None)を返す
+            # （Codex #99 R5）。
+            if ip.location == "json_body" and getattr(self.engine, "_api_auth_failed", False):
+                return None
             baseline_len = len(baseline_source)
             diff_true_base = abs(len(true_src) - baseline_len)
             diff_false_base = abs(len(false_src) - baseline_len)

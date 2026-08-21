@@ -118,23 +118,27 @@ class JsonInjectionCheckTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(engine.scanner.calls), 1)
         self.assertEqual(len(engine.marked), 1)
 
-    async def test_distinct_templates_with_same_pointer_are_both_scanned(self):
+    def test_same_url_pointer_operations_share_checkpoint_key(self):
+        # resume 安定性を優先し、checkpoint キー(stable_key_parts)は operation identity を
+        # 含めない＝同一 (method,url,pointer) の多重 operation は同一単位へ収束（許容する
+        # ニッチな取りこぼし）。揮発値(URL/body の nonce 等)で resume が壊れるのを避けるため。
         first = InjectionPoint.for_json_body(
             "POST", "http://h/api/rpc", "/params/name", template_id="op-a"
         )
         second = InjectionPoint.for_json_body(
             "POST", "http://h/api/rpc", "/params/name", template_id="op-b"
         )
-        self.assertNotEqual(first.stable_key_parts(), second.stable_key_parts())
-        engine = _Engine([first, second], {"op-a": {}, "op-b": {}})
-
-        await engine._run_json_injection_checks()
-
-        self.assertEqual(
-            [call[0].template_id for call in engine.scanner.calls],
-            ["op-a", "op-b"],
-        )
-        self.assertEqual(len(engine.marked), 2)
+        self.assertEqual(first.stable_key_parts(), second.stable_key_parts())
+        # ただし finding-dedup キーは operation identity(template_id)を保持し、run 内で
+        # 両 operation の finding を取りこぼさない。
+        def _f(tid):
+            return Finding(
+                check_type="sqli", severity="high", url="http://h/api/rpc",
+                field_name="name", payload="'", evidence="e", evidence_type="sqli_error",
+                injection_location="json_body", injection_pointer="/params/name",
+                injection_method="POST", injection_template_id=tid,
+            )
+        self.assertNotEqual(finding_dedup_key_for(_f("op-a")), finding_dedup_key_for(_f("op-b")))
 
     async def test_failed_reauth_does_not_mark_done(self):
         # 再認証に失敗（relogin_ok=False）したら、probe は送っても完了記録しない

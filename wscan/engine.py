@@ -101,12 +101,15 @@ _JSON_INJECTION_CHECKS = ("sqli",)
 def _stable_json_template_id(dedup_key: tuple) -> str:
     """JSON 注入テンプレートの**決定論的**な識別子を dedup_key から生成する。
 
-    `jb-{len(injection_templates)}` のような観測順依存の連番は resume で不安定
-    （テンプレートは checkpoint に永続化されず再生成される／SPA の XHR 観測順は
-    タイミング依存）。checkpoint/dedup キーへ operation identity として織り込むには、
-    同一 operation が run/resume を跨いで**同じ ID**になる必要がある。dedup_key
-    （method, observed_url, body_signature, content_type）は値まで含む安定な識別子
-    なので、その正規化表現の hash を ID にする（衝突は sha1 先頭で実質無視できる）。
+    `jb-{len(injection_templates)}` のような観測順依存の連番は、同一 run 内でも
+    観測順で変わり、resume でも再生成順に依存する。テンプレート dict のキーと verify の
+    executable 判定（`ip.template_id in injection_templates`）が同一 operation で一貫する
+    よう、dedup_key（method, observed_url, body_signature, content_type）の hash で決定論化
+    する（衝突は sha1 先頭で実質無視できる）。
+    ※ この ID は harvest identity と 1:1（値に敏感）なので、URL/body の nonce 等で run 跨ぎ
+    に変わりうる。よって**永続 checkpoint キー（stable_key_parts）には含めない**
+    （resume 安定性のため。injection_point.stable_key_parts 参照）。用途は template dict と
+    同一 run 内の verify 突合に限る。
     """
     raw = repr(dedup_key).encode("utf-8", "replace")
     return "jb-" + hashlib.sha1(raw).hexdigest()[:12]
@@ -2776,10 +2779,9 @@ class ScanEngine:
                         dedup_key, target = accepted_targets[ti]
                         template_id = tid_by_index.get(ti)
                         if template_id is None:
-                            # 決定論的 ID: 同一 operation が run/resume を跨いで同じ ID に
-                            # なるよう、安定な dedup_key から生成する（連番 jb-N は観測順
-                            # 依存で resume 不安定＝checkpoint/dedup キーの operation identity
-                            # に使えない。Codex #99 R3）。
+                            # 決定論的 ID: 連番 jb-N は観測順依存なので、dedup_key から
+                            # 決定論生成し template dict / verify 突合を同一 run 内で一貫させる
+                            # （checkpoint キーには含めない＝resume 安定性。stable_key_parts 参照）。
                             template_id = _stable_json_template_id(dedup_key)
                             self._spa_json_harvest_seen[dedup_key] = template_id
                             self.injection_templates[template_id] = {

@@ -345,6 +345,62 @@ class InjectionPointRoutingTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIsNone(await sqli.verify_finding(finding))
 
+    async def test_json_boolean_empty_partner_response_no_false_positive(self):
+        # boolean pair の partner が transport 失敗で空応答("")を返すと、空を「false 条件の
+        # 相違」と誤認して高 severity の偽陽性を出しうる。空応答の pair は比較不能として
+        # スキップし、finding を出さないこと（誤検知ゼロ最優先）。
+        from unittest.mock import AsyncMock
+
+        engine = _Engine()
+        engine.injection_templates["t"] = {}
+        sqli = SQLiScanner(engine)
+        sqli.get_payloads = AsyncMock(return_value=["1 AND 1=1"])
+        sqli.evolved_payloads = AsyncMock(return_value=[])
+        sqli.mutated_payloads = AsyncMock(return_value=[])
+        sqli.run_equivalence_probe = AsyncMock(return_value=None)
+        baseline = "X" * 500
+        sqli._get_baseline = AsyncMock(
+            return_value=(baseline, {"response": {"body": baseline, "status": 200}})
+        )
+
+        async def _ai(ip, payload, **kw):
+            if payload == "1 AND 1=2":   # false/partner が transport 失敗（空応答）
+                return "", {}
+            return baseline, {"response": {"body": baseline, "status": 200}}
+
+        sqli._apply_ip = _ai
+        ip = InjectionPoint.for_json_body("POST", "http://h/api/q", "/name", template_id="t")
+        findings = await sqli.scan_injection_point(ip, {"name": "name", "type": "text"})
+        self.assertEqual(findings, [])
+
+    async def test_json_boolean_verify_auth_failure_midsequence_returns_none(self):
+        # boolean verify は初回 replay の後に baseline/true/false と複数回 replay する。
+        # 途中(true/false)で失効しても、login/401 本文を SQL 応答と比較せず None を返す。
+        engine = _Engine()
+        engine.injection_templates["stage5b2"] = {}
+        engine._api_auth_failed = False
+        sqli = SQLiScanner(engine)
+
+        calls = {"n": 0}
+
+        async def _ai(ip, payload, **kw):
+            calls["n"] += 1
+            if calls["n"] >= 3:  # baseline(2) の後の true/false replay 中に失効
+                engine._api_auth_failed = True
+                return "login required", {"response": {"status": 401, "body": "login required"}}
+            return "ok-body", {"response": {"status": 200, "body": "ok-body"}}
+
+        sqli._apply_ip = _ai
+        finding = Finding(
+            check_type="sqli", severity="high", url="https://example.test/api",
+            field_name="target", payload="1 AND 1=1", evidence="test",
+            evidence_type="sqli_boolean", injection_location="json_body",
+            injection_pointer="/profile/target", injection_method="POST",
+            injection_template_id="stage5b2",
+            evidence_details={"true_payload": "1 AND 1=1", "false_payload": "1 AND 1=2"},
+        )
+        self.assertIsNone(await sqli.verify_finding(finding))
+
 
 class ProvenanceAndCompatibilityTests(unittest.IsolatedAsyncioTestCase):
     def test_transport_signatures_remain_engine_verify_compatible(self):
