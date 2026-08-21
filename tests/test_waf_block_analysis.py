@@ -91,6 +91,27 @@ def test_long_distinct_payloads_render_distinctly_within_bound():
     assert "BLOCKED" in out and "PASSED" in out
 
 
+def test_short_payloads_folded_by_neutralize_render_distinctly():
+    # tab と space だけが違う短い payload は neutralize で同じ body に畳まれるが、
+    # digest により表示が一意になる（avoid/prefer が衝突しない）。
+    import hashlib
+    p_blocked = "a\tb"     # tab → "a b"
+    p_passed = "a\x0bb"    # vertical tab → "a b"（両方畳まれ同じ body になる）
+    entries = [_e(p_blocked, 403), _e(p_passed, 200, reflected=True)]
+    out = format_waf_block_analysis(entries, "Cloudflare")
+    d1 = hashlib.sha1(p_blocked.encode()).hexdigest()[:8]
+    d2 = hashlib.sha1(p_passed.encode()).hexdigest()[:8]
+    assert d1 != d2
+    assert f"sha1:{d1}" in out and f"sha1:{d2}" in out
+
+
+def test_unchanged_short_payload_has_no_digest():
+    # neutralize で変わらない単純 payload は digest 無しでそのまま表示。
+    out = format_waf_block_analysis([_e("abc", 403)], "Cloudflare")
+    assert "`abc`  -> 403" in out
+    assert "sha1:" not in out
+
+
 def test_empty_conditions():
     assert format_waf_block_analysis([_e("x", 403)], "") == ""
     assert format_waf_block_analysis([], "Cloudflare") == ""

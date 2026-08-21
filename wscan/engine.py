@@ -3974,7 +3974,7 @@ class ScanEngine:
         field_queue: list = []
         for fi, form in enumerate(forms):
             dom_idx = form.get("index", fi)
-            req_origin = _canon_origin(self._form_action_url(form, page.url))
+            req_origin = _canon_origin(self._form_submit_url(form, page.url))
             for inp in form.get("inputs", []):
                 field_queue.append((fi, dom_idx, req_origin, inp, False))
         _page_origin = _canon_origin(page.url)
@@ -4773,6 +4773,19 @@ class ScanEngine:
             return urljoin(page_url, action)
         except Exception:
             return page_url
+
+    def _form_submit_url(self, form: dict, page_url: str) -> str:
+        """実効送信先 URL（絶対）を返す。click される submit control の formaction が
+        form.action を上書きするため、formaction があればそれを優先する（無ければ action）。"""
+        formaction = (form.get("formaction") or "").strip()
+        if not formaction:
+            return self._form_action_url(form, page_url)
+        if formaction.startswith(("http://", "https://")):
+            return formaction
+        try:
+            return urljoin(page_url, formaction)
+        except Exception:
+            return self._form_action_url(form, page_url)
 
     def _is_registration_url(self, url: str) -> bool:
         """Return True if the URL path looks like a new-account registration page."""

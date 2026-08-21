@@ -1310,10 +1310,15 @@ class BrowserManager:
                             });
                         });
                         if (inputs.length > 0) {
+                            // fill_and_submit_form が click する submit control の formaction は
+                            // form.action を上書きする。実効送信先の判定用に生の属性を拾う。
+                            var submitter = form.querySelector('[type=submit], button');
+                            var formaction = (submitter && submitter.getAttribute('formaction')) || '';
                             results.push({
                                 index: fi,
                                 action: form.action || window.location.href,
                                 method: (form.method || 'GET').toUpperCase(),
+                                formaction: formaction,
                                 inputs: inputs,
                             });
                         }

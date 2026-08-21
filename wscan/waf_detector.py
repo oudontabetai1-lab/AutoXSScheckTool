@@ -284,10 +284,14 @@ def format_waf_block_analysis(entries, waf_name, *, max_each: int = 6, max_len: 
         # 表示を一意にする（digest は原文全体から算出＝末尾違いを識別）。
         body = neutralize_payload_for_prompt(p, max_len)
         marker = ""
-        if len(p) > max_len:
+        # neutralize は truncate だけでなく tab/backtick/制御文字/行区切りも畳む。表示が原文と
+        # 変われば、別 payload が同じ body に潰れ（avoid/prefer が衝突）得るため、原文全体の
+        # short digest を付して一意にする（bound は保つ）。truncate 時は残り長も併記。
+        if body != p:
             import hashlib
             digest = hashlib.sha1(p.encode("utf-8", "replace")).hexdigest()[:8]
-            marker = f" (+{len(p) - max_len} more chars, sha1:{digest})"
+            more = f"+{len(p) - max_len} more chars, " if len(p) > max_len else ""
+            marker = f" ({more}sha1:{digest})"
         return "`" + body + "`" + marker
 
     lines: list[str] = [
