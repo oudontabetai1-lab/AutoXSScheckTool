@@ -8,6 +8,7 @@ from wscan.url_extraction import (
     is_plausible_route_candidate,
     filter_route_candidates,
     truncated_regex_literal,
+    regex_literal_end,
     is_regex_literal_extraction,
     preceding_nonspace,
     strip_trailing_noise,
@@ -135,6 +136,22 @@ class PlausibleRouteCandidateTests(unittest.TestCase):
         self.assertTrue(is_regex_literal_extraction("return", "/foo/g.match(s)"))
         # 行頭（式先頭）も regex 文脈。
         self.assertTrue(is_regex_literal_extraction("", "/foo/"))
+        # escaped slash 後に再抽出される regex 片（/foo\/bar/ → /bar/）も、直前 \ を文脈として弾く。
+        self.assertTrue(is_regex_literal_extraction("\\", "/bar/"))
+
+    def test_regex_literal_end_skips_escaped_slash_and_class(self):
+        # /escpat\/subpat/ : 切り詰めは escpat の後（\ の位置）。閉じ / まで読み飛ばす。
+        body = "var e=/escpat\\/subpat/;fetch(x)"
+        trunc_pos = body.index("\\")          # 切り詰め位置（\）
+        end = regex_literal_end(body, trunc_pos)
+        # 閉じ / の直後（; の位置）まで進む。
+        self.assertEqual(body[end], ";")
+        self.assertLess(body.index("subpat"), end)  # subpat は skip 範囲内
+        # 文字クラス内の / は閉じでない。
+        body2 = "=/a[/]b/g;"
+        self.assertEqual(body2[regex_literal_end(body2, 2)], ";")
+        # 閉じが無ければ pos を返す（安全側）。
+        self.assertEqual(regex_literal_end("/nope", 1), 1)
 
     def test_truncated_regex_literal_detects_continuation_chars(self):
         # regex 継続文字（url_re が手前で切る）→ 切り詰めと判定。
@@ -177,6 +194,8 @@ class CollectUrlsFromAssetsIntegrationTests(unittest.TestCase):
             "var c=/zab.qux/g; if(s.match(/quux$/)){}"
             # 式キーワード直後・メンバ呼び出しの regex も文脈で弾く。
             "function f(){return /retpat.x/;} var q=/membpat.x/.test(z);"
+            # escaped slash を含む regex（/escpat\/subpat/）。/subpat/ が再抽出されるが \ 文脈で弾く。
+            "var e=/escpat\\/subpat/;"
             # OData/関数の末尾括弧を持つ実ルート（文字列リテラル由来 → 残す）。
             "fetch('/Products(1)'); fetch('/odata/GetDefault()');"
         )
@@ -210,6 +229,8 @@ class CollectUrlsFromAssetsIntegrationTests(unittest.TestCase):
         # 式キーワード直後・メンバ呼び出しの regex も弾く。
         self.assertFalse(any("retpat" in u for u in found), f"return /re/ が残った: {found}")
         self.assertFalse(any("membpat" in u for u in found), f"/re/.method() が残った: {found}")
+        # escaped slash の後半片（/subpat/）も残らない。
+        self.assertFalse(any("subpat" in u for u in found), f"escaped-slash 片が残った: {found}")
         # OData/関数の末尾括弧を持つ実ルートは残る（C1-g）。
         self.assertIn("http://juice-shop.test/Products(1)", found)
         self.assertIn("http://juice-shop.test/odata/GetDefault()", found)

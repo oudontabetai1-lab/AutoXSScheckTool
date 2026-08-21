@@ -93,6 +93,35 @@ def is_plausible_route_candidate(resolved_url: str) -> bool:
 _REGEX_CONTINUATION_CHARS = frozenset("|[]\\^{}")
 
 
+def regex_literal_end(body: str, pos: int) -> int:
+    """`body[pos]` 以降にある正規表現リテラルの閉じ `/`（+flags）の直後 index を返す（純粋）。
+
+    切り詰められた regex 片（`/escpat\\/subpat/` の escaped slash 等）を後続の finditer が
+    再抽出しないよう、切り詰め検知後にリテラルの残りを読み飛ばすために使う。escaped char
+    （`\\x`）と文字クラス `[...]`（内部の `/` は閉じでない）を考慮する。閉じが見つからなければ
+    `pos` を返す（読み飛ばさない＝安全側）。
+    """
+    i = pos
+    n = len(body)
+    in_class = False
+    while i < n:
+        c = body[i]
+        if c == "\\":
+            i += 2
+            continue
+        if c == "[":
+            in_class = True
+        elif c == "]":
+            in_class = False
+        elif c == "/" and not in_class:
+            i += 1
+            while i < n and body[i] in "dgimsuvy":
+                i += 1
+            return i
+        i += 1
+    return pos
+
+
 def truncated_regex_literal(next_char: str) -> bool:
     """抽出 match の直後の1文字が regex リテラルの継続を示すかを返す（純粋）。
 
@@ -104,7 +133,9 @@ def truncated_regex_literal(next_char: str) -> bool:
 
 # JS で正規表現リテラルを導く（`/` の直前に来うる）文脈文字。文字列リテラルの直前は引用符
 # や識別子なので、これらと区別できる。空白は読み飛ばして直前の非空白文字を見る。
-_REGEX_CONTEXT_PREV = frozenset("=(,:[!&|?{;<>~^*%")
+# `\` を含むのは、regex 内の escaped slash（`/foo\/bar/`）で finditer が再開して `/bar/` を
+# 別候補に切り出すため。直前が `\` の `/…/` 形は regex 片のみ（実 path 片は `/…/`形にならない）。
+_REGEX_CONTEXT_PREV = frozenset("=(,:[!&|?{;<>~^*%\\")
 # `return /re/` のように regex を導く式キーワード。直前トークンがこれらでも regex 文脈。
 _REGEX_PRECEDING_KEYWORDS = frozenset({
     "return", "throw", "yield", "typeof", "case", "delete", "void",

@@ -21,6 +21,7 @@ from .tls_config import TLSConfig
 from .url_extraction import (
     is_plausible_route_candidate,
     truncated_regex_literal,
+    regex_literal_end,
     is_regex_literal_extraction,
     strip_trailing_noise,
 )
@@ -1800,13 +1801,19 @@ class BrowserManager:
             if not is_text_asset:
                 continue
             scan_body = body[:200000]
+            skip_until = 0
             for m in url_re.finditer(scan_body):
+                # 直前に切り詰めた regex リテラルの内部（escaped slash 後の再抽出片など）は飛ばす。
+                if m.start() < skip_until:
+                    continue
                 match_text = m.group(0)
                 # 0009 C1: url_re は regex メタ文字（| [ ] \ ^ { }）の手前で match を
                 # 打ち切るため、`/foo|bar/`→`/foo` のように切り詰めた regex 片が一見正常な
                 # path に見えて通過する。match 直後の1文字が regex 継続文字なら、regex
-                # リテラルの切り詰めとして抽出時に弾く（切り詰め前の証拠を見る）。
+                # リテラルの切り詰めとして弾き、さらにリテラルの閉じ `/` まで読み飛ばして
+                # escaped slash 後の後半片（`/subpat/`）の再抽出も防ぐ。
                 if truncated_regex_literal(scan_body[m.end():m.end() + 1]):
+                    skip_until = regex_literal_end(scan_body, m.end())
                     continue
                 # 末尾ノイズだけ剥がす（均衡した OData/関数の閉じ括弧は残す）。url_re は `;`
                 # 等も取り込むため、regex 形判定の前に剥がしておく（`/re/g;`→`/re/g`）。
