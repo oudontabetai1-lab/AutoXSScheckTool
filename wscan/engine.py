@@ -4046,6 +4046,7 @@ class ScanEngine:
                     field_plan,
                     dom_index=dom,
                     crawl_html=page.html,
+                    external_scripts=page.external_scripts,
                 )
             except (AbortScan, SkipPage):
                 raise
@@ -4254,6 +4255,7 @@ class ScanEngine:
         field_plan: Optional[FieldAttackPlan] = None,
         dom_index: int = -1,
         crawl_html: str = "",
+        external_scripts: Optional[dict] = None,
     ):
         """Run enabled scanners on a single field, guided by the attack plan."""
         field_name = field.get("name", "unknown")
@@ -4412,6 +4414,7 @@ class ScanEngine:
                 field_plan,
                 dom_index=dom_index,
                 crawl_html=crawl_html,
+                external_scripts=external_scripts,
             )
             # None はいずれかの check が未完、list は今回対象がすべて完了。
             # 完了記録自体は check_type ごとに _adaptive_attack_field が行う。
@@ -4433,22 +4436,27 @@ class ScanEngine:
 
     async def _deterministic_field_observations(
         self, crawl_html: str, url: str, form_index: int, field_name: str,
-        is_url_param: bool, ip, check_names: list, field_type: str = "text"
+        is_url_param: bool, ip, check_names: list, field_type: str = "text",
+        external_scripts: Optional[dict] = None,
     ) -> tuple:
         """G7: js_analysis(純粋)＋context_mutator(marker probe)の決定論観測を返す。
         失敗しても空値を返し adaptive を壊さない（加算的・例外保護）。"""
         from wscan import js_analysis
 
-        # (a) js_analysis: **クロール時のページ HTML** のインライン script を静的解析する
-        #     （注入不要・純粋）。攻撃後の現在タブ（フォーム送信でリダイレクトした
-        #     result/login/error ページ等）ではなく url に対応するクロール文書を解析し、
-        #     無関係な sink の誤帰属を避ける（JsStaticScanner.scan_page_context と同方針）。
-        #     これは **ページ全体** の観測で、この入力からの到達性は保証しない
-        #     （呼び出し側が DOM 系 check にだけ page-level ラベルで付与する）。
+        # (a) js_analysis: **クロール時のページ HTML** のインライン script ＋クロール時に
+        #     スナップショットした **外部 script 本文**（external_scripts）を静的解析する
+        #     （注入不要・純粋）。攻撃後の現在タブではなく url に対応するクロール文書/資産を
+        #     解析し、無関係な sink の誤帰属を避ける（JsStaticScanner と同方針）。バンドル
+        #     アプリの source→sink は外部 script に載るため、これを含めないと DOM 系
+        #     grounding を取りこぼす。**ページ全体** の観測で、この入力からの到達性は保証
+        #     しない（呼び出し側が DOM 系 check にだけ page-level ラベルで付与する）。
         risks: list = []
         try:
             for body in js_analysis.extract_inline_scripts(crawl_html or ""):
                 risks.extend(js_analysis.analyze_js(body))
+            for body in (external_scripts or {}).values():
+                if body:
+                    risks.extend(js_analysis.analyze_js(body))
         except Exception:
             risks = []
 
@@ -4514,6 +4522,7 @@ class ScanEngine:
         field_plan: Optional[FieldAttackPlan],
         dom_index: int = -1,
         crawl_html: str = "",
+        external_scripts: Optional[dict] = None,
     ) -> Optional[list[str]]:
         """
         Phase 3b: Adaptive AI round.
@@ -4571,6 +4580,7 @@ class ScanEngine:
                     crawl_html or page_html, url, form_index, field_name,
                     is_url_param, ip, check_names,
                     field_type=str(field.get("type", "text")).lower(),
+                    external_scripts=external_scripts,
                 )
             )
         except Exception:
