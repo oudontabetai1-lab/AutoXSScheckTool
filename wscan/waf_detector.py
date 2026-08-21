@@ -94,6 +94,10 @@ class WAFDetector:
         self.headers_provider = headers_provider
         self.tls_options_provider = tls_options_provider
         self._detected: Optional[str] = None
+        # follow_redirects=True で probe するため、判定は最終到達 origin を表す。
+        # planner fingerprint を origin 別に出す際、WAF を実際に probe した origin にだけ
+        # 帰属させるため、最終応答の origin を記録する（pre-redirect の target と食い違う）。
+        self._detected_origin: Optional[str] = None
         self._checked_at: float = 0.0  # epoch seconds of last probe
 
     async def detect(self, url: str, timeout: float = 10.0) -> Optional[str]:
@@ -129,6 +133,12 @@ class WAFDetector:
             ) as client:
                 # First: normal request (collect always-present WAF headers)
                 resp = await client.get(url)
+                # follow_redirects により最終到達した origin を記録（WAF 帰属用）。
+                try:
+                    from wscan.header_scope import _url_origin
+                    self._detected_origin = _url_origin(str(resp.url)) or None
+                except Exception:
+                    self._detected_origin = None
                 normal_headers = {k.lower(): v.lower() for k, v in resp.headers.items()}
                 normal_body = resp.text[:5000].lower()
 

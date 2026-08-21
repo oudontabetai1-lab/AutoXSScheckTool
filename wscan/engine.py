@@ -2794,11 +2794,14 @@ class ScanEngine:
             # ページに origin A のスタックを渡さない）。WAF は target 単位の単一検出のため共通。
             # capture 側と同じ canonical_origin でキーを揃える（default port/host 大小の食い違い回避）。
             _origin = canonical_origin(page.url)
-            # WAF は primary target のみを probe しているため、その origin のページに限り含める
-            # （multi-origin で origin B のページに origin A の WAF を告げない）。
+            # WAF は follow_redirects で probe した「最終到達 origin」にだけ帰属させる
+            # （detect() は follow_redirects=True で最終応答を見るため、_detected は
+            # pre-redirect の target ではなく landed origin を表す）。probe origin が
+            # 不明なら注入しない（別 origin への誤帰属を避ける）。
+            _waf_origin = getattr(self.waf_detector, "_detected_origin", None)
             _waf = (
                 getattr(self.waf_detector, "_detected", None)
-                if _origin and _origin == canonical_origin(self.target_url)
+                if _origin and _waf_origin and _origin == _waf_origin
                 else None
             )
             planner_fingerprint = build_planner_fingerprint(
