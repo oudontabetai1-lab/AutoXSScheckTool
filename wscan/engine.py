@@ -3976,10 +3976,10 @@ class ScanEngine:
             dom_idx = form.get("index", fi)
             # submit の formaction は form.action を上書きし、実効リクエスト先/best_pair_for_page
             # の選択（form.action ベース）と食い違う。base-href 相対解決も絡み cheap に一致
-            # させられないため、formaction 上書きがあるフォームでは WAF ヒントを付けない
-            # （req_origin="" で never-match＝suppress）。advisory な hint なので誤帰属より
-            # 取りこぼし側に倒す。formaction が無ければ form.action の origin。
-            if (form.get("formaction") or "").strip():
+            # させられないため、formaction 属性がある（空文字でも document URL へ送るので present
+            # 扱い）フォームでは WAF ヒントを付けない（req_origin="" で never-match＝suppress）。
+            # advisory な hint なので誤帰属より取りこぼし側に倒す。属性が無ければ form.action の origin。
+            if form.get("formaction_present"):
                 req_origin = ""
             else:
                 req_origin = _canon_origin(self._form_action_url(form, page.url))
