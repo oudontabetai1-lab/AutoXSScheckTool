@@ -345,6 +345,19 @@ def _crawl_review_wants_recrawl(command: str) -> bool:
 
 
 _ADAPTIVE_PAGE_LEVEL_CHECKS = frozenset({"csrf", "session", "clickjacking"})
+# G7: js_analysis の DOM sink 観測（ページ全体）を付与する check。DOM XSS 系のみ。
+# SQLi/OS 等の無関係 check に DOM XSS flow を grounded 証拠として渡さない。
+_DOM_OBS_CHECKS = frozenset({"xss", "dom_xss"})
+
+
+# G7 の反射/生存文字 probe を動かしてよい check。evolution wave（evolved_payloads）が
+# 配線され、かつ **任意のテキストフィールドを一律に攻撃する** generic 注入系のみ。
+# ここに:
+#  - 受動スキャナ（js_static/security_headers 等）を入れない＝受動監査を能動化しない。
+#  - field-selective な注入系（ssrf/open_redirect＝URL/redirect っぽい field 以外は無送信）も
+#    入れない＝username/password 等の無関係 field へ marker を注入しない。
+# default-safe（未収録/未知 check では probe しない）。CLAUDE.md の evolution 配線と一致。
+
 
 
 def _adaptive_checkpoint_check(check_name: str) -> str:
@@ -589,6 +602,8 @@ class ScanEngine:
         # C: CMS 検出結果 (crawl時に設定)
         self.detected_cms = None
         self._cms_origin: str = ""
+        # G7: ページ単位の js_analysis risk キャッシュ（url -> list[JsRisk]）。
+        self._js_risks_cache: dict = {}
         # origin(scheme://netloc) → 主要応答ヘッダ dict。multi-origin(--target-url)で
         # planner fingerprint を origin 別に出すため origin キーで保持する。
         self.detected_tech_headers: dict = {}
@@ -4018,6 +4033,8 @@ class ScanEngine:
                     is_url_param,
                     field_plan,
                     dom_index=dom,
+                    crawl_html=page.html,
+                    external_scripts=page.external_scripts,
                 )
             except (AbortScan, SkipPage):
                 raise
@@ -4225,6 +4242,8 @@ class ScanEngine:
         is_url_param: bool = False,
         field_plan: Optional[FieldAttackPlan] = None,
         dom_index: int = -1,
+        crawl_html: str = "",
+        external_scripts: Optional[dict] = None,
     ):
         """Run enabled scanners on a single field, guided by the attack plan."""
         field_name = field.get("name", "unknown")
@@ -4382,6 +4401,8 @@ class ScanEngine:
                 ordered_checks,
                 field_plan,
                 dom_index=dom_index,
+                crawl_html=crawl_html,
+                external_scripts=external_scripts,
             )
             # None はいずれかの check が未完、list は今回対象がすべて完了。
             # 完了記録自体は check_type ごとに _adaptive_attack_field が行う。
@@ -4401,6 +4422,33 @@ class ScanEngine:
                 message=f"{field_name} ({url})",
             )
 
+    def _page_js_risks(self, url, crawl_html, external_scripts, check_names) -> list:
+        """G7: クロール時スナップショット（インライン＋外部 script）を静的解析し、
+        DOM source→sink risk を返す（純粋・注入不要・**ページ単位でキャッシュ**）。
+
+        観測を消費するのは DOM 系 check（_DOM_OBS_CHECKS）だけなので、それが check_names に
+        無ければ解析しない（例: --checks sqli では無駄に解析しない）。crawl_html/
+        external_scripts はページ単位なので url をキーに 1 度だけ解析し、同一ページの各
+        フィールドで使い回す（大きなバンドル script × 多入力での再解析を避ける）。
+        """
+        if not (_DOM_OBS_CHECKS & set(check_names or [])):
+            return []
+        cache = self._js_risks_cache
+        if url in cache:
+            return cache[url]
+        from wscan import js_analysis
+        risks: list = []
+        try:
+            for body in js_analysis.extract_inline_scripts(crawl_html or ""):
+                risks.extend(js_analysis.analyze_js(body))
+            for body in (external_scripts or {}).values():
+                if body:
+                    risks.extend(js_analysis.analyze_js(body))
+        except Exception:
+            risks = []
+        cache[url] = risks
+        return risks
+
     async def _adaptive_attack_field(
         self,
         url: str,
@@ -4410,6 +4458,8 @@ class ScanEngine:
         check_names: list,
         field_plan: Optional[FieldAttackPlan],
         dom_index: int = -1,
+        crawl_html: str = "",
+        external_scripts: Optional[dict] = None,
     ) -> Optional[list[str]]:
         """
         Phase 3b: Adaptive AI round.
@@ -4457,6 +4507,17 @@ class ScanEngine:
             page_html = await self.browser.page.content()
         except Exception:
             return None
+
+        # G7: DOM source→sink 観測（ページ単位・キャッシュ・注入なし）。反射 probe は
+        # 注入を伴い際限のないエッジ（validation/並行/監査/resume/型）を生むため本 PR では
+        # 導入しない。反射文脈は初回 evolution wave の観測を保持・再利用する別タスクで扱う。
+        det_js_risks: list = []
+        try:
+            det_js_risks = self._page_js_risks(
+                url, crawl_html or page_html, external_scripts, check_names
+            )
+        except Exception:
+            det_js_risks = []
 
         generated_payloads: list[str] = []
         generation_failed = False
@@ -4511,6 +4572,14 @@ class ScanEngine:
             except Exception:
                 history_note = ""
 
+            # 反射観測(field 固有)は全 check に、JS の DOM sink(page 全体)は DOM 系 check
+            # にだけ付与する（SQLi 等の無関係 check に DOM XSS flow を grounded として
+            # 提示し生成を誤誘導しないため）。
+            from wscan.adaptive_observations import format_deterministic_observations
+            _js_for_check = det_js_risks if check_name in _DOM_OBS_CHECKS else None
+            det_obs = format_deterministic_observations(_js_for_check)
+            extra = "\n".join(x for x in (history_note, det_obs) if x)
+
             # Ask LLM for bypass payloads (include detected WAF for targeted evasion)
             adaptive_payloads, generation_status = await self.adaptive_engine.generate(
                 check_type=check_name,
@@ -4519,7 +4588,7 @@ class ScanEngine:
                 payloads_tried=tried,
                 page_html=page_html,
                 waf_name=self.waf_detector._detected,
-                extra_observations=history_note,
+                extra_observations=extra,
                 return_status=True,
             )
 

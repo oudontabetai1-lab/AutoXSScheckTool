@@ -986,16 +986,19 @@ class BaseScanner(ABC):
             dom = form_index if dom_index is None else dom_index
             marker = context_mutator.make_marker()
             probe = context_mutator.make_char_probe(marker)
-            await self.log_payload_test(
-                field_name,
-                probe,
-                f"{self.CHECK_TYPE}_evolution_probe",
-                url,
-            )
+            probe_check = f"{self.CHECK_TYPE}_evolution_probe"
             if is_url_param:
+                await self.log_payload_test(field_name, probe, probe_check, url)
                 source, pair = await self.browser.test_url_param(url, field_name, probe)
             else:
-                await self.browser.navigate(url)
+                # navigate 失敗（timeout/HTTP エラー）時に前 scanner の残存ページへ
+                # probe を送ると別フォーム/別 action へ注入し、観測を誤ったフィールドに
+                # 帰属してしまう。復帰できなければ観測を諦めて空値を返す（安全側）。
+                # log_payload_test は navigate 成功後・submit 直前に呼ぶ。失敗時に先に
+                # 記録すると、未送信の payload が payloads.jsonl に残り監査の 1:1 対応が壊れる。
+                if not await self.browser.navigate(url):
+                    return "", set(), {}
+                await self.log_payload_test(field_name, probe, probe_check, url)
                 source, pair = await self.browser.fill_and_submit_form(
                     dom,
                     field_name,
