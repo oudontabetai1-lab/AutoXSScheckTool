@@ -94,6 +94,10 @@ class WAFDetector:
         self.headers_provider = headers_provider
         self.tls_options_provider = tls_options_provider
         self._detected: Optional[str] = None
+        # follow_redirects=True で probe するため、判定は最終到達 origin を表す。
+        # planner fingerprint を origin 別に出す際、WAF を実際に probe した origin にだけ
+        # 帰属させるため、最終応答の origin を記録する（pre-redirect の target と食い違う）。
+        self._detected_origin: Optional[str] = None
         self._checked_at: float = 0.0  # epoch seconds of last probe
 
     async def detect(self, url: str, timeout: float = 10.0) -> Optional[str]:
@@ -142,6 +146,14 @@ class WAFDetector:
                 resp2 = await client.get(probe_url)
                 waf_headers = {k.lower(): v.lower() for k, v in resp2.headers.items()}
                 waf_body = resp2.text[:5000].lower()
+                # 一致した応答の origin を帰属に使う（normal と probe が別 origin に
+                # 到達し得るため、どちらで当たったかで記録を分ける）。
+                try:
+                    from wscan.header_scope import _url_origin
+                    normal_origin = _url_origin(str(resp.url)) or None
+                    probe_origin = _url_origin(str(resp2.url)) or None
+                except Exception:
+                    normal_origin = probe_origin = None
         except Exception:
             return None
 
@@ -150,9 +162,11 @@ class WAFDetector:
             header_str = " ".join(f"{k}: {v}" for k, v in waf_headers.items())
             if header_pat and re.search(header_pat, header_str, re.IGNORECASE):
                 self._detected = name
+                self._detected_origin = probe_origin
                 return name
             if body_pat and re.search(body_pat, waf_body, re.IGNORECASE):
                 self._detected = name
+                self._detected_origin = probe_origin
                 return name
 
         # Check normal response headers too (some WAFs add headers always)
@@ -162,6 +176,7 @@ class WAFDetector:
             header_str = " ".join(f"{k}: {v}" for k, v in normal_headers.items())
             if re.search(header_pat, header_str, re.IGNORECASE):
                 self._detected = name
+                self._detected_origin = normal_origin
                 return name
 
         return None
