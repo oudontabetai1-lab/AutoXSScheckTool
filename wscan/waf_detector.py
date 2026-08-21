@@ -252,7 +252,8 @@ def format_waf_block_analysis(entries, waf_name, *, max_each: int = 6, max_len: 
         return ""
     from wscan.attempt_ledger import neutralize_payload_for_prompt
 
-    # 原文 payload をキーに最新結果へ集約（後勝ち・挿入順保持）。
+    # 原文 payload をキーに最新結果へ集約（後勝ち）。retry は末尾へ移動して **recency 順**を
+    # 保つ（後段の [-max_each:] で最新の観測＝evolution/mutation 由来を優先し、古い初出を捨てる）。
     last_by_payload: dict = {}
     for e in entries:
         try:
@@ -260,6 +261,7 @@ def format_waf_block_analysis(entries, waf_name, *, max_each: int = 6, max_len: 
         except Exception:
             continue
         if payload:
+            last_by_payload.pop(payload, None)   # 既存キーは末尾へ移すため一旦削除
             last_by_payload[payload] = e
 
     blocked: list[tuple[str, int]] = []
@@ -300,10 +302,10 @@ def format_waf_block_analysis(entries, waf_name, *, max_each: int = 6, max_len: 
     ]
     if blocked:
         lines.append("Payloads BLOCKED by the WAF (HTTP 403/406):")
-        for p, code in blocked[:max_each]:
+        for p, code in blocked[-max_each:]:
             lines.append(f"- {_render(p)}  -> {code}")
     if passed:
         lines.append("Payloads that PASSED to the application (HTTP 2xx and reflected):")
-        for p in passed[:max_each]:
+        for p in passed[-max_each:]:
             lines.append(f"- {_render(p)}")
     return "\n".join(lines)

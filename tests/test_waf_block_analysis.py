@@ -112,6 +112,16 @@ def test_unchanged_short_payload_has_no_digest():
     assert "sha1:" not in out
 
 
+def test_recency_keeps_newest_retries_within_bound():
+    # blocked が max_each を超える。古い payload を retry すると末尾へ移動し、最新 max_each に残る。
+    entries = [_e(f"old{i}", 403) for i in range(6)]        # old0..old5（初出順）
+    entries.append(_e("old0", 403))                          # old0 を retry（最新へ）
+    out = format_waf_block_analysis(entries, "Cloudflare", max_each=3)
+    # 末尾＝最新3件（old4, old5, old0）が残り、最古の old1/old2/old3 は落ちる。
+    assert "`old4`" in out and "`old5`" in out and "`old0`" in out
+    assert "`old1`" not in out and "`old2`" not in out and "`old3`" not in out
+
+
 def test_empty_conditions():
     assert format_waf_block_analysis([_e("x", 403)], "") == ""
     assert format_waf_block_analysis([], "Cloudflare") == ""

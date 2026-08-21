@@ -59,6 +59,7 @@ class Attempt:
     reflected: bool = False           # payload 文字列が応答本文に現れたか
     error: bool = False               # transport が失敗した（空 pair）
     elapsed: Optional[float] = None    # 応答所要秒（計測不能は None）
+    req_url: Optional[str] = None      # 実際に記録した応答/リクエスト URL（origin 帰属用）
 
 
 def attempt_from_pair(payload, source: str, pair: dict) -> Attempt:
@@ -83,6 +84,8 @@ def attempt_from_pair(payload, source: str, pair: dict) -> Attempt:
     body_len = len(observed) if has_pair else None
     reflected = bool(payload_str) and payload_str in observed
     elapsed = _elapsed_from_pair(pair) if has_pair else None
+    req = (pair or {}).get("request") or {}
+    req_url = (resp.get("url") or req.get("url")) if has_pair else None
     return Attempt(
         payload=payload_str,
         status=status if isinstance(status, int) else None,
@@ -90,6 +93,7 @@ def attempt_from_pair(payload, source: str, pair: dict) -> Attempt:
         reflected=reflected,
         error=not has_pair,
         elapsed=elapsed,
+        req_url=req_url if isinstance(req_url, str) else None,
     )
 
 
@@ -146,6 +150,7 @@ class AttemptLedger:
                         "reflected": a.reflected,
                         "error": a.error,
                         "elapsed": a.elapsed,
+                        "req_url": a.req_url,
                     }
                     for a in attempts
                 ],
@@ -173,6 +178,7 @@ class AttemptLedger:
                             reflected=bool(ad.get("reflected", False)),
                             error=bool(ad.get("error", False)),
                             elapsed=ad.get("elapsed"),
+                            req_url=ad.get("req_url"),
                         ),
                     )
             except Exception:
