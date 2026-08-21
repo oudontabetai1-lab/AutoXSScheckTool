@@ -63,6 +63,86 @@ class VerificationStateTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(await engine._verify_one(_finding()), "unreproduced")
 
+    async def _run_fallback_engine(self, mode):
+        # scanner verify が失効/transport 失敗で None を返しても、_verify_one は既定で
+        # フォールバック再送し 401/空応答を評価して "unreproduced" にしてしまう。json の
+        # 失効/transport 失敗時は terminal な "assumed"（penalize しない）にする（Codex #99 R6）。
+        # ハーネスは**フォールバックが実際に走る**よう browser 等を備え、fix 無しなら
+        # unreproduced を返す（＝有効な回帰テスト）。
+        import re as _re
+
+        class _FbBrowser:
+            async def navigate(self, url, retries=0):
+                return None
+
+            def reset_dialog(self):
+                pass
+
+        class _FbScanner:
+            CHECK_TYPE = "sqli"
+
+            def __init__(self, engine, mode):
+                self.engine = engine
+                self.mode = mode
+
+            def _fail(self):
+                if self.mode == "auth":
+                    self.engine._api_auth_failed = True
+                    return "login required", {"response": {"status": 401, "body": "login required"}}
+                self.engine._json_probe_failed = True
+                return "", {}
+
+            async def verify_finding(self, finding):
+                self._fail()
+                return None
+
+            async def _apply_ip(self, ip, payload):
+                return self._fail()
+
+            def check_response_for_patterns(self, body, patterns):
+                return any(_re.search(p, body or "", _re.IGNORECASE) for p in patterns)
+
+        class _FbEngine:
+            _verify_one = ScanEngine._verify_one
+
+            def __init__(self, mode):
+                self.scanners = {"sqli": _FbScanner(self, mode)}
+                self.browser = _FbBrowser()
+                self._effective_delay = 0
+                self.navigation_retries = 0
+                self._api_auth_failed = False
+                self._json_probe_failed = False
+
+        finding = Finding(
+            check_type="sqli", severity="critical", url="http://h/api/login",
+            field_name="email", payload="'", evidence="e",
+            injection_location="json_body", injection_pointer="/email",
+            injection_method="POST", injection_template_id="t",
+        )
+        return await _FbEngine(mode)._verify_one(finding)
+
+    async def test_verify_one_false_result_with_transport_failure_is_assumed(self):
+        # scanner verify が transport 失敗時に False を返す経路（error-based の空 body・
+        # boolean の空 baseline 等）でも、flag が立っていれば結果値より前に assumed にする
+        # （「検証リクエストが失敗しただけ」で unreproduced に誤格下げしない。Codex #99 R7）。
+        class _FalseWithFailScanner:
+            def __init__(self, engine):
+                self.engine = engine
+
+            async def verify_finding(self, finding):
+                self.engine._json_probe_failed = True
+                return False
+
+        engine = _VerifyOneEngine()
+        engine.scanners = {"sqli": _FalseWithFailScanner(engine)}
+        self.assertEqual(await engine._verify_one(_finding()), "assumed")
+
+    async def test_verify_one_json_auth_failure_is_assumed_not_unreproduced(self):
+        self.assertEqual(await self._run_fallback_engine("auth"), "assumed")
+
+    async def test_verify_one_json_transport_failure_is_assumed(self):
+        self.assertEqual(await self._run_fallback_engine("transport"), "assumed")
+
     async def test_phase_verify_applies_all_states_without_dropping_findings(self):
         findings = [
             _finding("reproduced"),

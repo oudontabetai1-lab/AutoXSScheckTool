@@ -23,6 +23,7 @@ Phase 4: Report   — Save evidence JSON and generate HTML report.
 import asyncio
 import datetime
 import fnmatch
+import hashlib
 import json
 import os
 import re
@@ -91,6 +92,28 @@ _AUTO_ENABLED_CHECKS: frozenset[str] = frozenset({"cms", "privesc"})
 # page-level ループからは除外し、checkpoint を刻む _run_api_template_checks に一本化
 # する（状態変更系プローブの二重送信・resume 重複を防ぐ）。
 _API_TEMPLATE_ONLY_CHECKS: frozenset[str] = frozenset({"mass_assignment"})
+
+# SPA 収穫の JSON body を実攻撃するチェック。capability 判定に加えて明示的な
+# ホワイトリストを置き、将来の対応拡大が意図せず攻撃範囲を広げるのを防ぐ。
+_JSON_INJECTION_CHECKS = ("sqli",)
+
+
+def _stable_json_template_id(dedup_key: tuple) -> str:
+    """JSON 注入テンプレートの**決定論的**な識別子を dedup_key から生成する。
+
+    `jb-{len(injection_templates)}` のような観測順依存の連番は、同一 run 内でも
+    観測順で変わり、resume でも再生成順に依存する。テンプレート dict のキーと verify の
+    executable 判定（`ip.template_id in injection_templates`）が同一 operation で一貫する
+    よう、dedup_key（method, observed_url, body_signature, content_type）の hash で決定論化
+    する（衝突は sha1 先頭で実質無視できる）。
+    ※ この ID は harvest identity と 1:1（値に敏感）なので、URL/body の nonce 等で run 跨ぎ
+    に変わりうる。よって**永続 checkpoint キー（stable_key_parts）には含めない**
+    （resume 安定性のため。injection_point.stable_key_parts 参照）。用途は template dict と
+    同一 run 内の verify 突合に限る。
+    """
+    raw = repr(dedup_key).encode("utf-8", "replace")
+    return "jb-" + hashlib.sha1(raw).hexdigest()[:12]
+
 
 def _page_check_cp_url(check_name: str, url: str) -> str:
     """page-level チェックポイントの url 成分を返す（exact URL）。
@@ -581,6 +604,16 @@ class ScanEngine:
         # mass_assignment 等がベースライン応答で検知し、_run_api_template_checks が
         # 「済み」記録を抑止して resume での恒久スキップを防ぐ。
         self._api_auth_failed: bool = False
+        # JSON body 注入 transport(_apply_json_payload)が実応答を 1 度でも受信したら立つ。
+        # _run_json_injection_checks が「送信成功の証拠」として mark 前に確認し、transport
+        # 失敗(timeout/TLS/DNS/proxy)で空振りした probe の恒久スキップ(偽陰性)を防ぐ。
+        self._json_probe_sent: bool = False
+        # JSON body 注入 probe が**有効な結果を出せなかった**ら立つ：通信失敗（timeout/TLS/
+        # DNS/proxy 等の例外）または replay 不能（テンプレ不在＝resume で nonce 変化/cap 到達に
+        # より再生成されなかった等）。scan は「済み」記録を抑止し、verify は terminal な assumed
+        # へ倒すのに使う（_json_probe_sent だけでは baseline 成功で誤 mark／None だけでは verify が
+        # 汎用フォールバックへ落ち unreproduced 誤格下げ、を防ぐ）。
+        self._json_probe_failed: bool = False
         # 再開可能スキャン
         self.resume_dir: str = resume_dir
         self.enable_checkpoint: bool = enable_checkpoint
@@ -1365,6 +1398,84 @@ class ScanEngine:
             # URL 単位で進捗＋Finding スナップショットを保存（クラッシュ耐性）。
             self._save_checkpoint()
 
+    async def _run_json_injection_checks(self) -> None:
+        """SPA が収穫した JSON body 注入点を対応スキャナで実スキャンする。"""
+        if not self.json_injection_points:
+            return
+        # operator が skip_page したら、その URL に属する残り全 pointer を飛ばす。
+        # 1 endpoint = 複数 pointer(注入点)なので、inner break だけでは同一 URL の別
+        # pointer に侵襲リクエストが続いてしまう（_run_api_template_checks は URL 単位
+        # ループなので continue で足りるが、こちらは pointer 単位ループのため URL で括る）。
+        skipped_urls: set[str] = set()
+        for ip in self.json_injection_points:
+            if ip.url in skipped_urls:
+                continue
+            for check_name in _JSON_INJECTION_CHECKS:
+                scanner = self.scanners.get(check_name)
+                if scanner is None or not getattr(scanner, "SUPPORTS_JSON_BODY", False):
+                    continue
+                try:
+                    await self.controller.checkpoint()
+                except SkipField:
+                    continue
+                except SkipPage:
+                    skipped_urls.add(ip.url)
+                    break
+                # 再開: 済み単位は auth/network 操作の**前**に飛ばす。完了済み JSON 点で
+                # _maybe_relogin_for_page（browser 遷移）や _api_session_looks_expired
+                # （HTTP GET）を再実行すると、resume で完了エンドポイントを無駄に再訪し
+                # GET 副作用/ログインを繰り返すため（Codex #99 R4）。
+                if self._checkpoint_is_done_ip(ip, check_name):
+                    continue
+                await self._maybe_relogin_for_page(ip.url)
+                try:
+                    await self._sync_cookies_from_browser(self.browser, for_url=ip.url)
+                except Exception:
+                    pass
+                # 再認証に失敗したまま probe を送ると、保護エンドポイントの 401/redirect を
+                # 「陰性」と誤記録し resume で恒久スキップしてしまう。api-template と同じく
+                # 認証失敗単位は完了記録しない（送信不能と同格の偽陰性防止）。
+                auth_failed = False
+                if await self._api_session_looks_expired(ip.url):
+                    if not await self._force_relogin(for_url=ip.url):
+                        auth_failed = True
+                field = {"name": ip.display_name or ip.parameter_id}
+                # scan 前にリセット。transport(_apply_json_payload) が実応答を受けたら
+                # _json_probe_sent、通信失敗（timeout/TLS/DNS/proxy）で _json_probe_failed、
+                # logout で _api_auth_failed を立てる。mark は「送信成功あり・失敗なし・
+                # 未認証でない」の全条件を満たすときだけ。baseline は通ったが後続の攻撃
+                # payload が落ちたケースも _json_probe_failed で捕らえ、attack 未実行の点を
+                # 「済み」にしない（Codex #99 R4）。
+                self._api_auth_failed = False
+                self._json_probe_sent = False
+                self._json_probe_failed = False
+                try:
+                    findings = await scanner.scan_injection_point(ip, field)
+                    for finding in findings or []:
+                        self._record_finding(finding, source="json-body")
+                except AbortScan:
+                    self._save_checkpoint()
+                    raise
+                except Exception as exc:
+                    console.print(
+                        f"  [yellow]JSON injection ({check_name}) on {ip.url}: {exc}[/yellow]"
+                    )
+                else:
+                    # 送信成功の証拠が無い/途中で通信失敗した・再認証失敗・実 POST 失効・
+                    # template 不在は、いずれも未認証/送信不能の空振りなので陰性として完了
+                    # 記録しない（resume で再試行できるよう残す）。
+                    if (
+                        self._json_probe_sent
+                        and not self._json_probe_failed
+                        and not auth_failed
+                        and not self._api_auth_failed
+                        and ip.template_id in (
+                            getattr(self, "injection_templates", {}) or {}
+                        )
+                    ):
+                        self._checkpoint_mark_done_ip(ip, check_name)
+            self._save_checkpoint()
+
     def _check_type_in_scope(self, check_type: str) -> bool:
         """Finding の check_type が今回有効なチェック集合に属するか。
 
@@ -1821,15 +1932,17 @@ class ScanEngine:
                     "Generating partial report …"
                 )
 
-            # ── Phase 3b: API スペック由来の本文検査（クロール非依存）──────
+            # ── Phase 3b: API スペック／SPA 観測由来の本文検査 ───────────
             # JSON API は GET に 404/405 を返してページ化されないことが多く、
             # その場合 page-level の scan_page が一度も呼ばれず mass_assignment 等が
-            # 空振りする。クロール結果に依存せず api_seed_requests を直接検査する。
+            # 空振りする。クロール結果に依存せず api_seed_requests を直接検査し、
+            # SPA クロールが収穫した JSON body 注入点も専用ループで消費する。
             # 既に Abort 済みなら、状態変更系（POST/PUT/PATCH）を新たに送らないため
             # この後続フェーズは実行しない（abort 制御の信頼性を保つ）。
             if not scan_aborted:
                 try:
                     await self._run_api_template_checks()
+                    await self._run_json_injection_checks()
                 except AbortScan:
                     scan_aborted = True
 
@@ -2594,8 +2707,8 @@ class ScanEngine:
                 except Exception:
                     pass
 
-            # SPA 観測の JSON body は CrawledPage 化せず、PR-b2 の攻撃ループへ
-            # 引き渡すメモリ内キューにだけ積む（本 PR では誰も消費しない）。
+            # SPA 観測の JSON body は CrawledPage 化せず、専用の攻撃ループへ
+            # 引き渡すメモリ内キューにだけ積む。
             if self.spa_crawl:
                 try:
                     from . import spa_harvest
@@ -2668,7 +2781,10 @@ class ScanEngine:
                         dedup_key, target = accepted_targets[ti]
                         template_id = tid_by_index.get(ti)
                         if template_id is None:
-                            template_id = f"jb-{len(self.injection_templates)}"
+                            # 決定論的 ID: 連番 jb-N は観測順依存なので、dedup_key から
+                            # 決定論生成し template dict / verify 突合を同一 run 内で一貫させる
+                            # （checkpoint キーには含めない＝resume 安定性。stable_key_parts 参照）。
+                            template_id = _stable_json_template_id(dedup_key)
                             self._spa_json_harvest_seen[dedup_key] = template_id
                             self.injection_templates[template_id] = {
                                 "method": target["method"],
@@ -4985,7 +5101,21 @@ class ScanEngine:
 
         verifier = getattr(scanner, "verify_finding", None)
         if verifier:
+            # json verify 中に失効/transport 失敗が起きたら、汎用フォールバック
+            # （下の _apply_ip 再送）へ落とさず terminal な "assumed"（penalize しない
+            # indeterminate）にする。scanner の verify が None を返しても _verify_one は
+            # 既定でフォールバックを実行し、401/空応答を脆弱性応答として評価して
+            # unreproduced にしてしまうため（Codex #99 R6）。
+            self._api_auth_failed = False
+            self._json_probe_failed = False
             scanner_result = await verifier(f)
+            # 結果値(None/False/True)に関わらず、verify 中に失効/transport 失敗が起きたら
+            # 判定を信頼せず terminal な "assumed" にする。scanner の verify は transport 失敗
+            # 時に False を返す経路（error-based の空 body・boolean の空 baseline）があり、
+            # None だけを見ると「検証リクエストが失敗しただけ」で unreproduced に誤格下げ
+            # してしまうため、結果値より前に flag を確認する（Codex #99 R7）。
+            if self._api_auth_failed or self._json_probe_failed:
+                return "assumed"
             if scanner_result is not None:
                 # SSTI has an HTTP-level fallback below for URL parameters. Use
                 # it when browser-based scanner verification could not reproduce
@@ -5060,8 +5190,17 @@ class ScanEngine:
         try:
             await self.browser.navigate(f.url, retries=self.navigation_retries)
             self.browser.reset_dialog()
+            self._api_auth_failed = False
+            self._json_probe_failed = False
             source, pair = await scanner._apply_ip(ip, f.payload)
             await asyncio.sleep(self._effective_delay)
+
+            # 汎用フォールバックの json 再送でも失効/transport 失敗を拾い、401/空応答を
+            # 脆弱性応答として評価せず terminal な "assumed" へ倒す（Codex #99 R6）。
+            if ip.location == "json_body" and (
+                self._api_auth_failed or self._json_probe_failed
+            ):
+                return "assumed"
 
             if f.check_type == "xss":
                 reproduced = self.browser.dialog_fired or bool(

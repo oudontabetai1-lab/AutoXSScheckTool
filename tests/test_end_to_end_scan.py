@@ -39,6 +39,7 @@ from tests.fixtures.realistic_site import (
     SAFE_ENDPOINTS,
     create_app,
 )
+from tests.fixtures.spa_app import app as spa_app
 from wscan.engine import ScanEngine
 
 # Injection checks whose detection is deterministic over HTTP/Chromium.
@@ -104,6 +105,35 @@ async def _run_scan(port: int, output_dir: str):
         depth=2,
         fast_mode=True,
         max_payloads=8,
+        request_delay=0,
+        use_planner=False,
+        sarif=False,
+        timeout=8,
+        navigation_retries=0,
+    )
+    await asyncio.wait_for(engine.run(), timeout=SCAN_TIMEOUT_S)
+    return engine
+
+
+async def _run_spa_json_scan(port: int, output_dir: str):
+    engine = ScanEngine(
+        f"http://127.0.0.1:{port}/",
+        checks=["sqli"],
+        llm_provider="none",
+        headless=True,
+        output_dir=output_dir,
+        open_report=False,
+        enable_waf_detection=False,
+        enable_ai_analysis=False,
+        enable_payload_learning=False,
+        enable_payload_evolution=False,
+        enable_payload_mutation=False,
+        enable_adaptive_payloads=False,
+        enable_sitemap_crawl=False,
+        spa_crawl=True,
+        depth=1,
+        fast_mode=True,
+        max_payloads=4,
         request_delay=0,
         use_planner=False,
         sarif=False,
@@ -215,6 +245,70 @@ class EndToEndRealisticScanTests(unittest.TestCase):
                     f"{spec['note']}. Findings: "
                     f"{[(f.check_type, f.field_name, f.evidence[:80]) for f in bogus]}",
                 )
+
+
+@unittest.skipUnless(_e2e_enabled(), "set WSCAN_E2E=1 to run the end-to-end browser scan")
+@unittest.skipUnless(
+    _chromium_available(),
+    "Playwright Chromium browser is not installed (run: playwright install chromium)",
+)
+class EndToEndSpaJsonSqlInjectionTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls._port = _free_port()
+        cls._config = uvicorn.Config(
+            spa_app, host="127.0.0.1", port=cls._port, log_level="error"
+        )
+        cls._server = uvicorn.Server(cls._config)
+        cls._thread = threading.Thread(target=cls._server.run, daemon=True)
+        cls._thread.start()
+        _wait_until_serving(cls._port)
+
+        cls._tmp = tempfile.TemporaryDirectory()
+        cls.engine = asyncio.run(_run_spa_json_scan(cls._port, cls._tmp.name))
+        cls.findings = list(cls.engine.all_findings)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._server.should_exit = True
+        cls._thread.join(timeout=5)
+        cls._tmp.cleanup()
+
+    def _json_sqli_on(self, path: str) -> list:
+        return [
+            finding
+            for finding in self.findings
+            if finding.check_type == "sqli"
+            and urlparse(finding.url).path == path
+            and finding.injection_location == "json_body"
+        ]
+
+    def test_spa_json_login_sqli_is_harvested_detected_and_verified(self):
+        harvested = [
+            ip
+            for ip in self.engine.json_injection_points
+            if urlparse(ip.url).path == "/api/login"
+            and ip.parameter_id == "/email"
+        ]
+        self.assertTrue(harvested, "SPA harvest が /api/login の /email を収穫しなかった")
+
+        matches = [
+            finding
+            for finding in self._json_sqli_on("/api/login")
+            if finding.injection_pointer == "/email"
+        ]
+        self.assertTrue(matches, "JSON body SQLi が end-to-end で検出されなかった")
+        self.assertTrue(
+            any(finding.verified for finding in matches),
+            "JSON body SQLi が verify で再現されなかった",
+        )
+
+    def test_safe_json_login_twin_produces_no_sqli_finding(self):
+        self.assertEqual(
+            self._json_sqli_on("/api/login_safe"),
+            [],
+            "安全ツイン /api/login_safe が SQLi と誤検出された",
+        )
 
 
 if __name__ == "__main__":

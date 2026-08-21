@@ -264,6 +264,14 @@ class InjectionPoint:
             location_token, pointer = "u", ""
         else:
             location_token = f"j:{self.method.upper()}"
+            # operation identity(template_id/body_signature)は checkpoint キーに含めない。
+            # 正しい body で攻撃するには template_id が値に敏感な harvest identity と 1:1 で
+            # なければならず、その値敏感性ゆえ URL クエリや body の nonce/timestamp/CSRF で
+            # run 毎に変わる＝resume 不安定（完了済みの状態変更 POST を再送・復元 finding が
+            # 検証不能）。resume 安全性を優先し、キーは安定な (url, pointer) に留める。
+            # 同一 (method,url,pointer) で body 構造だけ違う稀な多重 operation は同一単位へ
+            # 収束（ニッチな取りこぼし）を許容する。値の正規化（揮発クエリ/値の除去）は
+            # 全注入点共通の別課題（norm_url 自体の揮発も含む・vault Task 0013）。
             pointer = self.parameter_id
         return norm_url, field_name, str(self.form_index), location_token, pointer
 

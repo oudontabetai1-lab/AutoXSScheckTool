@@ -5,6 +5,7 @@ Provides common utilities for all vulnerability scanners.
 import json
 import re
 import time
+import uuid
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Optional, TYPE_CHECKING
@@ -128,6 +129,31 @@ def _is_sensitive_for_evidence(name) -> bool:
     """(2) evidence で伏せる機密ヘッダか（request_logger の正典＝静的＋runtime へ委譲）。"""
     from wscan.request_logger import is_sensitive_header
     return is_sensitive_header(name)
+
+
+_IDEMPOTENCY_HEADER_NAMES = frozenset({
+    "idempotency-key",
+    "x-idempotency-key",
+    "idempotency-token",
+    "x-idempotency-token",
+})
+
+
+def refresh_idempotency_headers(headers: dict) -> dict:
+    """replay 毎に idempotency キーの**値だけ**を新規 uuid へ置換する（純粋）。
+
+    b1 が template に温存した捕捉キーをそのまま連投すると、冪等 API はブラウザ原本の
+    キャッシュ応答を返す/変異 body を弾くため SQLi payload が実行されず偽陰性になる
+    （B2-2）。ヘッダ名は温存（必須キー API を満たす）しつつ、present かつ unique にして
+    dedup/required-key の双方を満たす。元ヘッダの表記(大文字小文字)は保つ。
+    """
+    if not headers:
+        return headers
+    result = dict(headers)
+    for name in list(result.keys()):
+        if str(name).lower() in _IDEMPOTENCY_HEADER_NAMES:
+            result[name] = uuid.uuid4().hex
+    return result
 
 
 def merge_template_headers(base: dict, tmpl_headers: dict) -> dict:
@@ -265,16 +291,20 @@ def _augment_dedup_key(
     injection_location: str,
     injection_method: str,
     injection_pointer: str,
+    injection_template_id: str = "",
 ) -> tuple:
-    """JSON body 注入点の dedup identity を method+pointer で拡張する（純粋）。
+    """JSON body 注入点の dedup identity を method+pointer+operation で拡張する（純粋）。
 
     同一 leaf 名(例 /profile/id と /billing/id が共に field_name="id")でも別入力
-    なので取りこぼさない。form/url_param は base のまま(4-tuple)。record_finding・
-    finding_dedup_key_for(engine の _record_finding/_init_checkpoint 経由)の**全 dedup
-    地点で同一キー**になるよう、この 1 箇所に集約する。
+    なので取りこぼさない。さらに同一 (method,url,pointer) でも body 構造の異なる別
+    operation(別 template)は別脆弱性なので、operation identity(`template_id`)も含めて
+    2 件目が重複として捨てられるのを防ぐ(checkpoint キーの B2-1 と対で揃える)。
+    form/url_param は base のまま(4-tuple)。record_finding・finding_dedup_key_for
+    (engine の _record_finding/_init_checkpoint 経由)の**全 dedup 地点で同一キー**に
+    なるよう、この 1 箇所に集約する。template_id 空なら従来どおり(後方互換)。
     """
     if injection_location == "json_body":
-        return base + (injection_method, injection_pointer)
+        return base + (injection_method, injection_pointer, injection_template_id)
     return base
 
 
@@ -289,6 +319,7 @@ def finding_dedup_key_for(finding: "Finding") -> tuple:
         getattr(finding, "injection_location", ""),
         getattr(finding, "injection_method", ""),
         getattr(finding, "injection_pointer", ""),
+        getattr(finding, "injection_template_id", ""),
     )
 
 
@@ -639,6 +670,18 @@ class BaseScanner(ABC):
             ip = injection_point_from_finding(finding)
         except ProvenanceError:
             return None
+        if ip is not None and ip.location == "json_body":
+            templates = getattr(self.engine, "injection_templates", {}) or {}
+            if not ip.template_id or ip.template_id not in templates:
+                # 登録テンプレ不在＝replay 不能（resume で nonce 変化/cap 到達により
+                # 再生成されなかった等）。呼び出し側(_verify_one)が「検証リクエスト失敗」と
+                # 同じく terminal な assumed へ倒せるよう probe 失敗を記録する（None のままだと
+                # 汎用フォールバックへ落ち unreproduced に誤格下げされる。Codex #99 R8）。
+                try:
+                    self.engine._json_probe_failed = True
+                except Exception:
+                    pass
+                return None
         if ip is not None:
             return ip
         if is_url_param:
@@ -838,6 +881,13 @@ class BaseScanner(ABC):
             getattr(self.engine, "injection_templates", {}) or {}
         ).get(ip.template_id)
         if not isinstance(template, dict):
+            # テンプレ不在＝送信不能。呼び出し側が「送れなかった」を陰性(完了/unreproduced)と
+            # 誤記録しないよう probe 失敗を記録する（scan は既に template 実在も別途確認・
+            # 冪等。verify の汎用フォールバックはこの flag で assumed に倒す。Codex #99 R8）。
+            try:
+                self.engine._json_probe_failed = True
+            except Exception:
+                pass
             return "", {}
 
         try:
@@ -858,6 +908,9 @@ class BaseScanner(ABC):
                 headers,
                 template.get("headers") or {},
             )
+            # idempotency キーはプローブ毎に fresh 値へ（B2-2）。捕捉値を連投すると冪等
+            # API がキャッシュ応答を返し SQLi payload が実行されず偽陰性になる。
+            headers = refresh_idempotency_headers(headers)
             kwargs = {
                 "timeout": getattr(self.engine, "timeout", 15),
                 "follow_redirects": True,
@@ -883,6 +936,13 @@ class BaseScanner(ABC):
             async with httpx.AsyncClient(**kwargs) as client:
                 response = await client.request(method, url, content=post_data)
             response_timestamp = time.time()
+            # 実応答を受信できた＝送信成功。呼び出し側ループはこの証拠が無いと「済み」に
+            # しない（transport 失敗〈timeout/TLS/DNS/proxy〉で空振りした probe を resume
+            # 恒久スキップする偽陰性を防ぐ）。ステータス不問（401/500 も送信自体は成立）。
+            try:
+                self.engine._json_probe_sent = True
+            except Exception:
+                pass
             pair = {
                 "request": {
                     "url": url,
@@ -899,8 +959,31 @@ class BaseScanner(ABC):
                     "timestamp": response_timestamp,
                 },
             }
+            # 実 POST の応答で認証失効を検知したらエンジンへ通知する。GET プレフライト
+            # (_api_session_looks_expired) では検知できない「メソッド限定保護」エンドポイント
+            # (GET=404/405, POST=401) の失効で、空 Finding を「済み」記録するのを防ぐ
+            # (呼び出し側ループが未マークにして resume 対象に残す)。mass_assignment と同型。
+            try:
+                from wscan import session_guard
+                if session_guard.looks_logged_out(
+                    status=response.status_code,
+                    final_url=str(response.url),
+                    body=response.text,
+                    login_url=getattr(self.engine, "login_url", ""),
+                    logged_in_marker=getattr(self.engine, "logged_in_marker", ""),
+                ):
+                    self.engine._api_auth_failed = True
+            except Exception:
+                pass
             return response.text, pair
         except Exception:
+            # 通信失敗（timeout/TLS/DNS/proxy 等）。baseline が通った後に個々の攻撃
+            # payload が落ちたケースでも、呼び出し側が「済み」記録して attack 未実行の
+            # 点を resume 恒久スキップしないよう、失敗を engine に記録する（Codex #99 R4）。
+            try:
+                self.engine._json_probe_failed = True
+            except Exception:
+                pass
             return "", {}
 
     async def run_equivalence_probe(
@@ -1161,6 +1244,7 @@ class BaseScanner(ABC):
             injection_point.location if injection_point is not None else "",
             injection_point.method if injection_point is not None else "",
             injection_point.parameter_id if injection_point is not None else "",
+            injection_point.template_id if injection_point is not None else "",
         )
         if dedup_key in self.engine._finding_dedup:
             return None  # duplicate
