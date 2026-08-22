@@ -18,6 +18,16 @@ from rich.console import Console
 
 from .header_scope import headers_allowed_for_url
 from .tls_config import TLSConfig
+from .url_extraction import (
+    is_plausible_route_candidate,
+    truncated_regex_literal,
+    regex_literal_end,
+    is_regex_literal_extraction,
+    preceding_is_regex_context,
+    advance_string_state,
+    extend_query_bracket_tail,
+    strip_trailing_noise,
+)
 
 
 console = Console()
@@ -1793,8 +1803,63 @@ class BrowserManager:
             )
             if not is_text_asset:
                 continue
-            for match in url_re.findall(body[:200000]):
-                candidate = match.rstrip(" \t\r\n\"'`<>)}],;")
+            scan_body = body[:200000]
+            skip_until = 0
+            # JS 文字列/テンプレートの開閉状態を本文先頭から漸進的に持ち越す（窓では字句状態を
+            # 復元できないため）。url_re の match は引用符を含まないので、状態変化は match 間の
+            # gap のみ＝全体で O(n)。これで「match が文字列/テンプレート内か」を正確に判定する。
+            string_quote = None
+            state_pos = 0
+            for m in url_re.finditer(scan_body):
+                string_quote = advance_string_state(
+                    scan_body, state_pos, m.start(), string_quote
+                )
+                state_pos = m.end()
+                in_string = string_quote is not None
+                match_text = m.group(0)
+                # コメント（`//`・`/* */`）は url_re の match として現れる。文字列外の
+                # コメントは終端まで読み飛ばし、内部の引用符/バッククォートが文字列状態を
+                # 汚染して後続の実ルートを隠すのを防ぐ（Codex #100 R14）。
+                if not in_string and match_text[:2] in ("//", "/*"):
+                    if match_text[:2] == "//":
+                        j = scan_body.find("\n", m.end())
+                    else:
+                        j = scan_body.find("*/", m.end())
+                        j = j + 2 if j >= 0 else -1
+                    comment_end = len(scan_body) if j < 0 else j
+                    state_pos = comment_end
+                    skip_until = max(skip_until, comment_end)
+                    continue
+                # 直前に切り詰めた regex リテラルの内部（escaped slash 後の再抽出片など）は飛ばす。
+                if m.start() < skip_until:
+                    continue
+                preceding = scan_body[max(0, m.start() - 64):m.start()]
+                # 0009 C1: url_re は regex メタ文字（| [ ] \ ^ { }）の手前で match を
+                # 打ち切るため、`/foo|bar/`→`/foo` のように切り詰めた regex 片が一見正常な
+                # path に見えて通過する。match 直後の1文字が regex 継続文字なら切り詰めとして
+                # 現候補を捨てる。さらに **regex 文脈が確定したときだけ** リテラルの閉じ `/` まで
+                # 読み飛ばして escaped slash 後の後半片（`/subpat/`）の再抽出を防ぐ。除算式
+                # （`a/b[c]`）を regex と誤認して後続の実ルートを飛ばさないよう、skip は文脈で gate する。
+                if truncated_regex_literal(scan_body[m.end():m.end() + 1]):
+                    if preceding_is_regex_context(preceding, in_string):
+                        # regex 文脈のみ「切り詰めた regex 片」として捨て、リテラルの残りも飛ばす。
+                        skip_until = regex_literal_end(scan_body, m.end())
+                        continue
+                    # 非 regex（文字列）文脈では継続文字 `[` 等は array/object query 構文
+                    # （`/search?filters[]=x`）。捨てずに `[]` を含むクエリ末尾を取り戻して
+                    # 完全なルートを残す（route も injectable な query param も失わない）。
+                    match_text = match_text + extend_query_bracket_tail(
+                        scan_body, m.end()
+                    )
+                # 末尾ノイズだけ剥がす（均衡した OData/関数の閉じ括弧は残す）。url_re は `;`
+                # 等も取り込むため、regex 形判定の前に剥がしておく（`/re/g;`→`/re/g`）。
+                candidate = strip_trailing_noise(match_text)
+                # 切り詰められない完全な regex リテラル（`/foo.bar/`・`return /re/`・`/re/.test(x)`）は
+                # content で実ルートと区別できないため、直前の文脈（regex を導く演算子/式キーワード）
+                # ＋`/…/flags`（もしくはメンバ呼び出し）の形で判定して弾く。文字列リテラル由来の
+                # 実ルートは残る。直前の式キーワード検出のため 1 文字でなくテキスト窓を渡す。
+                if is_regex_literal_extraction(preceding, candidate, in_string):
+                    continue
                 try:
                     resolved = urljoin(base_url, candidate)
                     parsed = urlparse(resolved)
@@ -1802,7 +1867,13 @@ class BrowserManager:
                         continue
                     if ignored_ext.search(parsed.path):
                         continue
-                    discovered.append(resolved.split("#")[0])
+                    cleaned = resolved.split("#")[0]
+                    # 切り詰め後の候補も、regex リテラル/式片の誤抽出を純粋関数で除去する
+                    # （無駄クロール＋planner LLM 浪費＋実ルート到達阻害を防ぐ）。判定は
+                    # 保守的で実ルートは落とさない。
+                    if not is_plausible_route_candidate(cleaned):
+                        continue
+                    discovered.append(cleaned)
                 except Exception:
                     continue
         return discovered

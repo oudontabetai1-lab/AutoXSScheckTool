@@ -863,6 +863,7 @@ OpenAPI 2.0/3.x、Swagger JSON/YAML、Postman Collection から URL、共通ヘ�
 - `cms`: CMS の種類、バージョン、既知露出、危険な設定を確認します。
 - sitemap/robots: 既定で未リンク URL のシードにします。`--no-sitemap-crawl` で無効化します。
 - SPA: `--spa-crawl` で React/Vue/Angular の SPA を検査します。(1) `history.pushState` フックとクリック探索で動的ルートを収集、(2) **描画確定待ち**（`networkidle` 上限付き＋ルート要素の描画完了）で `<app-root>` が空のまま抽出されるのを防止、(3) **描画中に観測した同一スコープの GET API/XHR エンドポイント**（クエリ付き。例: `/rest/products/search?q=`）を攻撃対象に自動追加し、URL パラメータとして注入検査します。観測した JSON ボディの POST も収穫し、JSON の葉を SQLi スキャナで検査します（XSS/NoSQL の JSON 対応は今後追加予定です）。
+- 読み込んだ JS/JSON 資産からリンク候補を抽出する際、minified JS の正規表現リテラルや式片（`/(?:` `/16*(…` 等）を誤ってルートとして拾わないようフィルタします。無駄なクロールとプランナー LLM の浪費を抑え、実ルートへの到達性を保ちます。
 - `js_static`: インライン/外部 JavaScript の危険な source-to-sink フローを静的確認します。
 
 ### flow / 手動巡回 / HAR
