@@ -27,9 +27,23 @@ def test_agent_config_directory_result_has_actionable_xdg_guidance():
     assert "書込み可能" in message
 
 
-def test_agent_exit_code_depends_only_on_result_error():
-    assert main._agent_exit_code(SimpleNamespace(error="initialization failed")) == 1
-    assert main._agent_exit_code(SimpleNamespace(error="")) == 0
+def test_agent_exit_code_flags_errors_and_unsuccessful_empty_runs():
+    # 明示エラー → 1。
+    assert main._agent_exit_code(
+        SimpleNamespace(error="initialization failed", success=False, findings=[])
+    ) == 1
+    # 正常成功（success=True）→ 0。
+    assert main._agent_exit_code(
+        SimpleNamespace(error="", success=True, findings=[])
+    ) == 0
+    # history 上の非成功 かつ 0 findings（誤成功表示の元）→ 1。
+    assert main._agent_exit_code(
+        SimpleNamespace(error="", success=False, findings=[])
+    ) == 1
+    # 非成功でも findings があれば検出は有効 → 0。
+    assert main._agent_exit_code(
+        SimpleNamespace(error="", success=False, findings=[object()])
+    ) == 0
     assert main._agent_exit_code(None) == 0
 
 
@@ -56,4 +70,71 @@ async def test_agent_initialization_error_prints_failed_not_zero_findings():
     assert "Agent scan FAILED: provider unavailable" in rendered
     assert "脆弱性は検出されませんでした" not in rendered
     assert "0 findings" not in rendered
+
+
+@pytest.mark.asyncio
+async def test_agent_unsuccessful_history_is_incomplete_not_clean():
+    # browser-use が例外でなく history.is_successful()=False で失敗を報告し、findings が
+    # 空のとき、「正常完了・0 findings」と誤表示せず INCOMPLETE＋非0 exit にする（D8）。
+    import sys
+    import types
+
+    output = StringIO()
+
+    class _FakeHistory:
+        def is_successful(self):
+            return False
+
+        def final_result(self):
+            return ""
+
+        def extracted_content(self):
+            return []
+
+        def errors(self):
+            return []
+
+        def model_actions(self):
+            return []
+
+        def urls(self):
+            return []
+
+    class _FakeAgent:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def run(self, **_kwargs):
+            return _FakeHistory()
+
+    class _FakeBrowser:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def stop(self):
+            return None
+
+    browser_use = types.ModuleType("browser_use")
+    browser_use.Agent = _FakeAgent
+    browser_use.Browser = _FakeBrowser
+
+    scanner = AgentBrowserScanner(target_url="http://fixture.test")
+    with patch(
+        "wscan.llm_agent_browser.check_agent_config_directory", return_value=(True, ""),
+    ), patch(
+        "wscan.llm_agent_browser._build_llm", return_value=object(),
+    ), patch(
+        "wscan.llm_agent_browser.console",
+        Console(file=output, force_terminal=False, color_system=None),
+    ), patch.dict(sys.modules, {"browser_use": browser_use}):
+        result = await scanner.run()
+
+    rendered = output.getvalue()
+    assert result.error is None
+    assert result.success is False
+    assert not result.findings
+    assert main._agent_exit_code(result) == 1
+    assert "INCOMPLETE" in rendered
+    assert "Agent Scan Complete" not in rendered
+    assert "脆弱性は検出されませんでした" not in rendered
 

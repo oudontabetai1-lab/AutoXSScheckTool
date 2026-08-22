@@ -213,13 +213,20 @@ class AgentEngine:
             summary_path = self.output_dir / "agent_summary.md"
             summary_path.write_text(result.final_summary, encoding="utf-8")
 
-        # 初期化・実行のハードエラーを「0 finding の正常完了」に見せない。
-        # evidence は残すが、成功レポートと完了イベントは生成しない。
-        if result.error:
+        # 初期化・実行のハードエラー、または history 上の非成功で 0 findings を「正常完了」に
+        # 見せない。evidence は残すが、成功レポートと完了イベントは生成しない（D8）。findings が
+        # あれば不完全でも検出結果は有効なのでレポートは生成する。
+        incomplete_empty = (
+            not result.error and not result.success and not result.findings
+        )
+        if result.error or incomplete_empty:
             if self.monitor:
-                await self.monitor.emit_status(
-                    f"Agent scan FAILED: {result.error}", "error"
+                msg = (
+                    f"Agent scan FAILED: {result.error}"
+                    if result.error
+                    else "Agent scan INCOMPLETE: 正常に完了しませんでした（0 findings は安全を意味しません）"
                 )
+                await self.monitor.emit_status(msg, "error")
             return result
 
         # Generate HTML report

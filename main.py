@@ -1714,8 +1714,20 @@ def _effective_open_report(args) -> bool:
 
 
 def _agent_exit_code(result) -> int:
-    """Agent 結果だけを対象に CLI 終了コードを決める純粋関数。"""
-    return 1 if result is not None and getattr(result, "error", None) else 0
+    """Agent 結果だけを対象に CLI 終了コードを決める純粋関数。
+
+    失敗（``error``）に加え、**正常に完了しなかった 0-findings** も非0にする。browser-use は
+    実行失敗を例外だけでなく ``history.is_successful()``（→ ``result.success``）でも報告するため、
+    success=False の空振りを「成功・0 findings」と誤表示しない（D8）。findings があれば実際に検出
+    できているので 0（不完全でも検出結果は有効）。
+    """
+    if result is None:
+        return 0
+    if getattr(result, "error", None):
+        return 1
+    if not getattr(result, "success", False) and not getattr(result, "findings", None):
+        return 1
+    return 0
 
 
 def _llm_model_display(args) -> str:

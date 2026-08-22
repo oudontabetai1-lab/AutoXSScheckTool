@@ -1182,13 +1182,24 @@ class AgentBrowserScanner:
                 except Exception as exc:
                     console.print(f"[yellow]ブラウザ終了エラー: {exc}[/yellow]")
 
+        # 実行失敗（例外）または history 上の非成功で 0 findings なら、「成功・0 findings」と
+        # 誤表示しない（D8）。findings があれば不完全でも検出結果は有効なので表示する。
+        incomplete_empty = (
+            not result.error and not result.success and not result.findings
+        )
         # サマリー表示
         if result.error:
             console.print(Rule("[bold red] Agent Scan Failed [/bold red]", style="red"))
             console.print(f"[bold red]Agent scan FAILED: {result.error}[/bold red]")
+        elif incomplete_empty:
+            console.print(Rule("[bold yellow] Agent Scan Incomplete [/bold yellow]", style="yellow"))
+            console.print(
+                "[bold yellow]Agent scan INCOMPLETE: 正常に完了しませんでした"
+                "（0 findings は安全を意味しません）[/bold yellow]"
+            )
         else:
             console.print(Rule("[bold magenta] Agent Scan Complete [/bold magenta]", style="magenta"))
-        if result.error:
+        if result.error or incomplete_empty:
             pass
         elif result.findings:
             console.print(
@@ -1212,6 +1223,11 @@ class AgentBrowserScanner:
             if result.error:
                 await self.monitor.emit_status(
                     f"Agent scan FAILED: {result.error}", "error"
+                )
+            elif incomplete_empty:
+                await self.monitor.emit_status(
+                    "Agent scan INCOMPLETE: 正常に完了しませんでした（0 findings は安全を意味しません）",
+                    "error",
                 )
             else:
                 await self.monitor.emit_status(
