@@ -185,7 +185,14 @@ class EngineScanGapTests(unittest.IsolatedAsyncioTestCase):
         return engine
 
     async def test_crawl_records_unscannable_urls_in_scan_matrix(self):
+        from wscan.engine import _configure_network_coverage_origins
+
         engine = self._engine()
+        # run() は browser.init 直後に coverage origin を設定する。_phase_crawl を
+        # 直接呼ぶこのテストでは同等のセットアップを明示的に行う。
+        _configure_network_coverage_origins(
+            engine._browser, getattr(engine, "_coverage_origins", set())
+        )
 
         pages = await engine._phase_crawl()
 

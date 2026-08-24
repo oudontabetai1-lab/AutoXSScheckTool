@@ -1617,6 +1617,16 @@ class ScanEngine:
                     and self._checkpoint_is_done(cp_url, "(page)", 0, check_name)
                 ):
                     continue
+                # field-only スキャナ（XSS 等）は BaseScanner.scan_page の no-op を継承する。
+                # 実 page/API 実装を持つ scanner だけ処理し、API URL 毎の人工的 tested を
+                # 数えない（mass_assignment 等 API テンプレ専用は scan_page override で残る・
+                # Codex #102 P2）。
+                has_page_impl = (
+                    hasattr(scanner, "scan_page_context")
+                    or type(scanner).scan_page is not BaseScanner.scan_page
+                )
+                if not has_page_impl:
+                    continue
                 try:
                     self._api_auth_failed = url_auth_failed
                     before_count = len(self.all_findings)
@@ -2105,6 +2115,11 @@ class ScanEngine:
 
         try:
             await self._browser.init()
+            # coverage の blocked カウンタ用 origin フィルタは、pre-auth ログインフロー等の
+            # 最初のトラフィックより前に main browser へ設定する（Codex #102 P2）。
+            _configure_network_coverage_origins(
+                self._browser, getattr(self, "_coverage_origins", set())
+            )
             if self.cookies:
                 await self._browser.set_cookies(self.cookies, self.target_url)
             if self.cookie_list:
@@ -2447,10 +2462,7 @@ class ScanEngine:
 
     async def _phase_crawl(self) -> list:
         """BFS crawl — navigate every reachable page, collect forms/HTML. No payloads."""
-        _configure_network_coverage_origins(
-            self._browser,
-            getattr(self, "_coverage_origins", set()),
-        )
+        # main browser の coverage origin は run() の browser.init 直後に設定済み。
         console.print(Rule("[bold blue] Phase 1 / 4  ·  Crawl [/bold blue]", style="blue"))
         console.print(f"  Target: [cyan]{self.target_url}[/cyan]  depth={self.depth}")
         if len(self.target_urls) > 1 or self.access_urls:
