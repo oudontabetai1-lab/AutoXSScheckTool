@@ -87,9 +87,9 @@ def strip_path_trailing_slash(url: str) -> str:
 def normalize_url_for_key(url: str) -> str:
     """揮発クエリを除き、checkpoint identity 用の安定した URL を返す。
 
-    未知のキー、パス末尾以外、値、および scheme/netloc の表記は保持する。パスの
-    trailing slash だけを除き、クエリ項目の raw 表現も保持して、判定とソートにだけ
-    デコード済みキーを使う。解析不能時は安全側として入力をそのまま返す。
+    未知のキー・パス・値・scheme/netloc の表記をすべて保持し、既知の揮発クエリだけを
+    除く（クエリ項目の raw 表現も保持し、判定にだけデコード済みキーを使う）。パスは
+    変更しないため冪等（normalize∘normalize=normalize）。解析不能時は安全側として入力を返す。
     """
     try:
         parsed = urlsplit(url)
@@ -123,13 +123,14 @@ def normalize_url_for_key(url: str) -> str:
             if fragment[:1] in ("/", "!") or "/" in fragment
             else ""
         )
-        # パス末尾スラッシュは、それが URL の末尾（元クエリ・保持 fragment が続かない）
-        # ときだけ吸収する。判定は **volatile strip 前の元クエリ** と保持 fragment を見る
-        # （strip 後の query_str で判定すると /app/?nonce=X と /app?nonce=Y が /app へ collide
-        # する・Codex #103 P1）。クエリ値末尾スラッシュ(?z=/admin/)は path 非対象なので不変。
+        # パス末尾スラッシュは **除去後クエリ(query_str)が空** のときだけ吸収する。これは
+        # 次を同時に満たす: (a) 冪等 normalize∘normalize=normalize（query_str は1回目の除去で
+        # 確定し2回目以降不変・Codex #103 P1）、(b) slash 非依存 /a/≡/a（長年の中核契約）、
+        # (c) 生存クエリがあれば /app/?x と /app?x を区別。volatile のみのクエリ(/app/?nonce)は
+        # 除去後 slash だけの差になり /app へ収束する（slash 非依存の帰結として容認）。クエリ値/
+        # fragment は不変。
         query_str = "&".join(item for _, item in kept)
-        has_url_suffix = bool(parsed.query) or bool(keep_frag)
-        norm_path = parsed.path if has_url_suffix else parsed.path.rstrip("/")
+        norm_path = parsed.path if query_str else parsed.path.rstrip("/")
         return urlunsplit(
             parsed._replace(
                 scheme=raw_scheme,
