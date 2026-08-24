@@ -700,3 +700,25 @@ def test_legacy_fallback_only_applies_to_loaded_v5_checkpoints():
     assert v5.source_version == 5
     # 新 URL（スラッシュ保持）で照合しても legacy fallback でヒットする
     assert v5.is_done(admin_slash, "q", 0, "xss", is_url_param=True) is True
+
+
+def test_legacy_fallback_excludes_units_marked_during_v5_resume():
+    """v5 resume 中に新規 mark した単位は legacy fallback の対象外（Codex #103 P1）。
+
+    v5 state をロード後、`?z=/admin` を新規に mark_done しても、distinct な
+    `?z=/admin/` は完了扱いにならない（新規 mark は _legacy_units に含めない）。
+    """
+    from wscan.checkpoint import CheckpointState
+
+    state = CheckpointState.from_dict({
+        "version": 5,
+        "target_url": "https://h/",
+        "checks": ["sqli"],
+        "completed_units": [],  # legacy には何も無い
+    })
+    assert state.source_version == 5
+    # resume 中に新規 mark
+    state.mark_done("https://h/p?z=/admin", "q", 0, "sqli", is_url_param=True)
+    assert state.is_done("https://h/p?z=/admin", "q", 0, "sqli", is_url_param=True) is True
+    # distinct な末尾スラッシュ版は完了にならない（新規 mark は legacy 照合対象外）
+    assert state.is_done("https://h/p?z=/admin/", "q", 0, "sqli", is_url_param=True) is False

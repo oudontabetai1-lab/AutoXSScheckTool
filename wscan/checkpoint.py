@@ -100,10 +100,11 @@ class CheckpointState:
         if key in self.completed_units:
             return True
         # v5 の whole-url rstrip で query 値末尾スラッシュを失った legacy checkpoint 互換。
-        # **実際に legacy(v5 以前) checkpoint を読み込んだときだけ**適用する。新規 v6 state で
-        # 適用すると `?z=/admin` 完了後に `?z=/admin/` が誤一致し初回スキャンで別 operation を
-        # skip してしまう（Codex #103 P1）。新規の完了記録には通常キーだけを書く。
-        if self.source_version >= 6:
+        # 読み込んだ legacy 単位だけを別集合 _legacy_units で照合する（新規 mark_done で
+        # 追加した単位を含めないため。含めると v5 resume 中に `?z=/admin` 完了後 `?z=/admin/`
+        # が誤一致し別 operation を skip する・Codex #103 P1）。
+        legacy_units = getattr(self, "_legacy_units", None)
+        if not legacy_units:
             return False
         legacy_key = unit_key(
             url,
@@ -113,7 +114,7 @@ class CheckpointState:
             is_url_param,
             legacy_whole_rstrip=True,
         )
-        return legacy_key in self.completed_units
+        return legacy_key in legacy_units
 
     def mark_done(
         self, url: str, field_name: str, form_index: int, check_type: str,
@@ -135,9 +136,10 @@ class CheckpointState:
         )
         if key in self.completed_units:
             return True
-        # legacy(v5 以前) checkpoint を読み込んだときだけ適用（新規 v6 state では
-        # `?z=/admin` と `?z=/admin/` の誤一致を防ぐ・Codex #103 P1）。
-        if self.source_version >= 6:
+        # 読み込んだ legacy 単位だけを _legacy_units で照合する（新規 mark を含めない・
+        # Codex #103 P1）。
+        legacy_units = getattr(self, "_legacy_units", None)
+        if not legacy_units:
             return False
         legacy_key = unit_key(
             url,
@@ -148,7 +150,7 @@ class CheckpointState:
             pointer=pointer,
             legacy_whole_rstrip=True,
         )
-        return legacy_key in self.completed_units
+        return legacy_key in legacy_units
 
     def mark_done_ip(self, ip: "InjectionPoint", check_type: str) -> None:
         """InjectionPoint が表す作業単位を完了済みにする。"""
@@ -245,6 +247,9 @@ class CheckpointState:
             parts[0] = normalize_url_for_key(parts[0])
             migrated.add("\x1f".join(parts))
         self.completed_units = migrated
+        # legacy fallback 照合用に、読み込んだ v5 単位のスナップショットを保持する
+        # （新規 mark_done で追加した単位は含めない・Codex #103 P1）。
+        self._legacy_units = set(migrated)
 
         # attempt_ledger の key は stable_key_parts の serialized list。
         # 壊れた旧 record は他の resume データを巻き込まず best-effort で飛ばす。

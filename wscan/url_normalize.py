@@ -121,12 +121,13 @@ def normalize_url_for_key(url: str) -> str:
             if fragment[:1] in ("/", "!") or "/" in fragment
             else ""
         )
-        # パス末尾スラッシュは、それが URL の末尾（クエリ/保持 fragment が続かない）
-        # ときだけ吸収する。baseline(whole-url rstrip)と同じく、クエリが続く /app/?x と
-        # /app?x は区別する（Codex #103 P1）。クエリ値末尾スラッシュ(?z=/admin/)は path
-        # 非対象なので不変。
+        # パス末尾スラッシュは、それが URL の末尾（元クエリ・保持 fragment が続かない）
+        # ときだけ吸収する。判定は **volatile strip 前の元クエリ** と保持 fragment を見る
+        # （strip 後の query_str で判定すると /app/?nonce=X と /app?nonce=Y が /app へ collide
+        # する・Codex #103 P1）。クエリ値末尾スラッシュ(?z=/admin/)は path 非対象なので不変。
         query_str = "&".join(item for _, item in kept)
-        norm_path = parsed.path if query_str else parsed.path.rstrip("/")
+        has_url_suffix = bool(parsed.query) or bool(keep_frag)
+        norm_path = parsed.path if has_url_suffix else parsed.path.rstrip("/")
         return urlunsplit(
             parsed._replace(
                 scheme=raw_scheme,
