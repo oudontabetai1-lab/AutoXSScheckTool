@@ -85,6 +85,7 @@ def _probe_body(probe_name: str) -> bytes:
 class RequestSmugglingScanner(BaseScanner):
     """HTTP request smuggling detection scanner."""
 
+    HAS_PAGE_LEVEL = True
     CHECK_TYPE = "request_smuggling"
     SEVERITY = "high"
 

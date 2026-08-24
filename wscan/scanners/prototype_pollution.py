@@ -93,6 +93,7 @@ def _append_query(url: str, fragment: str) -> str:
 class PrototypePollutionScanner(BaseScanner):
     """Prototype Pollution（クライアント/サーバ両面）スキャナ。"""
 
+    HAS_PAGE_LEVEL = True
     CHECK_TYPE = "prototype_pollution"
     SEVERITY = "high"
 

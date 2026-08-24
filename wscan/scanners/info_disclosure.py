@@ -85,6 +85,7 @@ _TECH_HEADERS = [
 class InfoDisclosureScanner(BaseScanner):
     """Sensitive file exposure and information disclosure scanner."""
 
+    HAS_PAGE_LEVEL = True
     CHECK_TYPE = "info_disclosure"
     SEVERITY = "medium"
 

@@ -49,6 +49,7 @@ _OVERRIDE_HEADERS = [
 class HostHeaderScanner(BaseScanner):
     """Host Header Injection scanner."""
 
+    HAS_PAGE_LEVEL = True
     CHECK_TYPE = "host_header"
     SEVERITY = "medium"
 

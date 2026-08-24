@@ -19,6 +19,7 @@ if TYPE_CHECKING:
 class ClickjackingScanner(BaseScanner):
     """Clickjacking vulnerability scanner — response-header analysis (IPA 1.9)."""
 
+    HAS_PAGE_LEVEL = True
     CHECK_TYPE = "clickjacking"
     SEVERITY = "medium"
 

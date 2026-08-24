@@ -1,6 +1,7 @@
 """到達性カバレッジと HTTP status 集計のブラウザ非依存テスト。"""
 
 import asyncio
+import importlib
 from collections import Counter
 from types import SimpleNamespace
 
@@ -434,6 +435,45 @@ def test_findings_total_uses_all_in_scope_findings_without_matrix_rows():
     assert summary["findings_total"] == 1
 
 
+def test_builtin_page_level_capability_flags_match_scanner_contract():
+    page_level_scanners = {
+        "cache_poisoning.CachePoisoningScanner",
+        "clickjacking.ClickjackingScanner",
+        "cms.CmsScanner",
+        "cors.CORSScanner",
+        "csrf.CSRFScanner",
+        "graphql.GraphQLScanner",
+        "host_header.HostHeaderScanner",
+        "info_disclosure.InfoDisclosureScanner",
+        "js_static.JsStaticScanner",
+        "jwt_scanner.JWTScanner",
+        "mass_assignment.MassAssignmentScanner",
+        "privesc.PrivEscScanner",
+        "prototype_pollution.PrototypePollutionScanner",
+        "race_condition.RaceConditionScanner",
+        "request_smuggling.RequestSmugglingScanner",
+        "secret_leak.SecretLeakScanner",
+        "security_headers.SecurityHeadersScanner",
+        "session.SessionScanner",
+        "sri.SRIScanner",
+        "stored_xss.StoredXSSScanner",
+        "websocket.WebSocketScanner",
+    }
+    compat_noop_scanners = {
+        "deserialization.DeserializationScanner",
+        "file_upload.FileUploadScanner",
+        "ldap_injection.LDAPScanner",
+        "nosql_injection.NoSQLInjectionScanner",
+        "xxe.XXEScanner",
+    }
+
+    for scanner_path in page_level_scanners | compat_noop_scanners:
+        module_name, class_name = scanner_path.split(".")
+        module = importlib.import_module(f"wscan.scanners.{module_name}")
+        scanner_class = getattr(module, class_name)
+        assert scanner_class.HAS_PAGE_LEVEL is (scanner_path in page_level_scanners)
+
+
 def test_page_level_attempt_uses_only_findings_returned_by_scanner(tmp_path):
     engine = ScanEngine(
         "http://fixture.test/page",
@@ -448,6 +488,8 @@ def test_page_level_attempt_uses_only_findings_returned_by_scanner(tmp_path):
     )
 
     class _Scanner:
+        HAS_PAGE_LEVEL = True
+
         async def scan_page(self, url):
             engine.all_findings.append(
                 Finding(
@@ -480,7 +522,7 @@ def test_page_level_attempt_uses_only_findings_returned_by_scanner(tmp_path):
     assert engine.coverage_summary()["attempts"] == 1
 
 
-def test_default_scan_page_noop_does_not_create_page_level_attempt(tmp_path):
+def test_compat_scan_page_noop_does_not_create_page_level_attempt(tmp_path):
     engine = ScanEngine(
         "http://fixture.test/page",
         checks=["xss"],
@@ -495,6 +537,9 @@ def test_default_scan_page_noop_does_not_create_page_level_attempt(tmp_path):
 
     class _FieldOnlyScanner(BaseScanner):
         async def scan_field(self, *args, **kwargs):
+            return []
+
+        async def scan_page(self, url):
             return []
 
     engine.scanners = {"xss": _FieldOnlyScanner(engine)}
@@ -512,6 +557,38 @@ def test_default_scan_page_noop_does_not_create_page_level_attempt(tmp_path):
     assert engine.coverage_summary()["attempts"] == 0
 
 
+def test_scan_page_context_creates_page_level_attempt_without_flag(tmp_path):
+    engine = ScanEngine(
+        "http://fixture.test/page",
+        checks=["js_static"],
+        llm_provider="none",
+        output_dir=tmp_path,
+        open_report=False,
+        enable_waf_detection=False,
+        enable_ai_analysis=False,
+        enable_payload_learning=False,
+        enable_adaptive_payloads=False,
+    )
+
+    class _ContextScanner:
+        async def scan_page_context(self, page):
+            return []
+
+    engine.scanners = {"js_static": _ContextScanner()}
+    page = CrawledPage(
+        url=engine.target_url,
+        html="<html></html>",
+        forms=[],
+        url_params=[],
+        depth=0,
+    )
+
+    asyncio.run(engine._attack_one_page(page, {}))
+
+    assert engine.scan_matrix[-1]["field_name"] == "(page)"
+    assert engine.scan_matrix[-1]["status"] == "tested"
+
+
 def test_api_template_execution_is_recorded_as_an_attempt(tmp_path):
     engine = ScanEngine(
         "http://fixture.test/api",
@@ -526,6 +603,8 @@ def test_api_template_execution_is_recorded_as_an_attempt(tmp_path):
     )
 
     class _Scanner:
+        HAS_PAGE_LEVEL = True
+
         async def scan_page(self, url):
             return [_finding("mass_assignment", url)]
 
@@ -539,6 +618,35 @@ def test_api_template_execution_is_recorded_as_an_attempt(tmp_path):
     assert row["status"] == "vulnerable"
     assert row["finding_count"] == 1
     assert engine.coverage_summary()["attempts"] == 1
+
+
+def test_compat_scan_page_noop_does_not_create_api_template_attempt(tmp_path):
+    engine = ScanEngine(
+        "http://fixture.test/api",
+        checks=["nosql"],
+        llm_provider="none",
+        output_dir=tmp_path,
+        open_report=False,
+        enable_waf_detection=False,
+        enable_ai_analysis=False,
+        enable_payload_learning=False,
+        enable_adaptive_payloads=False,
+    )
+
+    class _FieldOnlyScanner(BaseScanner):
+        async def scan_field(self, *args, **kwargs):
+            return []
+
+        async def scan_page(self, url):
+            return []
+
+    engine.scanners = {"nosql": _FieldOnlyScanner(engine)}
+    engine.api_seed_requests = [SimpleNamespace(url=engine.target_url)]
+
+    asyncio.run(engine._run_api_template_checks())
+
+    assert engine.scan_matrix == []
+    assert engine.coverage_summary()["attempts"] == 0
 
 
 def test_coverage_console_and_html_render_blocked_warning(tmp_path):

@@ -153,6 +153,7 @@ class JWTScanner(BaseScanner):
     JWT attack vectors.
     """
 
+    HAS_PAGE_LEVEL = True
     CHECK_TYPE = "jwt"
     SEVERITY = "high"
 

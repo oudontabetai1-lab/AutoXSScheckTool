@@ -48,6 +48,7 @@ def _looks_like_state_change(url: str, field: dict) -> bool:
 class RaceConditionScanner(BaseScanner):
     """Race condition / TOCTOU vulnerability scanner."""
 
+    HAS_PAGE_LEVEL = True
     CHECK_TYPE = "race_condition"
     SEVERITY = "high"
 

@@ -128,6 +128,7 @@ def find_unprotected_externals(html: str, page_url: str) -> list[dict]:
 class SRIScanner(BaseScanner):
     """Audit third-party <script>/<link> tags missing ``integrity`` attribute."""
 
+    HAS_PAGE_LEVEL = True
     CHECK_TYPE = "sri"
     SEVERITY = "medium"
 

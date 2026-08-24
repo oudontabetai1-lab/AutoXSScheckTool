@@ -233,7 +233,6 @@ from .monitor import MonitorServer
 from .payload_gen import PayloadGenerator
 from .injection_point import InjectionPoint
 from .scanners.base import (
-    BaseScanner,
     Finding,
     ProvenanceError,
     finding_dedup_key_for,
@@ -1443,8 +1442,11 @@ class ScanEngine:
                             ).items()
                         })
                     else:
-                        # サブセット resume で out-of-scope の 403/429 を復元し、
-                        # blocked 警告へ誤って計上しないため、当該 run で再計上する。
+                        # サブセット resume では historical HTTP counter を復元しない。
+                        # out-of-scope check の 403/429 を blocked へ誤計上しない一方、
+                        # in-scope check の完了済み probe に属する block も失われるため、
+                        # blocked は当該 run で観測した status のみを反映する既知の制約。
+                        # 完全 resume（check 集合一致）では上の分岐で counter を復元する。
                         self._restored_status_counts = Counter()
                 except Exception as exc:
                     self._restored_status_counts = Counter()
@@ -1617,14 +1619,11 @@ class ScanEngine:
                     and self._checkpoint_is_done(cp_url, "(page)", 0, check_name)
                 ):
                     continue
-                # field-only スキャナ（XSS 等）は BaseScanner.scan_page の no-op を継承する。
-                # 実 page/API 実装を持つ scanner だけ処理し、API URL 毎の人工的 tested を
-                # 数えない（mass_assignment 等 API テンプレ専用は scan_page override で残る・
-                # Codex #102 P2）。
-                has_page_impl = (
-                    hasattr(scanner, "scan_page_context")
-                    or type(scanner).scan_page is not BaseScanner.scan_page
-                )
+                # 明示的な page-level 能力か page context 実装を持つ scanner だけ処理し、
+                # 互換 no-op の scan_page override で人工的 tested を数えない。
+                has_page_impl = getattr(
+                    scanner, "HAS_PAGE_LEVEL", False
+                ) or hasattr(scanner, "scan_page_context")
                 if not has_page_impl:
                     continue
                 try:
@@ -4253,10 +4252,9 @@ class ScanEngine:
             # 重複する。これらは checkpoint を刻む _run_api_template_checks に一本化する。
             if check_name in _API_TEMPLATE_ONLY_CHECKS:
                 continue
-            has_page_impl = (
-                hasattr(scanner, "scan_page_context")
-                or type(scanner).scan_page is not BaseScanner.scan_page
-            )
+            has_page_impl = getattr(
+                scanner, "HAS_PAGE_LEVEL", False
+            ) or hasattr(scanner, "scan_page_context")
             if not has_page_impl:
                 continue
             # 再開: 済みの page-level 単位 (url,"(page)",check) は飛ばす。intrusive な

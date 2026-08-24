@@ -23,6 +23,7 @@ CSRF_TOKEN_NAMES = {
 class CSRFScanner(BaseScanner):
     """CSRF vulnerability scanner — checks POST forms for missing CSRF tokens (IPA 1.6)."""
 
+    HAS_PAGE_LEVEL = True
     CHECK_TYPE = "csrf"
     SEVERITY = "medium"
 

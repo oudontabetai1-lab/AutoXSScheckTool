@@ -19,6 +19,7 @@ from .base import BaseScanner, Finding
 
 
 class CmsScanner(BaseScanner):
+    HAS_PAGE_LEVEL = True
     CHECK_TYPE = "cms"
     SEVERITY = "medium"
 

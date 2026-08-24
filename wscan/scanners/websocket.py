@@ -56,6 +56,7 @@ _INJECT_KEYS = {
 class WebSocketScanner(BaseScanner):
     """WebSocket エンドポイントへのインジェクション脆弱性を検査するスキャナー。"""
 
+    HAS_PAGE_LEVEL = True
     CHECK_TYPE = "websocket"
     SEVERITY = "high"
 

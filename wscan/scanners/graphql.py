@@ -203,6 +203,7 @@ class GraphQLScanner(BaseScanner):
     common GraphQL-specific vulnerabilities.
     """
 
+    HAS_PAGE_LEVEL = True
     CHECK_TYPE = "graphql"
     SEVERITY = "medium"
 

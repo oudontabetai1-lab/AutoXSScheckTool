@@ -106,6 +106,7 @@ def detect_mass_assignment(
 class MassAssignmentScanner(BaseScanner):
     """Mass Assignment（過剰割り当て）スキャナ。API スペック由来の JSON 操作を検査。"""
 
+    HAS_PAGE_LEVEL = True
     CHECK_TYPE = "mass_assignment"
     SEVERITY = "high"
 

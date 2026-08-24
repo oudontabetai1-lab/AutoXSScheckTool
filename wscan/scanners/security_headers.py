@@ -68,6 +68,7 @@ _HEADER_CHECKS = [
 class SecurityHeadersScanner(BaseScanner):
     """HTTP security headers audit scanner."""
 
+    HAS_PAGE_LEVEL = True
     CHECK_TYPE = "security_headers"
     SEVERITY = "low"
 

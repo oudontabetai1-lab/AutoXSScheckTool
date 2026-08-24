@@ -355,6 +355,7 @@ class PrivEscScanner(BaseScanner):
     All logic lives in scan_page().
     """
 
+    HAS_PAGE_LEVEL = True
     CHECK_TYPE = "privesc"
     SEVERITY = "high"
 

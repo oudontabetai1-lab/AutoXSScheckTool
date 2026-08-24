@@ -522,6 +522,7 @@ def injection_point_from_finding(finding: Finding) -> Optional[InjectionPoint]:
 class BaseScanner(ABC):
     """Base class for all vulnerability scanners."""
 
+    HAS_PAGE_LEVEL: bool = False
     CHECK_TYPE = "base"
     SEVERITY = "medium"
     SUPPORTS_JSON_BODY = False

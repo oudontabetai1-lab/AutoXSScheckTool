@@ -32,6 +32,7 @@ SESSION_COOKIE_HINTS = {
 class SessionScanner(BaseScanner):
     """Session management / insecure cookie scanner (IPA 1.4)."""
 
+    HAS_PAGE_LEVEL = True
     CHECK_TYPE = "session"
     SEVERITY = "medium"
 

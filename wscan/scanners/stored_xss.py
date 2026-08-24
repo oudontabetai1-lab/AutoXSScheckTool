@@ -57,6 +57,7 @@ def classify_stored_marker(marker: str, payload: str, source: str) -> dict:
 class StoredXSSScanner(BaseScanner):
     """Stored / second-order XSS scanner."""
 
+    HAS_PAGE_LEVEL = True
     CHECK_TYPE = "stored_xss"
     SEVERITY = "critical"
 

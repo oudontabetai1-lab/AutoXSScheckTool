@@ -20,6 +20,7 @@ _CANARY_ORIGIN = "https://evil.wscan-test.example.com"
 class CORSScanner(BaseScanner):
     """CORS misconfiguration scanner."""
 
+    HAS_PAGE_LEVEL = True
     CHECK_TYPE = "cors"
     SEVERITY = "high"
 

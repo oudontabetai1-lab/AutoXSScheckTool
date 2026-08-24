@@ -148,6 +148,7 @@ def _bodies_similar(a: str, b: str, threshold: float = 0.9) -> bool:
 class CachePoisoningScanner(BaseScanner):
     """Web Cache Poisoning / Deception スキャナ。"""
 
+    HAS_PAGE_LEVEL = True
     CHECK_TYPE = "cache_poisoning"
     SEVERITY = "high"
 
