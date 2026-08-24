@@ -145,6 +145,7 @@ class InfoDisclosureScanner(BaseScanner):
                 target = urljoin(origin, path)
                 try:
                     r = await client.get(target)
+                    self._record_probe_status(r)
                     if r.status_code not in (200, 206):
                         continue
                     body = r.text[:4000]
@@ -307,7 +308,9 @@ class InfoDisclosureScanner(BaseScanner):
         if hasattr(self.engine, "auth_headers"):
             kwargs["headers"] = self.auth_headers_for_url(url)
         async with httpx.AsyncClient(**kwargs) as client:
-            return await client.get(url)
+            response = await client.get(url)
+            self._record_probe_status(response)
+        return response
 
     def _classify_sensitive_body(self, body: str, content_type: str) -> str | None:
         for pattern, label in _CONTENT_PATTERNS.items():

@@ -485,6 +485,7 @@ class MailHeaderInjectionScanner(BaseScanner):
                 resp = await client.post(action, files=files)
             else:
                 resp = await client.post(action, data=data)
+        self._record_probe_status(resp)
         body = resp.text
         pair = {
             "request": {"url": action, "method": method, "payload": payload},

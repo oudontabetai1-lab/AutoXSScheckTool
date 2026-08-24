@@ -196,7 +196,9 @@ class MassAssignmentScanner(BaseScanner):
         try:
             async with httpx.AsyncClient(**kwargs) as client:
                 baseline = await client.request(method, tmpl.url, content=baseline_payload)
+                self._record_probe_status(baseline)
                 tainted = await client.request(method, tmpl.url, content=polluted_payload)
+                self._record_probe_status(tainted)
         except Exception:
             return None
 

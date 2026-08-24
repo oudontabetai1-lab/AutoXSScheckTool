@@ -983,6 +983,7 @@ class ScanEngine:
         self.reached_urls: set = set()
         self._worker_status_counts = Counter()
         self._restored_status_counts = Counter()
+        self._probe_status_counts = Counter()
         self.scanned_forms: set = set()
         self._scanned_forms_lock = asyncio.Lock()   # guards scanned_forms in concurrent mode
         self.completed_fields: int = 0
@@ -1034,12 +1035,16 @@ class ScanEngine:
             )
         ]
         by_status = Counter(row.get("status", "") for row in attack_rows)
-        findings_total = 0
-        for row in attack_rows:
-            try:
-                findings_total += int(row.get("finding_count", 0) or 0)
-            except (TypeError, ValueError):
-                pass
+        # Finding の権威ソースは all_findings。scan_matrix に行を持たない chain /
+        # multi-parameter Finding もここでは数える一方、attempts は field/page/API の
+        # 実行台帳だけを対象にして過剰な推測計上をしない。
+        findings_total = sum(
+            1
+            for finding in (getattr(self, "all_findings", None) or [])
+            if ScanEngine._check_type_in_scope(
+                self, getattr(finding, "check_type", "")
+            )
+        )
 
         unreached_by_url: dict[str, dict] = {}
         for row in rows:
@@ -1085,6 +1090,12 @@ class ScanEngine:
         except Exception:
             pass
         try:
+            merged_status_counts.update(
+                getattr(self, "_probe_status_counts", {}) or {}
+            )
+        except Exception:
+            pass
+        try:
             http_status = bucketize_status_counts(merged_status_counts)
         except Exception:
             pass
@@ -1100,6 +1111,20 @@ class ScanEngine:
             "unreached_count": len(unreached),
             "http_status": http_status,
         }
+
+    def record_probe_status(self, status) -> None:
+        """非ブラウザプローブの HTTP status を scan 単位で安全に記録する。"""
+        try:
+            value = int(status)
+            if not 100 <= value < 600:
+                return
+            counts = getattr(self, "_probe_status_counts", None)
+            if counts is None:
+                counts = Counter()
+                self._probe_status_counts = counts
+            counts[value] += 1
+        except Exception:
+            pass
 
     def _observability_report_data(self, sample_limit: int = 5) -> dict:
         """レポート用に集計と代表サンプルを同じデータ源から返す。"""
@@ -1369,6 +1394,7 @@ class ScanEngine:
                 )
             else:
                 state = loaded
+                self.reached_urls = set(state.reached_urls or [])
                 self.scan_matrix = [
                     row for row in state.scan_matrix
                     if (
@@ -1440,6 +1466,9 @@ class ScanEngine:
             self.checkpoint.scan_matrix = list(
                 getattr(self, "scan_matrix", []) or []
             )
+            self.checkpoint.reached_urls = sorted(
+                getattr(self, "reached_urls", set()) or set()
+            )
             # D5: 試行台帳も保存（resume で adaptive 履歴を維持）。台帳未配線でも安全。
             ledger = getattr(self, "attempt_ledger", None)
             if ledger is not None:
@@ -1466,6 +1495,12 @@ class ScanEngine:
             try:
                 merged_status_counts.update(
                     getattr(self, "_restored_status_counts", {}) or {}
+                )
+            except Exception:
+                pass
+            try:
+                merged_status_counts.update(
+                    getattr(self, "_probe_status_counts", {}) or {}
                 )
             except Exception:
                 pass
@@ -1550,6 +1585,7 @@ class ScanEngine:
                     continue
                 try:
                     self._api_auth_failed = url_auth_failed
+                    before_count = len(self.all_findings)
                     findings = await scanner.scan_page(url)
                     # 実テンプレ要求で認証失効を観測したら、再ログイン+1回だけ再試行。
                     # GET プレフライトでは検知できないメソッド限定保護(POST=401)を救済。
@@ -1578,6 +1614,18 @@ class ScanEngine:
                     # 認証失効が解消しないまま空振りした単位は「済み」にしない
                     # （resume が再試行できるようにする）。
                     if not self._api_auth_failed:
+                        new_findings = self.all_findings[before_count:]
+                        self._record_scan_matrix(
+                            url=url,
+                            field_name="(api-template)",
+                            check_name=check_name,
+                            status="vulnerable" if new_findings else "tested",
+                            location="API template",
+                            severity=max(
+                                (f.severity for f in new_findings), default=""
+                            ),
+                            finding_count=len(new_findings),
+                        )
                         self._checkpoint_mark_done(cp_url, "(api-template)", 0, check_name)
             # URL 単位で進捗＋Finding スナップショットを保存（クラッシュ耐性）。
             self._save_checkpoint()
@@ -1673,7 +1721,9 @@ class ScanEngine:
         既出 ``privesc_*`` Finding が復元されず、レポートから消えてしまう。
         """
         ct = check_type or ""
-        effective = set(self.checks) | set(getattr(self, "scanners", {}).keys())
+        effective = set(getattr(self, "checks", []) or []) | set(
+            getattr(self, "scanners", {}).keys()
+        )
         # crawl 中に条件付きで自動有効化される検査（cms/privesc）は、復元時点では
         # まだ scanners に無いことがあるため常に in-scope 扱いで既出 Finding を保つ。
         effective |= _AUTO_ENABLED_CHECKS
@@ -1977,6 +2027,7 @@ class ScanEngine:
         try:
             async with httpx.AsyncClient(**kwargs) as client:
                 r = await client.get(url, headers=headers)
+                self.record_probe_status(r.status_code)
         except Exception:
             return False
         return session_guard.looks_logged_out(
@@ -4101,6 +4152,7 @@ class ScanEngine:
         # Prevent the authenticated crawl/attack from re-visiting the login page
         # (which, on redirect-on-auth apps, would only capture post-login content).
         self.visited_urls.add(login_seed)
+        self.reached_urls.add(login_seed)
 
     async def _attack_one_page(self, page: CrawledPage, plans: dict):
         """
@@ -4141,12 +4193,25 @@ class ScanEngine:
                 continue
             page_errored = False
             try:
+                before_count = len(self.all_findings)
                 if hasattr(scanner, "scan_page_context"):
                     page_findings = await scanner.scan_page_context(page)
                 else:
                     page_findings = await scanner.scan_page(page.url)
                 for f in (page_findings or []):
                     self._record_finding(f, source="page-level")
+                new_findings = self.all_findings[before_count:]
+                self._record_scan_matrix(
+                    url=page.url,
+                    field_name="(page)",
+                    check_name=check_name,
+                    status="vulnerable" if new_findings else "tested",
+                    location="page-level",
+                    severity=max(
+                        (f.severity for f in new_findings), default=""
+                    ),
+                    finding_count=len(new_findings),
+                )
             except Exception as e:
                 page_errored = True
                 console.print(f"  [yellow]Page-level ({check_name}): {e}[/yellow]")
@@ -5364,10 +5429,12 @@ class ScanEngine:
                             baseline_url,
                             headers=self.auth_headers(url=baseline_url),
                         )
+                        self.record_probe_status(baseline_resp.status_code)
                         probe_resp = await client.get(
                             probe_url,
                             headers=self.auth_headers(url=probe_url),
                         )
+                        self.record_probe_status(probe_resp.status_code)
                     baseline_text = baseline_resp.text
                     probe_text = probe_resp.text
                     for expected in expected_values:

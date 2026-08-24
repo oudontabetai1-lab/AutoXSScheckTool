@@ -138,7 +138,9 @@ class CORSScanner(BaseScanner):
             kwargs["proxy"] = proxy
 
         async with httpx.AsyncClient(**kwargs) as client:
-            return await client.get(url)
+            response = await client.get(url)
+            self._record_probe_status(response)
+        return response
 
     def _origin_headers(self, origin: str) -> dict:
         return {

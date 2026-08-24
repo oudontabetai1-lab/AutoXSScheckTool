@@ -525,6 +525,7 @@ class PrivEscScanner(BaseScanner):
                 **self._client_transport_kwargs(),
             ) as client:
                 resp = await client.get(url)
+                self._record_probe_status(resp)
                 status = resp.status_code
                 body = resp.text[:8000]
         except Exception:
@@ -595,6 +596,7 @@ class PrivEscScanner(BaseScanner):
                 **self._client_transport_kwargs(),
             ) as client:
                 resp = await client.get(url)
+                self._record_probe_status(resp)
                 status = resp.status_code
                 body = resp.text[:8000]
         except Exception:
@@ -1256,6 +1258,7 @@ class PrivEscScanner(BaseScanner):
                 **self._client_transport_kwargs(),
             ) as client:
                 resp = await client.get(url)
+                self._record_probe_status(resp)
                 return resp.status_code, resp.text[:8000]
         except Exception:
             return 0, ""
@@ -1292,6 +1295,7 @@ class PrivEscScanner(BaseScanner):
                 **self._client_transport_kwargs(),
             ) as client:
                 resp = await client.request(method, url)
+                self._record_probe_status(resp)
                 return resp.status_code, resp.text[:8000]
         except Exception:
             return 0, ""
@@ -1418,6 +1422,7 @@ class PrivEscScanner(BaseScanner):
                 **self._client_transport_kwargs(),
             ) as client:
                 resp = await client.request(method, url, data=data)
+                self._record_probe_status(resp)
                 return resp.status_code, resp.text[:8000]
         except Exception:
             return 0, ""

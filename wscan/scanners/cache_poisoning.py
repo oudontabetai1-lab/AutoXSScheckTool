@@ -210,6 +210,7 @@ class CachePoisoningScanner(BaseScanner):
             try:
                 async with httpx.AsyncClient(**self._client_kwargs()) as client:
                     poisoned = await client.get(probe_url, headers=inj_headers)
+                    self._record_probe_status(poisoned)
             except Exception:
                 continue
 
@@ -226,6 +227,7 @@ class CachePoisoningScanner(BaseScanner):
                         probe_url,
                         headers=self._auth_headers(probe_url),
                     )
+                    self._record_probe_status(clean)
                 confirmed = reflected(clean.text, marker_host) and cache_hit(
                     dict(clean.headers)
                 )
@@ -284,10 +286,12 @@ class CachePoisoningScanner(BaseScanner):
         try:
             async with httpx.AsyncClient(**self._client_kwargs()) as client:
                 base = await client.get(url, headers=self._auth_headers(url))
+                self._record_probe_status(base)
                 css = await client.get(
                     css_url,
                     headers=self._auth_headers(css_url),
                 )
+                self._record_probe_status(css)
         except Exception:
             return []
 

@@ -82,6 +82,8 @@ class PreAuthLoginScanTests(unittest.TestCase):
         self.assertIn("http://app.test/login", engine._browser.navigated)
         # Marked visited so the authenticated crawl won't re-record it.
         self.assertIn("http://app.test/login", engine.visited_urls)
+        # A successfully attacked pre-auth page is also part of reached coverage.
+        self.assertIn("http://app.test/login", engine.reached_urls)
 
     def test_skipped_when_no_login_url(self):
         engine = self._engine()

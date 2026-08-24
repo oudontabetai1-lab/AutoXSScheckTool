@@ -276,7 +276,9 @@ class DeserializationScanner(BaseScanner):
 
                 async with httpx.AsyncClient(**kwargs) as client:
                     baseline = await client.post(url, content=b"wscan_deser_baseline")
+                    self._record_probe_status(baseline)
                     r = await client.post(url, content=raw_payload)
+                    self._record_probe_status(r)
 
                 err = self.check_response_for_patterns(r.text, _DESER_ERROR_PATTERNS)
                 baseline_err = self.check_response_for_patterns(
@@ -396,7 +398,9 @@ class DeserializationScanner(BaseScanner):
                 raw_payload = payload.encode()
             async with httpx.AsyncClient(**kwargs) as client:
                 baseline = await client.post(url, content=b"wscan_deser_baseline")
+                self._record_probe_status(baseline)
                 probe = await client.post(url, content=raw_payload)
+                self._record_probe_status(probe)
         except Exception:
             return None
 

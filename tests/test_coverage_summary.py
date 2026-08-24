@@ -6,8 +6,9 @@ from types import SimpleNamespace
 
 from wscan.browser import NetworkCapture, bucketize_status_counts
 from wscan.checkpoint import CheckpointState, load_checkpoint
-from wscan.engine import ScanEngine, _coverage_summary_text
+from wscan.engine import CrawledPage, ScanEngine, _coverage_summary_text
 from wscan.report import ReportGenerator
+from wscan.scanners.base import BaseScanner, Finding
 
 
 def _response(
@@ -29,6 +30,17 @@ def _response(
         status=status,
         headers={},
         request=request,
+    )
+
+
+def _finding(check_type: str, url: str = "http://fixture.test/a") -> Finding:
+    return Finding(
+        check_type=check_type,
+        severity="high",
+        url=url,
+        field_name="(page)",
+        payload="probe",
+        evidence="fixture finding",
     )
 
 
@@ -137,6 +149,10 @@ def test_coverage_summary_aggregates_matrix_urls_and_http_status():
         ),
         _worker_status_counts=Counter({404: 1, 429: 1, 500: 1}),
         _restored_status_counts=Counter({429: 2, 502: 1}),
+        _probe_status_counts=Counter({403: 1, 429: 2}),
+        checks=["xss", "sqli"],
+        scanners={},
+        all_findings=[_finding("xss"), _finding("sqli")],
     )
 
     summary = ScanEngine.coverage_summary(engine)
@@ -152,9 +168,9 @@ def test_coverage_summary_aggregates_matrix_urls_and_http_status():
         ],
         "unreached_count": 1,
         "http_status": {
-            "total": 11,
-            "blocked": 4,
-            "client_error": 5,
+            "total": 14,
+            "blocked": 7,
+            "client_error": 8,
             "server_error": 2,
         },
     }
@@ -178,6 +194,9 @@ def test_coverage_summary_excludes_resume_only_skipped_rows():
         reached_urls={"http://fixture.test/a"},
         scan_matrix=[restored_row, resume_skip_row],
         browser=None,
+        checks=["xss"],
+        scanners={},
+        all_findings=[_finding("xss")],
     )
 
     summary = ScanEngine.coverage_summary(engine)
@@ -200,6 +219,9 @@ def test_coverage_summary_excludes_reached_url_from_unreached_rows():
             }
         ],
         browser=None,
+        checks=[],
+        scanners={},
+        all_findings=[],
     )
 
     summary = ScanEngine.coverage_summary(engine)
@@ -215,6 +237,9 @@ def test_coverage_summary_handles_empty_matrix_and_missing_browser():
         reached_urls=set(),
         scan_matrix=[],
         browser=None,
+        checks=[],
+        scanners={},
+        all_findings=[],
     )
 
     assert ScanEngine.coverage_summary(engine) == {
@@ -254,6 +279,7 @@ def test_parallel_worker_statuses_are_checkpointed_after_close(tmp_path):
         _browser=_MainBrowser(),
         _worker_status_counts=Counter(),
         _restored_status_counts=Counter(),
+        _probe_status_counts=Counter({429: 2}),
         enable_checkpoint=True,
         checkpoint=CheckpointState(
             target_url="http://fixture.test/", checks=["xss"]
@@ -276,7 +302,135 @@ def test_parallel_worker_statuses_are_checkpointed_after_close(tmp_path):
     assert engine._worker_status_counts == Counter({403: 2, 503: 1})
     assert worker.closed is True
     assert save_calls == [{403: 2, 503: 1}]
-    assert load_checkpoint(tmp_path).http_status_counts == {"403": 2, "503": 1}
+    assert load_checkpoint(tmp_path).http_status_counts == {
+        "403": 2,
+        "429": 2,
+        "503": 1,
+    }
+
+
+def test_record_probe_status_is_guarded_and_contributes_to_blocked():
+    engine = SimpleNamespace(
+        _probe_status_counts=Counter(),
+        reached_urls=set(),
+        scan_matrix=[],
+        browser=None,
+        checks=[],
+        scanners={},
+        all_findings=[],
+    )
+
+    for status in ("403", 429, None, "invalid", 99, 600):
+        ScanEngine.record_probe_status(engine, status)
+
+    assert engine._probe_status_counts == Counter({403: 1, 429: 1})
+    assert ScanEngine.coverage_summary(engine)["http_status"] == {
+        "total": 2,
+        "blocked": 2,
+        "client_error": 2,
+        "server_error": 0,
+    }
+
+
+def test_scanner_probe_status_forwarding_is_optional_and_exception_safe():
+    class _Scanner(BaseScanner):
+        async def scan_field(self, *args, **kwargs):
+            return []
+
+    scanner = _Scanner.__new__(_Scanner)
+    recorded = []
+    scanner.engine = SimpleNamespace(record_probe_status=recorded.append)
+    scanner._record_probe_status(SimpleNamespace(status_code=403))
+    assert recorded == [403]
+
+    scanner.engine = SimpleNamespace()
+    scanner._record_probe_status(SimpleNamespace(status_code=403))
+
+    def broken_recorder(_status):
+        raise RuntimeError("recorder unavailable")
+
+    scanner.engine.record_probe_status = broken_recorder
+    scanner._record_probe_status(SimpleNamespace(status_code=429))
+
+
+def test_findings_total_uses_all_in_scope_findings_without_matrix_rows():
+    engine = SimpleNamespace(
+        reached_urls=set(),
+        scan_matrix=[],
+        browser=None,
+        checks=["security_headers"],
+        scanners={},
+        all_findings=[_finding("security_headers"), _finding("xss")],
+    )
+
+    summary = ScanEngine.coverage_summary(engine)
+
+    assert summary["attempts"] == 0
+    assert summary["findings_total"] == 1
+
+
+def test_page_level_execution_is_recorded_as_an_attempt(tmp_path):
+    engine = ScanEngine(
+        "http://fixture.test/page",
+        checks=["security_headers"],
+        llm_provider="none",
+        output_dir=tmp_path,
+        open_report=False,
+        enable_waf_detection=False,
+        enable_ai_analysis=False,
+        enable_payload_learning=False,
+        enable_adaptive_payloads=False,
+    )
+
+    class _Scanner:
+        async def scan_page(self, url):
+            return [_finding("security_headers", url)]
+
+    engine.scanners = {"security_headers": _Scanner()}
+    page = CrawledPage(
+        url=engine.target_url,
+        html="<html></html>",
+        forms=[],
+        url_params=[],
+        depth=0,
+    )
+
+    asyncio.run(engine._attack_one_page(page, {}))
+
+    row = engine.scan_matrix[-1]
+    assert row["field_name"] == "(page)"
+    assert row["status"] == "vulnerable"
+    assert row["finding_count"] == 1
+    assert engine.coverage_summary()["attempts"] == 1
+
+
+def test_api_template_execution_is_recorded_as_an_attempt(tmp_path):
+    engine = ScanEngine(
+        "http://fixture.test/api",
+        checks=["mass_assignment"],
+        llm_provider="none",
+        output_dir=tmp_path,
+        open_report=False,
+        enable_waf_detection=False,
+        enable_ai_analysis=False,
+        enable_payload_learning=False,
+        enable_adaptive_payloads=False,
+    )
+
+    class _Scanner:
+        async def scan_page(self, url):
+            return [_finding("mass_assignment", url)]
+
+    engine.scanners = {"mass_assignment": _Scanner()}
+    engine.api_seed_requests = [SimpleNamespace(url=engine.target_url)]
+
+    asyncio.run(engine._run_api_template_checks())
+
+    row = engine.scan_matrix[-1]
+    assert row["field_name"] == "(api-template)"
+    assert row["status"] == "vulnerable"
+    assert row["finding_count"] == 1
+    assert engine.coverage_summary()["attempts"] == 1
 
 
 def test_coverage_console_and_html_render_blocked_warning(tmp_path):

@@ -100,6 +100,7 @@ class FileUploadScanner(BaseScanner):
         }
         async with httpx.AsyncClient(**client_kwargs) as client:
             response = await client.post(url, **request_kwargs)
+            self._record_probe_status(response)
         pair = {
             "request": {"url": url, "method": "POST", "filename": filename},
             "response": {"status": response.status_code, "body": response.text[:1000]},

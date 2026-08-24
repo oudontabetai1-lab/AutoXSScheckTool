@@ -246,6 +246,7 @@ class PrototypePollutionScanner(BaseScanner):
         try:
             async with httpx.AsyncClient(**kwargs) as client:
                 baseline = await client.request(method, url, content=json.dumps(base_obj))
+                self._record_probe_status(baseline)
                 baseline_body = baseline.text
         except Exception:
             return None
@@ -275,6 +276,7 @@ class PrototypePollutionScanner(BaseScanner):
             try:
                 async with httpx.AsyncClient(**kwargs) as client:
                     r = await client.request(method, url, content=body)
+                    self._record_probe_status(r)
                     # 受理(2xx)された場合のみ汚染候補。__proto__/constructor を 400/422 で
                     # 拒否しつつエラー本文にマーカーをエコーするケースを誤検知しない。
                     if not (200 <= r.status_code < 300):
@@ -284,6 +286,7 @@ class PrototypePollutionScanner(BaseScanner):
                     # その応答に value が現れたら Object.prototype 汚染の波及（=エコーでは
                     # 説明できない）と判定する。
                     followup = await client.request(method, url, content=clean_body)
+                    self._record_probe_status(followup)
                 followup_text = followup.text
             except Exception:
                 continue

@@ -205,6 +205,7 @@ class JWTScanner(BaseScanner):
                 **self._client_transport_kwargs(),
             ) as client:
                 resp = await client.get(url)
+                self._record_probe_status(resp)
         except Exception:
             return []
 
@@ -634,6 +635,7 @@ class JWTScanner(BaseScanner):
                     **self._client_transport_kwargs(),
                 ) as client:
                     resp = await client.get(url)
+                    self._record_probe_status(resp)
                     if 200 <= resp.status_code < 300:
                         if not LOGIN_GATE_RE.search(resp.text[:4000]):
                             return True
