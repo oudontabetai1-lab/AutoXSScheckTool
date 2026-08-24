@@ -45,6 +45,18 @@ class UnitKeyTests(unittest.TestCase):
             unit_key("http://h/a", "id", 0, "sqli", is_url_param=False),
         )
 
+    def test_volatile_query_values_share_one_unit_key(self):
+        self.assertEqual(
+            unit_key("https://h/a?op=create&t=1699999999", "id", 0, "sqli"),
+            unit_key("https://h/a?t=1699999999000&op=create", "id", 0, "sqli"),
+        )
+
+    def test_meaningful_operation_values_remain_distinct(self):
+        self.assertNotEqual(
+            unit_key("https://h/a?op=create", "id", 0, "sqli"),
+            unit_key("https://h/a?op=delete", "id", 0, "sqli"),
+        )
+
 
 class StateTests(unittest.TestCase):
     def test_form_injection_point_matches_legacy_unit(self):
@@ -59,6 +71,26 @@ class StateTests(unittest.TestCase):
         ip = InjectionPoint.for_url_param("http://h/a/", "id")
         state.mark_done("http://h/a", "id", 0, "sqli", is_url_param=True)
         self.assertTrue(state.is_done_ip(ip, "sqli"))
+
+    def test_non_ip_path_normalizes_volatile_query(self):
+        state = CheckpointState()
+        state.mark_done(
+            "https://h/action?op=create&t=1699999999", "name", 0, "sqli"
+        )
+        self.assertTrue(state.is_done(
+            "https://h/action?t=1699999999000&op=create", "name", 0, "sqli"
+        ))
+
+    def test_ip_path_normalizes_volatile_query(self):
+        state = CheckpointState()
+        first = InjectionPoint.for_url_param(
+            "https://h/action?op=create&t=1699999999", "name"
+        )
+        second = InjectionPoint.for_url_param(
+            "https://h/action?t=1699999999000&op=create", "name"
+        )
+        state.mark_done_ip(first, "sqli")
+        self.assertTrue(state.is_done_ip(second, "sqli"))
 
     def test_json_body_pointer_and_method_do_not_collide(self):
         state = CheckpointState()
@@ -88,6 +120,34 @@ class StateTests(unittest.TestCase):
         self.assertEqual(state.source_version, 3)
         self.assertTrue(state.is_done("http://h/a", "id", 0, "sqli"))
         self.assertIn(legacy_key, state.completed_units)
+
+    def test_v5_checkpoint_urls_migrate_for_non_ip_and_ip_lookups(self):
+        old_url = "https://h/action?t=1699999999&op=create"
+        legacy_form_key = "\x1f".join([old_url, "name", "0", "f", "sqli"])
+        legacy_json_key = "\x1f".join(
+            [old_url, "name", "0", "j:POST", "sqli", "/name"]
+        )
+        state = CheckpointState.from_dict({
+            "version": 5,
+            "target_url": "https://h",
+            "checks": ["sqli"],
+            "completed_units": [legacy_form_key, legacy_json_key],
+            "findings": [],
+        })
+
+        self.assertTrue(state.is_done(
+            "https://h/action?op=create&t=1699999999000", "name", 0, "sqli"
+        ))
+        resumed_ip = InjectionPoint.for_json_body(
+            "POST",
+            "https://h/action?op=create&t=1700000000",
+            "/name",
+        )
+        self.assertTrue(state.is_done_ip(resumed_ip, "sqli"))
+        self.assertTrue(all(
+            key.split("\x1f")[0] == "https://h/action?op=create"
+            for key in state.completed_units
+        ))
 
     def test_mark_and_is_done(self):
         s = CheckpointState(target_url="http://h", checks=["xss"])

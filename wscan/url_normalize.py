@@ -4,24 +4,16 @@ from __future__ import annotations
 from urllib.parse import unquote_plus, urlsplit, urlunsplit
 
 
-# 値にかかわらず run ごとに変化し得ることが明確なキーだけを除く。
-_VOLATILE_QUERY_KEYS = frozenset(
+# 名前だけで意味を持ち得ない、純粋なキャッシュバスター/CSRF トークン。
+_ALWAYS_VOLATILE_KEYS = frozenset(
     {
         "_",
-        "t",
-        "ts",
-        "time",
-        "timestamp",
-        "nonce",
-        "_nonce",
         "cb",
         "_cb",
         "cachebuster",
         "cache_buster",
         "cache-buster",
         "cachebust",
-        "rand",
-        "random",
         "_dc",
         "csrf",
         "_csrf",
@@ -43,6 +35,20 @@ _VOLATILE_QUERY_KEYS = frozenset(
         "__requestverificationtoken",
     }
 )
+
+# operation や版番号にも使われ得るため、値が明白に揮発的な場合だけ除くキー。
+_VALUE_CONDITIONAL_KEYS = frozenset(
+    {"t", "ts", "time", "timestamp", "nonce", "_nonce", "rand", "random", "v"}
+)
+
+
+def _looks_volatile_value(value: str) -> bool:
+    """epoch/長いランダムトークンらしい値だけを揮発値とみなす（純粋）。"""
+    if value.isascii() and value.isdigit() and len(value) >= 8:
+        return True
+    return len(value) >= 16 and all(
+        char.isascii() and (char.isalnum() or char in "_-") for char in value
+    )
 
 
 def _split_query_item(item: str) -> tuple[str, str]:
@@ -72,9 +78,12 @@ def normalize_url_for_key(url: str) -> str:
         for item in parsed.query.split("&") if parsed.query else []:
             key, value = _split_query_item(item)
             folded_key = key.casefold()
-            if folded_key in _VOLATILE_QUERY_KEYS:
+            if folded_key in _ALWAYS_VOLATILE_KEYS:
                 continue
-            if folded_key == "v" and value.isascii() and value.isdigit():
+            if (
+                folded_key in _VALUE_CONDITIONAL_KEYS
+                and _looks_volatile_value(value)
+            ):
                 continue
             kept.append((key, item))
 

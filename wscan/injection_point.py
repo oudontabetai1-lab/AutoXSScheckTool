@@ -6,8 +6,6 @@ from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any
 
-from .url_normalize import normalize_url_for_key
-
 
 def unescape_token(token: str) -> str:
     """RFC6901 のトークンをデコードする。"""
@@ -258,8 +256,8 @@ class InjectionPoint:
 
     def stable_key_parts(self) -> tuple[str, str, str, str, str]:
         """既存互換の checkpoint キー生成に必要な部品を返す。"""
-        # Task 0013: 実送信 URL は変えず、永続キーだけ全注入点共通で揮発クエリを除く。
-        norm_url = normalize_url_for_key(self.url or "").rstrip("/")
+        # 揮発クエリ正規化は checkpoint.unit_key 側で一元的に行う。
+        norm_url = (self.url or "").rstrip("/")
         field_name = self.display_name or self.parameter_id
         if self.location == "form":
             location_token, pointer = "f", ""

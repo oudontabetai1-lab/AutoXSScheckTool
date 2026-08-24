@@ -23,6 +23,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, TYPE_CHECKING
 
+from .url_normalize import normalize_url_for_key
+
 if TYPE_CHECKING:
     from wscan.injection_point import InjectionPoint
 
@@ -30,7 +32,8 @@ if TYPE_CHECKING:
 # v3: adaptive を "(adaptive:<check_type>)" 単位へ細分化。旧 "(adaptive)" は
 # engine が「全 adaptive check 完了」として尊重するため、旧 checkpoint も読める。
 # v4: JSON body 注入点用の6部品キーを加算。従来キーは5部品のまま保持する。
-CHECKPOINT_VERSION = 5
+# v6: checkpoint キーの URL を揮発クエリ正規化。旧版キーは from_dict で移行。
+CHECKPOINT_VERSION = 6
 CHECKPOINT_FILENAME = "checkpoint.json"
 
 
@@ -53,7 +56,7 @@ def unit_key(
     ``form_index=0``）が同じキーに潰れて一方が未検査のまま resume にスキップ
     されるのを防ぐため、入力種別（URL param / form）もキーに含める。
     """
-    norm_url = (url or "").rstrip("/")
+    norm_url = normalize_url_for_key(url or "").rstrip("/")
     if location_token is None:
         location_token = "u" if is_url_param else "f"
     parts = [
@@ -162,6 +165,8 @@ class CheckpointState:
         )
         if state.source_version < 2:
             state._migrate_v1_adaptive_units()
+        if state.source_version < 6:
+            state._migrate_v5_normalize_urls()
         return state
 
     def _migrate_v1_adaptive_units(self) -> None:
@@ -194,6 +199,15 @@ class CheckpointState:
             if all(c in got for c in checks):
                 adaptive_key = "\x1f".join([url, field_name, form_s, location, "(adaptive)"])
                 self.completed_units.add(adaptive_key)
+
+    def _migrate_v5_normalize_urls(self) -> None:
+        """v5以前の完了単位 URL を現行の揮発クエリ正規化へ移行する（純粋）。"""
+        migrated: set[str] = set()
+        for key in self.completed_units:
+            parts = key.split("\x1f")
+            parts[0] = normalize_url_for_key(parts[0]).rstrip("/")
+            migrated.add("\x1f".join(parts))
+        self.completed_units = migrated
 
     def is_compatible_with(self, target_url: str, checks: list[str]) -> bool:
         """再開先のターゲット/チェック集合が、保存時と整合するか（純粋）。
