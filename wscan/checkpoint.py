@@ -49,14 +49,14 @@ def unit_key(
 ) -> str:
     """攻撃の作業単位を一意な文字列キーにする（純粋関数）。
 
-    URL は末尾スラッシュを ``rstrip`` してスコープ照合と同じ前提に揃える
-    （``engine`` の正規化規約に従う）。区切りは衝突しにくい ``\\x1f``。
+    URL はパス成分の末尾スラッシュだけを除いて同一視する。クエリ値と fragment
+    はこの目的では変更しない。区切りは衝突しにくい ``\\x1f``。
 
     同名の URL パラメータとフォームフィールド（例: どちらも ``id`` で
     ``form_index=0``）が同じキーに潰れて一方が未検査のまま resume にスキップ
     されるのを防ぐため、入力種別（URL param / form）もキーに含める。
     """
-    norm_url = normalize_url_for_key(url or "").rstrip("/")
+    norm_url = normalize_url_for_key(url or "")
     if location_token is None:
         location_token = "u" if is_url_param else "f"
     parts = [
@@ -202,11 +202,11 @@ class CheckpointState:
 
     def _migrate_v5_normalize_urls(self) -> None:
         """v5以前の完了単位 URL を現行の揮発クエリ正規化へ移行する（純粋）。"""
-        self.target_url = normalize_url_for_key(self.target_url or "").rstrip("/")
+        self.target_url = normalize_url_for_key(self.target_url or "")
         migrated: set[str] = set()
         for key in self.completed_units:
             parts = key.split("\x1f")
-            parts[0] = normalize_url_for_key(parts[0]).rstrip("/")
+            parts[0] = normalize_url_for_key(parts[0])
             migrated.add("\x1f".join(parts))
         self.completed_units = migrated
 
@@ -216,8 +216,8 @@ class CheckpointState:
         ターゲット URL が一致し、要求チェックが保存時チェックの部分集合なら互換。
         新しいチェックを足した再開では「済み」が信用できないので非互換扱いにする。
         """
-        if normalize_url_for_key(self.target_url or "").rstrip("/") != (
-            normalize_url_for_key(target_url or "").rstrip("/")
+        if normalize_url_for_key(self.target_url or "") != (
+            normalize_url_for_key(target_url or "")
         ):
             return False
         return set(checks or []).issubset(set(self.checks or []))

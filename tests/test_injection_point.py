@@ -191,7 +191,7 @@ class InjectionPointTests(unittest.TestCase):
         self.assertEqual(ip.source, "crawl")
         self.assertEqual(
             ip.stable_key_parts(),
-            ("http://h/form", "email", "2", "f", ""),
+            ("http://h/form/", "email", "2", "f", ""),
         )
 
     def test_url_param_constructor_and_stable_key(self):
@@ -200,7 +200,7 @@ class InjectionPointTests(unittest.TestCase):
         self.assertEqual(ip.form_index, 0)
         self.assertEqual(
             ip.stable_key_parts(),
-            ("http://h/search", "q", "0", "u", ""),
+            ("http://h/search/", "q", "0", "u", ""),
         )
 
     def test_json_constructor_derives_display_name_and_stable_key(self):
@@ -217,7 +217,7 @@ class InjectionPointTests(unittest.TestCase):
         self.assertEqual(ip.source, "spa")
         self.assertEqual(
             ip.stable_key_parts(),
-            ("http://h/login", "email", "0", "j:POST", "/profile/email"),
+            ("http://h/login/", "email", "0", "j:POST", "/profile/email"),
         )
 
     def test_json_constructor_honours_display_name(self):

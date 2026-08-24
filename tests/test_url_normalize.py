@@ -55,22 +55,16 @@ def test_always_volatile_query_keys_are_removed_case_insensitively(key):
         ("time=commit", "time=commit"),
         ("t=preview", "t=preview"),
         ("v=2", "v=2"),
+        ("v=release-candidate-1", "v=release-candidate-1"),
+        ("timestamp=1700000000000000000", "timestamp=1700000000000000000"),
+        (
+            "t=0123456789abcdef0123456789abcdef",
+            "t=0123456789abcdef0123456789abcdef",
+        ),
     ],
 )
-def test_ambiguous_keys_keep_epoch_date_and_meaningful_values(query, expected):
+def test_ambiguous_keys_are_always_kept(query, expected):
     assert normalize_url_for_key(f"https://h/p?{query}") == f"https://h/p?{expected}"
-
-
-@pytest.mark.parametrize(
-    "query",
-    [
-        "t=0123456789abcdef0123456789abcdef",
-        "timestamp=AbCdEfGhIjKlMnOp_-012345",
-        "v=0123456789abcdef",
-    ],
-)
-def test_ambiguous_keys_remove_random_tokens(query):
-    assert normalize_url_for_key(f"https://h/p?keep=yes&{query}") == "https://h/p?keep=yes"
 
 
 @pytest.mark.parametrize(
@@ -138,6 +132,17 @@ def test_query_order_is_stable():
     )
 
 
+def test_trailing_slash_normalization_only_changes_path():
+    assert normalize_url_for_key("http://h/p/") == "http://h/p"
+    assert normalize_url_for_key("http://h/") == "http://h"
+    assert normalize_url_for_key("http://h/p?z=/admin/&a=1") == (
+        "http://h/p?a=1&z=/admin/"
+    )
+    assert normalize_url_for_key("http://h/p?z=/admin/&a=1") != (
+        normalize_url_for_key("http://h/p?a=1&z=/admin")
+    )
+
+
 def test_rotating_values_normalize_to_the_same_url():
     first = "https://h/p?op=create&nonce=1699999999&csrf=aaa"
     second = "https://h/p?csrf=bbb&nonce=1699999999000&op=create"
@@ -160,8 +165,8 @@ def test_spa_hash_routes_remain_distinct():
     admin = normalize_url_for_key("https://app.test/#/admin")
     users = normalize_url_for_key("https://app.test/#/users")
 
-    assert admin == "https://app.test/#/admin"
-    assert users == "https://app.test/#/users"
+    assert admin == "https://app.test#/admin"
+    assert users == "https://app.test#/users"
     assert admin != users
 
 
@@ -174,7 +179,7 @@ def test_in_page_anchor_is_removed():
 def test_hashbang_route_is_preserved():
     assert normalize_url_for_key(
         "https://app.test/#!/route"
-    ) == "https://app.test/#!/route"
+    ) == "https://app.test#!/route"
 
 
 @pytest.mark.parametrize("url", ["", "http://[::1"])
@@ -191,7 +196,7 @@ def test_stable_key_parts_keeps_raw_url_for_unit_key_choke_point(location):
             return InjectionPoint.for_url_param(url, "name")
         return InjectionPoint.for_json_body("POST", url, "/name")
 
-    url = "https://h/action?op=create&t=1699999999"
+    url = "https://h/action/?op=create&z=/admin/"
     ip = make(url)
 
     assert ip.stable_key_parts()[0] == url

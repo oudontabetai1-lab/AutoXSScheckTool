@@ -257,7 +257,7 @@ class InjectionPoint:
     def stable_key_parts(self) -> tuple[str, str, str, str, str]:
         """既存互換の checkpoint キー生成に必要な部品を返す。"""
         # 揮発クエリ正規化は checkpoint.unit_key 側で一元的に行う。
-        norm_url = (self.url or "").rstrip("/")
+        norm_url = self.url or ""
         field_name = self.display_name or self.parameter_id
         if self.location == "form":
             location_token, pointer = "f", ""

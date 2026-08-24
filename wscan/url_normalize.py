@@ -39,9 +39,6 @@ _ALWAYS_VOLATILE_KEYS = frozenset(
 # 名前自体がtransienceを強く示すため、epoch数字またはランダムトークンの場合に除くキー。
 _TRANSIENT_NAME_KEYS = frozenset({"nonce", "_nonce", "rand", "random"})
 
-# 意味的なリソース座標にも使われ得るため、より強い揮発性の証拠がある場合だけ除くキー。
-_AMBIGUOUS_KEYS = frozenset({"t", "ts", "time", "timestamp", "v"})
-
 
 def _looks_random_token(value: str) -> bool:
     """16文字以上のhex/base64url英数トークンらしさを判定する（純粋）。"""
@@ -70,9 +67,9 @@ def _split_query_item(item: str) -> tuple[str, str]:
 def normalize_url_for_key(url: str) -> str:
     """揮発クエリを除き、checkpoint identity 用の安定した URL を返す。
 
-    未知のキー、パス、値、および scheme/netloc の表記は保持する。クエリ項目の raw
-    表現も保持し、判定とソートにだけデコード済みキーを使う。解析不能時は安全側として
-    入力をそのまま返す。
+    未知のキー、パス末尾以外、値、および scheme/netloc の表記は保持する。パスの
+    trailing slash だけを除き、クエリ項目の raw 表現も保持して、判定とソートにだけ
+    デコード済みキーを使う。解析不能時は安全側として入力をそのまま返す。
     """
     try:
         parsed = urlsplit(url)
@@ -88,13 +85,10 @@ def normalize_url_for_key(url: str) -> str:
                 _looks_epoch_digits(value) or _looks_random_token(value)
             ):
                 continue
-            # plain epoch/date は曖昧なため保持し、意味的リソース座標を
-            # 潰さない。曖昧名キーはランダムトークンという強い transience の
-            # 証拠があるときのみ除く。標準的 cache-buster 名は ALWAYS set が
-            # 吸収する。`t=<epoch>` 型の非標準 cache-buster は正規化しない
-            # （安全側＝検出の偽陰性を作らない）ことを既知の制約とする。
-            if folded_key in _AMBIGUOUS_KEYS and _looks_random_token(value):
-                continue
+            # 曖昧名キー（時刻/版）は value だけで transience を確実に判定できず、
+            # 通常層では偽陰性が最悪のため保持する。標準的 cache-buster 名は
+            # ALWAYS set が吸収する。`t=<epoch>` 型の非標準 cache-buster は
+            # 正規化しない（安全側の既知制約）。
             kept.append((key, item))
 
         # 同名キーの値順には意味があり得るため、安定ソートでキー間の順序だけを揃える。
@@ -110,6 +104,7 @@ def normalize_url_for_key(url: str) -> str:
         return urlunsplit(
             parsed._replace(
                 scheme=raw_scheme,
+                path=parsed.path.rstrip("/"),
                 query="&".join(item for _, item in kept),
                 fragment=keep_frag,
             )

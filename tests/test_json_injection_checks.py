@@ -341,7 +341,7 @@ class JsonInjectionCheckTests(unittest.IsolatedAsyncioTestCase):
         key = finding_dedup_key_for(form_finding)
         self.assertEqual(len(key), 4)
 
-    def test_legacy_keys_and_empty_template_json_key_are_unchanged(self):
+    def test_stable_key_parts_keep_raw_urls_and_empty_template_json_key(self):
         form = InjectionPoint.for_form("http://h/form/", "email", 2)
         url_param = InjectionPoint.for_url_param("http://h/search/", "q")
         json_ip = InjectionPoint.for_json_body(
@@ -350,15 +350,15 @@ class JsonInjectionCheckTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(
             form.stable_key_parts(),
-            ("http://h/form", "email", "2", "f", ""),
+            ("http://h/form/", "email", "2", "f", ""),
         )
         self.assertEqual(
             url_param.stable_key_parts(),
-            ("http://h/search", "q", "0", "u", ""),
+            ("http://h/search/", "q", "0", "u", ""),
         )
         self.assertEqual(
             json_ip.stable_key_parts(),
-            ("http://h/api/login", "email", "0", "j:POST", "/email"),
+            ("http://h/api/login/", "email", "0", "j:POST", "/email"),
         )
 
 

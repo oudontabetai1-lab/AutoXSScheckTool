@@ -32,6 +32,12 @@ class UnitKeyTests(unittest.TestCase):
             unit_key("http://h/a", "q", 0, "xss"),
         )
 
+    def test_query_value_trailing_slash_remains_distinct(self):
+        self.assertNotEqual(
+            unit_key("http://h/p?z=/admin/&a=1", "q", 0, "xss"),
+            unit_key("http://h/p?a=1&z=/admin", "q", 0, "xss"),
+        )
+
     def test_distinct_checks_distinct_keys(self):
         self.assertNotEqual(
             unit_key("http://h/a", "q", 0, "xss"),
@@ -166,6 +172,22 @@ class StateTests(unittest.TestCase):
 
         self.assertEqual(state.target_url, "https://h/start")
 
+    def test_v5_migration_trims_path_but_keeps_query_value_slash(self):
+        old_url = "https://h/action/?z=/admin/&a=1"
+        legacy_key = "\x1f".join([old_url, "name", "0", "f", "sqli"])
+        state = CheckpointState.from_dict({
+            "version": 5,
+            "target_url": old_url,
+            "checks": ["sqli"],
+            "completed_units": [legacy_key],
+            "findings": [],
+        })
+
+        expected_url = "https://h/action?a=1&z=/admin/"
+        self.assertEqual(state.target_url, expected_url)
+        self.assertEqual(next(iter(state.completed_units)).split("\x1f")[0], expected_url)
+        self.assertTrue(state.is_done(expected_url, "name", 0, "sqli"))
+
     def test_mark_and_is_done(self):
         s = CheckpointState(target_url="http://h", checks=["xss"])
         self.assertFalse(s.is_done("http://h/a", "q", 0, "xss"))
@@ -212,6 +234,19 @@ class StateTests(unittest.TestCase):
 
         self.assertFalse(s.is_compatible_with(
             "https://h/start?op=delete", ["sqli"]
+        ))
+
+    def test_compatibility_trims_path_but_keeps_query_value_slash(self):
+        s = CheckpointState(
+            target_url="https://h/start/?z=/admin/&a=1",
+            checks=["sqli"],
+        )
+
+        self.assertTrue(s.is_compatible_with(
+            "https://h/start?a=1&z=/admin/", ["sqli"]
+        ))
+        self.assertFalse(s.is_compatible_with(
+            "https://h/start?a=1&z=/admin", ["sqli"]
         ))
 
 
