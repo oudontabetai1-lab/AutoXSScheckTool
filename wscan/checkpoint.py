@@ -202,6 +202,7 @@ class CheckpointState:
 
     def _migrate_v5_normalize_urls(self) -> None:
         """v5以前の完了単位 URL を現行の揮発クエリ正規化へ移行する（純粋）。"""
+        self.target_url = normalize_url_for_key(self.target_url or "").rstrip("/")
         migrated: set[str] = set()
         for key in self.completed_units:
             parts = key.split("\x1f")
@@ -215,7 +216,9 @@ class CheckpointState:
         ターゲット URL が一致し、要求チェックが保存時チェックの部分集合なら互換。
         新しいチェックを足した再開では「済み」が信用できないので非互換扱いにする。
         """
-        if (self.target_url or "").rstrip("/") != (target_url or "").rstrip("/"):
+        if normalize_url_for_key(self.target_url or "").rstrip("/") != (
+            normalize_url_for_key(target_url or "").rstrip("/")
+        ):
             return False
         return set(checks or []).issubset(set(self.checks or []))
 

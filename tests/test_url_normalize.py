@@ -121,6 +121,27 @@ def test_meaningful_operations_remain_distinct():
     assert create != delete
 
 
+def test_spa_hash_routes_remain_distinct():
+    admin = normalize_url_for_key("https://app.test/#/admin")
+    users = normalize_url_for_key("https://app.test/#/users")
+
+    assert admin == "https://app.test/#/admin"
+    assert users == "https://app.test/#/users"
+    assert admin != users
+
+
+def test_in_page_anchor_is_removed():
+    assert normalize_url_for_key(
+        "https://app.test/page#section"
+    ) == "https://app.test/page"
+
+
+def test_hashbang_route_is_preserved():
+    assert normalize_url_for_key(
+        "https://app.test/#!/route"
+    ) == "https://app.test/#!/route"
+
+
 @pytest.mark.parametrize("url", ["", "http://[::1"])
 def test_empty_or_unparseable_url_is_exception_safe(url):
     assert normalize_url_for_key(url) == url

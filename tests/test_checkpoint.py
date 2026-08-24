@@ -149,6 +149,17 @@ class StateTests(unittest.TestCase):
             for key in state.completed_units
         ))
 
+    def test_v5_checkpoint_target_url_is_normalized_during_migration(self):
+        state = CheckpointState.from_dict({
+            "version": 5,
+            "target_url": "https://h/start?t=1699999999",
+            "checks": ["sqli"],
+            "completed_units": [],
+            "findings": [],
+        })
+
+        self.assertEqual(state.target_url, "https://h/start")
+
     def test_mark_and_is_done(self):
         s = CheckpointState(target_url="http://h", checks=["xss"])
         self.assertFalse(s.is_done("http://h/a", "q", 0, "xss"))
@@ -176,6 +187,26 @@ class StateTests(unittest.TestCase):
         self.assertFalse(s.is_compatible_with("http://h", ["xss", "os"]))
         # different target → not compatible
         self.assertFalse(s.is_compatible_with("http://other", ["xss"]))
+
+    def test_compatibility_normalizes_rotating_target_query(self):
+        s = CheckpointState(
+            target_url="https://h/start?t=1699999999",
+            checks=["sqli"],
+        )
+
+        self.assertTrue(s.is_compatible_with(
+            "https://h/start?t=1699999999000", ["sqli"]
+        ))
+
+    def test_compatibility_keeps_meaningful_target_operations_distinct(self):
+        s = CheckpointState(
+            target_url="https://h/start?op=create",
+            checks=["sqli"],
+        )
+
+        self.assertFalse(s.is_compatible_with(
+            "https://h/start?op=delete", ["sqli"]
+        ))
 
 
 class PageCheckCpUrlTests(unittest.TestCase):

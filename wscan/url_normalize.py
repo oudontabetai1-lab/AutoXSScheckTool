@@ -89,11 +89,19 @@ def normalize_url_for_key(url: str) -> str:
 
         # 同名キーの値順には意味があり得るため、安定ソートでキー間の順序だけを揃える。
         kept.sort(key=lambda pair: pair[0])
+        # manual_crawl._strip_in_page_anchor と同じ規則。predicate は循環 import を
+        # 避けるため複製しているので、変更時は両者の挙動を一致させること。
+        fragment = parsed.fragment
+        keep_frag = (
+            fragment
+            if fragment[:1] in ("/", "!") or "/" in fragment
+            else ""
+        )
         return urlunsplit(
             parsed._replace(
                 scheme=raw_scheme,
                 query="&".join(item for _, item in kept),
-                fragment="",
+                fragment=keep_frag,
             )
         )
     except Exception:
