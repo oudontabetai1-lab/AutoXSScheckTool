@@ -99,8 +99,12 @@ class CheckpointState:
         key = unit_key(url, field_name, form_index, check_type, is_url_param)
         if key in self.completed_units:
             return True
-        # v5 の whole-url rstrip で query 値末尾スラッシュを失った
-        # legacy checkpoint 互換。新規の完了記録には通常キーだけを書く。
+        # v5 の whole-url rstrip で query 値末尾スラッシュを失った legacy checkpoint 互換。
+        # **実際に legacy(v5 以前) checkpoint を読み込んだときだけ**適用する。新規 v6 state で
+        # 適用すると `?z=/admin` 完了後に `?z=/admin/` が誤一致し初回スキャンで別 operation を
+        # skip してしまう（Codex #103 P1）。新規の完了記録には通常キーだけを書く。
+        if self.source_version >= 6:
+            return False
         legacy_key = unit_key(
             url,
             field_name,
@@ -131,8 +135,10 @@ class CheckpointState:
         )
         if key in self.completed_units:
             return True
-        # v5 の whole-url rstrip で query 値末尾スラッシュを失った
-        # legacy checkpoint 互換。新規の完了記録には通常キーだけを書く。
+        # legacy(v5 以前) checkpoint を読み込んだときだけ適用（新規 v6 state では
+        # `?z=/admin` と `?z=/admin/` の誤一致を防ぐ・Codex #103 P1）。
+        if self.source_version >= 6:
+            return False
         legacy_key = unit_key(
             url,
             field_name,
@@ -246,6 +252,12 @@ class CheckpointState:
             records = self.attempt_ledger.get("records", [])
         except Exception:
             records = []
+        # 既知の制約（Codex #103 P2）: v5 の ledger record が query 値末尾スラッシュ URL
+        # （例 https://h/p?z=/admin/）を持つ場合、旧 stable_key_parts は URL 全体を rstrip して
+        # `...?z=/admin` で serialize しており、正規化では失われたスラッシュを復元できない。
+        # 現行キーはスラッシュを保持するため、そのごく稀な未完了ユニットの adaptive 履歴は
+        # resume 後に引けず再探索になる（安全性は completed-unit の legacy fallback が担保し
+        # 状態変更 POST は再送しない。効果は adaptive の効率低下のみで1 run で自己回復）。
         for record in records if isinstance(records, list) else []:
             try:
                 key = record.get("key")

@@ -660,3 +660,37 @@ class AttemptLedgerPersistenceTests(unittest.TestCase):
         ledger = AttemptLedger.from_dict(state.attempt_ledger)
         history = ledger.history(resumed.stable_key_parts(), "sqli")
         self.assertEqual([attempt.payload for attempt in history], ["'"])
+
+
+def test_legacy_fallback_only_applies_to_loaded_v5_checkpoints():
+    """v5 legacy fallback は fresh v6 state では無効（初回スキャンで別 operation を潰さない）。
+
+    fresh v6: `?z=/admin` 完了後に `?z=/admin/` は未完了扱い（fallback 無効）。
+    v5 load: whole-url rstrip で保存された `?z=/admin` を `?z=/admin/` の照合で拾う（互換）。
+    """
+    from wscan.checkpoint import CheckpointState, unit_key, CHECKPOINT_VERSION
+
+    admin = "https://h/p?z=/admin"
+    admin_slash = "https://h/p?z=/admin/"
+
+    # fresh v6 state
+    fresh = CheckpointState(target_url="https://h/", checks=["xss"])
+    assert fresh.source_version >= 6
+    fresh.mark_done(admin, "q", 0, "xss", is_url_param=True)
+    assert fresh.is_done(admin, "q", 0, "xss", is_url_param=True) is True
+    # 別 operation（末尾スラッシュ有り）は未完了のまま（fallback を適用しない）
+    assert fresh.is_done(admin_slash, "q", 0, "xss", is_url_param=True) is False
+
+    # v5 loaded state: 旧 whole-url rstrip 形のキーを completed_units に持つ
+    legacy_key = unit_key(
+        admin_slash, "q", 0, "xss", True, legacy_whole_rstrip=True
+    )
+    v5 = CheckpointState.from_dict({
+        "version": 5,
+        "target_url": "https://h/",
+        "checks": ["xss"],
+        "completed_units": [legacy_key],
+    })
+    assert v5.source_version == 5
+    # 新 URL（スラッシュ保持）で照合しても legacy fallback でヒットする
+    assert v5.is_done(admin_slash, "q", 0, "xss", is_url_param=True) is True
