@@ -199,5 +199,26 @@ def test_stable_key_parts_keeps_raw_url_for_unit_key_choke_point(location):
     url = "https://h/action/?op=create&z=/admin/"
     ip = make(url)
 
-    assert ip.stable_key_parts()[0] == url
+    # stable_key_parts はパス末尾スラッシュのみ吸収し、クエリ値(?z=/admin/)は保持する。
+    # 実 URL(ip.url)は不変。揮発クエリ正規化は unit_key 側で行う。
+    assert ip.stable_key_parts()[0] == "https://h/action?op=create&z=/admin/"
     assert ip.url == url
+
+
+def test_strip_path_trailing_slash_keeps_query_values():
+    from wscan.url_normalize import strip_path_trailing_slash
+    # パス末尾スラッシュは吸収（旧 whole-url rstrip と同等）。
+    assert strip_path_trailing_slash("http://h/p/") == "http://h/p"
+    assert strip_path_trailing_slash("http://h/p") == "http://h/p"
+    # 末尾スラッシュのパス値クエリは壊さない（fix4 の意図を維持）。
+    assert strip_path_trailing_slash("http://h/p/?z=/admin/") == "http://h/p?z=/admin/"
+    # 解析不能でも例外を出さず入力を返す。
+    assert strip_path_trailing_slash("::://bad") == "::://bad"
+
+
+def test_stable_key_parts_ledger_url_matches_legacy_path_trim():
+    # attempt_ledger の共有キー url は旧来の path 末尾スラッシュ吸収を維持し、
+    # v5 checkpoint の ledger と継続する（Codex #103 P2）。
+    from wscan.injection_point import InjectionPoint
+    ip = InjectionPoint.for_url_param("http://h/api/", "q")
+    assert ip.stable_key_parts()[0] == "http://h/api"

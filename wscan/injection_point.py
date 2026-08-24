@@ -6,6 +6,8 @@ from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any
 
+from .url_normalize import strip_path_trailing_slash
+
 
 def unescape_token(token: str) -> str:
     """RFC6901 のトークンをデコードする。"""
@@ -256,8 +258,10 @@ class InjectionPoint:
 
     def stable_key_parts(self) -> tuple[str, str, str, str, str]:
         """既存互換の checkpoint キー生成に必要な部品を返す。"""
-        # 揮発クエリ正規化は checkpoint.unit_key 側で一元的に行う。
-        norm_url = self.url or ""
+        # 揮発クエリ正規化は checkpoint.unit_key 側で一元的に行う。ここではパス末尾
+        # スラッシュだけを吸収する（attempt_ledger の共有キーを旧来の rstrip と実質同一に
+        # 保ちつつ、末尾スラッシュのパス値クエリを壊さない。Codex #103 P2）。
+        norm_url = strip_path_trailing_slash(self.url or "")
         field_name = self.display_name or self.parameter_id
         if self.location == "form":
             location_token, pointer = "f", ""

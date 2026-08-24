@@ -64,6 +64,23 @@ def _split_query_item(item: str) -> tuple[str, str]:
     return key, value
 
 
+def strip_path_trailing_slash(url: str) -> str:
+    """URL のパス成分の末尾スラッシュだけを除く（クエリ値/fragment は不変・純粋）。
+
+    attempt_ledger の共有キー（stable_key_parts の url）を、旧来の whole-url ``rstrip("/")``
+    と実質同一に保ちつつ、末尾がスラッシュのパス値クエリ（``?z=/admin/``）を壊さない。
+    解析不能時は安全側として入力をそのまま返す。
+    """
+    try:
+        parsed = urlsplit(url)
+        raw_scheme = url[: url.find(":")] if parsed.scheme else ""
+        return urlunsplit(
+            parsed._replace(scheme=raw_scheme, path=parsed.path.rstrip("/"))
+        )
+    except Exception:
+        return url
+
+
 def normalize_url_for_key(url: str) -> str:
     """揮発クエリを除き、checkpoint identity 用の安定した URL を返す。
 

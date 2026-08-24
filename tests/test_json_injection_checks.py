@@ -350,15 +350,15 @@ class JsonInjectionCheckTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(
             form.stable_key_parts(),
-            ("http://h/form/", "email", "2", "f", ""),
+            ("http://h/form", "email", "2", "f", ""),
         )
         self.assertEqual(
             url_param.stable_key_parts(),
-            ("http://h/search/", "q", "0", "u", ""),
+            ("http://h/search", "q", "0", "u", ""),
         )
         self.assertEqual(
             json_ip.stable_key_parts(),
-            ("http://h/api/login/", "email", "0", "j:POST", "/email"),
+            ("http://h/api/login", "email", "0", "j:POST", "/email"),
         )
 
 
