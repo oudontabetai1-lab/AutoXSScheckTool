@@ -5,17 +5,25 @@ from collections import Counter
 from types import SimpleNamespace
 
 from wscan.browser import NetworkCapture, bucketize_status_counts
+from wscan.checkpoint import CheckpointState, load_checkpoint
 from wscan.engine import ScanEngine, _coverage_summary_text
 from wscan.report import ReportGenerator
 
 
-def _response(status: int, url: str = "http://fixture.test/"):
-    request = SimpleNamespace(
-        url=url,
-        method="GET",
-        headers={},
-        post_data=None,
-    )
+def _response(
+    status: int,
+    url: str = "http://fixture.test/",
+    resource_type: str | None = None,
+):
+    request_data = {
+        "url": url,
+        "method": "GET",
+        "headers": {},
+        "post_data": None,
+    }
+    if resource_type is not None:
+        request_data["resource_type"] = resource_type
+    request = SimpleNamespace(**request_data)
     return SimpleNamespace(
         url=url,
         status=status,
@@ -51,6 +59,32 @@ def test_network_capture_tallies_statuses_across_clear():
     assert capture.pairs == []
     assert capture._pending == {}
     assert capture.status_summary()["total"] == 6
+
+
+def test_network_capture_excludes_static_assets_from_status_counts():
+    capture = NetworkCapture()
+    for resource_type in ("image", "font", "stylesheet", "media"):
+        response = _response(403, resource_type=resource_type)
+        capture.on_request(response.request)
+        capture.on_response(response)
+
+    assert capture.status_counts == {}
+    assert len(capture.pairs) == 4
+
+
+def test_network_capture_counts_scan_related_and_unknown_resource_types():
+    capture = NetworkCapture()
+    for status, resource_type in (
+        (403, "document"),
+        (403, "xhr"),
+        (429, "fetch"),
+        (429, None),
+    ):
+        response = _response(status, resource_type=resource_type)
+        capture.on_request(response.request)
+        capture.on_response(response)
+
+    assert capture.status_counts == {403: 2, 429: 2}
 
 
 def test_bucketize_status_counts_groups_blocked_and_error_classes():
@@ -153,6 +187,28 @@ def test_coverage_summary_excludes_resume_only_skipped_rows():
     assert summary["findings_total"] == 1
 
 
+def test_coverage_summary_excludes_reached_url_from_unreached_rows():
+    url = "http://fixture.test/recovered"
+    engine = SimpleNamespace(
+        reached_urls={url},
+        scan_matrix=[
+            {
+                "url": url,
+                "check": "access",
+                "status": "error",
+                "note": "restore navigation failed",
+            }
+        ],
+        browser=None,
+    )
+
+    summary = ScanEngine.coverage_summary(engine)
+
+    assert summary["reached_urls"] == [url]
+    assert summary["unreached"] == []
+    assert summary["unreached_count"] == 0
+
+
 def test_coverage_summary_handles_empty_matrix_and_missing_browser():
     engine = SimpleNamespace(
         visited_urls={"http://fixture.test/discovered-only"},
@@ -178,7 +234,7 @@ def test_coverage_summary_handles_empty_matrix_and_missing_browser():
     }
 
 
-def test_parallel_worker_statuses_are_accumulated_before_close():
+def test_parallel_worker_statuses_are_checkpointed_after_close(tmp_path):
     class _Worker:
         def __init__(self):
             self.network = SimpleNamespace(status_counts=Counter({403: 2, 503: 1}))
@@ -197,12 +253,30 @@ def test_parallel_worker_statuses_are_accumulated_before_close():
         concurrency=2,
         _browser=_MainBrowser(),
         _worker_status_counts=Counter(),
+        _restored_status_counts=Counter(),
+        enable_checkpoint=True,
+        checkpoint=CheckpointState(
+            target_url="http://fixture.test/", checks=["xss"]
+        ),
+        all_findings=[],
+        scan_matrix=[],
+        output_dir=tmp_path,
+        wave_errors=[],
     )
+    save_calls = []
+
+    def _save_checkpoint():
+        save_calls.append(dict(engine._worker_status_counts))
+        ScanEngine._save_checkpoint(engine)
+
+    engine._save_checkpoint = _save_checkpoint
 
     asyncio.run(ScanEngine._phase_attack_concurrent(engine, [], {}))
 
     assert engine._worker_status_counts == Counter({403: 2, 503: 1})
     assert worker.closed is True
+    assert save_calls == [{403: 2, 503: 1}]
+    assert load_checkpoint(tmp_path).http_status_counts == {"403": 2, "503": 1}
 
 
 def test_coverage_console_and_html_render_blocked_warning(tmp_path):

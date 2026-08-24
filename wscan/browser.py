@@ -212,7 +212,14 @@ class NetworkCapture:
         }
         self.pairs.append(pair)
         try:
-            self.status_counts[response.status] += 1
+            try:
+                rtype = response.request.resource_type if response.request else ""
+            except Exception:
+                # Unknown request types are counted conservatively so a real
+                # block is not hidden by an incomplete response object.
+                rtype = ""
+            if rtype not in ("image", "font", "stylesheet", "media"):
+                self.status_counts[response.status] += 1
         except Exception:
             pass
         if self.logger is not None:

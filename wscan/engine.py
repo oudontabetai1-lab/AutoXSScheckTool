@@ -1048,6 +1048,8 @@ class ScanEngine:
             if row.get("check") != "access" or row.get("status") != "error":
                 continue
             url = str(row.get("url", "") or "")
+            if url in reached_url_set:
+                continue
             if url not in unreached_by_url:
                 unreached_by_url[url] = {
                     "url": url,
@@ -3640,6 +3642,7 @@ class ScanEngine:
                     console.print(
                         f"  [yellow][Worker cleanup] close() failed: {_close_exc}[/yellow]"
                     )
+            self._save_checkpoint()
 
         # Propagate AbortScan to the caller (_phase_attack → run)
         if _abort_event.is_set():
