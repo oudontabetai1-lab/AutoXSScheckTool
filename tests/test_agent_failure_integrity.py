@@ -160,3 +160,82 @@ async def test_agent_unsuccessful_history_is_incomplete_not_clean():
     assert "Agent Scan Complete" not in rendered
     assert "脆弱性は検出されませんでした" not in rendered
 
+
+
+@pytest.mark.asyncio
+async def test_monitored_agent_incomplete_empty_returns_before_sleep():
+    # monitored 経路（ダッシュボード有り）でも、incomplete-empty（success=False かつ
+    # 0 findings）のとき sleep(3600) に入らず result を返し、_agent_exit_code が非0を
+    # 返せることを検証する（D8・Codex #101 comment 3845791232）。early-return 条件を
+    # `result.error` だけにしていると、Ctrl+C 待ちの sleep に落ちて非0 exit が消える。
+    import types
+
+    sleep_calls: list = []
+
+    async def _fake_sleep(delay, *a, **k):
+        sleep_calls.append(delay)
+        return None
+
+    incomplete = SimpleNamespace(error=None, success=False, findings=[])
+
+    class _FakeEngine:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def run(self):
+            return incomplete
+
+    class _FakeMonitor:
+        def __init__(self, **_kwargs):
+            self.app = object()
+
+    class _FakeConfig:
+        def __init__(self, **_kwargs):
+            pass
+
+    class _FakeServer:
+        def __init__(self, config):
+            self.should_exit = False
+
+        async def serve(self):
+            return None
+
+    fake_uvicorn = types.SimpleNamespace(Config=_FakeConfig, Server=_FakeServer)
+
+    args = SimpleNamespace(
+        url="http://fixture.test",
+        llm="none",
+        model="",
+        ollama_url="http://localhost:11434",
+        llm_base_url="",
+        checks=["xss"],
+        no_headless=True,
+        auth_user="",
+        auth_pass="",
+        login_url="",
+        max_steps=1,
+        output="",
+        open_report=False,
+        no_open_report=True,
+        no_monitor=False,
+        port=9099,
+        header_file="",
+        bearer="",
+        header=[],
+    )
+
+    with patch.dict("sys.modules", {"uvicorn": fake_uvicorn}), patch(
+        "wscan.monitor.MonitorServer", _FakeMonitor
+    ), patch(
+        "wscan.agent_engine.AgentEngine", _FakeEngine
+    ), patch(
+        "main.webbrowser.open", lambda *a, **k: None
+    ), patch(
+        "main.asyncio.sleep", _fake_sleep
+    ):
+        result = await main.run_agent(args)
+
+    assert result is incomplete
+    assert main._agent_exit_code(result) == 1
+    # sleep(3600)（Ctrl+C 待ち）へは絶対に入らない。
+    assert 3600 not in sleep_calls

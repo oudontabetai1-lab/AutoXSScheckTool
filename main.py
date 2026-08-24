@@ -1930,7 +1930,10 @@ async def run_agent(args):
                 extra_headers=_agent_headers,
             )
             result = await engine.run()
-            if result.error:
+            # early-return 条件は _agent_exit_code の非0条件と一致させる（D8）。
+            # incomplete-empty（success=False かつ 0 findings）でも sleep(3600) に入れず
+            # result をそのまま返し、非0 exit を確実に届ける。
+            if result.error or (not result.success and not result.findings):
                 return result
             console.print("[dim]Dashboard is still running — press Ctrl+C to stop.[/dim]")
             await asyncio.sleep(3600)
