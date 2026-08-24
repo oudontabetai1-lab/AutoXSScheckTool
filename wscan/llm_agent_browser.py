@@ -1005,8 +1005,12 @@ class AgentBrowserScanner:
         try:
             llm = _build_llm(self.llm_provider, self.llm_model, self.ollama_url,
                              base_url=self.llm_base_url)
-        except RuntimeError as e:
-            result.error = str(e)
+        except (RuntimeError, ImportError) as e:
+            # ImportError(ModuleNotFoundError 含む)= browser-use 未導入。`_build_llm` は
+            # `from browser_use.llm import ...` を実行するため、後段の except ImportError より
+            # 前にここへ来る。traceback で漏らさず FAILED＋非0 exit へ倒す（D8。Codex #101）。
+            result.error = str(e) or type(e).__name__
+            console.print(f"[bold red]Agent scan FAILED: {result.error}[/bold red]")
             console.print(f"[bold red]Agent scan FAILED: {result.error}[/bold red]")
             if self.monitor:
                 await self.monitor.emit_status(

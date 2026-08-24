@@ -59,13 +59,17 @@ def test_observability_summary_groups_categories_and_other():
 
 
 @pytest.mark.asyncio
-async def test_form_transport_exception_is_recorded_and_falls_back():
+async def test_form_transport_exception_propagates_for_baseline_guards():
+    # form/url transport の例外は `_apply_ip` で握りつぶさず**伝播**させる（挙動不変）。
+    # 握りつぶすと LDAP 等の baseline `except` が発火せず、空 baseline との比較で偽陽性を生む
+    # （Codex #101）。json transport の脱落記録は `_apply_json_payload` 側に限る。
     engine = _engine()
     scanner = _Scanner(engine)
     ip = InjectionPoint.for_url_param("http://fixture.test/?q=x", "q")
 
-    assert await scanner._apply_ip(ip, "probe") == ("", {})
-    assert engine.wave_errors == ["transport_error:xss:TimeoutError"]
+    with pytest.raises(TimeoutError):
+        await scanner._apply_ip(ip, "probe")
+    assert engine.wave_errors == []
 
 
 @pytest.mark.asyncio

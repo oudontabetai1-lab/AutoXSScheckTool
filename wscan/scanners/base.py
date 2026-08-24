@@ -599,26 +599,24 @@ class BaseScanner(ABC):
         capability を明示したスキャナだけ共有 transport を使う。未対応の JSON を
         form へ暗黙に落とさないことで tri-state を維持する。
         """
-        try:
-            if ip.location == "json_body":
-                if not self.SUPPORTS_JSON_BODY:
-                    return "", {}
-                source, pair = await self._apply_json_payload(ip, payload)
-            else:
-                source, pair = await self._apply_payload(
-                    ip.url,
-                    ip.submit_index,
-                    ip.parameter_id,
-                    payload,
-                    ip.legacy_is_url_param(),
-                )
-        except Exception as exc:
-            # scanner ごとの transport が例外を返す版でも、従来の空応答フォールバックを
-            # 保ったまま脱落を共通地点で観測する。
-            self._record_scan_note(
-                f"transport_error:{self.CHECK_TYPE}:{type(exc).__name__}"
+        # 注意: ここで transport 例外を握りつぶさない（挙動不変）。以前はここに try/except で
+        # `("",{})` を返すラップを置いたが、それだと LDAP 等の baseline `except` へ**伝播すべき
+        # 例外**を奪い、空 baseline と成功応答を比較して偽陽性（例: "welcome" を認証バイパス）を
+        # 生む（0007 D1 は「記録を足すだけ・挙動不変」が不変条件。Codex #101）。json transport の
+        # 脱落記録は `_apply_json_payload` の**既存**の swallow 点（transport_error/unexecutable_template）
+        # に限る。form/url の例外は従来どおりスキャナ側（baseline_unavailable 等）へ伝播させる。
+        if ip.location == "json_body":
+            if not self.SUPPORTS_JSON_BODY:
+                return "", {}
+            source, pair = await self._apply_json_payload(ip, payload)
+        else:
+            source, pair = await self._apply_payload(
+                ip.url,
+                ip.submit_index,
+                ip.parameter_id,
+                payload,
+                ip.legacy_is_url_param(),
             )
-            return "", {}
         # D5/G2: 波状層横断の試行台帳へ応答メタを記録する。判定には関与せず、観測の
         # 記録のみ（例外は絶対に scan を止めない＝加算的・安全側）。
         self._record_attempt(ip, payload, source, pair)

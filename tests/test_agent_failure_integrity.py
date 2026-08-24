@@ -73,6 +73,28 @@ async def test_agent_initialization_error_prints_failed_not_zero_findings():
 
 
 @pytest.mark.asyncio
+async def test_agent_missing_browser_use_is_failed_not_traceback():
+    # browser-use 未導入は _build_llm が ModuleNotFoundError(ImportError)を投げる。
+    # traceback で漏らさず FAILED＋非0 exit にする（D8・Codex #101）。
+    output = StringIO()
+    scanner = AgentBrowserScanner(target_url="http://fixture.test")
+    with patch(
+        "wscan.llm_agent_browser.check_agent_config_directory", return_value=(True, ""),
+    ), patch(
+        "wscan.llm_agent_browser._build_llm",
+        side_effect=ModuleNotFoundError("No module named 'browser_use'"),
+    ), patch(
+        "wscan.llm_agent_browser.console",
+        Console(file=output, force_terminal=False, color_system=None),
+    ):
+        result = await scanner.run()
+
+    assert result.error is not None
+    assert main._agent_exit_code(result) == 1
+    assert "Agent scan FAILED" in output.getvalue()
+
+
+@pytest.mark.asyncio
 async def test_agent_unsuccessful_history_is_incomplete_not_clean():
     # browser-use が例外でなく history.is_successful()=False で失敗を報告し、findings が
     # 空のとき、「正常完了・0 findings」と誤表示せず INCOMPLETE＋非0 exit にする（D8）。
