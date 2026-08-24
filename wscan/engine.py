@@ -33,7 +33,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass, field as dc_field
 from pathlib import Path
 from typing import Optional
-from urllib.parse import urlparse, urljoin, parse_qs
+from urllib.parse import urlparse, urljoin, parse_qs, urlsplit
 
 # ---------------------------------------------------------------------------
 # Per-worker browser context variable
@@ -73,6 +73,29 @@ def _coverage_summary_text(coverage: dict) -> str:
         f"attempts={int(coverage.get('attempts', 0) or 0)} / "
         f"blocked={int((coverage.get('http_status', {}) or {}).get('blocked', 0) or 0)}"
     )
+
+
+def _coverage_allowed_origins(
+    target_urls: list[str],
+    access_urls: list[str],
+) -> set[str]:
+    """Return raw scheme://netloc origins used by HTTP coverage counters."""
+    origins: set[str] = set()
+    for url in [*target_urls, *access_urls]:
+        try:
+            parsed = urlsplit(url)
+            if parsed.scheme and parsed.netloc:
+                origins.add(f"{parsed.scheme}://{parsed.netloc}")
+        except Exception:
+            continue
+    return origins
+
+
+def _configure_network_coverage_origins(browser, origins: set[str]) -> None:
+    """Apply a non-empty coverage origin set to a browser network capture."""
+    network = getattr(browser, "network", None)
+    if origins and network is not None:
+        network.allowed_origins = set(origins)
 
 
 def _coerce_header_scope_enforce(value, default: bool = True) -> bool:
@@ -610,6 +633,10 @@ class ScanEngine:
         )
         self.access_urls: list[str] = self._normalize_scope_urls(
             list(access_urls or []) + ([login_url] if login_url else [])
+        )
+        self._coverage_origins: set[str] = _coverage_allowed_origins(
+            self.target_urls,
+            self.access_urls,
         )
         # I: 差分スキャン
         self.previous_scan_dir: Optional[str] = previous_scan_dir
@@ -2420,6 +2447,10 @@ class ScanEngine:
 
     async def _phase_crawl(self) -> list:
         """BFS crawl — navigate every reachable page, collect forms/HTML. No payloads."""
+        _configure_network_coverage_origins(
+            self._browser,
+            getattr(self, "_coverage_origins", set()),
+        )
         console.print(Rule("[bold blue] Phase 1 / 4  ·  Crawl [/bold blue]", style="blue"))
         console.print(f"  Target: [cyan]{self.target_url}[/cyan]  depth={self.depth}")
         if len(self.target_urls) > 1 or self.access_urls:
@@ -2678,8 +2709,22 @@ class ScanEngine:
                     console.print(
                         "  [yellow][Auth] Re-login may have failed — skipping page.[/yellow]"
                     )
+                    self._record_unscannable_url(
+                        url,
+                        note="Re-login failed — authenticated content not accessible.",
+                    )
                     continue
 
+            if (
+                self.login_url
+                and self._browser.is_on_login_page(self.login_url)
+                and not self._is_login_target_url(url)
+            ):
+                self._record_unscannable_url(
+                    url,
+                    note="Redirected to login (authenticated content not accessible).",
+                )
+                continue
             self.reached_urls.add(url)
             try:
                 html = await self.browser.page.content()
@@ -3621,6 +3666,10 @@ class ScanEngine:
         for i in range(self.concurrency - 1):
             try:
                 w = await self._browser.create_worker()
+                _configure_network_coverage_origins(
+                    w,
+                    getattr(self, "_coverage_origins", set()),
+                )
                 extra_workers.append(w)
                 console.print(f"  [dim]Worker {i + 2} page created[/dim]")
             except Exception as e:

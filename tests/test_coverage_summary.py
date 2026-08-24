@@ -6,7 +6,12 @@ from types import SimpleNamespace
 
 from wscan.browser import NetworkCapture, bucketize_status_counts
 from wscan.checkpoint import CheckpointState, load_checkpoint
-from wscan.engine import CrawledPage, ScanEngine, _coverage_summary_text
+from wscan.engine import (
+    CrawledPage,
+    ScanEngine,
+    _coverage_allowed_origins,
+    _coverage_summary_text,
+)
 from wscan.report import ReportGenerator
 from wscan.scanners.base import BaseScanner, Finding
 
@@ -97,6 +102,61 @@ def test_network_capture_counts_scan_related_and_unknown_resource_types():
         capture.on_response(response)
 
     assert capture.status_counts == {403: 2, 429: 2}
+
+
+def test_network_capture_filters_status_counts_to_allowed_origins():
+    capture = NetworkCapture()
+    capture.allowed_origins = {"http://fixture.test"}
+    for status, url, resource_type in (
+        (403, "http://fixture.test/private", "document"),
+        (429, "http://fixture.test/api", "fetch"),
+        (403, "https://cdn.example.test/script.js", "script"),
+        (403, "https://api.example.test/data", "xhr"),
+        (403, "https://api.example.test/data", "fetch"),
+    ):
+        response = _response(status, url=url, resource_type=resource_type)
+        capture.on_request(response.request)
+        capture.on_response(response)
+
+    assert capture.status_counts == {403: 1, 429: 1}
+    assert len(capture.pairs) == 5
+
+
+def test_network_capture_without_allowed_origins_counts_every_origin():
+    capture = NetworkCapture()
+    for url in (
+        "http://fixture.test/private",
+        "https://api.example.test/data",
+    ):
+        response = _response(403, url=url, resource_type="xhr")
+        capture.on_request(response.request)
+        capture.on_response(response)
+
+    assert capture.allowed_origins is None
+    assert capture.status_counts == {403: 2}
+
+
+def test_network_capture_origin_filter_is_exception_safe():
+    capture = NetworkCapture()
+    capture.allowed_origins = {"http://fixture.test"}
+    response = _response(403, url="http://[invalid", resource_type="fetch")
+    capture.on_request(response.request)
+
+    capture.on_response(response)
+
+    assert capture.status_counts == {}
+    assert len(capture.pairs) == 1
+
+
+def test_coverage_allowed_origins_uses_target_and_access_urls():
+    assert _coverage_allowed_origins(
+        ["https://target.test/app", "http://other.test:8080/path"],
+        ["https://auth.test/login", "/relative-scope", "http://[invalid"],
+    ) == {
+        "https://target.test",
+        "http://other.test:8080",
+        "https://auth.test",
+    }
 
 
 def test_bucketize_status_counts_groups_blocked_and_error_classes():
@@ -262,7 +322,10 @@ def test_coverage_summary_handles_empty_matrix_and_missing_browser():
 def test_parallel_worker_statuses_are_checkpointed_after_close(tmp_path):
     class _Worker:
         def __init__(self):
-            self.network = SimpleNamespace(status_counts=Counter({403: 2, 503: 1}))
+            self.network = SimpleNamespace(
+                status_counts=Counter({403: 2, 503: 1}),
+                allowed_origins=None,
+            )
             self.closed = False
 
         async def close(self):
@@ -280,6 +343,7 @@ def test_parallel_worker_statuses_are_checkpointed_after_close(tmp_path):
         _worker_status_counts=Counter(),
         _restored_status_counts=Counter(),
         _probe_status_counts=Counter({429: 2}),
+        _coverage_origins={"http://fixture.test"},
         enable_checkpoint=True,
         checkpoint=CheckpointState(
             target_url="http://fixture.test/", checks=["xss"]
@@ -300,6 +364,7 @@ def test_parallel_worker_statuses_are_checkpointed_after_close(tmp_path):
     asyncio.run(ScanEngine._phase_attack_concurrent(engine, [], {}))
 
     assert engine._worker_status_counts == Counter({403: 2, 503: 1})
+    assert worker.network.allowed_origins == {"http://fixture.test"}
     assert worker.closed is True
     assert save_calls == [{403: 2, 503: 1}]
     assert load_checkpoint(tmp_path).http_status_counts == {

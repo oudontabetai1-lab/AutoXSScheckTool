@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+from types import SimpleNamespace
 
 from wscan.browser import BrowserManager
 from wscan.engine import ScanEngine
@@ -89,6 +90,7 @@ class _FakeCrawlBrowser:
         self.last_navigation_status = None
         self.auth_user = ""
         self.auth_pass = ""
+        self.network = SimpleNamespace(allowed_origins=None)
 
     async def navigate(self, url, **kwargs):
         if url.endswith("/down"):
@@ -197,6 +199,10 @@ class EngineScanGapTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("fixture timeout", failures[0]["note"])
         self.assertIn("http://fixture.test/", engine.reached_urls)
         self.assertNotIn("http://fixture.test/down", engine.reached_urls)
+        self.assertEqual(
+            engine._browser.network.allowed_origins,
+            {"http://fixture.test"},
+        )
         coverage = engine.coverage_summary()
         self.assertEqual(coverage["reached_count"], 1)
         self.assertEqual(coverage["reached_urls"], ["http://fixture.test/"])
@@ -220,6 +226,59 @@ class EngineScanGapTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(pages, [])
         self.assertNotIn("http://fixture.test/private", engine.reached_urls)
+        self.assertEqual(
+            engine.coverage_summary()["unreached"],
+            [{
+                "url": "http://fixture.test/private",
+                "reason": "Re-login failed — authenticated content not accessible.",
+            }],
+        )
+
+    async def test_crawl_no_relogin_records_login_redirect_as_unreached(self):
+        engine = self._engine(
+            "http://fixture.test/private",
+            login_url="http://auth.fixture.test/login",
+            relogin_on_expiry=False,
+            depth=1,
+        )
+        engine._browser = _SessionExpiryBrowser(relogin_succeeds=False)
+
+        pages = await engine._phase_crawl()
+
+        self.assertEqual(pages, [])
+        self.assertNotIn("http://fixture.test/private", engine.reached_urls)
+        self.assertEqual(
+            engine.coverage_summary()["unreached"],
+            [{
+                "url": "http://fixture.test/private",
+                "reason": "Redirected to login (authenticated content not accessible).",
+            }],
+        )
+
+    async def test_crawl_reaches_page_after_successful_relogin(self):
+        engine = self._engine(
+            "http://fixture.test/private",
+            login_url="http://auth.fixture.test/login",
+            depth=1,
+        )
+        engine._browser = _SessionExpiryBrowser(relogin_succeeds=True)
+
+        pages = await engine._phase_crawl()
+
+        self.assertEqual(len(pages), 1)
+        self.assertIn("http://fixture.test/private", engine.reached_urls)
+        self.assertEqual(engine.coverage_summary()["unreached"], [])
+
+    async def test_crawl_counts_deliberate_login_target_as_reached(self):
+        login_url = "http://fixture.test/login"
+        engine = self._engine(login_url, login_url=login_url, depth=1)
+        engine._browser = _FakeCrawlBrowser()
+
+        pages = await engine._phase_crawl()
+
+        self.assertEqual(len(pages), 1)
+        self.assertIn(login_url, engine.reached_urls)
+        self.assertEqual(engine.coverage_summary()["unreached"], [])
 
     async def test_crawl_reload_failure_is_unreached_only(self):
         engine = self._engine(

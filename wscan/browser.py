@@ -13,7 +13,7 @@ import urllib.request
 from collections.abc import Mapping
 from urllib.parse import urlparse as _urlparse
 from typing import Optional, Callable, Any
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin, urlparse, urlsplit
 
 from playwright.async_api import async_playwright, Browser, BrowserContext, Page, Request, Response
 from rich.console import Console
@@ -168,6 +168,10 @@ class NetworkCapture:
     def __init__(self, logger=None):
         self.pairs: list[dict] = []
         self.status_counts = collections.Counter()
+        # None preserves the historical behaviour of counting every origin.
+        # ScanEngine sets this to the configured target/access origins so
+        # third-party script/XHR failures do not inflate coverage warnings.
+        self.allowed_origins: Optional[set] = None
         # Use (url, id(request_object)) as key to avoid collisions when the same URL
         # is requested multiple times concurrently (race condition fix).
         self._pending: dict[tuple, dict] = {}
@@ -218,7 +222,22 @@ class NetworkCapture:
                 # Unknown request types are counted conservatively so a real
                 # block is not hidden by an incomplete response object.
                 rtype = ""
-            if rtype not in ("image", "font", "stylesheet", "media"):
+            in_allowed_origin = True
+            if self.allowed_origins is not None:
+                try:
+                    parsed = urlsplit(response.url)
+                    origin = (
+                        f"{parsed.scheme}://{parsed.netloc}"
+                        if parsed.scheme and parsed.netloc
+                        else ""
+                    )
+                except Exception:
+                    origin = ""
+                in_allowed_origin = origin in self.allowed_origins
+            if (
+                rtype not in ("image", "font", "stylesheet", "media")
+                and in_allowed_origin
+            ):
                 self.status_counts[response.status] += 1
         except Exception:
             pass
