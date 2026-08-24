@@ -111,8 +111,10 @@ def normalize_url_for_key(url: str) -> str:
             # 正規化しない（安全側の既知制約）。
             kept.append((key, item))
 
-        # 同名キーの値順には意味があり得るため、安定ソートでキー間の順序だけを揃える。
-        kept.sort(key=lambda pair: pair[0])
+        # クエリ順は app 定義で order-sensitive なエンドポイント（?action=transfer&stage=confirm
+        # vs ?stage=confirm&action=transfer）を潰さないよう、**非揮発パラメータの観測順を保持**する
+        # （ソートすると別 operation を同一 checkpoint identity にして初回でも偽陰性・Codex #103 P1）。
+        # 揮発項目のみ除去済み。
         # manual_crawl._strip_in_page_anchor と同じ規則。predicate は循環 import を
         # 避けるため複製しているので、変更時は両者の挙動を一致させること。
         fragment = parsed.fragment

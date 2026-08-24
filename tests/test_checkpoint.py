@@ -197,7 +197,7 @@ class StateTests(unittest.TestCase):
             "findings": [],
         })
 
-        expected_url = "https://h/action/?a=1&z=/admin/"
+        expected_url = "https://h/action/?z=/admin/&a=1"
         self.assertEqual(state.target_url, expected_url)
         self.assertEqual(next(iter(state.completed_units)).split("\x1f")[0], expected_url)
         self.assertTrue(state.is_done(expected_url, "name", 0, "sqli"))
@@ -301,17 +301,21 @@ class StateTests(unittest.TestCase):
             checks=["sqli"],
         )
 
-        # path 末尾スラッシュはクエリが続くと保持される（/start/ と /start は別）。
+        # 同一（path スラッシュ・クエリ値スラッシュ・観測順すべて一致）は互換。
         self.assertTrue(s.is_compatible_with(
-            "https://h/start/?a=1&z=/admin/", ["sqli"]
+            "https://h/start/?z=/admin/&a=1", ["sqli"]
         ))
         # query 値の末尾スラッシュ違いは別 operation。
         self.assertFalse(s.is_compatible_with(
-            "https://h/start/?a=1&z=/admin", ["sqli"]
+            "https://h/start/?z=/admin&a=1", ["sqli"]
         ))
         # path 末尾スラッシュ違いも別（クエリが続くため保持）。
         self.assertFalse(s.is_compatible_with(
-            "https://h/start?a=1&z=/admin/", ["sqli"]
+            "https://h/start?z=/admin/&a=1", ["sqli"]
+        ))
+        # クエリ順違いも別（観測順を保持するため）。
+        self.assertFalse(s.is_compatible_with(
+            "https://h/start/?a=1&z=/admin/", ["sqli"]
         ))
 
 
@@ -657,7 +661,7 @@ class AttemptLedgerPersistenceTests(unittest.TestCase):
             "attempt_ledger": serialized,
         })
         resumed = InjectionPoint.for_url_param(
-            "https://h/action/?op=create&csrf=new&nonce=1700000000&z=/admin/",
+            "https://h/action/?z=/admin/&csrf=new&nonce=1700000000&op=create",
             "name",
         )
 

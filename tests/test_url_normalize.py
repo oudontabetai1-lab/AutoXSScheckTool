@@ -121,22 +121,24 @@ def test_looks_epoch_digits(value, expected):
 
 def test_meaningful_and_unknown_query_keys_are_preserved_without_reencoding():
     url = "https://h/p?q=foo%20bar&op=create&id=5&build_nonce=keep%2Fme"
-    assert normalize_url_for_key(url) == (
-        "https://h/p?build_nonce=keep%2Fme&id=5&op=create&q=foo%20bar"
-    )
+    # 非揮発キーは観測順のまま保持（再エンコード・並べ替えしない）。
+    assert normalize_url_for_key(url) == url
 
 
-def test_query_order_is_stable():
-    assert normalize_url_for_key("https://h/p?a=1&b=2") == normalize_url_for_key(
+def test_query_order_is_preserved():
+    # クエリ順は app 定義で order-sensitive なため観測順を保持する（別 operation を
+    # 同一 identity にしない・Codex #103 P1）。
+    assert normalize_url_for_key("https://h/p?a=1&b=2") != normalize_url_for_key(
         "https://h/p?b=2&a=1"
     )
+    assert normalize_url_for_key("https://h/p?a=1&b=2") == "https://h/p?a=1&b=2"
 
 
 def test_trailing_slash_normalization_only_changes_path():
     assert normalize_url_for_key("http://h/p/") == "http://h/p"
     assert normalize_url_for_key("http://h/") == "http://h"
     assert normalize_url_for_key("http://h/p?z=/admin/&a=1") == (
-        "http://h/p?a=1&z=/admin/"
+        "http://h/p?z=/admin/&a=1"
     )
     assert normalize_url_for_key("http://h/p?z=/admin/&a=1") != (
         normalize_url_for_key("http://h/p?a=1&z=/admin")
@@ -204,7 +206,7 @@ def test_stable_key_parts_fully_normalizes_url_without_changing_attack_url(locat
 
     # ledger/checkpoint 共有キーは path trim + 揮発 query strip を行い、意味クエリと
     # query 値の末尾スラッシュは保持する。実 URL(ip.url)は不変。
-    assert ip.stable_key_parts()[0] == "https://h/action/?op=create&z=/admin/"
+    assert ip.stable_key_parts()[0] == "https://h/action/?z=/admin/&op=create"
     assert ip.url == url
 
 
