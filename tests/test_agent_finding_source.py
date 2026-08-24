@@ -242,6 +242,7 @@ class AgentReconHandoffTests(unittest.IsolatedAsyncioTestCase):
             memory=AgentMemory(visited_urls=["http://fixture.test/search"]),
             final_summary="site mapped",
             error=None,
+            success=True,
         )
 
         with patch("wscan.llm_agent_browser.AgentBrowserScanner") as scanner_cls:

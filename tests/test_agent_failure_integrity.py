@@ -293,3 +293,59 @@ async def test_run_recon_returns_handoff_on_success(tmp_path):
 
     assert "http://fixture.test" in handoff.discovered_urls
     assert "http://fixture.test/a" in handoff.discovered_urls
+
+
+@pytest.mark.asyncio
+async def test_run_recon_raises_on_unsuccessful_empty(tmp_path):
+    # 例外を投げずに step 上限/失敗で終わり（error=None・success=False・URL/findings 無し）
+    # の INCOMPLETE 偵察は「偵察完了」と誤表示せず送出する（Codex #101 P1）。
+    from wscan.agent_engine import AgentEngine
+
+    class _IncompleteScanner:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def run(self):
+            return SimpleNamespace(
+                error=None,
+                success=False,
+                findings=[],
+                memory=SimpleNamespace(visited_urls=[]),
+                final_summary="",
+            )
+
+    engine = AgentEngine(url="http://fixture.test", llm_provider="none",
+                         output_dir=str(tmp_path))
+    with patch("wscan.llm_agent_browser.AgentBrowserScanner", _IncompleteScanner):
+        with pytest.raises(RuntimeError, match="incomplete"):
+            await engine.run_recon()
+
+
+@pytest.mark.asyncio
+async def test_run_recon_keeps_partial_recon_urls_when_unsuccessful(tmp_path):
+    # success=False でも URL を発見していれば partial recon として有効（到達性の価値を
+    # 捨てない）。target-only でない handoff は送出せず返す。
+    from wscan.agent_engine import AgentEngine
+
+    class _PartialScanner:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def run(self):
+            return SimpleNamespace(
+                error=None,
+                success=False,
+                findings=[],
+                memory=SimpleNamespace(
+                    visited_urls=["http://fixture.test/a", "http://fixture.test/b"]
+                ),
+                final_summary="partial",
+            )
+
+    engine = AgentEngine(url="http://fixture.test", llm_provider="none",
+                         output_dir=str(tmp_path))
+    with patch("wscan.llm_agent_browser.AgentBrowserScanner", _PartialScanner):
+        handoff = await engine.run_recon()
+
+    assert "http://fixture.test/a" in handoff.discovered_urls
+    assert "http://fixture.test/b" in handoff.discovered_urls

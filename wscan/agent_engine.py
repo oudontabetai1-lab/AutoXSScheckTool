@@ -327,6 +327,21 @@ class AgentEngine:
             if u not in all_urls:
                 all_urls.append(u)
 
+        # 例外を投げずに step 上限/失敗で終わり（error=None・success=False・findings 無し）、
+        # かつ新規 URL も得られなかった場合は INCOMPLETE。AgentBrowserScanner はこの状態を
+        # 明示的に INCOMPLETE と分類するため、target-only handoff を「偵察完了」と誤表示せず
+        # 送出し、呼び出し側の Hybrid 失敗ブランチ（seed 無しで Phase 2 続行＋警告）へ委ねる
+        # （Codex #101 P1・run() の incomplete_empty と同型）。ただし URL を1つでも発見していれば
+        # partial recon として有効なので、到達性の価値を捨てず handoff を返す。
+        if not result.success and not findings and len(all_urls) <= 1:
+            if self.monitor:
+                await self.monitor.emit_status(
+                    "Agent偵察 INCOMPLETE: 正常に完了せず URL も検出できませんでした"
+                    "（0 件は安全を意味しません）",
+                    "error",
+                )
+            raise RuntimeError("Agent recon incomplete: no URLs or findings")
+
         console.print(
             f"\n[bold cyan]Agent偵察完了:[/bold cyan] "
             f"[cyan]{len(all_urls)}[/cyan] URL 発見 / "

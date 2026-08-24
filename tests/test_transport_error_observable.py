@@ -61,3 +61,51 @@ class TransportErrorObservableTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class _XmlBoomBrowser:
+    async def test_url_param(self, *a, **k):
+        raise RuntimeError("nav boom")
+
+    async def navigate(self, *a, **k):
+        raise RuntimeError("nav boom")
+
+    async def fill_and_submit_form(self, *a, **k):
+        raise RuntimeError("submit boom")
+
+
+class _XxeFakeEngine:
+    def __init__(self):
+        self.browser = _XmlBoomBrowser()
+        self.monitor = None
+        self.payload_gen = None
+        self.wave_errors: list = []
+        self.timeout = 5
+
+
+class XxeTransportObservableTests(unittest.IsolatedAsyncioTestCase):
+    """XXE は独自の direct-HTTP 経路（_post_xml）を持つ。baseline/attack 失敗を
+    握りつぶすと --checks xxe が丸ごと落ちても total:0 と誤表示する（Codex #101 P1）。
+    _post_xml を失敗させ、baseline 失敗が transport_error として記録されることを検証。
+    """
+
+    async def test_baseline_failure_is_recorded(self):
+        from unittest.mock import patch
+        from wscan.scanners import SCANNERS
+
+        engine = _XxeFakeEngine()
+        scanner = SCANNERS["xxe"](engine)
+        field = {"name": "data", "content_type": "application/xml"}
+
+        async def _boom(*a, **k):
+            raise RuntimeError("post boom")
+
+        with patch.object(scanner, "_post_xml", _boom), \
+             patch("wscan.scanners.xxe._looks_like_xml_endpoint", return_value=True):
+            out = await scanner.scan_field("http://x/api", 0, field, False)
+
+        self.assertEqual(out, [])
+        self.assertTrue(
+            any(e.startswith("transport_error:xxe:") for e in engine.wave_errors),
+            f"xxe transport_error not recorded: {engine.wave_errors}",
+        )

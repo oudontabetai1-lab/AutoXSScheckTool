@@ -500,6 +500,7 @@ class AgentHeaderWiringTests(unittest.IsolatedAsyncioTestCase):
             memory=SimpleNamespace(visited_urls=[]),
             final_summary="",
             error=None,
+            success=True,
         )
 
         with tempfile.TemporaryDirectory() as output_dir, patch(
