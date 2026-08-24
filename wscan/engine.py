@@ -1653,6 +1653,15 @@ class ScanEngine:
                     console.print(
                         f"  [yellow]API template check ({check_name}) on {url}: {e}[/yellow]"
                     )
+                    # 劣化した実行を coverage に残す（Codex #102 P2）。
+                    self._record_scan_matrix(
+                        url=url,
+                        field_name="(api-template)",
+                        check_name=check_name,
+                        status="error",
+                        location="API template",
+                        note=f"api-template scan raised: {type(e).__name__}: {e}",
+                    )
                 else:
                     # 認証失効が解消しないまま空振りした単位は「済み」にしない
                     # （resume が再試行できるようにする）。
@@ -4257,6 +4266,14 @@ class ScanEngine:
             ) or hasattr(scanner, "scan_page_context")
             if not has_page_impl:
                 continue
+            # 既知の制約（Codex #102 P2）: HAS_PAGE_LEVEL=True でも、GET-only spec の
+            # mass_assignment や、host/origin 単位で 1 回だけ走る request_smuggling/graphql の
+            # ように、当該ページで実際にはプローブを送らず no-op になる場合がある。その際も
+            # "tested" 行を1件記録するため attempts が上振れしうる（page-level 実行を per-page で
+            # 数える設計の副作用）。堅牢化には各スキャナが「実際に work したか」を報告する仕組みが
+            # 要り、~21 スキャナ横断＋並行実行下では比例しない。findings_total は all_findings が
+            # 権威ソースで影響を受けない。attempts の page-level 分は自己制御スキャナで上限寄りに
+            # なりうる点に留意する。
             # 再開: 済みの page-level 単位 (url,"(page)",check) は飛ばす。intrusive な
             # page-level プローブ（proto の JSON POST、graphql コスト探索）を resume で
             # 再送しないため。exact URL で刻む（origin だと別 URL を取りこぼす）。
@@ -4286,6 +4303,16 @@ class ScanEngine:
             except Exception as e:
                 page_errored = True
                 console.print(f"  [yellow]Page-level ({check_name}): {e}[/yellow]")
+                # 実行途中で例外（probe timeout 等）＝劣化した実行。field-level と同様に
+                # error 行を残し、coverage の attempts/by_status から消えないようにする（Codex #102 P2）。
+                self._record_scan_matrix(
+                    url=page.url,
+                    field_name="(page)",
+                    check_name=check_name,
+                    status="error",
+                    location="page-level",
+                    note=f"page-level scan raised: {type(e).__name__}: {e}",
+                )
             if not page_errored:
                 self._checkpoint_mark_done(cp_url, "(page)", 0, check_name)
         # page-level のみのページ（フォーム/URLパラメータ無し）でも進捗を永続化する。
