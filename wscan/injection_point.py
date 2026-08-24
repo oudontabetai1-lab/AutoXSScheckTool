@@ -6,6 +6,8 @@ from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any
 
+from .url_normalize import normalize_url_for_key
+
 
 def unescape_token(token: str) -> str:
     """RFC6901 のトークンをデコードする。"""
@@ -256,7 +258,8 @@ class InjectionPoint:
 
     def stable_key_parts(self) -> tuple[str, str, str, str, str]:
         """既存互換の checkpoint キー生成に必要な部品を返す。"""
-        norm_url = (self.url or "").rstrip("/")
+        # Task 0013: 実送信 URL は変えず、永続キーだけ全注入点共通で揮発クエリを除く。
+        norm_url = normalize_url_for_key(self.url or "").rstrip("/")
         field_name = self.display_name or self.parameter_id
         if self.location == "form":
             location_token, pointer = "f", ""
@@ -270,8 +273,9 @@ class InjectionPoint:
             # run 毎に変わる＝resume 不安定（完了済みの状態変更 POST を再送・復元 finding が
             # 検証不能）。resume 安全性を優先し、キーは安定な (url, pointer) に留める。
             # 同一 (method,url,pointer) で body 構造だけ違う稀な多重 operation は同一単位へ
-            # 収束（ニッチな取りこぼし）を許容する。値の正規化（揮発クエリ/値の除去）は
-            # 全注入点共通の別課題（norm_url 自体の揮発も含む・vault Task 0013）。
+            # 収束（ニッチな取りこぼし）を許容する。将来、値抜きの body 構造シグネチャを
+            # 安定 identity にできるか検討するが、JSON-RPC method のように operation が値に
+            # 埋まる場合は構造だけで区別不能なため、本タスクでは再導入しない。
             pointer = self.parameter_id
         return norm_url, field_name, str(self.form_index), location_token, pointer
 
