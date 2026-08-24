@@ -369,7 +369,7 @@ def test_findings_total_uses_all_in_scope_findings_without_matrix_rows():
     assert summary["findings_total"] == 1
 
 
-def test_page_level_execution_is_recorded_as_an_attempt(tmp_path):
+def test_page_level_attempt_uses_only_findings_returned_by_scanner(tmp_path):
     engine = ScanEngine(
         "http://fixture.test/page",
         checks=["security_headers"],
@@ -384,6 +384,16 @@ def test_page_level_execution_is_recorded_as_an_attempt(tmp_path):
 
     class _Scanner:
         async def scan_page(self, url):
+            engine.all_findings.append(
+                Finding(
+                    check_type="sqli",
+                    severity="critical",
+                    url="http://fixture.test/other-page",
+                    field_name="q",
+                    payload="other",
+                    evidence="concurrent finding from another page",
+                )
+            )
             return [_finding("security_headers", url)]
 
     engine.scanners = {"security_headers": _Scanner()}
@@ -400,8 +410,41 @@ def test_page_level_execution_is_recorded_as_an_attempt(tmp_path):
     row = engine.scan_matrix[-1]
     assert row["field_name"] == "(page)"
     assert row["status"] == "vulnerable"
+    assert row["severity"] == "high"
     assert row["finding_count"] == 1
     assert engine.coverage_summary()["attempts"] == 1
+
+
+def test_default_scan_page_noop_does_not_create_page_level_attempt(tmp_path):
+    engine = ScanEngine(
+        "http://fixture.test/page",
+        checks=["xss"],
+        llm_provider="none",
+        output_dir=tmp_path,
+        open_report=False,
+        enable_waf_detection=False,
+        enable_ai_analysis=False,
+        enable_payload_learning=False,
+        enable_adaptive_payloads=False,
+    )
+
+    class _FieldOnlyScanner(BaseScanner):
+        async def scan_field(self, *args, **kwargs):
+            return []
+
+    engine.scanners = {"xss": _FieldOnlyScanner(engine)}
+    page = CrawledPage(
+        url=engine.target_url,
+        html="<html></html>",
+        forms=[],
+        url_params=[],
+        depth=0,
+    )
+
+    asyncio.run(engine._attack_one_page(page, {}))
+
+    assert engine.scan_matrix == []
+    assert engine.coverage_summary()["attempts"] == 0
 
 
 def test_api_template_execution_is_recorded_as_an_attempt(tmp_path):

@@ -210,6 +210,7 @@ from .monitor import MonitorServer
 from .payload_gen import PayloadGenerator
 from .injection_point import InjectionPoint
 from .scanners.base import (
+    BaseScanner,
     Finding,
     ProvenanceError,
     finding_dedup_key_for,
@@ -938,6 +939,7 @@ class ScanEngine:
             proxy=proxy,
             headers_provider=lambda url="": self.auth_headers(url=url),
             tls_options_provider=lambda: self.tls_config.httpx_options(),
+            record_status=self.record_probe_status,
         )
         # A-3: Payload continuous learning
         self.payload_learner = PayloadLearner(learning_file=learning_file)
@@ -1406,12 +1408,17 @@ class ScanEngine:
                     )
                 ]
                 try:
-                    self._restored_status_counts = Counter({
-                        int(status): int(count)
-                        for status, count in (
-                            state.http_status_counts or {}
-                        ).items()
-                    })
+                    if set(self.checks or []) == set(state.checks or []):
+                        self._restored_status_counts = Counter({
+                            int(status): int(count)
+                            for status, count in (
+                                state.http_status_counts or {}
+                            ).items()
+                        })
+                    else:
+                        # サブセット resume で out-of-scope の 403/429 を復元し、
+                        # blocked 警告へ誤って計上しないため、当該 run で再計上する。
+                        self._restored_status_counts = Counter()
                 except Exception as exc:
                     self._restored_status_counts = Counter()
                     self.wave_errors.append(
@@ -4185,6 +4192,12 @@ class ScanEngine:
             # 重複する。これらは checkpoint を刻む _run_api_template_checks に一本化する。
             if check_name in _API_TEMPLATE_ONLY_CHECKS:
                 continue
+            has_page_impl = (
+                hasattr(scanner, "scan_page_context")
+                or type(scanner).scan_page is not BaseScanner.scan_page
+            )
+            if not has_page_impl:
+                continue
             # 再開: 済みの page-level 単位 (url,"(page)",check) は飛ばす。intrusive な
             # page-level プローブ（proto の JSON POST、graphql コスト探索）を resume で
             # 再送しないため。exact URL で刻む（origin だと別 URL を取りこぼす）。
@@ -4193,24 +4206,23 @@ class ScanEngine:
                 continue
             page_errored = False
             try:
-                before_count = len(self.all_findings)
                 if hasattr(scanner, "scan_page_context"):
                     page_findings = await scanner.scan_page_context(page)
                 else:
                     page_findings = await scanner.scan_page(page.url)
-                for f in (page_findings or []):
+                page_findings = page_findings or []
+                for f in page_findings:
                     self._record_finding(f, source="page-level")
-                new_findings = self.all_findings[before_count:]
                 self._record_scan_matrix(
                     url=page.url,
                     field_name="(page)",
                     check_name=check_name,
-                    status="vulnerable" if new_findings else "tested",
+                    status="vulnerable" if page_findings else "tested",
                     location="page-level",
                     severity=max(
-                        (f.severity for f in new_findings), default=""
+                        (f.severity for f in page_findings), default=""
                     ),
-                    finding_count=len(new_findings),
+                    finding_count=len(page_findings),
                 )
             except Exception as e:
                 page_errored = True

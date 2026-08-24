@@ -371,7 +371,7 @@ class SaveCheckpointFindingsTests(unittest.TestCase):
             )
             self.assertEqual(loaded.reached_urls, ["http://h/a"])
 
-    def test_resume_restores_scan_matrix_before_new_rows_are_appended(self):
+    def test_resume_subset_discards_out_of_scope_status_counts(self):
         from wscan.engine import ScanEngine
 
         with tempfile.TemporaryDirectory() as d:
@@ -422,7 +422,7 @@ class SaveCheckpointFindingsTests(unittest.TestCase):
             self.assertIsNot(engine.scan_matrix, state.scan_matrix)
             engine.scan_matrix.append({"url": "http://h/b", "check": "sqli"})
             self.assertEqual(engine.scan_matrix[0], saved_rows[0])
-            self.assertEqual(engine._restored_status_counts, {403: 2, 500: 1})
+            self.assertEqual(engine._restored_status_counts, {})
             self.assertEqual(
                 engine.reached_urls,
                 {"http://h/a", "http://h/transient"},
@@ -432,18 +432,44 @@ class SaveCheckpointFindingsTests(unittest.TestCase):
             self.assertEqual(
                 engine.coverage_summary()["http_status"],
                 {
-                    "total": 3,
-                    "blocked": 2,
-                    "client_error": 2,
-                    "server_error": 1,
+                    "total": 0,
+                    "blocked": 0,
+                    "client_error": 0,
+                    "server_error": 0,
                 },
             )
             reloaded = load_checkpoint(d)
-            self.assertEqual(reloaded.http_status_counts, {"403": 2, "500": 1})
+            self.assertEqual(reloaded.http_status_counts, {})
             self.assertEqual(
                 reloaded.reached_urls,
                 ["http://h/a", "http://h/new", "http://h/transient"],
             )
+
+    def test_resume_exact_checks_restore_status_counts(self):
+        from wscan.engine import ScanEngine
+
+        with tempfile.TemporaryDirectory() as d:
+            state = CheckpointState(
+                target_url="http://h", checks=["sqli", "xss"]
+            )
+            state.http_status_counts = {"403": 2, "500": 1}
+            save_checkpoint(d, state)
+
+            engine = ScanEngine(
+                "http://h",
+                checks=["xss", "sqli"],
+                llm_provider="none",
+                output_dir=d,
+                resume_dir=d,
+                open_report=False,
+                enable_waf_detection=False,
+                enable_ai_analysis=False,
+                enable_payload_learning=False,
+                enable_adaptive_payloads=False,
+            )
+            engine._init_checkpoint()
+
+            self.assertEqual(engine._restored_status_counts, {403: 2, 500: 1})
 
     def test_save_noop_when_checkpoint_disabled(self):
         import types

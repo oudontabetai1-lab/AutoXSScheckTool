@@ -4,6 +4,7 @@ detect() は normal(resp) と anomaly probe(resp2) を送る。両者が別 orig
 planner fingerprint（G5）で WAF を正しい origin に帰属させるには、当たった側の origin を記録する。
 """
 import asyncio
+from collections import Counter
 
 import httpx
 
@@ -14,10 +15,11 @@ def _run(coro):
     return asyncio.run(coro)
 
 
-def _detector(handler):
+def _detector(handler, record_status=None):
     transport = httpx.MockTransport(handler)
     return WAFDetector(
-        tls_options_provider=lambda: {"verify": False, "transport": transport}
+        tls_options_provider=lambda: {"verify": False, "transport": transport},
+        record_status=record_status,
     )
 
 
@@ -49,3 +51,19 @@ def test_normal_match_records_normal_origin():
     name = _run(det.detect("https://c.test:443/x"))
     assert name == "Cloudflare"
     assert det._detected_origin == "https://c.test"
+
+
+def test_normal_and_anomaly_statuses_are_recorded():
+    recorded = Counter()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        query = request.url.query
+        is_probe = "wscan=" in (
+            query.decode() if isinstance(query, bytes) else str(query)
+        )
+        return httpx.Response(429 if is_probe else 200, text="ok")
+
+    det = _detector(handler, record_status=lambda status: recorded.update([status]))
+
+    assert _run(det.detect("https://status.test/")) is None
+    assert recorded == Counter({200: 1, 429: 1})
