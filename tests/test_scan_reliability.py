@@ -84,13 +84,17 @@ class BrowserNavigationReliabilityTests(unittest.IsolatedAsyncioTestCase):
 class _FakeCrawlBrowser:
     def __init__(self):
         self.page = self
+        self.url = ""
         self.last_navigation_error = ""
         self.last_navigation_status = None
+        self.auth_user = ""
+        self.auth_pass = ""
 
     async def navigate(self, url, **kwargs):
         if url.endswith("/down"):
             self.last_navigation_error = "TimeoutError: fixture timeout"
             return False
+        self.url = url
         self.last_navigation_error = ""
         self.last_navigation_status = 200
         return True
@@ -119,13 +123,50 @@ class _FakeCrawlBrowser:
             "viewport": {"w": 1280, "h": 800},
         }]
 
+    def is_on_login_page(self, login_url):
+        return bool(login_url) and self.url.rstrip("/") == login_url.rstrip("/")
+
+
+class _SessionExpiryBrowser(_FakeCrawlBrowser):
+    def __init__(
+        self,
+        *,
+        relogin_succeeds,
+        renavigate_succeeds=True,
+        login_url="http://auth.fixture.test/login",
+    ):
+        super().__init__()
+        self.auth_user = "user"
+        self.auth_pass = "pass"
+        self.relogin_succeeds = relogin_succeeds
+        self.renavigate_succeeds = renavigate_succeeds
+        self.login_url = login_url
+        self.private_navigations = 0
+
+    async def navigate(self, url, **kwargs):
+        if url.endswith("/private"):
+            self.private_navigations += 1
+            if self.private_navigations == 1:
+                self.url = self.login_url
+                return True
+            if not self.renavigate_succeeds:
+                self.last_navigation_error = "TimeoutError: reload failed"
+                return False
+        return await super().navigate(url, **kwargs)
+
+    async def auto_login(self, *args, **kwargs):
+        if self.relogin_succeeds:
+            self.url = "http://fixture.test/dashboard"
+        return self.relogin_succeeds
+
 
 class EngineScanGapTests(unittest.IsolatedAsyncioTestCase):
-    def _engine(self):
+    def _engine(self, url="http://fixture.test/", **kwargs):
         out = tempfile.TemporaryDirectory()
         self.addCleanup(out.cleanup)
+        depth = kwargs.pop("depth", 2)
         engine = ScanEngine(
-            "http://fixture.test/",
+            url,
             checks=["xss"],
             llm_provider="none",
             output_dir=out.name,
@@ -135,7 +176,8 @@ class EngineScanGapTests(unittest.IsolatedAsyncioTestCase):
             enable_payload_learning=False,
             enable_adaptive_payloads=False,
             enable_sitemap_crawl=False,
-            depth=2,
+            depth=depth,
+            **kwargs,
         )
         engine._browser = _FakeCrawlBrowser()
         return engine
@@ -165,6 +207,48 @@ class EngineScanGapTests(unittest.IsolatedAsyncioTestCase):
                 "reason": failures[0]["note"],
             }],
         )
+
+    async def test_crawl_does_not_reach_page_when_relogin_fails(self):
+        engine = self._engine(
+            "http://fixture.test/private",
+            login_url="http://auth.fixture.test/login",
+            depth=1,
+        )
+        engine._browser = _SessionExpiryBrowser(relogin_succeeds=False)
+
+        pages = await engine._phase_crawl()
+
+        self.assertEqual(pages, [])
+        self.assertNotIn("http://fixture.test/private", engine.reached_urls)
+
+    async def test_crawl_reload_failure_is_unreached_only(self):
+        engine = self._engine(
+            "http://fixture.test/private",
+            login_url="http://auth.fixture.test/login",
+            depth=1,
+        )
+        engine._browser = _SessionExpiryBrowser(
+            relogin_succeeds=True,
+            renavigate_succeeds=False,
+        )
+
+        pages = await engine._phase_crawl()
+
+        self.assertEqual(pages, [])
+        self.assertNotIn("http://fixture.test/private", engine.reached_urls)
+        self.assertEqual(
+            engine.coverage_summary()["unreached"][0]["url"],
+            "http://fixture.test/private",
+        )
+
+    async def test_postauth_crawl_records_successful_navigation_as_reached(self):
+        engine = self._engine("http://fixture.test/private", depth=1)
+        engine._browser = _FakeCrawlBrowser()
+
+        pages = await engine._phase_crawl_postauth()
+
+        self.assertEqual(len(pages), 1)
+        self.assertIn("http://fixture.test/private", engine.reached_urls)
 
 
 if __name__ == "__main__":

@@ -982,6 +982,7 @@ class ScanEngine:
         self.visited_urls: set = set()
         self.reached_urls: set = set()
         self._worker_status_counts = Counter()
+        self._restored_status_counts = Counter()
         self.scanned_forms: set = set()
         self._scanned_forms_lock = asyncio.Lock()   # guards scanned_forms in concurrent mode
         self.completed_fields: int = 0
@@ -1026,13 +1027,15 @@ class ScanEngine:
         reached_url_set = getattr(self, "reached_urls", None) or set()
         attack_rows = [
             row for row in rows
-            if isinstance(row, dict) and row.get("check") != "access"
+            if (
+                isinstance(row, dict)
+                and row.get("check") != "access"
+                and row.get("status") != "skipped"
+            )
         ]
         by_status = Counter(row.get("status", "") for row in attack_rows)
         findings_total = 0
-        for row in rows:
-            if not isinstance(row, dict):
-                continue
+        for row in attack_rows:
             try:
                 findings_total += int(row.get("finding_count", 0) or 0)
             except (TypeError, ValueError):
@@ -1058,7 +1061,9 @@ class ScanEngine:
             "client_error": 0,
             "server_error": 0,
         }
-        browser = getattr(self, "browser", None)
+        browser = getattr(self, "_browser", None)
+        if browser is None:
+            browser = getattr(self, "browser", None)
         network = getattr(browser, "network", None) if browser is not None else None
         merged_status_counts = Counter()
         try:
@@ -1068,6 +1073,12 @@ class ScanEngine:
         try:
             merged_status_counts.update(
                 getattr(self, "_worker_status_counts", {}) or {}
+            )
+        except Exception:
+            pass
+        try:
+            merged_status_counts.update(
+                getattr(self, "_restored_status_counts", {}) or {}
             )
         except Exception:
             pass
@@ -1356,7 +1367,28 @@ class ScanEngine:
                 )
             else:
                 state = loaded
-                self.scan_matrix = list(state.scan_matrix)
+                self.scan_matrix = [
+                    row for row in state.scan_matrix
+                    if (
+                        isinstance(row, dict)
+                        and (
+                            row.get("check") == "access"
+                            or self._check_type_in_scope(row.get("check"))
+                        )
+                    )
+                ]
+                try:
+                    self._restored_status_counts = Counter({
+                        int(status): int(count)
+                        for status, count in (
+                            state.http_status_counts or {}
+                        ).items()
+                    })
+                except Exception as exc:
+                    self._restored_status_counts = Counter()
+                    self.wave_errors.append(
+                        f"http_status_restore: {type(exc).__name__}: {exc}"
+                    )
                 # 既出 Finding をレポートへ復元（重複防止のため dedup へも登録）。
                 # ただし今回要求されたチェックに属する Finding のみ復元する
                 # （xss sqli の結果を --checks xss で再開したとき、SQLi の古い
@@ -1410,6 +1442,35 @@ class ScanEngine:
             ledger = getattr(self, "attempt_ledger", None)
             if ledger is not None:
                 self.checkpoint.attempt_ledger = ledger.to_dict()
+            merged_status_counts = Counter()
+            browser = getattr(self, "_browser", None)
+            network = (
+                getattr(browser, "network", None)
+                if browser is not None
+                else None
+            )
+            try:
+                merged_status_counts.update(
+                    getattr(network, "status_counts", {}) or {}
+                )
+            except Exception:
+                pass
+            try:
+                merged_status_counts.update(
+                    getattr(self, "_worker_status_counts", {}) or {}
+                )
+            except Exception:
+                pass
+            try:
+                merged_status_counts.update(
+                    getattr(self, "_restored_status_counts", {}) or {}
+                )
+            except Exception:
+                pass
+            self.checkpoint.http_status_counts = {
+                str(status): int(count)
+                for status, count in merged_status_counts.items()
+            }
             cp.save_checkpoint(self.output_dir, self.checkpoint)
         except Exception as exc:
             self.wave_errors.append(f"checkpoint_save: {type(exc).__name__}: {exc}")
@@ -2516,7 +2577,6 @@ class ScanEngine:
                 console.print(f"  [yellow]  ✘ could not load[/yellow]")
                 self._record_unscannable_url(url)
                 continue
-            self.reached_urls.add(url)
 
             # SPA の描画確定待ちは navigate() 内(spa_settle)で行うため、ここでの明示待ちは不要。
 
@@ -2553,7 +2613,6 @@ class ScanEngine:
                             + self._navigation_failure_note(),
                         )
                         continue
-                    self.reached_urls.add(url)
                     # 再ログイン後の再navigate も navigate() 内(spa_settle)で settle する。
                 else:
                     console.print(
@@ -2561,6 +2620,7 @@ class ScanEngine:
                     )
                     continue
 
+            self.reached_urls.add(url)
             try:
                 html = await self.browser.page.content()
             except Exception:
@@ -3832,6 +3892,7 @@ class ScanEngine:
                 )
                 break
 
+            self.reached_urls.add(actual_url)
             try:
                 html = await self._browser.page.content()
             except Exception:

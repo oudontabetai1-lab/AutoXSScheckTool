@@ -76,6 +76,7 @@ class CheckpointState:
     completed_units: set[str] = field(default_factory=set)
     findings: list[dict] = field(default_factory=list)
     scan_matrix: list = field(default_factory=list)
+    http_status_counts: dict = field(default_factory=dict)
     # D5: 試行台帳のシリアライズ（resume 時に adaptive の実履歴を失わないため）。
     attempt_ledger: dict = field(default_factory=dict)
     created_at: float = field(default_factory=time.time)
@@ -139,6 +140,7 @@ class CheckpointState:
             "completed_units": sorted(self.completed_units),
             "findings": self.findings,
             "scan_matrix": self.scan_matrix,
+            "http_status_counts": self.http_status_counts,
             "attempt_ledger": self.attempt_ledger,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
@@ -158,6 +160,7 @@ class CheckpointState:
             completed_units=set(data.get("completed_units", []) or []),
             findings=list(data.get("findings", []) or []),
             scan_matrix=list(data.get("scan_matrix", []) or []),
+            http_status_counts=data.get("http_status_counts", {}) or {},
             attempt_ledger=data.get("attempt_ledger", {}) or {},
             created_at=data.get("created_at", time.time()),
             updated_at=data.get("updated_at", time.time()),

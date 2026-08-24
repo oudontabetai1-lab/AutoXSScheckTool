@@ -102,6 +102,7 @@ def test_coverage_summary_aggregates_matrix_urls_and_http_status():
             )
         ),
         _worker_status_counts=Counter({404: 1, 429: 1, 500: 1}),
+        _restored_status_counts=Counter({429: 2, 502: 1}),
     )
 
     summary = ScanEngine.coverage_summary(engine)
@@ -117,12 +118,39 @@ def test_coverage_summary_aggregates_matrix_urls_and_http_status():
         ],
         "unreached_count": 1,
         "http_status": {
-            "total": 8,
-            "blocked": 2,
-            "client_error": 3,
-            "server_error": 1,
+            "total": 11,
+            "blocked": 4,
+            "client_error": 5,
+            "server_error": 2,
         },
     }
+
+
+def test_coverage_summary_excludes_resume_only_skipped_rows():
+    restored_row = {
+        "url": "http://fixture.test/a",
+        "check": "xss",
+        "status": "vulnerable",
+        "finding_count": 1,
+    }
+    resume_skip_row = {
+        "url": "http://fixture.test/a",
+        "check": "xss",
+        "status": "skipped",
+        "finding_count": 9,
+        "note": "Skipped — already completed in checkpoint",
+    }
+    engine = SimpleNamespace(
+        reached_urls={"http://fixture.test/a"},
+        scan_matrix=[restored_row, resume_skip_row],
+        browser=None,
+    )
+
+    summary = ScanEngine.coverage_summary(engine)
+
+    assert summary["attempts"] == 1
+    assert summary["by_status"] == {"vulnerable": 1}
+    assert summary["findings_total"] == 1
 
 
 def test_coverage_summary_handles_empty_matrix_and_missing_browser():
