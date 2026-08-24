@@ -722,3 +722,30 @@ def test_legacy_fallback_excludes_units_marked_during_v5_resume():
     assert state.is_done("https://h/p?z=/admin", "q", 0, "sqli", is_url_param=True) is True
     # distinct な末尾スラッシュ版は完了にならない（新規 mark は legacy 照合対象外）
     assert state.is_done("https://h/p?z=/admin/", "q", 0, "sqli", is_url_param=True) is False
+
+
+def test_legacy_aliases_survive_checkpoint_save_and_reload():
+    """v5 legacy fallback は保存(version 6)→再ロードを跨いでも維持される（Codex #103 P1）。
+
+    v5 で whole-url rstrip により `?z=/admin` に切り詰められた単位を、`?z=/admin/` の
+    照合で拾える状態が、to_dict→from_dict(version 6)の後も保たれる。
+    """
+    from wscan.checkpoint import CheckpointState, unit_key
+
+    legacy_key = unit_key(
+        "https://h/p?z=/admin/", "q", 0, "sqli", True, legacy_whole_rstrip=True
+    )
+    v5 = CheckpointState.from_dict({
+        "version": 5,
+        "target_url": "https://h/",
+        "checks": ["sqli"],
+        "completed_units": [legacy_key],
+    })
+    assert v5.is_done("https://h/p?z=/admin/", "q", 0, "sqli", is_url_param=True) is True
+
+    # 保存（version 6）→再ロード。migration はもう走らないが fallback は維持される。
+    reloaded = CheckpointState.from_dict(v5.to_dict())
+    assert reloaded.source_version >= 6
+    assert reloaded.is_done("https://h/p?z=/admin/", "q", 0, "sqli", is_url_param=True) is True
+    # 別 operation（distinct）は誤一致しない。
+    assert reloaded.is_done("https://h/p?z=/other/", "q", 0, "sqli", is_url_param=True) is False

@@ -177,6 +177,10 @@ class CheckpointState:
             "target_url": self.target_url,
             "checks": list(self.checks),
             "completed_units": sorted(self.completed_units),
+            # v5 legacy fallback 用エイリアス。保存を跨いでも fallback を維持するため
+            # 永続する（Codex #103 P1）。読み込んだ v5 単位のスナップショットで、
+            # 新規 mark で増えない。
+            "legacy_units": sorted(getattr(self, "_legacy_units", set()) or set()),
             "findings": self.findings,
             "attempt_ledger": self.attempt_ledger,
             "created_at": self.created_at,
@@ -201,6 +205,8 @@ class CheckpointState:
             updated_at=data.get("updated_at", time.time()),
             source_version=source_version,
         )
+        # 永続化された legacy エイリアスを復元（保存を跨いだ v6 でも fallback を維持）。
+        state._legacy_units = set(data.get("legacy_units", []) or [])
         if state.source_version < 2:
             state._migrate_v1_adaptive_units()
         if state.source_version < 6:
@@ -248,8 +254,8 @@ class CheckpointState:
             migrated.add("\x1f".join(parts))
         self.completed_units = migrated
         # legacy fallback 照合用に、読み込んだ v5 単位のスナップショットを保持する
-        # （新規 mark_done で追加した単位は含めない・Codex #103 P1）。
-        self._legacy_units = set(migrated)
+        # （新規 mark_done で追加した単位は含めない・Codex #103 P1）。永続復元分と union。
+        self._legacy_units = getattr(self, "_legacy_units", set()) | set(migrated)
 
         # attempt_ledger の key は stable_key_parts の serialized list。
         # 壊れた旧 record は他の resume データを巻き込まず best-effort で飛ばす。
