@@ -28,7 +28,7 @@ import json
 import os
 import re
 import xml.etree.ElementTree as _ET
-from collections import deque
+from collections import Counter, deque
 from contextvars import ContextVar
 from dataclasses import dataclass, field as dc_field
 from pathlib import Path
@@ -62,6 +62,16 @@ def _observability_warning_text(summary: dict) -> str:
     return (
         f"⚠ 観測性: {total} 件の probe/wave が劣化・脱落{detail}。"
         "0 findings は「安全」を意味しない可能性"
+    )
+
+
+def _coverage_summary_text(coverage: dict) -> str:
+    """到達性カバレッジの console 1行要約を組み立てる純粋関数。"""
+    return (
+        "Coverage: "
+        f"reached URLs={int(coverage.get('reached_count', 0) or 0)} / "
+        f"attempts={int(coverage.get('attempts', 0) or 0)} / "
+        f"blocked={int((coverage.get('http_status', {}) or {}).get('blocked', 0) or 0)}"
     )
 
 
@@ -1006,6 +1016,69 @@ class ScanEngine:
         return {
             "total": len(self.wave_errors),
             "by_category": by_category,
+        }
+
+    def coverage_summary(self) -> dict:
+        """到達 URL・試行結果・HTTP status を副作用なしで集計する。"""
+        rows = getattr(self, "scan_matrix", None) or []
+        visited_urls = getattr(self, "visited_urls", None) or set()
+        attack_rows = [
+            row for row in rows
+            if isinstance(row, dict) and row.get("check") != "access"
+        ]
+        by_status = Counter(row.get("status", "") for row in attack_rows)
+        findings_total = 0
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            try:
+                findings_total += int(row.get("finding_count", 0) or 0)
+            except (TypeError, ValueError):
+                pass
+
+        unreached_by_url: dict[str, dict] = {}
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            if row.get("check") != "access" or row.get("status") != "error":
+                continue
+            url = str(row.get("url", "") or "")
+            if url not in unreached_by_url:
+                unreached_by_url[url] = {
+                    "url": url,
+                    "reason": str(row.get("note", "") or ""),
+                }
+        unreached = [unreached_by_url[url] for url in sorted(unreached_by_url)]
+
+        http_status = {
+            "total": 0,
+            "blocked": 0,
+            "client_error": 0,
+            "server_error": 0,
+        }
+        browser = getattr(self, "browser", None)
+        network = getattr(browser, "network", None) if browser is not None else None
+        status_summary = getattr(network, "status_summary", None)
+        if callable(status_summary):
+            try:
+                raw_status = status_summary() or {}
+                http_status = {
+                    key: int(raw_status.get(key, 0) or 0)
+                    for key in http_status
+                }
+            except Exception:
+                pass
+
+        reached_urls = sorted(str(url) for url in visited_urls)
+        return {
+            "reached_urls": reached_urls,
+            "reached_count": len(visited_urls),
+            "attempts": len(attack_rows),
+            "by_status": dict(by_status),
+            "findings_total": findings_total,
+            "unreached": unreached,
+            "unreached_count": len(unreached),
+            "http_status": http_status,
         }
 
     def _observability_report_data(self, sample_limit: int = 5) -> dict:
@@ -5366,6 +5439,7 @@ class ScanEngine:
             "findings": findings_dicts,
             "scan_matrix": self.scan_matrix,
             "observability": self._observability_report_data(),
+            "coverage": self.coverage_summary(),
             "ctf_flags": [{"flag": flag, "source": src} for flag, src in self.ctf_found_flags],
             "diff": diff_data,
             "attack_plans": [
@@ -5485,6 +5559,7 @@ class ScanEngine:
             scan_matrix=self.scan_matrix,
             llm_summary=self._llm_runtime_summary(),
             observability=self._observability_report_data(),
+            coverage=self.coverage_summary(),
             template="audit",
             diff_result=diff_result,
         )
@@ -5502,6 +5577,7 @@ class ScanEngine:
                     scan_matrix=self.scan_matrix,
                     llm_summary=self._llm_runtime_summary(),
                     observability=self._observability_report_data(),
+                    coverage=self.coverage_summary(),
                     template=tmpl,
                     diff_result=diff_result,
                 )
@@ -5891,6 +5967,14 @@ class ScanEngine:
         )
         if observability_warning:
             console.print(f"  [yellow]{observability_warning}[/yellow]")
+        coverage = self.coverage_summary()
+        coverage_color = (
+            "yellow"
+            if int((coverage.get("http_status", {}) or {}).get("blocked", 0) or 0) > 0
+            or int(coverage.get("unreached_count", 0) or 0) > 0
+            else "cyan"
+        )
+        console.print(f"  [{coverage_color}]{_coverage_summary_text(coverage)}[/{coverage_color}]")
         adaptive_count = sum(1 for f in self.all_findings if "[AdaptiveAI]" in f.evidence)
         if adaptive_count:
             console.print(

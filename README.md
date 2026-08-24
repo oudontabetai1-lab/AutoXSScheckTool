@@ -726,7 +726,7 @@ output/<timestamp>/
 
 | 出力 | 用途 |
 | --- | --- |
-| `report.html` | 自己完結型 HTML。Finding、証拠、Agent バッジ、実行条件、**観測性メトリクス**（劣化・脱落した probe/wave の件数とカテゴリ内訳）。0 findings が「安全」を意味するとは限らないため、脱落数を明示します |
+| `report.html` | 自己完結型 HTML。Finding、証拠、Agent バッジ、実行条件、**カバレッジ表＋観測性メトリクス**（到達/未到達 URL と理由、試行結果、403/429 ブロック、劣化・脱落した probe/wave）。0 findings が「安全」を意味するとは限らないため、検査できなかった範囲を明示します |
 | `report_executive.html` | 管理層向けサマリー |
 | `report_developer.html` | 開発者向け詳細・修正観点 |
 | `evidence.json` | Finding と証跡の機械可読 JSON |
@@ -735,6 +735,8 @@ output/<timestamp>/
 | `remediation_plan.md`, `remediation_tasks.json` | 修正計画とタスク |
 | `http_requests.jsonl`, `payloads.jsonl` | 通信・投入ペイロード監査ログ。秘匿ヘッダ等はマスク |
 | `scan_config.json` | 実行設定スナップショット。秘匿値は伏字 |
+
+確実性を重視する通常層では、HTML レポートの Observability の直後に Coverage を表示します。`reached`、`attempts`、`by_status`、HTTP 403/429、未到達 URL と理由を Finding と分けて確認し、0 findings の場合も検査範囲と通信ブロックの有無を合わせて判断してください。これらは記録・集計用で、既存の検出判定やスキャン挙動は変更しません。
 
 ### Webhook
 

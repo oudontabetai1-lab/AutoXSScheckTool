@@ -4,6 +4,7 @@ Playwright-based browser automation with evidence collection.
 """
 import asyncio
 import base64
+import collections
 import json
 import re
 import socket
@@ -149,6 +150,7 @@ class NetworkCapture:
 
     def __init__(self, logger=None):
         self.pairs: list[dict] = []
+        self.status_counts = collections.Counter()
         # Use (url, id(request_object)) as key to avoid collisions when the same URL
         # is requested multiple times concurrently (race condition fix).
         self._pending: dict[tuple, dict] = {}
@@ -192,6 +194,10 @@ class NetworkCapture:
             },
         }
         self.pairs.append(pair)
+        try:
+            self.status_counts[response.status] += 1
+        except Exception:
+            pass
         if self.logger is not None:
             self.logger.log_http(pair)
 
@@ -284,6 +290,22 @@ class NetworkCapture:
     def clear(self):
         self.pairs.clear()
         self._pending.clear()
+
+    def status_summary(self) -> dict:
+        """スキャン全体で捕捉した HTTP status を集計する。"""
+        counts = self.status_counts
+        return {
+            "total": sum(counts.values()),
+            "blocked": counts.get(403, 0) + counts.get(429, 0),
+            "client_error": sum(
+                count for status, count in counts.items()
+                if isinstance(status, int) and 400 <= status < 500
+            ),
+            "server_error": sum(
+                count for status, count in counts.items()
+                if isinstance(status, int) and 500 <= status < 600
+            ),
+        }
 
 
 class BrowserManager:

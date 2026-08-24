@@ -270,7 +270,7 @@ HTML レポートのバッジ:
 
 | ファイル | 内容 |
 | --- | --- |
-| `report.html` | Finding、Evidence、Agent バッジを含む HTML |
+| `report.html` | Finding、Evidence、Agent バッジ、カバレッジ表、観測性メトリクスを含む HTML |
 | `report_executive.html` | 管理層向けサマリー |
 | `report_developer.html` | 開発者向け詳細 |
 | `evidence.json` | Finding と証跡 JSON |
@@ -282,6 +282,8 @@ HTML レポートのバッジ:
 | `checkpoint.json` | 再開用の完了単位と Finding |
 
 HTML レポートと Evidence を確認し、必要なら再現物で人手検証してから修正タスク化します。
+
+通常層（確実性重視）の HTML レポートでは、Observability の直後に Coverage（到達性カバレッジ）を表示します。到達/未到達 URL と理由、検査試行の状態別件数、HTTP 403/429 のブロック数を確認してください。0 findings でも、未到達やブロックがあれば攻撃面を十分に検査できていない可能性があります。
 
 ## 11. 長時間スキャンと再開
 
