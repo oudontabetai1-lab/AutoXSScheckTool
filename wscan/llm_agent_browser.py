@@ -1011,7 +1011,6 @@ class AgentBrowserScanner:
             # 前にここへ来る。traceback で漏らさず FAILED＋非0 exit へ倒す（D8。Codex #101）。
             result.error = str(e) or type(e).__name__
             console.print(f"[bold red]Agent scan FAILED: {result.error}[/bold red]")
-            console.print(f"[bold red]Agent scan FAILED: {result.error}[/bold red]")
             if self.monitor:
                 await self.monitor.emit_status(
                     f"Agent scan FAILED: {result.error}", "error"

@@ -239,3 +239,57 @@ async def test_monitored_agent_incomplete_empty_returns_before_sleep():
     assert main._agent_exit_code(result) == 1
     # sleep(3600)（Ctrl+C 待ち）へは絶対に入らない。
     assert 3600 not in sleep_calls
+
+
+@pytest.mark.asyncio
+async def test_run_recon_raises_on_hard_error_for_hybrid_fallback(tmp_path):
+    # Hybrid Phase 1: browser-use 未導入等で scanner.run() が result.error を立てたとき、
+    # run_recon は「偵察完了」と誤表示せず送出する。呼び出し側の Hybrid 失敗ブランチ
+    # （seed 無しで Phase 2 続行＋警告）が使われる（Codex #101 P2）。
+    from wscan.agent_engine import AgentEngine
+
+    class _FailingScanner:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def run(self):
+            return SimpleNamespace(
+                error="No module named 'browser_use'",
+                success=False,
+                findings=[],
+                memory=SimpleNamespace(visited_urls=[]),
+                final_summary="",
+            )
+
+    engine = AgentEngine(url="http://fixture.test", llm_provider="none",
+                         output_dir=str(tmp_path))
+    with patch("wscan.llm_agent_browser.AgentBrowserScanner", _FailingScanner):
+        with pytest.raises(RuntimeError, match="Agent recon failed"):
+            await engine.run_recon()
+
+
+@pytest.mark.asyncio
+async def test_run_recon_returns_handoff_on_success(tmp_path):
+    # 正常時（error なし）は従来どおり handoff を返す（回帰防止）。
+    from wscan.agent_engine import AgentEngine
+
+    class _OkScanner:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def run(self):
+            return SimpleNamespace(
+                error=None,
+                success=True,
+                findings=[],
+                memory=SimpleNamespace(visited_urls=["http://fixture.test/a"]),
+                final_summary="done",
+            )
+
+    engine = AgentEngine(url="http://fixture.test", llm_provider="none",
+                         output_dir=str(tmp_path))
+    with patch("wscan.llm_agent_browser.AgentBrowserScanner", _OkScanner):
+        handoff = await engine.run_recon()
+
+    assert "http://fixture.test" in handoff.discovered_urls
+    assert "http://fixture.test/a" in handoff.discovered_urls

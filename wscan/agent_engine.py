@@ -307,6 +307,18 @@ class AgentEngine:
         )
 
         result = await scanner.run()
+
+        # 初期化・実行のハードエラー（browser-use 未導入=ImportError／provider 不在等）を
+        # 「偵察完了」と誤表示しない。呼び出し側の Hybrid 失敗ブランチ（seed 無しで Phase 2 を
+        # 続行＋警告）へ委ねるため送出する。`_run_with_time_window_monitor` は
+        # `operation_task.result()` で再送出し、caller の except へ伝播する（D8・Codex #101）。
+        if result.error:
+            if self.monitor:
+                await self.monitor.emit_status(
+                    f"Agent偵察 FAILED: {result.error}", "error"
+                )
+            raise RuntimeError(f"Agent recon failed: {result.error}")
+
         findings = _convert_agent_findings(result.findings)
 
         # URL リストを生成: ターゲット URL を先頭に、重複を除去
