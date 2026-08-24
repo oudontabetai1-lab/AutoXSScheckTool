@@ -199,7 +199,10 @@ class DeserializationScanner(BaseScanner):
                     findings.append(finding)
                     break  # One confirmed finding per field is enough
 
-            except Exception:
+            except Exception as exc:
+                self._record_scan_note(
+                    f"probe_error:{self.CHECK_TYPE}:{type(exc).__name__}"
+                )
                 continue
             await asyncio.sleep(0.2 * self.sleep_factor)
 
@@ -311,7 +314,10 @@ class DeserializationScanner(BaseScanner):
                     )
                     findings.append(finding)
                     break
-            except Exception:
+            except Exception as exc:
+                self._record_scan_note(
+                    f"probe_error:{self.CHECK_TYPE}:{type(exc).__name__}"
+                )
                 continue
 
         return findings

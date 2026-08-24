@@ -23,9 +23,11 @@ import asyncio
 import fnmatch
 import inspect
 import json
+import os
 import re
 import secrets
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Optional, TYPE_CHECKING
 from urllib.parse import urlparse
 
@@ -47,6 +49,41 @@ if TYPE_CHECKING:
 console = Console()
 
 _TARGET_HANDLER_TIMEOUT_SECONDS = 3.0
+
+
+def _agent_config_directory_result(
+    config_dir: str | Path,
+    is_writable: bool,
+) -> tuple[bool, str]:
+    """Agent 設定ディレクトリの可用性と案内文を返す純粋関数。"""
+    if is_writable:
+        return True, ""
+    path = str(config_dir)
+    return False, (
+        f"Agent 設定ディレクトリへ書き込めません: {path}。"
+        "書込み可能な場所を指定して再実行してください（例: "
+        "export XDG_CONFIG_HOME=/tmp/wscan-config）。"
+    )
+
+
+def check_agent_config_directory(
+    config_dir: str | Path | None = None,
+) -> tuple[bool, str]:
+    """browser-use が使う設定領域を起動前に検査する。"""
+    if config_dir is None:
+        configured = (
+            os.environ.get("BROWSER_USE_CONFIG_DIR")
+            or os.environ.get("XDG_CONFIG_HOME")
+        )
+        config_dir = configured or (Path.home() / ".config")
+    target = Path(config_dir).expanduser()
+    probe = target
+    while not probe.exists() and probe != probe.parent:
+        probe = probe.parent
+    writable = probe.is_dir() and os.access(probe, os.W_OK | os.X_OK)
+    if target.exists() and not target.is_dir():
+        writable = False
+    return _agent_config_directory_result(target, writable)
 
 
 def _normalize_agent_url(url: str) -> str:
@@ -954,15 +991,33 @@ class AgentBrowserScanner:
             f"  [bold]Max steps:[/bold] {self.max_steps}\n"
         )
 
+        result = AgentScanResult(target_url=self.target_url)
+        config_ok, config_error = check_agent_config_directory()
+        if not config_ok:
+            # 起動前の actionable 案内は**警告**に留め、ここでは中断しない。設定領域の
+            # 書込み可否は os.access で誤判定しうる（sandbox/CI 等で ~/.config が read-only）
+            # うえ、browser-use が XDG や遅延生成で回避することもある。ここで早期 return
+            # すると、そうした環境で FakeBrowser を使うテスト/ライブラリ呼び出しまで含め
+            # 全 agent 実行を誤ってブロックする。実際に初期化が失敗すれば下流で
+            # result.error → FAILED＋非0 exit として誠実に表面化する（D8 の核）。
+            console.print(f"[yellow]⚠ {config_error}[/yellow]")
+
         try:
             llm = _build_llm(self.llm_provider, self.llm_model, self.ollama_url,
                              base_url=self.llm_base_url)
-        except RuntimeError as e:
-            console.print(f"[red]LLM初期化エラー: {e}[/red]")
-            return AgentScanResult(target_url=self.target_url, error=str(e))
+        except (RuntimeError, ImportError) as e:
+            # ImportError(ModuleNotFoundError 含む)= browser-use 未導入。`_build_llm` は
+            # `from browser_use.llm import ...` を実行するため、後段の except ImportError より
+            # 前にここへ来る。traceback で漏らさず FAILED＋非0 exit へ倒す（D8。Codex #101）。
+            result.error = str(e) or type(e).__name__
+            console.print(f"[bold red]Agent scan FAILED: {result.error}[/bold red]")
+            if self.monitor:
+                await self.monitor.emit_status(
+                    f"Agent scan FAILED: {result.error}", "error"
+                )
+            return result
 
         task = self._build_recon_task() if self.recon_mode else self._build_task()
-        result = AgentScanResult(target_url=self.target_url)
         browser = None
 
         try:
@@ -1116,8 +1171,6 @@ class AgentBrowserScanner:
 
         except ImportError:
             result.error = "browser-use がインストールされていません。pip install browser-use を実行してください。"
-            console.print(f"[red]{result.error}[/red]")
-            return result
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -1132,9 +1185,26 @@ class AgentBrowserScanner:
                 except Exception as exc:
                     console.print(f"[yellow]ブラウザ終了エラー: {exc}[/yellow]")
 
+        # 実行失敗（例外）または history 上の非成功で 0 findings なら、「成功・0 findings」と
+        # 誤表示しない（D8）。findings があれば不完全でも検出結果は有効なので表示する。
+        incomplete_empty = (
+            not result.error and not result.success and not result.findings
+        )
         # サマリー表示
-        console.print(Rule("[bold magenta] Agent Scan Complete [/bold magenta]", style="magenta"))
-        if result.findings:
+        if result.error:
+            console.print(Rule("[bold red] Agent Scan Failed [/bold red]", style="red"))
+            console.print(f"[bold red]Agent scan FAILED: {result.error}[/bold red]")
+        elif incomplete_empty:
+            console.print(Rule("[bold yellow] Agent Scan Incomplete [/bold yellow]", style="yellow"))
+            console.print(
+                "[bold yellow]Agent scan INCOMPLETE: 正常に完了しませんでした"
+                "（0 findings は安全を意味しません）[/bold yellow]"
+            )
+        else:
+            console.print(Rule("[bold magenta] Agent Scan Complete [/bold magenta]", style="magenta"))
+        if result.error or incomplete_empty:
+            pass
+        elif result.findings:
             console.print(
                 f"  [bold green]{len(result.findings)} 件の脆弱性を検出[/bold green]"
             )
@@ -1153,9 +1223,19 @@ class AgentBrowserScanner:
             console.print("  [dim]脆弱性は検出されませんでした。[/dim]")
 
         if self.monitor:
-            await self.monitor.emit_status(
-                f"Agent Browser 完了: {len(result.findings)} 件検出", "done"
-            )
+            if result.error:
+                await self.monitor.emit_status(
+                    f"Agent scan FAILED: {result.error}", "error"
+                )
+            elif incomplete_empty:
+                await self.monitor.emit_status(
+                    "Agent scan INCOMPLETE: 正常に完了しませんでした（0 findings は安全を意味しません）",
+                    "error",
+                )
+            else:
+                await self.monitor.emit_status(
+                    f"Agent Browser 完了: {len(result.findings)} 件検出", "done"
+                )
 
         return result
 

@@ -365,8 +365,10 @@ class GraphQLScanner(BaseScanner):
                 if resp2.status_code in (200, 400):
                     if _GQL_RESPONSE_RE.search(resp2.text):
                         return True
-        except Exception:
-            pass
+        except Exception as exc:
+            self._record_scan_note(
+                f"probe_error:{self.CHECK_TYPE}:{type(exc).__name__}"
+            )
         return False
 
     # ------------------------------------------------------------------
@@ -419,7 +421,10 @@ class GraphQLScanner(BaseScanner):
                 if resp.status_code != 200:
                     return None
                 data = resp.json()
-        except Exception:
+        except Exception as exc:
+            self._record_scan_note(
+                f"probe_error:{self.CHECK_TYPE}:{type(exc).__name__}"
+            )
             return None
 
         if "data" not in data or "__schema" not in (data.get("data") or {}):
@@ -471,7 +476,10 @@ class GraphQLScanner(BaseScanner):
                 if resp.status_code != 200:
                     return
                 body = resp.text
-        except Exception:
+        except Exception as exc:
+            self._record_scan_note(
+                f"probe_error:{self.CHECK_TYPE}:{type(exc).__name__}"
+            )
             return
 
         # A batched response is a JSON array
@@ -526,7 +534,10 @@ class GraphQLScanner(BaseScanner):
                     return
                 alias_data = r1.json()
                 depth_data = r2.json()
-        except Exception:
+        except Exception as exc:
+            self._record_scan_note(
+                f"probe_error:{self.CHECK_TYPE}:{type(exc).__name__}"
+            )
             return
 
         alias_ok = detect_alias_amplification(alias_data, _DOS_ALIAS_COUNT)
@@ -613,7 +624,10 @@ class GraphQLScanner(BaseScanner):
                     ) as client:
                         resp = await client.post(endpoint, json=gql_body)
                         body = resp.text[:4000]
-                except Exception:
+                except Exception as exc:
+                    self._record_scan_note(
+                        f"probe_error:{self.CHECK_TYPE}:{type(exc).__name__}"
+                    )
                     continue
 
                 matched, expected = self._classify_injection_response(
@@ -775,7 +789,10 @@ class GraphQLScanner(BaseScanner):
             ) as client:
                 resp = await client.post(endpoint, json=payload)
                 return resp.status_code, resp.text
-        except Exception:
+        except Exception as exc:
+            self._record_scan_note(
+                f"probe_error:{self.CHECK_TYPE}:{type(exc).__name__}"
+            )
             return 0, ""
 
     async def _fetch_schema(

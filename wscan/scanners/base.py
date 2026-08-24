@@ -599,6 +599,12 @@ class BaseScanner(ABC):
         capability を明示したスキャナだけ共有 transport を使う。未対応の JSON を
         form へ暗黙に落とさないことで tri-state を維持する。
         """
+        # 注意: ここで transport 例外を握りつぶさない（挙動不変）。以前はここに try/except で
+        # `("",{})` を返すラップを置いたが、それだと LDAP 等の baseline `except` へ**伝播すべき
+        # 例外**を奪い、空 baseline と成功応答を比較して偽陽性（例: "welcome" を認証バイパス）を
+        # 生む（0007 D1 は「記録を足すだけ・挙動不変」が不変条件。Codex #101）。json transport の
+        # 脱落記録は `_apply_json_payload` の**既存**の swallow 点（transport_error/unexecutable_template）
+        # に限る。form/url の例外は従来どおりスキャナ側（baseline_unavailable 等）へ伝播させる。
         if ip.location == "json_body":
             if not self.SUPPORTS_JSON_BODY:
                 return "", {}
@@ -888,6 +894,7 @@ class BaseScanner(ABC):
                 self.engine._json_probe_failed = True
             except Exception:
                 pass
+            self._record_scan_note(f"unexecutable_template:{self.CHECK_TYPE}")
             return "", {}
 
         try:
@@ -920,7 +927,10 @@ class BaseScanner(ABC):
                 kwargs = self.engine.httpx_client_kwargs(**kwargs)
             elif getattr(self.engine, "proxy", ""):
                 kwargs["proxy"] = self.engine.proxy
-        except Exception:
+        except Exception as exc:
+            self._record_scan_note(
+                f"transport_error:{self.CHECK_TYPE}:{type(exc).__name__}"
+            )
             return "", {}
 
         # 監査ログ(payloads.jsonl / monitor)と abort 判定は**呼び出し側(scanner)が
@@ -976,7 +986,7 @@ class BaseScanner(ABC):
             except Exception:
                 pass
             return response.text, pair
-        except Exception:
+        except Exception as exc:
             # 通信失敗（timeout/TLS/DNS/proxy 等）。baseline が通った後に個々の攻撃
             # payload が落ちたケースでも、呼び出し側が「済み」記録して attack 未実行の
             # 点を resume 恒久スキップしないよう、失敗を engine に記録する（Codex #99 R4）。
@@ -984,6 +994,9 @@ class BaseScanner(ABC):
                 self.engine._json_probe_failed = True
             except Exception:
                 pass
+            self._record_scan_note(
+                f"transport_error:{self.CHECK_TYPE}:{type(exc).__name__}"
+            )
             return "", {}
 
     async def run_equivalence_probe(

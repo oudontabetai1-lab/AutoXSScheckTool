@@ -213,6 +213,22 @@ class AgentEngine:
             summary_path = self.output_dir / "agent_summary.md"
             summary_path.write_text(result.final_summary, encoding="utf-8")
 
+        # 初期化・実行のハードエラー、または history 上の非成功で 0 findings を「正常完了」に
+        # 見せない。evidence は残すが、成功レポートと完了イベントは生成しない（D8）。findings が
+        # あれば不完全でも検出結果は有効なのでレポートは生成する。
+        incomplete_empty = (
+            not result.error and not result.success and not result.findings
+        )
+        if result.error or incomplete_empty:
+            if self.monitor:
+                msg = (
+                    f"Agent scan FAILED: {result.error}"
+                    if result.error
+                    else "Agent scan INCOMPLETE: 正常に完了しませんでした（0 findings は安全を意味しません）"
+                )
+                await self.monitor.emit_status(msg, "error")
+            return result
+
         # Generate HTML report
         gen = ReportGenerator(self.output_dir)
         report_path = gen.generate(
@@ -291,6 +307,18 @@ class AgentEngine:
         )
 
         result = await scanner.run()
+
+        # 初期化・実行のハードエラー（browser-use 未導入=ImportError／provider 不在等）を
+        # 「偵察完了」と誤表示しない。呼び出し側の Hybrid 失敗ブランチ（seed 無しで Phase 2 を
+        # 続行＋警告）へ委ねるため送出する。`_run_with_time_window_monitor` は
+        # `operation_task.result()` で再送出し、caller の except へ伝播する（D8・Codex #101）。
+        if result.error:
+            if self.monitor:
+                await self.monitor.emit_status(
+                    f"Agent偵察 FAILED: {result.error}", "error"
+                )
+            raise RuntimeError(f"Agent recon failed: {result.error}")
+
         findings = _convert_agent_findings(result.findings)
 
         # URL リストを生成: ターゲット URL を先頭に、重複を除去
@@ -298,6 +326,21 @@ class AgentEngine:
         for u in result.memory.visited_urls:
             if u not in all_urls:
                 all_urls.append(u)
+
+        # 例外を投げずに step 上限/失敗で終わり（error=None・success=False・findings 無し）、
+        # かつ新規 URL も得られなかった場合は INCOMPLETE。AgentBrowserScanner はこの状態を
+        # 明示的に INCOMPLETE と分類するため、target-only handoff を「偵察完了」と誤表示せず
+        # 送出し、呼び出し側の Hybrid 失敗ブランチ（seed 無しで Phase 2 続行＋警告）へ委ねる
+        # （Codex #101 P1・run() の incomplete_empty と同型）。ただし URL を1つでも発見していれば
+        # partial recon として有効なので、到達性の価値を捨てず handoff を返す。
+        if not result.success and not findings and len(all_urls) <= 1:
+            if self.monitor:
+                await self.monitor.emit_status(
+                    "Agent偵察 INCOMPLETE: 正常に完了せず URL も検出できませんでした"
+                    "（0 件は安全を意味しません）",
+                    "error",
+                )
+            raise RuntimeError("Agent recon incomplete: no URLs or findings")
 
         console.print(
             f"\n[bold cyan]Agent偵察完了:[/bold cyan] "

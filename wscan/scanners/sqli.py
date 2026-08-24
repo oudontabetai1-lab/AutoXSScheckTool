@@ -750,6 +750,9 @@ class SQLiScanner(BaseScanner):
                     form_index, field_name, payload
                 )
         except Exception as exc:
+            self._record_scan_note(
+                f"transport_error:{self.CHECK_TYPE}:{type(exc).__name__}"
+            )
             if self.monitor:
                 await self.monitor.emit_status(
                     f"[warn] sqli: _apply_payload failed on {field_name} @ {url}: {exc}"
