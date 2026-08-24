@@ -205,7 +205,7 @@ class InjectionPointTests(unittest.TestCase):
 
     def test_stable_key_normalizes_volatile_query_but_preserves_operation(self):
         first = InjectionPoint.for_url_param(
-            "http://h/search/?op=create&nonce=1699999999&csrf=first", "q"
+            "http://h/search?op=create&nonce=1699999999&csrf=first", "q"
         )
         second = InjectionPoint.for_url_param(
             "http://h/search?csrf=second&nonce=1700000000&op=create", "q"

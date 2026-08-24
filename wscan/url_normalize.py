@@ -54,10 +54,13 @@ def _looks_epoch_digits(value: str) -> bool:
 
 def _split_query_item(item: str) -> tuple[str, str]:
     """raw query item から判定用の key/value をデコードして返す。"""
+    # 判定用のデコードのみ（raw item は kept で保持）。非 UTF-8 の
+    # percent-encoded オクテット(blob=%FF 等)で例外を出して正規化全体を無効化
+    # しないよう errors="replace" で寛容にデコードする（Codex #103 P2）。
     raw_key, separator, raw_value = item.partition("=")
-    key = unquote_plus(raw_key, encoding="utf-8", errors="strict")
+    key = unquote_plus(raw_key, encoding="utf-8", errors="replace")
     value = (
-        unquote_plus(raw_value, encoding="utf-8", errors="strict")
+        unquote_plus(raw_value, encoding="utf-8", errors="replace")
         if separator
         else ""
     )
@@ -118,11 +121,17 @@ def normalize_url_for_key(url: str) -> str:
             if fragment[:1] in ("/", "!") or "/" in fragment
             else ""
         )
+        # パス末尾スラッシュは、それが URL の末尾（クエリ/保持 fragment が続かない）
+        # ときだけ吸収する。baseline(whole-url rstrip)と同じく、クエリが続く /app/?x と
+        # /app?x は区別する（Codex #103 P1）。クエリ値末尾スラッシュ(?z=/admin/)は path
+        # 非対象なので不変。
+        query_str = "&".join(item for _, item in kept)
+        norm_path = parsed.path if query_str else parsed.path.rstrip("/")
         return urlunsplit(
             parsed._replace(
                 scheme=raw_scheme,
-                path=parsed.path.rstrip("/"),
-                query="&".join(item for _, item in kept),
+                path=norm_path,
+                query=query_str,
                 fragment=keep_frag,
             )
         )

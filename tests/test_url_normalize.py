@@ -204,7 +204,7 @@ def test_stable_key_parts_fully_normalizes_url_without_changing_attack_url(locat
 
     # ledger/checkpoint 共有キーは path trim + 揮発 query strip を行い、意味クエリと
     # query 値の末尾スラッシュは保持する。実 URL(ip.url)は不変。
-    assert ip.stable_key_parts()[0] == "https://h/action?op=create&z=/admin/"
+    assert ip.stable_key_parts()[0] == "https://h/action/?op=create&z=/admin/"
     assert ip.url == url
 
 
@@ -221,7 +221,7 @@ def test_strip_path_trailing_slash_keeps_query_values():
 
 def test_stable_key_parts_ledger_url_is_stable_across_rotating_tokens():
     first = InjectionPoint.for_url_param(
-        "http://h/api/?op=create&nonce=1699999999&csrf=first", "q"
+        "http://h/api?op=create&nonce=1699999999&csrf=first", "q"
     )
     second = InjectionPoint.for_url_param(
         "http://h/api?csrf=second&nonce=1700000000&op=create", "q"
@@ -233,3 +233,24 @@ def test_stable_key_parts_ledger_url_is_stable_across_rotating_tokens():
     assert first.stable_key_parts() == second.stable_key_parts()
     assert first.stable_key_parts()[0] == "http://h/api?op=create"
     assert first.stable_key_parts() != different_operation.stable_key_parts()
+
+
+def test_path_trailing_slash_preserved_when_query_follows():
+    from wscan.url_normalize import normalize_url_for_key as n
+    # クエリが続くと /app/?x と /app?x は別（baseline 挙動・Codex #103 P1）。
+    assert n("http://h/app/?mode=x") != n("http://h/app?mode=x")
+    assert n("http://h/app/?mode=x") == "http://h/app/?mode=x"
+    # クエリ無しでは /app/ と /app は同一（吸収）。
+    assert n("http://h/app/") == n("http://h/app") == "http://h/app"
+    # クエリ値末尾スラッシュは不変（fix4 維持）。
+    assert n("http://h/p?z=/admin/") == "http://h/p?z=/admin/"
+
+
+def test_opaque_query_octet_does_not_abort_normalization():
+    from wscan.url_normalize import normalize_url_for_key as n
+    # 非 UTF-8 percent-encoded オクテットで正規化全体を無効化しない（Codex #103 P2）。
+    a = n("http://h/p?blob=%FF&nonce=1699999999")
+    b = n("http://h/p?blob=%FF&nonce=1700000001")
+    assert a == b  # 回転 nonce は除去され同一キー
+    assert "nonce" not in a
+    assert "blob=%FF" in a  # 不明値は raw 保持
