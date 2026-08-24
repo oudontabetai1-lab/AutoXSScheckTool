@@ -2,7 +2,11 @@
 import pytest
 
 from wscan.injection_point import InjectionPoint
-from wscan.url_normalize import _looks_volatile_value, normalize_url_for_key
+from wscan.url_normalize import (
+    _looks_epoch_digits,
+    _looks_random_token,
+    normalize_url_for_key,
+)
 
 
 @pytest.mark.parametrize(
@@ -44,28 +48,40 @@ def test_always_volatile_query_keys_are_removed_case_insensitively(key):
 @pytest.mark.parametrize(
     ("query", "expected"),
     [
+        ("timestamp=1700000000", "timestamp=1700000000"),
+        ("time=1700000000", "time=1700000000"),
+        ("t=1699999999", "t=1699999999"),
+        ("v=20231101", "v=20231101"),
         ("time=commit", "time=commit"),
-        ("time=preview", "time=preview"),
         ("t=preview", "t=preview"),
-        ("t=5", "t=5"),
         ("v=2", "v=2"),
     ],
 )
-def test_conditional_keys_keep_meaningful_values(query, expected):
+def test_ambiguous_keys_keep_epoch_date_and_meaningful_values(query, expected):
     assert normalize_url_for_key(f"https://h/p?{query}") == f"https://h/p?{expected}"
 
 
 @pytest.mark.parametrize(
     "query",
     [
-        "t=1699999999",
-        "timestamp=1699999999000",
-        "nonce=0123456789abcdef0123456789abcdef",
-        "v=20231101",
-        "v=AbCdEfGhIjKlMnOp_-012345",
+        "t=0123456789abcdef0123456789abcdef",
+        "timestamp=AbCdEfGhIjKlMnOp_-012345",
+        "v=0123456789abcdef",
     ],
 )
-def test_conditional_keys_remove_only_volatile_values(query):
+def test_ambiguous_keys_remove_random_tokens(query):
+    assert normalize_url_for_key(f"https://h/p?keep=yes&{query}") == "https://h/p?keep=yes"
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "nonce=1700000000",
+        "nonce=0123456789abcdef0123456789abcdef",
+        "rand=12345678",
+    ],
+)
+def test_transient_name_keys_remove_epoch_digits_and_random_tokens(query):
     assert normalize_url_for_key(f"https://h/p?keep=yes&{query}") == "https://h/p?keep=yes"
 
 
@@ -80,20 +96,33 @@ def test_cachebuster_and_csrf_names_are_removed_regardless_of_value():
 @pytest.mark.parametrize(
     ("value", "expected"),
     [
-        ("16999999", True),
-        ("1699999", False),
-        ("1699999999", True),
-        ("1699999999000", True),
         ("0123456789abcdef", True),
         ("AbCdEfGhIjKlMn_-", True),
+        ("1234567890123456", True),
+        ("0123456789abcde", False),
         ("short-token", False),
         ("preview", False),
         ("１２３４５６７８", False),
         ("long token with spaces", False),
     ],
 )
-def test_looks_volatile_value(value, expected):
-    assert _looks_volatile_value(value) is expected
+def test_looks_random_token(value, expected):
+    assert _looks_random_token(value) is expected
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("16999999", True),
+        ("1699999", False),
+        ("1699999999", True),
+        ("1699999999000", True),
+        ("1234567a", False),
+        ("１２３４５６７８", False),
+    ],
+)
+def test_looks_epoch_digits(value, expected):
+    assert _looks_epoch_digits(value) is expected
 
 
 def test_meaningful_and_unknown_query_keys_are_preserved_without_reencoding():
@@ -110,9 +139,15 @@ def test_query_order_is_stable():
 
 
 def test_rotating_values_normalize_to_the_same_url():
-    first = "https://h/p?op=create&t=1699999999&csrf=aaa"
-    second = "https://h/p?csrf=bbb&t=1699999999000&op=create"
+    first = "https://h/p?op=create&nonce=1699999999&csrf=aaa"
+    second = "https://h/p?csrf=bbb&nonce=1699999999000&op=create"
     assert normalize_url_for_key(first) == normalize_url_for_key(second)
+
+
+def test_meaningful_timestamp_values_remain_distinct():
+    first = normalize_url_for_key("https://h/p?timestamp=1699999999")
+    second = normalize_url_for_key("https://h/p?timestamp=1700000000")
+    assert first != second
 
 
 def test_meaningful_operations_remain_distinct():

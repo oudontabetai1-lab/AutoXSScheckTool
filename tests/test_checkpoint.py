@@ -45,10 +45,16 @@ class UnitKeyTests(unittest.TestCase):
             unit_key("http://h/a", "id", 0, "sqli", is_url_param=False),
         )
 
-    def test_volatile_query_values_share_one_unit_key(self):
+    def test_rotating_nonce_values_share_one_unit_key(self):
         self.assertEqual(
-            unit_key("https://h/a?op=create&t=1699999999", "id", 0, "sqli"),
-            unit_key("https://h/a?t=1699999999000&op=create", "id", 0, "sqli"),
+            unit_key("https://h/a?op=create&nonce=1699999999", "id", 0, "sqli"),
+            unit_key("https://h/a?nonce=1699999999000&op=create", "id", 0, "sqli"),
+        )
+
+    def test_meaningful_timestamp_values_have_distinct_unit_keys(self):
+        self.assertNotEqual(
+            unit_key("https://h/a?timestamp=1699999999", "id", 0, "sqli"),
+            unit_key("https://h/a?timestamp=1700000000", "id", 0, "sqli"),
         )
 
     def test_meaningful_operation_values_remain_distinct(self):
@@ -72,22 +78,22 @@ class StateTests(unittest.TestCase):
         state.mark_done("http://h/a", "id", 0, "sqli", is_url_param=True)
         self.assertTrue(state.is_done_ip(ip, "sqli"))
 
-    def test_non_ip_path_normalizes_volatile_query(self):
+    def test_non_ip_path_normalizes_rotating_nonce(self):
         state = CheckpointState()
         state.mark_done(
-            "https://h/action?op=create&t=1699999999", "name", 0, "sqli"
+            "https://h/action?op=create&nonce=1699999999", "name", 0, "sqli"
         )
         self.assertTrue(state.is_done(
-            "https://h/action?t=1699999999000&op=create", "name", 0, "sqli"
+            "https://h/action?nonce=1699999999000&op=create", "name", 0, "sqli"
         ))
 
-    def test_ip_path_normalizes_volatile_query(self):
+    def test_ip_path_normalizes_rotating_nonce(self):
         state = CheckpointState()
         first = InjectionPoint.for_url_param(
-            "https://h/action?op=create&t=1699999999", "name"
+            "https://h/action?op=create&nonce=1699999999", "name"
         )
         second = InjectionPoint.for_url_param(
-            "https://h/action?t=1699999999000&op=create", "name"
+            "https://h/action?nonce=1699999999000&op=create", "name"
         )
         state.mark_done_ip(first, "sqli")
         self.assertTrue(state.is_done_ip(second, "sqli"))
@@ -122,7 +128,7 @@ class StateTests(unittest.TestCase):
         self.assertIn(legacy_key, state.completed_units)
 
     def test_v5_checkpoint_urls_migrate_for_non_ip_and_ip_lookups(self):
-        old_url = "https://h/action?t=1699999999&op=create"
+        old_url = "https://h/action?nonce=1699999999&op=create"
         legacy_form_key = "\x1f".join([old_url, "name", "0", "f", "sqli"])
         legacy_json_key = "\x1f".join(
             [old_url, "name", "0", "j:POST", "sqli", "/name"]
@@ -136,11 +142,11 @@ class StateTests(unittest.TestCase):
         })
 
         self.assertTrue(state.is_done(
-            "https://h/action?op=create&t=1699999999000", "name", 0, "sqli"
+            "https://h/action?op=create&nonce=1699999999000", "name", 0, "sqli"
         ))
         resumed_ip = InjectionPoint.for_json_body(
             "POST",
-            "https://h/action?op=create&t=1700000000",
+            "https://h/action?op=create&nonce=1700000000",
             "/name",
         )
         self.assertTrue(state.is_done_ip(resumed_ip, "sqli"))
@@ -152,7 +158,7 @@ class StateTests(unittest.TestCase):
     def test_v5_checkpoint_target_url_is_normalized_during_migration(self):
         state = CheckpointState.from_dict({
             "version": 5,
-            "target_url": "https://h/start?t=1699999999",
+            "target_url": "https://h/start?nonce=1699999999",
             "checks": ["sqli"],
             "completed_units": [],
             "findings": [],
@@ -188,14 +194,14 @@ class StateTests(unittest.TestCase):
         # different target → not compatible
         self.assertFalse(s.is_compatible_with("http://other", ["xss"]))
 
-    def test_compatibility_normalizes_rotating_target_query(self):
+    def test_compatibility_normalizes_rotating_target_nonce(self):
         s = CheckpointState(
-            target_url="https://h/start?t=1699999999",
+            target_url="https://h/start?nonce=1699999999",
             checks=["sqli"],
         )
 
         self.assertTrue(s.is_compatible_with(
-            "https://h/start?t=1699999999000", ["sqli"]
+            "https://h/start?nonce=1699999999000", ["sqli"]
         ))
 
     def test_compatibility_keeps_meaningful_target_operations_distinct(self):

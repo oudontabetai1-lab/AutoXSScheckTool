@@ -36,19 +36,23 @@ _ALWAYS_VOLATILE_KEYS = frozenset(
     }
 )
 
-# operation や版番号にも使われ得るため、値が明白に揮発的な場合だけ除くキー。
-_VALUE_CONDITIONAL_KEYS = frozenset(
-    {"t", "ts", "time", "timestamp", "nonce", "_nonce", "rand", "random", "v"}
-)
+# 名前自体がtransienceを強く示すため、epoch数字またはランダムトークンの場合に除くキー。
+_TRANSIENT_NAME_KEYS = frozenset({"nonce", "_nonce", "rand", "random"})
+
+# 意味的なリソース座標にも使われ得るため、より強い揮発性の証拠がある場合だけ除くキー。
+_AMBIGUOUS_KEYS = frozenset({"t", "ts", "time", "timestamp", "v"})
 
 
-def _looks_volatile_value(value: str) -> bool:
-    """epoch/長いランダムトークンらしい値だけを揮発値とみなす（純粋）。"""
-    if value.isascii() and value.isdigit() and len(value) >= 8:
-        return True
+def _looks_random_token(value: str) -> bool:
+    """16文字以上のhex/base64url英数トークンらしさを判定する（純粋）。"""
     return len(value) >= 16 and all(
         char.isascii() and (char.isalnum() or char in "_-") for char in value
     )
+
+
+def _looks_epoch_digits(value: str) -> bool:
+    """8桁以上のASCII数字列かを判定する（純粋）。"""
+    return len(value) >= 8 and value.isascii() and value.isdigit()
 
 
 def _split_query_item(item: str) -> tuple[str, str]:
@@ -80,10 +84,16 @@ def normalize_url_for_key(url: str) -> str:
             folded_key = key.casefold()
             if folded_key in _ALWAYS_VOLATILE_KEYS:
                 continue
-            if (
-                folded_key in _VALUE_CONDITIONAL_KEYS
-                and _looks_volatile_value(value)
+            if folded_key in _TRANSIENT_NAME_KEYS and (
+                _looks_epoch_digits(value) or _looks_random_token(value)
             ):
+                continue
+            # plain epoch/date は曖昧なため保持し、意味的リソース座標を
+            # 潰さない。曖昧名キーはランダムトークンという強い transience の
+            # 証拠があるときのみ除く。標準的 cache-buster 名は ALWAYS set が
+            # 吸収する。`t=<epoch>` 型の非標準 cache-buster は正規化しない
+            # （安全側＝検出の偽陰性を作らない）ことを既知の制約とする。
+            if folded_key in _AMBIGUOUS_KEYS and _looks_random_token(value):
                 continue
             kept.append((key, item))
 
