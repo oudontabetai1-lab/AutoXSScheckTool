@@ -10,6 +10,7 @@ import re
 import socket
 import time
 import urllib.request
+from collections.abc import Mapping
 from urllib.parse import urlparse as _urlparse
 from typing import Optional, Callable, Any
 from urllib.parse import urljoin, urlparse
@@ -32,6 +33,22 @@ from .url_extraction import (
 
 
 console = Console()
+
+
+def bucketize_status_counts(counts: Mapping) -> dict:
+    """HTTP status の生カウンタをカバレッジ用バケットへ集計する（純粋関数）。"""
+    return {
+        "total": sum(counts.values()),
+        "blocked": counts.get(403, 0) + counts.get(429, 0),
+        "client_error": sum(
+            count for status, count in counts.items()
+            if isinstance(status, int) and 400 <= status < 500
+        ),
+        "server_error": sum(
+            count for status, count in counts.items()
+            if isinstance(status, int) and 500 <= status < 600
+        ),
+    }
 
 
 class _BrowserCDPConnection:
@@ -293,19 +310,7 @@ class NetworkCapture:
 
     def status_summary(self) -> dict:
         """スキャン全体で捕捉した HTTP status を集計する。"""
-        counts = self.status_counts
-        return {
-            "total": sum(counts.values()),
-            "blocked": counts.get(403, 0) + counts.get(429, 0),
-            "client_error": sum(
-                count for status, count in counts.items()
-                if isinstance(status, int) and 400 <= status < 500
-            ),
-            "server_error": sum(
-                count for status, count in counts.items()
-                if isinstance(status, int) and 500 <= status < 600
-            ),
-        }
+        return bucketize_status_counts(self.status_counts)
 
 
 class BrowserManager:

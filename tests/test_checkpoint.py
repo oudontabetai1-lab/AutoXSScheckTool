@@ -103,10 +103,28 @@ class StateTests(unittest.TestCase):
         s = CheckpointState(target_url="http://h", checks=["xss", "sqli"])
         s.mark_done("http://h/a", "q", 0, "xss")
         s.add_finding({"check_type": "xss", "url": "http://h/a"})
+        s.scan_matrix = [{
+            "url": "http://h/a",
+            "field": "q",
+            "check": "xss",
+            "status": "vulnerable",
+            "finding_count": 1,
+        }]
         restored = CheckpointState.from_dict(s.to_dict())
         self.assertEqual(restored.target_url, "http://h")
         self.assertTrue(restored.is_done("http://h/a", "q", 0, "xss"))
         self.assertEqual(len(restored.findings), 1)
+        self.assertEqual(restored.scan_matrix, s.scan_matrix)
+
+    def test_legacy_checkpoint_defaults_scan_matrix_to_empty(self):
+        restored = CheckpointState.from_dict({
+            "version": 4,
+            "target_url": "http://h",
+            "checks": ["xss"],
+            "completed_units": [],
+            "findings": [],
+        })
+        self.assertEqual(restored.scan_matrix, [])
 
     def test_compatibility(self):
         s = CheckpointState(target_url="http://h/", checks=["xss", "sqli"])
@@ -315,6 +333,13 @@ class SaveCheckpointFindingsTests(unittest.TestCase):
                 enable_checkpoint=True,
                 checkpoint=state,
                 all_findings=[f],
+                scan_matrix=[{
+                    "url": "http://h/a",
+                    "field": "q",
+                    "check": "xss",
+                    "status": "vulnerable",
+                    "finding_count": 1,
+                }],
                 output_dir=Path(d),
                 wave_errors=[],
             )
@@ -326,6 +351,41 @@ class SaveCheckpointFindingsTests(unittest.TestCase):
             self.assertEqual(len(loaded.findings), 1)
             self.assertEqual(loaded.findings[0]["check_type"], "xss")
             self.assertEqual(loaded.findings[0]["field_name"], "q")
+            self.assertEqual(loaded.scan_matrix, e.scan_matrix)
+
+    def test_resume_restores_scan_matrix_before_new_rows_are_appended(self):
+        from wscan.engine import ScanEngine
+
+        with tempfile.TemporaryDirectory() as d:
+            saved_rows = [{
+                "url": "http://h/a",
+                "field": "q",
+                "check": "xss",
+                "status": "clean",
+                "finding_count": 0,
+            }]
+            state = CheckpointState(target_url="http://h", checks=["xss"])
+            state.scan_matrix = saved_rows
+            save_checkpoint(d, state)
+
+            engine = ScanEngine(
+                "http://h",
+                checks=["xss"],
+                llm_provider="none",
+                output_dir=d,
+                resume_dir=d,
+                open_report=False,
+                enable_waf_detection=False,
+                enable_ai_analysis=False,
+                enable_payload_learning=False,
+                enable_adaptive_payloads=False,
+            )
+            engine._init_checkpoint()
+
+            self.assertEqual(engine.scan_matrix, saved_rows)
+            self.assertIsNot(engine.scan_matrix, state.scan_matrix)
+            engine.scan_matrix.append({"url": "http://h/b", "check": "sqli"})
+            self.assertEqual(engine.scan_matrix[0], saved_rows[0])
 
     def test_save_noop_when_checkpoint_disabled(self):
         import types

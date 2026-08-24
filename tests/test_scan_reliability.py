@@ -153,6 +153,18 @@ class EngineScanGapTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(failures), 1)
         self.assertEqual(failures[0]["status"], "error")
         self.assertIn("fixture timeout", failures[0]["note"])
+        self.assertIn("http://fixture.test/", engine.reached_urls)
+        self.assertNotIn("http://fixture.test/down", engine.reached_urls)
+        coverage = engine.coverage_summary()
+        self.assertEqual(coverage["reached_count"], 1)
+        self.assertEqual(coverage["reached_urls"], ["http://fixture.test/"])
+        self.assertEqual(
+            coverage["unreached"],
+            [{
+                "url": "http://fixture.test/down",
+                "reason": failures[0]["note"],
+            }],
+        )
 
 
 if __name__ == "__main__":

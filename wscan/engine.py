@@ -200,7 +200,7 @@ from rich import box as rbox
 
 from .attack_planner import AttackPlanner, FieldAttackPlan, PageAttackPlan
 from .adaptive_payload import AdaptivePayloadEngine
-from .browser import BrowserManager
+from .browser import BrowserManager, bucketize_status_counts
 from .header_scope import allowed_header_origins, headers_allowed_for_url
 from .tls_config import TLSConfig
 from .chain_scanner import ChainScanner, ChainFinding
@@ -980,6 +980,8 @@ class ScanEngine:
         self._finding_dedup: set[tuple] = set()     # (url, field_name, check_type) — prevent duplicates
         self.attack_plans: list = []
         self.visited_urls: set = set()
+        self.reached_urls: set = set()
+        self._worker_status_counts = Counter()
         self.scanned_forms: set = set()
         self._scanned_forms_lock = asyncio.Lock()   # guards scanned_forms in concurrent mode
         self.completed_fields: int = 0
@@ -1021,7 +1023,7 @@ class ScanEngine:
     def coverage_summary(self) -> dict:
         """到達 URL・試行結果・HTTP status を副作用なしで集計する。"""
         rows = getattr(self, "scan_matrix", None) or []
-        visited_urls = getattr(self, "visited_urls", None) or set()
+        reached_url_set = getattr(self, "reached_urls", None) or set()
         attack_rows = [
             row for row in rows
             if isinstance(row, dict) and row.get("check") != "access"
@@ -1058,21 +1060,26 @@ class ScanEngine:
         }
         browser = getattr(self, "browser", None)
         network = getattr(browser, "network", None) if browser is not None else None
-        status_summary = getattr(network, "status_summary", None)
-        if callable(status_summary):
-            try:
-                raw_status = status_summary() or {}
-                http_status = {
-                    key: int(raw_status.get(key, 0) or 0)
-                    for key in http_status
-                }
-            except Exception:
-                pass
+        merged_status_counts = Counter()
+        try:
+            merged_status_counts.update(getattr(network, "status_counts", {}) or {})
+        except Exception:
+            pass
+        try:
+            merged_status_counts.update(
+                getattr(self, "_worker_status_counts", {}) or {}
+            )
+        except Exception:
+            pass
+        try:
+            http_status = bucketize_status_counts(merged_status_counts)
+        except Exception:
+            pass
 
-        reached_urls = sorted(str(url) for url in visited_urls)
+        reached_urls = sorted(str(url) for url in reached_url_set)
         return {
             "reached_urls": reached_urls,
-            "reached_count": len(visited_urls),
+            "reached_count": len(reached_url_set),
             "attempts": len(attack_rows),
             "by_status": dict(by_status),
             "findings_total": findings_total,
@@ -1349,6 +1356,7 @@ class ScanEngine:
                 )
             else:
                 state = loaded
+                self.scan_matrix = list(state.scan_matrix)
                 # 既出 Finding をレポートへ復元（重複防止のため dedup へも登録）。
                 # ただし今回要求されたチェックに属する Finding のみ復元する
                 # （xss sqli の結果を --checks xss で再開したとき、SQLi の古い
@@ -1395,6 +1403,9 @@ class ScanEngine:
         try:
             # Finding は all_findings から都度スナップショット（最新を保存）
             self.checkpoint.findings = [f.to_dict() for f in self.all_findings]
+            self.checkpoint.scan_matrix = list(
+                getattr(self, "scan_matrix", []) or []
+            )
             # D5: 試行台帳も保存（resume で adaptive 履歴を維持）。台帳未配線でも安全。
             ledger = getattr(self, "attempt_ledger", None)
             if ledger is not None:
@@ -2505,6 +2516,7 @@ class ScanEngine:
                 console.print(f"  [yellow]  ✘ could not load[/yellow]")
                 self._record_unscannable_url(url)
                 continue
+            self.reached_urls.add(url)
 
             # SPA の描画確定待ちは navigate() 内(spa_settle)で行うため、ここでの明示待ちは不要。
 
@@ -2541,6 +2553,7 @@ class ScanEngine:
                             + self._navigation_failure_note(),
                         )
                         continue
+                    self.reached_urls.add(url)
                     # 再ログイン後の再navigate も navigate() 内(spa_settle)で settle する。
                 else:
                     console.print(
@@ -3555,6 +3568,12 @@ class ScanEngine:
             # worker so their browser contexts don't leak. Exceptions from one
             # worker must not prevent the next one from closing.
             for w in extra_workers:
+                try:
+                    self._worker_status_counts.update(
+                        getattr(w.network, "status_counts", {}) or {}
+                    )
+                except Exception:
+                    pass
                 try:
                     await w.close()
                 except Exception as _close_exc:

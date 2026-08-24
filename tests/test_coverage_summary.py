@@ -1,8 +1,10 @@
 """到達性カバレッジと HTTP status 集計のブラウザ非依存テスト。"""
 
+import asyncio
+from collections import Counter
 from types import SimpleNamespace
 
-from wscan.browser import NetworkCapture
+from wscan.browser import NetworkCapture, bucketize_status_counts
 from wscan.engine import ScanEngine, _coverage_summary_text
 from wscan.report import ReportGenerator
 
@@ -51,9 +53,23 @@ def test_network_capture_tallies_statuses_across_clear():
     assert capture.status_summary()["total"] == 6
 
 
+def test_bucketize_status_counts_groups_blocked_and_error_classes():
+    assert bucketize_status_counts({200: 3, 403: 2, 404: 1, 429: 4, 503: 5}) == {
+        "total": 15,
+        "blocked": 6,
+        "client_error": 7,
+        "server_error": 5,
+    }
+
+
 def test_coverage_summary_aggregates_matrix_urls_and_http_status():
     engine = SimpleNamespace(
-        visited_urls={"http://fixture.test/b", "http://fixture.test/a"},
+        visited_urls={
+            "http://fixture.test/a",
+            "http://fixture.test/b",
+            "http://fixture.test/missing",
+        },
+        reached_urls={"http://fixture.test/b", "http://fixture.test/a"},
         scan_matrix=[
             {
                 "url": "http://fixture.test/a",
@@ -82,14 +98,10 @@ def test_coverage_summary_aggregates_matrix_urls_and_http_status():
         ],
         browser=SimpleNamespace(
             network=SimpleNamespace(
-                status_summary=lambda: {
-                    "total": 8,
-                    "blocked": 2,
-                    "client_error": 3,
-                    "server_error": 1,
-                }
+                status_counts=Counter({200: 4, 403: 1})
             )
         ),
+        _worker_status_counts=Counter({404: 1, 429: 1, 500: 1}),
     )
 
     summary = ScanEngine.coverage_summary(engine)
@@ -114,7 +126,12 @@ def test_coverage_summary_aggregates_matrix_urls_and_http_status():
 
 
 def test_coverage_summary_handles_empty_matrix_and_missing_browser():
-    engine = SimpleNamespace(visited_urls=set(), scan_matrix=[], browser=None)
+    engine = SimpleNamespace(
+        visited_urls={"http://fixture.test/discovered-only"},
+        reached_urls=set(),
+        scan_matrix=[],
+        browser=None,
+    )
 
     assert ScanEngine.coverage_summary(engine) == {
         "reached_urls": [],
@@ -131,6 +148,33 @@ def test_coverage_summary_handles_empty_matrix_and_missing_browser():
             "server_error": 0,
         },
     }
+
+
+def test_parallel_worker_statuses_are_accumulated_before_close():
+    class _Worker:
+        def __init__(self):
+            self.network = SimpleNamespace(status_counts=Counter({403: 2, 503: 1}))
+            self.closed = False
+
+        async def close(self):
+            self.closed = True
+
+    worker = _Worker()
+
+    class _MainBrowser:
+        async def create_worker(self):
+            return worker
+
+    engine = SimpleNamespace(
+        concurrency=2,
+        _browser=_MainBrowser(),
+        _worker_status_counts=Counter(),
+    )
+
+    asyncio.run(ScanEngine._phase_attack_concurrent(engine, [], {}))
+
+    assert engine._worker_status_counts == Counter({403: 2, 503: 1})
+    assert worker.closed is True
 
 
 def test_coverage_console_and_html_render_blocked_warning(tmp_path):
