@@ -123,14 +123,15 @@ def normalize_url_for_key(url: str) -> str:
             if fragment[:1] in ("/", "!") or "/" in fragment
             else ""
         )
-        # パス末尾スラッシュは **除去後クエリ(query_str)が空** のときだけ吸収する。これは
-        # 次を同時に満たす: (a) 冪等 normalize∘normalize=normalize（query_str は1回目の除去で
-        # 確定し2回目以降不変・Codex #103 P1）、(b) slash 非依存 /a/≡/a（長年の中核契約）、
-        # (c) 生存クエリがあれば /app/?x と /app?x を区別。volatile のみのクエリ(/app/?nonce)は
-        # 除去後 slash だけの差になり /app へ収束する（slash 非依存の帰結として容認）。クエリ値/
-        # fragment は不変。
+        # パス末尾スラッシュは **除去後クエリ(query_str)も保持 fragment(keep_frag)も無い**
+        # ときだけ吸収する。query_str と keep_frag はどちらも正規化後に不変なので **冪等**
+        # （normalize∘normalize=normalize・Codex #103 P1）。同時に: (a) slash 非依存 /a/≡/a
+        # （長年の中核契約）、(b) 生存クエリがあれば /app/?x と /app?x を区別、(c) 保持 SPA
+        # fragment があれば /app/#/admin と /app#/admin を区別（Codex #103）。volatile のみの
+        # クエリ(/app/?nonce・fragment 無し)は除去後 slash だけの差になり /app へ収束する
+        # （slash 非依存の帰結として容認）。クエリ値/ fragment は不変。
         query_str = "&".join(item for _, item in kept)
-        norm_path = parsed.path if query_str else parsed.path.rstrip("/")
+        norm_path = parsed.path if (query_str or keep_frag) else parsed.path.rstrip("/")
         return urlunsplit(
             parsed._replace(
                 scheme=raw_scheme,

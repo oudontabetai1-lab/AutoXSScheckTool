@@ -167,8 +167,8 @@ def test_spa_hash_routes_remain_distinct():
     admin = normalize_url_for_key("https://app.test/#/admin")
     users = normalize_url_for_key("https://app.test/#/users")
 
-    assert admin == "https://app.test#/admin"
-    assert users == "https://app.test#/users"
+    assert admin == "https://app.test/#/admin"
+    assert users == "https://app.test/#/users"
     assert admin != users
 
 
@@ -181,7 +181,7 @@ def test_in_page_anchor_is_removed():
 def test_hashbang_route_is_preserved():
     assert normalize_url_for_key(
         "https://app.test/#!/route"
-    ) == "https://app.test#!/route"
+    ) == "https://app.test/#!/route"
 
 
 @pytest.mark.parametrize("url", ["", "http://[::1"])
@@ -256,3 +256,14 @@ def test_opaque_query_octet_does_not_abort_normalization():
     assert a == b  # 回転 nonce は除去され同一キー
     assert "nonce" not in a
     assert "blob=%FF" in a  # 不明値は raw 保持
+
+
+def test_spa_fragment_path_slash_is_distinct_and_idempotent():
+    from wscan.url_normalize import normalize_url_for_key as n
+    # 保持 SPA fragment の前の path スラッシュは区別する（Codex #103）。
+    assert n("http://h/app/#/admin") != n("http://h/app#/admin")
+    assert n("http://h/app/#/admin") == "http://h/app/#/admin"
+    # 冪等（keep_frag/query_str は正規化後も不変）。
+    for u in ("http://h/app/#/admin", "http://h/app/?nonce=1699999999#/route",
+              "http://h/app/?nonce=1699999999", "http://h/a/"):
+        assert n(n(u)) == n(u)
