@@ -46,17 +46,21 @@ def unit_key(
     *,
     location_token: str | None = None,
     pointer: str = "",
+    legacy_whole_rstrip: bool = False,
 ) -> str:
     """攻撃の作業単位を一意な文字列キーにする（純粋関数）。
 
-    URL はパス成分の末尾スラッシュだけを除いて同一視する。クエリ値と fragment
-    はこの目的では変更しない。区切りは衝突しにくい ``\\x1f``。
+    URL はパス末尾スラッシュと揮発 query を正規化し、意味 query と SPA route
+    fragment は保持する。``legacy_whole_rstrip`` は v5 読み取り互換専用。
+    区切りは衝突しにくい ``\\x1f``。
 
     同名の URL パラメータとフォームフィールド（例: どちらも ``id`` で
     ``form_index=0``）が同じキーに潰れて一方が未検査のまま resume にスキップ
     されるのを防ぐため、入力種別（URL param / form）もキーに含める。
     """
     norm_url = normalize_url_for_key(url or "")
+    if legacy_whole_rstrip:
+        norm_url = norm_url.rstrip("/")
     if location_token is None:
         location_token = "u" if is_url_param else "f"
     parts = [
@@ -92,7 +96,20 @@ class CheckpointState:
         self, url: str, field_name: str, form_index: int, check_type: str,
         is_url_param: bool = False,
     ) -> bool:
-        return unit_key(url, field_name, form_index, check_type, is_url_param) in self.completed_units
+        key = unit_key(url, field_name, form_index, check_type, is_url_param)
+        if key in self.completed_units:
+            return True
+        # v5 の whole-url rstrip で query 値末尾スラッシュを失った
+        # legacy checkpoint 互換。新規の完了記録には通常キーだけを書く。
+        legacy_key = unit_key(
+            url,
+            field_name,
+            form_index,
+            check_type,
+            is_url_param,
+            legacy_whole_rstrip=True,
+        )
+        return legacy_key in self.completed_units
 
     def mark_done(
         self, url: str, field_name: str, form_index: int, check_type: str,
@@ -112,7 +129,20 @@ class CheckpointState:
             location_token=location_token,
             pointer=pointer,
         )
-        return key in self.completed_units
+        if key in self.completed_units:
+            return True
+        # v5 の whole-url rstrip で query 値末尾スラッシュを失った
+        # legacy checkpoint 互換。新規の完了記録には通常キーだけを書く。
+        legacy_key = unit_key(
+            url,
+            field_name,
+            int(form_index),
+            check_type,
+            location_token=location_token,
+            pointer=pointer,
+            legacy_whole_rstrip=True,
+        )
+        return legacy_key in self.completed_units
 
     def mark_done_ip(self, ip: "InjectionPoint", check_type: str) -> None:
         """InjectionPoint が表す作業単位を完了済みにする。"""
@@ -201,7 +231,7 @@ class CheckpointState:
                 self.completed_units.add(adaptive_key)
 
     def _migrate_v5_normalize_urls(self) -> None:
-        """v5以前の完了単位 URL を現行の揮発クエリ正規化へ移行する（純粋）。"""
+        """v5以前の完了単位と ledger URL を現行の正規化へ移行する（純粋）。"""
         self.target_url = normalize_url_for_key(self.target_url or "")
         migrated: set[str] = set()
         for key in self.completed_units:
@@ -209,6 +239,20 @@ class CheckpointState:
             parts[0] = normalize_url_for_key(parts[0])
             migrated.add("\x1f".join(parts))
         self.completed_units = migrated
+
+        # attempt_ledger の key は stable_key_parts の serialized list。
+        # 壊れた旧 record は他の resume データを巻き込まず best-effort で飛ばす。
+        try:
+            records = self.attempt_ledger.get("records", [])
+        except Exception:
+            records = []
+        for record in records if isinstance(records, list) else []:
+            try:
+                key = record.get("key")
+                if isinstance(key, list) and key:
+                    key[0] = normalize_url_for_key(key[0])
+            except Exception:
+                continue
 
     def is_compatible_with(self, target_url: str, checks: list[str]) -> bool:
         """再開先のターゲット/チェック集合が、保存時と整合するか（純粋）。

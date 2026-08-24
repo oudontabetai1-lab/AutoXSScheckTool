@@ -188,7 +188,7 @@ def test_empty_or_unparseable_url_is_exception_safe(url):
 
 
 @pytest.mark.parametrize("location", ["form", "url_param", "json_body"])
-def test_stable_key_parts_keeps_raw_url_for_unit_key_choke_point(location):
+def test_stable_key_parts_fully_normalizes_url_without_changing_attack_url(location):
     def make(url):
         if location == "form":
             return InjectionPoint.for_form(url, "name")
@@ -196,11 +196,14 @@ def test_stable_key_parts_keeps_raw_url_for_unit_key_choke_point(location):
             return InjectionPoint.for_url_param(url, "name")
         return InjectionPoint.for_json_body("POST", url, "/name")
 
-    url = "https://h/action/?op=create&z=/admin/"
+    url = (
+        "https://h/action/?z=/admin/&nonce=1699999999"
+        "&csrf=run-token&op=create"
+    )
     ip = make(url)
 
-    # stable_key_parts はパス末尾スラッシュのみ吸収し、クエリ値(?z=/admin/)は保持する。
-    # 実 URL(ip.url)は不変。揮発クエリ正規化は unit_key 側で行う。
+    # ledger/checkpoint 共有キーは path trim + 揮発 query strip を行い、意味クエリと
+    # query 値の末尾スラッシュは保持する。実 URL(ip.url)は不変。
     assert ip.stable_key_parts()[0] == "https://h/action?op=create&z=/admin/"
     assert ip.url == url
 
@@ -216,9 +219,17 @@ def test_strip_path_trailing_slash_keeps_query_values():
     assert strip_path_trailing_slash("::://bad") == "::://bad"
 
 
-def test_stable_key_parts_ledger_url_matches_legacy_path_trim():
-    # attempt_ledger の共有キー url は旧来の path 末尾スラッシュ吸収を維持し、
-    # v5 checkpoint の ledger と継続する（Codex #103 P2）。
-    from wscan.injection_point import InjectionPoint
-    ip = InjectionPoint.for_url_param("http://h/api/", "q")
-    assert ip.stable_key_parts()[0] == "http://h/api"
+def test_stable_key_parts_ledger_url_is_stable_across_rotating_tokens():
+    first = InjectionPoint.for_url_param(
+        "http://h/api/?op=create&nonce=1699999999&csrf=first", "q"
+    )
+    second = InjectionPoint.for_url_param(
+        "http://h/api?csrf=second&nonce=1700000000&op=create", "q"
+    )
+    different_operation = InjectionPoint.for_url_param(
+        "http://h/api?op=delete&nonce=1700000000&csrf=third", "q"
+    )
+
+    assert first.stable_key_parts() == second.stable_key_parts()
+    assert first.stable_key_parts()[0] == "http://h/api?op=create"
+    assert first.stable_key_parts() != different_operation.stable_key_parts()

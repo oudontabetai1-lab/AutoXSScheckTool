@@ -38,6 +38,20 @@ class UnitKeyTests(unittest.TestCase):
             unit_key("http://h/p?a=1&z=/admin", "q", 0, "xss"),
         )
 
+    def test_legacy_whole_rstrip_matches_v5_query_value_key(self):
+        url = "https://h/p?z=/admin/"
+        self.assertEqual(
+            unit_key(
+                url,
+                "q",
+                0,
+                "xss",
+                legacy_whole_rstrip=True,
+            ),
+            "https://h/p?z=/admin\x1fq\x1f0\x1ff\x1fxss",
+        )
+        self.assertTrue(unit_key(url, "q", 0, "xss").startswith(f"{url}\x1f"))
+
     def test_distinct_checks_distinct_keys(self):
         self.assertNotEqual(
             unit_key("http://h/a", "q", 0, "xss"),
@@ -187,6 +201,51 @@ class StateTests(unittest.TestCase):
         self.assertEqual(state.target_url, expected_url)
         self.assertEqual(next(iter(state.completed_units)).split("\x1f")[0], expected_url)
         self.assertTrue(state.is_done(expected_url, "name", 0, "sqli"))
+
+    def test_v5_whole_url_rstrip_key_has_read_only_lookup_fallback(self):
+        url = "https://h/p?z=/admin/"
+        legacy_key = unit_key(
+            url,
+            "name",
+            0,
+            "sqli",
+            legacy_whole_rstrip=True,
+        )
+        state = CheckpointState.from_dict({
+            "version": 5,
+            "target_url": "https://h",
+            "checks": ["sqli"],
+            "completed_units": [legacy_key],
+            "findings": [],
+        })
+
+        self.assertTrue(state.is_done(url, "name", 0, "sqli"))
+        self.assertTrue(state.is_done_ip(InjectionPoint.for_form(url, "name"), "sqli"))
+
+        current = CheckpointState()
+        current.mark_done(url, "name", 0, "sqli")
+        normal_key = unit_key(url, "name", 0, "sqli")
+        self.assertEqual(current.completed_units, {normal_key})
+        self.assertNotIn(legacy_key, current.completed_units)
+
+        current_ip = CheckpointState()
+        current_ip.mark_done_ip(InjectionPoint.for_form(url, "name"), "sqli")
+        self.assertEqual(current_ip.completed_units, {normal_key})
+        self.assertNotIn(legacy_key, current_ip.completed_units)
+
+    def test_v5_legacy_fallback_is_noop_for_url_without_query_value_slash(self):
+        url = "https://h/p?op=create"
+        normal_key = unit_key(url, "name", 0, "sqli")
+        legacy_key = unit_key(
+            url,
+            "name",
+            0,
+            "sqli",
+            legacy_whole_rstrip=True,
+        )
+        self.assertEqual(normal_key, legacy_key)
+        state = CheckpointState(completed_units={normal_key})
+        self.assertTrue(state.is_done(url, "name", 0, "sqli"))
 
     def test_mark_and_is_done(self):
         s = CheckpointState(target_url="http://h", checks=["xss"])
@@ -563,3 +622,41 @@ class AttemptLedgerPersistenceTests(unittest.TestCase):
         state = CheckpointState.from_dict({"version": 4, "target_url": "http://t",
                                            "checks": ["xss"], "completed_units": []})
         self.assertEqual(state.attempt_ledger, {})
+
+    def test_v5_ledger_record_urls_migrate_to_stable_key_parts(self):
+        from wscan.attempt_ledger import AttemptLedger
+
+        raw_url = (
+            "https://h/action/?z=/admin/&nonce=1699999999"
+            "&csrf=old&op=create"
+        )
+        serialized = {
+            "max_per_key": 40,
+            "records": [
+                {
+                    "key": [raw_url, "name", "0", "u", ""],
+                    "check": "sqli",
+                    "attempts": [{"payload": "'", "status": 500}],
+                },
+                {"key": []},
+                {"key": (raw_url, "name", "0", "u", "")},
+                "broken-record",
+            ],
+        }
+        state = CheckpointState.from_dict({
+            "version": 5,
+            "target_url": "https://h",
+            "checks": ["sqli"],
+            "completed_units": [],
+            "attempt_ledger": serialized,
+        })
+        resumed = InjectionPoint.for_url_param(
+            "https://h/action?op=create&csrf=new&nonce=1700000000&z=/admin/",
+            "name",
+        )
+
+        migrated_key = state.attempt_ledger["records"][0]["key"]
+        self.assertEqual(tuple(migrated_key), resumed.stable_key_parts())
+        ledger = AttemptLedger.from_dict(state.attempt_ledger)
+        history = ledger.history(resumed.stable_key_parts(), "sqli")
+        self.assertEqual([attempt.payload for attempt in history], ["'"])
