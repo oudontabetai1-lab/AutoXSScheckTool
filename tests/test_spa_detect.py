@@ -101,6 +101,8 @@ def test_generic_mount_id_requires_matching_framework_trace(html, framework):
         # 未終端コメント（truncated 応答）は EOF まで内容扱い（Codex #104 P2）。
         '<html><body><!-- <app-root></app-root>',
         '<html><body><!-- <div id="__next"></div>',
+        # 属性値内に直列化された <script> 文字列は実 script ではない（Codex #104 P2）。
+        '<html><body><div title="<script>self.__next_f.push([])</script>">x</div></body></html>',
     ],
 )
 def test_normal_or_ambiguous_html_is_not_spa(html):
@@ -167,6 +169,17 @@ def test_executable_script_type_still_detected():
     info = detect_spa(
         '<html><body><script type="text/javascript">'
         'self.__next_f.push([1])</script></body></html>'
+    )
+    assert info.is_spa is True
+    assert info.framework == "Next.js"
+
+
+def test_type_like_text_in_other_attribute_does_not_exclude_script():
+    # 別属性の引用値内 type= を実 script type と誤認して実行 script を除外しない
+    # （偽陰性の回帰・Codex #104 P2）。
+    info = detect_spa(
+        "<html><body><script data-example='type=\"text/plain\"'>"
+        "self.__next_f.push([1])</script></body></html>"
     )
     assert info.is_spa is True
     assert info.framework == "Next.js"

@@ -92,8 +92,6 @@ def _has_bundle_script(source: str) -> bool:
 # <code>/<pre> の表示テキストや、type="text/plain"/"application/json" のデータブロックで
 # 誤検出する。ブラウザが実行する type だけに限定する（Codex #104 P2）。外部 script
 # （<script src=…></script>）は本文が空なので寄与しない。
-_SCRIPT_TAG_RE = re.compile(r"<script\b([^>]*)>(.*?)</script>", flags=re.I | re.S)
-_SCRIPT_TYPE_RE = re.compile(r"""(?<![\w-])type\s*=\s*['"]?\s*([^'"\s>]+)""", flags=re.I)
 # 実行可能な script type（未指定は JS 扱い）。text/plain・application/json・importmap・
 # speculationrules・application/ld+json 等の非実行データブロックは除外する。
 _EXECUTABLE_SCRIPT_TYPES = frozenset({
@@ -114,21 +112,24 @@ def _script_bodies(source: str) -> str:
     pos = 0
     n = len(source)
     while pos < n:
-        cm = _COMMENT_RE.search(source, pos)
-        io = _INERT_OPEN_RE.search(source, pos)
-        if cm and (not io or cm.start() < io.start()):
-            pos = cm.end()  # コメントは実行されないので飛ばす
-            continue
-        if not io:
+        tk = _next_tag(source, pos)
+        if not tk:
             break
-        tag = io.group(1).lower()
-        close_start, close_end = _find_inert_end(source, tag, io.end())
-        if tag == "script":
-            tm = _SCRIPT_TYPE_RE.search(io.group(0))
-            stype = tm.group(1).strip().lower() if tm else ""
-            if stype in _EXECUTABLE_SCRIPT_TYPES:
-                bodies.append(source[io.end():close_start])
-        pos = close_end  # inert サブツリー（script 含む）を丸ごと飛ばす
+        kind, name, text, s, e = tk
+        if kind == "comment":
+            pos = e  # コメントは実行されないので飛ばす
+            continue
+        if kind == "starttag" and name in _INERT_TAGS:
+            close_start, close_end = _find_inert_end(source, name, e)
+            if name == "script":
+                # type は属性を引用を尊重してパースする。data-example='type="…"' の
+                # 属性値内 type= を実 type と誤認しない（Codex #104 P2）。
+                stype = (_get_attr(text, "type") or "").strip().lower()
+                if stype in _EXECUTABLE_SCRIPT_TYPES:
+                    bodies.append(source[e:close_start])
+            pos = close_end  # inert サブツリー（script 含む）を丸ごと飛ばす
+        else:
+            pos = e  # 非 inert タグは属性値ごと読み飛ばす（属性内の擬似タグを見ない）
     return "\n".join(bodies)
 
 
@@ -141,15 +142,67 @@ def _script_bodies(source: str) -> str:
 _INERT_TAGS = ("template", "script", "style", "noscript", "textarea", "title")
 # raw-text 要素は本文がリテラル（最初の </tag> で閉じる。コメント/入れ子タグは効かない）。
 _RAWTEXT_TAGS = ("script", "style", "textarea", "title")
-_INERT_OPEN_RE = re.compile(
-    r"<(" + "|".join(_INERT_TAGS) + r")(?![\w-])[^>]*>", flags=re.I
-)
 _RAWTEXT_OPEN_RE = re.compile(
     r"<(" + "|".join(_RAWTEXT_TAGS) + r")(?![\w-])[^>]*>", flags=re.I
 )
 # HTML コメント。終端 --> が欠落（truncated/malformed 応答）した場合、コメントは
 # EOF まで継続する。未終端でも残り全体を「コメント内容」として扱う（Codex #104 P2）。
 _COMMENT_RE = re.compile(r"<!--.*?(?:-->|\Z)", flags=re.S)
+
+_TAG_NAME_RE = re.compile(r"/?([a-zA-Z][\w:-]*)")
+_ATTR_RE = re.compile(
+    r"""(?<![\w-])([\w:-]+)\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)""", flags=re.I
+)
+
+
+def _next_tag(source: str, pos: int):
+    """``pos`` 以降の最初の「実際のタグ/コメント」を返す（引用属性値を尊重）。
+
+    ``(kind, name, tag_text, start, end)``。kind は "starttag"/"endtag"/"comment"。
+    開始タグの終端 ``>`` を探すとき引用属性値内の ``>`` や ``<`` を跨がないので、
+    ``<div title="<script>…">`` の属性値内 ``<script>`` を実タグと誤認しない（Codex #104 P2）。
+    未終端コメントは EOF まで。タグでない ``<`` は読み飛ばす。見つからなければ None。
+    """
+    n = len(source)
+    while pos < n:
+        lt = source.find("<", pos)
+        if lt < 0:
+            return None
+        if source.startswith("<!--", lt):
+            end = source.find("-->", lt + 4)
+            end = end + 3 if end >= 0 else n
+            return ("comment", None, source[lt:end], lt, end)
+        m = _TAG_NAME_RE.match(source, lt + 1)
+        if not m:
+            pos = lt + 1
+            continue
+        is_end = source[lt + 1] == "/"
+        name = m.group(1).lower()
+        j = m.end()
+        while j < n:
+            c = source[j]
+            if c in "\"'":
+                q = source.find(c, j + 1)
+                j = q + 1 if q >= 0 else n
+            elif c == ">":
+                j += 1
+                break
+            else:
+                j += 1
+        return (("endtag" if is_end else "starttag"), name, source[lt:j], lt, j)
+    return None
+
+
+def _get_attr(tag_text: str, name: str):
+    """開始タグ文字列から属性値を引用を尊重して取り出す（無ければ None）。"""
+    name = name.lower()
+    for m in _ATTR_RE.finditer(tag_text):
+        if m.group(1).lower() == name:
+            v = m.group(2)
+            if v and v[0] in "\"'":
+                v = v[1:-1]
+            return v
+    return None
 
 
 def _find_inert_end(source: str, tag: str, start: int) -> tuple[int, int]:
@@ -216,24 +269,30 @@ def _strip_inert_elements(source: str) -> str:
     """
     result: list[str] = []
     pos = 0
-    while True:
-        m = _INERT_OPEN_RE.search(source, pos)
-        cm = _COMMENT_RE.search(source, pos)
-        # コメントが次の inert 開始タグより前にあれば、コメントをそのまま残して読み飛ばす。
-        # コメント内の <template> 等を live な inert opener と誤認して以降を破棄すると、
-        # 後続の実 SPA マーカーを見逃す（Codex #104 P2）。
-        if cm and (not m or cm.start() < m.start()):
-            result.append(source[pos:cm.end()])
-            pos = cm.end()
-            continue
-        if not m:
+    n = len(source)
+    while pos < n:
+        tk = _next_tag(source, pos)
+        if not tk:
             result.append(source[pos:])
             break
-        tag = m.group(1).lower()
-        result.append(source[pos:m.end()])  # 開始タグまでは残す
-        # コメント/入れ子 raw-text を飛ばして対応する閉じタグを見つける。
-        close_start, close_end = _find_inert_end(source, tag, m.end())
-        result.append(source[close_start:close_end])  # 閉じタグは残す（間は捨てる）
+        kind, name, text, s, e = tk
+        result.append(source[pos:s])  # タグ前のテキストは残す
+        # コメントはそのまま残す（コメント内の <template> 等を live opener と誤認して
+        # 以降を破棄すると後続の実 SPA マーカーを見逃す・Codex #104 P2）。
+        if kind == "comment":
+            result.append(text)
+            pos = e
+            continue
+        # 非 inert タグ（開始/終了）は属性値ごと丸ごと残す。属性値内の擬似 <template>
+        # 等を見ないので、_next_tag が引用を尊重して跨いでいる（Codex #104 P2）。
+        if kind != "starttag" or name not in _INERT_TAGS:
+            result.append(text)
+            pos = e
+            continue
+        # inert 開始タグ: 開始タグを残し、対応する閉じタグまで（内容）を空にする。
+        result.append(text)
+        close_start, close_end = _find_inert_end(source, name, e)
+        result.append(source[close_start:close_end])  # 閉じタグは残す
         pos = close_end
     return "".join(result)
 

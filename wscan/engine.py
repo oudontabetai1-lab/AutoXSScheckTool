@@ -2965,6 +2965,23 @@ class ScanEngine:
                 except Exception:
                     pass
 
+            # settle 中の client-side redirect で landed が access スコープ外へ出た場合、
+            # このイテレーションで外部ドキュメントを forms 抽出・CrawledPage 記録・
+            # collect_links_rich(url) すると、外部ページを元 URL のターゲットとして保存し
+            # 相対リンクを元 origin に解決して偽のクロール/攻撃対象を作る。外部へ出たら
+            # unscannable として記録し、以降の処理をスキップする（Codex #104 P2）。
+            # settle を走らせた検出イテレーションに限定し、非SPA のリダイレクト挙動は変えない。
+            if (
+                spa_just_enabled
+                and landed_url
+                and not self._is_access_allowed_url(landed_url)
+            ):
+                self._record_unscannable_url(
+                    url,
+                    note="SPA settle 中に access スコープ外へリダイレクトしたため未検査。",
+                )
+                continue
+
             # A: 重複ページスキップ (DOM構造フィンガープリント)
             if html:
                 if self.flag_finder:
