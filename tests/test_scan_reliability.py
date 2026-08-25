@@ -280,6 +280,14 @@ class _LateSpaTargetBrowser(_FakeCrawlBrowser):
         pass
 
 
+class _SettleRedirectSpaBrowser(_SpaMarkerCrawlBrowser):
+    """settle_spa 中に client-side redirect で out-of-scope へ移る本番シェル。"""
+
+    async def settle_spa(self):
+        await super().settle_spa()
+        self.url = "https://idp.external.test/login"
+
+
 class _RedirectRecordingSpaBrowser(_FakeCrawlBrowser):
     """queued URL から同一 origin の別パスへリダイレクトし、explore の base_url を記録する。"""
 
@@ -543,6 +551,20 @@ class EngineScanGapTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(engine.spa_crawl)
         self.assertEqual(b.explore_base, "http://fixture.test/landed")
+
+    async def test_settle_redirect_refreshes_landed_url_and_blocks_explore(self):
+        # settle 中の client-side redirect で out-of-scope へ移ったら、landed_url を採り直して
+        # explore ガードで弾く（古い in-scope 値でクリック探索しない・Codex #104 P1）。
+        engine = self._engine(
+            "http://fixture.test/", depth=1, allow_state_changing_probes=True
+        )
+        b = _SettleRedirectSpaBrowser()
+        engine._browser = b
+
+        await engine._phase_crawl()
+
+        self.assertTrue(engine.spa_crawl)  # redirect 前に検出・有効化される
+        self.assertEqual(b.explore_calls, 0)  # landed が out-of-scope なので探索しない
 
     async def test_out_of_scope_landing_does_not_auto_enable_spa(self):
         # in-scope URL が access スコープ外の外部 SPA へリダイレクトしたら、
