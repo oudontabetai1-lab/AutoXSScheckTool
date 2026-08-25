@@ -408,8 +408,14 @@ def test_coverage_summary_handles_empty_matrix_and_missing_browser():
         "attempts": 0,
         "by_status": {},
         "findings_total": 0,
-        "unreached": [],
-        "unreached_count": 0,
+        # queued(visited)だが未到達の URL は「未試行」として unreached に出る（Codex #102）。
+        "unreached": [
+            {
+                "url": "http://fixture.test/discovered-only",
+                "reason": "not attempted (scan ended before navigation)",
+            }
+        ],
+        "unreached_count": 1,
         "http_status": {
             "total": 0,
             "blocked": 0,

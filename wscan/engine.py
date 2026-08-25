@@ -1110,6 +1110,16 @@ class ScanEngine:
                     "url": url,
                     "reason": str(row.get("note", "") or ""),
                 }
+        # abort/incomplete: queued(visited_urls)だが reached でも access/error 行でもない URL は
+        # 「未試行」として unreached に含める（reached/unreached のどちらにも出ない穴を防ぐ・Codex #102）。
+        for vurl in (getattr(self, "visited_urls", None) or set()):
+            u = str(vurl or "")
+            if not u or u in reached_url_set or u in unreached_by_url:
+                continue
+            unreached_by_url[u] = {
+                "url": u,
+                "reason": "not attempted (scan ended before navigation)",
+            }
         unreached = [unreached_by_url[url] for url in sorted(unreached_by_url)]
 
         http_status = {
@@ -4316,9 +4326,8 @@ class ScanEngine:
             landed_url = self._browser.page.url or login_seed
         except Exception:
             landed_url = login_seed
-        # login URL が canonical redirect(bare→www 等)しても reached に計上する
-        # （exact な _is_login_target_url だけだと漏れる・Codex #102）。ただし path は
-        # 一致必須（/login→/account の別ページ redirect を login 到達と誤認しない）。
+        # canonical redirect(bare→www 等)で netloc が変わっても、同一 host かつ同一 path なら
+        # login target とみなす（path 不一致の別ページ redirect は form の有無で別途判定する）。
         def _same_canonical_login(a: str, b: str) -> bool:
             try:
                 if canonical_host(a) != canonical_host(b):
@@ -4327,10 +4336,6 @@ class ScanEngine:
                 return _us(a).path.rstrip("/") == _us(b).path.rstrip("/")
             except Exception:
                 return False
-        if self._is_login_target_url(landed_url) or _same_canonical_login(
-            landed_url, login_seed
-        ):
-            self.reached_urls.add(login_seed)
         try:
             html = await self._browser.page.content()
         except Exception:
@@ -4339,6 +4344,16 @@ class ScanEngine:
         url_params = self._merge_url_params(
             await self._browser.get_url_params(), login_seed
         )
+        # reached: login target(canonical host+path)に着地した、または form/URL param が
+        # 実際に見つかった(=このあと検査/攻撃する)なら path が違っても login ページは到達済み
+        # （/login→/auth/login 等・Codex #102）。form 無しで別ページへ逸れた場合のみ未到達。
+        if (
+            self._is_login_target_url(landed_url)
+            or _same_canonical_login(landed_url, login_seed)
+            or forms
+            or url_params
+        ):
+            self.reached_urls.add(login_seed)
 
         if not forms and not url_params:
             console.print(
