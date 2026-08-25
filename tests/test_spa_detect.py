@@ -63,6 +63,11 @@ def test_generic_mount_id_requires_matching_framework_trace(html, framework):
         # 実行式でも <code>/<pre> の表示テキストなら Next.js ではない（script 本文に
         # 限定・Codex #104 P2）。
         '<html><body><code>self.__next_f.push([1])</code> の例</body></html>',
+        # 非実行 script（text/plain / application/json）の式は実行されないので非SPA
+        # （Codex #104 P2）。
+        '<html><body><script type="text/plain">self.__next_f.push([1])</script></body></html>',
+        '<html><body><script type="application/json">'
+        '{"note":"window.__NUXT__ example"}</script></body></html>',
         # __NEXT_DATA__ / id="__next" を表示テキストとして含む静的ドキュメントは
         # Next.js ではない（script の id 属性 / 実タグ内属性に限定・Codex #104 P2）。
         '<html><body><code>__NEXT_DATA__</code> はハイドレーション用</body></html>',
@@ -107,6 +112,16 @@ def test_modern_framework_bootstrap_markers_are_high_confidence(html, framework,
     assert info.framework == framework
     assert info.confidence == "high"
     assert signal in info.signals
+
+
+def test_executable_script_type_still_detected():
+    # 明示的な実行可能 type の script 本文は判定対象（Codex #104 P2 の除外で落とさない）。
+    info = detect_spa(
+        '<html><body><script type="text/javascript">'
+        'self.__next_f.push([1])</script></body></html>'
+    )
+    assert info.is_spa is True
+    assert info.framework == "Next.js"
 
 
 @pytest.mark.parametrize(

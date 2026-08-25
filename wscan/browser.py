@@ -2407,8 +2407,18 @@ class BrowserManager:
                     break
                 try:
                     # クリック先を絶対 URL へ解決してスコープ判定する（Codex #104 P1）。
+                    # href が無い要素（button[data-route] 等）はルーティング data 属性が
+                    # 遷移先を持つので、それも解決してスコープ検証する。data-route="//outside"
+                    # のような外部先を検証前にクリックしない（Codex #104 P1）。
                     href = await el.get_attribute("href") or ""
-                    if not click_target_in_scope(base_url, href, is_in_scope):
+                    route_ref = href
+                    if not route_ref:
+                        for _attr in ("data-href", "data-route", "data-path", "data-page"):
+                            _v = await el.get_attribute(_attr)
+                            if _v:
+                                route_ref = _v
+                                break
+                    if not click_target_in_scope(base_url, route_ref, is_in_scope):
                         continue
 
                     # セッションを終了させるリンク（logout/signout 等）はクリックしない。
@@ -2417,7 +2427,7 @@ class BrowserManager:
                         _text = await el.inner_text()
                     except Exception:
                         _text = ""
-                    if is_session_ending_link(href, _text or ""):
+                    if is_session_ending_link(route_ref, _text or ""):
                         continue
 
                     await el.click(timeout=3000)

@@ -80,15 +80,30 @@ def _has_bundle_script(source: str) -> bool:
     return False
 
 
-# インライン <script> の本文だけを連結する。JS 式マーカー（self.__next_f /
-# window.__NUXT__ / React.createElement 等）を HTML 全体で探すと、<code>/<pre> の
-# 表示テキストで誤検出する。実行コンテンツに限定するために使う（Codex #104 P2）。
-# 外部 script（<script src=…></script>）は本文が空なので寄与しない。
-_SCRIPT_BODY_RE = re.compile(r"<script\b[^>]*>(.*?)</script>", flags=re.I | re.S)
+# 実行される インライン <script> の本文だけを連結する。JS 式マーカー
+# （self.__next_f / window.__NUXT__ / React.createElement 等）を HTML 全体で探すと、
+# <code>/<pre> の表示テキストや、type="text/plain"/"application/json" のデータブロックで
+# 誤検出する。ブラウザが実行する type だけに限定する（Codex #104 P2）。外部 script
+# （<script src=…></script>）は本文が空なので寄与しない。
+_SCRIPT_TAG_RE = re.compile(r"<script\b([^>]*)>(.*?)</script>", flags=re.I | re.S)
+_SCRIPT_TYPE_RE = re.compile(r"""(?<![\w-])type\s*=\s*['"]?\s*([^'"\s>]+)""", flags=re.I)
+# 実行可能な script type（未指定は JS 扱い）。text/plain・application/json・importmap・
+# speculationrules・application/ld+json 等の非実行データブロックは除外する。
+_EXECUTABLE_SCRIPT_TYPES = frozenset({
+    "", "text/javascript", "application/javascript",
+    "text/ecmascript", "application/ecmascript", "module",
+})
 
 
 def _script_bodies(source: str) -> str:
-    return "\n".join(m.group(1) for m in _SCRIPT_BODY_RE.finditer(source))
+    bodies: list[str] = []
+    for m in _SCRIPT_TAG_RE.finditer(source):
+        attrs, body = m.group(1), m.group(2)
+        tm = _SCRIPT_TYPE_RE.search(attrs)
+        stype = tm.group(1).strip().lower() if tm else ""
+        if stype in _EXECUTABLE_SCRIPT_TYPES:
+            bodies.append(body)
+    return "\n".join(bodies)
 
 
 def _weak_layout_signals(source: str) -> list[str]:
