@@ -2503,13 +2503,23 @@ class BrowserManager:
 
                     # Navigate back to not get lost
                     if page.url != current_url_before:
+                        restored = False
                         try:
                             await page.go_back(timeout=5000)
                             await page.wait_for_load_state("domcontentloaded", timeout=5000)
                             # Re-inject hook after navigation
                             await page.evaluate(hook_script)
+                            restored = page.url == current_url_before
                         except Exception:
-                            pass
+                            restored = False
+                        if not restored:
+                            # location.replace 等で go_back が current_url_before へ戻せない
+                            # 場合、以降のクリックは置換ドキュメント上で古い effective_base
+                            # 基準に承認され、engine の collect_links_rich(url) も元 URL 基準で
+                            # 相対リンクを誤解決して偽ターゲットを作る。探索を中断する
+                            # （in-scope 遷移でも復帰不能なら止める・Codex #104 P2）。
+                            aborted = True
+                            break
 
                 except Exception:
                     continue
