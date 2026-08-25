@@ -48,6 +48,11 @@ _EXECUTABLE_SCRIPT_TYPES = frozenset({
 # これらは式を終えられないトークンなので後続の `/` は除算ではない。識別子/`)`/`]`/数字/
 # 文字列の後の `/` は除算として扱う（誤って regex 認定して実コードを飲み込まない）。
 _REGEX_PRECEDERS = frozenset("([{,;:=!&|?+-*%^~<>")
+# 直前トークンがこれらのキーワードなら次の `/` は正規表現（return /re/ 等・Codex #104 P2）。
+_REGEX_KEYWORDS = frozenset({
+    "return", "typeof", "instanceof", "in", "of", "new", "delete", "void",
+    "throw", "yield", "await", "case", "do", "else",
+})
 
 
 def _strip_js_strings_comments(js: str) -> str:
@@ -55,11 +60,13 @@ def _strip_js_strings_comments(js: str) -> str:
 
     実行 script の文字列/コメント/正規表現内に置かれた framework 構文
     （const x = "self.__next_f.push([])" / // self.__next_f… / const m = /self.__next_f/）を
-    実行式と誤認しない（Codex #104 P2）。regex と除算は直前の有意トークンで区別する。
+    実行式と誤認しない（Codex #104 P2）。regex と除算は直前の有意トークン（記号 or キーワード）で
+    区別する（return /re/ 等のキーワード後も regex 認定・Codex #104 P2）。
     """
     out: list[str] = []
     i, n = 0, len(js)
-    prev = ""  # 直前に出力した非空白文字（regex/除算の判定用）
+    prev = ""       # 直前に出力した非空白文字
+    cur_word = ""   # 直前の識別子（キーワード判定用）
     while i < n:
         c = js[i]
         if c in "\"'`":
@@ -74,7 +81,7 @@ def _strip_js_strings_comments(js: str) -> str:
                     break
                 i += 1
             out.append(" ")
-            prev = "x"  # 文字列は値なので後続 / は除算
+            prev, cur_word = "x", ""  # 文字列は値なので後続 / は除算
             continue
         if c == "/" and i + 1 < n and js[i + 1] == "/":
             j = js.find("\n", i)
@@ -84,7 +91,9 @@ def _strip_js_strings_comments(js: str) -> str:
             j = js.find("*/", i + 2)
             i = (j + 2) if j >= 0 else n
             continue
-        if c == "/" and (prev == "" or prev in _REGEX_PRECEDERS):
+        if c == "/" and (
+            prev == "" or prev in _REGEX_PRECEDERS or cur_word in _REGEX_KEYWORDS
+        ):
             # 正規表現リテラル。文字クラス [...] 内の / はデリミタでない。
             i += 1
             in_class = False
@@ -104,11 +113,16 @@ def _strip_js_strings_comments(js: str) -> str:
                     break
                 i += 1
             out.append(" ")
-            prev = "x"  # regex は値なので後続 / は除算
+            prev, cur_word = "x", ""  # regex は値なので後続 / は除算
             continue
         out.append(c)
         if not c.isspace():
             prev = c
+            # 識別子トークンを追跡（英数字/_/$ の連続）。非識別子文字でリセット。
+            if c.isalnum() or c in "_$":
+                cur_word += c
+            else:
+                cur_word = ""
         i += 1
     return "".join(out)
 
@@ -471,7 +485,7 @@ def detect_spa(html: str) -> SpaInfo:
     if tags["ngcontent"]:
         angular_signals.append("_ngcontent")
     # window.ng は JS 式なので script 本文に限定する（Codex #104 P2）。
-    if re.search(r"\bwindow\s*\.\s*ng\b", scripts, flags=re.I):
+    if re.search(r"\bwindow\s*\.\s*ng\b", scripts):
         angular_signals.append("window.ng")
     if angular_signals:
         return SpaInfo(True, "Angular", "high", angular_signals)
@@ -489,7 +503,7 @@ def detect_spa(html: str) -> SpaInfo:
     # __next_f トークンや <code>self.__next_f.push(...)</code> の表示テキストで誤検出
     # しないよう、script 本文中の実行式（.push / 代入 / ||）に限定する（Codex #104 P2）。
     if re.search(
-        r"\bself\s*\.\s*__next_f\s*(?:\.\s*push\b|=|\|\|)", scripts, flags=re.I
+        r"\bself\s*\.\s*__next_f\s*(?:\.\s*push\b|=|\|\|)", scripts
     ):
         next_signals.append("self.__next_f")
     if next_signals:
@@ -507,7 +521,7 @@ def detect_spa(html: str) -> SpaInfo:
     react_root = "root" in tags["ids"] or "app" in tags["ids"]
     # JS トークンは script 本文で、react バンドルの script src は実 <script> の src で照合。
     react_trace = bool(
-        re.search(r"React\s*\.\s*createElement|__REACT_DEVTOOLS", scripts, flags=re.I)
+        re.search(r"React\s*\.\s*createElement|__REACT_DEVTOOLS", scripts)
         or tags["react_src"]
     )
     if react_root and react_trace:
@@ -519,7 +533,7 @@ def detect_spa(html: str) -> SpaInfo:
     nuxt_marker = False
     # Nuxt 2 は window.__NUXT__={...} を吐く。裸トークン一致だと解説記事等の表示
     # テキストで誤検出するため、window.__NUXT__ の実行式に限定する（Codex #104 P2）。
-    if re.search(r"\bwindow\s*\.\s*__NUXT__\b", scripts, flags=re.I):
+    if re.search(r"\bwindow\s*\.\s*__NUXT__\b", scripts):
         vue_signals.append("window.__NUXT__")
         nuxt_marker = True
     # Nuxt 3 は <script id="__NUXT_DATA__" type="application/json"> / id="__nuxt" /
@@ -533,14 +547,14 @@ def detect_spa(html: str) -> SpaInfo:
     if tags["data_nuxt_data"]:
         vue_signals.append("data-nuxt-data")
         nuxt_marker = True
-    if re.search(r"\bwindow\s*\.\s*__VUE__\b", scripts, flags=re.I):
+    if re.search(r"\bwindow\s*\.\s*__VUE__\b", scripts):
         vue_signals.append("window.__VUE__")
     if tags["data_v"]:
         vue_signals.append("data-v-")
     vue_root = "app" in tags["ids"]
     # JS トークンは script 本文、vue バンドルの script src は実 <script> の src で照合。
     vue_trace = bool(
-        re.search(r"createApp\s*\(|new\s+Vue\b", scripts, flags=re.I)
+        re.search(r"createApp\s*\(|new\s+Vue\b", scripts)
         or tags["vue_src"]
     )
     if vue_root and vue_trace:
