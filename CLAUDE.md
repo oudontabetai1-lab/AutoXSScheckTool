@@ -154,6 +154,7 @@ python main.py scan http://127.0.0.1:8000 --checks xss sqli --no-monitor --llm n
 | `waf_bypass.py` | **LLM不要**の純粋関数。WAF/入力フィルタ回避の種を生成。`crlf_bypass_variants`（メールヘッダ用の多様な改行表現：生CR/LF・%エンコード・二重エンコード・Unicode行区切り・オーバーロングUTF-8）と `upload_bypass_probes`（ファイルアップロード用：代替拡張子/大小混在/末尾ドット・空白/画像マジックバイトpolyglot/Content-Type偽装）。`mail_header`・`file_upload` スキャナが共有 |
 | `js_analysis.py` | **LLM不要**の純粋関数。JS ソースを静的解析し危険シンク×汚染ソースの source→sink を抽出（`js_static` スキャナの実体）。HTMLからのインラインscript抽出も提供 |
 | `url_extraction.py` | **LLM不要**の純粋関数。JS/JSON 資産から抽出した URL 候補のゴミ判定（0009 C1）。minified JS の regex リテラル/式片（`/(?:` `/16*(...` 等）を `/…` ルートと誤抽出したものを path 部のコードメタ文字で除去（`is_plausible_route_candidate`/`filter_route_candidates`）。`browser._collect_urls_from_loaded_assets` が使用。**保守側判定＝実ルートは落とさない**（到達性維持） |
+| `url_normalize.py` / `checkpoint.py` | `checkpoint.unit_key` は resume キーの単一チョークポイントとして `normalize_url_for_key` を適用し、明白な揮発クエリだけを除く（実攻撃 URL は不変、未知キー・意味値は保持） |
 | `auth_detect.py` | ログイン成否判定の純粋関数（フォーム残存/失敗文言/ログインページ離脱/MFA を統合）。`browser.auto_login` の判定を集約 |
 | `payload_importer.py` | 公開ペイロード集(PaTT/SecLists)の取込ツール（`import-payloads` サブコマンドの実体） |
 | `equivalence_probe.py` | 文字列結合の等価性プローブ（SQLi/XSS 共通の純粋判定ロジック） |
@@ -401,7 +402,7 @@ retry/失敗種別/エンドポイント処理を変えるときは同種の全 
 ## 触るときの不変条件・落とし穴
 
 - SPA 由来 JSON body の実スキャンは**通常層（確実性）**で、既存 SQLi 判定を再利用する。送信成功・認証の**肯定的証拠**があるときだけ checkpoint を完了にする：`_run_json_injection_checks` は template 不在（送信不能）・再認証失敗・実 POST 失効（`_api_auth_failed`）・transport 失敗（`_json_probe_failed`）のいずれかなら mark せず resume に残す。verify も同様で、失効/transport 失敗時は scanner が `None` を返し、`_verify_one`（scanner verify・汎用フォールバックの json 再送の両方）が terminal な `assumed`（penalize しない）へ倒す（401/空応答を脆弱性応答と誤評価しない）。
-- **checkpoint/試行台帳キー（`InjectionPoint.stable_key_parts`）は resume 安定性のため揮発値を含めない**（`template_id` を**含めない**）：json 用 `template_id` は harvest の値敏感 identity と 1:1 で、URL クエリ/body の nonce 等で run 跨ぎに変わるため、永続キーに入れると完了済み状態変更 POST の再送・検証不能 finding を招く。`template_id` は **template dict と finding-dedup（run 内の operation 識別）専用のランタイム識別子**として使う（決定論生成だが永続キー非採用）。form/URL parameter の既存キーは変えない。根本の揮発値正規化（`norm_url` 自体の揮発含む・全注入点共通）は別課題（vault Task 0013）。
+- **checkpoint キーは `checkpoint.unit_key` で一元生成し、resume 安定性のため明白な揮発値だけを除く**（`template_id` を**含めない**）：json 用 `template_id` は harvest の値敏感 identity と 1:1 で、URL クエリ/body の nonce 等で run 跨ぎに変わるため、永続キーに入れると完了済み状態変更 POST の再送・検証不能 finding を招く。`template_id` は **template dict と finding-dedup（run 内の operation 識別）専用のランタイム識別子**として使う（決定論生成だが永続キー非採用）。`InjectionPoint.stable_key_parts` は生 URL を渡し、全 location の URL は `unit_key` が `url_normalize.normalize_url_for_key` で正規化する。名前だけで意味値を消さず、未知キーと実攻撃 URL は保持する。json body の値抜き構造シグネチャは安定 identity 候補だが、JSON-RPC method のような値内 operation を区別できないため未導入。
 
 - **ターゲット URL は `url.strip()` で保持**（末尾 `/` を勝手に除去しない）。スコープ照合は
   比較時に両辺 `rstrip("/")` する前提。`engine.py` の正規化を変えないこと。

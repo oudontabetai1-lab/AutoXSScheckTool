@@ -32,6 +32,12 @@ class UnitKeyTests(unittest.TestCase):
             unit_key("http://h/a", "q", 0, "xss"),
         )
 
+    def test_query_value_trailing_slash_remains_distinct(self):
+        self.assertNotEqual(
+            unit_key("http://h/p?z=/admin/&a=1", "q", 0, "xss"),
+            unit_key("http://h/p?a=1&z=/admin", "q", 0, "xss"),
+        )
+
     def test_distinct_checks_distinct_keys(self):
         self.assertNotEqual(
             unit_key("http://h/a", "q", 0, "xss"),
@@ -43,6 +49,24 @@ class UnitKeyTests(unittest.TestCase):
         self.assertNotEqual(
             unit_key("http://h/a", "id", 0, "sqli", is_url_param=True),
             unit_key("http://h/a", "id", 0, "sqli", is_url_param=False),
+        )
+
+    def test_rotating_nonce_values_share_one_unit_key(self):
+        self.assertEqual(
+            unit_key("https://h/a?op=create&nonce=1699999999", "id", 0, "sqli"),
+            unit_key("https://h/a?nonce=1699999999000&op=create", "id", 0, "sqli"),
+        )
+
+    def test_meaningful_timestamp_values_have_distinct_unit_keys(self):
+        self.assertNotEqual(
+            unit_key("https://h/a?timestamp=1699999999", "id", 0, "sqli"),
+            unit_key("https://h/a?timestamp=1700000000", "id", 0, "sqli"),
+        )
+
+    def test_meaningful_operation_values_remain_distinct(self):
+        self.assertNotEqual(
+            unit_key("https://h/a?op=create", "id", 0, "sqli"),
+            unit_key("https://h/a?op=delete", "id", 0, "sqli"),
         )
 
 
@@ -59,6 +83,26 @@ class StateTests(unittest.TestCase):
         ip = InjectionPoint.for_url_param("http://h/a/", "id")
         state.mark_done("http://h/a", "id", 0, "sqli", is_url_param=True)
         self.assertTrue(state.is_done_ip(ip, "sqli"))
+
+    def test_non_ip_path_normalizes_rotating_nonce(self):
+        state = CheckpointState()
+        state.mark_done(
+            "https://h/action?op=create&nonce=1699999999", "name", 0, "sqli"
+        )
+        self.assertTrue(state.is_done(
+            "https://h/action?nonce=1699999999000&op=create", "name", 0, "sqli"
+        ))
+
+    def test_ip_path_normalizes_rotating_nonce(self):
+        state = CheckpointState()
+        first = InjectionPoint.for_url_param(
+            "https://h/action?op=create&nonce=1699999999", "name"
+        )
+        second = InjectionPoint.for_url_param(
+            "https://h/action?nonce=1699999999000&op=create", "name"
+        )
+        state.mark_done_ip(first, "sqli")
+        self.assertTrue(state.is_done_ip(second, "sqli"))
 
     def test_json_body_pointer_and_method_do_not_collide(self):
         state = CheckpointState()
@@ -88,6 +132,63 @@ class StateTests(unittest.TestCase):
         self.assertEqual(state.source_version, 3)
         self.assertTrue(state.is_done("http://h/a", "id", 0, "sqli"))
         self.assertIn(legacy_key, state.completed_units)
+
+    def test_v5_checkpoint_urls_migrate_for_non_ip_and_ip_lookups(self):
+        old_url = "https://h/action?nonce=1699999999&op=create"
+        legacy_form_key = "\x1f".join([old_url, "name", "0", "f", "sqli"])
+        legacy_json_key = "\x1f".join(
+            [old_url, "name", "0", "j:POST", "sqli", "/name"]
+        )
+        state = CheckpointState.from_dict({
+            "version": 5,
+            "target_url": "https://h",
+            "checks": ["sqli"],
+            "completed_units": [legacy_form_key, legacy_json_key],
+            "findings": [],
+        })
+
+        self.assertTrue(state.is_done(
+            "https://h/action?op=create&nonce=1699999999000", "name", 0, "sqli"
+        ))
+        resumed_ip = InjectionPoint.for_json_body(
+            "POST",
+            "https://h/action?op=create&nonce=1700000000",
+            "/name",
+        )
+        self.assertTrue(state.is_done_ip(resumed_ip, "sqli"))
+        self.assertTrue(all(
+            key.split("\x1f")[0] == "https://h/action?op=create"
+            for key in state.completed_units
+        ))
+
+    def test_v5_checkpoint_target_url_is_normalized_during_migration(self):
+        state = CheckpointState.from_dict({
+            "version": 5,
+            "target_url": "https://h/start?nonce=1699999999",
+            "checks": ["sqli"],
+            "completed_units": [],
+            "findings": [],
+        })
+
+        # 揮発 nonce は除去されるが、元 URL の明示的な `?` は保持する（/p と /p? を
+        # 区別・Codex #103 P2）。
+        self.assertEqual(state.target_url, "https://h/start?")
+
+    def test_v5_migration_trims_path_but_keeps_query_value_slash(self):
+        old_url = "https://h/action/?z=/admin/&a=1"
+        legacy_key = "\x1f".join([old_url, "name", "0", "f", "sqli"])
+        state = CheckpointState.from_dict({
+            "version": 5,
+            "target_url": old_url,
+            "checks": ["sqli"],
+            "completed_units": [legacy_key],
+            "findings": [],
+        })
+
+        expected_url = "https://h/action/?z=/admin/&a=1"
+        self.assertEqual(state.target_url, expected_url)
+        self.assertEqual(next(iter(state.completed_units)).split("\x1f")[0], expected_url)
+        self.assertTrue(state.is_done(expected_url, "name", 0, "sqli"))
 
     def test_mark_and_is_done(self):
         s = CheckpointState(target_url="http://h", checks=["xss"])
@@ -140,6 +241,49 @@ class StateTests(unittest.TestCase):
         self.assertFalse(s.is_compatible_with("http://h", ["xss", "os"]))
         # different target → not compatible
         self.assertFalse(s.is_compatible_with("http://other", ["xss"]))
+
+    def test_compatibility_normalizes_rotating_target_nonce(self):
+        s = CheckpointState(
+            target_url="https://h/start?nonce=1699999999",
+            checks=["sqli"],
+        )
+
+        self.assertTrue(s.is_compatible_with(
+            "https://h/start?nonce=1699999999000", ["sqli"]
+        ))
+
+    def test_compatibility_keeps_meaningful_target_operations_distinct(self):
+        s = CheckpointState(
+            target_url="https://h/start?op=create",
+            checks=["sqli"],
+        )
+
+        self.assertFalse(s.is_compatible_with(
+            "https://h/start?op=delete", ["sqli"]
+        ))
+
+    def test_compatibility_trims_path_but_keeps_query_value_slash(self):
+        s = CheckpointState(
+            target_url="https://h/start/?z=/admin/&a=1",
+            checks=["sqli"],
+        )
+
+        # 同一（path スラッシュ・クエリ値スラッシュ・観測順すべて一致）は互換。
+        self.assertTrue(s.is_compatible_with(
+            "https://h/start/?z=/admin/&a=1", ["sqli"]
+        ))
+        # query 値の末尾スラッシュ違いは別 operation。
+        self.assertFalse(s.is_compatible_with(
+            "https://h/start/?z=/admin&a=1", ["sqli"]
+        ))
+        # path 末尾スラッシュ違いも別（クエリが続くため保持）。
+        self.assertFalse(s.is_compatible_with(
+            "https://h/start?z=/admin/&a=1", ["sqli"]
+        ))
+        # クエリ順違いも別（観測順を保持するため）。
+        self.assertFalse(s.is_compatible_with(
+            "https://h/start/?a=1&z=/admin/", ["sqli"]
+        ))
 
 
 class PageCheckCpUrlTests(unittest.TestCase):
@@ -577,3 +721,92 @@ class AttemptLedgerPersistenceTests(unittest.TestCase):
         state = CheckpointState.from_dict({"version": 4, "target_url": "http://t",
                                            "checks": ["xss"], "completed_units": []})
         self.assertEqual(state.attempt_ledger, {})
+
+    def test_v5_ledger_record_urls_migrate_to_stable_key_parts(self):
+        from wscan.attempt_ledger import AttemptLedger
+
+        raw_url = (
+            "https://h/action/?z=/admin/&nonce=1699999999"
+            "&csrf=old&op=create"
+        )
+        serialized = {
+            "max_per_key": 40,
+            "records": [
+                {
+                    "key": [raw_url, "name", "0", "u", ""],
+                    "check": "sqli",
+                    "attempts": [{"payload": "'", "status": 500}],
+                },
+                {"key": []},
+                {"key": (raw_url, "name", "0", "u", "")},
+                "broken-record",
+            ],
+        }
+        state = CheckpointState.from_dict({
+            "version": 5,
+            "target_url": "https://h",
+            "checks": ["sqli"],
+            "completed_units": [],
+            "attempt_ledger": serialized,
+        })
+        resumed = InjectionPoint.for_url_param(
+            "https://h/action/?z=/admin/&csrf=new&nonce=1700000000&op=create",
+            "name",
+        )
+
+        migrated_key = state.attempt_ledger["records"][0]["key"]
+        self.assertEqual(tuple(migrated_key), resumed.stable_key_parts())
+        ledger = AttemptLedger.from_dict(state.attempt_ledger)
+        history = ledger.history(resumed.stable_key_parts(), "sqli")
+        self.assertEqual([attempt.payload for attempt in history], ["'"])
+
+def test_legacy_fallback_excludes_units_marked_during_v5_resume():
+    """v5 resume 中に新規 mark した単位は legacy fallback の対象外（Codex #103 P1）。
+
+    v5 state をロード後、`?z=/admin` を新規に mark_done しても、distinct な
+    `?z=/admin/` は完了扱いにならない（新規 mark は _legacy_units に含めない）。
+    """
+    from wscan.checkpoint import CheckpointState
+
+    state = CheckpointState.from_dict({
+        "version": 5,
+        "target_url": "https://h/",
+        "checks": ["sqli"],
+        "completed_units": [],  # legacy には何も無い
+    })
+    assert state.source_version == 5
+    # resume 中に新規 mark
+    state.mark_done("https://h/p?z=/admin", "q", 0, "sqli", is_url_param=True)
+    assert state.is_done("https://h/p?z=/admin", "q", 0, "sqli", is_url_param=True) is True
+    # distinct な末尾スラッシュ版は完了にならない（新規 mark は legacy 照合対象外）
+    assert state.is_done("https://h/p?z=/admin/", "q", 0, "sqli", is_url_param=True) is False
+
+
+def test_v5_migration_no_longer_false_matches_distinct_slash_variant():
+    """v5 の genuine な ?z=/admin 完了は、distinct な ?z=/admin/ を誤って done にしない
+    （whole-rstrip alias を撤去し検出偽陰性を回避・Codex #103 P1）。migration 自体は
+    削除/揮発クエリ正規化を維持する。
+    """
+    from wscan.checkpoint import CheckpointState, unit_key
+
+    admin = "https://h/p?z=/admin"
+    legacy_key = "\x1f".join([admin, "q", "0", "u", "sqli"])
+    state = CheckpointState.from_dict({
+        "version": 5,
+        "target_url": "https://h/",
+        "checks": ["sqli"],
+        "completed_units": [legacy_key],
+    })
+    # genuine な ?z=/admin は done。
+    assert state.is_done(admin, "q", 0, "sqli", is_url_param=True) is True
+    # distinct な ?z=/admin/ は done にしない（誤一致=検出偽陰性を作らない）。
+    assert state.is_done(admin + "/", "q", 0, "sqli", is_url_param=True) is False
+
+    # migration は揮発クエリ正規化を維持: v5 の rotating nonce 付きキーは正規化され、
+    # 現行キー（nonce 除去後）で done になる。
+    v5nonce = "\x1f".join(["https://h/a?op=create&nonce=12345678", "q", "0", "u", "sqli"])
+    st2 = CheckpointState.from_dict({
+        "version": 5, "target_url": "https://h/", "checks": ["sqli"],
+        "completed_units": [v5nonce],
+    })
+    assert st2.is_done("https://h/a?op=create&nonce=99999999", "q", 0, "sqli", is_url_param=True) is True
