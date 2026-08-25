@@ -1342,7 +1342,19 @@ class ScanEngine:
         return clean != url and self._is_attack_target_url(clean)
 
     def _is_access_allowed_url(self, url: str) -> bool:
-        return self._is_attack_target_url(url) or self._url_matches_scope(url, self.access_urls)
+        if self._is_attack_target_url(url) or self._url_matches_scope(url, self.access_urls):
+            return True
+        # path-scoped target（query 無しで設定）に対し ?page=2 や #details のような
+        # 同一パスの query/fragment 付き URL を許可する。query 付きで明示スコープした
+        # ターゲット（例 .../action?op=save）は clean 一致しないので厳密性を保つ
+        # （_json_target_in_scope と同じ path-scope 許容・Codex #104 P2）。
+        clean = urlparse(url)._replace(query="", fragment="").geturl()
+        if clean != url and (
+            self._is_attack_target_url(clean)
+            or self._url_matches_scope(clean, self.access_urls)
+        ):
+            return True
+        return False
 
     def _is_login_target_url(self, url: str) -> bool:
         """Return True when *url* itself is the configured login page.
@@ -3370,6 +3382,19 @@ class ScanEngine:
                     pass
 
             if depth + 1 < self.depth:
+                # SPA クリック探索で復帰不能だった場合、ページが別ドキュメントに残って
+                # いることがある。collect_links_rich(url) が誤 DOM から相対リンクを拾って
+                # 偽ルートを作らないよう、landed から drift していたら landed へ戻す
+                # （Codex #104 P2）。
+                if self.spa_crawl and landed_url:
+                    try:
+                        _cur = (self._browser.page.url or "").split("#")[0]
+                        if _cur != landed_url.split("#")[0]:
+                            await self._browser.navigate(
+                                landed_url, retries=self.navigation_retries
+                            )
+                    except Exception:
+                        pass
                 link_entries = await self.browser.collect_links_rich(url, same_domain=False)
                 url_cap = max(200, self.depth * 50)
                 _cap_warned = False

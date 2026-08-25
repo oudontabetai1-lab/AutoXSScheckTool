@@ -130,7 +130,8 @@ def _script_bodies(source: str) -> str:
                 # パラメータを除いた本体）で比較する。text/javascript; charset=utf-8 の
                 # ような実行可能 type を除外しない（Codex #104 P2）。
                 stype = (_get_attr(text, "type") or "").split(";", 1)[0].strip().lower()
-                if not _get_attr(text, "src") and stype in _EXECUTABLE_SCRIPT_TYPES:
+                # src 属性が「存在」すれば（src="" や bare src も含む）本文は実行されない。
+                if not _has_attr(text, "src") and stype in _EXECUTABLE_SCRIPT_TYPES:
                     bodies.append(source[e:close_start])
             pos = close_end  # inert サブツリー（script 含む）を丸ごと飛ばす
         else:
@@ -205,6 +206,19 @@ def _get_attr(tag_text: str, name: str):
                 v = v[1:-1]
             return v
     return None
+
+
+def _has_attr(tag_text: str, name: str) -> bool:
+    """開始タグに属性 ``name`` が**存在**するか（値の有無に関わらず）。
+
+    ``_get_attr`` は欠落と ``src=""``/bare ``src`` を同じ falsy で返すが、ブラウザは
+    ``src`` 属性があれば外部 script として本文を無視する。presence を値と別に判定する
+    （Codex #104 P2）。引用属性値を先に除去し、値の中の ``src=`` を誤検出しない。
+    """
+    stripped = re.sub(r"\"[^\"]*\"|'[^']*'", "", tag_text)
+    return re.search(
+        rf"(?<![\w-]){re.escape(name)}(?:\s*=|[\s/>]|$)", stripped, flags=re.I
+    ) is not None
 
 
 def _has_start_tag(source: str, tagname: str) -> bool:

@@ -113,6 +113,9 @@ def test_generic_mount_id_requires_matching_framework_trace(html, framework):
         # 後続の引用属性値内の > / </div> で偽の空マウントを作らない（Codex #104 P2）。
         '<html><body><div id="root" title="></div>">static</div>'
         '<script src="/assets/site.js"></script></body></html>',
+        # src="" / bare src の script も外部扱いで本文は実行されない（Codex #104 P2）。
+        '<html><body><script src="">self.__next_f.push([])</script></body></html>',
+        '<html><body><script src>self.__next_f.push([])</script></body></html>',
     ],
 )
 def test_normal_or_ambiguous_html_is_not_spa(html):

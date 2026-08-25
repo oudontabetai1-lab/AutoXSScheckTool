@@ -593,6 +593,16 @@ class EngineScanGapTests(unittest.IsolatedAsyncioTestCase):
         target = engine.target_url.rstrip("/")
         self.assertFalse(any(p.url.rstrip("/") == target for p in pages))
 
+    def test_access_scope_allows_query_and_fragment_on_path_target(self):
+        # path-scoped target に対し同一パスの ?query / #fragment は access 許可する
+        # （pagination/hash ルート探索を落とさない・Codex #104 P2）。
+        engine = self._engine("http://fixture.test/", depth=1)
+        engine.target_urls = ["http://fixture.test/catalog"]
+        self.assertTrue(engine._is_access_allowed_url("http://fixture.test/catalog?page=2"))
+        self.assertTrue(engine._is_access_allowed_url("http://fixture.test/catalog#details"))
+        # 別パスは許可しない。
+        self.assertFalse(engine._is_access_allowed_url("http://fixture.test/other"))
+
     async def test_out_of_scope_landing_does_not_auto_enable_spa(self):
         # in-scope URL が access スコープ外の外部 SPA へリダイレクトしたら、
         # マーカーがあっても自動有効化しない（外部ページを探索しない・Codex #104 P1）。
