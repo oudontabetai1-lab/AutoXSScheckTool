@@ -29,7 +29,7 @@ class _CanonicalBlockedPage:
         self.network = network
 
     async def goto(self, url, wait_until="domcontentloaded", timeout=30000):
-        final_url = "https://www.FIXTURE.test:8443/private"
+        final_url = "https://www.FIXTURE.test/private"
         request = SimpleNamespace(
             url=final_url,
             method="GET",

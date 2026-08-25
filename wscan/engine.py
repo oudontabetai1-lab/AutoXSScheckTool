@@ -4316,7 +4316,20 @@ class ScanEngine:
             landed_url = self._browser.page.url or login_seed
         except Exception:
             landed_url = login_seed
-        if self._is_login_target_url(landed_url):
+        # login URL が canonical redirect(bare→www 等)しても reached に計上する
+        # （exact な _is_login_target_url だけだと漏れる・Codex #102）。ただし path は
+        # 一致必須（/login→/account の別ページ redirect を login 到達と誤認しない）。
+        def _same_canonical_login(a: str, b: str) -> bool:
+            try:
+                if canonical_host(a) != canonical_host(b):
+                    return False
+                from urllib.parse import urlsplit as _us
+                return _us(a).path.rstrip("/") == _us(b).path.rstrip("/")
+            except Exception:
+                return False
+        if self._is_login_target_url(landed_url) or _same_canonical_login(
+            landed_url, login_seed
+        ):
             self.reached_urls.add(login_seed)
         try:
             html = await self._browser.page.content()

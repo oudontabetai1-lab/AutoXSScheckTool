@@ -35,17 +35,34 @@ from .url_extraction import (
 console = Console()
 
 
+_DEFAULT_PORTS = {"http": 80, "https": 443, "ws": 80, "wss": 443}
+
+
 def canonical_host(url_or_netloc) -> str:
-    """Return a case-insensitive host key without port or leading ``www.``."""
+    """Return a case-insensitive ``host[:port]`` key without leading ``www.``.
+
+    既定ポート（http=80/https=443）と暗黙ポートは省き http↔https / bare↔www を
+    同一視するが、明示された非既定ポート（例 :3000 と :8080）は保持して別 origin と
+    区別する（Codex #102）。
+    """
     try:
         value = str(url_or_netloc).strip()
         parsed = urlsplit(value)
         if parsed.hostname is None and "://" not in value:
             parsed = urlsplit(f"//{value}")
         host = (parsed.hostname or "").casefold()
+        if host.startswith("www."):
+            host = host[4:]
+        try:
+            port = parsed.port
+        except ValueError:
+            port = None
+        default = _DEFAULT_PORTS.get((parsed.scheme or "").casefold())
+        if port is not None and port != default:
+            return f"{host}:{port}"
+        return host
     except Exception:
         return ""
-    return host[4:] if host.startswith("www.") else host
 
 
 def bucketize_status_counts(counts: Mapping) -> dict:

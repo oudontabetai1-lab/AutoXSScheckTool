@@ -106,9 +106,15 @@ def test_network_capture_counts_scan_related_and_unknown_resource_types():
     assert capture.status_counts == {403: 2, 429: 2}
 
 
-def test_canonical_host_strips_www_port_and_casefolds():
-    assert canonical_host("https://WWW.Fixture.Test:8443/path") == "fixture.test"
-    assert canonical_host("www.FIXTURE.test:443") == "fixture.test"
+def test_canonical_host_strips_www_casefolds_and_default_ports_but_keeps_explicit():
+    # www 除去・casefold・既定 port(http80/https443)と暗黙 port は省く。
+    assert canonical_host("https://WWW.Fixture.Test/path") == "fixture.test"
+    assert canonical_host("http://fixture.test:80") == "fixture.test"
+    assert canonical_host("https://fixture.test:443") == "fixture.test"
+    # 明示された非既定 port は保持し別 origin と区別する（Codex #102）。
+    assert canonical_host("https://WWW.Fixture.Test:8443/path") == "fixture.test:8443"
+    assert canonical_host("http://fixture.test:3000") == "fixture.test:3000"
+    assert canonical_host("http://fixture.test:3000") != canonical_host("http://fixture.test:8080")
     assert canonical_host("http://[invalid") == ""
 
 
@@ -117,7 +123,7 @@ def test_network_capture_filters_status_counts_to_allowed_hosts():
     capture.allowed_hosts = {"fixture.test"}
     for status, url, resource_type in (
         (403, "http://fixture.test/private", "document"),
-        (429, "https://www.FIXTURE.test:8443/api", "fetch"),
+        (429, "https://www.FIXTURE.test/api", "fetch"),
         (403, "https://cdn.example.test/script.js", "script"),
         (403, "https://api.example.test/data", "xhr"),
         (403, "https://api.example.test/data", "fetch"),
@@ -162,7 +168,7 @@ def test_coverage_allowed_hosts_uses_canonical_target_and_access_hosts():
         ["https://auth.test/login", "/relative-scope", "http://[invalid"],
     ) == {
         "target.test",
-        "other.test",
+        "other.test:8080",
         "auth.test",
     }
 
@@ -498,7 +504,7 @@ def test_record_probe_status_filters_url_by_canonical_host():
         _coverage_hosts={"fixture.test"},
     )
 
-    ScanEngine.record_probe_status(engine, 403, "https://www.FIXTURE.test:8443/private")
+    ScanEngine.record_probe_status(engine, 403, "https://www.FIXTURE.test/private")
     ScanEngine.record_probe_status(engine, 429, "https://external.test/rate-limit")
     ScanEngine.record_probe_status(engine, 500, None)
 
@@ -533,7 +539,7 @@ def test_engine_session_preflight_records_final_url_with_host_filter():
         ),
         SimpleNamespace(
             status_code=429,
-            url="https://www.FIXTURE.test:8443/login",
+            url="https://www.FIXTURE.test/login",
             text="rate limited",
         ),
     ]
@@ -664,7 +670,7 @@ def test_engine_ssti_fallback_records_each_final_url_with_host_filter():
         ),
         SimpleNamespace(
             status_code=429,
-            url="https://www.fixture.test:8443/search?q=probe",
+            url="https://www.fixture.test/search?q=probe",
             text="rate limited",
         ),
     ]
