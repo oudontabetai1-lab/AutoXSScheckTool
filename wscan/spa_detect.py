@@ -51,7 +51,12 @@ _EMPTY_MOUNT_RE = re.compile(
 # 認めると analytics.js 等でも SPA 誤判定するため（Codex #104 P2）、本番バンドラの
 # 典型（ハッシュ付きファイル名 / 既知の SPA アセットディレクトリ / 既知のバンドル語）
 # に限定する。
-_BUNDLE_SRC_RE = re.compile(r"<script\b[^>]*\bsrc\s*=\s*(['\"])([^'\"]+)\1", flags=re.I)
+# \bsrc は data-src/async-src（ハイフン付き）にも一致し、遅延プレースホルダ
+# <script data-src="…">（未ロード）を実バンドルと誤認する。(?<![\w-]) で実 src 属性に
+# 限定する（_has_id と同じ・Codex #104 P2）。
+_BUNDLE_SRC_RE = re.compile(
+    r"<script\b[^>]*?(?<![\w-])src\s*=\s*(['\"])([^'\"]+)\1", flags=re.I
+)
 _BUNDLE_HINT_RE = re.compile(
     r"(?:/_next/|/_nuxt/|/assets/|/static/js/|/build/|/dist/"
     r"|[.-][0-9a-f]{6,}\.m?js(?:$|[?#])"

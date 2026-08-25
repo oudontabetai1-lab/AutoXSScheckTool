@@ -38,6 +38,34 @@ console = Console()
 _DEFAULT_PORTS = {"http": 80, "https": 443, "ws": 80, "wss": 443}
 
 
+# セッションを終了させるリンク（ログアウト等）。SPA クリック探索がこれを踏むと、
+# 認証セッションが失効し go_back() でも復元できず、以降の認証ページが軒並みログインへ
+# リダイレクトして攻撃面を失う（自動有効化で既定化するため特に危険・Codex #104 P1）。
+_SESSION_ENDING_HREF_RE = re.compile(
+    r"(?:log[\W_]*out|sign[\W_]*out|log[\W_]*off|sign[\W_]*off|deauth\w*|/logoff\b)",
+    flags=re.I,
+)
+_SESSION_ENDING_TEXT_RE = re.compile(
+    r"(?:log\s*out|sign\s*out|log\s*off|sign\s*off"
+    r"|ログアウト|サインアウト|ログオフ|サインオフ)",
+    flags=re.I,
+)
+
+
+def is_session_ending_link(href: str, text: str) -> bool:
+    """href またはリンク文言がログアウト/サインアウト系か（純粋関数）。
+
+    クリックするとサーバセッションを失効させるリンクを SPA クリック探索から除外する
+    ために使う。保守的に logout/signout/logoff 系だけを対象にする（過剰除外で正当な
+    ルート発見を殺さない）。
+    """
+    if href and _SESSION_ENDING_HREF_RE.search(href):
+        return True
+    if text and _SESSION_ENDING_TEXT_RE.search(text):
+        return True
+    return False
+
+
 def canonical_host(url_or_netloc) -> str:
     """Return a case-insensitive ``host[:port]`` key without leading ``www.``.
 
@@ -2358,6 +2386,15 @@ class BrowserManager:
                     if href.startswith("http") and not href.startswith(
                         urlparse(base_url).scheme + "://" + urlparse(base_url).netloc
                     ):
+                        continue
+
+                    # セッションを終了させるリンク（logout/signout 等）はクリックしない。
+                    # 認証セッションを失効させ、以降の認証ページを軒並み失う（Codex #104 P1）。
+                    try:
+                        _text = await el.inner_text()
+                    except Exception:
+                        _text = ""
+                    if is_session_ending_link(href, _text or ""):
                         continue
 
                     await el.click(timeout=3000)

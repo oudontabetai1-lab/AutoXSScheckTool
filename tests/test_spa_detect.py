@@ -171,6 +171,10 @@ def test_hydrated_react_ssr_markers_are_spa_even_with_content():
         # 空マウント＋非バンドル src の module → 非SPA。
         '<html><body><div id="app"></div>'
         '<script type="module" src="/analytics.js"></script></body></html>',
+        # data-src（遅延プレースホルダ・未ロード）は実 src ではないので非SPA
+        # （\bsrc が data-src に一致する問題の回帰・Codex #104 P2）。
+        '<html><body><div id="root"></div>'
+        '<script data-src="/assets/index-abcdef.js"></script></body></html>',
         # マウントに内容がある（サーバ描画済み）＋ script → 静的サイト扱い。
         '<html><body><div id="root"><h1>ようこそ</h1><p>案内です。</p></div>'
         '<script src="/assets/site.js"></script></body></html>',
