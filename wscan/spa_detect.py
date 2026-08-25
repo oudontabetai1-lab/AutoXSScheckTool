@@ -39,6 +39,29 @@ _EMPTY_MOUNT_RE = re.compile(
     flags=re.I | re.S,
 )
 
+# アプリバンドルらしい script src。空マウント fallback で「任意の script」を
+# 認めると analytics.js 等でも SPA 誤判定するため（Codex #104 P2）、本番バンドラの
+# 典型（ハッシュ付きファイル名 / 既知の SPA アセットディレクトリ / 既知のバンドル語）
+# に限定する。
+_BUNDLE_SRC_RE = re.compile(r"<script\b[^>]*\bsrc\s*=\s*(['\"])([^'\"]+)\1", flags=re.I)
+_BUNDLE_HINT_RE = re.compile(
+    r"(?:/_next/|/_nuxt/|/assets/|/static/js/|/build/|/dist/"
+    r"|[.-][0-9a-f]{6,}\.m?js(?:$|[?#])"
+    r"|\b(?:bundle|runtime|polyfills|vendor|chunk|webpack|entry)[.\-/])",
+    flags=re.I,
+)
+
+
+def _has_bundle_script(source: str) -> bool:
+    """本番アプリバンドルらしい script が存在するか（無関係な単発 script を除く）。"""
+    # ES モジュール読み込みは SPA エントリの強い痕跡。
+    if re.search(r"<script\b[^>]*\btype\s*=\s*(['\"])module\1", source, flags=re.I):
+        return True
+    for m in _BUNDLE_SRC_RE.finditer(source):
+        if _BUNDLE_HINT_RE.search(m.group(2)):
+            return True
+    return False
+
 
 def _weak_layout_signals(source: str) -> list[str]:
     """単独では SPA と断定しない、汎用的なページ構成シグナルを返す。"""
@@ -104,6 +127,12 @@ def detect_spa(html: str) -> SpaInfo:
     react_signals: list[str] = []
     if re.search(r"<[^>]+\bdata-reactroot(?:\s*=|\s|>)", source, flags=re.I):
         react_signals.append("data-reactroot")
+    # SSR / RSC / Suspense の React 固有コメントマーカー（<!--$-->, <!--/$-->,
+    # <!--$?-->, <!--$!-->）。hydration 済みで id="root" に内容がある本番 React
+    # （空マウント fallback に載らない）でも、これらは React 特有で誤検出しにくい
+    # （Codex #104 P1・SSR/Next の本番 React を拾う）。
+    if re.search(r"<!--/?\$[?!]?-->", source):
+        react_signals.append("react-ssr-marker")
     react_root = _has_id(source, "root") or _has_id(source, "app")
     react_trace = re.search(
         r"(?:React\s*\.\s*createElement|__REACT_DEVTOOLS|"
@@ -156,7 +185,7 @@ def detect_spa(html: str) -> SpaInfo:
     # 「空マウント」＝サーバ描画済み HTML が無い＝クライアント描画前提の強い証拠なので、
     # 内容を持つ静的サイトを誤有効化せずに本番 SPA を拾える（保守側の維持）。
     shell = _EMPTY_MOUNT_RE.search(source)
-    if shell and re.search(r"<script\b[^>]*\bsrc\s*=", source, flags=re.I):
+    if shell and _has_bundle_script(source):
         mount_id = shell.group(3).lower()
         framework = {
             "root": "React",

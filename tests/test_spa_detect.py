@@ -119,14 +119,47 @@ def test_production_empty_mount_shell_is_high_confidence_spa(html, framework):
     assert info.confidence == "high"
 
 
+def test_empty_mount_with_module_script_is_spa():
+    # ES モジュール読み込みは SPA エントリの強い痕跡。
+    info = detect_spa(
+        '<html><body><div id="root"></div>'
+        '<script type="module" src="/entry.js"></script></body></html>'
+    )
+    assert info.is_spa is True
+    assert info.confidence == "high"
+
+
+def test_hydrated_react_ssr_markers_are_spa_even_with_content():
+    # SSR/RSC/Suspense の React 固有コメントは、hydration 済みで root に内容が
+    # あっても React を示す（Codex #104 P1・本番 SSR React を拾う）。
+    info = detect_spa(
+        '<html><body><div id="root"><!--$--><h1>App</h1><!--/$--></div>'
+        '<script src="/assets/index-9f3a2b.js"></script></body></html>'
+    )
+    assert info.is_spa is True
+    assert info.framework == "React"
+    assert info.confidence == "high"
+    assert "react-ssr-marker" in info.signals
+
+
 @pytest.mark.parametrize(
     "html",
     [
         # 空マウントだがバンドル script が無い → シェルと断定しない。
         '<html><body><div id="root"></div></body></html>',
+        # 空マウント＋無関係な単発 script（analytics）→ アプリバンドルでないので非SPA
+        # （Codex #104 P2・誤有効化の回避）。
+        '<html><body><div id="app"></div>'
+        '<script src="/analytics.js"></script></body></html>',
         # マウントに内容がある（サーバ描画済み）＋ script → 静的サイト扱い。
         '<html><body><div id="root"><h1>ようこそ</h1><p>案内です。</p></div>'
         '<script src="/assets/site.js"></script></body></html>',
+        # 既知の限界（documented limitation・Codex #104 P1）: 内容ありの root ＋
+        # ハッシュ付きバンドルだが React 固有マーカーが一切無いページは、SSR の
+        # 通常サイトと静的 HTML だけでは区別できないため非SPA とする（誤有効化を
+        # 選ばない保守側。必要なら利用者が --spa-crawl を明示）。
+        '<html><body><div id="root"><h1>Welcome</h1></div>'
+        '<script src="/assets/index-9f3a2b.js"></script></body></html>',
     ],
 )
 def test_empty_mount_shell_requires_empty_mount_and_bundle(html):
