@@ -44,6 +44,47 @@ _EXECUTABLE_SCRIPT_TYPES = frozenset({
 })
 
 
+def _strip_js_strings_comments(js: str) -> str:
+    """JS ソースから文字列リテラルと行/ブロックコメントを空白へ置換する（軽量字句）。
+
+    実行 script の文字列/コメント内に置かれた framework 構文
+    （const x = "self.__next_f.push([])" や // self.__next_f…）を実行式と誤認しない
+    （Codex #104 P2）。regex リテラルは扱わないが、対象マーカーは識別子/プロパティ
+    アクセスなので実害は無い。
+    """
+    out: list[str] = []
+    i, n = 0, len(js)
+    while i < n:
+        c = js[i]
+        if c in "\"'`":
+            q = c
+            i += 1
+            while i < n:
+                if js[i] == "\\":
+                    i += 2
+                    continue
+                if js[i] == q:
+                    i += 1
+                    break
+                i += 1
+            out.append(" ")
+            continue
+        if c == "/" and i + 1 < n:
+            if js[i + 1] == "/":
+                j = js.find("\n", i)
+                i = j if j >= 0 else n
+                out.append(" ")
+                continue
+            if js[i + 1] == "*":
+                j = js.find("*/", i + 2)
+                i = (j + 2) if j >= 0 else n
+                out.append(" ")
+                continue
+        out.append(c)
+        i += 1
+    return "".join(out)
+
+
 def _script_bodies(source: str) -> str:
     """実行される（コメント/inert コンテナの外の）top-level script 本文を連結する。
 
@@ -87,9 +128,17 @@ def _script_bodies(source: str) -> str:
 # var x="<app-root>"）で SPA 誤判定しないため（Codex #104 P2）。タグ自体は残す（script の
 # src/id 属性は markup マーカーとして使うため）。React SSR コメント <!--$--> は別途 raw source で
 # 判定するのでここでコメントを消しても影響しない。
-_INERT_TAGS = ("template", "script", "style", "noscript", "textarea", "title")
+# iframe の fallback body や xmp/noembed/noframes の本文はブラウザが実行/レンダリング
+# せず、中の <script> も実行しない。これらを inert に含めないと _script_bodies が中の
+# マーカーを拾い、inert 領域の早期 close にもなる（Codex #104 P2）。
+_INERT_TAGS = (
+    "template", "script", "style", "noscript", "textarea", "title",
+    "iframe", "xmp", "noembed", "noframes",
+)
 # raw-text 要素は本文がリテラル（最初の </tag> で閉じる。コメント/入れ子タグは効かない）。
-_RAWTEXT_TAGS = ("script", "style", "textarea", "title")
+_RAWTEXT_TAGS = (
+    "script", "style", "textarea", "title", "iframe", "xmp", "noembed", "noframes",
+)
 # HTML コメント。終端 --> が欠落（truncated/malformed 応答）した場合、コメントは
 # EOF まで継続する。未終端でも残り全体を「コメント内容」として扱う（Codex #104 P2）。
 _COMMENT_RE = re.compile(r"<!--.*?(?:-->|\Z)", flags=re.S)
@@ -368,8 +417,10 @@ def detect_spa(html: str) -> SpaInfo:
     誤有効化を避けるため、それらだけで ``is_spa=True`` にはしない。
     """
     source = html or ""
-    # JS 式マーカーは表示テキスト誤検出を避けるため script 本文だけで探す。
-    scripts = _script_bodies(source)
+    # JS 式マーカーは表示テキスト誤検出を避けるため script 本文だけで探す。さらに JS の
+    # 文字列/コメントを除去し、"self.__next_f…" のような文字列/コメント内の構文を
+    # 実行式と誤認しない（Codex #104 P2）。
+    scripts = _strip_js_strings_comments(_script_bodies(source))
     # inert 要素（template/script/style 等）の本文を空にした版（コメントは残す）。
     # React SSR コメント <!--$--> は inert 内では無効なのでこの版で探す（Codex #104 P2）。
     noninert = _strip_inert_elements(source)

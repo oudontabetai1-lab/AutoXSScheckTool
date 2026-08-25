@@ -127,6 +127,12 @@ def test_generic_mount_id_requires_matching_framework_trace(html, framework):
         '<html><body><template id="__next"></template></body></html>',
         '<html><body><template id="app"></template>'
         '<script src="/assets/site.js"></script></body></html>',
+        # 実行 script の文字列/コメント内の構文は実行式ではない（Codex #104 P2）。
+        '<html><body><script>const example = "self.__next_f.push([])"</script></body></html>',
+        '<html><body><script>// self.__next_f.push([])</script></body></html>',
+        # iframe/xmp の本文は実行/レンダリングされない raw-text（Codex #104 P2）。
+        '<html><body><iframe><script>self.__next_f.push([])</script></iframe></body></html>',
+        '<html><body><xmp><app-root></app-root></xmp></body></html>',
     ],
 )
 def test_normal_or_ambiguous_html_is_not_spa(html):
