@@ -1024,3 +1024,20 @@ def test_top_severity_uses_explicit_order_not_lexicographic():
     assert _top_severity(fs) == "critical"
     assert _top_severity([SimpleNamespace(severity="high"), SimpleNamespace(severity="info")]) == "high"
     assert _top_severity([]) == ""
+
+
+def test_scan_matrix_display_and_save_exclude_skipped_rows():
+    """resume-only の skip 行は display/evidence/save から除外される（Codex #102 P2）。"""
+    from wscan.engine import ScanEngine
+
+    eng = ScanEngine.__new__(ScanEngine)
+    eng.checks = ["xss"]
+    eng.scan_matrix = [
+        {"url": "u1", "field_name": "q", "check": "xss", "status": "tested", "location": "", "severity": "", "finding_count": 0, "note": ""},
+        {"url": "u1", "field_name": "q", "check": "xss", "status": "skipped", "location": "", "note": "resume"},
+        {"url": "u1", "field_name": "(page)", "check": "access", "status": "error", "location": "", "note": "x"},
+    ]
+    disp = eng._scan_matrix_for_display()
+    statuses = [r["status"] for r in disp]
+    assert "skipped" not in statuses
+    assert "tested" in statuses and "error" in statuses  # 実行行と access 行は残る

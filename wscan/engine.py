@@ -1169,6 +1169,8 @@ class ScanEngine:
             for row in (getattr(self, "scan_matrix", None) or [])
             if (
                 isinstance(row, dict)
+                # resume-only の skip 行は実行ではないので表示/evidence から除く。
+                and row.get("status") != "skipped"
                 and (
                     row.get("check") == "access"
                     or ScanEngine._check_type_in_scope(
@@ -1560,9 +1562,12 @@ class ScanEngine:
         try:
             # Finding は all_findings から都度スナップショット（最新を保存）
             self.checkpoint.findings = [f.to_dict() for f in self.all_findings]
-            self.checkpoint.scan_matrix = list(
-                getattr(self, "scan_matrix", []) or []
-            )
+            # resume-only の skip 行（status="skipped"）は resume 毎に再生成され、保存すると
+            # 累積して HTML チェックリストの行上限を stale が消費する。実行行だけ永続する。
+            self.checkpoint.scan_matrix = [
+                row for row in (getattr(self, "scan_matrix", []) or [])
+                if not (isinstance(row, dict) and row.get("status") == "skipped")
+            ]
             self.checkpoint.reached_urls = sorted(
                 getattr(self, "reached_urls", set()) or set()
             )
@@ -5801,7 +5806,7 @@ class ScanEngine:
             "visited_urls": list(self.visited_urls),
             "llm_summary": llm_summary,
             "findings": findings_dicts,
-            "scan_matrix": self.scan_matrix,
+            "scan_matrix": self._scan_matrix_for_display(),
             "observability": self._observability_report_data(),
             "coverage": self.coverage_summary(),
             "ctf_flags": [{"flag": flag, "source": src} for flag, src in self.ctf_found_flags],
