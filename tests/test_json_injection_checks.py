@@ -164,12 +164,12 @@ class JsonInjectionCheckTests(unittest.IsolatedAsyncioTestCase):
         await engine._run_json_injection_checks()
 
         row = engine.scan_matrix[-1]
-        self.assertEqual(row["status"], "vulnerable")
+        self.assertEqual(row["status"], "finding")
         self.assertEqual(row["severity"], "critical")
         self.assertEqual(row["finding_count"], 1)
         coverage = ScanEngine.coverage_summary(engine)
         self.assertEqual(coverage["attempts"], 1)
-        self.assertEqual(coverage["by_status"], {"vulnerable": 1})
+        self.assertEqual(coverage["by_status"], {"finding": 1})
 
     def test_same_url_pointer_operations_share_checkpoint_key(self):
         # resume 安定性を優先し、checkpoint キー(stable_key_parts)は operation identity を

@@ -835,7 +835,7 @@ def test_page_level_attempt_uses_only_findings_returned_by_scanner(tmp_path):
 
     row = engine.scan_matrix[-1]
     assert row["field_name"] == "(page)"
-    assert row["status"] == "vulnerable"
+    assert row["status"] == "finding"
     assert row["severity"] == "high"
     assert row["finding_count"] == 1
     assert engine.coverage_summary()["attempts"] == 1
@@ -934,7 +934,7 @@ def test_api_template_execution_is_recorded_as_an_attempt(tmp_path):
 
     row = engine.scan_matrix[-1]
     assert row["field_name"] == "(api-template)"
-    assert row["status"] == "vulnerable"
+    assert row["status"] == "finding"
     assert row["finding_count"] == 1
     assert engine.coverage_summary()["attempts"] == 1
 
