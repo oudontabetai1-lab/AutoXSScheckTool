@@ -188,6 +188,40 @@ class _SpaMarkerCrawlBrowser(_FakeCrawlBrowser):
         self.settle_calls += 1
 
 
+class _SpaHydrationCrawlBrowser(_FakeCrawlBrowser):
+    """本番シェル: hydration 前は空 <app-root>、settle 後にフォームが現れる。"""
+
+    def __init__(self):
+        super().__init__()
+        self.events: list[str] = []
+        self._settled = False
+
+    async def content(self):
+        if self._settled:
+            return (
+                "<html><body><app-root><form>"
+                "<input name='q'></form></app-root></body></html>"
+            )
+        return "<html><body><app-root></app-root></body></html>"
+
+    async def find_forms(self):
+        self.events.append("find_forms")
+        if self._settled:
+            return [{"action": "", "inputs": [{"name": "q", "type": "text"}]}]
+        return []
+
+    async def explore_spa_interactions(self, page, url, max_clicks=20):
+        self.events.append("explore")
+        return []
+
+    async def settle_spa(self):
+        self.events.append("settle_spa")
+        self._settled = True
+
+    async def collect_links_rich(self, base_url, same_domain=False):
+        return []
+
+
 class _SessionExpiryBrowser(_FakeCrawlBrowser):
     def __init__(
         self,
@@ -273,9 +307,11 @@ class EngineScanGapTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(engine.spa_crawl)
         self.assertTrue(browser.spa_settle)
-        # 初回ページの同一イテレーション後段で SPA 探索と settle が動く。
+        # 初回ページの同一イテレーション後段で SPA 探索が動く。
         self.assertEqual(browser.explore_calls, 1)
-        self.assertEqual(browser.settle_calls, 1)
+        # settle は初回ページで2回: 自動有効化直後の hydration 待ち（Codex #104 P1）と、
+        # クリック探索後の in-flight XHR 待ち。
+        self.assertEqual(browser.settle_calls, 2)
 
     async def test_auto_spa_opt_out_keeps_crawl_disabled(self):
         engine = self._engine(depth=1, auto_spa_crawl=False)
@@ -288,6 +324,32 @@ class EngineScanGapTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(browser.spa_settle)
         self.assertEqual(browser.explore_calls, 0)
         self.assertEqual(browser.settle_calls, 0)
+
+    async def test_auto_enabled_spa_settles_first_page_before_form_extraction(self):
+        # 初回 navigate は spa_settle=False で完了済み。自動有効化した本番シェルでは、
+        # find_forms/get_url_params の前に settle して html を採り直さないと hydration
+        # 前の空 DOM から 0 件になる（Codex #104 P1）。
+        engine = self._engine(depth=1)
+        browser = _SpaHydrationCrawlBrowser()
+        engine._browser = browser
+
+        pages = await engine._phase_crawl()
+
+        self.assertTrue(engine.spa_crawl)
+        # settle が初回ページの form 抽出より前に走る。
+        self.assertIn("settle_spa", browser.events)
+        self.assertIn("find_forms", browser.events)
+        self.assertLess(
+            browser.events.index("settle_spa"),
+            browser.events.index("find_forms"),
+        )
+        # hydration 後のフォームが初回ページに反映される。
+        target = engine.target_url.rstrip("/")
+        first = next(
+            (p for p in pages if p.url.rstrip("/") == target), None
+        )
+        self.assertIsNotNone(first)
+        self.assertTrue(first.forms)
 
     async def test_normal_first_page_never_auto_enables_spa_crawl(self):
         engine = self._engine(depth=1)

@@ -2987,6 +2987,16 @@ class ScanEngine:
                             f"  [cyan][SPA] {self.detected_spa.framework} を検出 — "
                             "SPA クロールを自動有効化[/cyan]"
                         )
+                        # 初回 navigate は spa_settle=False のまま完了しており、フラグ反転は
+                        # 以降のナビゲーションにしか効かない。唯一の到達ページが本番シェル
+                        # （空マウント）の場合、この場で settle して html を採り直さないと、
+                        # 直後の find_forms()/get_url_params() と CrawledPage が hydration 前の
+                        # 空 DOM を見て forms/route/url_params が 0 件になる（Codex #104 P1）。
+                        try:
+                            await self.browser.settle_spa()
+                            html = await self.browser.page.content()
+                        except Exception:
+                            pass
                 except Exception:
                     pass
 

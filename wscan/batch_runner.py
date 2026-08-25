@@ -141,7 +141,12 @@ class BatchRunner:
         # global_cfg から ScanEngine 共通オプションを構築
         global_kwargs = {}
         for key in ("llm", "sarif", "webhook_url", "notify_min_severity",
-                    "request_delay", "fast_mode"):
+                    "request_delay", "fast_mode",
+                    # SPA クロールと自動有効化を batch でも制御可能にする。
+                    # auto_spa_crawl は既定 ON のため、global.auto_spa_crawl: false で
+                    # opt-out できないと既存バッチが検出 SPA を勝手にクリックし始める
+                    # （Codex #104 P2）。spa_crawl: true で明示 ON も可。
+                    "spa_crawl", "auto_spa_crawl"):
             if key in global_cfg:
                 global_kwargs[key] = global_cfg[key]
 
