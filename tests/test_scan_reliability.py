@@ -516,6 +516,10 @@ class EngineScanGapTests(unittest.IsolatedAsyncioTestCase):
         fp_a = ScanEngine._page_fingerprint(html, "https://a.example/")
         fp_b = ScanEngine._page_fingerprint(html, "https://b.example/")
         self.assertNotEqual(fp_a, fp_b)
+        # scheme も含める（同一ホストの HTTP/HTTPS アプリを区別・Codex #104 P2）。
+        fp_http = ScanEngine._page_fingerprint(html, "http://a.example/")
+        fp_https = ScanEngine._page_fingerprint(html, "https://a.example/")
+        self.assertNotEqual(fp_http, fp_https)
 
     async def test_auto_spa_json_body_harvest_gated_on_probe_opt_in(self):
         # 自動有効化（既定 read-only）では非GET body の harvest→再送を行わない。

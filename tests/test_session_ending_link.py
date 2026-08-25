@@ -73,6 +73,12 @@ def test_session_ending_links_are_flagged(href, text):
         ("/products?q=1", "検索"),
         ("/about", "About"),
         ("/settings/profile", "プロフィール"),
+        # トークン境界で誤検出しない（log/out・sign/out がセグメント跨ぎ・Codex #104 P2）。
+        ("/catalog/output", ""),
+        ("/blog/outdoors", ""),
+        ("/prologoutfitters", ""),  # log/out を含むが単一の連続語（トークン境界なし）
+        ("", "Catalog Output"),
+        ("", "Blog Outdoors"),
         ("", "ログイン"),
         ("", "Sign in"),
         ("", ""),

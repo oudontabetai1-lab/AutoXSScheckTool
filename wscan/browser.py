@@ -41,13 +41,19 @@ _DEFAULT_PORTS = {"http": 80, "https": 443, "ws": 80, "wss": 443}
 # セッションを終了させるリンク（ログアウト等）。SPA クリック探索がこれを踏むと、
 # 認証セッションが失効し go_back() でも復元できず、以降の認証ページが軒並みログインへ
 # リダイレクトして攻撃面を失う（自動有効化で既定化するため特に危険・Codex #104 P1）。
+# href: logout 変種を「完全なトークン」に限定する。log[\W_]*out のように区切りを
+# 貪欲に許すと /catalog/output や /blog/outdoors が session 終了リンク扱いされ、正当な
+# SPA ルートをクリックしなくなる（Codex #104 P2）。区切りは単一の -_. のみ許し、前後は
+# 英数字でない（トークン境界）ことを要求する。
 _SESSION_ENDING_HREF_RE = re.compile(
-    r"(?:log[\W_]*out|sign[\W_]*out|log[\W_]*off|sign[\W_]*off|deauth\w*|/logoff\b)",
+    r"(?<![a-z0-9])(?:log[-_.]?out|sign[-_.]?out|log[-_.]?off|sign[-_.]?off|deauth)"
+    r"(?![a-z0-9])",
     flags=re.I,
 )
+# text: 単語境界に限定する（"Catalog Output" 等の誤検出回避）。CJK は境界不要。
 _SESSION_ENDING_TEXT_RE = re.compile(
-    r"(?:log\s*out|sign\s*out|log\s*off|sign\s*off"
-    r"|ログアウト|サインアウト|ログオフ|サインオフ)",
+    r"\b(?:log\s*out|sign\s*out|log\s*off|sign\s*off)\b"
+    r"|ログアウト|サインアウト|ログオフ|サインオフ",
     flags=re.I,
 )
 

@@ -2559,9 +2559,11 @@ class ScanEngine:
         route_sig = ""
         if url:
             parsed = urlparse(url)
-            # netloc を含めて origin-aware にする。別 origin の構造的に同一なページ
-            # （複数ターゲットの SPA ルート `/` 等）を重複スキップで落とさない（Codex #104 P1）。
-            route_sig = f"route:{parsed.netloc}{parsed.path or '/'}"
+            # 完全な正規化 origin（scheme+netloc）を含めて origin-aware にする。別 origin の
+            # 構造的に同一なページ（複数ターゲットの SPA ルート `/` 等）を重複スキップで
+            # 落とさない。scheme も含めるので同一ホストの HTTP/HTTPS アプリも区別する
+            # （Codex #104 P1/P2）。
+            route_sig = f"route:{parsed.scheme}://{parsed.netloc}{parsed.path or '/'}"
             query_names = sorted(
                 {
                     part.split("=", 1)[0]
