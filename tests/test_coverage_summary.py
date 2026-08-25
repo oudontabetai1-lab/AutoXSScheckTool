@@ -4,13 +4,14 @@ import asyncio
 import importlib
 from collections import Counter
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
-from wscan.browser import NetworkCapture, bucketize_status_counts
+from wscan.browser import NetworkCapture, bucketize_status_counts, canonical_host
 from wscan.checkpoint import CheckpointState, load_checkpoint
 from wscan.engine import (
     CrawledPage,
     ScanEngine,
-    _coverage_allowed_origins,
+    _coverage_allowed_hosts,
     _coverage_summary_text,
 )
 from wscan.report import ReportGenerator
@@ -105,12 +106,18 @@ def test_network_capture_counts_scan_related_and_unknown_resource_types():
     assert capture.status_counts == {403: 2, 429: 2}
 
 
-def test_network_capture_filters_status_counts_to_allowed_origins():
+def test_canonical_host_strips_www_port_and_casefolds():
+    assert canonical_host("https://WWW.Fixture.Test:8443/path") == "fixture.test"
+    assert canonical_host("www.FIXTURE.test:443") == "fixture.test"
+    assert canonical_host("http://[invalid") == ""
+
+
+def test_network_capture_filters_status_counts_to_allowed_hosts():
     capture = NetworkCapture()
-    capture.allowed_origins = {"http://fixture.test"}
+    capture.allowed_hosts = {"fixture.test"}
     for status, url, resource_type in (
         (403, "http://fixture.test/private", "document"),
-        (429, "http://fixture.test/api", "fetch"),
+        (429, "https://www.FIXTURE.test:8443/api", "fetch"),
         (403, "https://cdn.example.test/script.js", "script"),
         (403, "https://api.example.test/data", "xhr"),
         (403, "https://api.example.test/data", "fetch"),
@@ -123,7 +130,7 @@ def test_network_capture_filters_status_counts_to_allowed_origins():
     assert len(capture.pairs) == 5
 
 
-def test_network_capture_without_allowed_origins_counts_every_origin():
+def test_network_capture_without_allowed_hosts_counts_every_origin():
     capture = NetworkCapture()
     for url in (
         "http://fixture.test/private",
@@ -133,13 +140,13 @@ def test_network_capture_without_allowed_origins_counts_every_origin():
         capture.on_request(response.request)
         capture.on_response(response)
 
-    assert capture.allowed_origins is None
+    assert capture.allowed_hosts is None
     assert capture.status_counts == {403: 2}
 
 
-def test_network_capture_origin_filter_is_exception_safe():
+def test_network_capture_host_filter_is_exception_safe():
     capture = NetworkCapture()
-    capture.allowed_origins = {"http://fixture.test"}
+    capture.allowed_hosts = {"fixture.test"}
     response = _response(403, url="http://[invalid", resource_type="fetch")
     capture.on_request(response.request)
 
@@ -149,22 +156,22 @@ def test_network_capture_origin_filter_is_exception_safe():
     assert len(capture.pairs) == 1
 
 
-def test_coverage_allowed_origins_uses_target_and_access_urls():
-    assert _coverage_allowed_origins(
-        ["https://target.test/app", "http://other.test:8080/path"],
+def test_coverage_allowed_hosts_uses_canonical_target_and_access_hosts():
+    assert _coverage_allowed_hosts(
+        ["https://www.TARGET.test/app", "http://other.test:8080/path"],
         ["https://auth.test/login", "/relative-scope", "http://[invalid"],
     ) == {
-        "https://target.test",
-        "http://other.test:8080",
-        "https://auth.test",
+        "target.test",
+        "other.test",
+        "auth.test",
     }
 
 
-def test_note_coverage_origin_adds_in_scope_landing_to_main_and_workers():
-    main = SimpleNamespace(network=SimpleNamespace(allowed_origins=None))
-    worker = SimpleNamespace(network=SimpleNamespace(allowed_origins=None))
+def test_note_coverage_origin_refreshes_in_scope_host_on_main_and_workers():
+    main = SimpleNamespace(network=SimpleNamespace(allowed_hosts=None))
+    worker = SimpleNamespace(network=SimpleNamespace(allowed_hosts=None))
     engine = SimpleNamespace(
-        _coverage_origins={"http://fixture.test"},
+        _coverage_hosts={"fixture.test"},
         _browser=main,
         _coverage_workers=[worker],
         # Canonical redirects must not depend on exact scheme/host scope checks.
@@ -173,17 +180,17 @@ def test_note_coverage_origin_adds_in_scope_landing_to_main_and_workers():
 
     ScanEngine._note_coverage_origin(engine, "https://www.fixture.test/app")
 
-    expected = {"http://fixture.test", "https://www.fixture.test"}
-    assert engine._coverage_origins == expected
-    assert main.network.allowed_origins == expected
-    assert worker.network.allowed_origins == expected
+    expected = {"fixture.test"}
+    assert engine._coverage_hosts == expected
+    assert main.network.allowed_hosts == expected
+    assert worker.network.allowed_hosts == expected
 
     ScanEngine._note_coverage_origin(engine, "https://third-party.test/track")
     ScanEngine._note_coverage_origin(engine, "http://[invalid")
 
-    assert engine._coverage_origins == expected
-    assert main.network.allowed_origins == expected
-    assert worker.network.allowed_origins == expected
+    assert engine._coverage_hosts == expected
+    assert main.network.allowed_hosts == expected
+    assert worker.network.allowed_hosts == expected
 
 
 def test_bucketize_status_counts_groups_blocked_and_error_classes():
@@ -411,7 +418,7 @@ def test_parallel_worker_statuses_are_checkpointed_after_close(tmp_path):
         def __init__(self):
             self.network = SimpleNamespace(
                 status_counts=Counter({403: 2, 503: 1}),
-                allowed_origins=None,
+                allowed_hosts=None,
             )
             self.closed = False
 
@@ -430,7 +437,7 @@ def test_parallel_worker_statuses_are_checkpointed_after_close(tmp_path):
         _worker_status_counts=Counter(),
         _restored_status_counts=Counter(),
         _probe_status_counts=Counter({429: 2}),
-        _coverage_origins={"http://fixture.test"},
+        _coverage_hosts={"fixture.test"},
         enable_checkpoint=True,
         checkpoint=CheckpointState(
             target_url="http://fixture.test/", checks=["xss"]
@@ -451,7 +458,7 @@ def test_parallel_worker_statuses_are_checkpointed_after_close(tmp_path):
     asyncio.run(ScanEngine._phase_attack_concurrent(engine, [], {}))
 
     assert engine._worker_status_counts == Counter({403: 2, 503: 1})
-    assert worker.network.allowed_origins == {"http://fixture.test"}
+    assert worker.network.allowed_hosts == {"fixture.test"}
     assert worker.closed is True
     assert save_calls == [{403: 2, 503: 1}]
     assert load_checkpoint(tmp_path).http_status_counts == {
@@ -464,7 +471,7 @@ def test_parallel_worker_statuses_are_checkpointed_after_close(tmp_path):
 def test_record_probe_status_is_guarded_and_contributes_to_blocked():
     engine = SimpleNamespace(
         _probe_status_counts=Counter(),
-        _coverage_origins=set(),
+        _coverage_hosts=set(),
         reached_urls=set(),
         scan_matrix=[],
         browser=None,
@@ -485,22 +492,113 @@ def test_record_probe_status_is_guarded_and_contributes_to_blocked():
     }
 
 
-def test_record_probe_status_filters_url_when_coverage_origins_are_set():
+def test_record_probe_status_filters_url_by_canonical_host():
     engine = SimpleNamespace(
         _probe_status_counts=Counter(),
-        _coverage_origins={"https://fixture.test"},
+        _coverage_hosts={"fixture.test"},
     )
 
-    ScanEngine.record_probe_status(engine, 403, "https://fixture.test/private")
+    ScanEngine.record_probe_status(engine, 403, "https://www.FIXTURE.test:8443/private")
     ScanEngine.record_probe_status(engine, 429, "https://external.test/rate-limit")
     ScanEngine.record_probe_status(engine, 500, None)
 
     assert engine._probe_status_counts == Counter({403: 1, 500: 1})
 
-    engine._coverage_origins.clear()
+    engine._coverage_hosts.clear()
     ScanEngine.record_probe_status(engine, 429, "https://external.test/rate-limit")
 
     assert engine._probe_status_counts == Counter({403: 1, 429: 1, 500: 1})
+
+
+class _QueuedAsyncClient:
+    def __init__(self, responses):
+        self.responses = list(responses)
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *args):
+        return None
+
+    async def get(self, *args, **kwargs):
+        return self.responses.pop(0)
+
+
+def test_engine_session_preflight_records_final_url_with_host_filter():
+    responses = [
+        SimpleNamespace(
+            status_code=403,
+            url="https://external-idp.test/login",
+            text="blocked",
+        ),
+        SimpleNamespace(
+            status_code=429,
+            url="https://www.FIXTURE.test:8443/login",
+            text="rate limited",
+        ),
+    ]
+    engine = SimpleNamespace(
+        relogin_on_expiry=True,
+        login_url="http://fixture.test/login",
+        logged_in_marker="",
+        timeout=1,
+        proxy="",
+        _coverage_hosts={"fixture.test"},
+        _probe_status_counts=Counter(),
+        auth_headers=lambda **kwargs: {},
+    )
+    engine.record_probe_status = lambda status, url=None: ScanEngine.record_probe_status(
+        engine, status, url
+    )
+
+    with patch("httpx.AsyncClient", return_value=_QueuedAsyncClient(responses)):
+        asyncio.run(ScanEngine._api_session_looks_expired(engine, "http://fixture.test/a"))
+        asyncio.run(ScanEngine._api_session_looks_expired(engine, "http://fixture.test/b"))
+
+    assert engine._probe_status_counts == Counter({429: 1})
+
+
+def test_engine_ssti_fallback_records_each_final_url_with_host_filter():
+    payload = "{{2654435761*2654435761}}"
+    responses = [
+        SimpleNamespace(
+            status_code=403,
+            url="https://external-idp.test/login",
+            text="blocked",
+        ),
+        SimpleNamespace(
+            status_code=429,
+            url="https://www.fixture.test:8443/search?q=probe",
+            text="rate limited",
+        ),
+    ]
+    scanner = SimpleNamespace(verify_finding=AsyncMock(return_value=False))
+    engine = SimpleNamespace(
+        scanners={"ssti": scanner},
+        timeout=1,
+        _coverage_hosts={"fixture.test"},
+        _probe_status_counts=Counter(),
+        httpx_client_kwargs=lambda **kwargs: kwargs,
+        auth_headers=lambda **kwargs: {},
+    )
+    engine.record_probe_status = lambda status, url=None: ScanEngine.record_probe_status(
+        engine, status, url
+    )
+    finding = Finding(
+        check_type="ssti",
+        severity="critical",
+        url=f"http://fixture.test/search?q={payload}",
+        field_name="q",
+        payload=payload,
+        evidence="fixture",
+        injection_location="url_param",
+    )
+
+    with patch("httpx.AsyncClient", return_value=_QueuedAsyncClient(responses)):
+        result = asyncio.run(ScanEngine._verify_one(engine, finding))
+
+    assert result == "unreproduced"
+    assert engine._probe_status_counts == Counter({429: 1})
 
 
 def test_scanner_probe_status_forwarding_is_optional_and_exception_safe():

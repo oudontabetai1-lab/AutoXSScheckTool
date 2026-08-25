@@ -24,6 +24,30 @@ class _FlakyPage:
         return _Response(self.status)
 
 
+class _CanonicalBlockedPage:
+    def __init__(self, network):
+        self.network = network
+
+    async def goto(self, url, wait_until="domcontentloaded", timeout=30000):
+        final_url = "https://www.FIXTURE.test:8443/private"
+        request = SimpleNamespace(
+            url=final_url,
+            method="GET",
+            headers={},
+            post_data=None,
+            resource_type="document",
+        )
+        response = SimpleNamespace(
+            url=final_url,
+            status=403,
+            headers={},
+            request=request,
+        )
+        self.network.on_request(request)
+        self.network.on_response(response)
+        return response
+
+
 class _UnsettledPage:
     def __init__(self):
         self.calls = []
@@ -81,6 +105,17 @@ class BrowserNavigationReliabilityTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(browser.last_navigation_status, 403)
         self.assertEqual(browser.last_navigation_error, "HTTP 403")
 
+    async def test_failed_canonical_redirect_counts_known_host_block(self):
+        browser = BrowserManager(headless=True, timeout=1)
+        browser.network.allowed_hosts = {"fixture.test"}
+        browser.page = _CanonicalBlockedPage(browser.network)
+
+        ok = await browser.navigate("http://fixture.test/private", retries=0)
+
+        self.assertFalse(ok)
+        self.assertEqual(browser.network.status_counts, {403: 1})
+        self.assertEqual(browser.network.status_summary()["blocked"], 1)
+
 
 class _FakeCrawlBrowser:
     def __init__(self):
@@ -90,7 +125,7 @@ class _FakeCrawlBrowser:
         self.last_navigation_status = None
         self.auth_user = ""
         self.auth_pass = ""
-        self.network = SimpleNamespace(allowed_origins=None)
+        self.network = SimpleNamespace(allowed_hosts=None)
 
     async def navigate(self, url, **kwargs):
         if url.endswith("/down"):
@@ -206,13 +241,13 @@ class EngineScanGapTests(unittest.IsolatedAsyncioTestCase):
         return engine
 
     async def test_crawl_records_unscannable_urls_in_scan_matrix(self):
-        from wscan.engine import _configure_network_coverage_origins
+        from wscan.engine import _configure_network_coverage_hosts
 
         engine = self._engine()
         # run() は browser.init 直後に coverage origin を設定する。_phase_crawl を
         # 直接呼ぶこのテストでは同等のセットアップを明示的に行う。
-        _configure_network_coverage_origins(
-            engine._browser, getattr(engine, "_coverage_origins", set())
+        _configure_network_coverage_hosts(
+            engine._browser, getattr(engine, "_coverage_hosts", set())
         )
 
         pages = await engine._phase_crawl()
@@ -228,8 +263,8 @@ class EngineScanGapTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("http://fixture.test/", engine.reached_urls)
         self.assertNotIn("http://fixture.test/down", engine.reached_urls)
         self.assertEqual(
-            engine._browser.network.allowed_origins,
-            {"http://fixture.test"},
+            engine._browser.network.allowed_hosts,
+            {"fixture.test"},
         )
         coverage = engine.coverage_summary()
         self.assertEqual(coverage["reached_count"], 1)

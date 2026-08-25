@@ -75,36 +75,23 @@ def _coverage_summary_text(coverage: dict) -> str:
     )
 
 
-def _coverage_allowed_origins(
+def _coverage_allowed_hosts(
     target_urls: list[str],
     access_urls: list[str],
 ) -> set[str]:
-    """Return raw scheme://netloc origins used by HTTP coverage counters."""
-    origins: set[str] = set()
+    """Return canonical target/access hosts used by HTTP coverage counters."""
+    hosts: set[str] = set()
     for url in [*target_urls, *access_urls]:
-        try:
-            parsed = urlsplit(url)
-            if parsed.scheme and parsed.netloc:
-                origins.add(f"{parsed.scheme}://{parsed.netloc}")
-        except Exception:
-            continue
-    return origins
+        if host := canonical_host(url):
+            hosts.add(host)
+    return hosts
 
 
-def _canonical_coverage_host(url: str) -> str:
-    """Return a case-insensitive host key, ignoring ``www.`` and port."""
-    try:
-        host = (urlsplit(str(url)).hostname or "").lower()
-    except Exception:
-        return ""
-    return host[4:] if host.startswith("www.") else host
-
-
-def _configure_network_coverage_origins(browser, origins: set[str]) -> None:
-    """Apply a non-empty coverage origin set to a browser network capture."""
+def _configure_network_coverage_hosts(browser, hosts: set[str]) -> None:
+    """Apply canonical coverage hosts to a browser network capture."""
     network = getattr(browser, "network", None)
-    if origins and network is not None:
-        network.allowed_origins = set(origins)
+    if network is not None:
+        network.allowed_hosts = set(hosts) if hosts else None
 
 
 def _coerce_header_scope_enforce(value, default: bool = True) -> bool:
@@ -232,7 +219,7 @@ from rich import box as rbox
 
 from .attack_planner import AttackPlanner, FieldAttackPlan, PageAttackPlan
 from .adaptive_payload import AdaptivePayloadEngine
-from .browser import BrowserManager, bucketize_status_counts
+from .browser import BrowserManager, bucketize_status_counts, canonical_host
 from .header_scope import allowed_header_origins, headers_allowed_for_url
 from .tls_config import TLSConfig
 from .chain_scanner import ChainScanner, ChainFinding
@@ -642,7 +629,7 @@ class ScanEngine:
         self.access_urls: list[str] = self._normalize_scope_urls(
             list(access_urls or []) + ([login_url] if login_url else [])
         )
-        self._coverage_origins: set[str] = _coverage_allowed_origins(
+        self._coverage_hosts: set[str] = _coverage_allowed_hosts(
             self.target_urls,
             self.access_urls,
         )
@@ -1175,18 +1162,9 @@ class ScanEngine:
     def record_probe_status(self, status, url=None) -> None:
         """非ブラウザプローブの HTTP status を scan 単位で安全に記録する。"""
         try:
-            origins = getattr(self, "_coverage_origins", set()) or set()
-            if url is not None and origins:
-                try:
-                    parsed = urlsplit(str(url))
-                    origin = (
-                        f"{parsed.scheme}://{parsed.netloc}"
-                        if parsed.scheme and parsed.netloc
-                        else ""
-                    )
-                except Exception:
-                    origin = ""
-                if origin not in origins:
+            hosts = getattr(self, "_coverage_hosts", set()) or set()
+            if url is not None and hosts:
+                if canonical_host(url) not in hosts:
                     return
             value = int(status)
             if not 100 <= value < 600:
@@ -1200,27 +1178,17 @@ class ScanEngine:
             pass
 
     def _note_coverage_origin(self, url) -> None:
-        """Add a canonical-host landing origin and refresh live network filters."""
+        """Admit an in-scope canonical landing host and refresh live filters."""
         try:
-            parsed = urlsplit(str(url))
-            if not (parsed.scheme and parsed.netloc):
+            landing_host = canonical_host(url)
+            if not landing_host:
                 return
-            origins = getattr(self, "_coverage_origins", None)
-            if origins is None:
-                origins = set()
-                self._coverage_origins = origins
-            in_scope_hosts = {
-                host
-                for origin_value in origins
-                if (host := _canonical_coverage_host(origin_value))
-            }
-            landing_host = _canonical_coverage_host(str(url))
-            if not landing_host or landing_host not in in_scope_hosts:
+            hosts = getattr(self, "_coverage_hosts", None)
+            if hosts is None:
+                hosts = set()
+                self._coverage_hosts = hosts
+            if landing_host not in hosts:
                 return
-            origin = f"{parsed.scheme}://{parsed.netloc}"
-            if origin in origins:
-                return
-            origins.add(origin)
         except Exception:
             return
 
@@ -1230,7 +1198,7 @@ class ScanEngine:
             if browser is None:
                 continue
             try:
-                _configure_network_coverage_origins(browser, origins)
+                _configure_network_coverage_hosts(browser, hosts)
             except Exception:
                 continue
 
@@ -2153,7 +2121,7 @@ class ScanEngine:
         try:
             async with httpx.AsyncClient(**kwargs) as client:
                 r = await client.get(url, headers=headers)
-                self.record_probe_status(r.status_code)
+                self.record_probe_status(r.status_code, r.url)
         except Exception:
             return False
         return session_guard.looks_logged_out(
@@ -2199,8 +2167,8 @@ class ScanEngine:
             await self._browser.init()
             # coverage の blocked カウンタ用 origin フィルタは、pre-auth ログインフロー等の
             # 最初のトラフィックより前に main browser へ設定する（Codex #102 P2）。
-            _configure_network_coverage_origins(
-                self._browser, getattr(self, "_coverage_origins", set())
+            _configure_network_coverage_hosts(
+                self._browser, getattr(self, "_coverage_hosts", set())
             )
             if self.cookies:
                 await self._browser.set_cookies(self.cookies, self.target_url)
@@ -3766,9 +3734,9 @@ class ScanEngine:
         for i in range(self.concurrency - 1):
             try:
                 w = await self._browser.create_worker()
-                _configure_network_coverage_origins(
+                _configure_network_coverage_hosts(
                     w,
-                    getattr(self, "_coverage_origins", set()),
+                    getattr(self, "_coverage_hosts", set()),
                 )
                 extra_workers.append(w)
                 coverage_workers.append(w)
@@ -5627,12 +5595,14 @@ class ScanEngine:
                             baseline_url,
                             headers=self.auth_headers(url=baseline_url),
                         )
-                        self.record_probe_status(baseline_resp.status_code)
+                        self.record_probe_status(
+                            baseline_resp.status_code, baseline_resp.url
+                        )
                         probe_resp = await client.get(
                             probe_url,
                             headers=self.auth_headers(url=probe_url),
                         )
-                        self.record_probe_status(probe_resp.status_code)
+                        self.record_probe_status(probe_resp.status_code, probe_resp.url)
                     baseline_text = baseline_resp.text
                     probe_text = probe_resp.text
                     for expected in expected_values:

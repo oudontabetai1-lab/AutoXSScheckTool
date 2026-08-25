@@ -35,6 +35,19 @@ from .url_extraction import (
 console = Console()
 
 
+def canonical_host(url_or_netloc) -> str:
+    """Return a case-insensitive host key without port or leading ``www.``."""
+    try:
+        value = str(url_or_netloc).strip()
+        parsed = urlsplit(value)
+        if parsed.hostname is None and "://" not in value:
+            parsed = urlsplit(f"//{value}")
+        host = (parsed.hostname or "").casefold()
+    except Exception:
+        return ""
+    return host[4:] if host.startswith("www.") else host
+
+
 def bucketize_status_counts(counts: Mapping) -> dict:
     """HTTP status の生カウンタをカバレッジ用バケットへ集計する（純粋関数）。"""
     return {
@@ -169,9 +182,9 @@ class NetworkCapture:
         self.pairs: list[dict] = []
         self.status_counts = collections.Counter()
         # None preserves the historical behaviour of counting every origin.
-        # ScanEngine sets this to the configured target/access origins so
+        # ScanEngine sets this to the configured target/access canonical hosts so
         # third-party script/XHR failures do not inflate coverage warnings.
-        self.allowed_origins: Optional[set] = None
+        self.allowed_hosts: Optional[set] = None
         # Use (url, id(request_object)) as key to avoid collisions when the same URL
         # is requested multiple times concurrently (race condition fix).
         self._pending: dict[tuple, dict] = {}
@@ -222,21 +235,12 @@ class NetworkCapture:
                 # Unknown request types are counted conservatively so a real
                 # block is not hidden by an incomplete response object.
                 rtype = ""
-            in_allowed_origin = True
-            if self.allowed_origins is not None:
-                try:
-                    parsed = urlsplit(response.url)
-                    origin = (
-                        f"{parsed.scheme}://{parsed.netloc}"
-                        if parsed.scheme and parsed.netloc
-                        else ""
-                    )
-                except Exception:
-                    origin = ""
-                in_allowed_origin = origin in self.allowed_origins
+            in_allowed_host = True
+            if self.allowed_hosts:
+                in_allowed_host = canonical_host(response.url) in self.allowed_hosts
             if (
                 rtype not in ("image", "font", "stylesheet", "media")
-                and in_allowed_origin
+                and in_allowed_host
             ):
                 self.status_counts[response.status] += 1
         except Exception:
