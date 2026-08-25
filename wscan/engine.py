@@ -3140,8 +3140,11 @@ class ScanEngine:
                 and _spa_click_allowed
             ):
                 try:
+                    # base_url は landed_url を渡す。相対 href/routing 属性は landed
+                    # ドキュメント URL で解決されるため、pre-redirect の url を渡すと
+                    # スコープ判定と実リクエスト先がずれる（Codex #104 P1）。
                     spa_links = await self._browser.explore_spa_interactions(
-                        self._browser.page, url, max_clicks=20,
+                        self._browser.page, landed_url, max_clicks=20,
                         is_in_scope=self._is_access_allowed_url,
                     )
                     # 発見ルートの巡回キュー投入は通常リンクと同じ深度ガードに従う。
