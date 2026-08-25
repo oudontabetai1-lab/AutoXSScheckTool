@@ -133,6 +133,8 @@ def test_generic_mount_id_requires_matching_framework_trace(html, framework):
         # iframe/xmp の本文は実行/レンダリングされない raw-text（Codex #104 P2）。
         '<html><body><iframe><script>self.__next_f.push([])</script></iframe></body></html>',
         '<html><body><xmp><app-root></app-root></xmp></body></html>',
+        # 正規表現リテラル内の構文は実行式ではない（Codex #104 P2）。
+        '<html><body><script>const marker = /self.__next_f.push/;</script></body></html>',
     ],
 )
 def test_normal_or_ambiguous_html_is_not_spa(html):

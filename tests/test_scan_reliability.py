@@ -164,6 +164,9 @@ class _FakeCrawlBrowser:
     def is_on_login_page(self, login_url):
         return bool(login_url) and self.url.rstrip("/") == login_url.rstrip("/")
 
+    async def clear_scope_route(self):
+        return None
+
 
 class _SpaMarkerCrawlBrowser(_FakeCrawlBrowser):
     def __init__(self):

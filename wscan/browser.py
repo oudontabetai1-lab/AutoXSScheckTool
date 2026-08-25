@@ -2348,6 +2348,23 @@ class BrowserManager:
     # ① SPA/Dynamic content crawl exploration
     # ------------------------------------------------------------------
 
+    async def clear_scope_route(self) -> None:
+        """explore_spa_interactions が張った context スコープ route を剥がす。
+
+        探索中に張ったスコープ外リクエスト遮断 route を、呼び出し側（engine）が
+        settle/harvest 後に剥がすために使う（遅延リクエストを settle 中も遮断するため
+        探索直後には剥がさない・Codex #104 P1）。
+        """
+        handle = getattr(self, "_spa_scope_route", None)
+        if not handle:
+            return
+        ctx, route = handle
+        try:
+            await ctx.unroute("**/*", route)
+        except Exception:
+            pass
+        self._spa_scope_route = None
+
     async def explore_spa_interactions(
         self,
         page,
@@ -2433,6 +2450,14 @@ class BrowserManager:
             except Exception:
                 _scope_route = None
                 _scope_ctx = None
+        # route はここで剥がさず self に保持し、呼び出し側（engine）が settle/harvest 後に
+        # clear_scope_route() する。setTimeout(()=>fetch('//outside'),5000) のような遅延
+        # リクエストが、探索直後の settle 中（guard 消失後）に飛ぶのを防ぐ（Codex #104 P1）。
+        self._spa_scope_route = (
+            (_scope_ctx, _scope_route)
+            if (_scope_route is not None and _scope_ctx is not None)
+            else None
+        )
 
         # Collect interactive elements to click
         selectors = [
@@ -2487,11 +2512,22 @@ class BrowserManager:
 
                     # セッションを終了させるリンク（logout/signout 等）はクリックしない。
                     # 認証セッションを失効させ、以降の認証ページを軒並み失う（Codex #104 P1）。
+                    # アイコンのみのコントロール（inner_text 空）向けに aria-label/title の
+                    # アクセシブル名も判定に含める（Codex #104 P1）。
                     try:
                         _text = await el.inner_text()
                     except Exception:
                         _text = ""
-                    if is_session_ending_link(route_ref, _text or ""):
+                    try:
+                        _aria = await el.get_attribute("aria-label") or ""
+                    except Exception:
+                        _aria = ""
+                    try:
+                        _title = await el.get_attribute("title") or ""
+                    except Exception:
+                        _title = ""
+                    _label = " ".join(t for t in (_text, _aria, _title) if t)
+                    if is_session_ending_link(route_ref, _label):
                         continue
 
                     await el.click(timeout=3000)
@@ -2575,13 +2611,9 @@ class BrowserManager:
         # 復帰不能で中断した場合、ページは置換ドキュメント上に残っている。呼び出し側は
         # 元の queued URL を基準に collect_links_rich(url) 等を行うので、外部/別ページの
         # 相対リンクを誤解決して偽ターゲットを作らないよう、元ページへ戻してから返す。
-        # goto の結果を検証し、戻れなければもう一度試みる（Codex #104 P2）。route を先に
-        # 剥がしてから戻す（元ページが in-scope でも route が張ったままだと余計な干渉を避ける）。
-        if _scope_route is not None and _scope_ctx is not None:
-            try:
-                await _scope_ctx.unroute("**/*", _scope_route)
-            except Exception:
-                pass
+        # 復元 goto の結果を検証し、戻れなければもう一度試みる（Codex #104 P2）。scope route は
+        # ここでは剥がさない（engine が settle/harvest 後に clear する）。復元先は in-scope
+        # なので route が張ったままでも許可される。
         if aborted:
             for _ in range(2):
                 try:

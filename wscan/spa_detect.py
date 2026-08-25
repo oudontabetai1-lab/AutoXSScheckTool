@@ -44,16 +44,22 @@ _EXECUTABLE_SCRIPT_TYPES = frozenset({
 })
 
 
-def _strip_js_strings_comments(js: str) -> str:
-    """JS ソースから文字列リテラルと行/ブロックコメントを空白へ置換する（軽量字句）。
+# `/` の直前がこれらのいずれか（または先頭）なら正規表現リテラルの開始とみなす。
+# これらは式を終えられないトークンなので後続の `/` は除算ではない。識別子/`)`/`]`/数字/
+# 文字列の後の `/` は除算として扱う（誤って regex 認定して実コードを飲み込まない）。
+_REGEX_PRECEDERS = frozenset("([{,;:=!&|?+-*%^~<>")
 
-    実行 script の文字列/コメント内に置かれた framework 構文
-    （const x = "self.__next_f.push([])" や // self.__next_f…）を実行式と誤認しない
-    （Codex #104 P2）。regex リテラルは扱わないが、対象マーカーは識別子/プロパティ
-    アクセスなので実害は無い。
+
+def _strip_js_strings_comments(js: str) -> str:
+    """JS から文字列・コメント・正規表現リテラルを空白へ置換する（軽量字句）。
+
+    実行 script の文字列/コメント/正規表現内に置かれた framework 構文
+    （const x = "self.__next_f.push([])" / // self.__next_f… / const m = /self.__next_f/）を
+    実行式と誤認しない（Codex #104 P2）。regex と除算は直前の有意トークンで区別する。
     """
     out: list[str] = []
     i, n = 0, len(js)
+    prev = ""  # 直前に出力した非空白文字（regex/除算の判定用）
     while i < n:
         c = js[i]
         if c in "\"'`":
@@ -68,19 +74,41 @@ def _strip_js_strings_comments(js: str) -> str:
                     break
                 i += 1
             out.append(" ")
+            prev = "x"  # 文字列は値なので後続 / は除算
             continue
-        if c == "/" and i + 1 < n:
-            if js[i + 1] == "/":
-                j = js.find("\n", i)
-                i = j if j >= 0 else n
-                out.append(" ")
-                continue
-            if js[i + 1] == "*":
-                j = js.find("*/", i + 2)
-                i = (j + 2) if j >= 0 else n
-                out.append(" ")
-                continue
+        if c == "/" and i + 1 < n and js[i + 1] == "/":
+            j = js.find("\n", i)
+            i = j if j >= 0 else n
+            continue
+        if c == "/" and i + 1 < n and js[i + 1] == "*":
+            j = js.find("*/", i + 2)
+            i = (j + 2) if j >= 0 else n
+            continue
+        if c == "/" and (prev == "" or prev in _REGEX_PRECEDERS):
+            # 正規表現リテラル。文字クラス [...] 内の / はデリミタでない。
+            i += 1
+            in_class = False
+            while i < n:
+                ch = js[i]
+                if ch == "\\":
+                    i += 2
+                    continue
+                if ch == "\n":
+                    break  # 未終端 regex は中断
+                if ch == "[":
+                    in_class = True
+                elif ch == "]":
+                    in_class = False
+                elif ch == "/" and not in_class:
+                    i += 1
+                    break
+                i += 1
+            out.append(" ")
+            prev = "x"  # regex は値なので後続 / は除算
+            continue
         out.append(c)
+        if not c.isspace():
+            prev = c
         i += 1
     return "".join(out)
 

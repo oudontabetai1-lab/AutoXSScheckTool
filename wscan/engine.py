@@ -3389,6 +3389,15 @@ class ScanEngine:
                 except Exception:
                     pass
 
+            # explore が張ったスコープ外リクエスト遮断 route を、settle/harvest 完了後に
+            # 剥がす。遅延リクエスト（setTimeout fetch 等）を settle 中も遮断するため探索
+            # 直後には剥がさない（Codex #104 P1）。
+            if self.spa_crawl:
+                try:
+                    await self._browser.clear_scope_route()
+                except Exception:
+                    pass
+
             # SPA クリック探索で復帰不能だった場合、ページが別ドキュメントに残って
             # いることがある。collect_links_rich(url) が誤 DOM から相対リンクを拾って
             # 偽ルートを作らないよう、landed から drift していたら landed へ戻す。
