@@ -128,9 +128,13 @@ def detect_spa(html: str) -> SpaInfo:
     if _has_id(source, "__next"):
         next_signals.append('id="__next"')
     # App Router（RSC）は __NEXT_DATA__ も id="__next" も出さず、
-    # self.__next_f.push(...) のブートストラップだけを吐くことがある。
-    if re.search(r"\b__next_f\b", source, flags=re.I):
-        next_signals.append("__next_f")
+    # self.__next_f.push(...) のブートストラップだけを吐くことがある。裸の
+    # __next_f トークン（ドキュメント/エラーページの表示テキスト等）で誤検出しない
+    # よう、self.__next_f を用いた実行式（.push / 代入 / ||）に限定する（Codex #104 P2）。
+    if re.search(
+        r"\bself\s*\.\s*__next_f\s*(?:\.\s*push\b|=|\|\|)", source, flags=re.I
+    ):
+        next_signals.append("self.__next_f")
     if next_signals:
         return SpaInfo(True, "Next.js", "high", next_signals)
 

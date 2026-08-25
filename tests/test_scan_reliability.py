@@ -245,6 +245,41 @@ class _SpaRouteDiscoveryBrowser(_FakeCrawlBrowser):
         return []
 
 
+class _LateSpaTargetBrowser(_FakeCrawlBrowser):
+    """主ページは通常サイト、リンク先 /page2 が SPA シェル。"""
+
+    def _is_page2(self) -> bool:
+        return self.url.rstrip("/").endswith("/page2")
+
+    async def content(self):
+        if self._is_page2():
+            return "<html><body><app-root></app-root></body></html>"
+        return (
+            "<html><body><h1>Home</h1>"
+            "<a href='http://fixture.test/page2'>next</a></body></html>"
+        )
+
+    async def find_forms(self):
+        return []
+
+    async def collect_links_rich(self, base_url, same_domain=False):
+        if self._is_page2():
+            return []
+        return [{
+            "url": "http://fixture.test/page2",
+            "text": "next",
+            "selector": "a",
+            "rect": {"x": 0, "y": 0, "w": 10, "h": 10},
+            "viewport": {"w": 1280, "h": 800},
+        }]
+
+    async def explore_spa_interactions(self, page, url, max_clicks=20):
+        return []
+
+    async def settle_spa(self):
+        pass
+
+
 class _SessionExpiryBrowser(_FakeCrawlBrowser):
     def __init__(
         self,
@@ -392,6 +427,16 @@ class EngineScanGapTests(unittest.IsolatedAsyncioTestCase):
         await engine._phase_crawl()
 
         self.assertIn("http://fixture.test/dyn", engine.visited_urls)
+
+    async def test_spa_detection_not_locked_to_first_page(self):
+        # 主 URL が通常ページでも、後続のリンク先 SPA で自動有効化される
+        # （検出は _first_page に縛られない・Codex #104 P1）。
+        engine = self._engine(depth=2)
+        engine._browser = _LateSpaTargetBrowser()
+
+        await engine._phase_crawl()
+
+        self.assertTrue(engine.spa_crawl)
 
     async def test_normal_first_page_never_auto_enables_spa_crawl(self):
         engine = self._engine(depth=1)

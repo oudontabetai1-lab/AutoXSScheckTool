@@ -56,6 +56,10 @@ def test_generic_mount_id_requires_matching_framework_trace(html, framework):
         '<html><body><article data-id="__next">記事</article></body></html>',
         '<html><body><div data-id="root"></div>'
         '<script src="/assets/index-9f3a2b.js"></script></body></html>',
+        # 裸の __next_f トークンを表示するだけの静的ドキュメント/エラーページは
+        # Next.js ではない（self.__next_f の実行式に限定・Codex #104 P2）。
+        '<html><body><p>The <code>__next_f</code> hydration token</p></body></html>',
+        '<html><body><pre>self.__next_f</pre> と書かれた解説記事</body></html>',
     ],
 )
 def test_normal_or_ambiguous_html_is_not_spa(html):
@@ -74,7 +78,7 @@ def test_normal_or_ambiguous_html_is_not_spa(html):
         (
             '<div id="__next-x"></div><script>self.__next_f.push([1,"a"])</script>',
             "Next.js",
-            "__next_f",
+            "self.__next_f",
         ),
         # Nuxt 3 は window.__NUXT__ でなく __NUXT_DATA__ / id="__nuxt"。
         (
