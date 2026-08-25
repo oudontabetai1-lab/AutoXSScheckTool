@@ -49,8 +49,10 @@ def _has_id(source: str, element_id: str) -> bool:
 # 例: <div id="root"></div> / <main id="app">  </main>。内容を持つ要素
 # （<div id="root">案内</div> 等）は一致しないため静的サイトを誤検出しない。
 _EMPTY_MOUNT_RE = re.compile(
-    # (?<![\w-]) で data-id="root" 等を、_ATTR_PREFIX で引用値内 id を誤認しない（Codex #104 P2）。
-    rf"<(\w+)\b{_ATTR_PREFIX}(?<![\w-])id\s*=\s*(['\"])(root|app|__next|__nuxt)\2[^>]*>\s*</\1\s*>",
+    # id 前後とも _ATTR_PREFIX で引用属性値を跨がない。id 後を [^>]* にすると、後続の
+    # 引用属性値内の > や </div> に騙されて偽の空マウントを作る（Codex #104 P2）。
+    rf"<(\w+)\b{_ATTR_PREFIX}(?<![\w-])id\s*=\s*(['\"])(root|app|__next|__nuxt)\2"
+    rf"{_ATTR_PREFIX}>\s*</\1\s*>",
     flags=re.I | re.S,
 )
 

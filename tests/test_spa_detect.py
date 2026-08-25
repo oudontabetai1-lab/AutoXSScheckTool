@@ -110,6 +110,9 @@ def test_generic_mount_id_requires_matching_framework_trace(html, framework):
         # 外部 script（src あり）の本文は実行されないので JS 式マーカーにならない
         # （Codex #104 P2）。
         '<html><body><script src="/analytics.js">self.__next_f.push([])</script></body></html>',
+        # 後続の引用属性値内の > / </div> で偽の空マウントを作らない（Codex #104 P2）。
+        '<html><body><div id="root" title="></div>">static</div>'
+        '<script src="/assets/site.js"></script></body></html>',
     ],
 )
 def test_normal_or_ambiguous_html_is_not_spa(html):

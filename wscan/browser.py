@@ -2567,6 +2567,18 @@ class BrowserManager:
             except Exception:
                 pass
 
+        # 復帰不能で中断した場合、ページは置換ドキュメント上に残っている。呼び出し側は
+        # 元の queued URL を基準に collect_links_rich(url) 等を行うので、外部/別ページの
+        # 相対リンクを誤解決して偽ターゲットを作らないよう、元ページへ戻してから返す
+        # （Codex #104 P2）。
+        if aborted:
+            try:
+                await page.goto(
+                    current_url_before, wait_until="domcontentloaded", timeout=8000
+                )
+            except Exception:
+                pass
+
         return list(dict.fromkeys(discovered))  # preserve order, deduplicate
 
     # ------------------------------------------------------------------
