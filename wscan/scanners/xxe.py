@@ -84,6 +84,7 @@ class XXEScanner(BaseScanner):
                 url,
                 content=payload,
             )
+            self._record_probe_status(r)
         return r.text, r.status_code, r.elapsed.total_seconds()
 
     def _classify(

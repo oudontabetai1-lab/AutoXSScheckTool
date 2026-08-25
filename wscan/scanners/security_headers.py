@@ -68,6 +68,7 @@ _HEADER_CHECKS = [
 class SecurityHeadersScanner(BaseScanner):
     """HTTP security headers audit scanner."""
 
+    HAS_PAGE_LEVEL = True
     CHECK_TYPE = "security_headers"
     SEVERITY = "low"
 
@@ -237,7 +238,9 @@ class SecurityHeadersScanner(BaseScanner):
         if hasattr(self.engine, "auth_headers"):
             kwargs["headers"] = self.auth_headers_for_url(url)
         async with httpx.AsyncClient(**kwargs) as client:
-            return await client.get(url)
+            response = await client.get(url)
+            self._record_probe_status(response)
+        return response
 
     async def _response_pair(self, url: str) -> dict:
         try:

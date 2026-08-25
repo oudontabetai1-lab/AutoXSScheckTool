@@ -48,6 +48,7 @@ def _looks_like_state_change(url: str, field: dict) -> bool:
 class RaceConditionScanner(BaseScanner):
     """Race condition / TOCTOU vulnerability scanner."""
 
+    HAS_PAGE_LEVEL = True
     CHECK_TYPE = "race_condition"
     SEVERITY = "high"
 
@@ -126,10 +127,14 @@ class RaceConditionScanner(BaseScanner):
             return await session.get(url, headers=headers)
 
         async with httpx.AsyncClient(**client_kwargs) as session:
-            return await asyncio.gather(
+            responses = await asyncio.gather(
                 *[_one_request(session) for _ in range(_BURST_SIZE)],
                 return_exceptions=True,
             )
+            for response in responses:
+                if not isinstance(response, Exception):
+                    self._record_probe_status(response)
+        return responses
 
     def _classify_responses(self, responses: list, url: str) -> tuple[str, dict] | None:
         ok_responses = [

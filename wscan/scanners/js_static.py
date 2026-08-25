@@ -39,6 +39,7 @@ def _host_of(url: str) -> str:
 class JsStaticScanner(BaseScanner):
     """インライン/外部 JavaScript の危険パターンを静的に評価する。"""
 
+    HAS_PAGE_LEVEL = True
     CHECK_TYPE = "js_static"
     SEVERITY = "medium"
 

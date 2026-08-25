@@ -5,7 +5,7 @@ then suggests WAF-specific bypass encodings via LLM or built-in rules.
 """
 import re
 import time
-from typing import Optional
+from typing import Callable, Optional
 from urllib.parse import urlparse
 
 import httpx
@@ -86,13 +86,21 @@ _DETECTION_TTL = 300  # seconds — re-probe if stale
 class WAFDetector:
     """Detects WAF presence and suggests bypass strategies."""
 
-    def __init__(self, payload_gen=None, proxy: str = "", headers_provider=None, tls_options_provider=None):
+    def __init__(
+        self,
+        payload_gen=None,
+        proxy: str = "",
+        headers_provider=None,
+        tls_options_provider=None,
+        record_status: Optional[Callable[[int, object], None]] = None,
+    ):
         self.payload_gen = payload_gen
         self.proxy = proxy or ""
         # Callable returning a dict of HTTP headers (pulls fresh values each call
         # so a rotated bearer token is used on every probe).
         self.headers_provider = headers_provider
         self.tls_options_provider = tls_options_provider
+        self._record_status = record_status
         self._detected: Optional[str] = None
         # follow_redirects=True で probe するため、判定は最終到達 origin を表す。
         # planner fingerprint を origin 別に出す際、WAF を実際に probe した origin にだけ
@@ -133,6 +141,11 @@ class WAFDetector:
             ) as client:
                 # First: normal request (collect always-present WAF headers)
                 resp = await client.get(url)
+                if self._record_status:
+                    try:
+                        self._record_status(resp.status_code, resp.url)
+                    except Exception:
+                        pass
                 normal_headers = {k.lower(): v.lower() for k, v in resp.headers.items()}
                 normal_body = resp.text[:5000].lower()
 
@@ -144,6 +157,11 @@ class WAFDetector:
                 _sep = "&" if urlparse(url).query else "?"
                 probe_url = url + _sep + "wscan=..%2F..%2F&x=%00<wscan-probe>"
                 resp2 = await client.get(probe_url)
+                if self._record_status:
+                    try:
+                        self._record_status(resp2.status_code, resp2.url)
+                    except Exception:
+                        pass
                 waf_headers = {k.lower(): v.lower() for k, v in resp2.headers.items()}
                 waf_body = resp2.text[:5000].lower()
                 # 一致した応答の origin を帰属に使う（normal と probe が別 origin に

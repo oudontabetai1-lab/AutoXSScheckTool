@@ -14,10 +14,11 @@ def _run(coro):
     return asyncio.run(coro)
 
 
-def _detector(handler):
+def _detector(handler, record_status=None):
     transport = httpx.MockTransport(handler)
     return WAFDetector(
-        tls_options_provider=lambda: {"verify": False, "transport": transport}
+        tls_options_provider=lambda: {"verify": False, "transport": transport},
+        record_status=record_status,
     )
 
 
@@ -49,3 +50,35 @@ def test_normal_match_records_normal_origin():
     name = _run(det.detect("https://c.test:443/x"))
     assert name == "Cloudflare"
     assert det._detected_origin == "https://c.test"
+
+
+def test_normal_and_anomaly_statuses_are_recorded():
+    recorded = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        query = request.url.query
+        is_probe = "wscan=" in (
+            query.decode() if isinstance(query, bytes) else str(query)
+        )
+        if request.url.host == "status.test":
+            location = (
+                "https://external.test/rate-limit"
+                if is_probe
+                else "https://normal.test/final"
+            )
+            return httpx.Response(302, headers={"Location": location})
+        return httpx.Response(
+            429 if request.url.host == "external.test" else 200,
+            text="ok",
+        )
+
+    det = _detector(
+        handler,
+        record_status=lambda status, url: recorded.append((status, str(url))),
+    )
+
+    assert _run(det.detect("https://status.test/")) is None
+    assert recorded == [
+        (200, "https://normal.test/final"),
+        (429, "https://external.test/rate-limit"),
+    ]

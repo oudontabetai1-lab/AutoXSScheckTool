@@ -85,6 +85,7 @@ def _probe_body(probe_name: str) -> bytes:
 class RequestSmugglingScanner(BaseScanner):
     """HTTP request smuggling detection scanner."""
 
+    HAS_PAGE_LEVEL = True
     CHECK_TYPE = "request_smuggling"
     SEVERITY = "high"
 
@@ -175,7 +176,8 @@ class RequestSmugglingScanner(BaseScanner):
             follow_redirects=False,
             **({"proxy": proxy} if proxy else {}),
         ) as client:
-            await client.get(url, headers=headers)
+            response = await client.get(url, headers=headers)
+            self._record_probe_status(response)
         return time.monotonic() - normal_start
 
     async def _send_probe(
@@ -200,6 +202,7 @@ class RequestSmugglingScanner(BaseScanner):
                 **({"proxy": proxy} if proxy else {}),
             ) as client:
                 r_probe = await client.post(url, content=body, headers=headers)
+            self._record_probe_status(r_probe)
             return time.monotonic() - probe_start, r_probe.text, r_probe.status_code
         except httpx.ReadTimeout:
             return timeout, "", 0

@@ -49,6 +49,7 @@ _OVERRIDE_HEADERS = [
 class HostHeaderScanner(BaseScanner):
     """Host Header Injection scanner."""
 
+    HAS_PAGE_LEVEL = True
     CHECK_TYPE = "host_header"
     SEVERITY = "medium"
 
@@ -156,7 +157,9 @@ class HostHeaderScanner(BaseScanner):
             merged.update(self.auth_headers_for_url(url))
         merged.update(headers or {})
         async with httpx.AsyncClient(**client_kwargs) as client:
-            return await client.get(url, headers=merged)
+            response = await client.get(url, headers=merged)
+            self._record_probe_status(response)
+        return response
 
     async def verify_finding(self, finding: Finding) -> bool | None:
         if finding.evidence_type != "host_header_reflection":

@@ -106,6 +106,7 @@ def detect_mass_assignment(
 class MassAssignmentScanner(BaseScanner):
     """Mass Assignment（過剰割り当て）スキャナ。API スペック由来の JSON 操作を検査。"""
 
+    HAS_PAGE_LEVEL = True
     CHECK_TYPE = "mass_assignment"
     SEVERITY = "high"
 
@@ -196,7 +197,9 @@ class MassAssignmentScanner(BaseScanner):
         try:
             async with httpx.AsyncClient(**kwargs) as client:
                 baseline = await client.request(method, tmpl.url, content=baseline_payload)
+                self._record_probe_status(baseline)
                 tainted = await client.request(method, tmpl.url, content=polluted_payload)
+                self._record_probe_status(tainted)
         except Exception:
             return None
 

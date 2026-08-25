@@ -4,14 +4,16 @@ Playwright-based browser automation with evidence collection.
 """
 import asyncio
 import base64
+import collections
 import json
 import re
 import socket
 import time
 import urllib.request
+from collections.abc import Mapping
 from urllib.parse import urlparse as _urlparse
 from typing import Optional, Callable, Any
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin, urlparse, urlsplit
 
 from playwright.async_api import async_playwright, Browser, BrowserContext, Page, Request, Response
 from rich.console import Console
@@ -31,6 +33,52 @@ from .url_extraction import (
 
 
 console = Console()
+
+
+_DEFAULT_PORTS = {"http": 80, "https": 443, "ws": 80, "wss": 443}
+
+
+def canonical_host(url_or_netloc) -> str:
+    """Return a case-insensitive ``host[:port]`` key without leading ``www.``.
+
+    既定ポート（http=80/https=443）と暗黙ポートは省き http↔https / bare↔www を
+    同一視するが、明示された非既定ポート（例 :3000 と :8080）は保持して別 origin と
+    区別する（Codex #102）。
+    """
+    try:
+        value = str(url_or_netloc).strip()
+        parsed = urlsplit(value)
+        if parsed.hostname is None and "://" not in value:
+            parsed = urlsplit(f"//{value}")
+        host = (parsed.hostname or "").casefold()
+        if host.startswith("www."):
+            host = host[4:]
+        try:
+            port = parsed.port
+        except ValueError:
+            port = None
+        default = _DEFAULT_PORTS.get((parsed.scheme or "").casefold())
+        if port is not None and port != default:
+            return f"{host}:{port}"
+        return host
+    except Exception:
+        return ""
+
+
+def bucketize_status_counts(counts: Mapping) -> dict:
+    """HTTP status の生カウンタをカバレッジ用バケットへ集計する（純粋関数）。"""
+    return {
+        "total": sum(counts.values()),
+        "blocked": counts.get(403, 0) + counts.get(429, 0),
+        "client_error": sum(
+            count for status, count in counts.items()
+            if isinstance(status, int) and 400 <= status < 500
+        ),
+        "server_error": sum(
+            count for status, count in counts.items()
+            if isinstance(status, int) and 500 <= status < 600
+        ),
+    }
 
 
 class _BrowserCDPConnection:
@@ -149,6 +197,11 @@ class NetworkCapture:
 
     def __init__(self, logger=None):
         self.pairs: list[dict] = []
+        self.status_counts = collections.Counter()
+        # None preserves the historical behaviour of counting every origin.
+        # ScanEngine sets this to the configured target/access canonical hosts so
+        # third-party script/XHR failures do not inflate coverage warnings.
+        self.allowed_hosts: Optional[set] = None
         # Use (url, id(request_object)) as key to avoid collisions when the same URL
         # is requested multiple times concurrently (race condition fix).
         self._pending: dict[tuple, dict] = {}
@@ -192,6 +245,23 @@ class NetworkCapture:
             },
         }
         self.pairs.append(pair)
+        try:
+            try:
+                rtype = response.request.resource_type if response.request else ""
+            except Exception:
+                # Unknown request types are counted conservatively so a real
+                # block is not hidden by an incomplete response object.
+                rtype = ""
+            in_allowed_host = True
+            if self.allowed_hosts:
+                in_allowed_host = canonical_host(response.url) in self.allowed_hosts
+            if (
+                rtype not in ("image", "font", "stylesheet", "media")
+                and in_allowed_host
+            ):
+                self.status_counts[response.status] += 1
+        except Exception:
+            pass
         if self.logger is not None:
             self.logger.log_http(pair)
 
@@ -284,6 +354,10 @@ class NetworkCapture:
     def clear(self):
         self.pairs.clear()
         self._pending.clear()
+
+    def status_summary(self) -> dict:
+        """スキャン全体で捕捉した HTTP status を集計する。"""
+        return bucketize_status_counts(self.status_counts)
 
 
 class BrowserManager:

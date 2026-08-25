@@ -5,8 +5,9 @@ from wscan.engine import ScanEngine
 
 
 class _FakePage:
-    def __init__(self, content):
+    def __init__(self, content, url=""):
         self._content = content
+        self.url = url
 
     async def content(self):
         return self._content
@@ -15,15 +16,24 @@ class _FakePage:
 class _FakeBrowser:
     """Minimal async stand-in for the Playwright browser wrapper."""
 
-    def __init__(self, forms, url_params=None, content="<html></html>", navigate_ok=True):
+    def __init__(
+        self,
+        forms,
+        url_params=None,
+        content="<html></html>",
+        navigate_ok=True,
+        landed_url=None,
+    ):
         self._forms = forms
         self._url_params = url_params or []
         self._navigate_ok = navigate_ok
+        self._landed_url = landed_url
         self.navigated = []
         self.page = _FakePage(content)
 
     async def navigate(self, url, retries=2):
         self.navigated.append(url)
+        self.page.url = self._landed_url or url
         return self._navigate_ok
 
     async def find_forms(self):
@@ -82,6 +92,8 @@ class PreAuthLoginScanTests(unittest.TestCase):
         self.assertIn("http://app.test/login", engine._browser.navigated)
         # Marked visited so the authenticated crawl won't re-record it.
         self.assertIn("http://app.test/login", engine.visited_urls)
+        # A successfully attacked pre-auth page is also part of reached coverage.
+        self.assertIn("http://app.test/login", engine.reached_urls)
 
     def test_skipped_when_no_login_url(self):
         engine = self._engine()
@@ -111,6 +123,19 @@ class PreAuthLoginScanTests(unittest.TestCase):
         self.assertNotIn("page", captured)
         # No form to test → do not suppress the authenticated crawl of the page.
         self.assertNotIn("http://app.test/login", engine.visited_urls)
+        # Successful navigation is reached even when the page is form-less (SPA/button UI).
+        self.assertIn("http://app.test/login", engine.reached_urls)
+
+    def test_redirected_formless_login_seed_is_not_reached(self):
+        engine = self._engine(login_url="http://app.test/login")
+        engine._browser = _FakeBrowser(
+            forms=[], landed_url="http://app.test/account"
+        )
+
+        captured = self._run_preauth(engine)
+
+        self.assertNotIn("page", captured)
+        self.assertNotIn("http://app.test/login", engine.reached_urls)
 
 
 if __name__ == "__main__":

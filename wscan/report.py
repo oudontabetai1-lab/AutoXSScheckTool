@@ -327,6 +327,7 @@ class ReportGenerator:
         template: str = "audit",
         diff_result=None,
         observability: "Optional[dict]" = None,
+        coverage: "Optional[dict]" = None,
     ):
         """
         Generate HTML report and save to output directory.
@@ -341,18 +342,20 @@ class ReportGenerator:
         if template == "executive":
             html = self._build_executive_html(target, sorted_findings, visited_urls, checks,
                                                attack_plans or [], ctf_flags or [], page_graph or {},
-                                               diff_result, scan_matrix or [], observability or {})
+                                               diff_result, scan_matrix or [], observability or {},
+                                               coverage or {})
             report_path = self.output_dir / "report_executive.html"
         elif template == "developer":
             html = self._build_developer_html(target, sorted_findings, visited_urls, checks,
                                                attack_plans or [], ctf_flags or [], page_graph or {},
-                                               diff_result, scan_matrix or [], observability or {})
+                                               diff_result, scan_matrix or [], observability or {},
+                                               coverage or {})
             report_path = self.output_dir / "report_developer.html"
         else:
             html = self._build_html(target, sorted_findings, visited_urls, checks,
                                     attack_plans or [], ctf_flags or [], page_graph or {},
                                     diff_result, scan_matrix or [], llm_summary or {},
-                                    observability or {})
+                                    observability or {}, coverage or {})
             report_path = self.output_dir / "report.html"
 
         report_path.write_text(html, encoding="utf-8")
@@ -371,6 +374,7 @@ class ReportGenerator:
         scan_matrix: list = None,
         llm_summary: dict = None,
         observability: dict = None,
+        coverage: dict = None,
     ) -> str:
         attack_plans = attack_plans or []
         ctf_flags = ctf_flags or []
@@ -378,6 +382,7 @@ class ReportGenerator:
         scan_matrix = scan_matrix or []
         llm_summary = llm_summary or {}
         observability = observability or {}
+        coverage = coverage or {}
         scan_date = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         total = len(findings)
         counts = {}
@@ -550,6 +555,7 @@ class ReportGenerator:
         remediation_summary_html = self._build_remediation_summary_html(findings)
         llm_summary_html = self._build_llm_summary_html(llm_summary)
         observability_html = self._build_observability_html(observability)
+        coverage_html = self._build_coverage_html(coverage)
 
         return f"""<!DOCTYPE html>
 <html lang="ja">
@@ -842,6 +848,9 @@ body {{ font-family: 'Segoe UI', system-ui, -apple-system, sans-serif; backgroun
 
     <!-- Observability -->
     {observability_html}
+
+    <!-- Coverage -->
+    {coverage_html}
 
     <!-- Attack Plans -->
     {attack_plan_html}
@@ -1515,6 +1524,73 @@ document.querySelectorAll('.plan-payloads-toggle').forEach(btn => {{
             <ul>{sample_html}</ul>
         </div>"""
 
+    def _build_coverage_html(self, coverage: dict) -> str:
+        """到達性、試行結果、HTTP status を Finding と分離して表示する。
+
+        coverage 未提供（Agent モード等 metrics を渡さない caller）では None/空 dict に
+        なる。矛盾した「Findings: 0」セクションを描画せず、セクションごと省略する（Codex #102）。
+        """
+        if not coverage:
+            return ""
+        http_status = coverage.get("http_status", {}) or {}
+        reached_count = self._escape(coverage.get("reached_count", 0))
+        attempts = self._escape(coverage.get("attempts", 0))
+        findings_total = self._escape(coverage.get("findings_total", 0))
+        http_total = self._escape(http_status.get("total", 0))
+        blocked_raw = http_status.get("blocked", 0) or 0
+        blocked = self._escape(blocked_raw)
+        server_error = self._escape(http_status.get("server_error", 0))
+        client_error = self._escape(http_status.get("client_error", 0))
+
+        by_status = coverage.get("by_status", {}) or {}
+        by_status_html = "".join(
+            f"<li><code>{self._escape(status)}</code>: {self._escape(count)}</li>"
+            for status, count in sorted(by_status.items(), key=lambda item: str(item[0]))
+        ) or "<li>なし</li>"
+        reached_rows = "".join(
+            "<tr>" f"<td>{self._escape(url)}</td>" "</tr>"
+            for url in (coverage.get("reached_urls", []) or [])
+        ) or '<tr><td colspan="1">なし</td></tr>'
+        unreached_rows = "".join(
+            "<tr>"
+            f"<td>{self._escape((row or {}).get('url', ''))}</td>"
+            f"<td>{self._escape((row or {}).get('reason', ''))}</td>"
+            "</tr>"
+            for row in (coverage.get("unreached", []) or [])
+            if isinstance(row, dict)
+        ) or '<tr><td colspan="2">なし</td></tr>'
+        blocked_warning = ""
+        try:
+            has_blocked = int(blocked_raw) > 0
+        except (TypeError, ValueError):
+            has_blocked = False
+        if has_blocked:
+            blocked_warning = (
+                '<p style="color:#975a16;font-weight:600;margin-top:10px">'
+                f"{blocked} 件が 403/429 でブロック＝WAF/レート制限により攻撃面を"
+                "十分に検査できていない可能性があります</p>"
+            )
+
+        return f"""
+        <div class="section coverage-section">
+            <h2>Coverage（到達性カバレッジ）</h2>
+            <p>到達 URL: <strong>{reached_count}</strong> 件 / 試行: <strong>{attempts}</strong> 件 /
+            Findings: <strong>{findings_total}</strong> 件</p>
+            <h3 style="margin-top:14px">試行結果（by_status）</h3>
+            <ul>{by_status_html}</ul>
+            <h3 style="margin-top:14px">HTTP status</h3>
+            <p>total: <strong>{http_total}</strong> / blocked (403/429): <strong>{blocked}</strong> /
+            client_error (4xx): <strong>{client_error}</strong> /
+            server_error: <strong>{server_error}</strong></p>
+            {blocked_warning}
+            <h3 style="margin-top:14px">到達済み URL</h3>
+            <div class="table-wrap"><table><thead><tr><th>URL</th></tr></thead>
+            <tbody>{reached_rows}</tbody></table></div>
+            <h3 style="margin-top:14px">未到達 URL</h3>
+            <div class="table-wrap"><table><thead><tr><th>URL</th><th>Reason</th></tr></thead>
+            <tbody>{unreached_rows}</tbody></table></div>
+        </div>"""
+
     def _build_llm_summary_html(self, summary: dict) -> str:
         if not summary:
             return ""
@@ -1588,7 +1664,7 @@ document.querySelectorAll('.plan-payloads-toggle').forEach(btn => {{
     def _build_executive_html(
         self, target, findings, visited_urls, checks,
         attack_plans, ctf_flags, page_graph, diff_result=None, scan_matrix=None,
-        observability=None,
+        observability=None, coverage=None,
     ) -> str:
         """経営層向け: サマリーカード・リスク分布・コンプライアンス適合率・推奨事項。"""
         scan_date = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -1663,6 +1739,7 @@ document.querySelectorAll('.plan-payloads-toggle').forEach(btn => {{
         recs.append("定期的なペネトレーションテストの実施を推奨します。")
         rec_html = "".join(f"<li>{self._escape(r)}</li>" for r in recs)
         observability_html = self._build_observability_html(observability or {})
+        coverage_html = self._build_coverage_html(coverage or {})
 
         return f"""<!DOCTYPE html>
 <html lang="ja"><head><meta charset="UTF-8">
@@ -1726,6 +1803,7 @@ ul li{{margin:4px 0;font-size:.9rem}} .footer{{text-align:center;color:#a0aec0;f
     <ul>{rec_html}</ul>
   </div>
   {observability_html}
+  {coverage_html}
   <div class="section">
     <h2>スキャン範囲</h2>
     <p style="font-size:.9rem">{len(visited_urls)} ページを検査 / 検査項目: {", ".join(checks)}</p>
@@ -1741,7 +1819,7 @@ ul li{{margin:4px 0;font-size:.9rem}} .footer{{text-align:center;color:#a0aec0;f
     def _build_developer_html(
         self, target, findings, visited_urls, checks,
         attack_plans, ctf_flags, page_graph, diff_result=None, scan_matrix=None,
-        observability=None,
+        observability=None, coverage=None,
     ) -> str:
         """開発者向け: チェックリスト形式・修正コード例・重要度別ソート。"""
         scan_date = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -1803,6 +1881,7 @@ ul li{{margin:4px 0;font-size:.9rem}} .footer{{text-align:center;color:#a0aec0;f
                 🆕 新規 {len(diff_result.new_findings)} / ✅ 修正済 {len(diff_result.fixed_findings)} / 🔄 継続 {len(diff_result.persistent_findings)}
             </div>"""
         observability_html = self._build_observability_html(observability or {})
+        coverage_html = self._build_coverage_html(coverage or {})
 
         return f"""<!DOCTYPE html>
 <html lang="ja"><head><meta charset="UTF-8">
@@ -1841,6 +1920,7 @@ body{{font-family:'Segoe UI',system-ui,sans-serif;background:#f7f8fa;color:#1a20
 <div class="container">
   {diff_summary}
   {observability_html}
+  {coverage_html}
   <p style="font-size:.85rem;color:#4a5568;margin-bottom:12px">各項目をクリックして詳細を展開してください。チェックボックスで修正完了を記録できます。</p>
   {items_html if items_html else '<p style="color:#38a169;font-weight:600">✓ 検出された脆弱性はありません。</p>'}
 </div>

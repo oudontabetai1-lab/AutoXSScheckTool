@@ -303,6 +303,7 @@ class NoSQLInjectionScanner(BaseScanner):
             try:
                 async with httpx.AsyncClient(**kwargs) as client:
                     r = await client.post(url, content=body)
+                self._record_probe_status(r)
                 resp_text = r.text
 
                 err = self.check_response_for_patterns(resp_text, _NOSQL_ERROR_PATTERNS)
@@ -415,7 +416,9 @@ class NoSQLInjectionScanner(BaseScanner):
             safe_body = json.dumps({finding.field_name: "baseline_value_wscan"})
             async with httpx.AsyncClient(**kwargs) as client:
                 baseline_resp = await client.post(finding.url, content=safe_body)
+                self._record_probe_status(baseline_resp)
                 probe_resp = await client.post(finding.url, content=finding.payload)
+                self._record_probe_status(probe_resp)
         except Exception:
             return None
 

@@ -233,6 +233,7 @@ _SEVERITY_RANK = {"critical": 4, "high": 3, "medium": 2, "low": 1, "info": 0}
 class SecretLeakScanner(BaseScanner):
     """Detect hard-coded secrets shipped to the browser (page-level)."""
 
+    HAS_PAGE_LEVEL = True
     CHECK_TYPE = "secret_leak"
     SEVERITY = "high"
 

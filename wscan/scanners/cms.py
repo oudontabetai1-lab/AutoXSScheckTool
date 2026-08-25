@@ -19,6 +19,7 @@ from .base import BaseScanner, Finding
 
 
 class CmsScanner(BaseScanner):
+    HAS_PAGE_LEVEL = True
     CHECK_TYPE = "cms"
     SEVERITY = "medium"
 
@@ -132,6 +133,7 @@ class CmsScanner(BaseScanner):
                 try:
                     req_ts = time.time()
                     resp = await client.get(target_url, cookies=cookies_dict)
+                    self._record_probe_status(resp)
                     resp_ts = time.time()
                     status = resp.status_code
                     body = resp.text[:2000]

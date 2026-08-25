@@ -522,6 +522,7 @@ def injection_point_from_finding(finding: Finding) -> Optional[InjectionPoint]:
 class BaseScanner(ABC):
     """Base class for all vulnerability scanners."""
 
+    HAS_PAGE_LEVEL: bool = False
     CHECK_TYPE = "base"
     SEVERITY = "medium"
     SUPPORTS_JSON_BODY = False
@@ -549,6 +550,15 @@ class BaseScanner(ABC):
             except Exception:
                 return
         errors.append(note)
+
+    def _record_probe_status(self, response) -> None:
+        """受信済み httpx 応答の status をエンジンへ例外安全に渡す。"""
+        try:
+            record = getattr(self.engine, "record_probe_status", None)
+            if callable(record):
+                record(response.status_code, getattr(response, "url", None))
+        except Exception:
+            pass
 
     def _note_wave_degradation(self, wave: str, exc: Exception) -> None:
         """payload 強化 wave（evolution/mutation）の失敗を *観測可能* にする。
@@ -945,6 +955,7 @@ class BaseScanner(ABC):
         try:
             async with httpx.AsyncClient(**kwargs) as client:
                 response = await client.request(method, url, content=post_data)
+                self._record_probe_status(response)
             response_timestamp = time.time()
             # 実応答を受信できた＝送信成功。呼び出し側ループはこの証拠が無いと「済み」に
             # しない（transport 失敗〈timeout/TLS/DNS/proxy〉で空振りした probe を resume

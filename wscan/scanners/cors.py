@@ -20,6 +20,7 @@ _CANARY_ORIGIN = "https://evil.wscan-test.example.com"
 class CORSScanner(BaseScanner):
     """CORS misconfiguration scanner."""
 
+    HAS_PAGE_LEVEL = True
     CHECK_TYPE = "cors"
     SEVERITY = "high"
 
@@ -138,7 +139,9 @@ class CORSScanner(BaseScanner):
             kwargs["proxy"] = proxy
 
         async with httpx.AsyncClient(**kwargs) as client:
-            return await client.get(url)
+            response = await client.get(url)
+            self._record_probe_status(response)
+        return response
 
     def _origin_headers(self, origin: str) -> dict:
         return {

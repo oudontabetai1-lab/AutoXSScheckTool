@@ -203,6 +203,7 @@ class GraphQLScanner(BaseScanner):
     common GraphQL-specific vulnerabilities.
     """
 
+    HAS_PAGE_LEVEL = True
     CHECK_TYPE = "graphql"
     SEVERITY = "medium"
 
@@ -348,6 +349,7 @@ class GraphQLScanner(BaseScanner):
                 **self._client_transport_kwargs(),
             ) as client:
                 resp = await client.post(endpoint, json=query)
+                self._record_probe_status(resp)
                 # 実 POST が 401/ログイン化 → 失効を通知して中断（resume の誤スキップ防止）
                 if self._note_auth_failure(resp, endpoint):
                     return False
@@ -360,6 +362,7 @@ class GraphQLScanner(BaseScanner):
                     endpoint,
                     params={"query": "{ __typename }"},
                 )
+                self._record_probe_status(resp2)
                 if self._note_auth_failure(resp2, endpoint):
                     return False
                 if resp2.status_code in (200, 400):
@@ -418,6 +421,7 @@ class GraphQLScanner(BaseScanner):
                 **self._client_transport_kwargs(),
             ) as client:
                 resp = await client.post(endpoint, json=query)
+                self._record_probe_status(resp)
                 if resp.status_code != 200:
                     return None
                 data = resp.json()
@@ -473,6 +477,7 @@ class GraphQLScanner(BaseScanner):
                 **self._client_transport_kwargs(),
             ) as client:
                 resp = await client.post(endpoint, json=batch_query)
+                self._record_probe_status(resp)
                 if resp.status_code != 200:
                     return
                 body = resp.text
@@ -529,7 +534,9 @@ class GraphQLScanner(BaseScanner):
                 **self._client_transport_kwargs(),
             ) as client:
                 r1 = await client.post(endpoint, json={"query": alias_query})
+                self._record_probe_status(r1)
                 r2 = await client.post(endpoint, json={"query": depth_query})
+                self._record_probe_status(r2)
                 if r1.status_code != 200 or r2.status_code != 200:
                     return
                 alias_data = r1.json()
@@ -623,6 +630,7 @@ class GraphQLScanner(BaseScanner):
                         **self._client_transport_kwargs(),
                     ) as client:
                         resp = await client.post(endpoint, json=gql_body)
+                        self._record_probe_status(resp)
                         body = resp.text[:4000]
                 except Exception as exc:
                     self._record_scan_note(
@@ -788,6 +796,7 @@ class GraphQLScanner(BaseScanner):
                 **self._client_transport_kwargs(),
             ) as client:
                 resp = await client.post(endpoint, json=payload)
+                self._record_probe_status(resp)
                 return resp.status_code, resp.text
         except Exception as exc:
             self._record_scan_note(

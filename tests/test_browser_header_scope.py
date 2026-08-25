@@ -779,6 +779,9 @@ class BrowserHeaderModeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_popup_opt_in_adds_loopback_devtools_args_and_warns_once(self):
         starter, _fake_browser, _context, _cdp = self._playwright_fakes()
+        probe = MagicMock()
+        probe.__enter__.return_value = probe
+        probe.getsockname.return_value = ("127.0.0.1", 43123)
         browser = BrowserManager(
             extra_headers={"Authorization": "Bearer secret"},
             header_scope_origins={"https://app.example"},
@@ -794,6 +797,7 @@ class BrowserHeaderModeTests(unittest.IsolatedAsyncioTestCase):
                 "_activate_header_target_auto_attach",
                 AsyncMock(return_value=True),
             ),
+            patch("wscan.browser.socket.socket", return_value=probe),
         ):
             socket_ctor.return_value.__enter__.return_value.getsockname.return_value = (
                 "127.0.0.1",
@@ -828,6 +832,9 @@ class BrowserHeaderModeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_popup_opt_in_with_expected_late_headers_adds_devtools_args(self):
         starter, _fake_browser, _context, _cdp = self._playwright_fakes()
+        probe = MagicMock()
+        probe.__enter__.return_value = probe
+        probe.getsockname.return_value = ("127.0.0.1", 43123)
         browser = BrowserManager(
             extra_headers={},
             header_scope_origins={"https://app.example"},
@@ -843,6 +850,7 @@ class BrowserHeaderModeTests(unittest.IsolatedAsyncioTestCase):
                 "_activate_header_target_auto_attach",
                 AsyncMock(return_value=True),
             ),
+            patch("wscan.browser.socket.socket", return_value=probe),
         ):
             socket_ctor.return_value.__enter__.return_value.getsockname.return_value = (
                 "127.0.0.1",

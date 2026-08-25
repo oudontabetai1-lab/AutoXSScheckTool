@@ -28,12 +28,12 @@ import json
 import os
 import re
 import xml.etree.ElementTree as _ET
-from collections import deque
+from collections import Counter, deque
 from contextvars import ContextVar
 from dataclasses import dataclass, field as dc_field
 from pathlib import Path
 from typing import Optional
-from urllib.parse import urlparse, urljoin, parse_qs
+from urllib.parse import urlparse, urljoin, parse_qs, urlsplit
 
 # ---------------------------------------------------------------------------
 # Per-worker browser context variable
@@ -63,6 +63,54 @@ def _observability_warning_text(summary: dict) -> str:
         f"⚠ 観測性: {total} 件の probe/wave が劣化・脱落{detail}。"
         "0 findings は「安全」を意味しない可能性"
     )
+
+
+_SEVERITY_RANK = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
+
+
+def _top_severity(findings) -> str:
+    """findings の最重 severity を明示順序で返す（純粋）。空なら空文字。
+
+    severity 文字列の max() は辞書順比較になり critical+medium を medium と誤評価する
+    ため、_SEVERITY_RANK（0=critical が最重）で最小ランクの severity を選ぶ（Codex #102）。
+    """
+    best = None
+    best_rank = None
+    for f in findings or []:
+        sev = getattr(f, "severity", "") or ""
+        rank = _SEVERITY_RANK.get(sev, 99)
+        if best_rank is None or rank < best_rank:
+            best, best_rank = sev, rank
+    return best or ""
+
+
+def _coverage_summary_text(coverage: dict) -> str:
+    """到達性カバレッジの console 1行要約を組み立てる純粋関数。"""
+    return (
+        "Coverage: "
+        f"reached URLs={int(coverage.get('reached_count', 0) or 0)} / "
+        f"attempts={int(coverage.get('attempts', 0) or 0)} / "
+        f"blocked={int((coverage.get('http_status', {}) or {}).get('blocked', 0) or 0)}"
+    )
+
+
+def _coverage_allowed_hosts(
+    target_urls: list[str],
+    access_urls: list[str],
+) -> set[str]:
+    """Return canonical target/access hosts used by HTTP coverage counters."""
+    hosts: set[str] = set()
+    for url in [*target_urls, *access_urls]:
+        if host := canonical_host(url):
+            hosts.add(host)
+    return hosts
+
+
+def _configure_network_coverage_hosts(browser, hosts: set[str]) -> None:
+    """Apply canonical coverage hosts to a browser network capture."""
+    network = getattr(browser, "network", None)
+    if network is not None:
+        network.allowed_hosts = set(hosts) if hosts else None
 
 
 def _coerce_header_scope_enforce(value, default: bool = True) -> bool:
@@ -190,7 +238,7 @@ from rich import box as rbox
 
 from .attack_planner import AttackPlanner, FieldAttackPlan, PageAttackPlan
 from .adaptive_payload import AdaptivePayloadEngine
-from .browser import BrowserManager
+from .browser import BrowserManager, bucketize_status_counts, canonical_host
 from .header_scope import allowed_header_origins, headers_allowed_for_url
 from .tls_config import TLSConfig
 from .chain_scanner import ChainScanner, ChainFinding
@@ -600,6 +648,14 @@ class ScanEngine:
         self.access_urls: list[str] = self._normalize_scope_urls(
             list(access_urls or []) + ([login_url] if login_url else [])
         )
+        self._coverage_hosts: set[str] = _coverage_allowed_hosts(
+            self.target_urls,
+            self.access_urls,
+        )
+        # Concurrent attack workers exist only for the duration of that phase.
+        # Keep the live instances here so a newly observed canonical landing
+        # origin can be applied consistently to every active network capture.
+        self._coverage_workers: list = []
         # I: 差分スキャン
         self.previous_scan_dir: Optional[str] = previous_scan_dir
         # K: SARIF 出力フラグ
@@ -928,6 +984,7 @@ class ScanEngine:
             proxy=proxy,
             headers_provider=lambda url="": self.auth_headers(url=url),
             tls_options_provider=lambda: self.tls_config.httpx_options(),
+            record_status=self.record_probe_status,
         )
         # A-3: Payload continuous learning
         self.payload_learner = PayloadLearner(learning_file=learning_file)
@@ -970,6 +1027,10 @@ class ScanEngine:
         self._finding_dedup: set[tuple] = set()     # (url, field_name, check_type) — prevent duplicates
         self.attack_plans: list = []
         self.visited_urls: set = set()
+        self.reached_urls: set = set()
+        self._worker_status_counts = Counter()
+        self._restored_status_counts = Counter()
+        self._probe_status_counts = Counter()
         self.scanned_forms: set = set()
         self._scanned_forms_lock = asyncio.Lock()   # guards scanned_forms in concurrent mode
         self.completed_fields: int = 0
@@ -1007,6 +1068,191 @@ class ScanEngine:
             "total": len(self.wave_errors),
             "by_category": by_category,
         }
+
+    def coverage_summary(self) -> dict:
+        """到達 URL・試行結果・HTTP status を副作用なしで集計する。"""
+        rows = getattr(self, "scan_matrix", None) or []
+        reached_url_set = getattr(self, "reached_urls", None) or set()
+        # SPA の hash route は fragment 付きで reached に載る一方、queue/visited_urls は
+        # fragment を剥いた base を持つ（explore_spa_interactions は spa_link を queue に、
+        # split("#")[0] を visited_urls に入れる）。unreached 判定は fragment を無視して
+        # 比較し、到達済み base（例 /app）を「未試行」と誤計上しない（Codex #102 P2・
+        # 純粋集計のみ・巡回挙動は不変）。
+        reached_url_nofrag = {str(u).split("#", 1)[0] for u in reached_url_set}
+        attack_rows = [
+            row for row in rows
+            if (
+                isinstance(row, dict)
+                and row.get("check") != "access"
+                and row.get("status") != "skipped"
+                and ScanEngine._check_type_in_scope(
+                    self, row.get("check")
+                )
+            )
+        ]
+        by_status = Counter(row.get("status", "") for row in attack_rows)
+        # Finding の権威ソースは all_findings。scan_matrix に行を持たない chain /
+        # multi-parameter Finding もここでは数える一方、attempts は field/page/API の
+        # 実行台帳だけを対象にして過剰な推測計上をしない。
+        findings_total = sum(
+            1
+            for finding in (getattr(self, "all_findings", None) or [])
+            if ScanEngine._check_type_in_scope(
+                self, getattr(finding, "check_type", "")
+            )
+        )
+
+        unreached_by_url: dict[str, dict] = {}
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            if row.get("check") != "access" or row.get("status") != "error":
+                continue
+            url = str(row.get("url", "") or "")
+            if url in reached_url_set or url.split("#", 1)[0] in reached_url_nofrag:
+                continue
+            if url not in unreached_by_url:
+                unreached_by_url[url] = {
+                    "url": url,
+                    "reason": str(row.get("note", "") or ""),
+                }
+        # abort/incomplete: queued(visited_urls)だが reached でも access/error 行でもない URL は
+        # 「未試行」として unreached に含める（reached/unreached のどちらにも出ない穴を防ぐ・Codex #102）。
+        for vurl in (getattr(self, "visited_urls", None) or set()):
+            u = str(vurl or "")
+            if (
+                not u
+                or u in reached_url_set
+                or u.split("#", 1)[0] in reached_url_nofrag
+                or u in unreached_by_url
+            ):
+                continue
+            unreached_by_url[u] = {
+                "url": u,
+                "reason": "not attempted (scan ended before navigation)",
+            }
+        unreached = [unreached_by_url[url] for url in sorted(unreached_by_url)]
+
+        http_status = {
+            "total": 0,
+            "blocked": 0,
+            "client_error": 0,
+            "server_error": 0,
+        }
+        browser = getattr(self, "_browser", None)
+        if browser is None:
+            browser = getattr(self, "browser", None)
+        network = getattr(browser, "network", None) if browser is not None else None
+        merged_status_counts = Counter()
+        try:
+            merged_status_counts.update(getattr(network, "status_counts", {}) or {})
+        except Exception:
+            pass
+        try:
+            merged_status_counts.update(
+                getattr(self, "_worker_status_counts", {}) or {}
+            )
+        except Exception:
+            pass
+            # cleanup 前の per-page 保存でも live worker のカウンタを含める（クラッシュで
+        # 失われないため）。cleanup は accumulator へ transfer 後に _coverage_workers から
+        # 除くので二重計上しない（Codex #102）。
+        for _cw in (getattr(self, "_coverage_workers", ()) or ()):
+            try:
+                merged_status_counts.update(
+                    getattr(_cw.network, "status_counts", {}) or {}
+                )
+            except Exception:
+                pass
+        try:
+            merged_status_counts.update(
+                getattr(self, "_restored_status_counts", {}) or {}
+            )
+        except Exception:
+            pass
+        try:
+            merged_status_counts.update(
+                getattr(self, "_probe_status_counts", {}) or {}
+            )
+        except Exception:
+            pass
+        try:
+            http_status = bucketize_status_counts(merged_status_counts)
+        except Exception:
+            pass
+
+        reached_urls = sorted(str(url) for url in reached_url_set)
+        return {
+            "reached_urls": reached_urls,
+            "reached_count": len(reached_url_set),
+            "attempts": len(attack_rows),
+            "by_status": dict(by_status),
+            "findings_total": findings_total,
+            "unreached": unreached,
+            "unreached_count": len(unreached),
+            "http_status": http_status,
+        }
+
+    def _scan_matrix_for_display(self) -> list[dict]:
+        """Return the current-scope view without mutating durable matrix rows."""
+        return [
+            row
+            for row in (getattr(self, "scan_matrix", None) or [])
+            if (
+                isinstance(row, dict)
+                # resume-only の skip 行は実行ではないので表示/evidence から除く。
+                and row.get("status") != "skipped"
+                and (
+                    row.get("check") == "access"
+                    or ScanEngine._check_type_in_scope(
+                        self, row.get("check")
+                    )
+                )
+            )
+        ]
+
+    def record_probe_status(self, status, url=None) -> None:
+        """非ブラウザプローブの HTTP status を scan 単位で安全に記録する。"""
+        try:
+            hosts = getattr(self, "_coverage_hosts", set()) or set()
+            if url is not None and hosts:
+                if canonical_host(url) not in hosts:
+                    return
+            value = int(status)
+            if not 100 <= value < 600:
+                return
+            counts = getattr(self, "_probe_status_counts", None)
+            if counts is None:
+                counts = Counter()
+                self._probe_status_counts = counts
+            counts[value] += 1
+        except Exception:
+            pass
+
+    def _note_coverage_origin(self, url) -> None:
+        """Admit an in-scope canonical landing host and refresh live filters."""
+        try:
+            landing_host = canonical_host(url)
+            if not landing_host:
+                return
+            hosts = getattr(self, "_coverage_hosts", None)
+            if hosts is None:
+                hosts = set()
+                self._coverage_hosts = hosts
+            if landing_host not in hosts:
+                return
+        except Exception:
+            return
+
+        browsers = [getattr(self, "_browser", None)]
+        browsers.extend(list(getattr(self, "_coverage_workers", ()) or ()))
+        for browser in browsers:
+            if browser is None:
+                continue
+            try:
+                _configure_network_coverage_hosts(browser, hosts)
+            except Exception:
+                continue
 
     def _observability_report_data(self, sample_limit: int = 5) -> dict:
         """レポート用に集計と代表サンプルを同じデータ源から返す。"""
@@ -1276,6 +1522,31 @@ class ScanEngine:
                 )
             else:
                 state = loaded
+                self.reached_urls = set(state.reached_urls or [])
+                # Durable rows are always restored in full.  A subset resume
+                # narrows only report/coverage views so a subsequent full
+                # resume does not lose completed out-of-scope history.
+                self.scan_matrix = list(state.scan_matrix)
+                try:
+                    if set(self.checks or []) == set(state.checks or []):
+                        self._restored_status_counts = Counter({
+                            int(status): int(count)
+                            for status, count in (
+                                state.http_status_counts or {}
+                            ).items()
+                        })
+                    else:
+                        # サブセット resume では historical HTTP counter を復元しない。
+                        # out-of-scope check の 403/429 を blocked へ誤計上しない一方、
+                        # in-scope check の完了済み probe に属する block も失われるため、
+                        # blocked は当該 run で観測した status のみを反映する既知の制約。
+                        # 完全 resume（check 集合一致）では上の分岐で counter を復元する。
+                        self._restored_status_counts = Counter()
+                except Exception as exc:
+                    self._restored_status_counts = Counter()
+                    self.wave_errors.append(
+                        f"http_status_restore: {type(exc).__name__}: {exc}"
+                    )
                 # 既出 Finding をレポートへ復元（重複防止のため dedup へも登録）。
                 # ただし今回要求されたチェックに属する Finding のみ復元する
                 # （xss sqli の結果を --checks xss で再開したとき、SQLi の古い
@@ -1322,10 +1593,64 @@ class ScanEngine:
         try:
             # Finding は all_findings から都度スナップショット（最新を保存）
             self.checkpoint.findings = [f.to_dict() for f in self.all_findings]
+            # resume-only の skip 行（status="skipped"）は resume 毎に再生成され、保存すると
+            # 累積して HTML チェックリストの行上限を stale が消費する。実行行だけ永続する。
+            self.checkpoint.scan_matrix = [
+                row for row in (getattr(self, "scan_matrix", []) or [])
+                if not (isinstance(row, dict) and row.get("status") == "skipped")
+            ]
+            self.checkpoint.reached_urls = sorted(
+                getattr(self, "reached_urls", set()) or set()
+            )
             # D5: 試行台帳も保存（resume で adaptive 履歴を維持）。台帳未配線でも安全。
             ledger = getattr(self, "attempt_ledger", None)
             if ledger is not None:
                 self.checkpoint.attempt_ledger = ledger.to_dict()
+            merged_status_counts = Counter()
+            browser = getattr(self, "_browser", None)
+            network = (
+                getattr(browser, "network", None)
+                if browser is not None
+                else None
+            )
+            try:
+                merged_status_counts.update(
+                    getattr(network, "status_counts", {}) or {}
+                )
+            except Exception:
+                pass
+            try:
+                merged_status_counts.update(
+                    getattr(self, "_worker_status_counts", {}) or {}
+                )
+            except Exception:
+                pass
+            # cleanup 前の per-page 保存でも live worker のカウンタを含める（cleanup 前の
+            # クラッシュでも resume で復元できる）。cleanup は accumulator へ transfer 後に
+            # _coverage_workers から除くので二重計上しない（Codex #102）。
+            for _cw in (getattr(self, "_coverage_workers", ()) or ()):
+                try:
+                    merged_status_counts.update(
+                        getattr(_cw.network, "status_counts", {}) or {}
+                    )
+                except Exception:
+                    pass
+            try:
+                merged_status_counts.update(
+                    getattr(self, "_restored_status_counts", {}) or {}
+                )
+            except Exception:
+                pass
+            try:
+                merged_status_counts.update(
+                    getattr(self, "_probe_status_counts", {}) or {}
+                )
+            except Exception:
+                pass
+            self.checkpoint.http_status_counts = {
+                str(status): int(count)
+                for status, count in merged_status_counts.items()
+            }
             cp.save_checkpoint(self.output_dir, self.checkpoint)
         except Exception as exc:
             self.wave_errors.append(f"checkpoint_save: {type(exc).__name__}: {exc}")
@@ -1401,8 +1726,16 @@ class ScanEngine:
                     and self._checkpoint_is_done(cp_url, "(page)", 0, check_name)
                 ):
                     continue
+                # 明示的な page-level 能力か page context 実装を持つ scanner だけ処理し、
+                # 互換 no-op の scan_page override で人工的 tested を数えない。
+                has_page_impl = getattr(
+                    scanner, "HAS_PAGE_LEVEL", False
+                ) or hasattr(scanner, "scan_page_context")
+                if not has_page_impl:
+                    continue
                 try:
                     self._api_auth_failed = url_auth_failed
+                    before_count = len(self.all_findings)
                     findings = await scanner.scan_page(url)
                     # 実テンプレ要求で認証失効を観測したら、再ログイン+1回だけ再試行。
                     # GET プレフライトでは検知できないメソッド限定保護(POST=401)を救済。
@@ -1427,10 +1760,29 @@ class ScanEngine:
                     console.print(
                         f"  [yellow]API template check ({check_name}) on {url}: {e}[/yellow]"
                     )
+                    # 劣化した実行を coverage に残す（Codex #102 P2）。
+                    self._record_scan_matrix(
+                        url=url,
+                        field_name="(api-template)",
+                        check_name=check_name,
+                        status="error",
+                        location="API template",
+                        note=f"api-template scan raised: {type(e).__name__}: {e}",
+                    )
                 else:
                     # 認証失効が解消しないまま空振りした単位は「済み」にしない
                     # （resume が再試行できるようにする）。
                     if not self._api_auth_failed:
+                        new_findings = self.all_findings[before_count:]
+                        self._record_scan_matrix(
+                            url=url,
+                            field_name="(api-template)",
+                            check_name=check_name,
+                            status="finding" if new_findings else "tested",
+                            location="API template",
+                            severity=_top_severity(new_findings),
+                            finding_count=len(new_findings),
+                        )
                         self._checkpoint_mark_done(cp_url, "(api-template)", 0, check_name)
             # URL 単位で進捗＋Finding スナップショットを保存（クラッシュ耐性）。
             self._save_checkpoint()
@@ -1486,6 +1838,7 @@ class ScanEngine:
                 self._api_auth_failed = False
                 self._json_probe_sent = False
                 self._json_probe_failed = False
+                before_count = len(self.all_findings)
                 try:
                     findings = await scanner.scan_injection_point(ip, field)
                     for finding in findings or []:
@@ -1497,19 +1850,45 @@ class ScanEngine:
                     console.print(
                         f"  [yellow]JSON injection ({check_name}) on {ip.url}: {exc}[/yellow]"
                     )
+                    self._record_scan_matrix(
+                        url=ip.url,
+                        field_name="(json-body)",
+                        check_name=check_name,
+                        status="error",
+                        location="json-body",
+                        note=f"json-body scan raised: {type(exc).__name__}: {exc}",
+                    )
                 else:
-                    # 送信成功の証拠が無い/途中で通信失敗した・再認証失敗・実 POST 失効・
-                    # template 不在は、いずれも未認証/送信不能の空振りなので陰性として完了
-                    # 記録しない（resume で再試行できるよう残す）。
-                    if (
-                        self._json_probe_sent
-                        and not self._json_probe_failed
-                        and not auth_failed
-                        and not self._api_auth_failed
-                        and ip.template_id in (
-                            getattr(self, "injection_templates", {}) or {}
-                        )
+                    # transport/auth 失敗は degraded attempt として行を残すが完了にはせず、
+                    # resume で再試行できるようにする。template 不在や送信成功の証拠が
+                    # ない no-op は attempt に数えず、行も完了記録も残さない。
+                    template_available = ip.template_id in (
+                        getattr(self, "injection_templates", {}) or {}
+                    )
+                    if template_available and (
+                        self._json_probe_failed
+                        or auth_failed
+                        or self._api_auth_failed
                     ):
+                        self._record_scan_matrix(
+                            url=ip.url,
+                            field_name="(json-body)",
+                            check_name=check_name,
+                            status="error",
+                            location="json-body",
+                            note="JSON-body probe transport/authentication failure.",
+                        )
+                    elif template_available and self._json_probe_sent:
+                        new_findings = self.all_findings[before_count:]
+                        self._record_scan_matrix(
+                            url=ip.url,
+                            field_name="(json-body)",
+                            check_name=check_name,
+                            status="finding" if new_findings else "tested",
+                            location="json-body",
+                            severity=_top_severity(new_findings),
+                            finding_count=len(new_findings),
+                        )
                         self._checkpoint_mark_done_ip(ip, check_name)
             self._save_checkpoint()
 
@@ -1526,7 +1905,9 @@ class ScanEngine:
         既出 ``privesc_*`` Finding が復元されず、レポートから消えてしまう。
         """
         ct = check_type or ""
-        effective = set(self.checks) | set(getattr(self, "scanners", {}).keys())
+        effective = set(getattr(self, "checks", []) or []) | set(
+            getattr(self, "scanners", {}).keys()
+        )
         # crawl 中に条件付きで自動有効化される検査（cms/privesc）は、復元時点では
         # まだ scanners に無いことがあるため常に in-scope 扱いで既出 Finding を保つ。
         effective |= _AUTO_ENABLED_CHECKS
@@ -1830,6 +2211,7 @@ class ScanEngine:
         try:
             async with httpx.AsyncClient(**kwargs) as client:
                 r = await client.get(url, headers=headers)
+                self.record_probe_status(r.status_code, r.url)
         except Exception:
             return False
         return session_guard.looks_logged_out(
@@ -1873,6 +2255,11 @@ class ScanEngine:
 
         try:
             await self._browser.init()
+            # coverage の blocked カウンタ用 origin フィルタは、pre-auth ログインフロー等の
+            # 最初のトラフィックより前に main browser へ設定する（Codex #102 P2）。
+            _configure_network_coverage_hosts(
+                self._browser, getattr(self, "_coverage_hosts", set())
+            )
             if self.cookies:
                 await self._browser.set_cookies(self.cookies, self.target_url)
             if self.cookie_list:
@@ -2030,6 +2417,7 @@ class ScanEngine:
             # findings unconfirmed.
             try:
                 await self._phase_verify()
+                self._save_checkpoint()
             finally:
                 try:
                     await self.header_manager.stop_background_refresh()
@@ -2087,6 +2475,7 @@ class ScanEngine:
                     robots_url,
                     headers=self.auth_headers(url=robots_url),
                 )
+                self.record_probe_status(r.status_code, r.url)
                 if r.status_code == 200:
                     for line in r.text.splitlines():
                         line = line.strip()
@@ -2108,6 +2497,7 @@ class ScanEngine:
                     sitemap_url,
                     headers=self.auth_headers(url=sitemap_url),
                 )
+                self.record_probe_status(r.status_code, r.url)
                 if r.status_code == 200:
                     discovered += self._extract_sitemap_locs(r.text)
             except Exception:
@@ -2128,6 +2518,7 @@ class ScanEngine:
                 timeout=10.0,
                 headers=self.auth_headers(url=sitemap_url),
             )
+            self.record_probe_status(r.status_code, r.url)
             if r.status_code == 200:
                 return self._extract_sitemap_locs(r.text)
         except Exception:
@@ -2215,6 +2606,7 @@ class ScanEngine:
 
     async def _phase_crawl(self) -> list:
         """BFS crawl — navigate every reachable page, collect forms/HTML. No payloads."""
+        # main browser の coverage origin は run() の browser.init 直後に設定済み。
         console.print(Rule("[bold blue] Phase 1 / 4  ·  Crawl [/bold blue]", style="blue"))
         console.print(f"  Target: [cyan]{self.target_url}[/cyan]  depth={self.depth}")
         if len(self.target_urls) > 1 or self.access_urls:
@@ -2473,8 +2865,25 @@ class ScanEngine:
                     console.print(
                         "  [yellow][Auth] Re-login may have failed — skipping page.[/yellow]"
                     )
+                    self._record_unscannable_url(
+                        url,
+                        note="Re-login failed — authenticated content not accessible.",
+                    )
                     continue
 
+            if (
+                self.login_url
+                and self._browser.is_on_login_page(self.login_url)
+                and not self._is_login_target_url(url)
+            ):
+                self._record_unscannable_url(
+                    url,
+                    note="Redirected to login (authenticated content not accessible).",
+                )
+                continue
+            landed_url = self.browser.page.url or url
+            self._note_coverage_origin(landed_url)
+            self.reached_urls.add(url)
             try:
                 html = await self.browser.page.content()
             except Exception:
@@ -2488,7 +2897,7 @@ class ScanEngine:
                 # 応答＝プロキシの Server 等を掴む）。fingerprint を origin 別に出すため
                 # origin ごとに一度だけ捕捉する（multi-origin --target-url でスタックを取り違えない）。
                 # origin は canonical_origin で正規化し、lookup 側(CrawledPage.url)と表現を揃える。
-                _landed = self.browser.page.url or url
+                _landed = landed_url
                 _origin = canonical_origin(_landed)
                 if _origin and _origin not in self.detected_tech_headers:
                     _pair = self.browser.network.best_pair_for_page(_landed)
@@ -2727,6 +3136,9 @@ class ScanEngine:
                                 break
                             self._spa_harvest_seen.add(endpoint_key)
                             self.visited_urls.add(clean)
+                            # harvest した GET endpoint は observed かつ以降 attack 対象＝到達済み。
+                            # reached にも入れ、not-attempted 誤分類を防ぐ（Codex #102）。
+                            self.reached_urls.add(clean)
                             pages.append(CrawledPage(
                                 url=target["url"],
                                 html="",
@@ -3412,10 +3824,19 @@ class ScanEngine:
         self.total_fields = 0
         # Create (concurrency-1) additional worker pages; worker[0] = main page.
         extra_workers = []
+        coverage_workers = getattr(self, "_coverage_workers", None)
+        if coverage_workers is None:
+            coverage_workers = []
+            self._coverage_workers = coverage_workers
         for i in range(self.concurrency - 1):
             try:
                 w = await self._browser.create_worker()
+                _configure_network_coverage_hosts(
+                    w,
+                    getattr(self, "_coverage_hosts", set()),
+                )
                 extra_workers.append(w)
+                coverage_workers.append(w)
                 console.print(f"  [dim]Worker {i + 2} page created[/dim]")
             except Exception as e:
                 console.print(f"  [yellow]Could not create worker {i + 2}: {e}[/yellow]")
@@ -3483,11 +3904,22 @@ class ScanEngine:
             # worker must not prevent the next one from closing.
             for w in extra_workers:
                 try:
+                    self._worker_status_counts.update(
+                        getattr(w.network, "status_counts", {}) or {}
+                    )
+                except Exception:
+                    pass
+                try:
                     await w.close()
                 except Exception as _close_exc:
                     console.print(
                         f"  [yellow][Worker cleanup] close() failed: {_close_exc}[/yellow]"
                     )
+                try:
+                    coverage_workers.remove(w)
+                except ValueError:
+                    pass
+            self._save_checkpoint()
 
         # Propagate AbortScan to the caller (_phase_attack → run)
         if _abort_event.is_set():
@@ -3669,8 +4101,17 @@ class ScanEngine:
 
         # Navigate to target URL with authenticated session to find the landing page
         # (e.g., target is /login but authenticated session redirects to /dashboard)
-        await self._browser.navigate(self.target_url, retries=self.navigation_retries)
+        landing_success = await self._browser.navigate(
+            self.target_url, retries=self.navigation_retries
+        )
         landing_url = self._browser.page.url.rstrip("/")
+        if landing_success:
+            self._note_coverage_origin(landing_url)
+            # 成功したランディングを BFS ループ前に reached 計上する。ループ先頭の
+            # abort でループ内 navigate に到達しなくても、実際に読めたページが部分
+            # カバレッジから欠落しないようにする（Codex #102 P2・reached を足すのは
+            # unreached を減らすだけで偽警告を生まない安全側）。
+            self.reached_urls.add(landing_url)
 
         # If we landed on the login page, session may have expired — try to re-login.
         # Unless the target itself is the login page (then staying on it is expected).
@@ -3694,6 +4135,9 @@ class ScanEngine:
                     return []
                 await self._sync_cookies_from_browser(self._browser)
                 landing_url = self._browser.page.url.rstrip("/")
+                self._note_coverage_origin(landing_url)
+                # 再ログイン後のランディングも同様に reached 計上（Codex #102 P2）。
+                self.reached_urls.add(landing_url)
 
         new_pages: list = []
         # auth_visited: only prevents re-queueing within THIS crawl (not against pre-auth crawl)
@@ -3738,8 +4182,17 @@ class ScanEngine:
                 console.print(
                     "  [yellow][Post-Auth] Redirected to login — session expired.[/yellow]"
                 )
+                self._record_unscannable_url(
+                    url,
+                    note="Redirected to login during post-auth crawl (session lost).",
+                )
                 break
 
+            self._note_coverage_origin(actual_url)
+            self.reached_urls.add(actual_url)
+            # redirect で actual_url が queued url と違っても、queued url(visited_urls に登録済み)を
+            # reached にして not-attempted 誤分類を防ぐ（Codex #102）。
+            self.reached_urls.add(url.rstrip("/"))
             try:
                 html = await self._browser.page.content()
             except Exception:
@@ -3817,6 +4270,10 @@ class ScanEngine:
                         break
                     if clean not in auth_visited and not self._is_url_excluded(clean):
                         auth_visited.add(clean)
+                        # queued post-auth URL を scan-level state にも残し、abort 時に
+                        # coverage が pending を unreached(not attempted)へ分類できるようにする
+                        # （main crawl と同型・Codex #102）。
+                        self.visited_urls.add(clean)
                         self._transition_via.setdefault(clean, {
                             "text": entry.get("text", ""),
                             "selector": entry.get("selector", ""),
@@ -3914,6 +4371,20 @@ class ScanEngine:
             return
 
         try:
+            landed_url = self._browser.page.url or login_seed
+        except Exception:
+            landed_url = login_seed
+        # canonical redirect(bare→www 等)で netloc が変わっても、同一 host かつ同一 path なら
+        # login target とみなす（path 不一致の別ページ redirect は form の有無で別途判定する）。
+        def _same_canonical_login(a: str, b: str) -> bool:
+            try:
+                if canonical_host(a) != canonical_host(b):
+                    return False
+                from urllib.parse import urlsplit as _us
+                return _us(a).path.rstrip("/") == _us(b).path.rstrip("/")
+            except Exception:
+                return False
+        try:
             html = await self._browser.page.content()
         except Exception:
             html = ""
@@ -3921,6 +4392,16 @@ class ScanEngine:
         url_params = self._merge_url_params(
             await self._browser.get_url_params(), login_seed
         )
+        # reached: login target(canonical host+path)に着地した、または form/URL param が
+        # 実際に見つかった(=このあと検査/攻撃する)なら path が違っても login ページは到達済み
+        # （/login→/auth/login 等・Codex #102）。form 無しで別ページへ逸れた場合のみ未到達。
+        if (
+            self._is_login_target_url(landed_url)
+            or _same_canonical_login(landed_url, login_seed)
+            or forms
+            or url_params
+        ):
+            self.reached_urls.add(login_seed)
 
         if not forms and not url_params:
             console.print(
@@ -3977,6 +4458,19 @@ class ScanEngine:
             # 重複する。これらは checkpoint を刻む _run_api_template_checks に一本化する。
             if check_name in _API_TEMPLATE_ONLY_CHECKS:
                 continue
+            has_page_impl = getattr(
+                scanner, "HAS_PAGE_LEVEL", False
+            ) or hasattr(scanner, "scan_page_context")
+            if not has_page_impl:
+                continue
+            # 既知の制約（Codex #102 P2）: HAS_PAGE_LEVEL=True でも、GET-only spec の
+            # mass_assignment や、host/origin 単位で 1 回だけ走る request_smuggling/graphql の
+            # ように、当該ページで実際にはプローブを送らず no-op になる場合がある。その際も
+            # "tested" 行を1件記録するため attempts が上振れしうる（page-level 実行を per-page で
+            # 数える設計の副作用）。堅牢化には各スキャナが「実際に work したか」を報告する仕組みが
+            # 要り、~21 スキャナ横断＋並行実行下では比例しない。findings_total は all_findings が
+            # 権威ソースで影響を受けない。attempts の page-level 分は自己制御スキャナで上限寄りに
+            # なりうる点に留意する。
             # 再開: 済みの page-level 単位 (url,"(page)",check) は飛ばす。intrusive な
             # page-level プローブ（proto の JSON POST、graphql コスト探索）を resume で
             # 再送しないため。exact URL で刻む（origin だと別 URL を取りこぼす）。
@@ -3989,11 +4483,31 @@ class ScanEngine:
                     page_findings = await scanner.scan_page_context(page)
                 else:
                     page_findings = await scanner.scan_page(page.url)
-                for f in (page_findings or []):
+                page_findings = page_findings or []
+                for f in page_findings:
                     self._record_finding(f, source="page-level")
+                self._record_scan_matrix(
+                    url=page.url,
+                    field_name="(page)",
+                    check_name=check_name,
+                    status="finding" if page_findings else "tested",
+                    location="page-level",
+                    severity=_top_severity(page_findings),
+                    finding_count=len(page_findings),
+                )
             except Exception as e:
                 page_errored = True
                 console.print(f"  [yellow]Page-level ({check_name}): {e}[/yellow]")
+                # 実行途中で例外（probe timeout 等）＝劣化した実行。field-level と同様に
+                # error 行を残し、coverage の attempts/by_status から消えないようにする（Codex #102 P2）。
+                self._record_scan_matrix(
+                    url=page.url,
+                    field_name="(page)",
+                    check_name=check_name,
+                    status="error",
+                    location="page-level",
+                    note=f"page-level scan raised: {type(e).__name__}: {e}",
+                )
             if not page_errored:
                 self._checkpoint_mark_done(cp_url, "(page)", 0, check_name)
         # page-level のみのページ（フォーム/URLパラメータ無し）でも進捗を永続化する。
@@ -4480,7 +4994,7 @@ class ScanEngine:
                     check_name=check_name,
                     status="finding" if new_findings else "tested",
                     location=location,
-                    severity=max((f.severity for f in new_findings), default=""),
+                    severity=_top_severity(new_findings),
                     finding_count=len(new_findings),
                 )
             except AbortScan:
@@ -5208,10 +5722,14 @@ class ScanEngine:
                             baseline_url,
                             headers=self.auth_headers(url=baseline_url),
                         )
+                        self.record_probe_status(
+                            baseline_resp.status_code, baseline_resp.url
+                        )
                         probe_resp = await client.get(
                             probe_url,
                             headers=self.auth_headers(url=probe_url),
                         )
+                        self.record_probe_status(probe_resp.status_code, probe_resp.url)
                     baseline_text = baseline_resp.text
                     probe_text = probe_resp.text
                     for expected in expected_values:
@@ -5364,8 +5882,9 @@ class ScanEngine:
             "visited_urls": list(self.visited_urls),
             "llm_summary": llm_summary,
             "findings": findings_dicts,
-            "scan_matrix": self.scan_matrix,
+            "scan_matrix": self._scan_matrix_for_display(),
             "observability": self._observability_report_data(),
+            "coverage": self.coverage_summary(),
             "ctf_flags": [{"flag": flag, "source": src} for flag, src in self.ctf_found_flags],
             "diff": diff_data,
             "attack_plans": [
@@ -5461,6 +5980,7 @@ class ScanEngine:
         import webbrowser
         from .report import ReportGenerator
         gen = ReportGenerator(self.output_dir)
+        display_scan_matrix = self._scan_matrix_for_display()
 
         # 差分スキャン結果を読み込む (evidence.json に書き込み済み)
         diff_result = None
@@ -5482,9 +6002,10 @@ class ScanEngine:
             attack_plans=self.attack_plans,
             ctf_flags=self.ctf_found_flags,
             page_graph=self.page_graph,
-            scan_matrix=self.scan_matrix,
+            scan_matrix=display_scan_matrix,
             llm_summary=self._llm_runtime_summary(),
             observability=self._observability_report_data(),
+            coverage=self.coverage_summary(),
             template="audit",
             diff_result=diff_result,
         )
@@ -5499,9 +6020,10 @@ class ScanEngine:
                     attack_plans=self.attack_plans,
                     ctf_flags=self.ctf_found_flags,
                     page_graph=self.page_graph,
-                    scan_matrix=self.scan_matrix,
+                    scan_matrix=display_scan_matrix,
                     llm_summary=self._llm_runtime_summary(),
                     observability=self._observability_report_data(),
+                    coverage=self.coverage_summary(),
                     template=tmpl,
                     diff_result=diff_result,
                 )
@@ -5891,6 +6413,14 @@ class ScanEngine:
         )
         if observability_warning:
             console.print(f"  [yellow]{observability_warning}[/yellow]")
+        coverage = self.coverage_summary()
+        coverage_color = (
+            "yellow"
+            if int((coverage.get("http_status", {}) or {}).get("blocked", 0) or 0) > 0
+            or int(coverage.get("unreached_count", 0) or 0) > 0
+            else "cyan"
+        )
+        console.print(f"  [{coverage_color}]{_coverage_summary_text(coverage)}[/{coverage_color}]")
         adaptive_count = sum(1 for f in self.all_findings if "[AdaptiveAI]" in f.evidence)
         if adaptive_count:
             console.print(
