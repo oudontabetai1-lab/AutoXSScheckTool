@@ -1143,6 +1143,16 @@ class ScanEngine:
             )
         except Exception:
             pass
+            # cleanup 前の per-page 保存でも live worker のカウンタを含める（クラッシュで
+        # 失われないため）。cleanup は accumulator へ transfer 後に _coverage_workers から
+        # 除くので二重計上しない（Codex #102）。
+        for _cw in (getattr(self, "_coverage_workers", ()) or ()):
+            try:
+                merged_status_counts.update(
+                    getattr(_cw.network, "status_counts", {}) or {}
+                )
+            except Exception:
+                pass
         try:
             merged_status_counts.update(
                 getattr(self, "_restored_status_counts", {}) or {}
@@ -1604,6 +1614,16 @@ class ScanEngine:
                 )
             except Exception:
                 pass
+            # cleanup 前の per-page 保存でも live worker のカウンタを含める（cleanup 前の
+            # クラッシュでも resume で復元できる）。cleanup は accumulator へ transfer 後に
+            # _coverage_workers から除くので二重計上しない（Codex #102）。
+            for _cw in (getattr(self, "_coverage_workers", ()) or ()):
+                try:
+                    merged_status_counts.update(
+                        getattr(_cw.network, "status_counts", {}) or {}
+                    )
+                except Exception:
+                    pass
             try:
                 merged_status_counts.update(
                     getattr(self, "_restored_status_counts", {}) or {}

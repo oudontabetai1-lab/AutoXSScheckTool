@@ -1053,3 +1053,22 @@ def test_scan_matrix_display_and_save_exclude_skipped_rows():
     statuses = [r["status"] for r in disp]
     assert "skipped" not in statuses
     assert "tested" in statuses and "error" in statuses  # 実行行と access 行は残る
+
+
+def test_coverage_includes_live_worker_status_before_cleanup():
+    """cleanup 前でも live worker(_coverage_workers)の status が coverage に反映される（Codex #102）。"""
+    from collections import Counter
+    from wscan.engine import ScanEngine
+
+    live_worker = SimpleNamespace(network=SimpleNamespace(status_counts=Counter({403: 2, 429: 1})))
+    eng = SimpleNamespace(
+        scan_matrix=[], reached_urls=set(), visited_urls=set(), checks=[], scanners={},
+        all_findings=[], browser=None,
+        _worker_status_counts=Counter(),      # cleanup 未実施なので空
+        _restored_status_counts=Counter(),
+        _probe_status_counts=Counter(),
+        _coverage_workers=[live_worker],
+    )
+    hs = ScanEngine.coverage_summary(eng)["http_status"]
+    assert hs["blocked"] == 3  # 403x2 + 429x1（live worker 由来）
+    assert hs["total"] == 3
