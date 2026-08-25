@@ -372,6 +372,25 @@ class EngineScanGapTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(pages), 1)
         self.assertIn("http://fixture.test/private", engine.reached_urls)
 
+    async def test_postauth_landing_recorded_before_abort_at_first_wait(self):
+        # 初回 post-auth ナビが成功した直後、BFS ループ先頭の abort でループ内 navigate に
+        # 到達しなくても、実際に読めたランディングが reached に残る（Codex #102 P2）。
+        from wscan.intervention import AbortScan
+
+        engine = self._engine("http://fixture.test/private", depth=1)
+        engine._browser = _FakeCrawlBrowser()
+
+        async def _abort_immediately():
+            raise AbortScan("Scan aborted by operator")
+
+        engine.controller.wait_if_paused_or_abort = _abort_immediately
+
+        with self.assertRaises(AbortScan):
+            await engine._phase_crawl_postauth()
+
+        self.assertIn("http://fixture.test/private", engine.reached_urls)
+        self.assertEqual(engine.coverage_summary()["unreached"], [])
+
     async def test_postauth_login_redirect_is_unreached(self):
         protected_url = "http://fixture.test/private"
         engine = self._engine(

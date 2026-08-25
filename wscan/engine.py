@@ -4107,6 +4107,11 @@ class ScanEngine:
         landing_url = self._browser.page.url.rstrip("/")
         if landing_success:
             self._note_coverage_origin(landing_url)
+            # 成功したランディングを BFS ループ前に reached 計上する。ループ先頭の
+            # abort でループ内 navigate に到達しなくても、実際に読めたページが部分
+            # カバレッジから欠落しないようにする（Codex #102 P2・reached を足すのは
+            # unreached を減らすだけで偽警告を生まない安全側）。
+            self.reached_urls.add(landing_url)
 
         # If we landed on the login page, session may have expired — try to re-login.
         # Unless the target itself is the login page (then staying on it is expected).
@@ -4131,6 +4136,8 @@ class ScanEngine:
                 await self._sync_cookies_from_browser(self._browser)
                 landing_url = self._browser.page.url.rstrip("/")
                 self._note_coverage_origin(landing_url)
+                # 再ログイン後のランディングも同様に reached 計上（Codex #102 P2）。
+                self.reached_urls.add(landing_url)
 
         new_pages: list = []
         # auth_visited: only prevents re-queueing within THIS crawl (not against pre-auth crawl)
