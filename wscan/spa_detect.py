@@ -147,7 +147,9 @@ _INERT_OPEN_RE = re.compile(
 _RAWTEXT_OPEN_RE = re.compile(
     r"<(" + "|".join(_RAWTEXT_TAGS) + r")(?![\w-])[^>]*>", flags=re.I
 )
-_COMMENT_RE = re.compile(r"<!--.*?-->", flags=re.S)
+# HTML コメント。終端 --> が欠落（truncated/malformed 応答）した場合、コメントは
+# EOF まで継続する。未終端でも残り全体を「コメント内容」として扱う（Codex #104 P2）。
+_COMMENT_RE = re.compile(r"<!--.*?(?:-->|\Z)", flags=re.S)
 
 
 def _find_inert_end(source: str, tag: str, start: int) -> tuple[int, int]:
@@ -239,7 +241,7 @@ def _strip_inert_elements(source: str) -> str:
 def _inert_stripped(source: str) -> str:
     # markup マーカー用: inert 要素の本文を空にした上で、コメントも除去する。
     s = _strip_inert_elements(source)
-    s = re.sub(r"<!--.*?-->", " ", s, flags=re.S)
+    s = _COMMENT_RE.sub(" ", s)
     return s
 
 
@@ -283,7 +285,7 @@ def detect_spa(html: str) -> SpaInfo:
     noninert = _strip_inert_elements(source)
     # markup マーカーは inert 領域（コメント/<template>/<script>本文等）を無害化した
     # 版で探す。<!-- <app-root> --> や var x="<app-root>" で誤判定しない（Codex #104 P2）。
-    markup = re.sub(r"<!--.*?-->", " ", noninert, flags=re.S)
+    markup = _COMMENT_RE.sub(" ", noninert)
 
     angular_signals: list[str] = []
     # 属性/タグベースのマーカー（markup）は inert 除去済みの markup で探す。

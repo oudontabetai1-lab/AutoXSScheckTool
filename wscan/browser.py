@@ -2464,7 +2464,21 @@ class BrowserManager:
                     clicked += 1
 
                     new_url = page.url
-                    if new_url not in seen_urls and new_url != current_url_before:
+                    navigated = new_url != current_url_before
+                    # href/routing 属性を持たない JS-only コントロール（onclick で
+                    # location=… する tab/button 等）は遷移先を静的に検証できない。
+                    # クリック後に out-of-scope へ遷移していたら記録せず即戻り、
+                    # スコープ漏れを1ナビゲーションに抑える（Codex #104 P1）。
+                    if navigated and is_in_scope is not None and not is_in_scope(new_url):
+                        try:
+                            await page.go_back(timeout=5000)
+                            await page.wait_for_load_state("domcontentloaded", timeout=5000)
+                            await page.evaluate(hook_script)
+                        except Exception:
+                            pass
+                        continue
+
+                    if navigated and new_url not in seen_urls:
                         seen_urls.add(new_url)
                         discovered.append(new_url)
 

@@ -98,6 +98,9 @@ def test_generic_mount_id_requires_matching_framework_trace(html, framework):
         '<html><body><!-- <script>self.__next_f.push([])</script> --></body></html>',
         '<html><body><template><script>self.__next_f.push([])</script>'
         '</template></body></html>',
+        # 未終端コメント（truncated 応答）は EOF まで内容扱い（Codex #104 P2）。
+        '<html><body><!-- <app-root></app-root>',
+        '<html><body><!-- <div id="__next"></div>',
     ],
 )
 def test_normal_or_ambiguous_html_is_not_spa(html):
