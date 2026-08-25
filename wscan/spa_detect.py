@@ -59,10 +59,14 @@ _BUNDLE_HINT_RE = re.compile(
 
 
 def _has_bundle_script(source: str) -> bool:
-    """本番アプリバンドルらしい script が存在するか（無関係な単発 script を除く）。"""
-    # ES モジュール読み込みは SPA エントリの強い痕跡。
-    if re.search(r"<script\b[^>]*\btype\s*=\s*(['\"])module\1", source, flags=re.I):
-        return True
+    """本番アプリバンドルらしい外部 script が存在するか（無関係な単発 script を除く）。
+
+    ``type="module"`` 単独では判定しない。インラインの analytics/ユーティリティ
+    モジュール（src 無し）や無関係な外部モジュールでも真になり、空 #root/#app の
+    静的ページを SPA 誤判定するため（Codex #104 P2）。外部 ``src`` がアプリバンドルの
+    痕跡（ハッシュ付きファイル名 / 既知の SPA アセットディレクトリ / 既知のバンドル語）を
+    持つ場合のみ真とする。
+    """
     for m in _BUNDLE_SRC_RE.finditer(source):
         if _BUNDLE_HINT_RE.search(m.group(2)):
             return True
