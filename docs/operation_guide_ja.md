@@ -176,7 +176,7 @@ python3 main.py scan https://app.example.com \
 | 接続確認 | `--fast --depth 1 --max-payloads 3 --delay 0.5` |
 | 初回診断 | ダッシュボードの「標準Web診断」 |
 | 認証あり | 「認証あり診断」または Cookie / Login URL 設定 |
-| SPA | `--spa-crawl` または「精度重視診断」 |
+| SPA | 固有マーカー検出で自動有効化（既定 ON）。常時有効は `--spa-crawl`、自動判定の無効化は `--no-auto-spa` |
 | 負荷抑制 | `--delay 1.0`、`--concurrency 1`、`--max-payloads` を小さく |
 | 広範囲検査 | depth、checks、manual crawl、HAR を増やす |
 
@@ -192,6 +192,8 @@ python3 main.py scan https://app.example.com \
 ```
 
 検査可能/停止時間帯は CLI の `--allowed-hours` / `--forbidden-hours`、またはダッシュボードの「基本設定」から指定できます。ダッシュボードでは `Mon-Fri 22:00-06:00` のように1行1件で入力し、空欄なら無効です。
+
+SPA 自動有効化は通常層の既定挙動です。Angular / React / Next.js / Vue / Nuxt の固有マーカーがある初回ページだけを high confidence とし、フォームなし・script 多数・可視テキスト希薄といった一般的な特徴だけでは有効化しません。誤有効化を避けたい運用では `--no-auto-spa` またはダッシュボードの「SPA自動有効化（検出時）」をオフにしてください。明示した `--spa-crawl` は opt-out より優先されます。
 
 ## 6. プロキシ連携
 

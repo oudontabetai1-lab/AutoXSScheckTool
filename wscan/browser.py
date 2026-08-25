@@ -38,6 +38,74 @@ console = Console()
 _DEFAULT_PORTS = {"http": 80, "https": 443, "ws": 80, "wss": 443}
 
 
+# セッションを終了させるリンク（ログアウト等）。SPA クリック探索がこれを踏むと、
+# 認証セッションが失効し go_back() でも復元できず、以降の認証ページが軒並みログインへ
+# リダイレクトして攻撃面を失う（自動有効化で既定化するため特に危険・Codex #104 P1）。
+# href: logout 変種を「完全なトークン」に限定する。log[\W_]*out のように区切りを
+# 貪欲に許すと /catalog/output や /blog/outdoors が session 終了リンク扱いされ、正当な
+# SPA ルートをクリックしなくなる（Codex #104 P2）。区切りは単一の -_. のみ許し、前後は
+# 英数字でない（トークン境界）ことを要求する。
+_SESSION_ENDING_HREF_RE = re.compile(
+    r"(?<![a-z0-9])(?:log[-_.]?out|sign[-_.]?out|log[-_.]?off|sign[-_.]?off|deauth)"
+    r"(?![a-z0-9])",
+    flags=re.I,
+)
+# text: 単語境界に限定する（"Catalog Output" 等の誤検出回避）。CJK は境界不要。
+_SESSION_ENDING_TEXT_RE = re.compile(
+    r"\b(?:log\s*out|sign\s*out|log\s*off|sign\s*off)\b"
+    r"|ログアウト|サインアウト|ログオフ|サインオフ",
+    flags=re.I,
+)
+
+
+def looks_like_url_ref(value: str) -> bool:
+    """値が URL/パスらしいか（純粋関数）。
+
+    data-page="2" のような不透明な pagination token や data-route="dashboard" の
+    識別子はスコープを変える遷移先ではなく同一ページ操作なので、遷移先として解決しない
+    （Codex #104 P2）。パス区切り ``/`` を含むか scheme を持つ値だけを URL/パスとみなす。
+    外部先（``//outside`` / ``https://…``）は必ず ``/`` を含むのでスコープ判定へ回る。
+    """
+    v = (value or "").strip()
+    if not v:
+        return False
+    if "/" in v:
+        return True
+    return bool(re.match(r"[a-z][\w+.-]*:", v, flags=re.I))
+
+
+def click_target_in_scope(
+    base_url: str, href: str, is_in_scope: Optional[Callable[[str], bool]] = None
+) -> bool:
+    """クリック先 href を絶対 URL へ解決し、認可スコープ内か判定する（純粋関数）。
+
+    href をそのまま prefix 比較すると、プロトコル相対 ``//outside.example`` や
+    lookalike absolute ``https://target.example.evil`` を内部扱いしてスコープ外へ
+    リクエストしてしまう（Codex #104 P1）。``urljoin`` で絶対化してから判定する。
+    href 空（button 等・URL を持たない要素）は同一ページ操作として許可する。
+    """
+    if not href:
+        return True
+    resolved = urljoin(base_url, href)
+    if is_in_scope is not None:
+        return bool(is_in_scope(resolved))
+    return urlparse(resolved).netloc == urlparse(base_url).netloc
+
+
+def is_session_ending_link(href: str, text: str) -> bool:
+    """href またはリンク文言がログアウト/サインアウト系か（純粋関数）。
+
+    クリックするとサーバセッションを失効させるリンクを SPA クリック探索から除外する
+    ために使う。保守的に logout/signout/logoff 系だけを対象にする（過剰除外で正当な
+    ルート発見を殺さない）。
+    """
+    if href and _SESSION_ENDING_HREF_RE.search(href):
+        return True
+    if text and _SESSION_ENDING_TEXT_RE.search(text):
+        return True
+    return False
+
+
 def canonical_host(url_or_netloc) -> str:
     """Return a case-insensitive ``host[:port]`` key without leading ``www.``.
 
@@ -1340,7 +1408,12 @@ class BrowserManager:
                 await self.page.wait_for_function(
                     """
                     () => {
-                        const root = document.querySelector('app-root, #root') || document.body;
+                        // detect_spa が認識する全マウントを対象にする。#app/#__next/
+                        // #__nuxt の空シェルで body へフォールバックすると、body の
+                        // 子要素が既に非0のため hydration を待たず返ってしまう（Codex #104 P1）。
+                        const root = document.querySelector(
+                            'app-root, #root, #app, #__next, #__nuxt'
+                        ) || document.body;
                         if (!root) return false;
                         return root.childElementCount > 0
                             || (root.innerText || '').trim().length > 0;
@@ -2275,11 +2348,29 @@ class BrowserManager:
     # ① SPA/Dynamic content crawl exploration
     # ------------------------------------------------------------------
 
+    async def clear_scope_route(self) -> None:
+        """explore_spa_interactions が張った context スコープ route を剥がす。
+
+        探索中に張ったスコープ外リクエスト遮断 route を、呼び出し側（engine）が
+        settle/harvest 後に剥がすために使う（遅延リクエストを settle 中も遮断するため
+        探索直後には剥がさない・Codex #104 P1）。
+        """
+        handle = getattr(self, "_spa_scope_route", None)
+        if not handle:
+            return
+        ctx, route = handle
+        try:
+            await ctx.unroute("**/*", route)
+        except Exception:
+            pass
+        self._spa_scope_route = None
+
     async def explore_spa_interactions(
         self,
         page,
         base_url: str,
         max_clicks: int = 30,
+        is_in_scope: Optional[Callable[[str], bool]] = None,
     ) -> list[str]:
         """
         Explore client-side navigation by:
@@ -2317,6 +2408,57 @@ class BrowserManager:
         except Exception:
             pass
 
+        # 相対 href/routing 属性の解決基準はドキュメントの effective base URI。
+        # <base href> があるとブラウザはそれ基準で解決するので、渡された base_url
+        # （landed_url）ではなく document.baseURI を使う。取得失敗時は base_url へ
+        # フォールバックする（Codex #104 P1）。
+        try:
+            effective_base = await page.evaluate("() => document.baseURI") or base_url
+        except Exception:
+            effective_base = base_url
+
+        # スコープ外リクエストの遮断（ネットワーク層）。destination-less な JS-only
+        # コントロールが onclick で fetch('//outside/…') や window.open('//outside/…')
+        # する等、page.url を変えずにスコープ外へリクエストするケースは navigation ベースの
+        # ガードでは捕らえられない。探索中だけスコープ外の http(s) リクエストを abort する。
+        # popup（window.open）も捕捉するため page ではなく context 単位で route を張る
+        # （Codex #104 P1）。
+        _scope_route = None
+        _scope_ctx = None
+        if is_in_scope is not None:
+            async def _scope_route(route):
+                try:
+                    req_url = route.request.url
+                    if req_url.startswith(("http://", "https://")) and not is_in_scope(req_url):
+                        await route.abort()
+                        return
+                except Exception:
+                    pass
+                # 許可リクエストは route.fallback() で次の一致ハンドラ（既存の
+                # 認証ヘッダ付与 route 等）へ委譲する。continue_() だとチェーンを終端し、
+                # in-scope XHR が Authorization/カスタムヘッダを失い 401 になる（Codex #104 P2）。
+                try:
+                    await route.fallback()
+                except Exception:
+                    try:
+                        await route.continue_()
+                    except Exception:
+                        pass
+            try:
+                _scope_ctx = page.context
+                await _scope_ctx.route("**/*", _scope_route)
+            except Exception:
+                _scope_route = None
+                _scope_ctx = None
+        # route はここで剥がさず self に保持し、呼び出し側（engine）が settle/harvest 後に
+        # clear_scope_route() する。setTimeout(()=>fetch('//outside'),5000) のような遅延
+        # リクエストが、探索直後の settle 中（guard 消失後）に飛ぶのを防ぐ（Codex #104 P1）。
+        self._spa_scope_route = (
+            (_scope_ctx, _scope_route)
+            if (_scope_route is not None and _scope_ctx is not None)
+            else None
+        )
+
         # Collect interactive elements to click
         selectors = [
             "a[data-href]",
@@ -2335,9 +2477,10 @@ class BrowserManager:
         clicked = 0
         seen_urls: set[str] = set()
         current_url_before = page.url
+        aborted = False  # スコープ外へ出て復帰できないとき探索全体を中断する
 
         for sel in selectors:
-            if clicked >= max_clicks:
+            if aborted or clicked >= max_clicks:
                 break
             try:
                 elements = await page.query_selector_all(sel)
@@ -2348,11 +2491,43 @@ class BrowserManager:
                 if clicked >= max_clicks:
                     break
                 try:
-                    # Don't click external links
+                    # クリック先を絶対 URL へ解決してスコープ判定する（Codex #104 P1）。
+                    # href が無い要素（button[data-route] 等）はルーティング data 属性が
+                    # 遷移先を持つので、それも解決してスコープ検証する。data-route="//outside"
+                    # のような外部先を検証前にクリックしない（Codex #104 P1）。
                     href = await el.get_attribute("href") or ""
-                    if href.startswith("http") and not href.startswith(
-                        urlparse(base_url).scheme + "://" + urlparse(base_url).netloc
-                    ):
+                    route_ref = href
+                    if not route_ref:
+                        for _attr in ("data-href", "data-route", "data-path", "data-page"):
+                            _v = await el.get_attribute(_attr)
+                            if _v:
+                                # opaque な pagination token / 識別子（data-page="2" 等）は
+                                # 遷移先として解決せず同一ページ操作とみなす。URL/パスらしい
+                                # 値だけスコープ判定へ回す（Codex #104 P2）。
+                                if looks_like_url_ref(_v):
+                                    route_ref = _v
+                                break
+                    if not click_target_in_scope(effective_base, route_ref, is_in_scope):
+                        continue
+
+                    # セッションを終了させるリンク（logout/signout 等）はクリックしない。
+                    # 認証セッションを失効させ、以降の認証ページを軒並み失う（Codex #104 P1）。
+                    # アイコンのみのコントロール（inner_text 空）向けに aria-label/title の
+                    # アクセシブル名も判定に含める（Codex #104 P1）。
+                    try:
+                        _text = await el.inner_text()
+                    except Exception:
+                        _text = ""
+                    try:
+                        _aria = await el.get_attribute("aria-label") or ""
+                    except Exception:
+                        _aria = ""
+                    try:
+                        _title = await el.get_attribute("title") or ""
+                    except Exception:
+                        _title = ""
+                    _label = " ".join(t for t in (_text, _aria, _title) if t)
+                    if is_session_ending_link(route_ref, _label):
                         continue
 
                     await el.click(timeout=3000)
@@ -2360,7 +2535,30 @@ class BrowserManager:
                     clicked += 1
 
                     new_url = page.url
-                    if new_url not in seen_urls and new_url != current_url_before:
+                    navigated = new_url != current_url_before
+                    # href/routing 属性を持たない JS-only コントロール（onclick で
+                    # location=… する tab/button 等）は遷移先を静的に検証できない。
+                    # クリック後に out-of-scope へ遷移していたら記録せず即戻り、
+                    # スコープ漏れを1ナビゲーションに抑える（Codex #104 P1）。
+                    if navigated and is_in_scope is not None and not is_in_scope(new_url):
+                        recovered = False
+                        try:
+                            await page.go_back(timeout=5000)
+                            await page.wait_for_load_state("domcontentloaded", timeout=5000)
+                            await page.evaluate(hook_script)
+                            recovered = is_in_scope(page.url)
+                        except Exception:
+                            recovered = False
+                        if not recovered:
+                            # go_back 失敗（location.replace 等）or 復帰先が依然スコープ外:
+                            # 外部ドキュメント上でこれ以上クリックを続けると、相対リンクが
+                            # 古い in-scope effective_base で承認されつつ外部ページ基準で
+                            # クリックされ複数の不正リクエストになる。探索を中断する（Codex #104 P1）。
+                            aborted = True
+                            break
+                        continue
+
+                    if navigated and new_url not in seen_urls:
                         seen_urls.add(new_url)
                         discovered.append(new_url)
 
@@ -2370,32 +2568,65 @@ class BrowserManager:
                         if su not in seen_urls:
                             seen_urls.add(su)
                             # Resolve relative URLs
-                            full = urljoin(base_url, su)
+                            full = urljoin(effective_base, su)
                             discovered.append(full)
 
                     # Navigate back to not get lost
                     if page.url != current_url_before:
+                        restored = False
                         try:
                             await page.go_back(timeout=5000)
                             await page.wait_for_load_state("domcontentloaded", timeout=5000)
                             # Re-inject hook after navigation
                             await page.evaluate(hook_script)
+                            restored = page.url == current_url_before
                         except Exception:
-                            pass
+                            restored = False
+                        if not restored:
+                            # location.replace 等で go_back が current_url_before へ戻せない
+                            # 場合、以降のクリックは置換ドキュメント上で古い effective_base
+                            # 基準に承認され、engine の collect_links_rich(url) も元 URL 基準で
+                            # 相対リンクを誤解決して偽ターゲットを作る。探索を中断する
+                            # （in-scope 遷移でも復帰不能なら止める・Codex #104 P2）。
+                            aborted = True
+                            break
 
                 except Exception:
                     continue
+
+            if aborted:
+                break
 
         # Final flush of pushState-captured URLs
         try:
             spa_urls = await page.evaluate("window.__wscan_spa_urls || []")
             for su in spa_urls:
-                full = urljoin(base_url, su)
+                full = urljoin(effective_base, su)
                 if full not in seen_urls:
                     seen_urls.add(full)
                     discovered.append(full)
         except Exception:
             pass
+
+        # 復帰不能で中断した場合、ページは置換ドキュメント上に残っている。呼び出し側は
+        # 元の queued URL を基準に collect_links_rich(url) 等を行うので、外部/別ページの
+        # 相対リンクを誤解決して偽ターゲットを作らないよう、元ページへ戻してから返す。
+        # 復元 goto の結果を検証し、戻れなければもう一度試みる（Codex #104 P2）。scope route は
+        # ここでは剥がさない（engine が settle/harvest 後に clear する）。復元先は in-scope
+        # なので route が張ったままでも許可される。
+        if aborted:
+            for _ in range(2):
+                try:
+                    await page.goto(
+                        current_url_before, wait_until="domcontentloaded", timeout=8000
+                    )
+                except Exception:
+                    pass
+                try:
+                    if (page.url or "").split("#")[0] == current_url_before.split("#")[0]:
+                        break
+                except Exception:
+                    break
 
         return list(dict.fromkeys(discovered))  # preserve order, deduplicate
 

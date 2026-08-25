@@ -537,6 +537,7 @@ class ScanEngine:
         allow_state_changing_probes: bool = False,
         # ①: SPA crawl enhancement
         spa_crawl: bool = False,
+        auto_spa_crawl: bool = True,
         # ハイブリッドモード: Agent偵察で発見したURLをクロールのシードに使う
         seed_urls: Optional[list] = None,
         # Scope: URLs that are attacked vs. URLs that may be visited only
@@ -629,6 +630,12 @@ class ScanEngine:
         self.account_sessions: list = []
         # ①: SPA crawl
         self.spa_crawl = spa_crawl
+        self.auto_spa_crawl = auto_spa_crawl
+        self.detected_spa = None
+        # 自動検出で spa_crawl を有効化したか（明示 --spa-crawl と区別）。
+        # 自動有効化時はクリック探索を read-only 運用にし、状態変更しうる操作は
+        # allow_state_changing_probes の opt-in を要求する（Codex #104 P1）。
+        self._spa_auto_enabled = False
         # SPA harvest のページ跨ぎ大域 dedup キー集合 (endpoint, param集合)。
         self._spa_harvest_seen: set = set()
         # JSON body harvest の大域 dedup（dedup_key→template_id・再観測で template を最新化）と、
@@ -1335,7 +1342,27 @@ class ScanEngine:
         return clean != url and self._is_attack_target_url(clean)
 
     def _is_access_allowed_url(self, url: str) -> bool:
-        return self._is_attack_target_url(url) or self._url_matches_scope(url, self.access_urls)
+        if self._is_attack_target_url(url) or self._url_matches_scope(url, self.access_urls):
+            return True
+        parsed = urlparse(url)
+        # fragment はサーバに送られないので常に除いて再判定する。これで query 付きで
+        # 明示スコープした target（例 .../action?op=save）の fragment 付き変種
+        # （.../action?op=save#details）も許可される（設定 query は保持・Codex #104 P2）。
+        no_frag = parsed._replace(fragment="").geturl()
+        if no_frag != url and (
+            self._is_attack_target_url(no_frag)
+            or self._url_matches_scope(no_frag, self.access_urls)
+        ):
+            return True
+        # path-scoped target（query 無しで設定）向けに query も除いて再判定し、
+        # ?page=2 のような同一パス URL を許可する（_json_target_in_scope と同じ許容）。
+        clean = parsed._replace(query="", fragment="").geturl()
+        if clean != url and (
+            self._is_attack_target_url(clean)
+            or self._url_matches_scope(clean, self.access_urls)
+        ):
+            return True
+        return False
 
     def _is_login_target_url(self, url: str) -> bool:
         """Return True when *url* itself is the configured login page.
@@ -2552,7 +2579,11 @@ class ScanEngine:
         route_sig = ""
         if url:
             parsed = urlparse(url)
-            route_sig = f"route:{parsed.path or '/'}"
+            # 完全な正規化 origin（scheme+netloc）を含めて origin-aware にする。別 origin の
+            # 構造的に同一なページ（複数ターゲットの SPA ルート `/` 等）を重複スキップで
+            # 落とさない。scheme も含めるので同一ホストの HTTP/HTTPS アプリも区別する
+            # （Codex #104 P1/P2）。
+            route_sig = f"route:{parsed.scheme}://{parsed.netloc}{parsed.path or '/'}"
             query_names = sorted(
                 {
                     part.split("=", 1)[0]
@@ -2630,7 +2661,7 @@ class ScanEngine:
                 queue.append((scope_url, 0, self.target_url))
         # A: DOM構造フィンガープリントで類似ページを検出
         self._seen_page_fingerprints: set[str] = set()
-        _first_page = True  # CMS 検出は最初のページのみ
+        _first_page = True  # CMS / SPA 検出は最初のページのみ
 
         # 認証後の到達ページを通常クロールにも戻す。ログイン URL を起点にした診断では、
         # ここを入れないとログイン後画面を巡回しないまま攻撃フェーズへ進んでしまう。
@@ -2908,12 +2939,83 @@ class ScanEngine:
             except Exception:
                 pass
 
+            # SPA 検出は _first_page にも重複スキップにも縛らず、有効化されるまで各ページで
+            # 評価する。マルチターゲット/マルチオリジン scan で、主 URL が通常ページだったり、
+            # 二次オリジンの SPA シェルが origin 非依存の _page_fingerprint で主ページと衝突して
+            # 重複スキップされると、後続 SPA の動的ルート/API を見逃す（Codex #104 P1）。
+            # そのため重複スキップより前に検出し、必要なら settle して html を採り直す。
+            # ただし landed_url が access スコープ外（in-scope URL が未設定の外部 IdP/SSO 等へ
+            # リダイレクトした場合）は検出も有効化もしない。さもないと後段の explore が外部
+            # ページの相対リンク/タブ/ボタンをスコープ外でクリックする（Codex #104 P1）。
+            spa_just_enabled = False
+            if (
+                html
+                and self.auto_spa_crawl
+                and not self.spa_crawl
+                and self._is_access_allowed_url(landed_url)
+            ):
+                try:
+                    from wscan.spa_detect import detect_spa
+
+                    self.detected_spa = detect_spa(html)
+                    if self.detected_spa.is_spa and self.detected_spa.confidence == "high":
+                        self.spa_crawl = True
+                        self._spa_auto_enabled = True
+                        spa_just_enabled = True
+                        # __init__ 後の反転なので BrowserManager 側も同期する。
+                        self._browser.spa_settle = True
+                        console.print(
+                            f"  [cyan][SPA] {self.detected_spa.framework} を検出 — "
+                            "SPA クロールを自動有効化[/cyan]"
+                        )
+                        # 検出ページの navigate は spa_settle=False のまま完了しており、フラグ
+                        # 反転は以降のナビゲーションにしか効かない。到達ページが本番シェル
+                        # （空マウント）の場合、この場で settle して html を採り直さないと、
+                        # 直後の重複判定・find_forms()/get_url_params()・CrawledPage が hydration
+                        # 前の空 DOM を見て forms/route/url_params が 0 件になる（Codex #104 P1）。
+                        try:
+                            await self.browser.settle_spa()
+                            html = await self.browser.page.content()
+                            # settle 中の client-side redirect で landed が変わりうる。以降の
+                            # スコープ判定（explore ガード・base_url）が古い in-scope 値を使わ
+                            # ないよう landed_url を採り直す（Codex #104 P1）。
+                            landed_url = self.browser.page.url or landed_url
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+
+            # settle 中の client-side redirect で landed が access スコープ外へ出た場合、
+            # このイテレーションで外部ドキュメントを forms 抽出・CrawledPage 記録・
+            # collect_links_rich(url) すると、外部ページを元 URL のターゲットとして保存し
+            # 相対リンクを元 origin に解決して偽のクロール/攻撃対象を作る。外部へ出たら
+            # unscannable として記録し、以降の処理をスキップする（Codex #104 P2）。
+            # SPA モードが有効な間は navigate() 内でも settle が走る（検出イテレーション
+            # 以降の全ページ）ので、self.spa_crawl 有効時の全ナビに適用する。非SPA の
+            # リダイレクト挙動は変えない。
+            if (
+                self.spa_crawl
+                and landed_url
+                and not self._is_access_allowed_url(landed_url)
+            ):
+                self._record_unscannable_url(
+                    url,
+                    note="SPA settle 中に access スコープ外へリダイレクトしたため未検査。",
+                )
+                continue
+
             # A: 重複ページスキップ (DOM構造フィンガープリント)
             if html:
                 if self.flag_finder:
                     self._check_page_for_flags(html, url)
                 fp = self._page_fingerprint(html, url)
-                if fp in self._seen_page_fingerprints:
+                # このイテレーションで SPA を自動検出したページは、origin 非依存の
+                # fingerprint が別 origin の既出ページと衝突しても重複スキップしない
+                # （下の add で登録はする）。さもないと唯一の SPA ページの forms/探索/
+                # harvest を落とす（Codex #104 P1）。
+                if spa_just_enabled:
+                    pass
+                elif fp in self._seen_page_fingerprints:
                     console.print(f"  [dim]重複ページスキップ: {url} (同一構造を検出)[/dim]")
                     # リンクは抽出するが、スキャン対象には追加しない
                     if depth + 1 < self.depth:
@@ -2940,7 +3042,7 @@ class ScanEngine:
                     continue
                 self._seen_page_fingerprints.add(fp)
 
-            # C: CMS 検出 (最初のページのみ)
+            # C: CMS / SPA 検出 (最初のページのみ)
             if _first_page:
                 _first_page = False
                 try:
@@ -3063,20 +3165,45 @@ class ScanEngine:
                 )
 
             # ① SPA crawl: discover dynamically-rendered routes via click interaction
-            if self.spa_crawl:
+            # landed_url が access スコープ外（in-scope URL が外部 IdP/SSO へリダイレクト等）の
+            # ときはクリック探索しない。外部ページの相対リンク/タブ/ボタンをスコープ外で
+            # 操作するのを防ぐ（spa_crawl が既に有効でも landed で判定・Codex #104 P1）。
+            #
+            # クリック探索は state を変えうる（削除/送信/管理操作の nav a や button[data-route]）。
+            # 自動有効化（既定 ON）では read-only 運用とし、クリック探索は明示 --spa-crawl か
+            # allow_state_changing_probes の opt-in がある場合のみ行う。opt-in が無くても
+            # settle と GET XHR harvest（ページが自ら投げた read-only な観測）は継続する
+            # ので、API 到達性の主要な利得は保たれる（Codex #104 P1）。
+            _spa_click_allowed = (
+                not self._spa_auto_enabled or self.allow_state_changing_probes
+            )
+            if (
+                self.spa_crawl
+                and self._is_access_allowed_url(landed_url)
+                and _spa_click_allowed
+            ):
                 try:
+                    # base_url は landed_url を渡す。相対 href/routing 属性は landed
+                    # ドキュメント URL で解決されるため、pre-redirect の url を渡すと
+                    # スコープ判定と実リクエスト先がずれる（Codex #104 P1）。
                     spa_links = await self._browser.explore_spa_interactions(
-                        self._browser.page, url, max_clicks=20
+                        self._browser.page, landed_url, max_clicks=20,
+                        is_in_scope=self._is_access_allowed_url,
                     )
-                    for spa_link in spa_links:
-                        clean_spa = spa_link.split("#")[0]
-                        if (
-                            clean_spa not in self.visited_urls
-                            and self._is_access_allowed_url(clean_spa)
-                            and not self._is_url_excluded(clean_spa)
-                        ):
-                            self.visited_urls.add(clean_spa)
-                            queue.append((spa_link, depth + 1, url))
+                    # 発見ルートの巡回キュー投入は通常リンクと同じ深度ガードに従う。
+                    # これが無いと --depth 1 でも探索ルートを訪問し再帰的に深追いして
+                    # 操作者の深度=トラフィック上限を超える（Codex #104 P2）。現ページの
+                    # クリック探索と XHR harvest（同一ページの攻撃面拡充）は深度非依存で継続。
+                    if depth + 1 < self.depth:
+                        for spa_link in spa_links:
+                            clean_spa = spa_link.split("#")[0]
+                            if (
+                                clean_spa not in self.visited_urls
+                                and self._is_access_allowed_url(clean_spa)
+                                and not self._is_url_excluded(clean_spa)
+                            ):
+                                self.visited_urls.add(clean_spa)
+                                queue.append((spa_link, depth + 1, url))
                 except Exception:
                     pass
 
@@ -3158,7 +3285,14 @@ class ScanEngine:
 
             # SPA 観測の JSON body は CrawledPage 化せず、専用の攻撃ループへ
             # 引き渡すメモリ内キューにだけ積む。
-            if self.spa_crawl:
+            # 非GET body の harvest→_run_json_injection_checks は変異 body を再送する
+            # 状態変更操作。自動有効化（既定 read-only）ではクリック探索と同様、明示
+            # --spa-crawl か allow_state_changing_probes の opt-in がある場合のみ行う
+            # （autosave/cart 等の POST/PUT/PATCH を勝手に攻撃再送しない・Codex #104 P1）。
+            # GET XHR harvest（上）は read-only 相当なので既定でも継続する。
+            if self.spa_crawl and (
+                not self._spa_auto_enabled or self.allow_state_changing_probes
+            ):
                 try:
                     from . import spa_harvest
 
@@ -3255,7 +3389,33 @@ class ScanEngine:
                 except Exception:
                     pass
 
-            if depth + 1 < self.depth:
+            # explore が張ったスコープ外リクエスト遮断 route を、settle/harvest 完了後に
+            # 剥がす。遅延リクエスト（setTimeout fetch 等）を settle 中も遮断するため探索
+            # 直後には剥がさない（Codex #104 P1）。
+            if self.spa_crawl:
+                try:
+                    await self._browser.clear_scope_route()
+                except Exception:
+                    pass
+
+            # SPA クリック探索で復帰不能だった場合、ページが別ドキュメントに残って
+            # いることがある。collect_links_rich(url) が誤 DOM から相対リンクを拾って
+            # 偽ルートを作らないよう、landed から drift していたら landed へ戻す。
+            # navigate の成否と最終 URL を検証し、復元できなければ link 収集をスキップする
+            # （誤 DOM から偽ルートを拾わない・Codex #104 P2）。
+            _links_ok = True
+            if self.spa_crawl and landed_url:
+                try:
+                    _cur = (self._browser.page.url or "").split("#")[0]
+                    if _cur != landed_url.split("#")[0]:
+                        _ok = await self._browser.navigate(
+                            landed_url, retries=self.navigation_retries
+                        )
+                        _cur = (self._browser.page.url or "").split("#")[0]
+                        _links_ok = bool(_ok) and _cur == landed_url.split("#")[0]
+                except Exception:
+                    _links_ok = False
+            if _links_ok and depth + 1 < self.depth:
                 link_entries = await self.browser.collect_links_rich(url, same_domain=False)
                 url_cap = max(200, self.depth * 50)
                 _cap_warned = False

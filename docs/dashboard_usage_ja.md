@@ -126,7 +126,9 @@ Target URL を入力し、目的に近いプロファイルを選びます。
 | Agent Browser | LLM 自律操作モード |
 | ハイブリッド | Agent 偵察から通常スキャンへ引き渡すモード |
 
-機能フラグの「SPA クロール (React/Vue/Angular)」は、CLI の `--spa-crawl` と同じ動作をします。(1) `history.pushState`/`replaceState` をフックし、ナビゲーション要素（nav リンク・タブ・`data-route` ボタンなど）をクリックして仮想ルートを発見しクロール対象に追加、(2) 描画確定待ち（`networkidle` 上限付き＋ルート要素の描画完了）で `<app-root>` が空のまま抽出されるのを防止、(3) 描画中に観測した攻撃スコープ内の GET API/XHR エンドポイント（クエリ付き。例: `/rest/products/search?q=`）を攻撃対象へ自動追加し URL パラメータとして注入検査、を行います。通常のリンクだけでは辿れない SPA でも検査対象が広がります。JSON ボディの POST エンドポイントへの注入は現状対象外です。既定はオフです。
+機能フラグの「SPA自動有効化（検出時）」は既定 ON です。初回ページに Angular / React / Next.js / Vue / Nuxt の固有マーカーがある場合だけ「SPA クロール」を自動で有効化し、通常層の確実性を保つため一般的なページ構成だけでは有効化しません。CLI の opt-out は `--no-auto-spa` です。「SPA クロール (React/Vue/Angular)」を明示的に ON にした場合は自動判定の設定より優先されます。
+
+SPA クロールでは、(1) `history.pushState`/`replaceState` をフックし、ナビゲーション要素（nav リンク・タブ・`data-route` ボタンなど）をクリックして仮想ルートを発見しクロール対象に追加、(2) 描画確定待ち（`networkidle` 上限付き＋ルート要素の描画完了）で `<app-root>` が空のまま抽出されるのを防止、(3) 描画中に観測した攻撃スコープ内の GET API/XHR エンドポイント（クエリ付き。例: `/rest/products/search?q=`）を攻撃対象へ自動追加し URL パラメータとして注入検査、を行います。通常のリンクだけでは辿れない SPA でも検査対象が広がります。
 
 ### 認証とスコープ
 
