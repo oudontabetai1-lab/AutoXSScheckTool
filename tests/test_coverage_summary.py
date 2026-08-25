@@ -1087,3 +1087,15 @@ def test_coverage_html_omitted_when_no_metrics():
         "by_status": {}, "unreached": [],
     })
     assert "Coverage" in html
+
+
+def test_coverage_html_renders_client_error_bucket():
+    """coverage HTML が client_error(4xx) も表示する（Codex #102）。"""
+    from wscan.report import ReportGenerator
+    gen = ReportGenerator.__new__(ReportGenerator)
+    html = gen._build_coverage_html({
+        "reached_count": 1, "attempts": 1, "findings_total": 0,
+        "http_status": {"total": 3, "blocked": 0, "client_error": 2, "server_error": 1},
+        "by_status": {}, "unreached": [],
+    })
+    assert "client_error" in html

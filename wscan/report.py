@@ -1540,6 +1540,7 @@ document.querySelectorAll('.plan-payloads-toggle').forEach(btn => {{
         blocked_raw = http_status.get("blocked", 0) or 0
         blocked = self._escape(blocked_raw)
         server_error = self._escape(http_status.get("server_error", 0))
+        client_error = self._escape(http_status.get("client_error", 0))
 
         by_status = coverage.get("by_status", {}) or {}
         by_status_html = "".join(
@@ -1579,6 +1580,7 @@ document.querySelectorAll('.plan-payloads-toggle').forEach(btn => {{
             <ul>{by_status_html}</ul>
             <h3 style="margin-top:14px">HTTP status</h3>
             <p>total: <strong>{http_total}</strong> / blocked (403/429): <strong>{blocked}</strong> /
+            client_error (4xx): <strong>{client_error}</strong> /
             server_error: <strong>{server_error}</strong></p>
             {blocked_warning}
             <h3 style="margin-top:14px">到達済み URL</h3>

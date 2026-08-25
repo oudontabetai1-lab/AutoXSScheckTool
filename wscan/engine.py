@@ -3125,6 +3125,9 @@ class ScanEngine:
                                 break
                             self._spa_harvest_seen.add(endpoint_key)
                             self.visited_urls.add(clean)
+                            # harvest した GET endpoint は observed かつ以降 attack 対象＝到達済み。
+                            # reached にも入れ、not-attempted 誤分類を防ぐ（Codex #102）。
+                            self.reached_urls.add(clean)
                             pages.append(CrawledPage(
                                 url=target["url"],
                                 html="",
