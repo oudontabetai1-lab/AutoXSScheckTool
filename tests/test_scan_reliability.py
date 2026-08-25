@@ -125,6 +125,7 @@ class _FakeCrawlBrowser:
         self.last_navigation_status = None
         self.auth_user = ""
         self.auth_pass = ""
+        self.spa_settle = False
         self.network = SimpleNamespace(allowed_hosts=None)
 
     async def navigate(self, url, **kwargs):
@@ -162,6 +163,29 @@ class _FakeCrawlBrowser:
 
     def is_on_login_page(self, login_url):
         return bool(login_url) and self.url.rstrip("/") == login_url.rstrip("/")
+
+
+class _SpaMarkerCrawlBrowser(_FakeCrawlBrowser):
+    def __init__(self):
+        super().__init__()
+        self.explore_calls = 0
+        self.settle_calls = 0
+
+    async def content(self):
+        return "<html><body><app-root></app-root></body></html>"
+
+    async def find_forms(self):
+        return []
+
+    async def collect_links_rich(self, base_url, same_domain=False):
+        return []
+
+    async def explore_spa_interactions(self, page, url, max_clicks=20):
+        self.explore_calls += 1
+        return []
+
+    async def settle_spa(self):
+        self.settle_calls += 1
 
 
 class _SessionExpiryBrowser(_FakeCrawlBrowser):
@@ -239,6 +263,41 @@ class EngineScanGapTests(unittest.IsolatedAsyncioTestCase):
         )
         engine._browser = _FakeCrawlBrowser()
         return engine
+
+    async def test_first_page_spa_marker_auto_enables_crawl_and_settle(self):
+        engine = self._engine(depth=1)
+        browser = _SpaMarkerCrawlBrowser()
+        engine._browser = browser
+
+        await engine._phase_crawl()
+
+        self.assertTrue(engine.spa_crawl)
+        self.assertTrue(browser.spa_settle)
+        # 初回ページの同一イテレーション後段で SPA 探索と settle が動く。
+        self.assertEqual(browser.explore_calls, 1)
+        self.assertEqual(browser.settle_calls, 1)
+
+    async def test_auto_spa_opt_out_keeps_crawl_disabled(self):
+        engine = self._engine(depth=1, auto_spa_crawl=False)
+        browser = _SpaMarkerCrawlBrowser()
+        engine._browser = browser
+
+        await engine._phase_crawl()
+
+        self.assertFalse(engine.spa_crawl)
+        self.assertFalse(browser.spa_settle)
+        self.assertEqual(browser.explore_calls, 0)
+        self.assertEqual(browser.settle_calls, 0)
+
+    async def test_normal_first_page_never_auto_enables_spa_crawl(self):
+        engine = self._engine(depth=1)
+        browser = _FakeCrawlBrowser()
+        engine._browser = browser
+
+        await engine._phase_crawl()
+
+        self.assertFalse(engine.spa_crawl)
+        self.assertFalse(browser.spa_settle)
 
     async def test_crawl_records_unscannable_urls_in_scan_matrix(self):
         from wscan.engine import _configure_network_coverage_hosts

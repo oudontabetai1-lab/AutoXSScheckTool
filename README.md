@@ -46,6 +46,8 @@ WScan は、IPA「安全なウェブサイトの作り方」の脆弱性カテ�
 
 通常モードでは、LLM が利用できなくても既定・コミュニティ・決定論的変異ペイロードと静的修正テンプレートへフォールバックできます。Agent モードは LLM 自体が操作主体なので、対応プロバイダーと `browser-use` が必要です。
 
+通常層の確実性を保ちながら SPA の非同期 API を取りこぼさないため、Angular / React / Next.js / Vue / Nuxt の固有マーカーを初回ページで検出すると SPA クロールを自動有効化します（既定 ON）。一般的なページ構成だけでは有効化せず、不要なクリック探索を避けます。自動判定を使わない場合は `--no-auto-spa`、常に有効化する場合は `--spa-crawl` を指定します。
+
 ### 対応チェック種別
 
 `wscan.scanners.SCANNERS` に登録されている 36 種類です。
@@ -365,6 +367,7 @@ python3 main.py scan URL [options]
 | `--no-relogin` | 自動再ログイン有効 | セッション失効時の再ログインを無効化 |
 | `--logged-in-marker TEXT` | `--login-success` を流用 | 認証済み判定文字列 |
 | `--spa-crawl` | `false` | SPA を検査（動的ルート探索＋描画確定待ち＋観測した GET API/XHR を攻撃対象化） |
+| `--no-auto-spa` | SPA 自動有効化有効 | フレームワーク固有マーカー検出時の SPA クロール自動有効化を無効化（明示 `--spa-crawl` は優先） |
 | `--previous-scan DIR` | なし | 前回 `evidence.json` と差分比較 |
 | `--auto-config / --no-auto-config` | `false` | 起動時の設定ウィザード |
 
@@ -572,6 +575,7 @@ python3 main.py import-payloads [options]
 | `features.open_report` | bool | `true` | `--no-open-report` / 機能フラグ |
 | `features.auto_config` | bool | `false` | `--auto-config/--no-auto-config` |
 | `features.spa_crawl` | bool | `false` | `--spa-crawl` / 機能フラグ |
+| `features.auto_spa_crawl` | bool | `true` | `--no-auto-spa` / 「SPA自動有効化（検出時）」 |
 | `features.interactive_crawl_review` | bool | `false` | ダッシュボードの巡回レビュー |
 
 ### `learning` / `ctf` / `output`
@@ -866,7 +870,7 @@ OpenAPI 2.0/3.x、Swagger JSON/YAML、Postman Collection から URL、共通ヘ�
 
 - `cms`: CMS の種類、バージョン、既知露出、危険な設定を確認します。
 - sitemap/robots: 既定で未リンク URL のシードにします。`--no-sitemap-crawl` で無効化します。
-- SPA: `--spa-crawl` で React/Vue/Angular の SPA を検査します。(1) `history.pushState` フックとクリック探索で動的ルートを収集、(2) **描画確定待ち**（`networkidle` 上限付き＋ルート要素の描画完了）で `<app-root>` が空のまま抽出されるのを防止、(3) **描画中に観測した同一スコープの GET API/XHR エンドポイント**（クエリ付き。例: `/rest/products/search?q=`）を攻撃対象に自動追加し、URL パラメータとして注入検査します。観測した JSON ボディの POST も収穫し、JSON の葉を SQLi スキャナで検査します（XSS/NoSQL の JSON 対応は今後追加予定です）。
+- SPA: Angular / React / Next.js / Vue / Nuxt の固有マーカーを初回ページで検出すると、通常層の SPA クロールを既定で自動有効化します。一般的なページ構成だけでは有効化しない保守的判定です。`--no-auto-spa` で opt-out でき、明示 `--spa-crawl` は常に優先されます。(1) `history.pushState` フックとクリック探索で動的ルートを収集、(2) **描画確定待ち**（`networkidle` 上限付き＋ルート要素の描画完了）で `<app-root>` が空のまま抽出されるのを防止、(3) **描画中に観測した同一スコープの GET API/XHR エンドポイント**（クエリ付き。例: `/rest/products/search?q=`）を攻撃対象に自動追加し、URL パラメータとして注入検査します。観測した JSON ボディの POST も収穫し、JSON の葉を SQLi スキャナで検査します（XSS/NoSQL の JSON 対応は今後追加予定です）。API 仕様がある場合は `--api-spec` を併用すると、画面から観測できないバックエンドも直接検査できます。
 - 読み込んだ JS/JSON 資産からリンク候補を抽出する際、minified JS の正規表現リテラルや式片（`/(?:` `/16*(…` 等）を誤ってルートとして拾わないようフィルタします。無駄なクロールとプランナー LLM の浪費を抑え、実ルートへの到達性を保ちます。
 - `js_static`: インライン/外部 JavaScript の危険な source-to-sink フローを静的確認します。
 

@@ -157,6 +157,7 @@ def _load_config(path: Path = _CONFIG_PATH) -> dict:
     cfg["open_report"]             = bool(f.get("open_report",      True))
     cfg["auto_config"]             = bool(f.get("auto_config",      False))
     cfg["spa_crawl"]               = bool(f.get("spa_crawl",        False))
+    cfg["auto_spa_crawl"]          = bool(f.get("auto_spa_crawl",   True))
     cfg["interactive_crawl_review"] = bool(f.get("interactive_crawl_review", False))
 
     cfg["learning_file"]           = str(le.get("file", "") or "")
@@ -1310,6 +1311,14 @@ Examples:
             "to discover routes rendered by React/Vue/Angular."
         ),
     )
+    scan.add_argument(
+        "--no-auto-spa", action="store_false", dest="auto_spa_crawl",
+        default=_CFG.get("auto_spa_crawl", True),
+        help=(
+            "Disable conservative SPA marker detection and automatic SPA crawl "
+            "enablement. Explicit --spa-crawl remains enabled."
+        ),
+    )
 
     # I: Diff scan — previous output directory
     scan.add_argument(
@@ -2250,6 +2259,7 @@ async def run_scan(args):
             allow_state_changing_probes=getattr(args, "allow_state_changing_probes", False),
             # ①: SPA crawl
             spa_crawl=getattr(args, "spa_crawl", False),
+            auto_spa_crawl=getattr(args, "auto_spa_crawl", True),
             # I: 差分スキャン
             previous_scan_dir=getattr(args, "previous_scan", None),
             # N: リクエストレート制御
@@ -2566,6 +2576,7 @@ async def run_serve(args):
             "community_payloads": _CFG.get("community_payloads", True),
             "enable_sitemap_crawl": _CFG.get("sitemap_crawl", True),
             "spa_crawl": _CFG.get("spa_crawl", False),
+            "auto_spa_crawl": _CFG.get("auto_spa_crawl", True),
             "interactive_crawl_review": _CFG.get("interactive_crawl_review", False),
             "ctf_mode": _CFG.get("ctf_mode", False),
             "tls_verify": _CFG.get("tls_verify", False),
@@ -2862,6 +2873,12 @@ async def run_serve(args):
                 access_urls=cfg.get("access_urls", []) or [],
                 flows=cfg.get("flows", []) or [],
                 spa_crawl=bool(cfg.get("spa_crawl", False)),
+                auto_spa_crawl=bool(
+                    cfg.get(
+                        "auto_spa_crawl",
+                        _CFG.get("auto_spa_crawl", True),
+                    )
+                ),
                 fast_mode=bool(cfg.get("fast_mode", False)),
                 max_payloads=_serve_ints["max_payloads"],
                 request_delay=float(cfg.get("request_delay", 0.5) or 0.0),

@@ -537,6 +537,7 @@ class ScanEngine:
         allow_state_changing_probes: bool = False,
         # ①: SPA crawl enhancement
         spa_crawl: bool = False,
+        auto_spa_crawl: bool = True,
         # ハイブリッドモード: Agent偵察で発見したURLをクロールのシードに使う
         seed_urls: Optional[list] = None,
         # Scope: URLs that are attacked vs. URLs that may be visited only
@@ -629,6 +630,8 @@ class ScanEngine:
         self.account_sessions: list = []
         # ①: SPA crawl
         self.spa_crawl = spa_crawl
+        self.auto_spa_crawl = auto_spa_crawl
+        self.detected_spa = None
         # SPA harvest のページ跨ぎ大域 dedup キー集合 (endpoint, param集合)。
         self._spa_harvest_seen: set = set()
         # JSON body harvest の大域 dedup（dedup_key→template_id・再観測で template を最新化）と、
@@ -2630,7 +2633,7 @@ class ScanEngine:
                 queue.append((scope_url, 0, self.target_url))
         # A: DOM構造フィンガープリントで類似ページを検出
         self._seen_page_fingerprints: set[str] = set()
-        _first_page = True  # CMS 検出は最初のページのみ
+        _first_page = True  # CMS / SPA 検出は最初のページのみ
 
         # 認証後の到達ページを通常クロールにも戻す。ログイン URL を起点にした診断では、
         # ここを入れないとログイン後画面を巡回しないまま攻撃フェーズへ進んでしまう。
@@ -2940,7 +2943,7 @@ class ScanEngine:
                     continue
                 self._seen_page_fingerprints.add(fp)
 
-            # C: CMS 検出 (最初のページのみ)
+            # C: CMS / SPA 検出 (最初のページのみ)
             if _first_page:
                 _first_page = False
                 try:
@@ -2963,6 +2966,27 @@ class ScanEngine:
                         if "cms" not in self.scanners:
                             from wscan.scanners.cms import CmsScanner
                             self.scanners["cms"] = CmsScanner(self)
+                except Exception:
+                    pass
+
+                try:
+                    from wscan.spa_detect import detect_spa
+
+                    self.detected_spa = detect_spa(html)
+                    if (
+                        self.auto_spa_crawl
+                        and not self.spa_crawl
+                        and self.detected_spa.is_spa
+                        and self.detected_spa.confidence == "high"
+                    ):
+                        self.spa_crawl = True
+                        # __init__ 後の反転なので BrowserManager 側も同期し、同一ページの
+                        # クリック探索後に in-flight XHR の描画確定待ちを必ず有効にする。
+                        self._browser.spa_settle = True
+                        console.print(
+                            f"  [cyan][SPA] {self.detected_spa.framework} を検出 — "
+                            "SPA クロールを自動有効化[/cyan]"
+                        )
                 except Exception:
                     pass
 

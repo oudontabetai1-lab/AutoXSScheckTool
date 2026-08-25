@@ -268,6 +268,9 @@ features:
   # ① SPA クロール: クリック操作で動的ルートを発見するか
   spa_crawl: false
 
+  # フレームワーク固有マーカーを検出したとき SPA クロールを自動有効化するか
+  auto_spa_crawl: true
+
   # 巡回完了後に画面一覧を確認し、手動巡回や追加URLで再巡回できるようにするか
   interactive_crawl_review: false
 
