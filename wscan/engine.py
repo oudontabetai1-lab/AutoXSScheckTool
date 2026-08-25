@@ -2559,7 +2559,9 @@ class ScanEngine:
         route_sig = ""
         if url:
             parsed = urlparse(url)
-            route_sig = f"route:{parsed.path or '/'}"
+            # netloc を含めて origin-aware にする。別 origin の構造的に同一なページ
+            # （複数ターゲットの SPA ルート `/` 等）を重複スキップで落とさない（Codex #104 P1）。
+            route_sig = f"route:{parsed.netloc}{parsed.path or '/'}"
             query_names = sorted(
                 {
                     part.split("=", 1)[0]
@@ -3235,7 +3237,14 @@ class ScanEngine:
 
             # SPA 観測の JSON body は CrawledPage 化せず、専用の攻撃ループへ
             # 引き渡すメモリ内キューにだけ積む。
-            if self.spa_crawl:
+            # 非GET body の harvest→_run_json_injection_checks は変異 body を再送する
+            # 状態変更操作。自動有効化（既定 read-only）ではクリック探索と同様、明示
+            # --spa-crawl か allow_state_changing_probes の opt-in がある場合のみ行う
+            # （autosave/cart 等の POST/PUT/PATCH を勝手に攻撃再送しない・Codex #104 P1）。
+            # GET XHR harvest（上）は read-only 相当なので既定でも継続する。
+            if self.spa_crawl and (
+                not self._spa_auto_enabled or self.allow_state_changing_probes
+            ):
                 try:
                     from . import spa_harvest
 

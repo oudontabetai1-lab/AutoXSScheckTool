@@ -510,6 +510,41 @@ class EngineScanGapTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse(engine.spa_crawl)
 
+    def test_page_fingerprint_is_origin_aware(self):
+        # 別 origin の構造的に同一なページは別 fingerprint（重複スキップで落とさない・Codex #104 P1）。
+        html = "<html><body><app-root></app-root><form><input name='q'></form></body></html>"
+        fp_a = ScanEngine._page_fingerprint(html, "https://a.example/")
+        fp_b = ScanEngine._page_fingerprint(html, "https://b.example/")
+        self.assertNotEqual(fp_a, fp_b)
+
+    async def test_auto_spa_json_body_harvest_gated_on_probe_opt_in(self):
+        # 自動有効化（既定 read-only）では非GET body の harvest→再送を行わない。
+        # 明示 opt-in（allow_state_changing_probes）でのみ json_injection_points を積む（Codex #104 P1）。
+        json_pair = {
+            "request": {
+                "method": "POST",
+                "url": "http://fixture.test/api/save",
+                "post_data": '{"note":"x"}',
+                "headers": {"content-type": "application/json"},
+            }
+        }
+
+        engine = self._engine(depth=1)
+        b = _SpaMarkerCrawlBrowser()
+        b.network = SimpleNamespace(allowed_hosts=None, pairs=[json_pair])
+        engine._browser = b
+        await engine._phase_crawl()
+        self.assertTrue(engine.spa_crawl)
+        self.assertEqual(engine.json_injection_points, [])
+
+        engine2 = self._engine(depth=1, allow_state_changing_probes=True)
+        b2 = _SpaMarkerCrawlBrowser()
+        b2.network = SimpleNamespace(allowed_hosts=None, pairs=[json_pair])
+        engine2._browser = b2
+        await engine2._phase_crawl()
+        self.assertTrue(engine2.spa_crawl)
+        self.assertGreaterEqual(len(engine2.json_injection_points), 1)
+
     async def test_normal_first_page_never_auto_enables_spa_crawl(self):
         engine = self._engine(depth=1)
         browser = _FakeCrawlBrowser()
