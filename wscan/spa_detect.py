@@ -120,9 +120,20 @@ _INERT_CONTENT_RE = re.compile(
 )
 
 
+def _strip_inert_elements(source: str) -> str:
+    """inert 要素（template/script/style 等）の本文だけ空にする（コメントは残す）。
+
+    React SSR コメント <!--$--> は本物なら DOM の実コメントとして body にあり、
+    <template> や script 文字列の中にある <!--$--> は無効。コメント自体を消さずに
+    inert 要素の本文だけ無害化した版で SSR マーカーを探すために使う（Codex #104 P2）。
+    """
+    return _INERT_CONTENT_RE.sub(r"\1\3", source)
+
+
 def _inert_stripped(source: str) -> str:
-    s = re.sub(r"<!--.*?-->", " ", source, flags=re.S)
-    s = _INERT_CONTENT_RE.sub(r"\1\3", s)
+    # markup マーカー用: inert 要素の本文を空にした上で、コメントも除去する。
+    s = _strip_inert_elements(source)
+    s = re.sub(r"<!--.*?-->", " ", s, flags=re.S)
     return s
 
 
@@ -161,9 +172,12 @@ def detect_spa(html: str) -> SpaInfo:
     source = html or ""
     # JS 式マーカーは表示テキスト誤検出を避けるため script 本文だけで探す。
     scripts = _script_bodies(source)
+    # inert 要素（template/script/style 等）の本文を空にした版（コメントは残す）。
+    # React SSR コメント <!--$--> は inert 内では無効なのでこの版で探す（Codex #104 P2）。
+    noninert = _strip_inert_elements(source)
     # markup マーカーは inert 領域（コメント/<template>/<script>本文等）を無害化した
     # 版で探す。<!-- <app-root> --> や var x="<app-root>" で誤判定しない（Codex #104 P2）。
-    markup = _inert_stripped(source)
+    markup = re.sub(r"<!--.*?-->", " ", noninert, flags=re.S)
 
     angular_signals: list[str] = []
     # 属性/タグベースのマーカー（markup）は inert 除去済みの markup で探す。
@@ -211,7 +225,7 @@ def detect_spa(html: str) -> SpaInfo:
     # <!--$?-->, <!--$!-->）。hydration 済みで id="root" に内容がある本番 React
     # （空マウント fallback に載らない）でも、これらは React 特有で誤検出しにくい
     # （Codex #104 P1・SSR/Next の本番 React を拾う）。
-    if re.search(r"<!--/?\$[?!]?-->", source):
+    if re.search(r"<!--/?\$[?!]?-->", noninert):
         react_signals.append("react-ssr-marker")
     react_root = _has_id(markup, "root") or _has_id(markup, "app")
     # JS トークンは script 本文で、react バンドルの script src は markup（source）で探す。

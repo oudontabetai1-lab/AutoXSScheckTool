@@ -78,6 +78,9 @@ def test_generic_mount_id_requires_matching_framework_trace(html, framework):
         '<html><body><template><app-root></app-root></template></body></html>',
         '<html><body><script>var demo = "<app-root></app-root>";</script></body></html>',
         '<html><body><!-- <div id="__next"></div> --></body></html>',
+        # inert 要素内の React SSR コメント <!--$--> は無効（Codex #104 P2）。
+        '<html><body><template><!--$--></template></body></html>',
+        '<html><body><script>const ex = "<!--$-->";</script></body></html>',
     ],
 )
 def test_normal_or_ambiguous_html_is_not_spa(html):
