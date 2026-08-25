@@ -81,6 +81,12 @@ def test_generic_mount_id_requires_matching_framework_trace(html, framework):
         # inert 要素内の React SSR コメント <!--$--> は無効（Codex #104 P2）。
         '<html><body><template><!--$--></template></body></html>',
         '<html><body><script>const ex = "<!--$-->";</script></body></html>',
+        # ネストした inert 要素内の markup も無効（非貪欲 regex では残っていた・Codex #104 P2）。
+        '<html><body><template><template></template>'
+        '<app-root></app-root></template></body></html>',
+        # 前置のあるハイフン付き属性（x-data-reactroot）は真の data-reactroot ではない
+        # （Codex #104 P2）。
+        '<html><body><div id="root"></div><div x-data-reactroot></div></body></html>',
     ],
 )
 def test_normal_or_ambiguous_html_is_not_spa(html):
@@ -121,6 +127,17 @@ def test_modern_framework_bootstrap_markers_are_high_confidence(html, framework,
     assert info.framework == framework
     assert info.confidence == "high"
     assert signal in info.signals
+
+
+def test_real_marker_between_separate_inert_blocks_is_spa():
+    # 別々の inert ブロックの間にある実 markup マーカーは消さない（貪欲除去による
+    # 偽陰性を避ける・Codex #104 P2）。
+    info = detect_spa(
+        "<html><body><template>A</template>"
+        "<app-root></app-root><template>B</template></body></html>"
+    )
+    assert info.is_spa is True
+    assert info.framework == "Angular"
 
 
 def test_executable_script_type_still_detected():

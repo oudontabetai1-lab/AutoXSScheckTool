@@ -112,22 +112,56 @@ def _script_bodies(source: str) -> str:
 # var x="<app-root>"）で SPA 誤判定しないため（Codex #104 P2）。タグ自体は残す（script の
 # src/id 属性は markup マーカーとして使うため）。React SSR コメント <!--$--> は別途 raw source で
 # 判定するのでここでコメントを消しても影響しない。
-_INERT_CONTENT_RE = re.compile(
-    r"(<(template|script|style|noscript|textarea|title)\b[^>]*>)"
-    r".*?"
-    r"(</\2\s*>)",
-    flags=re.I | re.S,
+_INERT_TAGS = ("template", "script", "style", "noscript", "textarea", "title")
+_INERT_OPEN_RE = re.compile(
+    r"<(" + "|".join(_INERT_TAGS) + r")(?![\w-])[^>]*>", flags=re.I
 )
 
 
 def _strip_inert_elements(source: str) -> str:
     """inert 要素（template/script/style 等）の本文だけ空にする（コメントは残す）。
 
-    React SSR コメント <!--$--> は本物なら DOM の実コメントとして body にあり、
-    <template> や script 文字列の中にある <!--$--> は無効。コメント自体を消さずに
-    inert 要素の本文だけ無害化した版で SSR マーカーを探すために使う（Codex #104 P2）。
+    <template> や script 文字列の中にある markup 例（<app-root> や <!--$-->）は
+    レンダリングされないので、それらの本文を無害化した版で markup / React SSR マーカーを
+    探す（Codex #104 P2）。**ネスト対応**: 同名 inert 要素の深さを数え、外側の閉じタグ
+    まで（内側の inert サブツリー丸ごと）を空にする。非貪欲 regex では
+    ``<template><template></template><app-root></app-root></template>`` の内側 close で
+    止まり <app-root> が残るため、手続き的に走査する（別々の inert ブロック間の実コンテンツは
+    保持し、真の SPA マーカーを消さない）。開始/終了タグ自体は残す（外部 script の src/id を
+    markup マーカーに使うため）。
     """
-    return _INERT_CONTENT_RE.sub(r"\1\3", source)
+    result: list[str] = []
+    pos = 0
+    while True:
+        m = _INERT_OPEN_RE.search(source, pos)
+        if not m:
+            result.append(source[pos:])
+            break
+        tag = m.group(1).lower()
+        result.append(source[pos:m.end()])  # 開始タグまでは残す
+        open_re = re.compile(rf"<{re.escape(tag)}(?![\w-])[^>]*>", flags=re.I)
+        close_re = re.compile(rf"</{re.escape(tag)}\s*>", flags=re.I)
+        depth = 1
+        scan = m.end()
+        n = len(source)
+        close_start = close_end = n  # 閉じタグ無し（unbalanced）は末尾まで空に
+        while depth > 0:
+            nc = close_re.search(source, scan)
+            if not nc:
+                break
+            no = open_re.search(source, scan)
+            if no and no.start() < nc.start():
+                depth += 1
+                scan = no.end()
+            else:
+                depth -= 1
+                if depth == 0:
+                    close_start, close_end = nc.start(), nc.end()
+                else:
+                    scan = nc.end()
+        result.append(source[close_start:close_end])  # 閉じタグは残す（間は捨てる）
+        pos = close_end
+    return "".join(result)
 
 
 def _inert_stripped(source: str) -> str:
@@ -183,10 +217,10 @@ def detect_spa(html: str) -> SpaInfo:
     # 属性/タグベースのマーカー（markup）は inert 除去済みの markup で探す。
     angular_markup = (
         (r"<app-root\b", "<app-root>"),
-        (r"<[^>]+\bng-app(?:\s*=|\s|>)", "ng-app"),
-        (r"<[^>]+\bng-version\s*=", "ng-version"),
-        (r"<[^>]+\b_nghost(?:-[\w-]+)?(?:\s*=|\s|>)", "_nghost"),
-        (r"<[^>]+\b_ngcontent(?:-[\w-]+)?(?:\s*=|\s|>)", "_ngcontent"),
+        (r"<[^>]+(?<![\w-])ng-app(?:\s*=|\s|>)", "ng-app"),
+        (r"<[^>]+(?<![\w-])ng-version\s*=", "ng-version"),
+        (r"<[^>]+(?<![\w-])_nghost(?:-[\w-]+)?(?:\s*=|\s|>)", "_nghost"),
+        (r"<[^>]+(?<![\w-])_ngcontent(?:-[\w-]+)?(?:\s*=|\s|>)", "_ngcontent"),
     )
     for pattern, label in angular_markup:
         if re.search(pattern, markup, flags=re.I):
@@ -219,7 +253,7 @@ def detect_spa(html: str) -> SpaInfo:
         return SpaInfo(True, "Next.js", "high", next_signals)
 
     react_signals: list[str] = []
-    if re.search(r"<[^>]+\bdata-reactroot(?:\s*=|\s|>)", markup, flags=re.I):
+    if re.search(r"<[^>]+(?<![\w-])data-reactroot(?:\s*=|\s|>)", markup, flags=re.I):
         react_signals.append("data-reactroot")
     # SSR / RSC / Suspense の React 固有コメントマーカー（<!--$-->, <!--/$-->,
     # <!--$?-->, <!--$!-->）。hydration 済みで id="root" に内容がある本番 React
@@ -260,12 +294,12 @@ def detect_spa(html: str) -> SpaInfo:
     if _has_id(markup, "__nuxt"):
         vue_signals.append('id="__nuxt"')
         nuxt_marker = True
-    if re.search(r"<[^>]+\bdata-nuxt-data(?:\s*=|\s|>)", markup, flags=re.I):
+    if re.search(r"<[^>]+(?<![\w-])data-nuxt-data(?:\s*=|\s|>)", markup, flags=re.I):
         vue_signals.append("data-nuxt-data")
         nuxt_marker = True
     if re.search(r"\bwindow\s*\.\s*__VUE__\b", scripts, flags=re.I):
         vue_signals.append("window.__VUE__")
-    if re.search(r"<[^>]+\bdata-v-[\w-]+(?:\s*=|\s|>)", markup, flags=re.I):
+    if re.search(r"<[^>]+(?<![\w-])data-v-[\w-]+(?:\s*=|\s|>)", markup, flags=re.I):
         vue_signals.append("data-v-")
     vue_root = _has_id(markup, "app")
     # JS トークンは script 本文、vue バンドルの script src は markup（source）で探す。
