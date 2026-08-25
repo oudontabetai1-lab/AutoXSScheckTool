@@ -637,6 +637,10 @@ class ScanEngine:
             self.target_urls,
             self.access_urls,
         )
+        # Concurrent attack workers exist only for the duration of that phase.
+        # Keep the live instances here so a newly observed canonical landing
+        # origin can be applied consistently to every active network capture.
+        self._coverage_workers: list = []
         # I: 差分スキャン
         self.previous_scan_dir: Optional[str] = previous_scan_dir
         # K: SARIF 出力フラグ
@@ -1140,9 +1144,22 @@ class ScanEngine:
             "http_status": http_status,
         }
 
-    def record_probe_status(self, status) -> None:
+    def record_probe_status(self, status, url=None) -> None:
         """非ブラウザプローブの HTTP status を scan 単位で安全に記録する。"""
         try:
+            origins = getattr(self, "_coverage_origins", set()) or set()
+            if url is not None and origins:
+                try:
+                    parsed = urlsplit(str(url))
+                    origin = (
+                        f"{parsed.scheme}://{parsed.netloc}"
+                        if parsed.scheme and parsed.netloc
+                        else ""
+                    )
+                except Exception:
+                    origin = ""
+                if origin not in origins:
+                    return
             value = int(status)
             if not 100 <= value < 600:
                 return
@@ -1153,6 +1170,35 @@ class ScanEngine:
             counts[value] += 1
         except Exception:
             pass
+
+    def _note_coverage_origin(self, url) -> None:
+        """Add an in-scope landing origin and refresh live network filters."""
+        try:
+            if not url or not self._is_access_allowed_url(str(url)):
+                return
+            parsed = urlsplit(str(url))
+            if not (parsed.scheme and parsed.netloc):
+                return
+            origin = f"{parsed.scheme}://{parsed.netloc}"
+            origins = getattr(self, "_coverage_origins", None)
+            if origins is None:
+                origins = set()
+                self._coverage_origins = origins
+            if origin in origins:
+                return
+            origins.add(origin)
+        except Exception:
+            return
+
+        browsers = [getattr(self, "_browser", None)]
+        browsers.extend(list(getattr(self, "_coverage_workers", ()) or ()))
+        for browser in browsers:
+            if browser is None:
+                continue
+            try:
+                _configure_network_coverage_origins(browser, origins)
+            except Exception:
+                continue
 
     def _observability_report_data(self, sample_limit: int = 5) -> dict:
         """レポート用に集計と代表サンプルを同じデータ源から返す。"""
@@ -2745,6 +2791,8 @@ class ScanEngine:
                     note="Redirected to login (authenticated content not accessible).",
                 )
                 continue
+            landed_url = self.browser.page.url or url
+            self._note_coverage_origin(landed_url)
             self.reached_urls.add(url)
             try:
                 html = await self.browser.page.content()
@@ -2759,7 +2807,7 @@ class ScanEngine:
                 # 応答＝プロキシの Server 等を掴む）。fingerprint を origin 別に出すため
                 # origin ごとに一度だけ捕捉する（multi-origin --target-url でスタックを取り違えない）。
                 # origin は canonical_origin で正規化し、lookup 側(CrawledPage.url)と表現を揃える。
-                _landed = self.browser.page.url or url
+                _landed = landed_url
                 _origin = canonical_origin(_landed)
                 if _origin and _origin not in self.detected_tech_headers:
                     _pair = self.browser.network.best_pair_for_page(_landed)
@@ -3683,6 +3731,10 @@ class ScanEngine:
         self.total_fields = 0
         # Create (concurrency-1) additional worker pages; worker[0] = main page.
         extra_workers = []
+        coverage_workers = getattr(self, "_coverage_workers", None)
+        if coverage_workers is None:
+            coverage_workers = []
+            self._coverage_workers = coverage_workers
         for i in range(self.concurrency - 1):
             try:
                 w = await self._browser.create_worker()
@@ -3691,6 +3743,7 @@ class ScanEngine:
                     getattr(self, "_coverage_origins", set()),
                 )
                 extra_workers.append(w)
+                coverage_workers.append(w)
                 console.print(f"  [dim]Worker {i + 2} page created[/dim]")
             except Exception as e:
                 console.print(f"  [yellow]Could not create worker {i + 2}: {e}[/yellow]")
@@ -3769,6 +3822,10 @@ class ScanEngine:
                     console.print(
                         f"  [yellow][Worker cleanup] close() failed: {_close_exc}[/yellow]"
                     )
+                try:
+                    coverage_workers.remove(w)
+                except ValueError:
+                    pass
             self._save_checkpoint()
 
         # Propagate AbortScan to the caller (_phase_attack → run)
@@ -3951,8 +4008,12 @@ class ScanEngine:
 
         # Navigate to target URL with authenticated session to find the landing page
         # (e.g., target is /login but authenticated session redirects to /dashboard)
-        await self._browser.navigate(self.target_url, retries=self.navigation_retries)
+        landing_success = await self._browser.navigate(
+            self.target_url, retries=self.navigation_retries
+        )
         landing_url = self._browser.page.url.rstrip("/")
+        if landing_success:
+            self._note_coverage_origin(landing_url)
 
         # If we landed on the login page, session may have expired — try to re-login.
         # Unless the target itself is the login page (then staying on it is expected).
@@ -3976,6 +4037,7 @@ class ScanEngine:
                     return []
                 await self._sync_cookies_from_browser(self._browser)
                 landing_url = self._browser.page.url.rstrip("/")
+                self._note_coverage_origin(landing_url)
 
         new_pages: list = []
         # auth_visited: only prevents re-queueing within THIS crawl (not against pre-auth crawl)
@@ -4020,8 +4082,13 @@ class ScanEngine:
                 console.print(
                     "  [yellow][Post-Auth] Redirected to login — session expired.[/yellow]"
                 )
+                self._record_unscannable_url(
+                    url,
+                    note="Redirected to login during post-auth crawl (session lost).",
+                )
                 break
 
+            self._note_coverage_origin(actual_url)
             self.reached_urls.add(actual_url)
             try:
                 html = await self._browser.page.content()
@@ -4197,6 +4264,12 @@ class ScanEngine:
             return
 
         try:
+            landed_url = self._browser.page.url or login_seed
+        except Exception:
+            landed_url = login_seed
+        if self._is_login_target_url(landed_url):
+            self.reached_urls.add(login_seed)
+        try:
             html = await self._browser.page.content()
         except Exception:
             html = ""
@@ -4228,7 +4301,6 @@ class ScanEngine:
         # Prevent the authenticated crawl/attack from re-visiting the login page
         # (which, on redirect-on-auth apps, would only capture post-login content).
         self.visited_urls.add(login_seed)
-        self.reached_urls.add(login_seed)
 
     async def _attack_one_page(self, page: CrawledPage, plans: dict):
         """

@@ -556,7 +556,7 @@ class BaseScanner(ABC):
         try:
             record = getattr(self.engine, "record_probe_status", None)
             if callable(record):
-                record(response.status_code)
+                record(response.status_code, getattr(response, "url", None))
         except Exception:
             pass
 

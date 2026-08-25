@@ -160,6 +160,33 @@ def test_coverage_allowed_origins_uses_target_and_access_urls():
     }
 
 
+def test_note_coverage_origin_adds_in_scope_landing_to_main_and_workers():
+    main = SimpleNamespace(network=SimpleNamespace(allowed_origins=None))
+    worker = SimpleNamespace(network=SimpleNamespace(allowed_origins=None))
+    engine = SimpleNamespace(
+        _coverage_origins={"http://fixture.test"},
+        _browser=main,
+        _coverage_workers=[worker],
+        _is_access_allowed_url=lambda url: url.startswith(
+            "https://www.fixture.test/"
+        ),
+    )
+
+    ScanEngine._note_coverage_origin(engine, "https://www.fixture.test/app")
+
+    expected = {"http://fixture.test", "https://www.fixture.test"}
+    assert engine._coverage_origins == expected
+    assert main.network.allowed_origins == expected
+    assert worker.network.allowed_origins == expected
+
+    ScanEngine._note_coverage_origin(engine, "https://third-party.test/track")
+    ScanEngine._note_coverage_origin(engine, "http://[invalid")
+
+    assert engine._coverage_origins == expected
+    assert main.network.allowed_origins == expected
+    assert worker.network.allowed_origins == expected
+
+
 def test_bucketize_status_counts_groups_blocked_and_error_classes():
     assert bucketize_status_counts({200: 3, 403: 2, 404: 1, 429: 4, 503: 5}) == {
         "total": 15,
@@ -378,6 +405,7 @@ def test_parallel_worker_statuses_are_checkpointed_after_close(tmp_path):
 def test_record_probe_status_is_guarded_and_contributes_to_blocked():
     engine = SimpleNamespace(
         _probe_status_counts=Counter(),
+        _coverage_origins=set(),
         reached_urls=set(),
         scan_matrix=[],
         browser=None,
@@ -398,6 +426,24 @@ def test_record_probe_status_is_guarded_and_contributes_to_blocked():
     }
 
 
+def test_record_probe_status_filters_url_when_coverage_origins_are_set():
+    engine = SimpleNamespace(
+        _probe_status_counts=Counter(),
+        _coverage_origins={"https://fixture.test"},
+    )
+
+    ScanEngine.record_probe_status(engine, 403, "https://fixture.test/private")
+    ScanEngine.record_probe_status(engine, 429, "https://external.test/rate-limit")
+    ScanEngine.record_probe_status(engine, 500, None)
+
+    assert engine._probe_status_counts == Counter({403: 1, 500: 1})
+
+    engine._coverage_origins.clear()
+    ScanEngine.record_probe_status(engine, 429, "https://external.test/rate-limit")
+
+    assert engine._probe_status_counts == Counter({403: 1, 429: 1, 500: 1})
+
+
 def test_scanner_probe_status_forwarding_is_optional_and_exception_safe():
     class _Scanner(BaseScanner):
         async def scan_field(self, *args, **kwargs):
@@ -405,14 +451,22 @@ def test_scanner_probe_status_forwarding_is_optional_and_exception_safe():
 
     scanner = _Scanner.__new__(_Scanner)
     recorded = []
-    scanner.engine = SimpleNamespace(record_probe_status=recorded.append)
-    scanner._record_probe_status(SimpleNamespace(status_code=403))
-    assert recorded == [403]
+    scanner.engine = SimpleNamespace(
+        record_probe_status=lambda status, url: recorded.append((status, url))
+    )
+    scanner._record_probe_status(
+        SimpleNamespace(status_code=403, url="https://fixture.test/final")
+    )
+    scanner._record_probe_status(SimpleNamespace(status_code=429))
+    assert recorded == [
+        (403, "https://fixture.test/final"),
+        (429, None),
+    ]
 
     scanner.engine = SimpleNamespace()
     scanner._record_probe_status(SimpleNamespace(status_code=403))
 
-    def broken_recorder(_status):
+    def broken_recorder(_status, _url):
         raise RuntimeError("recorder unavailable")
 
     scanner.engine.record_probe_status = broken_recorder

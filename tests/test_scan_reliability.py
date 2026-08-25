@@ -162,6 +162,27 @@ class _SessionExpiryBrowser(_FakeCrawlBrowser):
         return self.relogin_succeeds
 
 
+class _PostAuthSessionLossBrowser(_FakeCrawlBrowser):
+    def __init__(self, login_url="http://auth.fixture.test/login"):
+        super().__init__()
+        self.login_url = login_url
+
+    async def navigate(self, url, **kwargs):
+        if url == "http://fixture.test/private":
+            self.url = self.login_url
+            return True
+        return await super().navigate(url, **kwargs)
+
+    async def collect_links_rich(self, base_url, same_domain=False):
+        return [{
+            "url": "http://fixture.test/private",
+            "text": "private",
+            "selector": "a",
+            "rect": {"x": 0, "y": 0, "w": 10, "h": 10},
+            "viewport": {"w": 1280, "h": 800},
+        }]
+
+
 class EngineScanGapTests(unittest.IsolatedAsyncioTestCase):
     def _engine(self, url="http://fixture.test/", **kwargs):
         out = tempfile.TemporaryDirectory()
@@ -315,6 +336,26 @@ class EngineScanGapTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(pages), 1)
         self.assertIn("http://fixture.test/private", engine.reached_urls)
+
+    async def test_postauth_login_redirect_is_unreached(self):
+        protected_url = "http://fixture.test/private"
+        engine = self._engine(
+            "http://fixture.test/",
+            login_url="http://auth.fixture.test/login",
+            depth=2,
+        )
+        engine._browser = _PostAuthSessionLossBrowser()
+
+        await engine._phase_crawl_postauth()
+
+        self.assertNotIn(protected_url, engine.reached_urls)
+        self.assertEqual(
+            engine.coverage_summary()["unreached"],
+            [{
+                "url": protected_url,
+                "reason": "Redirected to login during post-auth crawl (session lost).",
+            }],
+        )
 
 
 if __name__ == "__main__":
