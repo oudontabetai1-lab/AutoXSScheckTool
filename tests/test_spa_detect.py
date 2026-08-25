@@ -116,6 +116,12 @@ def test_generic_mount_id_requires_matching_framework_trace(html, framework):
         # src="" / bare src の script も外部扱いで本文は実行されない（Codex #104 P2）。
         '<html><body><script src="">self.__next_f.push([])</script></body></html>',
         '<html><body><script src>self.__next_f.push([])</script></body></html>',
+        # 完全なタグ形の属性値（<script id="__NEXT_DATA__"> 等）は実タグではない
+        # （Codex #104 P2）。
+        '<html><body><div title="<script id=\'__NEXT_DATA__\'></script>">'
+        'static</div></body></html>',
+        '<html><body><div title="<div id=\'root\'></div>">static</div>'
+        '<script src="/assets/x-abc123.js"></script></body></html>',
     ],
 )
 def test_normal_or_ambiguous_html_is_not_spa(html):

@@ -1344,11 +1344,19 @@ class ScanEngine:
     def _is_access_allowed_url(self, url: str) -> bool:
         if self._is_attack_target_url(url) or self._url_matches_scope(url, self.access_urls):
             return True
-        # path-scoped target（query 無しで設定）に対し ?page=2 や #details のような
-        # 同一パスの query/fragment 付き URL を許可する。query 付きで明示スコープした
-        # ターゲット（例 .../action?op=save）は clean 一致しないので厳密性を保つ
-        # （_json_target_in_scope と同じ path-scope 許容・Codex #104 P2）。
-        clean = urlparse(url)._replace(query="", fragment="").geturl()
+        parsed = urlparse(url)
+        # fragment はサーバに送られないので常に除いて再判定する。これで query 付きで
+        # 明示スコープした target（例 .../action?op=save）の fragment 付き変種
+        # （.../action?op=save#details）も許可される（設定 query は保持・Codex #104 P2）。
+        no_frag = parsed._replace(fragment="").geturl()
+        if no_frag != url and (
+            self._is_attack_target_url(no_frag)
+            or self._url_matches_scope(no_frag, self.access_urls)
+        ):
+            return True
+        # path-scoped target（query 無しで設定）向けに query も除いて再判定し、
+        # ?page=2 のような同一パス URL を許可する（_json_target_in_scope と同じ許容）。
+        clean = parsed._replace(query="", fragment="").geturl()
         if clean != url and (
             self._is_attack_target_url(clean)
             or self._url_matches_scope(clean, self.access_urls)
@@ -3381,20 +3389,24 @@ class ScanEngine:
                 except Exception:
                     pass
 
-            if depth + 1 < self.depth:
-                # SPA クリック探索で復帰不能だった場合、ページが別ドキュメントに残って
-                # いることがある。collect_links_rich(url) が誤 DOM から相対リンクを拾って
-                # 偽ルートを作らないよう、landed から drift していたら landed へ戻す
-                # （Codex #104 P2）。
-                if self.spa_crawl and landed_url:
-                    try:
+            # SPA クリック探索で復帰不能だった場合、ページが別ドキュメントに残って
+            # いることがある。collect_links_rich(url) が誤 DOM から相対リンクを拾って
+            # 偽ルートを作らないよう、landed から drift していたら landed へ戻す。
+            # navigate の成否と最終 URL を検証し、復元できなければ link 収集をスキップする
+            # （誤 DOM から偽ルートを拾わない・Codex #104 P2）。
+            _links_ok = True
+            if self.spa_crawl and landed_url:
+                try:
+                    _cur = (self._browser.page.url or "").split("#")[0]
+                    if _cur != landed_url.split("#")[0]:
+                        _ok = await self._browser.navigate(
+                            landed_url, retries=self.navigation_retries
+                        )
                         _cur = (self._browser.page.url or "").split("#")[0]
-                        if _cur != landed_url.split("#")[0]:
-                            await self._browser.navigate(
-                                landed_url, retries=self.navigation_retries
-                            )
-                    except Exception:
-                        pass
+                        _links_ok = bool(_ok) and _cur == landed_url.split("#")[0]
+                except Exception:
+                    _links_ok = False
+            if _links_ok and depth + 1 < self.depth:
                 link_entries = await self.browser.collect_links_rich(url, same_domain=False)
                 url_cap = max(200, self.depth * 50)
                 _cap_warned = False

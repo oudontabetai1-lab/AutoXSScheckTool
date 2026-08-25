@@ -603,6 +603,18 @@ class EngineScanGapTests(unittest.IsolatedAsyncioTestCase):
         # 別パスは許可しない。
         self.assertFalse(engine._is_access_allowed_url("http://fixture.test/other"))
 
+    def test_access_scope_query_target_allows_fragment_variant(self):
+        # query 付きで明示スコープした target の fragment 付き変種は許可（fragment は
+        # サーバに送られない）。別 query は許可しない（Codex #104 P2）。
+        engine = self._engine("http://fixture.test/", depth=1)
+        engine.target_urls = ["http://fixture.test/action?op=save"]
+        self.assertTrue(
+            engine._is_access_allowed_url("http://fixture.test/action?op=save#details")
+        )
+        self.assertFalse(
+            engine._is_access_allowed_url("http://fixture.test/action?op=delete")
+        )
+
     async def test_out_of_scope_landing_does_not_auto_enable_spa(self):
         # in-scope URL が access スコープ外の外部 SPA へリダイレクトしたら、
         # マーカーがあっても自動有効化しない（外部ページを探索しない・Codex #104 P1）。

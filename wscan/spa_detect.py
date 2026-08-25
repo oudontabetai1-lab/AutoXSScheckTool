@@ -20,73 +20,15 @@ class SpaInfo:
     signals: list[str] = field(default_factory=list)
 
 
-# 開始タグの属性領域を「引用値を跨がずに」消費するプレフィックス。これが無いと
-# <div title="id='__next'"> の属性値内の id='__next' を実属性と誤認する（Codex #104 P2）。
-# 素の文字・完全な "…" / '…' のいずれかを非貪欲に繰り返す。
-_ATTR_PREFIX = r"""(?:[^>"']|"[^"]*"|'[^']*')*?"""
-
-
-def _has_id(source: str, element_id: str) -> bool:
-    """実際の開始タグ内の id 属性として存在するか調べる。
-
-    - ``\\b`` はハイフンの後にも境界を作るため ``data-id="__next"`` を
-      ``id="__next"`` と誤認する。negative lookbehind ``(?<![\\w-])`` で除く。
-    - 開始タグ ``<tag … id="…" …>`` の内側に限定し、``<pre>id="__next"</pre>`` の
-      ような**表示テキスト**を属性と誤認しない（``[^>]*`` は ``>`` を跨がない）。
-    - ``_ATTR_PREFIX`` で引用属性値を跨がず、``<div title="id='__next'">`` の
-      属性値内 id を誤認しない（Codex #104 P2）。
-    """
-    return bool(
-        re.search(
-            rf"<[a-zA-Z]{_ATTR_PREFIX}(?<![\w-])id\s*=\s*(['\"])\s*{re.escape(element_id)}\s*\1",
-            source,
-            flags=re.I,
-        )
-    )
-
-
-# 本番 SPA シェルの「空マウント要素」を検出する（中身が空白のみ）。
-# 例: <div id="root"></div> / <main id="app">  </main>。内容を持つ要素
-# （<div id="root">案内</div> 等）は一致しないため静的サイトを誤検出しない。
-_EMPTY_MOUNT_RE = re.compile(
-    # id 前後とも _ATTR_PREFIX で引用属性値を跨がない。id 後を [^>]* にすると、後続の
-    # 引用属性値内の > や </div> に騙されて偽の空マウントを作る（Codex #104 P2）。
-    rf"<(\w+)\b{_ATTR_PREFIX}(?<![\w-])id\s*=\s*(['\"])(root|app|__next|__nuxt)\2"
-    rf"{_ATTR_PREFIX}>\s*</\1\s*>",
-    flags=re.I | re.S,
-)
-
-# アプリバンドルらしい script src。空マウント fallback で「任意の script」を
-# 認めると analytics.js 等でも SPA 誤判定するため（Codex #104 P2）、本番バンドラの
-# 典型（ハッシュ付きファイル名 / 既知の SPA アセットディレクトリ / 既知のバンドル語）
-# に限定する。
-# \bsrc は data-src/async-src（ハイフン付き）にも一致し、遅延プレースホルダ
-# <script data-src="…">（未ロード）を実バンドルと誤認する。(?<![\w-]) で実 src 属性に
-# 限定する（_has_id と同じ・Codex #104 P2）。
-_BUNDLE_SRC_RE = re.compile(
-    rf"<script\b{_ATTR_PREFIX}(?<![\w-])src\s*=\s*(['\"])([^'\"]+)\1", flags=re.I
-)
+# アプリバンドルらしい script src の痕跡（ハッシュ付きファイル名 / 既知の SPA アセット
+# ディレクトリ / 既知のバンドル語）。analytics.js 等の無関係 script を bundle 扱いしない
+# （Codex #104 P2）。_scan_markup が実 <script> の src 値に対して用いる。
 _BUNDLE_HINT_RE = re.compile(
     r"(?:/_next/|/_nuxt/|/assets/|/static/js/|/build/|/dist/"
     r"|[.-][0-9a-f]{6,}\.m?js(?:$|[?#])"
     r"|\b(?:bundle|runtime|polyfills|vendor|chunk|webpack|entry)[.\-/])",
     flags=re.I,
 )
-
-
-def _has_bundle_script(source: str) -> bool:
-    """本番アプリバンドルらしい外部 script が存在するか（無関係な単発 script を除く）。
-
-    ``type="module"`` 単独では判定しない。インラインの analytics/ユーティリティ
-    モジュール（src 無し）や無関係な外部モジュールでも真になり、空 #root/#app の
-    静的ページを SPA 誤判定するため（Codex #104 P2）。外部 ``src`` がアプリバンドルの
-    痕跡（ハッシュ付きファイル名 / 既知の SPA アセットディレクトリ / 既知のバンドル語）を
-    持つ場合のみ真とする。
-    """
-    for m in _BUNDLE_SRC_RE.finditer(source):
-        if _BUNDLE_HINT_RE.search(m.group(2)):
-            return True
-    return False
 
 
 # 実行される インライン <script> の本文だけを連結する。JS 式マーカー
@@ -221,25 +163,75 @@ def _has_attr(tag_text: str, name: str) -> bool:
     ) is not None
 
 
-def _has_start_tag(source: str, tagname: str) -> bool:
-    """``tagname`` の実際の開始タグが存在するか（引用属性値内の擬似タグを除く）。
+_MOUNT_IDS = ("root", "app", "__next", "__nuxt")
 
-    ``<div title="<app-root>">`` の属性値内 ``<app-root>`` を実タグと誤認しない
-    （Codex #104 P2）。``_next_tag`` は非 inert タグを属性値ごと跨ぐので、擬似タグは
-    別タグとして返らない。
-    """
-    tagname = tagname.lower()
-    pos = 0
-    n = len(source)
+
+def _scan_markup(markup: str) -> dict:
+    """markup（inert 除去済み）を実開始タグ単位で走査し、タグ/属性ベースの SPA マーカーを
+    集める。引用属性値内のタグ形テキスト（<div title='<script id="__NEXT_DATA__">'> 等）を
+    実タグ/実属性と誤認しない（Codex #104 P2）。"""
+    sig = {
+        "app_root": False, "ids": set(), "empty_mount_ids": set(),
+        "ng_app": False, "ng_version": False, "nghost": False, "ngcontent": False,
+        "data_reactroot": False, "data_nuxt_data": False, "data_v": False,
+        "next_data_script": False, "nuxt_data_script": False,
+        "bundle_src": False, "react_src": False, "vue_src": False,
+    }
+    tokens = []
+    pos, n = 0, len(markup)
     while pos < n:
-        tk = _next_tag(source, pos)
+        tk = _next_tag(markup, pos)
         if not tk:
-            return False
+            break
+        tokens.append(tk)
+        pos = tk[4]
+    for i, tk in enumerate(tokens):
         kind, name, text, s, e = tk
-        if kind == "starttag" and name == tagname:
-            return True
-        pos = e
-    return False
+        if kind != "starttag":
+            continue
+        # 属性「名」だけを見るため引用属性値を除去（値内の擬似属性を無視）。
+        names_only = re.sub(r"\"[^\"]*\"|'[^']*'", "", text)
+        if name == "app-root":
+            sig["app_root"] = True
+        idv = _get_attr(text, "id")
+        if idv is not None:
+            lid = idv.strip().lower()
+            sig["ids"].add(lid)
+            if lid in _MOUNT_IDS and i + 1 < len(tokens):
+                nk, nn, _, ns, _ = tokens[i + 1]
+                if nk == "endtag" and nn == name and markup[e:ns].strip() == "":
+                    sig["empty_mount_ids"].add(lid)
+        if re.search(r"(?<![\w-])ng-app(?:[\s=/>]|$)", names_only, re.I):
+            sig["ng_app"] = True
+        if re.search(r"(?<![\w-])ng-version\s*=", names_only, re.I):
+            sig["ng_version"] = True
+        if re.search(r"(?<![\w-])_nghost(?:-[\w-]+)?(?:[\s=/>]|$)", names_only, re.I):
+            sig["nghost"] = True
+        if re.search(r"(?<![\w-])_ngcontent(?:-[\w-]+)?(?:[\s=/>]|$)", names_only, re.I):
+            sig["ngcontent"] = True
+        if re.search(r"(?<![\w-])data-reactroot(?:[\s=/>]|$)", names_only, re.I):
+            sig["data_reactroot"] = True
+        if re.search(r"(?<![\w-])data-nuxt-data(?:[\s=/>]|$)", names_only, re.I):
+            sig["data_nuxt_data"] = True
+        if re.search(r"(?<![\w-])data-v-[\w-]+", names_only, re.I):
+            sig["data_v"] = True
+        if name == "script":
+            sid = (_get_attr(text, "id") or "").strip().lower()
+            if sid == "__next_data__":
+                sig["next_data_script"] = True
+            if sid == "__nuxt_data__":
+                sig["nuxt_data_script"] = True
+            src = _get_attr(text, "src")
+            if src:
+                if _BUNDLE_HINT_RE.search(src):
+                    sig["bundle_src"] = True
+                if re.search(r"react(?:-dom)?[^'\"]*\.js", src, flags=re.I):
+                    sig["react_src"] = True
+                if re.search(r"vue[^'\"]*\.js", src, flags=re.I):
+                    sig["vue_src"] = True
+    return sig
+
+
 
 
 def _find_inert_end(source: str, tag: str, start: int) -> tuple[int, int]:
@@ -376,22 +368,21 @@ def detect_spa(html: str) -> SpaInfo:
     # markup マーカーは inert 領域（コメント/<template>/<script>本文等）を無害化した
     # 版で探す。<!-- <app-root> --> や var x="<app-root>" で誤判定しない（Codex #104 P2）。
     markup = _COMMENT_RE.sub(" ", noninert)
+    # markup のタグ/属性マーカーは実開始タグ単位で評価し、引用属性値内のタグ形テキストを
+    # 実タグと誤認しない（Codex #104 P2）。
+    tags = _scan_markup(markup)
 
     angular_signals: list[str] = []
-    # <app-root> は実開始タグとして照合する（属性値内の <app-root> テキストを誤認しない・
-    # Codex #104 P2）。
-    if _has_start_tag(markup, "app-root"):
+    if tags["app_root"]:
         angular_signals.append("<app-root>")
-    # 属性/タグベースのマーカー（markup）は inert 除去済みの markup で探す。
-    angular_markup = (
-        (rf"<[a-zA-Z]{_ATTR_PREFIX}(?<![\w-])ng-app(?:\s*=|\s|>)", "ng-app"),
-        (rf"<[a-zA-Z]{_ATTR_PREFIX}(?<![\w-])ng-version\s*=", "ng-version"),
-        (rf"<[a-zA-Z]{_ATTR_PREFIX}(?<![\w-])_nghost(?:-[\w-]+)?(?:\s*=|\s|>)", "_nghost"),
-        (rf"<[a-zA-Z]{_ATTR_PREFIX}(?<![\w-])_ngcontent(?:-[\w-]+)?(?:\s*=|\s|>)", "_ngcontent"),
-    )
-    for pattern, label in angular_markup:
-        if re.search(pattern, markup, flags=re.I):
-            angular_signals.append(label)
+    if tags["ng_app"]:
+        angular_signals.append("ng-app")
+    if tags["ng_version"]:
+        angular_signals.append("ng-version")
+    if tags["nghost"]:
+        angular_signals.append("_nghost")
+    if tags["ngcontent"]:
+        angular_signals.append("_ngcontent")
     # window.ng は JS 式なので script 本文に限定する（Codex #104 P2）。
     if re.search(r"\bwindow\s*\.\s*ng\b", scripts, flags=re.I):
         angular_signals.append("window.ng")
@@ -400,13 +391,11 @@ def detect_spa(html: str) -> SpaInfo:
 
     next_signals: list[str] = []
     # __NEXT_DATA__ は <script id="__NEXT_DATA__" type="application/json"> として
-    # 出力される。裸トークン一致だと <code>__NEXT_DATA__</code> の表示テキストで
-    # 誤検出するため、script の id 属性に限定する（Codex #104 P2）。
-    if re.search(
-        rf"<script\b{_ATTR_PREFIX}(?<![\w-])id\s*=\s*(['\"])__NEXT_DATA__\1", markup, flags=re.I
-    ):
+    # 出力される。実 <script> の id 属性として照合する（表示テキストや属性値内の
+    # タグ形テキストで誤検出しない・Codex #104 P2）。
+    if tags["next_data_script"]:
         next_signals.append("__NEXT_DATA__")
-    if _has_id(markup, "__next"):
+    if "__next" in tags["ids"]:
         next_signals.append('id="__next"')
     # App Router（RSC）は __NEXT_DATA__ も id="__next" も出さず、
     # self.__next_f.push(...) のブートストラップだけを吐くことがある。裸の
@@ -420,7 +409,7 @@ def detect_spa(html: str) -> SpaInfo:
         return SpaInfo(True, "Next.js", "high", next_signals)
 
     react_signals: list[str] = []
-    if re.search(rf"<[a-zA-Z]{_ATTR_PREFIX}(?<![\w-])data-reactroot(?:\s*=|\s|>)", markup, flags=re.I):
+    if tags["data_reactroot"]:
         react_signals.append("data-reactroot")
     # SSR / RSC / Suspense の React 固有コメントマーカー（<!--$-->, <!--/$-->,
     # <!--$?-->, <!--$!-->）。hydration 済みで id="root" に内容がある本番 React
@@ -428,15 +417,11 @@ def detect_spa(html: str) -> SpaInfo:
     # （Codex #104 P1・SSR/Next の本番 React を拾う）。
     if re.search(r"<!--/?\$[?!]?-->", noninert):
         react_signals.append("react-ssr-marker")
-    react_root = _has_id(markup, "root") or _has_id(markup, "app")
-    # JS トークンは script 本文で、react バンドルの script src は markup（source）で探す。
-    react_trace = re.search(
-        r"React\s*\.\s*createElement|__REACT_DEVTOOLS", scripts, flags=re.I
-    ) or re.search(
-        # (?<![\w-])src で data-src/async-src の誤一致を防ぐ（Codex #104 P2）。
-        rf"<script\b{_ATTR_PREFIX}(?<![\w-])src\s*=\s*['\"][^'\"]*react(?:-dom)?[^'\"]*\.js",
-        markup,
-        flags=re.I,
+    react_root = "root" in tags["ids"] or "app" in tags["ids"]
+    # JS トークンは script 本文で、react バンドルの script src は実 <script> の src で照合。
+    react_trace = bool(
+        re.search(r"React\s*\.\s*createElement|__REACT_DEVTOOLS", scripts, flags=re.I)
+        or tags["react_src"]
     )
     if react_root and react_trace:
         react_signals.extend(['id="root/app"', "React trace"])
@@ -451,32 +436,25 @@ def detect_spa(html: str) -> SpaInfo:
         vue_signals.append("window.__NUXT__")
         nuxt_marker = True
     # Nuxt 3 は <script id="__NUXT_DATA__" type="application/json"> / id="__nuxt" /
-    # data-nuxt-data を吐く。__NUXT_DATA__ は script の id 属性に限定する（表示テキスト
-    # の誤検出回避・Codex #104 P2）。
-    if re.search(
-        rf"<script\b{_ATTR_PREFIX}(?<![\w-])id\s*=\s*(['\"])__NUXT_DATA__\1", markup, flags=re.I
-    ):
+    # data-nuxt-data を吐く。実 <script> の id 属性/実タグで照合する（Codex #104 P2）。
+    if tags["nuxt_data_script"]:
         vue_signals.append("__NUXT_DATA__")
         nuxt_marker = True
-    if _has_id(markup, "__nuxt"):
+    if "__nuxt" in tags["ids"]:
         vue_signals.append('id="__nuxt"')
         nuxt_marker = True
-    if re.search(rf"<[a-zA-Z]{_ATTR_PREFIX}(?<![\w-])data-nuxt-data(?:\s*=|\s|>)", markup, flags=re.I):
+    if tags["data_nuxt_data"]:
         vue_signals.append("data-nuxt-data")
         nuxt_marker = True
     if re.search(r"\bwindow\s*\.\s*__VUE__\b", scripts, flags=re.I):
         vue_signals.append("window.__VUE__")
-    if re.search(rf"<[a-zA-Z]{_ATTR_PREFIX}(?<![\w-])data-v-[\w-]+(?:\s*=|\s|>)", markup, flags=re.I):
+    if tags["data_v"]:
         vue_signals.append("data-v-")
-    vue_root = _has_id(markup, "app")
-    # JS トークンは script 本文、vue バンドルの script src は markup（source）で探す。
-    vue_trace = re.search(
-        r"createApp\s*\(|new\s+Vue\b", scripts, flags=re.I
-    ) or re.search(
-        # (?<![\w-])src で data-src/async-src の誤一致を防ぐ（Codex #104 P2）。
-        rf"<script\b{_ATTR_PREFIX}(?<![\w-])src\s*=\s*['\"][^'\"]*vue[^'\"]*\.js",
-        markup,
-        flags=re.I,
+    vue_root = "app" in tags["ids"]
+    # JS トークンは script 本文、vue バンドルの script src は実 <script> の src で照合。
+    vue_trace = bool(
+        re.search(r"createApp\s*\(|new\s+Vue\b", scripts, flags=re.I)
+        or tags["vue_src"]
     )
     if vue_root and vue_trace:
         vue_signals.extend(['id="app"', "Vue trace"])
@@ -489,9 +467,11 @@ def detect_spa(html: str) -> SpaInfo:
     # script だけを持つ（例: 本番 React=<div id="root"></div> + /assets/index-<hash>.js）。
     # 「空マウント」＝サーバ描画済み HTML が無い＝クライアント描画前提の強い証拠なので、
     # 内容を持つ静的サイトを誤有効化せずに本番 SPA を拾える（保守側の維持）。
-    shell = _EMPTY_MOUNT_RE.search(markup)
-    if shell and _has_bundle_script(markup):
-        mount_id = shell.group(3).lower()
+    if tags["empty_mount_ids"] and tags["bundle_src"]:
+        mount_id = next(
+            (m for m in ("__next", "__nuxt", "root", "app") if m in tags["empty_mount_ids"]),
+            "app",
+        )
         framework = {
             "root": "React",
             "__next": "Next.js",
