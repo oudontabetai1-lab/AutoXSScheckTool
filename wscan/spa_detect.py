@@ -142,9 +142,6 @@ def _script_bodies(source: str) -> str:
 _INERT_TAGS = ("template", "script", "style", "noscript", "textarea", "title")
 # raw-text 要素は本文がリテラル（最初の </tag> で閉じる。コメント/入れ子タグは効かない）。
 _RAWTEXT_TAGS = ("script", "style", "textarea", "title")
-_RAWTEXT_OPEN_RE = re.compile(
-    r"<(" + "|".join(_RAWTEXT_TAGS) + r")(?![\w-])[^>]*>", flags=re.I
-)
 # HTML コメント。終端 --> が欠落（truncated/malformed 応答）した場合、コメントは
 # EOF まで継続する。未終端でも残り全体を「コメント内容」として扱う（Codex #104 P2）。
 _COMMENT_RE = re.compile(r"<!--.*?(?:-->|\Z)", flags=re.S)
@@ -216,42 +213,36 @@ def _find_inert_end(source: str, tag: str, start: int) -> tuple[int, int]:
     """
     n = len(source)
     tag_l = tag.lower()
-    is_rawtext = tag_l in _RAWTEXT_TAGS
-    open_re = re.compile(rf"<{re.escape(tag)}(?![\w-])[^>]*>", flags=re.I)
-    close_re = re.compile(rf"</{re.escape(tag)}\s*>", flags=re.I)
+    # raw-text 要素は本文がリテラルなので、最初の </tag> が close（引用属性内で誤認する
+    # 余地はない・入れ子タグも効かない）。
+    if tag_l in _RAWTEXT_TAGS:
+        m = re.compile(rf"</{re.escape(tag)}\s*>", flags=re.I).search(source, start)
+        return (m.start(), m.end()) if m else (n, n)
+    # parsed-content（template/noscript）: 引用尊重の _next_tag で実タグだけを歩き、
+    # 引用属性値内の </template> 等を実 close と誤認しない（Codex #104 P2）。コメントは
+    # 飛ばし、入れ子 raw-text サブツリーは丸ごと飛ばし、同名タグの深さを数える。
     depth = 1
-    scan = start
-    while depth > 0:
-        nc = close_re.search(source, scan)
-        if not nc:
+    pos = start
+    while pos < n:
+        tk = _next_tag(source, pos)
+        if not tk:
             return (n, n)
-        events: list[tuple[int, str, "re.Match"]] = [(nc.start(), "close", nc)]
-        if not is_rawtext:
-            no = open_re.search(source, scan)
-            if no:
-                events.append((no.start(), "open", no))
-            cm = _COMMENT_RE.search(source, scan)
-            if cm:
-                events.append((cm.start(), "comment", cm))
-            rt = _RAWTEXT_OPEN_RE.search(source, scan)
-            if rt:
-                events.append((rt.start(), "rawtext", rt))
-        _, kind, m = min(events, key=lambda e: e[0])
-        if kind == "close":
+        kind, name, text, s, e = tk
+        if kind == "comment":
+            pos = e
+        elif kind == "starttag" and name == tag_l:
+            depth += 1
+            pos = e
+        elif kind == "endtag" and name == tag_l:
             depth -= 1
             if depth == 0:
-                return (m.start(), m.end())
-            scan = m.end()
-        elif kind == "open":
-            depth += 1
-            scan = m.end()
-        elif kind == "comment":
-            scan = m.end()
-        else:  # rawtext: 入れ子 raw-text サブツリー丸ごと飛ばす
-            rclose = re.compile(
-                rf"</{re.escape(m.group(1))}\s*>", flags=re.I
-            ).search(source, m.end())
-            scan = rclose.end() if rclose else n
+                return (s, e)
+            pos = e
+        elif kind == "starttag" and name in _RAWTEXT_TAGS:
+            _, ce = _find_inert_end(source, name, e)  # 入れ子 raw-text を飛ばす
+            pos = ce
+        else:
+            pos = e
     return (n, n)
 
 

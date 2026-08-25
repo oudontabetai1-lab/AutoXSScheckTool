@@ -2970,9 +2970,11 @@ class ScanEngine:
             # collect_links_rich(url) すると、外部ページを元 URL のターゲットとして保存し
             # 相対リンクを元 origin に解決して偽のクロール/攻撃対象を作る。外部へ出たら
             # unscannable として記録し、以降の処理をスキップする（Codex #104 P2）。
-            # settle を走らせた検出イテレーションに限定し、非SPA のリダイレクト挙動は変えない。
+            # SPA モードが有効な間は navigate() 内でも settle が走る（検出イテレーション
+            # 以降の全ページ）ので、self.spa_crawl 有効時の全ナビに適用する。非SPA の
+            # リダイレクト挙動は変えない。
             if (
-                spa_just_enabled
+                self.spa_crawl
                 and landed_url
                 and not self._is_access_allowed_url(landed_url)
             ):

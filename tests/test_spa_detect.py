@@ -103,6 +103,8 @@ def test_generic_mount_id_requires_matching_framework_trace(html, framework):
         '<html><body><!-- <div id="__next"></div>',
         # 属性値内に直列化された <script> 文字列は実 script ではない（Codex #104 P2）。
         '<html><body><div title="<script>self.__next_f.push([])</script>">x</div></body></html>',
+        # 属性値内の </template> テキストで inert 領域を早期に閉じない（Codex #104 P2）。
+        '<template><div title="</template>"><app-root></app-root></div></template>',
     ],
 )
 def test_normal_or_ambiguous_html_is_not_spa(html):

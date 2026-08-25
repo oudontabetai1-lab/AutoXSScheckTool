@@ -581,6 +581,18 @@ class EngineScanGapTests(unittest.IsolatedAsyncioTestCase):
             any(p.url.rstrip("/") == target for p in pages)
         )
 
+    async def test_active_spa_out_of_scope_landing_skips_iteration(self):
+        # SPA モード有効時（明示 --spa-crawl 含む）は、検出イテレーションに限らず、
+        # navigate 内 settle で out-of-scope へ出た全ページで外部ドキュメントを保存しない
+        # （Codex #104 P2）。
+        engine = self._engine("http://fixture.test/", depth=1, spa_crawl=True)
+        engine._browser = _ExternalRedirectSpaBrowser()
+
+        pages = await engine._phase_crawl()
+
+        target = engine.target_url.rstrip("/")
+        self.assertFalse(any(p.url.rstrip("/") == target for p in pages))
+
     async def test_out_of_scope_landing_does_not_auto_enable_spa(self):
         # in-scope URL が access スコープ外の外部 SPA へリダイレクトしたら、
         # マーカーがあっても自動有効化しない（外部ページを探索しない・Codex #104 P1）。

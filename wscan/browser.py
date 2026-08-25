@@ -2418,9 +2418,10 @@ class BrowserManager:
         clicked = 0
         seen_urls: set[str] = set()
         current_url_before = page.url
+        aborted = False  # スコープ外へ出て復帰できないとき探索全体を中断する
 
         for sel in selectors:
-            if clicked >= max_clicks:
+            if aborted or clicked >= max_clicks:
                 break
             try:
                 elements = await page.query_selector_all(sel)
@@ -2470,12 +2471,21 @@ class BrowserManager:
                     # クリック後に out-of-scope へ遷移していたら記録せず即戻り、
                     # スコープ漏れを1ナビゲーションに抑える（Codex #104 P1）。
                     if navigated and is_in_scope is not None and not is_in_scope(new_url):
+                        recovered = False
                         try:
                             await page.go_back(timeout=5000)
                             await page.wait_for_load_state("domcontentloaded", timeout=5000)
                             await page.evaluate(hook_script)
+                            recovered = is_in_scope(page.url)
                         except Exception:
-                            pass
+                            recovered = False
+                        if not recovered:
+                            # go_back 失敗（location.replace 等）or 復帰先が依然スコープ外:
+                            # 外部ドキュメント上でこれ以上クリックを続けると、相対リンクが
+                            # 古い in-scope effective_base で承認されつつ外部ページ基準で
+                            # クリックされ複数の不正リクエストになる。探索を中断する（Codex #104 P1）。
+                            aborted = True
+                            break
                         continue
 
                     if navigated and new_url not in seen_urls:
@@ -2503,6 +2513,9 @@ class BrowserManager:
 
                 except Exception:
                     continue
+
+            if aborted:
+                break
 
         # Final flush of pushState-captured URLs
         try:
