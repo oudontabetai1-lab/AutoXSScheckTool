@@ -4246,6 +4246,10 @@ class ScanEngine:
                         break
                     if clean not in auth_visited and not self._is_url_excluded(clean):
                         auth_visited.add(clean)
+                        # queued post-auth URL を scan-level state にも残し、abort 時に
+                        # coverage が pending を unreached(not attempted)へ分類できるようにする
+                        # （main crawl と同型・Codex #102）。
+                        self.visited_urls.add(clean)
                         self._transition_via.setdefault(clean, {
                             "text": entry.get("text", ""),
                             "selector": entry.get("selector", ""),

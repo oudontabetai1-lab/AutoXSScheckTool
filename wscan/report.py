@@ -1525,8 +1525,13 @@ document.querySelectorAll('.plan-payloads-toggle').forEach(btn => {{
         </div>"""
 
     def _build_coverage_html(self, coverage: dict) -> str:
-        """到達性、試行結果、HTTP status を Finding と分離して表示する。"""
-        coverage = coverage or {}
+        """到達性、試行結果、HTTP status を Finding と分離して表示する。
+
+        coverage 未提供（Agent モード等 metrics を渡さない caller）では None/空 dict に
+        なる。矛盾した「Findings: 0」セクションを描画せず、セクションごと省略する（Codex #102）。
+        """
+        if not coverage:
+            return ""
         http_status = coverage.get("http_status", {}) or {}
         reached_count = self._escape(coverage.get("reached_count", 0))
         attempts = self._escape(coverage.get("attempts", 0))

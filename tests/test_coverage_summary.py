@@ -1072,3 +1072,18 @@ def test_coverage_includes_live_worker_status_before_cleanup():
     hs = ScanEngine.coverage_summary(eng)["http_status"]
     assert hs["blocked"] == 3  # 403x2 + 429x1（live worker 由来）
     assert hs["total"] == 3
+
+
+def test_coverage_html_omitted_when_no_metrics():
+    """coverage 未提供(None/空)なら Coverage セクションを描画しない（Codex #102）。"""
+    from wscan.report import ReportGenerator
+    gen = ReportGenerator.__new__(ReportGenerator)
+    assert gen._build_coverage_html(None) == ""
+    assert gen._build_coverage_html({}) == ""
+    # 実データがあれば描画する。
+    html = gen._build_coverage_html({
+        "reached_count": 1, "attempts": 2, "findings_total": 0,
+        "http_status": {"total": 3, "blocked": 0, "server_error": 0},
+        "by_status": {}, "unreached": [],
+    })
+    assert "Coverage" in html
