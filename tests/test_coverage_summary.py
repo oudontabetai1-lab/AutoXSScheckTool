@@ -391,6 +391,51 @@ def test_coverage_summary_excludes_reached_url_from_unreached_rows():
     assert summary["unreached_count"] == 0
 
 
+def test_coverage_summary_spa_fragment_base_is_not_flagged_unreached():
+    # SPA hash route は fragment 付きで reached に載る（/app#dashboard）が、queue/visited は
+    # fragment を剥いた base（/app）を持つ。fragment を無視して比較しないと、到達済みの
+    # base が「未試行」に誤計上され偽の coverage 警告になる（Codex #102 P2）。
+    engine = SimpleNamespace(
+        visited_urls={"http://fixture.test/app"},
+        reached_urls={"http://fixture.test/app#dashboard"},
+        scan_matrix=[],
+        browser=None,
+        checks=[],
+        scanners={},
+        all_findings=[],
+    )
+
+    summary = ScanEngine.coverage_summary(engine)
+
+    assert summary["unreached"] == []
+    assert summary["unreached_count"] == 0
+
+
+def test_coverage_summary_access_error_fragment_matches_reached_base():
+    # access/error 行でも fragment 正規化で reached 済み base と一致させ、誤計上を防ぐ。
+    engine = SimpleNamespace(
+        visited_urls=set(),
+        reached_urls={"http://fixture.test/app#settings"},
+        scan_matrix=[
+            {
+                "url": "http://fixture.test/app",
+                "check": "access",
+                "status": "error",
+                "note": "transient nav error",
+            }
+        ],
+        browser=None,
+        checks=[],
+        scanners={},
+        all_findings=[],
+    )
+
+    summary = ScanEngine.coverage_summary(engine)
+
+    assert summary["unreached"] == []
+    assert summary["unreached_count"] == 0
+
+
 def test_coverage_summary_handles_empty_matrix_and_missing_browser():
     engine = SimpleNamespace(
         visited_urls={"http://fixture.test/discovered-only"},

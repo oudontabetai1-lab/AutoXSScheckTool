@@ -1073,6 +1073,12 @@ class ScanEngine:
         """到達 URL・試行結果・HTTP status を副作用なしで集計する。"""
         rows = getattr(self, "scan_matrix", None) or []
         reached_url_set = getattr(self, "reached_urls", None) or set()
+        # SPA の hash route は fragment 付きで reached に載る一方、queue/visited_urls は
+        # fragment を剥いた base を持つ（explore_spa_interactions は spa_link を queue に、
+        # split("#")[0] を visited_urls に入れる）。unreached 判定は fragment を無視して
+        # 比較し、到達済み base（例 /app）を「未試行」と誤計上しない（Codex #102 P2・
+        # 純粋集計のみ・巡回挙動は不変）。
+        reached_url_nofrag = {str(u).split("#", 1)[0] for u in reached_url_set}
         attack_rows = [
             row for row in rows
             if (
@@ -1103,7 +1109,7 @@ class ScanEngine:
             if row.get("check") != "access" or row.get("status") != "error":
                 continue
             url = str(row.get("url", "") or "")
-            if url in reached_url_set:
+            if url in reached_url_set or url.split("#", 1)[0] in reached_url_nofrag:
                 continue
             if url not in unreached_by_url:
                 unreached_by_url[url] = {
@@ -1114,7 +1120,12 @@ class ScanEngine:
         # 「未試行」として unreached に含める（reached/unreached のどちらにも出ない穴を防ぐ・Codex #102）。
         for vurl in (getattr(self, "visited_urls", None) or set()):
             u = str(vurl or "")
-            if not u or u in reached_url_set or u in unreached_by_url:
+            if (
+                not u
+                or u in reached_url_set
+                or u.split("#", 1)[0] in reached_url_nofrag
+                or u in unreached_by_url
+            ):
                 continue
             unreached_by_url[u] = {
                 "url": u,
