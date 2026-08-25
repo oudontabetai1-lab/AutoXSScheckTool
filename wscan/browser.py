@@ -2400,6 +2400,29 @@ class BrowserManager:
         except Exception:
             effective_base = base_url
 
+        # スコープ外リクエストの遮断（ネットワーク層）。destination-less な JS-only
+        # コントロールが onclick で fetch('//outside/…') する等、page.url を変えずに
+        # スコープ外へリクエストするケースは navigation ベースのガードでは捕らえられない。
+        # 探索中だけ page.route でスコープ外の http(s) リクエストを abort する（Codex #104 P1）。
+        _scope_route = None
+        if is_in_scope is not None:
+            async def _scope_route(route):
+                try:
+                    req_url = route.request.url
+                    if req_url.startswith(("http://", "https://")) and not is_in_scope(req_url):
+                        await route.abort()
+                        return
+                except Exception:
+                    pass
+                try:
+                    await route.continue_()
+                except Exception:
+                    pass
+            try:
+                await page.route("**/*", _scope_route)
+            except Exception:
+                _scope_route = None
+
         # Collect interactive elements to click
         selectors = [
             "a[data-href]",
@@ -2537,6 +2560,12 @@ class BrowserManager:
                     discovered.append(full)
         except Exception:
             pass
+
+        if _scope_route is not None:
+            try:
+                await page.unroute("**/*", _scope_route)
+            except Exception:
+                pass
 
         return list(dict.fromkeys(discovered))  # preserve order, deduplicate
 

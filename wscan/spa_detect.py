@@ -122,10 +122,12 @@ def _script_bodies(source: str) -> str:
         if kind == "starttag" and name in _INERT_TAGS:
             close_start, close_end = _find_inert_end(source, name, e)
             if name == "script":
+                # 外部 script（src あり）は本文が実行されず外部リソースが走るので、
+                # 本文の JS 式マーカーは収集しない（Codex #104 P2）。
                 # type は属性を引用を尊重してパースする。data-example='type="…"' の
                 # 属性値内 type= を実 type と誤認しない（Codex #104 P2）。
                 stype = (_get_attr(text, "type") or "").strip().lower()
-                if stype in _EXECUTABLE_SCRIPT_TYPES:
+                if not _get_attr(text, "src") and stype in _EXECUTABLE_SCRIPT_TYPES:
                     bodies.append(source[e:close_start])
             pos = close_end  # inert サブツリー（script 含む）を丸ごと飛ばす
         else:
@@ -200,6 +202,27 @@ def _get_attr(tag_text: str, name: str):
                 v = v[1:-1]
             return v
     return None
+
+
+def _has_start_tag(source: str, tagname: str) -> bool:
+    """``tagname`` の実際の開始タグが存在するか（引用属性値内の擬似タグを除く）。
+
+    ``<div title="<app-root>">`` の属性値内 ``<app-root>`` を実タグと誤認しない
+    （Codex #104 P2）。``_next_tag`` は非 inert タグを属性値ごと跨ぐので、擬似タグは
+    別タグとして返らない。
+    """
+    tagname = tagname.lower()
+    pos = 0
+    n = len(source)
+    while pos < n:
+        tk = _next_tag(source, pos)
+        if not tk:
+            return False
+        kind, name, text, s, e = tk
+        if kind == "starttag" and name == tagname:
+            return True
+        pos = e
+    return False
 
 
 def _find_inert_end(source: str, tag: str, start: int) -> tuple[int, int]:
@@ -338,9 +361,12 @@ def detect_spa(html: str) -> SpaInfo:
     markup = _COMMENT_RE.sub(" ", noninert)
 
     angular_signals: list[str] = []
+    # <app-root> は実開始タグとして照合する（属性値内の <app-root> テキストを誤認しない・
+    # Codex #104 P2）。
+    if _has_start_tag(markup, "app-root"):
+        angular_signals.append("<app-root>")
     # 属性/タグベースのマーカー（markup）は inert 除去済みの markup で探す。
     angular_markup = (
-        (r"<app-root\b", "<app-root>"),
         (rf"<[a-zA-Z]{_ATTR_PREFIX}(?<![\w-])ng-app(?:\s*=|\s|>)", "ng-app"),
         (rf"<[a-zA-Z]{_ATTR_PREFIX}(?<![\w-])ng-version\s*=", "ng-version"),
         (rf"<[a-zA-Z]{_ATTR_PREFIX}(?<![\w-])_nghost(?:-[\w-]+)?(?:\s*=|\s|>)", "_nghost"),

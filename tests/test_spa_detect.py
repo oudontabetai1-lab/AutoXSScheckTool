@@ -105,6 +105,11 @@ def test_generic_mount_id_requires_matching_framework_trace(html, framework):
         '<html><body><div title="<script>self.__next_f.push([])</script>">x</div></body></html>',
         # 属性値内の </template> テキストで inert 領域を早期に閉じない（Codex #104 P2）。
         '<template><div title="</template>"><app-root></app-root></div></template>',
+        # 属性値内の <app-root> は実タグではない（Codex #104 P2）。
+        '<html><body><div title="<app-root></app-root>">static</div></body></html>',
+        # 外部 script（src あり）の本文は実行されないので JS 式マーカーにならない
+        # （Codex #104 P2）。
+        '<html><body><script src="/analytics.js">self.__next_f.push([])</script></body></html>',
     ],
 )
 def test_normal_or_ambiguous_html_is_not_spa(html):
