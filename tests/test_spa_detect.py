@@ -51,6 +51,11 @@ def test_generic_mount_id_requires_matching_framework_trace(html, framework):
         "<html><body><h1>静的サイト</h1><p>通常の案内ページです。</p></body></html>",
         '<html><body><form action="/search"><input name="q"></form></body></html>',
         '<html><body><div id="root">React 入門</div></body></html>',
+        # data-id="__next" は id="__next" ではない（\b がハイフン後にも境界を作る
+        # 問題の回帰・Codex #104 P2）。メタ属性を持つ静的ページを SPA と誤判定しない。
+        '<html><body><article data-id="__next">記事</article></body></html>',
+        '<html><body><div data-id="root"></div>'
+        '<script src="/assets/index-9f3a2b.js"></script></body></html>',
     ],
 )
 def test_normal_or_ambiguous_html_is_not_spa(html):

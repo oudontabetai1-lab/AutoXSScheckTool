@@ -222,6 +222,29 @@ class _SpaHydrationCrawlBrowser(_FakeCrawlBrowser):
         return []
 
 
+class _SpaRouteDiscoveryBrowser(_FakeCrawlBrowser):
+    """SPA マーカー付きで、クリック探索が1つの動的ルートを返す。"""
+
+    def __init__(self, route="http://fixture.test/dyn"):
+        super().__init__()
+        self.route = route
+
+    async def content(self):
+        return "<html><body><app-root></app-root></body></html>"
+
+    async def find_forms(self):
+        return []
+
+    async def explore_spa_interactions(self, page, url, max_clicks=20):
+        return [self.route]
+
+    async def settle_spa(self):
+        pass
+
+    async def collect_links_rich(self, base_url, same_domain=False):
+        return []
+
+
 class _SessionExpiryBrowser(_FakeCrawlBrowser):
     def __init__(
         self,
@@ -350,6 +373,25 @@ class EngineScanGapTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIsNotNone(first)
         self.assertTrue(first.forms)
+
+    async def test_spa_route_enqueue_respects_depth_limit(self):
+        # --depth 1 では探索ルートを訪問しない（通常リンクと同じ深度ガード・Codex #104 P2）。
+        engine = self._engine(depth=1)
+        engine._browser = _SpaRouteDiscoveryBrowser()
+
+        await engine._phase_crawl()
+
+        self.assertTrue(engine.spa_crawl)
+        self.assertNotIn("http://fixture.test/dyn", engine.visited_urls)
+
+    async def test_spa_route_enqueue_allowed_within_depth(self):
+        # depth=2 なら初回ページ(depth0)の探索ルートは depth1 として巡回対象になる。
+        engine = self._engine(depth=2)
+        engine._browser = _SpaRouteDiscoveryBrowser()
+
+        await engine._phase_crawl()
+
+        self.assertIn("http://fixture.test/dyn", engine.visited_urls)
 
     async def test_normal_first_page_never_auto_enables_spa_crawl(self):
         engine = self._engine(depth=1)

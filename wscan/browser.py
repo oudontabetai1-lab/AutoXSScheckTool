@@ -1340,7 +1340,12 @@ class BrowserManager:
                 await self.page.wait_for_function(
                     """
                     () => {
-                        const root = document.querySelector('app-root, #root') || document.body;
+                        // detect_spa が認識する全マウントを対象にする。#app/#__next/
+                        // #__nuxt の空シェルで body へフォールバックすると、body の
+                        // 子要素が既に非0のため hydration を待たず返ってしまう（Codex #104 P1）。
+                        const root = document.querySelector(
+                            'app-root, #root, #app, #__next, #__nuxt'
+                        ) || document.body;
                         if (!root) return false;
                         return root.childElementCount > 0
                             || (root.innerText || '').trim().length > 0;

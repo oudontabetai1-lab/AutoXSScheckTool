@@ -21,10 +21,15 @@ class SpaInfo:
 
 
 def _has_id(source: str, element_id: str) -> bool:
-    """属性順や引用符に依存せず id の完全一致を調べる。"""
+    """属性順や引用符に依存せず id の完全一致を調べる。
+
+    ``\\b`` はハイフンの後にも境界を作るため ``data-id="__next"`` を
+    ``id="__next"`` と誤認する。ハイフン/英数字が直前に来る属性名（data-id 等）を
+    除くため negative lookbehind を使う（Codex #104 P2）。
+    """
     return bool(
         re.search(
-            rf"\bid\s*=\s*(['\"])\s*{re.escape(element_id)}\s*\1",
+            rf"(?<![\w-])id\s*=\s*(['\"])\s*{re.escape(element_id)}\s*\1",
             source,
             flags=re.I,
         )
@@ -35,7 +40,8 @@ def _has_id(source: str, element_id: str) -> bool:
 # 例: <div id="root"></div> / <main id="app">  </main>。内容を持つ要素
 # （<div id="root">案内</div> 等）は一致しないため静的サイトを誤検出しない。
 _EMPTY_MOUNT_RE = re.compile(
-    r"<(\w+)\b[^>]*\bid\s*=\s*(['\"])(root|app|__next|__nuxt)\2[^>]*>\s*</\1\s*>",
+    # (?<![\w-]) で data-id="root" 等を id="root" と誤認しない（Codex #104 P2）。
+    r"<(\w+)\b[^>]*(?<![\w-])id\s*=\s*(['\"])(root|app|__next|__nuxt)\2[^>]*>\s*</\1\s*>",
     flags=re.I | re.S,
 )
 

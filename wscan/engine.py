@@ -3102,15 +3102,20 @@ class ScanEngine:
                     spa_links = await self._browser.explore_spa_interactions(
                         self._browser.page, url, max_clicks=20
                     )
-                    for spa_link in spa_links:
-                        clean_spa = spa_link.split("#")[0]
-                        if (
-                            clean_spa not in self.visited_urls
-                            and self._is_access_allowed_url(clean_spa)
-                            and not self._is_url_excluded(clean_spa)
-                        ):
-                            self.visited_urls.add(clean_spa)
-                            queue.append((spa_link, depth + 1, url))
+                    # 発見ルートの巡回キュー投入は通常リンクと同じ深度ガードに従う。
+                    # これが無いと --depth 1 でも探索ルートを訪問し再帰的に深追いして
+                    # 操作者の深度=トラフィック上限を超える（Codex #104 P2）。現ページの
+                    # クリック探索と XHR harvest（同一ページの攻撃面拡充）は深度非依存で継続。
+                    if depth + 1 < self.depth:
+                        for spa_link in spa_links:
+                            clean_spa = spa_link.split("#")[0]
+                            if (
+                                clean_spa not in self.visited_urls
+                                and self._is_access_allowed_url(clean_spa)
+                                and not self._is_url_excluded(clean_spa)
+                            ):
+                                self.visited_urls.add(clean_spa)
+                                queue.append((spa_link, depth + 1, url))
                 except Exception:
                     pass
 
