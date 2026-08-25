@@ -122,6 +122,11 @@ def test_generic_mount_id_requires_matching_framework_trace(html, framework):
         'static</div></body></html>',
         '<html><body><div title="<div id=\'root\'></div>">static</div>'
         '<script src="/assets/x-abc123.js"></script></body></html>',
+        # inert コンテナ（template/noscript 等）の開始タグ属性は mount マーカーではない
+        # （Codex #104 P2）。
+        '<html><body><template id="__next"></template></body></html>',
+        '<html><body><template id="app"></template>'
+        '<script src="/assets/site.js"></script></body></html>',
     ],
 )
 def test_normal_or_ambiguous_html_is_not_spa(html):

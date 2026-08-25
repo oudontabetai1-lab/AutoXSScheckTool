@@ -2417,10 +2417,16 @@ class BrowserManager:
                         return
                 except Exception:
                     pass
+                # 許可リクエストは route.fallback() で次の一致ハンドラ（既存の
+                # 認証ヘッダ付与 route 等）へ委譲する。continue_() だとチェーンを終端し、
+                # in-scope XHR が Authorization/カスタムヘッダを失い 401 になる（Codex #104 P2）。
                 try:
-                    await route.continue_()
+                    await route.fallback()
                 except Exception:
-                    pass
+                    try:
+                        await route.continue_()
+                    except Exception:
+                        pass
             try:
                 _scope_ctx = page.context
                 await _scope_ctx.route("**/*", _scope_route)

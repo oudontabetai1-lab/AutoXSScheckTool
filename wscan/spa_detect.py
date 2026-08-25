@@ -189,6 +189,28 @@ def _scan_markup(markup: str) -> dict:
         kind, name, text, s, e = tk
         if kind != "starttag":
             continue
+        if name == "script":
+            # script 固有マーカー（id=__NEXT_DATA__/__NUXT_DATA__、bundle/react/vue src）。
+            # script の id/data-* は mount マーカーではないので下の汎用処理には回さない。
+            sid = (_get_attr(text, "id") or "").strip().lower()
+            if sid == "__next_data__":
+                sig["next_data_script"] = True
+            if sid == "__nuxt_data__":
+                sig["nuxt_data_script"] = True
+            src = _get_attr(text, "src")
+            if src:
+                if _BUNDLE_HINT_RE.search(src):
+                    sig["bundle_src"] = True
+                if re.search(r"react(?:-dom)?[^'\"]*\.js", src, flags=re.I):
+                    sig["react_src"] = True
+                if re.search(r"vue[^'\"]*\.js", src, flags=re.I):
+                    sig["vue_src"] = True
+            continue
+        if name in _INERT_TAGS:
+            # <template>/<noscript>/<style>/<textarea>/<title> の開始タグは
+            # レンダリングされる framework 要素ではないので、その id/属性を mount /
+            # framework マーカーにしない（<template id="__next"> 等・Codex #104 P2）。
+            continue
         # 属性「名」だけを見るため引用属性値を除去（値内の擬似属性を無視）。
         names_only = re.sub(r"\"[^\"]*\"|'[^']*'", "", text)
         if name == "app-root":
@@ -215,20 +237,6 @@ def _scan_markup(markup: str) -> dict:
             sig["data_nuxt_data"] = True
         if re.search(r"(?<![\w-])data-v-[\w-]+", names_only, re.I):
             sig["data_v"] = True
-        if name == "script":
-            sid = (_get_attr(text, "id") or "").strip().lower()
-            if sid == "__next_data__":
-                sig["next_data_script"] = True
-            if sid == "__nuxt_data__":
-                sig["nuxt_data_script"] = True
-            src = _get_attr(text, "src")
-            if src:
-                if _BUNDLE_HINT_RE.search(src):
-                    sig["bundle_src"] = True
-                if re.search(r"react(?:-dom)?[^'\"]*\.js", src, flags=re.I):
-                    sig["react_src"] = True
-                if re.search(r"vue[^'\"]*\.js", src, flags=re.I):
-                    sig["vue_src"] = True
     return sig
 
 
