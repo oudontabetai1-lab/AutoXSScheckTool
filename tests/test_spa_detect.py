@@ -184,6 +184,17 @@ def test_executable_script_type_still_detected():
     assert info.framework == "Next.js"
 
 
+def test_mime_type_with_parameters_is_executable():
+    # text/javascript; charset=utf-8 は essence が実行可能 type なので除外しない
+    # （偽陰性の回帰・Codex #104 P2）。
+    info = detect_spa(
+        '<html><body><script type="text/javascript; charset=utf-8">'
+        'self.__next_f.push([1])</script></body></html>'
+    )
+    assert info.is_spa is True
+    assert info.framework == "Next.js"
+
+
 def test_type_like_text_in_other_attribute_does_not_exclude_script():
     # 別属性の引用値内 type= を実 script type と誤認して実行 script を除外しない
     # （偽陰性の回帰・Codex #104 P2）。

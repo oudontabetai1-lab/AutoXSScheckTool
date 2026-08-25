@@ -2401,10 +2401,13 @@ class BrowserManager:
             effective_base = base_url
 
         # スコープ外リクエストの遮断（ネットワーク層）。destination-less な JS-only
-        # コントロールが onclick で fetch('//outside/…') する等、page.url を変えずに
-        # スコープ外へリクエストするケースは navigation ベースのガードでは捕らえられない。
-        # 探索中だけ page.route でスコープ外の http(s) リクエストを abort する（Codex #104 P1）。
+        # コントロールが onclick で fetch('//outside/…') や window.open('//outside/…')
+        # する等、page.url を変えずにスコープ外へリクエストするケースは navigation ベースの
+        # ガードでは捕らえられない。探索中だけスコープ外の http(s) リクエストを abort する。
+        # popup（window.open）も捕捉するため page ではなく context 単位で route を張る
+        # （Codex #104 P1）。
         _scope_route = None
+        _scope_ctx = None
         if is_in_scope is not None:
             async def _scope_route(route):
                 try:
@@ -2419,9 +2422,11 @@ class BrowserManager:
                 except Exception:
                     pass
             try:
-                await page.route("**/*", _scope_route)
+                _scope_ctx = page.context
+                await _scope_ctx.route("**/*", _scope_route)
             except Exception:
                 _scope_route = None
+                _scope_ctx = None
 
         # Collect interactive elements to click
         selectors = [
@@ -2561,23 +2566,29 @@ class BrowserManager:
         except Exception:
             pass
 
-        if _scope_route is not None:
-            try:
-                await page.unroute("**/*", _scope_route)
-            except Exception:
-                pass
-
         # 復帰不能で中断した場合、ページは置換ドキュメント上に残っている。呼び出し側は
         # 元の queued URL を基準に collect_links_rich(url) 等を行うので、外部/別ページの
-        # 相対リンクを誤解決して偽ターゲットを作らないよう、元ページへ戻してから返す
-        # （Codex #104 P2）。
-        if aborted:
+        # 相対リンクを誤解決して偽ターゲットを作らないよう、元ページへ戻してから返す。
+        # goto の結果を検証し、戻れなければもう一度試みる（Codex #104 P2）。route を先に
+        # 剥がしてから戻す（元ページが in-scope でも route が張ったままだと余計な干渉を避ける）。
+        if _scope_route is not None and _scope_ctx is not None:
             try:
-                await page.goto(
-                    current_url_before, wait_until="domcontentloaded", timeout=8000
-                )
+                await _scope_ctx.unroute("**/*", _scope_route)
             except Exception:
                 pass
+        if aborted:
+            for _ in range(2):
+                try:
+                    await page.goto(
+                        current_url_before, wait_until="domcontentloaded", timeout=8000
+                    )
+                except Exception:
+                    pass
+                try:
+                    if (page.url or "").split("#")[0] == current_url_before.split("#")[0]:
+                        break
+                except Exception:
+                    break
 
         return list(dict.fromkeys(discovered))  # preserve order, deduplicate
 

@@ -126,9 +126,10 @@ def _script_bodies(source: str) -> str:
             if name == "script":
                 # 外部 script（src あり）は本文が実行されず外部リソースが走るので、
                 # 本文の JS 式マーカーは収集しない（Codex #104 P2）。
-                # type は属性を引用を尊重してパースする。data-example='type="…"' の
-                # 属性値内 type= を実 type と誤認しない（Codex #104 P2）。
-                stype = (_get_attr(text, "type") or "").strip().lower()
+                # type は属性を引用を尊重してパースし、MIME の essence（; 以降の
+                # パラメータを除いた本体）で比較する。text/javascript; charset=utf-8 の
+                # ような実行可能 type を除外しない（Codex #104 P2）。
+                stype = (_get_attr(text, "type") or "").split(";", 1)[0].strip().lower()
                 if not _get_attr(text, "src") and stype in _EXECUTABLE_SCRIPT_TYPES:
                     bodies.append(source[e:close_start])
             pos = close_end  # inert サブツリー（script 含む）を丸ごと飛ばす
