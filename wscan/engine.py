@@ -4172,6 +4172,9 @@ class ScanEngine:
 
             self._note_coverage_origin(actual_url)
             self.reached_urls.add(actual_url)
+            # redirect で actual_url が queued url と違っても、queued url(visited_urls に登録済み)を
+            # reached にして not-attempted 誤分類を防ぐ（Codex #102）。
+            self.reached_urls.add(url.rstrip("/"))
             try:
                 html = await self._browser.page.content()
             except Exception:
