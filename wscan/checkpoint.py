@@ -46,26 +46,18 @@ def unit_key(
     *,
     location_token: str | None = None,
     pointer: str = "",
-    legacy_whole_rstrip: bool = False,
 ) -> str:
     """攻撃の作業単位を一意な文字列キーにする（純粋関数）。
 
     URL はパス末尾スラッシュと揮発 query を正規化し、意味 query と SPA route
-    fragment は保持する。``legacy_whole_rstrip`` は v5 読み取り互換専用。
+    fragment は保持する。
     区切りは衝突しにくい ``\\x1f``。
 
     同名の URL パラメータとフォームフィールド（例: どちらも ``id`` で
     ``form_index=0``）が同じキーに潰れて一方が未検査のまま resume にスキップ
     されるのを防ぐため、入力種別（URL param / form）もキーに含める。
     """
-    if legacy_whole_rstrip:
-        # v5 読み取り互換: v5 writer は whole-url rstrip を先に行い、migration が後で
-        # 正規化する（stored = normalize(rstrip(raw))）。fallback も rstrip→normalize の順に
-        # して一致させる。normalize(url).rstrip の順だと、スラッシュ値の transient param
-        # （?nonce=12345678/）で不一致になり再送する（Codex #103 P1）。
-        norm_url = normalize_url_for_key((url or "").rstrip("/"))
-    else:
-        norm_url = normalize_url_for_key(url or "")
+    norm_url = normalize_url_for_key(url or "")
     if location_token is None:
         location_token = "u" if is_url_param else "f"
     parts = [
@@ -102,24 +94,7 @@ class CheckpointState:
         is_url_param: bool = False,
     ) -> bool:
         key = unit_key(url, field_name, form_index, check_type, is_url_param)
-        if key in self.completed_units:
-            return True
-        # v5 の whole-url rstrip で query 値末尾スラッシュを失った legacy checkpoint 互換。
-        # 読み込んだ legacy 単位だけを別集合 _legacy_units で照合する（新規 mark_done で
-        # 追加した単位を含めないため。含めると v5 resume 中に `?z=/admin` 完了後 `?z=/admin/`
-        # が誤一致し別 operation を skip する・Codex #103 P1）。
-        legacy_units = getattr(self, "_legacy_units", None)
-        if not legacy_units:
-            return False
-        legacy_key = unit_key(
-            url,
-            field_name,
-            form_index,
-            check_type,
-            is_url_param,
-            legacy_whole_rstrip=True,
-        )
-        return legacy_key in legacy_units
+        return key in self.completed_units
 
     def mark_done(
         self, url: str, field_name: str, form_index: int, check_type: str,
@@ -139,23 +114,7 @@ class CheckpointState:
             location_token=location_token,
             pointer=pointer,
         )
-        if key in self.completed_units:
-            return True
-        # 読み込んだ legacy 単位だけを _legacy_units で照合する（新規 mark を含めない・
-        # Codex #103 P1）。
-        legacy_units = getattr(self, "_legacy_units", None)
-        if not legacy_units:
-            return False
-        legacy_key = unit_key(
-            url,
-            field_name,
-            int(form_index),
-            check_type,
-            location_token=location_token,
-            pointer=pointer,
-            legacy_whole_rstrip=True,
-        )
-        return legacy_key in legacy_units
+        return key in self.completed_units
 
     def mark_done_ip(self, ip: "InjectionPoint", check_type: str) -> None:
         """InjectionPoint が表す作業単位を完了済みにする。"""
@@ -185,7 +144,6 @@ class CheckpointState:
             # v5 legacy fallback 用エイリアス。保存を跨いでも fallback を維持するため
             # 永続する（Codex #103 P1）。読み込んだ v5 単位のスナップショットで、
             # 新規 mark で増えない。
-            "legacy_units": sorted(getattr(self, "_legacy_units", set()) or set()),
             "findings": self.findings,
             "attempt_ledger": self.attempt_ledger,
             "created_at": self.created_at,
@@ -210,8 +168,6 @@ class CheckpointState:
             updated_at=data.get("updated_at", time.time()),
             source_version=source_version,
         )
-        # 永続化された legacy エイリアスを復元（保存を跨いだ v6 でも fallback を維持）。
-        state._legacy_units = set(data.get("legacy_units", []) or [])
         if state.source_version < 2:
             state._migrate_v1_adaptive_units()
         if state.source_version < 6:
@@ -258,9 +214,14 @@ class CheckpointState:
             parts[0] = normalize_url_for_key(parts[0])
             migrated.add("\x1f".join(parts))
         self.completed_units = migrated
-        # legacy fallback 照合用に、読み込んだ v5 単位のスナップショットを保持する
-        # （新規 mark_done で追加した単位は含めない・Codex #103 P1）。永続復元分と union。
-        self._legacy_units = getattr(self, "_legacy_units", set()) | set(migrated)
+        # 既知の制約（Codex #103 P1）: v5 は whole-url rstrip で URL 末尾の / を落とすため、
+        # query 値末尾スラッシュ URL（例 https://h/p?z=/admin/）は ?z=/admin として保存され、
+        # 正規化しても失われた / を復元できない。かつて whole-rstrip alias で救おうとしたが、
+        # genuine な ?z=/admin と truncated された ?z=/admin/ を stored key から区別する証拠が
+        # 原理的に無く、別 operation を誤って skip する検出偽陰性（通常層で最悪）を生むため撤去した。
+        # 結果、この稀な v5 ケースの当該ユニットは v6 初回 resume で1度だけ再攻撃されうる（未検知
+        # ではなく完了済みの再送・v6 キーは以後一貫し自己回復）。migration は削除/並べ替え/揮発
+        # クエリの正規化を担い v5 compat の主要部を維持する。
 
         # attempt_ledger の key は stable_key_parts の serialized list。
         # 壊れた旧 record は他の resume データを巻き込まず best-effort で飛ばす。

@@ -38,20 +38,6 @@ class UnitKeyTests(unittest.TestCase):
             unit_key("http://h/p?a=1&z=/admin", "q", 0, "xss"),
         )
 
-    def test_legacy_whole_rstrip_matches_v5_query_value_key(self):
-        url = "https://h/p?z=/admin/"
-        self.assertEqual(
-            unit_key(
-                url,
-                "q",
-                0,
-                "xss",
-                legacy_whole_rstrip=True,
-            ),
-            "https://h/p?z=/admin\x1fq\x1f0\x1ff\x1fxss",
-        )
-        self.assertTrue(unit_key(url, "q", 0, "xss").startswith(f"{url}\x1f"))
-
     def test_distinct_checks_distinct_keys(self):
         self.assertNotEqual(
             unit_key("http://h/a", "q", 0, "xss"),
@@ -201,51 +187,6 @@ class StateTests(unittest.TestCase):
         self.assertEqual(state.target_url, expected_url)
         self.assertEqual(next(iter(state.completed_units)).split("\x1f")[0], expected_url)
         self.assertTrue(state.is_done(expected_url, "name", 0, "sqli"))
-
-    def test_v5_whole_url_rstrip_key_has_read_only_lookup_fallback(self):
-        url = "https://h/p?z=/admin/"
-        legacy_key = unit_key(
-            url,
-            "name",
-            0,
-            "sqli",
-            legacy_whole_rstrip=True,
-        )
-        state = CheckpointState.from_dict({
-            "version": 5,
-            "target_url": "https://h",
-            "checks": ["sqli"],
-            "completed_units": [legacy_key],
-            "findings": [],
-        })
-
-        self.assertTrue(state.is_done(url, "name", 0, "sqli"))
-        self.assertTrue(state.is_done_ip(InjectionPoint.for_form(url, "name"), "sqli"))
-
-        current = CheckpointState()
-        current.mark_done(url, "name", 0, "sqli")
-        normal_key = unit_key(url, "name", 0, "sqli")
-        self.assertEqual(current.completed_units, {normal_key})
-        self.assertNotIn(legacy_key, current.completed_units)
-
-        current_ip = CheckpointState()
-        current_ip.mark_done_ip(InjectionPoint.for_form(url, "name"), "sqli")
-        self.assertEqual(current_ip.completed_units, {normal_key})
-        self.assertNotIn(legacy_key, current_ip.completed_units)
-
-    def test_v5_legacy_fallback_is_noop_for_url_without_query_value_slash(self):
-        url = "https://h/p?op=create"
-        normal_key = unit_key(url, "name", 0, "sqli")
-        legacy_key = unit_key(
-            url,
-            "name",
-            0,
-            "sqli",
-            legacy_whole_rstrip=True,
-        )
-        self.assertEqual(normal_key, legacy_key)
-        state = CheckpointState(completed_units={normal_key})
-        self.assertTrue(state.is_done(url, "name", 0, "sqli"))
 
     def test_mark_and_is_done(self):
         s = CheckpointState(target_url="http://h", checks=["xss"])
@@ -671,41 +612,6 @@ class AttemptLedgerPersistenceTests(unittest.TestCase):
         history = ledger.history(resumed.stable_key_parts(), "sqli")
         self.assertEqual([attempt.payload for attempt in history], ["'"])
 
-
-def test_legacy_fallback_only_applies_to_loaded_v5_checkpoints():
-    """v5 legacy fallback は fresh v6 state では無効（初回スキャンで別 operation を潰さない）。
-
-    fresh v6: `?z=/admin` 完了後に `?z=/admin/` は未完了扱い（fallback 無効）。
-    v5 load: whole-url rstrip で保存された `?z=/admin` を `?z=/admin/` の照合で拾う（互換）。
-    """
-    from wscan.checkpoint import CheckpointState, unit_key, CHECKPOINT_VERSION
-
-    admin = "https://h/p?z=/admin"
-    admin_slash = "https://h/p?z=/admin/"
-
-    # fresh v6 state
-    fresh = CheckpointState(target_url="https://h/", checks=["xss"])
-    assert fresh.source_version >= 6
-    fresh.mark_done(admin, "q", 0, "xss", is_url_param=True)
-    assert fresh.is_done(admin, "q", 0, "xss", is_url_param=True) is True
-    # 別 operation（末尾スラッシュ有り）は未完了のまま（fallback を適用しない）
-    assert fresh.is_done(admin_slash, "q", 0, "xss", is_url_param=True) is False
-
-    # v5 loaded state: 旧 whole-url rstrip 形のキーを completed_units に持つ
-    legacy_key = unit_key(
-        admin_slash, "q", 0, "xss", True, legacy_whole_rstrip=True
-    )
-    v5 = CheckpointState.from_dict({
-        "version": 5,
-        "target_url": "https://h/",
-        "checks": ["xss"],
-        "completed_units": [legacy_key],
-    })
-    assert v5.source_version == 5
-    # 新 URL（スラッシュ保持）で照合しても legacy fallback でヒットする
-    assert v5.is_done(admin_slash, "q", 0, "xss", is_url_param=True) is True
-
-
 def test_legacy_fallback_excludes_units_marked_during_v5_resume():
     """v5 resume 中に新規 mark した単位は legacy fallback の対象外（Codex #103 P1）。
 
@@ -728,50 +634,31 @@ def test_legacy_fallback_excludes_units_marked_during_v5_resume():
     assert state.is_done("https://h/p?z=/admin/", "q", 0, "sqli", is_url_param=True) is False
 
 
-def test_legacy_aliases_survive_checkpoint_save_and_reload():
-    """v5 legacy fallback は保存(version 6)→再ロードを跨いでも維持される（Codex #103 P1）。
-
-    v5 で whole-url rstrip により `?z=/admin` に切り詰められた単位を、`?z=/admin/` の
-    照合で拾える状態が、to_dict→from_dict(version 6)の後も保たれる。
+def test_v5_migration_no_longer_false_matches_distinct_slash_variant():
+    """v5 の genuine な ?z=/admin 完了は、distinct な ?z=/admin/ を誤って done にしない
+    （whole-rstrip alias を撤去し検出偽陰性を回避・Codex #103 P1）。migration 自体は
+    削除/揮発クエリ正規化を維持する。
     """
     from wscan.checkpoint import CheckpointState, unit_key
 
-    legacy_key = unit_key(
-        "https://h/p?z=/admin/", "q", 0, "sqli", True, legacy_whole_rstrip=True
-    )
-    v5 = CheckpointState.from_dict({
+    admin = "https://h/p?z=/admin"
+    legacy_key = "\x1f".join([admin, "q", "0", "u", "sqli"])
+    state = CheckpointState.from_dict({
         "version": 5,
         "target_url": "https://h/",
         "checks": ["sqli"],
         "completed_units": [legacy_key],
     })
-    assert v5.is_done("https://h/p?z=/admin/", "q", 0, "sqli", is_url_param=True) is True
+    # genuine な ?z=/admin は done。
+    assert state.is_done(admin, "q", 0, "sqli", is_url_param=True) is True
+    # distinct な ?z=/admin/ は done にしない（誤一致=検出偽陰性を作らない）。
+    assert state.is_done(admin + "/", "q", 0, "sqli", is_url_param=True) is False
 
-    # 保存（version 6）→再ロード。migration はもう走らないが fallback は維持される。
-    reloaded = CheckpointState.from_dict(v5.to_dict())
-    assert reloaded.source_version >= 6
-    assert reloaded.is_done("https://h/p?z=/admin/", "q", 0, "sqli", is_url_param=True) is True
-    # 別 operation（distinct）は誤一致しない。
-    assert reloaded.is_done("https://h/p?z=/other/", "q", 0, "sqli", is_url_param=True) is False
-
-
-def test_legacy_fallback_matches_slash_valued_transient_param():
-    """v5 の slash 値 transient param(?nonce=12345678/)でも legacy fallback が一致する（Codex #103 P1）。
-
-    v5 writer は whole-url rstrip を先に行い(?nonce=12345678)、migration が後で正規化して
-    ?nonce(epoch) を除去し https://h/p を残す。lookup fallback も rstrip→normalize の順で
-    一致させる。
-    """
-    from wscan.checkpoint import CheckpointState, unit_key
-
-    raw = "https://h/p?nonce=12345678/"
-    # v5 stored = whole-url rstrip(raw)
-    legacy_stored = "\x1f".join([raw.rstrip("/"), "q", "0", "u", "sqli"])
-    state = CheckpointState.from_dict({
-        "version": 5,
-        "target_url": "https://h/",
-        "checks": ["sqli"],
-        "completed_units": [legacy_stored],
+    # migration は揮発クエリ正規化を維持: v5 の rotating nonce 付きキーは正規化され、
+    # 現行キー（nonce 除去後）で done になる。
+    v5nonce = "\x1f".join(["https://h/a?op=create&nonce=12345678", "q", "0", "u", "sqli"])
+    st2 = CheckpointState.from_dict({
+        "version": 5, "target_url": "https://h/", "checks": ["sqli"],
+        "completed_units": [v5nonce],
     })
-    # 現行 URL（slash 値 nonce 付き）で照合しても legacy fallback で一致する。
-    assert state.is_done(raw, "q", 0, "sqli", is_url_param=True) is True
+    assert st2.is_done("https://h/a?op=create&nonce=99999999", "q", 0, "sqli", is_url_param=True) is True
