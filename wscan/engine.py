@@ -2956,6 +2956,10 @@ class ScanEngine:
                         try:
                             await self.browser.settle_spa()
                             html = await self.browser.page.content()
+                            # settle 中の client-side redirect で landed が変わりうる。以降の
+                            # スコープ判定（explore ガード・base_url）が古い in-scope 値を使わ
+                            # ないよう landed_url を採り直す（Codex #104 P1）。
+                            landed_url = self.browser.page.url or landed_url
                         except Exception:
                             pass
                 except Exception:

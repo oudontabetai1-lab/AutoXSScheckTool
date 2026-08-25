@@ -87,6 +87,11 @@ def test_generic_mount_id_requires_matching_framework_trace(html, framework):
         # 前置のあるハイフン付き属性（x-data-reactroot）は真の data-reactroot ではない
         # （Codex #104 P2）。
         '<html><body><div id="root"></div><div x-data-reactroot></div></body></html>',
+        # コメント内の </template> テキストを実 close と誤認しない（Codex #104 P2）。
+        '<template><!-- </template><app-root> --></template>',
+        # 入れ子 raw-text（script 文字列）内の </template> も実 close ではない。
+        '<template><script>var x="</template>";</script>'
+        '<app-root></app-root></template>',
     ],
 )
 def test_normal_or_ambiguous_html_is_not_spa(html):

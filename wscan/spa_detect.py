@@ -113,9 +113,65 @@ def _script_bodies(source: str) -> str:
 # src/id 属性は markup マーカーとして使うため）。React SSR コメント <!--$--> は別途 raw source で
 # 判定するのでここでコメントを消しても影響しない。
 _INERT_TAGS = ("template", "script", "style", "noscript", "textarea", "title")
+# raw-text 要素は本文がリテラル（最初の </tag> で閉じる。コメント/入れ子タグは効かない）。
+_RAWTEXT_TAGS = ("script", "style", "textarea", "title")
 _INERT_OPEN_RE = re.compile(
     r"<(" + "|".join(_INERT_TAGS) + r")(?![\w-])[^>]*>", flags=re.I
 )
+_RAWTEXT_OPEN_RE = re.compile(
+    r"<(" + "|".join(_RAWTEXT_TAGS) + r")(?![\w-])[^>]*>", flags=re.I
+)
+_COMMENT_RE = re.compile(r"<!--.*?-->", flags=re.S)
+
+
+def _find_inert_end(source: str, tag: str, start: int) -> tuple[int, int]:
+    """``<tag …>`` 直後 ``start`` から対応する閉じタグ位置 ``(close_start, close_end)`` を返す。
+
+    template/noscript のような**parsed-content**要素では、コメント（``<!-- </template> -->``）や
+    入れ子の raw-text 要素（``<script>"</template>"</script>``）の中に現れる ``</tag>`` テキストを
+    実 close と誤認しないよう、それらのサブツリーを飛ばして同名タグの深さを数える（Codex #104 P2）。
+    raw-text 要素（script/style/textarea/title）自身の本文はリテラルなので、最初の ``</tag>`` が close。
+    見つからなければ ``(len, len)``（末尾まで inert 扱い）。
+    """
+    n = len(source)
+    tag_l = tag.lower()
+    is_rawtext = tag_l in _RAWTEXT_TAGS
+    open_re = re.compile(rf"<{re.escape(tag)}(?![\w-])[^>]*>", flags=re.I)
+    close_re = re.compile(rf"</{re.escape(tag)}\s*>", flags=re.I)
+    depth = 1
+    scan = start
+    while depth > 0:
+        nc = close_re.search(source, scan)
+        if not nc:
+            return (n, n)
+        events: list[tuple[int, str, "re.Match"]] = [(nc.start(), "close", nc)]
+        if not is_rawtext:
+            no = open_re.search(source, scan)
+            if no:
+                events.append((no.start(), "open", no))
+            cm = _COMMENT_RE.search(source, scan)
+            if cm:
+                events.append((cm.start(), "comment", cm))
+            rt = _RAWTEXT_OPEN_RE.search(source, scan)
+            if rt:
+                events.append((rt.start(), "rawtext", rt))
+        _, kind, m = min(events, key=lambda e: e[0])
+        if kind == "close":
+            depth -= 1
+            if depth == 0:
+                return (m.start(), m.end())
+            scan = m.end()
+        elif kind == "open":
+            depth += 1
+            scan = m.end()
+        elif kind == "comment":
+            scan = m.end()
+        else:  # rawtext: 入れ子 raw-text サブツリー丸ごと飛ばす
+            rclose = re.compile(
+                rf"</{re.escape(m.group(1))}\s*>", flags=re.I
+            ).search(source, m.end())
+            scan = rclose.end() if rclose else n
+    return (n, n)
 
 
 def _strip_inert_elements(source: str) -> str:
@@ -139,26 +195,8 @@ def _strip_inert_elements(source: str) -> str:
             break
         tag = m.group(1).lower()
         result.append(source[pos:m.end()])  # 開始タグまでは残す
-        open_re = re.compile(rf"<{re.escape(tag)}(?![\w-])[^>]*>", flags=re.I)
-        close_re = re.compile(rf"</{re.escape(tag)}\s*>", flags=re.I)
-        depth = 1
-        scan = m.end()
-        n = len(source)
-        close_start = close_end = n  # 閉じタグ無し（unbalanced）は末尾まで空に
-        while depth > 0:
-            nc = close_re.search(source, scan)
-            if not nc:
-                break
-            no = open_re.search(source, scan)
-            if no and no.start() < nc.start():
-                depth += 1
-                scan = no.end()
-            else:
-                depth -= 1
-                if depth == 0:
-                    close_start, close_end = nc.start(), nc.end()
-                else:
-                    scan = nc.end()
+        # コメント/入れ子 raw-text を飛ばして対応する閉じタグを見つける。
+        close_start, close_end = _find_inert_end(source, tag, m.end())
         result.append(source[close_start:close_end])  # 閉じタグは残す（間は捨てる）
         pos = close_end
     return "".join(result)
