@@ -20,18 +20,25 @@ class SpaInfo:
     signals: list[str] = field(default_factory=list)
 
 
+# 開始タグの属性領域を「引用値を跨がずに」消費するプレフィックス。これが無いと
+# <div title="id='__next'"> の属性値内の id='__next' を実属性と誤認する（Codex #104 P2）。
+# 素の文字・完全な "…" / '…' のいずれかを非貪欲に繰り返す。
+_ATTR_PREFIX = r"""(?:[^>"']|"[^"]*"|'[^']*')*?"""
+
+
 def _has_id(source: str, element_id: str) -> bool:
     """実際の開始タグ内の id 属性として存在するか調べる。
 
     - ``\\b`` はハイフンの後にも境界を作るため ``data-id="__next"`` を
       ``id="__next"`` と誤認する。negative lookbehind ``(?<![\\w-])`` で除く。
     - 開始タグ ``<tag … id="…" …>`` の内側に限定し、``<pre>id="__next"</pre>`` の
-      ような**表示テキスト**を属性と誤認しない（``[^>]*`` は ``>`` を跨がない・
-      Codex #104 P2）。
+      ような**表示テキスト**を属性と誤認しない（``[^>]*`` は ``>`` を跨がない）。
+    - ``_ATTR_PREFIX`` で引用属性値を跨がず、``<div title="id='__next'">`` の
+      属性値内 id を誤認しない（Codex #104 P2）。
     """
     return bool(
         re.search(
-            rf"<[a-zA-Z][^>]*?(?<![\w-])id\s*=\s*(['\"])\s*{re.escape(element_id)}\s*\1",
+            rf"<[a-zA-Z]{_ATTR_PREFIX}(?<![\w-])id\s*=\s*(['\"])\s*{re.escape(element_id)}\s*\1",
             source,
             flags=re.I,
         )
@@ -42,8 +49,8 @@ def _has_id(source: str, element_id: str) -> bool:
 # 例: <div id="root"></div> / <main id="app">  </main>。内容を持つ要素
 # （<div id="root">案内</div> 等）は一致しないため静的サイトを誤検出しない。
 _EMPTY_MOUNT_RE = re.compile(
-    # (?<![\w-]) で data-id="root" 等を id="root" と誤認しない（Codex #104 P2）。
-    r"<(\w+)\b[^>]*(?<![\w-])id\s*=\s*(['\"])(root|app|__next|__nuxt)\2[^>]*>\s*</\1\s*>",
+    # (?<![\w-]) で data-id="root" 等を、_ATTR_PREFIX で引用値内 id を誤認しない（Codex #104 P2）。
+    rf"<(\w+)\b{_ATTR_PREFIX}(?<![\w-])id\s*=\s*(['\"])(root|app|__next|__nuxt)\2[^>]*>\s*</\1\s*>",
     flags=re.I | re.S,
 )
 
@@ -55,7 +62,7 @@ _EMPTY_MOUNT_RE = re.compile(
 # <script data-src="…">（未ロード）を実バンドルと誤認する。(?<![\w-]) で実 src 属性に
 # 限定する（_has_id と同じ・Codex #104 P2）。
 _BUNDLE_SRC_RE = re.compile(
-    r"<script\b[^>]*?(?<![\w-])src\s*=\s*(['\"])([^'\"]+)\1", flags=re.I
+    rf"<script\b{_ATTR_PREFIX}(?<![\w-])src\s*=\s*(['\"])([^'\"]+)\1", flags=re.I
 )
 _BUNDLE_HINT_RE = re.compile(
     r"(?:/_next/|/_nuxt/|/assets/|/static/js/|/build/|/dist/"
@@ -96,13 +103,32 @@ _EXECUTABLE_SCRIPT_TYPES = frozenset({
 
 
 def _script_bodies(source: str) -> str:
+    """実行される（コメント/inert コンテナの外の）top-level script 本文を連結する。
+
+    ``<!-- <script>…</script> -->`` や ``<template><script>…</script></template>`` の
+    script はブラウザが実行しないので除外する（Codex #104 P2）。コメントは飛ばし、inert
+    コンテナ（template/noscript 等）は ``_find_inert_end`` でサブツリー丸ごと飛ばして、その中の
+    script は収集しない。top-level の実行可能 type の script のみ本文を集める。
+    """
     bodies: list[str] = []
-    for m in _SCRIPT_TAG_RE.finditer(source):
-        attrs, body = m.group(1), m.group(2)
-        tm = _SCRIPT_TYPE_RE.search(attrs)
-        stype = tm.group(1).strip().lower() if tm else ""
-        if stype in _EXECUTABLE_SCRIPT_TYPES:
-            bodies.append(body)
+    pos = 0
+    n = len(source)
+    while pos < n:
+        cm = _COMMENT_RE.search(source, pos)
+        io = _INERT_OPEN_RE.search(source, pos)
+        if cm and (not io or cm.start() < io.start()):
+            pos = cm.end()  # コメントは実行されないので飛ばす
+            continue
+        if not io:
+            break
+        tag = io.group(1).lower()
+        close_start, close_end = _find_inert_end(source, tag, io.end())
+        if tag == "script":
+            tm = _SCRIPT_TYPE_RE.search(io.group(0))
+            stype = tm.group(1).strip().lower() if tm else ""
+            if stype in _EXECUTABLE_SCRIPT_TYPES:
+                bodies.append(source[io.end():close_start])
+        pos = close_end  # inert サブツリー（script 含む）を丸ごと飛ばす
     return "\n".join(bodies)
 
 
@@ -190,6 +216,14 @@ def _strip_inert_elements(source: str) -> str:
     pos = 0
     while True:
         m = _INERT_OPEN_RE.search(source, pos)
+        cm = _COMMENT_RE.search(source, pos)
+        # コメントが次の inert 開始タグより前にあれば、コメントをそのまま残して読み飛ばす。
+        # コメント内の <template> 等を live な inert opener と誤認して以降を破棄すると、
+        # 後続の実 SPA マーカーを見逃す（Codex #104 P2）。
+        if cm and (not m or cm.start() < m.start()):
+            result.append(source[pos:cm.end()])
+            pos = cm.end()
+            continue
         if not m:
             result.append(source[pos:])
             break
@@ -255,10 +289,10 @@ def detect_spa(html: str) -> SpaInfo:
     # 属性/タグベースのマーカー（markup）は inert 除去済みの markup で探す。
     angular_markup = (
         (r"<app-root\b", "<app-root>"),
-        (r"<[^>]+(?<![\w-])ng-app(?:\s*=|\s|>)", "ng-app"),
-        (r"<[^>]+(?<![\w-])ng-version\s*=", "ng-version"),
-        (r"<[^>]+(?<![\w-])_nghost(?:-[\w-]+)?(?:\s*=|\s|>)", "_nghost"),
-        (r"<[^>]+(?<![\w-])_ngcontent(?:-[\w-]+)?(?:\s*=|\s|>)", "_ngcontent"),
+        (rf"<[a-zA-Z]{_ATTR_PREFIX}(?<![\w-])ng-app(?:\s*=|\s|>)", "ng-app"),
+        (rf"<[a-zA-Z]{_ATTR_PREFIX}(?<![\w-])ng-version\s*=", "ng-version"),
+        (rf"<[a-zA-Z]{_ATTR_PREFIX}(?<![\w-])_nghost(?:-[\w-]+)?(?:\s*=|\s|>)", "_nghost"),
+        (rf"<[a-zA-Z]{_ATTR_PREFIX}(?<![\w-])_ngcontent(?:-[\w-]+)?(?:\s*=|\s|>)", "_ngcontent"),
     )
     for pattern, label in angular_markup:
         if re.search(pattern, markup, flags=re.I):
@@ -274,7 +308,7 @@ def detect_spa(html: str) -> SpaInfo:
     # 出力される。裸トークン一致だと <code>__NEXT_DATA__</code> の表示テキストで
     # 誤検出するため、script の id 属性に限定する（Codex #104 P2）。
     if re.search(
-        r"<script\b[^>]*?(?<![\w-])id\s*=\s*(['\"])__NEXT_DATA__\1", markup, flags=re.I
+        rf"<script\b{_ATTR_PREFIX}(?<![\w-])id\s*=\s*(['\"])__NEXT_DATA__\1", markup, flags=re.I
     ):
         next_signals.append("__NEXT_DATA__")
     if _has_id(markup, "__next"):
@@ -291,7 +325,7 @@ def detect_spa(html: str) -> SpaInfo:
         return SpaInfo(True, "Next.js", "high", next_signals)
 
     react_signals: list[str] = []
-    if re.search(r"<[^>]+(?<![\w-])data-reactroot(?:\s*=|\s|>)", markup, flags=re.I):
+    if re.search(rf"<[a-zA-Z]{_ATTR_PREFIX}(?<![\w-])data-reactroot(?:\s*=|\s|>)", markup, flags=re.I):
         react_signals.append("data-reactroot")
     # SSR / RSC / Suspense の React 固有コメントマーカー（<!--$-->, <!--/$-->,
     # <!--$?-->, <!--$!-->）。hydration 済みで id="root" に内容がある本番 React
@@ -305,7 +339,7 @@ def detect_spa(html: str) -> SpaInfo:
         r"React\s*\.\s*createElement|__REACT_DEVTOOLS", scripts, flags=re.I
     ) or re.search(
         # (?<![\w-])src で data-src/async-src の誤一致を防ぐ（Codex #104 P2）。
-        r"<script\b[^>]*?(?<![\w-])src\s*=\s*['\"][^'\"]*react(?:-dom)?[^'\"]*\.js",
+        rf"<script\b{_ATTR_PREFIX}(?<![\w-])src\s*=\s*['\"][^'\"]*react(?:-dom)?[^'\"]*\.js",
         markup,
         flags=re.I,
     )
@@ -325,19 +359,19 @@ def detect_spa(html: str) -> SpaInfo:
     # data-nuxt-data を吐く。__NUXT_DATA__ は script の id 属性に限定する（表示テキスト
     # の誤検出回避・Codex #104 P2）。
     if re.search(
-        r"<script\b[^>]*?(?<![\w-])id\s*=\s*(['\"])__NUXT_DATA__\1", markup, flags=re.I
+        rf"<script\b{_ATTR_PREFIX}(?<![\w-])id\s*=\s*(['\"])__NUXT_DATA__\1", markup, flags=re.I
     ):
         vue_signals.append("__NUXT_DATA__")
         nuxt_marker = True
     if _has_id(markup, "__nuxt"):
         vue_signals.append('id="__nuxt"')
         nuxt_marker = True
-    if re.search(r"<[^>]+(?<![\w-])data-nuxt-data(?:\s*=|\s|>)", markup, flags=re.I):
+    if re.search(rf"<[a-zA-Z]{_ATTR_PREFIX}(?<![\w-])data-nuxt-data(?:\s*=|\s|>)", markup, flags=re.I):
         vue_signals.append("data-nuxt-data")
         nuxt_marker = True
     if re.search(r"\bwindow\s*\.\s*__VUE__\b", scripts, flags=re.I):
         vue_signals.append("window.__VUE__")
-    if re.search(r"<[^>]+(?<![\w-])data-v-[\w-]+(?:\s*=|\s|>)", markup, flags=re.I):
+    if re.search(rf"<[a-zA-Z]{_ATTR_PREFIX}(?<![\w-])data-v-[\w-]+(?:\s*=|\s|>)", markup, flags=re.I):
         vue_signals.append("data-v-")
     vue_root = _has_id(markup, "app")
     # JS トークンは script 本文、vue バンドルの script src は markup（source）で探す。
@@ -345,7 +379,7 @@ def detect_spa(html: str) -> SpaInfo:
         r"createApp\s*\(|new\s+Vue\b", scripts, flags=re.I
     ) or re.search(
         # (?<![\w-])src で data-src/async-src の誤一致を防ぐ（Codex #104 P2）。
-        r"<script\b[^>]*?(?<![\w-])src\s*=\s*['\"][^'\"]*vue[^'\"]*\.js",
+        rf"<script\b{_ATTR_PREFIX}(?<![\w-])src\s*=\s*['\"][^'\"]*vue[^'\"]*\.js",
         markup,
         flags=re.I,
     )

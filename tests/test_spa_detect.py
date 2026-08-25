@@ -92,6 +92,12 @@ def test_generic_mount_id_requires_matching_framework_trace(html, framework):
         # 入れ子 raw-text（script 文字列）内の </template> も実 close ではない。
         '<template><script>var x="</template>";</script>'
         '<app-root></app-root></template>',
+        # 属性値内のマーカー文字列は実属性ではない（Codex #104 P2）。
+        '<html><body><div title="id=\'__next\'"></div></body></html>',
+        # コメント/inert 内の script は実行されないので JS 式マーカーにならない（Codex #104 P2）。
+        '<html><body><!-- <script>self.__next_f.push([])</script> --></body></html>',
+        '<html><body><template><script>self.__next_f.push([])</script>'
+        '</template></body></html>',
     ],
 )
 def test_normal_or_ambiguous_html_is_not_spa(html):
@@ -132,6 +138,14 @@ def test_modern_framework_bootstrap_markers_are_high_confidence(html, framework,
     assert info.framework == framework
     assert info.confidence == "high"
     assert signal in info.signals
+
+
+def test_commented_inert_opener_does_not_hide_real_marker():
+    # コメント化された <template> を live opener と誤認して以降を捨てないこと
+    # （実 <app-root> を見逃す偽陰性の回帰・Codex #104 P2）。
+    info = detect_spa("<html><body><!-- <template> --> <app-root></app-root></body></html>")
+    assert info.is_spa is True
+    assert info.framework == "Angular"
 
 
 def test_real_marker_between_separate_inert_blocks_is_spa():
