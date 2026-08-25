@@ -21,15 +21,17 @@ class SpaInfo:
 
 
 def _has_id(source: str, element_id: str) -> bool:
-    """属性順や引用符に依存せず id の完全一致を調べる。
+    """実際の開始タグ内の id 属性として存在するか調べる。
 
-    ``\\b`` はハイフンの後にも境界を作るため ``data-id="__next"`` を
-    ``id="__next"`` と誤認する。ハイフン/英数字が直前に来る属性名（data-id 等）を
-    除くため negative lookbehind を使う（Codex #104 P2）。
+    - ``\\b`` はハイフンの後にも境界を作るため ``data-id="__next"`` を
+      ``id="__next"`` と誤認する。negative lookbehind ``(?<![\\w-])`` で除く。
+    - 開始タグ ``<tag … id="…" …>`` の内側に限定し、``<pre>id="__next"</pre>`` の
+      ような**表示テキスト**を属性と誤認しない（``[^>]*`` は ``>`` を跨がない・
+      Codex #104 P2）。
     """
     return bool(
         re.search(
-            rf"(?<![\w-])id\s*=\s*(['\"])\s*{re.escape(element_id)}\s*\1",
+            rf"<[a-zA-Z][^>]*?(?<![\w-])id\s*=\s*(['\"])\s*{re.escape(element_id)}\s*\1",
             source,
             flags=re.I,
         )
@@ -123,7 +125,12 @@ def detect_spa(html: str) -> SpaInfo:
         return SpaInfo(True, "Angular", "high", angular_signals)
 
     next_signals: list[str] = []
-    if re.search(r"\b__NEXT_DATA__\b", source, flags=re.I):
+    # __NEXT_DATA__ は <script id="__NEXT_DATA__" type="application/json"> として
+    # 出力される。裸トークン一致だと <code>__NEXT_DATA__</code> の表示テキストで
+    # 誤検出するため、script の id 属性に限定する（Codex #104 P2）。
+    if re.search(
+        r"<script\b[^>]*?(?<![\w-])id\s*=\s*(['\"])__NEXT_DATA__\1", source, flags=re.I
+    ):
         next_signals.append("__NEXT_DATA__")
     if _has_id(source, "__next"):
         next_signals.append('id="__next"')
@@ -161,13 +168,17 @@ def detect_spa(html: str) -> SpaInfo:
 
     vue_signals: list[str] = []
     nuxt_marker = False
-    if re.search(r"\b__NUXT__\b", source, flags=re.I):
-        vue_signals.append("__NUXT__")
+    # Nuxt 2 は window.__NUXT__={...} を吐く。裸トークン一致だと解説記事等の表示
+    # テキストで誤検出するため、window.__NUXT__ の実行式に限定する（Codex #104 P2）。
+    if re.search(r"\bwindow\s*\.\s*__NUXT__\b", source, flags=re.I):
+        vue_signals.append("window.__NUXT__")
         nuxt_marker = True
-    # Nuxt 3 は window.__NUXT__ ではなく __NUXT_DATA__ / id="__nuxt" /
-    # data-nuxt-data を吐く。__NUXT_DATA__ は \b__NUXT__\b では末尾の
-    # 続き（_DATA）が word 文字のため一致しないので、明示的に拾う。
-    if re.search(r"\b__NUXT_DATA__\b", source, flags=re.I):
+    # Nuxt 3 は <script id="__NUXT_DATA__" type="application/json"> / id="__nuxt" /
+    # data-nuxt-data を吐く。__NUXT_DATA__ は script の id 属性に限定する（表示テキスト
+    # の誤検出回避・Codex #104 P2）。
+    if re.search(
+        r"<script\b[^>]*?(?<![\w-])id\s*=\s*(['\"])__NUXT_DATA__\1", source, flags=re.I
+    ):
         vue_signals.append("__NUXT_DATA__")
         nuxt_marker = True
     if _has_id(source, "__nuxt"):

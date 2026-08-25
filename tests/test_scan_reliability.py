@@ -438,6 +438,21 @@ class EngineScanGapTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(engine.spa_crawl)
 
+    async def test_spa_detected_even_when_page_is_fingerprint_duplicate(self):
+        # origin 非依存の _page_fingerprint で SPA シェルが既出ページと衝突して重複
+        # スキップされても、検出は重複スキップより前に走り自動有効化される（Codex #104 P1）。
+        engine = self._engine(depth=1)
+        browser = _SpaMarkerCrawlBrowser()  # content()=<app-root></app-root>
+        engine._browser = browser
+        spa_html = "<html><body><app-root></app-root></body></html>"
+        engine._seen_page_fingerprints = {
+            engine._page_fingerprint(spa_html, engine.target_url)
+        }
+
+        await engine._phase_crawl()
+
+        self.assertTrue(engine.spa_crawl)
+
     async def test_normal_first_page_never_auto_enables_spa_crawl(self):
         engine = self._engine(depth=1)
         browser = _FakeCrawlBrowser()

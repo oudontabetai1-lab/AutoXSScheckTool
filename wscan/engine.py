@@ -2911,6 +2911,37 @@ class ScanEngine:
             except Exception:
                 pass
 
+            # SPA 検出は _first_page にも重複スキップにも縛らず、有効化されるまで各ページで
+            # 評価する。マルチターゲット/マルチオリジン scan で、主 URL が通常ページだったり、
+            # 二次オリジンの SPA シェルが origin 非依存の _page_fingerprint で主ページと衝突して
+            # 重複スキップされると、後続 SPA の動的ルート/API を見逃す（Codex #104 P1）。
+            # そのため重複スキップより前に検出し、必要なら settle して html を採り直す。
+            if html and self.auto_spa_crawl and not self.spa_crawl:
+                try:
+                    from wscan.spa_detect import detect_spa
+
+                    self.detected_spa = detect_spa(html)
+                    if self.detected_spa.is_spa and self.detected_spa.confidence == "high":
+                        self.spa_crawl = True
+                        # __init__ 後の反転なので BrowserManager 側も同期する。
+                        self._browser.spa_settle = True
+                        console.print(
+                            f"  [cyan][SPA] {self.detected_spa.framework} を検出 — "
+                            "SPA クロールを自動有効化[/cyan]"
+                        )
+                        # 検出ページの navigate は spa_settle=False のまま完了しており、フラグ
+                        # 反転は以降のナビゲーションにしか効かない。到達ページが本番シェル
+                        # （空マウント）の場合、この場で settle して html を採り直さないと、
+                        # 直後の重複判定・find_forms()/get_url_params()・CrawledPage が hydration
+                        # 前の空 DOM を見て forms/route/url_params が 0 件になる（Codex #104 P1）。
+                        try:
+                            await self.browser.settle_spa()
+                            html = await self.browser.page.content()
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+
             # A: 重複ページスキップ (DOM構造フィンガープリント)
             if html:
                 if self.flag_finder:
@@ -2966,36 +2997,6 @@ class ScanEngine:
                         if "cms" not in self.scanners:
                             from wscan.scanners.cms import CmsScanner
                             self.scanners["cms"] = CmsScanner(self)
-                except Exception:
-                    pass
-
-            # SPA 検出は _first_page に縛らず、有効化されるまで各ページで評価する。
-            # マルチターゲット scan で主 URL が通常ページ・後続ターゲットが SPA の場合に、
-            # _first_page 一回きりだと検出が恒久無効化され動的ルート/API を見逃す（Codex #104 P1）。
-            if self.auto_spa_crawl and not self.spa_crawl:
-                try:
-                    from wscan.spa_detect import detect_spa
-
-                    self.detected_spa = detect_spa(html)
-                    if self.detected_spa.is_spa and self.detected_spa.confidence == "high":
-                        self.spa_crawl = True
-                        # __init__ 後の反転なので BrowserManager 側も同期し、同一ページの
-                        # クリック探索後に in-flight XHR の描画確定待ちを必ず有効にする。
-                        self._browser.spa_settle = True
-                        console.print(
-                            f"  [cyan][SPA] {self.detected_spa.framework} を検出 — "
-                            "SPA クロールを自動有効化[/cyan]"
-                        )
-                        # 検出ページの navigate は spa_settle=False のまま完了しており、フラグ
-                        # 反転は以降のナビゲーションにしか効かない。到達ページが本番シェル
-                        # （空マウント）の場合、この場で settle して html を採り直さないと、
-                        # 直後の find_forms()/get_url_params() と CrawledPage が hydration 前の
-                        # 空 DOM を見て forms/route/url_params が 0 件になる（Codex #104 P1）。
-                        try:
-                            await self.browser.settle_spa()
-                            html = await self.browser.page.content()
-                        except Exception:
-                            pass
                 except Exception:
                     pass
 

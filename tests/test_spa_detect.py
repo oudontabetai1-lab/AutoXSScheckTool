@@ -10,7 +10,7 @@ from wscan.spa_detect import detect_spa
         ('<main data-reactroot=""></main>', "React", "data-reactroot"),
         ('<script id="__NEXT_DATA__" type="application/json">{}</script>', "Next.js", "__NEXT_DATA__"),
         ('<div id="__next"></div>', "Next.js", 'id="__next"'),
-        ("<script>window.__NUXT__={}</script>", "Nuxt", "__NUXT__"),
+        ("<script>window.__NUXT__={}</script>", "Nuxt", "window.__NUXT__"),
         ('<section data-v-ab12cd=""></section>', "Vue", "data-v-"),
     ],
 )
@@ -60,6 +60,10 @@ def test_generic_mount_id_requires_matching_framework_trace(html, framework):
         # Next.js ではない（self.__next_f の実行式に限定・Codex #104 P2）。
         '<html><body><p>The <code>__next_f</code> hydration token</p></body></html>',
         '<html><body><pre>self.__next_f</pre> と書かれた解説記事</body></html>',
+        # __NEXT_DATA__ / id="__next" を表示テキストとして含む静的ドキュメントは
+        # Next.js ではない（script の id 属性 / 実タグ内属性に限定・Codex #104 P2）。
+        '<html><body><code>__NEXT_DATA__</code> はハイドレーション用</body></html>',
+        '<html><body><pre>id="__next"</pre> と書くと…</body></html>',
     ],
 )
 def test_normal_or_ambiguous_html_is_not_spa(html):
