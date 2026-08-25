@@ -371,7 +371,7 @@ class SaveCheckpointFindingsTests(unittest.TestCase):
             )
             self.assertEqual(loaded.reached_urls, ["http://h/a"])
 
-    def test_resume_subset_discards_out_of_scope_status_counts(self):
+    def test_resume_subset_preserves_full_matrix_and_discards_status_counts(self):
         from wscan.engine import ScanEngine
 
         with tempfile.TemporaryDirectory() as d:
@@ -418,9 +418,10 @@ class SaveCheckpointFindingsTests(unittest.TestCase):
             )
             engine._init_checkpoint()
 
-            self.assertEqual(engine.scan_matrix, [saved_rows[0], saved_rows[2]])
+            self.assertEqual(engine.scan_matrix, saved_rows)
             self.assertIsNot(engine.scan_matrix, state.scan_matrix)
-            engine.scan_matrix.append({"url": "http://h/b", "check": "sqli"})
+            new_row = {"url": "http://h/b", "check": "xss"}
+            engine.scan_matrix.append(new_row)
             self.assertEqual(engine.scan_matrix[0], saved_rows[0])
             self.assertEqual(engine._restored_status_counts, {})
             self.assertEqual(
@@ -439,6 +440,7 @@ class SaveCheckpointFindingsTests(unittest.TestCase):
                 },
             )
             reloaded = load_checkpoint(d)
+            self.assertEqual(reloaded.scan_matrix, [*saved_rows, new_row])
             self.assertEqual(reloaded.http_status_counts, {})
             self.assertEqual(
                 reloaded.reached_urls,

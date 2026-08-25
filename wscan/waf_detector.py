@@ -92,7 +92,7 @@ class WAFDetector:
         proxy: str = "",
         headers_provider=None,
         tls_options_provider=None,
-        record_status: Optional[Callable[[int], None]] = None,
+        record_status: Optional[Callable[[int, object], None]] = None,
     ):
         self.payload_gen = payload_gen
         self.proxy = proxy or ""
@@ -143,7 +143,7 @@ class WAFDetector:
                 resp = await client.get(url)
                 if self._record_status:
                     try:
-                        self._record_status(resp.status_code)
+                        self._record_status(resp.status_code, resp.url)
                     except Exception:
                         pass
                 normal_headers = {k.lower(): v.lower() for k, v in resp.headers.items()}
@@ -159,7 +159,7 @@ class WAFDetector:
                 resp2 = await client.get(probe_url)
                 if self._record_status:
                     try:
-                        self._record_status(resp2.status_code)
+                        self._record_status(resp2.status_code, resp2.url)
                     except Exception:
                         pass
                 waf_headers = {k.lower(): v.lower() for k, v in resp2.headers.items()}

@@ -91,6 +91,15 @@ def _coverage_allowed_origins(
     return origins
 
 
+def _canonical_coverage_host(url: str) -> str:
+    """Return a case-insensitive host key, ignoring ``www.`` and port."""
+    try:
+        host = (urlsplit(str(url)).hostname or "").lower()
+    except Exception:
+        return ""
+    return host[4:] if host.startswith("www.") else host
+
+
 def _configure_network_coverage_origins(browser, origins: set[str]) -> None:
     """Apply a non-empty coverage origin set to a browser network capture."""
     network = getattr(browser, "network", None)
@@ -1064,6 +1073,9 @@ class ScanEngine:
                 isinstance(row, dict)
                 and row.get("check") != "access"
                 and row.get("status") != "skipped"
+                and ScanEngine._check_type_in_scope(
+                    self, row.get("check")
+                )
             )
         ]
         by_status = Counter(row.get("status", "") for row in attack_rows)
@@ -1144,6 +1156,22 @@ class ScanEngine:
             "http_status": http_status,
         }
 
+    def _scan_matrix_for_display(self) -> list[dict]:
+        """Return the current-scope view without mutating durable matrix rows."""
+        return [
+            row
+            for row in (getattr(self, "scan_matrix", None) or [])
+            if (
+                isinstance(row, dict)
+                and (
+                    row.get("check") == "access"
+                    or ScanEngine._check_type_in_scope(
+                        self, row.get("check")
+                    )
+                )
+            )
+        ]
+
     def record_probe_status(self, status, url=None) -> None:
         """非ブラウザプローブの HTTP status を scan 単位で安全に記録する。"""
         try:
@@ -1172,18 +1200,24 @@ class ScanEngine:
             pass
 
     def _note_coverage_origin(self, url) -> None:
-        """Add an in-scope landing origin and refresh live network filters."""
+        """Add a canonical-host landing origin and refresh live network filters."""
         try:
-            if not url or not self._is_access_allowed_url(str(url)):
-                return
             parsed = urlsplit(str(url))
             if not (parsed.scheme and parsed.netloc):
                 return
-            origin = f"{parsed.scheme}://{parsed.netloc}"
             origins = getattr(self, "_coverage_origins", None)
             if origins is None:
                 origins = set()
                 self._coverage_origins = origins
+            in_scope_hosts = {
+                host
+                for origin_value in origins
+                if (host := _canonical_coverage_host(origin_value))
+            }
+            landing_host = _canonical_coverage_host(str(url))
+            if not landing_host or landing_host not in in_scope_hosts:
+                return
+            origin = f"{parsed.scheme}://{parsed.netloc}"
             if origin in origins:
                 return
             origins.add(origin)
@@ -1469,16 +1503,10 @@ class ScanEngine:
             else:
                 state = loaded
                 self.reached_urls = set(state.reached_urls or [])
-                self.scan_matrix = [
-                    row for row in state.scan_matrix
-                    if (
-                        isinstance(row, dict)
-                        and (
-                            row.get("check") == "access"
-                            or self._check_type_in_scope(row.get("check"))
-                        )
-                    )
-                ]
+                # Durable rows are always restored in full.  A subset resume
+                # narrows only report/coverage views so a subsequent full
+                # resume does not lose completed out-of-scope history.
+                self.scan_matrix = list(state.scan_matrix)
                 try:
                     if set(self.checks or []) == set(state.checks or []):
                         self._restored_status_counts = Counter({
@@ -5855,6 +5883,7 @@ class ScanEngine:
         import webbrowser
         from .report import ReportGenerator
         gen = ReportGenerator(self.output_dir)
+        display_scan_matrix = self._scan_matrix_for_display()
 
         # 差分スキャン結果を読み込む (evidence.json に書き込み済み)
         diff_result = None
@@ -5876,7 +5905,7 @@ class ScanEngine:
             attack_plans=self.attack_plans,
             ctf_flags=self.ctf_found_flags,
             page_graph=self.page_graph,
-            scan_matrix=self.scan_matrix,
+            scan_matrix=display_scan_matrix,
             llm_summary=self._llm_runtime_summary(),
             observability=self._observability_report_data(),
             coverage=self.coverage_summary(),
@@ -5894,7 +5923,7 @@ class ScanEngine:
                     attack_plans=self.attack_plans,
                     ctf_flags=self.ctf_found_flags,
                     page_graph=self.page_graph,
-                    scan_matrix=self.scan_matrix,
+                    scan_matrix=display_scan_matrix,
                     llm_summary=self._llm_runtime_summary(),
                     observability=self._observability_report_data(),
                     coverage=self.coverage_summary(),

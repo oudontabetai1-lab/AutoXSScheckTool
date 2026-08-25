@@ -167,9 +167,8 @@ def test_note_coverage_origin_adds_in_scope_landing_to_main_and_workers():
         _coverage_origins={"http://fixture.test"},
         _browser=main,
         _coverage_workers=[worker],
-        _is_access_allowed_url=lambda url: url.startswith(
-            "https://www.fixture.test/"
-        ),
+        # Canonical redirects must not depend on exact scheme/host scope checks.
+        _is_access_allowed_url=lambda _url: False,
     )
 
     ScanEngine._note_coverage_origin(engine, "https://www.fixture.test/app")
@@ -278,9 +277,15 @@ def test_coverage_summary_excludes_resume_only_skipped_rows():
         "finding_count": 9,
         "note": "Skipped — already completed in checkpoint",
     }
+    out_of_scope_row = {
+        "url": "http://fixture.test/a",
+        "check": "sqli",
+        "status": "vulnerable",
+        "finding_count": 1,
+    }
     engine = SimpleNamespace(
         reached_urls={"http://fixture.test/a"},
-        scan_matrix=[restored_row, resume_skip_row],
+        scan_matrix=[restored_row, resume_skip_row, out_of_scope_row],
         browser=None,
         checks=["xss"],
         scanners={},
@@ -292,6 +297,60 @@ def test_coverage_summary_excludes_resume_only_skipped_rows():
     assert summary["attempts"] == 1
     assert summary["by_status"] == {"vulnerable": 1}
     assert summary["findings_total"] == 1
+
+
+def test_scan_matrix_display_view_keeps_access_and_current_scope_only():
+    xss_row = {"check": "xss", "status": "clean"}
+    sqli_row = {"check": "sqli", "status": "vulnerable"}
+    access_row = {"check": "access", "status": "error"}
+    engine = SimpleNamespace(
+        scan_matrix=[xss_row, sqli_row, access_row, "legacy malformed row"],
+        checks=["xss"],
+        scanners={},
+    )
+
+    assert ScanEngine._scan_matrix_for_display(engine) == [xss_row, access_row]
+
+
+def test_generate_report_passes_only_display_scope_matrix(monkeypatch, tmp_path):
+    xss_row = {"check": "xss", "status": "clean"}
+    sqli_row = {"check": "sqli", "status": "vulnerable"}
+    access_row = {"check": "access", "status": "error"}
+    generated = []
+
+    class _ReportGenerator:
+        def __init__(self, output_dir):
+            self.output_dir = output_dir
+
+        def generate(self, **kwargs):
+            generated.append(kwargs)
+            return self.output_dir / "report.html"
+
+    monkeypatch.setattr("wscan.report.ReportGenerator", _ReportGenerator)
+    engine = SimpleNamespace(
+        output_dir=tmp_path,
+        previous_scan_dir="",
+        target_url="http://fixture.test",
+        all_findings=[],
+        visited_urls=set(),
+        checks=["xss"],
+        scanners={},
+        attack_plans=[],
+        ctf_found_flags=[],
+        page_graph={},
+        scan_matrix=[xss_row, sqli_row, access_row],
+        open_report=False,
+        monitor=None,
+        _scan_matrix_for_display=lambda: [xss_row, access_row],
+        _llm_runtime_summary=lambda: {},
+        _observability_report_data=lambda: {},
+        coverage_summary=lambda: {},
+    )
+
+    ScanEngine._generate_report(engine)
+
+    assert len(generated) == 3
+    assert all(call["scan_matrix"] == [xss_row, access_row] for call in generated)
 
 
 def test_coverage_summary_excludes_reached_url_from_unreached_rows():
