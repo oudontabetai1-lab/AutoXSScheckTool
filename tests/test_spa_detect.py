@@ -72,6 +72,12 @@ def test_generic_mount_id_requires_matching_framework_trace(html, framework):
         # Next.js ではない（script の id 属性 / 実タグ内属性に限定・Codex #104 P2）。
         '<html><body><code>__NEXT_DATA__</code> はハイドレーション用</body></html>',
         '<html><body><pre>id="__next"</pre> と書くと…</body></html>',
+        # inert 領域（コメント/<template>/script 文字列）内の markup 例は非SPA
+        # （Codex #104 P2）。
+        '<html><body><!-- <app-root></app-root> --></body></html>',
+        '<html><body><template><app-root></app-root></template></body></html>',
+        '<html><body><script>var demo = "<app-root></app-root>";</script></body></html>',
+        '<html><body><!-- <div id="__next"></div> --></body></html>',
     ],
 )
 def test_normal_or_ambiguous_html_is_not_spa(html):

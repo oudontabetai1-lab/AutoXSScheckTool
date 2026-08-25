@@ -106,6 +106,26 @@ def _script_bodies(source: str) -> str:
     return "\n".join(bodies)
 
 
+# markup マーカー（<app-root> / data-reactroot / id="…" / 空マウント / script src 等）を
+# 判定する前に、実際にはレンダリングされない inert 領域を無害化する。コメントや
+# <template>・<script>・<style> の本文に置かれた例（<!-- <app-root> --> や
+# var x="<app-root>"）で SPA 誤判定しないため（Codex #104 P2）。タグ自体は残す（script の
+# src/id 属性は markup マーカーとして使うため）。React SSR コメント <!--$--> は別途 raw source で
+# 判定するのでここでコメントを消しても影響しない。
+_INERT_CONTENT_RE = re.compile(
+    r"(<(template|script|style|noscript|textarea|title)\b[^>]*>)"
+    r".*?"
+    r"(</\2\s*>)",
+    flags=re.I | re.S,
+)
+
+
+def _inert_stripped(source: str) -> str:
+    s = re.sub(r"<!--.*?-->", " ", source, flags=re.S)
+    s = _INERT_CONTENT_RE.sub(r"\1\3", s)
+    return s
+
+
 def _weak_layout_signals(source: str) -> list[str]:
     """単独では SPA と断定しない、汎用的なページ構成シグナルを返す。"""
     signals: list[str] = []
@@ -141,9 +161,12 @@ def detect_spa(html: str) -> SpaInfo:
     source = html or ""
     # JS 式マーカーは表示テキスト誤検出を避けるため script 本文だけで探す。
     scripts = _script_bodies(source)
+    # markup マーカーは inert 領域（コメント/<template>/<script>本文等）を無害化した
+    # 版で探す。<!-- <app-root> --> や var x="<app-root>" で誤判定しない（Codex #104 P2）。
+    markup = _inert_stripped(source)
 
     angular_signals: list[str] = []
-    # 属性/タグベースのマーカー（markup）は source 全体で探す。
+    # 属性/タグベースのマーカー（markup）は inert 除去済みの markup で探す。
     angular_markup = (
         (r"<app-root\b", "<app-root>"),
         (r"<[^>]+\bng-app(?:\s*=|\s|>)", "ng-app"),
@@ -152,7 +175,7 @@ def detect_spa(html: str) -> SpaInfo:
         (r"<[^>]+\b_ngcontent(?:-[\w-]+)?(?:\s*=|\s|>)", "_ngcontent"),
     )
     for pattern, label in angular_markup:
-        if re.search(pattern, source, flags=re.I):
+        if re.search(pattern, markup, flags=re.I):
             angular_signals.append(label)
     # window.ng は JS 式なので script 本文に限定する（Codex #104 P2）。
     if re.search(r"\bwindow\s*\.\s*ng\b", scripts, flags=re.I):
@@ -165,10 +188,10 @@ def detect_spa(html: str) -> SpaInfo:
     # 出力される。裸トークン一致だと <code>__NEXT_DATA__</code> の表示テキストで
     # 誤検出するため、script の id 属性に限定する（Codex #104 P2）。
     if re.search(
-        r"<script\b[^>]*?(?<![\w-])id\s*=\s*(['\"])__NEXT_DATA__\1", source, flags=re.I
+        r"<script\b[^>]*?(?<![\w-])id\s*=\s*(['\"])__NEXT_DATA__\1", markup, flags=re.I
     ):
         next_signals.append("__NEXT_DATA__")
-    if _has_id(source, "__next"):
+    if _has_id(markup, "__next"):
         next_signals.append('id="__next"')
     # App Router（RSC）は __NEXT_DATA__ も id="__next" も出さず、
     # self.__next_f.push(...) のブートストラップだけを吐くことがある。裸の
@@ -182,7 +205,7 @@ def detect_spa(html: str) -> SpaInfo:
         return SpaInfo(True, "Next.js", "high", next_signals)
 
     react_signals: list[str] = []
-    if re.search(r"<[^>]+\bdata-reactroot(?:\s*=|\s|>)", source, flags=re.I):
+    if re.search(r"<[^>]+\bdata-reactroot(?:\s*=|\s|>)", markup, flags=re.I):
         react_signals.append("data-reactroot")
     # SSR / RSC / Suspense の React 固有コメントマーカー（<!--$-->, <!--/$-->,
     # <!--$?-->, <!--$!-->）。hydration 済みで id="root" に内容がある本番 React
@@ -190,14 +213,14 @@ def detect_spa(html: str) -> SpaInfo:
     # （Codex #104 P1・SSR/Next の本番 React を拾う）。
     if re.search(r"<!--/?\$[?!]?-->", source):
         react_signals.append("react-ssr-marker")
-    react_root = _has_id(source, "root") or _has_id(source, "app")
+    react_root = _has_id(markup, "root") or _has_id(markup, "app")
     # JS トークンは script 本文で、react バンドルの script src は markup（source）で探す。
     react_trace = re.search(
         r"React\s*\.\s*createElement|__REACT_DEVTOOLS", scripts, flags=re.I
     ) or re.search(
         # (?<![\w-])src で data-src/async-src の誤一致を防ぐ（Codex #104 P2）。
         r"<script\b[^>]*?(?<![\w-])src\s*=\s*['\"][^'\"]*react(?:-dom)?[^'\"]*\.js",
-        source,
+        markup,
         flags=re.I,
     )
     if react_root and react_trace:
@@ -216,28 +239,28 @@ def detect_spa(html: str) -> SpaInfo:
     # data-nuxt-data を吐く。__NUXT_DATA__ は script の id 属性に限定する（表示テキスト
     # の誤検出回避・Codex #104 P2）。
     if re.search(
-        r"<script\b[^>]*?(?<![\w-])id\s*=\s*(['\"])__NUXT_DATA__\1", source, flags=re.I
+        r"<script\b[^>]*?(?<![\w-])id\s*=\s*(['\"])__NUXT_DATA__\1", markup, flags=re.I
     ):
         vue_signals.append("__NUXT_DATA__")
         nuxt_marker = True
-    if _has_id(source, "__nuxt"):
+    if _has_id(markup, "__nuxt"):
         vue_signals.append('id="__nuxt"')
         nuxt_marker = True
-    if re.search(r"<[^>]+\bdata-nuxt-data(?:\s*=|\s|>)", source, flags=re.I):
+    if re.search(r"<[^>]+\bdata-nuxt-data(?:\s*=|\s|>)", markup, flags=re.I):
         vue_signals.append("data-nuxt-data")
         nuxt_marker = True
     if re.search(r"\bwindow\s*\.\s*__VUE__\b", scripts, flags=re.I):
         vue_signals.append("window.__VUE__")
-    if re.search(r"<[^>]+\bdata-v-[\w-]+(?:\s*=|\s|>)", source, flags=re.I):
+    if re.search(r"<[^>]+\bdata-v-[\w-]+(?:\s*=|\s|>)", markup, flags=re.I):
         vue_signals.append("data-v-")
-    vue_root = _has_id(source, "app")
+    vue_root = _has_id(markup, "app")
     # JS トークンは script 本文、vue バンドルの script src は markup（source）で探す。
     vue_trace = re.search(
         r"createApp\s*\(|new\s+Vue\b", scripts, flags=re.I
     ) or re.search(
         # (?<![\w-])src で data-src/async-src の誤一致を防ぐ（Codex #104 P2）。
         r"<script\b[^>]*?(?<![\w-])src\s*=\s*['\"][^'\"]*vue[^'\"]*\.js",
-        source,
+        markup,
         flags=re.I,
     )
     if vue_root and vue_trace:
@@ -251,8 +274,8 @@ def detect_spa(html: str) -> SpaInfo:
     # script だけを持つ（例: 本番 React=<div id="root"></div> + /assets/index-<hash>.js）。
     # 「空マウント」＝サーバ描画済み HTML が無い＝クライアント描画前提の強い証拠なので、
     # 内容を持つ静的サイトを誤有効化せずに本番 SPA を拾える（保守側の維持）。
-    shell = _EMPTY_MOUNT_RE.search(source)
-    if shell and _has_bundle_script(source):
+    shell = _EMPTY_MOUNT_RE.search(markup)
+    if shell and _has_bundle_script(markup):
         mount_id = shell.group(3).lower()
         framework = {
             "root": "React",

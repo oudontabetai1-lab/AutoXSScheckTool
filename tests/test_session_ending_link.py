@@ -3,7 +3,28 @@ from __future__ import annotations
 
 import pytest
 
-from wscan.browser import click_target_in_scope, is_session_ending_link
+from wscan.browser import (
+    click_target_in_scope,
+    is_session_ending_link,
+    looks_like_url_ref,
+)
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["/account", "products/2", "//outside.example/a", "https://x/a", "./x", "../y", "mailto:a@b"],
+)
+def test_looks_like_url_ref_true(value):
+    assert looks_like_url_ref(value) is True
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["2", "dashboard", "next", "", "   ", "page42"],
+)
+def test_looks_like_url_ref_false(value):
+    # 不透明な pagination token / 識別子は URL/パスではない（同一ページ操作・Codex #104 P2）。
+    assert looks_like_url_ref(value) is False
 
 
 def _scope_fixture(url: str) -> bool:

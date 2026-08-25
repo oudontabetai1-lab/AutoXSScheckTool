@@ -58,6 +58,22 @@ _SESSION_ENDING_TEXT_RE = re.compile(
 )
 
 
+def looks_like_url_ref(value: str) -> bool:
+    """値が URL/パスらしいか（純粋関数）。
+
+    data-page="2" のような不透明な pagination token や data-route="dashboard" の
+    識別子はスコープを変える遷移先ではなく同一ページ操作なので、遷移先として解決しない
+    （Codex #104 P2）。パス区切り ``/`` を含むか scheme を持つ値だけを URL/パスとみなす。
+    外部先（``//outside`` / ``https://…``）は必ず ``/`` を含むのでスコープ判定へ回る。
+    """
+    v = (value or "").strip()
+    if not v:
+        return False
+    if "/" in v:
+        return True
+    return bool(re.match(r"[a-z][\w+.-]*:", v, flags=re.I))
+
+
 def click_target_in_scope(
     base_url: str, href: str, is_in_scope: Optional[Callable[[str], bool]] = None
 ) -> bool:
@@ -2416,7 +2432,11 @@ class BrowserManager:
                         for _attr in ("data-href", "data-route", "data-path", "data-page"):
                             _v = await el.get_attribute(_attr)
                             if _v:
-                                route_ref = _v
+                                # opaque な pagination token / 識別子（data-page="2" 等）は
+                                # 遷移先として解決せず同一ページ操作とみなす。URL/パスらしい
+                                # 値だけスコープ判定へ回す（Codex #104 P2）。
+                                if looks_like_url_ref(_v):
+                                    route_ref = _v
                                 break
                     if not click_target_in_scope(base_url, route_ref, is_in_scope):
                         continue
