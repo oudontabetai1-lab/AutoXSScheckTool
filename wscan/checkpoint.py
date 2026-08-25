@@ -58,9 +58,14 @@ def unit_key(
     ``form_index=0``）が同じキーに潰れて一方が未検査のまま resume にスキップ
     されるのを防ぐため、入力種別（URL param / form）もキーに含める。
     """
-    norm_url = normalize_url_for_key(url or "")
     if legacy_whole_rstrip:
-        norm_url = norm_url.rstrip("/")
+        # v5 読み取り互換: v5 writer は whole-url rstrip を先に行い、migration が後で
+        # 正規化する（stored = normalize(rstrip(raw))）。fallback も rstrip→normalize の順に
+        # して一致させる。normalize(url).rstrip の順だと、スラッシュ値の transient param
+        # （?nonce=12345678/）で不一致になり再送する（Codex #103 P1）。
+        norm_url = normalize_url_for_key((url or "").rstrip("/"))
+    else:
+        norm_url = normalize_url_for_key(url or "")
     if location_token is None:
         location_token = "u" if is_url_param else "f"
     parts = [

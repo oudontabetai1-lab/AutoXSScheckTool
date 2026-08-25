@@ -753,3 +753,25 @@ def test_legacy_aliases_survive_checkpoint_save_and_reload():
     assert reloaded.is_done("https://h/p?z=/admin/", "q", 0, "sqli", is_url_param=True) is True
     # 別 operation（distinct）は誤一致しない。
     assert reloaded.is_done("https://h/p?z=/other/", "q", 0, "sqli", is_url_param=True) is False
+
+
+def test_legacy_fallback_matches_slash_valued_transient_param():
+    """v5 の slash 値 transient param(?nonce=12345678/)でも legacy fallback が一致する（Codex #103 P1）。
+
+    v5 writer は whole-url rstrip を先に行い(?nonce=12345678)、migration が後で正規化して
+    ?nonce(epoch) を除去し https://h/p を残す。lookup fallback も rstrip→normalize の順で
+    一致させる。
+    """
+    from wscan.checkpoint import CheckpointState, unit_key
+
+    raw = "https://h/p?nonce=12345678/"
+    # v5 stored = whole-url rstrip(raw)
+    legacy_stored = "\x1f".join([raw.rstrip("/"), "q", "0", "u", "sqli"])
+    state = CheckpointState.from_dict({
+        "version": 5,
+        "target_url": "https://h/",
+        "checks": ["sqli"],
+        "completed_units": [legacy_stored],
+    })
+    # 現行 URL（slash 値 nonce 付き）で照合しても legacy fallback で一致する。
+    assert state.is_done(raw, "q", 0, "sqli", is_url_param=True) is True
