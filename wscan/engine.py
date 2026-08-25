@@ -65,6 +65,25 @@ def _observability_warning_text(summary: dict) -> str:
     )
 
 
+_SEVERITY_RANK = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
+
+
+def _top_severity(findings) -> str:
+    """findings の最重 severity を明示順序で返す（純粋）。空なら空文字。
+
+    severity 文字列の max() は辞書順比較になり critical+medium を medium と誤評価する
+    ため、_SEVERITY_RANK（0=critical が最重）で最小ランクの severity を選ぶ（Codex #102）。
+    """
+    best = None
+    best_rank = None
+    for f in findings or []:
+        sev = getattr(f, "severity", "") or ""
+        rank = _SEVERITY_RANK.get(sev, 99)
+        if best_rank is None or rank < best_rank:
+            best, best_rank = sev, rank
+    return best or ""
+
+
 def _coverage_summary_text(coverage: dict) -> str:
     """到達性カバレッジの console 1行要約を組み立てる純粋関数。"""
     return (
@@ -1715,9 +1734,7 @@ class ScanEngine:
                             check_name=check_name,
                             status="vulnerable" if new_findings else "tested",
                             location="API template",
-                            severity=max(
-                                (f.severity for f in new_findings), default=""
-                            ),
+                            severity=_top_severity(new_findings),
                             finding_count=len(new_findings),
                         )
                         self._checkpoint_mark_done(cp_url, "(api-template)", 0, check_name)
@@ -1823,9 +1840,7 @@ class ScanEngine:
                             check_name=check_name,
                             status="vulnerable" if new_findings else "tested",
                             location="json-body",
-                            severity=max(
-                                (f.severity for f in new_findings), default=""
-                            ),
+                            severity=_top_severity(new_findings),
                             finding_count=len(new_findings),
                         )
                         self._checkpoint_mark_done_ip(ip, check_name)
@@ -4396,9 +4411,7 @@ class ScanEngine:
                     check_name=check_name,
                     status="vulnerable" if page_findings else "tested",
                     location="page-level",
-                    severity=max(
-                        (f.severity for f in page_findings), default=""
-                    ),
+                    severity=_top_severity(page_findings),
                     finding_count=len(page_findings),
                 )
             except Exception as e:
@@ -4900,7 +4913,7 @@ class ScanEngine:
                     check_name=check_name,
                     status="finding" if new_findings else "tested",
                     location=location,
-                    severity=max((f.severity for f in new_findings), default=""),
+                    severity=_top_severity(new_findings),
                     finding_count=len(new_findings),
                 )
             except AbortScan:

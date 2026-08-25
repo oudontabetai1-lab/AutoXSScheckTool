@@ -1013,3 +1013,14 @@ def test_generate_threads_coverage_after_observability_for_all_templates(tmp_pat
         assert html.index("Observability（観測性メトリクス）") < html.index(
             "Coverage（到達性カバレッジ）"
         )
+
+
+def test_top_severity_uses_explicit_order_not_lexicographic():
+    from types import SimpleNamespace
+    from wscan.engine import _top_severity
+    fs = [SimpleNamespace(severity="medium"), SimpleNamespace(severity="critical"),
+          SimpleNamespace(severity="low")]
+    # 辞書順(max)なら "medium" になるが、明示順序で最重は critical。
+    assert _top_severity(fs) == "critical"
+    assert _top_severity([SimpleNamespace(severity="high"), SimpleNamespace(severity="info")]) == "high"
+    assert _top_severity([]) == ""
