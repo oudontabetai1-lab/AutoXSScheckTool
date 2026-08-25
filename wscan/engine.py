@@ -2916,7 +2916,15 @@ class ScanEngine:
             # 二次オリジンの SPA シェルが origin 非依存の _page_fingerprint で主ページと衝突して
             # 重複スキップされると、後続 SPA の動的ルート/API を見逃す（Codex #104 P1）。
             # そのため重複スキップより前に検出し、必要なら settle して html を採り直す。
-            if html and self.auto_spa_crawl and not self.spa_crawl:
+            # ただし landed_url が access スコープ外（in-scope URL が未設定の外部 IdP/SSO 等へ
+            # リダイレクトした場合）は検出も有効化もしない。さもないと後段の explore が外部
+            # ページの相対リンク/タブ/ボタンをスコープ外でクリックする（Codex #104 P1）。
+            if (
+                html
+                and self.auto_spa_crawl
+                and not self.spa_crawl
+                and self._is_access_allowed_url(landed_url)
+            ):
                 try:
                     from wscan.spa_detect import detect_spa
 
@@ -3097,7 +3105,10 @@ class ScanEngine:
                 )
 
             # ① SPA crawl: discover dynamically-rendered routes via click interaction
-            if self.spa_crawl:
+            # landed_url が access スコープ外（in-scope URL が外部 IdP/SSO へリダイレクト等）の
+            # ときはクリック探索しない。外部ページの相対リンク/タブ/ボタンをスコープ外で
+            # 操作するのを防ぐ（spa_crawl が既に有効でも landed で判定・Codex #104 P1）。
+            if self.spa_crawl and self._is_access_allowed_url(landed_url):
                 try:
                     spa_links = await self._browser.explore_spa_interactions(
                         self._browser.page, url, max_clicks=20

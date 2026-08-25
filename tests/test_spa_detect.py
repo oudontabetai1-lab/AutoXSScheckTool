@@ -60,6 +60,9 @@ def test_generic_mount_id_requires_matching_framework_trace(html, framework):
         # Next.js ではない（self.__next_f の実行式に限定・Codex #104 P2）。
         '<html><body><p>The <code>__next_f</code> hydration token</p></body></html>',
         '<html><body><pre>self.__next_f</pre> と書かれた解説記事</body></html>',
+        # 実行式でも <code>/<pre> の表示テキストなら Next.js ではない（script 本文に
+        # 限定・Codex #104 P2）。
+        '<html><body><code>self.__next_f.push([1])</code> の例</body></html>',
         # __NEXT_DATA__ / id="__next" を表示テキストとして含む静的ドキュメントは
         # Next.js ではない（script の id 属性 / 実タグ内属性に限定・Codex #104 P2）。
         '<html><body><code>__NEXT_DATA__</code> はハイドレーション用</body></html>',

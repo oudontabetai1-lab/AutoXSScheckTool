@@ -280,6 +280,31 @@ class _LateSpaTargetBrowser(_FakeCrawlBrowser):
         pass
 
 
+class _ExternalRedirectSpaBrowser(_FakeCrawlBrowser):
+    """in-scope URL が外部 IdP(SPA シェル) へリダイレクトした状況を模す。"""
+
+    async def navigate(self, url, **kwargs):
+        self.url = "https://idp.external.test/login"
+        self.last_navigation_error = ""
+        self.last_navigation_status = 200
+        return True
+
+    async def content(self):
+        return "<html><body><app-root></app-root></body></html>"
+
+    async def find_forms(self):
+        return []
+
+    async def collect_links_rich(self, base_url, same_domain=False):
+        return []
+
+    async def explore_spa_interactions(self, page, url, max_clicks=20):
+        return []
+
+    async def settle_spa(self):
+        pass
+
+
 class _SessionExpiryBrowser(_FakeCrawlBrowser):
     def __init__(
         self,
@@ -452,6 +477,16 @@ class EngineScanGapTests(unittest.IsolatedAsyncioTestCase):
         await engine._phase_crawl()
 
         self.assertTrue(engine.spa_crawl)
+
+    async def test_out_of_scope_landing_does_not_auto_enable_spa(self):
+        # in-scope URL が access スコープ外の外部 SPA へリダイレクトしたら、
+        # マーカーがあっても自動有効化しない（外部ページを探索しない・Codex #104 P1）。
+        engine = self._engine(depth=1)
+        engine._browser = _ExternalRedirectSpaBrowser()
+
+        await engine._phase_crawl()
+
+        self.assertFalse(engine.spa_crawl)
 
     async def test_normal_first_page_never_auto_enables_spa_crawl(self):
         engine = self._engine(depth=1)

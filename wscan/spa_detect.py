@@ -80,6 +80,17 @@ def _has_bundle_script(source: str) -> bool:
     return False
 
 
+# インライン <script> の本文だけを連結する。JS 式マーカー（self.__next_f /
+# window.__NUXT__ / React.createElement 等）を HTML 全体で探すと、<code>/<pre> の
+# 表示テキストで誤検出する。実行コンテンツに限定するために使う（Codex #104 P2）。
+# 外部 script（<script src=…></script>）は本文が空なので寄与しない。
+_SCRIPT_BODY_RE = re.compile(r"<script\b[^>]*>(.*?)</script>", flags=re.I | re.S)
+
+
+def _script_bodies(source: str) -> str:
+    return "\n".join(m.group(1) for m in _SCRIPT_BODY_RE.finditer(source))
+
+
 def _weak_layout_signals(source: str) -> list[str]:
     """単独では SPA と断定しない、汎用的なページ構成シグナルを返す。"""
     signals: list[str] = []
@@ -113,19 +124,24 @@ def detect_spa(html: str) -> SpaInfo:
     誤有効化を避けるため、それらだけで ``is_spa=True`` にはしない。
     """
     source = html or ""
+    # JS 式マーカーは表示テキスト誤検出を避けるため script 本文だけで探す。
+    scripts = _script_bodies(source)
 
     angular_signals: list[str] = []
-    angular_patterns = (
+    # 属性/タグベースのマーカー（markup）は source 全体で探す。
+    angular_markup = (
         (r"<app-root\b", "<app-root>"),
         (r"<[^>]+\bng-app(?:\s*=|\s|>)", "ng-app"),
         (r"<[^>]+\bng-version\s*=", "ng-version"),
         (r"<[^>]+\b_nghost(?:-[\w-]+)?(?:\s*=|\s|>)", "_nghost"),
         (r"<[^>]+\b_ngcontent(?:-[\w-]+)?(?:\s*=|\s|>)", "_ngcontent"),
-        (r"\bwindow\s*\.\s*ng\b", "window.ng"),
     )
-    for pattern, label in angular_patterns:
+    for pattern, label in angular_markup:
         if re.search(pattern, source, flags=re.I):
             angular_signals.append(label)
+    # window.ng は JS 式なので script 本文に限定する（Codex #104 P2）。
+    if re.search(r"\bwindow\s*\.\s*ng\b", scripts, flags=re.I):
+        angular_signals.append("window.ng")
     if angular_signals:
         return SpaInfo(True, "Angular", "high", angular_signals)
 
@@ -141,10 +157,10 @@ def detect_spa(html: str) -> SpaInfo:
         next_signals.append('id="__next"')
     # App Router（RSC）は __NEXT_DATA__ も id="__next" も出さず、
     # self.__next_f.push(...) のブートストラップだけを吐くことがある。裸の
-    # __next_f トークン（ドキュメント/エラーページの表示テキスト等）で誤検出しない
-    # よう、self.__next_f を用いた実行式（.push / 代入 / ||）に限定する（Codex #104 P2）。
+    # __next_f トークンや <code>self.__next_f.push(...)</code> の表示テキストで誤検出
+    # しないよう、script 本文中の実行式（.push / 代入 / ||）に限定する（Codex #104 P2）。
     if re.search(
-        r"\bself\s*\.\s*__next_f\s*(?:\.\s*push\b|=|\|\|)", source, flags=re.I
+        r"\bself\s*\.\s*__next_f\s*(?:\.\s*push\b|=|\|\|)", scripts, flags=re.I
     ):
         next_signals.append("self.__next_f")
     if next_signals:
@@ -160,9 +176,11 @@ def detect_spa(html: str) -> SpaInfo:
     if re.search(r"<!--/?\$[?!]?-->", source):
         react_signals.append("react-ssr-marker")
     react_root = _has_id(source, "root") or _has_id(source, "app")
+    # JS トークンは script 本文で、react バンドルの script src は markup（source）で探す。
     react_trace = re.search(
-        r"(?:React\s*\.\s*createElement|__REACT_DEVTOOLS|"
-        r"<script\b[^>]*\bsrc\s*=\s*['\"][^'\"]*react(?:-dom)?[^'\"]*\.js)",
+        r"React\s*\.\s*createElement|__REACT_DEVTOOLS", scripts, flags=re.I
+    ) or re.search(
+        r"<script\b[^>]*\bsrc\s*=\s*['\"][^'\"]*react(?:-dom)?[^'\"]*\.js",
         source,
         flags=re.I,
     )
@@ -175,7 +193,7 @@ def detect_spa(html: str) -> SpaInfo:
     nuxt_marker = False
     # Nuxt 2 は window.__NUXT__={...} を吐く。裸トークン一致だと解説記事等の表示
     # テキストで誤検出するため、window.__NUXT__ の実行式に限定する（Codex #104 P2）。
-    if re.search(r"\bwindow\s*\.\s*__NUXT__\b", source, flags=re.I):
+    if re.search(r"\bwindow\s*\.\s*__NUXT__\b", scripts, flags=re.I):
         vue_signals.append("window.__NUXT__")
         nuxt_marker = True
     # Nuxt 3 は <script id="__NUXT_DATA__" type="application/json"> / id="__nuxt" /
@@ -192,14 +210,16 @@ def detect_spa(html: str) -> SpaInfo:
     if re.search(r"<[^>]+\bdata-nuxt-data(?:\s*=|\s|>)", source, flags=re.I):
         vue_signals.append("data-nuxt-data")
         nuxt_marker = True
-    if re.search(r"\bwindow\s*\.\s*__VUE__\b", source, flags=re.I):
+    if re.search(r"\bwindow\s*\.\s*__VUE__\b", scripts, flags=re.I):
         vue_signals.append("window.__VUE__")
     if re.search(r"<[^>]+\bdata-v-[\w-]+(?:\s*=|\s|>)", source, flags=re.I):
         vue_signals.append("data-v-")
     vue_root = _has_id(source, "app")
+    # JS トークンは script 本文、vue バンドルの script src は markup（source）で探す。
     vue_trace = re.search(
-        r"(?:createApp\s*\(|new\s+Vue\b|"
-        r"<script\b[^>]*\bsrc\s*=\s*['\"][^'\"]*vue[^'\"]*\.js)",
+        r"createApp\s*\(|new\s+Vue\b", scripts, flags=re.I
+    ) or re.search(
+        r"<script\b[^>]*\bsrc\s*=\s*['\"][^'\"]*vue[^'\"]*\.js",
         source,
         flags=re.I,
     )
