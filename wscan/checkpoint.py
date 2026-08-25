@@ -23,6 +23,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional, TYPE_CHECKING
 
+from .url_normalize import normalize_url_for_key
+
 if TYPE_CHECKING:
     from wscan.injection_point import InjectionPoint
 
@@ -30,7 +32,8 @@ if TYPE_CHECKING:
 # v3: adaptive を "(adaptive:<check_type>)" 単位へ細分化。旧 "(adaptive)" は
 # engine が「全 adaptive check 完了」として尊重するため、旧 checkpoint も読める。
 # v4: JSON body 注入点用の6部品キーを加算。従来キーは5部品のまま保持する。
-CHECKPOINT_VERSION = 5
+# v6: checkpoint キーの URL を揮発クエリ正規化。旧版キーは from_dict で移行。
+CHECKPOINT_VERSION = 6
 CHECKPOINT_FILENAME = "checkpoint.json"
 
 
@@ -46,14 +49,15 @@ def unit_key(
 ) -> str:
     """攻撃の作業単位を一意な文字列キーにする（純粋関数）。
 
-    URL は末尾スラッシュを ``rstrip`` してスコープ照合と同じ前提に揃える
-    （``engine`` の正規化規約に従う）。区切りは衝突しにくい ``\\x1f``。
+    URL はパス末尾スラッシュと揮発 query を正規化し、意味 query と SPA route
+    fragment は保持する。
+    区切りは衝突しにくい ``\\x1f``。
 
     同名の URL パラメータとフォームフィールド（例: どちらも ``id`` で
     ``form_index=0``）が同じキーに潰れて一方が未検査のまま resume にスキップ
     されるのを防ぐため、入力種別（URL param / form）もキーに含める。
     """
-    norm_url = (url or "").rstrip("/")
+    norm_url = normalize_url_for_key(url or "")
     if location_token is None:
         location_token = "u" if is_url_param else "f"
     parts = [
@@ -89,7 +93,8 @@ class CheckpointState:
         self, url: str, field_name: str, form_index: int, check_type: str,
         is_url_param: bool = False,
     ) -> bool:
-        return unit_key(url, field_name, form_index, check_type, is_url_param) in self.completed_units
+        key = unit_key(url, field_name, form_index, check_type, is_url_param)
+        return key in self.completed_units
 
     def mark_done(
         self, url: str, field_name: str, form_index: int, check_type: str,
@@ -136,6 +141,9 @@ class CheckpointState:
             "target_url": self.target_url,
             "checks": list(self.checks),
             "completed_units": sorted(self.completed_units),
+            # v5 legacy fallback 用エイリアス。保存を跨いでも fallback を維持するため
+            # 永続する（Codex #103 P1）。読み込んだ v5 単位のスナップショットで、
+            # 新規 mark で増えない。
             "findings": self.findings,
             "attempt_ledger": self.attempt_ledger,
             "created_at": self.created_at,
@@ -162,6 +170,8 @@ class CheckpointState:
         )
         if state.source_version < 2:
             state._migrate_v1_adaptive_units()
+        if state.source_version < 6:
+            state._migrate_v5_normalize_urls()
         return state
 
     def _migrate_v1_adaptive_units(self) -> None:
@@ -195,13 +205,53 @@ class CheckpointState:
                 adaptive_key = "\x1f".join([url, field_name, form_s, location, "(adaptive)"])
                 self.completed_units.add(adaptive_key)
 
+    def _migrate_v5_normalize_urls(self) -> None:
+        """v5以前の完了単位と ledger URL を現行の正規化へ移行する（純粋）。"""
+        self.target_url = normalize_url_for_key(self.target_url or "")
+        migrated: set[str] = set()
+        for key in self.completed_units:
+            parts = key.split("\x1f")
+            parts[0] = normalize_url_for_key(parts[0])
+            migrated.add("\x1f".join(parts))
+        self.completed_units = migrated
+        # 既知の制約（Codex #103 P1）: v5 は whole-url rstrip で URL 末尾の / を落とすため、
+        # query 値末尾スラッシュ URL（例 https://h/p?z=/admin/）は ?z=/admin として保存され、
+        # 正規化しても失われた / を復元できない。かつて whole-rstrip alias で救おうとしたが、
+        # genuine な ?z=/admin と truncated された ?z=/admin/ を stored key から区別する証拠が
+        # 原理的に無く、別 operation を誤って skip する検出偽陰性（通常層で最悪）を生むため撤去した。
+        # 結果、この稀な v5 ケースの当該ユニットは v6 初回 resume で1度だけ再攻撃されうる（未検知
+        # ではなく完了済みの再送・v6 キーは以後一貫し自己回復）。migration は削除/並べ替え/揮発
+        # クエリの正規化を担い v5 compat の主要部を維持する。
+
+        # attempt_ledger の key は stable_key_parts の serialized list。
+        # 壊れた旧 record は他の resume データを巻き込まず best-effort で飛ばす。
+        try:
+            records = self.attempt_ledger.get("records", [])
+        except Exception:
+            records = []
+        # 既知の制約（Codex #103 P2）: v5 の ledger record が query 値末尾スラッシュ URL
+        # （例 https://h/p?z=/admin/）を持つ場合、旧 stable_key_parts は URL 全体を rstrip して
+        # `...?z=/admin` で serialize しており、正規化では失われたスラッシュを復元できない。
+        # 現行キーはスラッシュを保持するため、そのごく稀な未完了ユニットの adaptive 履歴は
+        # resume 後に引けず再探索になる（安全性は completed-unit の legacy fallback が担保し
+        # 状態変更 POST は再送しない。効果は adaptive の効率低下のみで1 run で自己回復）。
+        for record in records if isinstance(records, list) else []:
+            try:
+                key = record.get("key")
+                if isinstance(key, list) and key:
+                    key[0] = normalize_url_for_key(key[0])
+            except Exception:
+                continue
+
     def is_compatible_with(self, target_url: str, checks: list[str]) -> bool:
         """再開先のターゲット/チェック集合が、保存時と整合するか（純粋）。
 
         ターゲット URL が一致し、要求チェックが保存時チェックの部分集合なら互換。
         新しいチェックを足した再開では「済み」が信用できないので非互換扱いにする。
         """
-        if (self.target_url or "").rstrip("/") != (target_url or "").rstrip("/"):
+        if normalize_url_for_key(self.target_url or "") != (
+            normalize_url_for_key(target_url or "")
+        ):
             return False
         return set(checks or []).issubset(set(self.checks or []))
 

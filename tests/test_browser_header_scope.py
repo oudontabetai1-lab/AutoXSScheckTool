@@ -788,12 +788,17 @@ class BrowserHeaderModeTests(unittest.IsolatedAsyncioTestCase):
 
         with (
             patch("wscan.browser.async_playwright", return_value=starter),
+            patch("wscan.browser.socket.socket") as socket_ctor,
             patch.object(
                 browser,
                 "_activate_header_target_auto_attach",
                 AsyncMock(return_value=True),
             ),
         ):
+            socket_ctor.return_value.__enter__.return_value.getsockname.return_value = (
+                "127.0.0.1",
+                43123,
+            )
             await browser.init()
             await browser._warn_popup_header_intercept()
 
@@ -832,12 +837,17 @@ class BrowserHeaderModeTests(unittest.IsolatedAsyncioTestCase):
 
         with (
             patch("wscan.browser.async_playwright", return_value=starter),
+            patch("wscan.browser.socket.socket") as socket_ctor,
             patch.object(
                 browser,
                 "_activate_header_target_auto_attach",
                 AsyncMock(return_value=True),
             ),
         ):
+            socket_ctor.return_value.__enter__.return_value.getsockname.return_value = (
+                "127.0.0.1",
+                43123,
+            )
             await browser.init()
 
         launch_args = browser._playwright.chromium.launch.await_args.kwargs["args"]

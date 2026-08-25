@@ -203,6 +203,22 @@ class InjectionPointTests(unittest.TestCase):
             ("http://h/search", "q", "0", "u", ""),
         )
 
+    def test_stable_key_normalizes_volatile_query_but_preserves_operation(self):
+        first = InjectionPoint.for_url_param(
+            "http://h/search?op=create&nonce=1699999999&csrf=first", "q"
+        )
+        second = InjectionPoint.for_url_param(
+            "http://h/search?csrf=second&nonce=1700000000&op=create", "q"
+        )
+        delete = InjectionPoint.for_url_param(
+            "http://h/search?op=delete&nonce=1700000000", "q"
+        )
+
+        self.assertEqual(first.stable_key_parts(), second.stable_key_parts())
+        self.assertEqual(first.stable_key_parts()[0], "http://h/search?op=create")
+        self.assertNotEqual(first.stable_key_parts(), delete.stable_key_parts())
+        self.assertIn("nonce=1699999999", first.url)
+
     def test_json_constructor_derives_display_name_and_stable_key(self):
         ip = InjectionPoint.for_json_body(
             "post",
