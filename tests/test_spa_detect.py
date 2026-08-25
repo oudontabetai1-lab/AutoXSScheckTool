@@ -61,6 +61,81 @@ def test_normal_or_ambiguous_html_is_not_spa(html):
     assert info.confidence == "low"
 
 
+@pytest.mark.parametrize(
+    ("html", "framework", "signal"),
+    [
+        # Next.js App Router（RSC）は __NEXT_DATA__ / id="__next" を出さず
+        # self.__next_f.push(...) だけを吐くことがある。
+        (
+            '<div id="__next-x"></div><script>self.__next_f.push([1,"a"])</script>',
+            "Next.js",
+            "__next_f",
+        ),
+        # Nuxt 3 は window.__NUXT__ でなく __NUXT_DATA__ / id="__nuxt"。
+        (
+            '<div id="__nuxt"></div><script id="__NUXT_DATA__">[]</script>',
+            "Nuxt",
+            "__NUXT_DATA__",
+        ),
+        (
+            '<div id="__nuxt"></div><script src="/_nuxt/entry.js"></script>',
+            "Nuxt",
+            'id="__nuxt"',
+        ),
+    ],
+)
+def test_modern_framework_bootstrap_markers_are_high_confidence(html, framework, signal):
+    info = detect_spa(html)
+
+    assert info.is_spa is True
+    assert info.framework == framework
+    assert info.confidence == "high"
+    assert signal in info.signals
+
+
+@pytest.mark.parametrize(
+    ("html", "framework"),
+    [
+        # 本番 React シェル: 空の id="root" ＋ ハッシュ付きバンドルのみ
+        # （data-reactroot も React.createElement も react 名の script も無い）。
+        (
+            '<html><body><div id="root"></div>'
+            '<script src="/assets/index-9f3a2b.js"></script></body></html>',
+            "React",
+        ),
+        # 汎用マウント id="app" が空＋バンドル＝クライアント描画前提の SPA シェル。
+        (
+            '<html><body><main id="app">  </main>'
+            '<script src="/static/bundle.js"></script></body></html>',
+            "SPA",
+        ),
+    ],
+)
+def test_production_empty_mount_shell_is_high_confidence_spa(html, framework):
+    info = detect_spa(html)
+
+    assert info.is_spa is True
+    assert info.framework == framework
+    assert info.confidence == "high"
+
+
+@pytest.mark.parametrize(
+    "html",
+    [
+        # 空マウントだがバンドル script が無い → シェルと断定しない。
+        '<html><body><div id="root"></div></body></html>',
+        # マウントに内容がある（サーバ描画済み）＋ script → 静的サイト扱い。
+        '<html><body><div id="root"><h1>ようこそ</h1><p>案内です。</p></div>'
+        '<script src="/assets/site.js"></script></body></html>',
+    ],
+)
+def test_empty_mount_shell_requires_empty_mount_and_bundle(html):
+    info = detect_spa(html)
+
+    assert info.is_spa is False
+    assert info.confidence == "low"
+
+
 def test_weak_layout_signals_never_enable_spa_on_their_own():
     html = """
     <html><body><main></main>

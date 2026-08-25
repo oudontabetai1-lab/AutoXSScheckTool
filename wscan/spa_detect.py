@@ -31,6 +31,15 @@ def _has_id(source: str, element_id: str) -> bool:
     )
 
 
+# 本番 SPA シェルの「空マウント要素」を検出する（中身が空白のみ）。
+# 例: <div id="root"></div> / <main id="app">  </main>。内容を持つ要素
+# （<div id="root">案内</div> 等）は一致しないため静的サイトを誤検出しない。
+_EMPTY_MOUNT_RE = re.compile(
+    r"<(\w+)\b[^>]*\bid\s*=\s*(['\"])(root|app|__next|__nuxt)\2[^>]*>\s*</\1\s*>",
+    flags=re.I | re.S,
+)
+
+
 def _weak_layout_signals(source: str) -> list[str]:
     """単独では SPA と断定しない、汎用的なページ構成シグナルを返す。"""
     signals: list[str] = []
@@ -85,6 +94,10 @@ def detect_spa(html: str) -> SpaInfo:
         next_signals.append("__NEXT_DATA__")
     if _has_id(source, "__next"):
         next_signals.append('id="__next"')
+    # App Router（RSC）は __NEXT_DATA__ も id="__next" も出さず、
+    # self.__next_f.push(...) のブートストラップだけを吐くことがある。
+    if re.search(r"\b__next_f\b", source, flags=re.I):
+        next_signals.append("__next_f")
     if next_signals:
         return SpaInfo(True, "Next.js", "high", next_signals)
 
@@ -104,8 +117,22 @@ def detect_spa(html: str) -> SpaInfo:
         return SpaInfo(True, "React", "high", react_signals)
 
     vue_signals: list[str] = []
+    nuxt_marker = False
     if re.search(r"\b__NUXT__\b", source, flags=re.I):
         vue_signals.append("__NUXT__")
+        nuxt_marker = True
+    # Nuxt 3 は window.__NUXT__ ではなく __NUXT_DATA__ / id="__nuxt" /
+    # data-nuxt-data を吐く。__NUXT_DATA__ は \b__NUXT__\b では末尾の
+    # 続き（_DATA）が word 文字のため一致しないので、明示的に拾う。
+    if re.search(r"\b__NUXT_DATA__\b", source, flags=re.I):
+        vue_signals.append("__NUXT_DATA__")
+        nuxt_marker = True
+    if _has_id(source, "__nuxt"):
+        vue_signals.append('id="__nuxt"')
+        nuxt_marker = True
+    if re.search(r"<[^>]+\bdata-nuxt-data(?:\s*=|\s|>)", source, flags=re.I):
+        vue_signals.append("data-nuxt-data")
+        nuxt_marker = True
     if re.search(r"\bwindow\s*\.\s*__VUE__\b", source, flags=re.I):
         vue_signals.append("window.__VUE__")
     if re.search(r"<[^>]+\bdata-v-[\w-]+(?:\s*=|\s|>)", source, flags=re.I):
@@ -120,7 +147,25 @@ def detect_spa(html: str) -> SpaInfo:
     if vue_root and vue_trace:
         vue_signals.extend(['id="app"', "Vue trace"])
     if vue_signals:
-        framework = "Nuxt" if "__NUXT__" in vue_signals else "Vue"
+        framework = "Nuxt" if nuxt_marker else "Vue"
         return SpaInfo(True, framework, "high", vue_signals)
+
+    # 本番ビルドの SPA シェル: フレームワーク固有マーカーを一切吐かず、
+    # 空のマウント要素（id=root/app/__next/__nuxt）＋ハッシュ付きバンドル
+    # script だけを持つ（例: 本番 React=<div id="root"></div> + /assets/index-<hash>.js）。
+    # 「空マウント」＝サーバ描画済み HTML が無い＝クライアント描画前提の強い証拠なので、
+    # 内容を持つ静的サイトを誤有効化せずに本番 SPA を拾える（保守側の維持）。
+    shell = _EMPTY_MOUNT_RE.search(source)
+    if shell and re.search(r"<script\b[^>]*\bsrc\s*=", source, flags=re.I):
+        mount_id = shell.group(3).lower()
+        framework = {
+            "root": "React",
+            "__next": "Next.js",
+            "__nuxt": "Nuxt",
+        }.get(mount_id, "SPA")
+        return SpaInfo(
+            True, framework, "high",
+            [f'empty id="{mount_id}"', "bundle script"],
+        )
 
     return SpaInfo(False, "unknown", "low", _weak_layout_signals(source))
