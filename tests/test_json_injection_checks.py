@@ -65,6 +65,8 @@ class _Engine:
         self._json_probe_sent = False
         self._json_probe_failed = False
         self.relogin_calls = []
+        self.all_findings = []
+        self.scan_matrix = []
 
     async def _maybe_relogin_for_page(self, url):
         self.relogin_calls.append(url)
@@ -88,7 +90,11 @@ class _Engine:
         self.marked.append(key)
 
     def _record_finding(self, finding, source=""):
-        raise AssertionError("このテストでは Finding を返さない")
+        finding.source = source
+        self.all_findings.append(finding)
+
+    def _record_scan_matrix(self, *args, **kwargs):
+        ScanEngine._record_scan_matrix(self, *args, **kwargs)
 
     def _save_checkpoint(self):
         self.saved += 1
@@ -106,6 +112,7 @@ class JsonInjectionCheckTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(engine.scanner.calls), 1)
         self.assertEqual(engine.marked, [])
         self.assertEqual(engine.saved, 1)
+        self.assertEqual(engine.scan_matrix, [])
 
     async def test_registered_template_is_marked_done(self):
         ip = InjectionPoint.for_json_body(
@@ -117,6 +124,52 @@ class JsonInjectionCheckTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(engine.scanner.calls), 1)
         self.assertEqual(len(engine.marked), 1)
+        self.assertEqual(
+            engine.scan_matrix,
+            [{
+                "url": "http://h/api/login",
+                "field_name": "(json-body)",
+                "check": "sqli",
+                "status": "tested",
+                "location": "json-body",
+                "severity": "",
+                "finding_count": 0,
+                "note": "",
+            }],
+        )
+        coverage = ScanEngine.coverage_summary(engine)
+        self.assertEqual(coverage["attempts"], 1)
+        self.assertEqual(coverage["by_status"], {"tested": 1})
+
+    async def test_finding_is_recorded_as_vulnerable_json_body_attempt(self):
+        finding = Finding(
+            check_type="sqli",
+            severity="critical",
+            url="http://h/api/login",
+            field_name="email",
+            payload="'",
+            evidence="SQL error",
+        )
+
+        class _FindingScanner(_Scanner):
+            async def scan_injection_point(self, ip, field):
+                await super().scan_injection_point(ip, field)
+                return [finding]
+
+        ip = InjectionPoint.for_json_body(
+            "POST", "http://h/api/login", "/email", template_id="login"
+        )
+        engine = _Engine([ip], {"login": {}}, scanner=_FindingScanner())
+
+        await engine._run_json_injection_checks()
+
+        row = engine.scan_matrix[-1]
+        self.assertEqual(row["status"], "vulnerable")
+        self.assertEqual(row["severity"], "critical")
+        self.assertEqual(row["finding_count"], 1)
+        coverage = ScanEngine.coverage_summary(engine)
+        self.assertEqual(coverage["attempts"], 1)
+        self.assertEqual(coverage["by_status"], {"vulnerable": 1})
 
     def test_same_url_pointer_operations_share_checkpoint_key(self):
         # resume 安定性を優先し、checkpoint キー(stable_key_parts)は operation identity を
@@ -194,6 +247,7 @@ class JsonInjectionCheckTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(scanner.calls), 1)   # probe は走る
         self.assertEqual(engine.marked, [])       # が「済み」にはしない
+        self.assertEqual(engine.scan_matrix[-1]["status"], "error")
 
     async def test_transport_failure_does_not_mark_done(self):
         # transport 失敗（timeout/TLS/DNS/proxy）で 1 度も送れなかったケース。
@@ -219,6 +273,7 @@ class JsonInjectionCheckTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(engine.scanner.calls), 1)  # scan は走る
         self.assertEqual(engine.marked, [])             # が「済み」にはしない
+        self.assertEqual(engine.scan_matrix, [])        # no-op は attempt に数えない
 
     async def test_probe_failure_after_baseline_does_not_mark_done(self):
         # baseline は通ったが後続の攻撃 payload が transport 失敗したケース
@@ -246,6 +301,27 @@ class JsonInjectionCheckTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(engine.scanner.calls), 1)
         self.assertEqual(engine.marked, [])
+        self.assertEqual(engine.scan_matrix[-1]["status"], "error")
+        coverage = ScanEngine.coverage_summary(engine)
+        self.assertEqual(coverage["attempts"], 1)
+        self.assertEqual(coverage["by_status"], {"error": 1})
+
+    async def test_scanner_exception_is_recorded_as_error_attempt(self):
+        class _RaisingScanner(_Scanner):
+            async def scan_injection_point(self, ip, field):
+                raise RuntimeError("probe exploded")
+
+        ip = InjectionPoint.for_json_body(
+            "POST", "http://h/api/login", "/email", template_id="login"
+        )
+        engine = _Engine([ip], {"login": {}}, scanner=_RaisingScanner())
+
+        await engine._run_json_injection_checks()
+
+        row = engine.scan_matrix[-1]
+        self.assertEqual(row["status"], "error")
+        self.assertEqual(row["location"], "json-body")
+        self.assertIn("RuntimeError: probe exploded", row["note"])
 
     async def test_completed_point_skips_relogin_and_network(self):
         # 再開: 済み単位は auth/network の前に飛ばす（完了点で browser nav/GET を再訪しない）。

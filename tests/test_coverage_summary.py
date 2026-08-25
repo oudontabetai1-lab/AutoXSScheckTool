@@ -558,6 +558,102 @@ def test_engine_session_preflight_records_final_url_with_host_filter():
     assert engine._probe_status_counts == Counter({429: 1})
 
 
+def test_sitemap_and_robots_fetches_record_each_response_status():
+    responses = [
+        SimpleNamespace(
+            status_code=200,
+            url="http://fixture.test/robots.txt",
+            text="Sitemap: http://fixture.test/nested-sitemap.xml",
+        ),
+        SimpleNamespace(
+            status_code=403,
+            url="http://fixture.test/nested-sitemap.xml",
+            text="blocked",
+        ),
+        SimpleNamespace(
+            status_code=429,
+            url="http://fixture.test/sitemap.xml",
+            text="rate limited",
+        ),
+    ]
+    recorded = []
+    engine = SimpleNamespace(
+        target_url="http://fixture.test",
+        visited_urls=set(),
+        httpx_client_kwargs=lambda **kwargs: kwargs,
+        auth_headers=lambda **kwargs: {},
+        record_probe_status=lambda status, url: recorded.append((status, url)),
+        _extract_sitemap_locs=ScanEngine._extract_sitemap_locs,
+    )
+    engine._parse_sitemap = lambda client, url: ScanEngine._parse_sitemap(
+        engine, client, url
+    )
+
+    with patch("httpx.AsyncClient", return_value=_QueuedAsyncClient(responses)):
+        discovered = asyncio.run(ScanEngine._fetch_sitemap_urls(engine))
+
+    assert discovered == []
+    assert recorded == [
+        (200, "http://fixture.test/robots.txt"),
+        (403, "http://fixture.test/nested-sitemap.xml"),
+        (429, "http://fixture.test/sitemap.xml"),
+    ]
+
+
+def test_run_saves_probe_status_recorded_during_verification(tmp_path):
+    engine = ScanEngine(
+        "http://fixture.test/",
+        checks=["xss"],
+        llm_provider="none",
+        output_dir=tmp_path,
+        open_report=False,
+        enable_waf_detection=False,
+        enable_ai_analysis=False,
+        enable_payload_learning=False,
+        enable_adaptive_payloads=False,
+    )
+    engine.controller = SimpleNamespace(
+        start=lambda *args, **kwargs: None,
+        stop=lambda: None,
+    )
+    engine.header_manager = SimpleNamespace(
+        start_background_refresh=lambda: None,
+        stop_background_refresh=AsyncMock(),
+    )
+    engine._browser = SimpleNamespace(
+        init=AsyncMock(),
+        close=AsyncMock(),
+        network=SimpleNamespace(status_counts=Counter()),
+        auth_user="",
+        auth_pass="",
+    )
+    engine._phase_crawl = AsyncMock(return_value=[])
+    engine._phase_plan = AsyncMock(return_value={})
+    engine._phase_attack = AsyncMock()
+    engine._run_api_template_checks = AsyncMock()
+    engine._run_json_injection_checks = AsyncMock()
+    engine._phase_report_async = AsyncMock()
+    engine._merge_additional_report_findings = lambda: None
+
+    async def _verify():
+        engine.record_probe_status(429, engine.target_url)
+
+    engine._phase_verify = _verify
+    saved_statuses = []
+    real_save = engine._save_checkpoint
+
+    def _tracked_save():
+        saved_statuses.append(dict(engine._probe_status_counts))
+        real_save()
+
+    engine._save_checkpoint = _tracked_save
+
+    asyncio.run(engine.run())
+
+    assert saved_statuses[-1] == {429: 1}
+    assert load_checkpoint(tmp_path).http_status_counts == {"429": 1}
+
+
 def test_engine_ssti_fallback_records_each_final_url_with_host_filter():
     payload = "{{2654435761*2654435761}}"
     responses = [

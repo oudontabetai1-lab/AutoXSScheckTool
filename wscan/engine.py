@@ -1775,6 +1775,7 @@ class ScanEngine:
                 self._api_auth_failed = False
                 self._json_probe_sent = False
                 self._json_probe_failed = False
+                before_count = len(self.all_findings)
                 try:
                     findings = await scanner.scan_injection_point(ip, field)
                     for finding in findings or []:
@@ -1786,19 +1787,47 @@ class ScanEngine:
                     console.print(
                         f"  [yellow]JSON injection ({check_name}) on {ip.url}: {exc}[/yellow]"
                     )
+                    self._record_scan_matrix(
+                        url=ip.url,
+                        field_name="(json-body)",
+                        check_name=check_name,
+                        status="error",
+                        location="json-body",
+                        note=f"json-body scan raised: {type(exc).__name__}: {exc}",
+                    )
                 else:
-                    # 送信成功の証拠が無い/途中で通信失敗した・再認証失敗・実 POST 失効・
-                    # template 不在は、いずれも未認証/送信不能の空振りなので陰性として完了
-                    # 記録しない（resume で再試行できるよう残す）。
-                    if (
-                        self._json_probe_sent
-                        and not self._json_probe_failed
-                        and not auth_failed
-                        and not self._api_auth_failed
-                        and ip.template_id in (
-                            getattr(self, "injection_templates", {}) or {}
-                        )
+                    # transport/auth 失敗は degraded attempt として行を残すが完了にはせず、
+                    # resume で再試行できるようにする。template 不在や送信成功の証拠が
+                    # ない no-op は attempt に数えず、行も完了記録も残さない。
+                    template_available = ip.template_id in (
+                        getattr(self, "injection_templates", {}) or {}
+                    )
+                    if template_available and (
+                        self._json_probe_failed
+                        or auth_failed
+                        or self._api_auth_failed
                     ):
+                        self._record_scan_matrix(
+                            url=ip.url,
+                            field_name="(json-body)",
+                            check_name=check_name,
+                            status="error",
+                            location="json-body",
+                            note="JSON-body probe transport/authentication failure.",
+                        )
+                    elif template_available and self._json_probe_sent:
+                        new_findings = self.all_findings[before_count:]
+                        self._record_scan_matrix(
+                            url=ip.url,
+                            field_name="(json-body)",
+                            check_name=check_name,
+                            status="vulnerable" if new_findings else "tested",
+                            location="json-body",
+                            severity=max(
+                                (f.severity for f in new_findings), default=""
+                            ),
+                            finding_count=len(new_findings),
+                        )
                         self._checkpoint_mark_done_ip(ip, check_name)
             self._save_checkpoint()
 
@@ -2327,6 +2356,7 @@ class ScanEngine:
             # findings unconfirmed.
             try:
                 await self._phase_verify()
+                self._save_checkpoint()
             finally:
                 try:
                     await self.header_manager.stop_background_refresh()
@@ -2384,6 +2414,7 @@ class ScanEngine:
                     robots_url,
                     headers=self.auth_headers(url=robots_url),
                 )
+                self.record_probe_status(r.status_code, r.url)
                 if r.status_code == 200:
                     for line in r.text.splitlines():
                         line = line.strip()
@@ -2405,6 +2436,7 @@ class ScanEngine:
                     sitemap_url,
                     headers=self.auth_headers(url=sitemap_url),
                 )
+                self.record_probe_status(r.status_code, r.url)
                 if r.status_code == 200:
                     discovered += self._extract_sitemap_locs(r.text)
             except Exception:
@@ -2425,6 +2457,7 @@ class ScanEngine:
                 timeout=10.0,
                 headers=self.auth_headers(url=sitemap_url),
             )
+            self.record_probe_status(r.status_code, r.url)
             if r.status_code == 200:
                 return self._extract_sitemap_locs(r.text)
         except Exception:
