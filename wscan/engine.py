@@ -632,6 +632,10 @@ class ScanEngine:
         self.spa_crawl = spa_crawl
         self.auto_spa_crawl = auto_spa_crawl
         self.detected_spa = None
+        # 自動検出で spa_crawl を有効化したか（明示 --spa-crawl と区別）。
+        # 自動有効化時はクリック探索を read-only 運用にし、状態変更しうる操作は
+        # allow_state_changing_probes の opt-in を要求する（Codex #104 P1）。
+        self._spa_auto_enabled = False
         # SPA harvest のページ跨ぎ大域 dedup キー集合 (endpoint, param集合)。
         self._spa_harvest_seen: set = set()
         # JSON body harvest の大域 dedup（dedup_key→template_id・再観測で template を最新化）と、
@@ -2919,6 +2923,7 @@ class ScanEngine:
             # ただし landed_url が access スコープ外（in-scope URL が未設定の外部 IdP/SSO 等へ
             # リダイレクトした場合）は検出も有効化もしない。さもないと後段の explore が外部
             # ページの相対リンク/タブ/ボタンをスコープ外でクリックする（Codex #104 P1）。
+            spa_just_enabled = False
             if (
                 html
                 and self.auto_spa_crawl
@@ -2931,6 +2936,8 @@ class ScanEngine:
                     self.detected_spa = detect_spa(html)
                     if self.detected_spa.is_spa and self.detected_spa.confidence == "high":
                         self.spa_crawl = True
+                        self._spa_auto_enabled = True
+                        spa_just_enabled = True
                         # __init__ 後の反転なので BrowserManager 側も同期する。
                         self._browser.spa_settle = True
                         console.print(
@@ -2955,7 +2962,13 @@ class ScanEngine:
                 if self.flag_finder:
                     self._check_page_for_flags(html, url)
                 fp = self._page_fingerprint(html, url)
-                if fp in self._seen_page_fingerprints:
+                # このイテレーションで SPA を自動検出したページは、origin 非依存の
+                # fingerprint が別 origin の既出ページと衝突しても重複スキップしない
+                # （下の add で登録はする）。さもないと唯一の SPA ページの forms/探索/
+                # harvest を落とす（Codex #104 P1）。
+                if spa_just_enabled:
+                    pass
+                elif fp in self._seen_page_fingerprints:
                     console.print(f"  [dim]重複ページスキップ: {url} (同一構造を検出)[/dim]")
                     # リンクは抽出するが、スキャン対象には追加しない
                     if depth + 1 < self.depth:
@@ -3108,10 +3121,24 @@ class ScanEngine:
             # landed_url が access スコープ外（in-scope URL が外部 IdP/SSO へリダイレクト等）の
             # ときはクリック探索しない。外部ページの相対リンク/タブ/ボタンをスコープ外で
             # 操作するのを防ぐ（spa_crawl が既に有効でも landed で判定・Codex #104 P1）。
-            if self.spa_crawl and self._is_access_allowed_url(landed_url):
+            #
+            # クリック探索は state を変えうる（削除/送信/管理操作の nav a や button[data-route]）。
+            # 自動有効化（既定 ON）では read-only 運用とし、クリック探索は明示 --spa-crawl か
+            # allow_state_changing_probes の opt-in がある場合のみ行う。opt-in が無くても
+            # settle と GET XHR harvest（ページが自ら投げた read-only な観測）は継続する
+            # ので、API 到達性の主要な利得は保たれる（Codex #104 P1）。
+            _spa_click_allowed = (
+                not self._spa_auto_enabled or self.allow_state_changing_probes
+            )
+            if (
+                self.spa_crawl
+                and self._is_access_allowed_url(landed_url)
+                and _spa_click_allowed
+            ):
                 try:
                     spa_links = await self._browser.explore_spa_interactions(
-                        self._browser.page, url, max_clicks=20
+                        self._browser.page, url, max_clicks=20,
+                        is_in_scope=self._is_access_allowed_url,
                     )
                     # 発見ルートの巡回キュー投入は通常リンクと同じ深度ガードに従う。
                     # これが無いと --depth 1 でも探索ルートを訪問し再帰的に深追いして

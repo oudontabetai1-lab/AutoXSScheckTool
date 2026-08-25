@@ -180,7 +180,8 @@ def detect_spa(html: str) -> SpaInfo:
     react_trace = re.search(
         r"React\s*\.\s*createElement|__REACT_DEVTOOLS", scripts, flags=re.I
     ) or re.search(
-        r"<script\b[^>]*\bsrc\s*=\s*['\"][^'\"]*react(?:-dom)?[^'\"]*\.js",
+        # (?<![\w-])src で data-src/async-src の誤一致を防ぐ（Codex #104 P2）。
+        r"<script\b[^>]*?(?<![\w-])src\s*=\s*['\"][^'\"]*react(?:-dom)?[^'\"]*\.js",
         source,
         flags=re.I,
     )
@@ -219,7 +220,8 @@ def detect_spa(html: str) -> SpaInfo:
     vue_trace = re.search(
         r"createApp\s*\(|new\s+Vue\b", scripts, flags=re.I
     ) or re.search(
-        r"<script\b[^>]*\bsrc\s*=\s*['\"][^'\"]*vue[^'\"]*\.js",
+        # (?<![\w-])src で data-src/async-src の誤一致を防ぐ（Codex #104 P2）。
+        r"<script\b[^>]*?(?<![\w-])src\s*=\s*['\"][^'\"]*vue[^'\"]*\.js",
         source,
         flags=re.I,
     )

@@ -52,6 +52,24 @@ _SESSION_ENDING_TEXT_RE = re.compile(
 )
 
 
+def click_target_in_scope(
+    base_url: str, href: str, is_in_scope: Optional[Callable[[str], bool]] = None
+) -> bool:
+    """クリック先 href を絶対 URL へ解決し、認可スコープ内か判定する（純粋関数）。
+
+    href をそのまま prefix 比較すると、プロトコル相対 ``//outside.example`` や
+    lookalike absolute ``https://target.example.evil`` を内部扱いしてスコープ外へ
+    リクエストしてしまう（Codex #104 P1）。``urljoin`` で絶対化してから判定する。
+    href 空（button 等・URL を持たない要素）は同一ページ操作として許可する。
+    """
+    if not href:
+        return True
+    resolved = urljoin(base_url, href)
+    if is_in_scope is not None:
+        return bool(is_in_scope(resolved))
+    return urlparse(resolved).netloc == urlparse(base_url).netloc
+
+
 def is_session_ending_link(href: str, text: str) -> bool:
     """href またはリンク文言がログアウト/サインアウト系か（純粋関数）。
 
@@ -2313,6 +2331,7 @@ class BrowserManager:
         page,
         base_url: str,
         max_clicks: int = 30,
+        is_in_scope: Optional[Callable[[str], bool]] = None,
     ) -> list[str]:
         """
         Explore client-side navigation by:
@@ -2381,11 +2400,9 @@ class BrowserManager:
                 if clicked >= max_clicks:
                     break
                 try:
-                    # Don't click external links
+                    # クリック先を絶対 URL へ解決してスコープ判定する（Codex #104 P1）。
                     href = await el.get_attribute("href") or ""
-                    if href.startswith("http") and not href.startswith(
-                        urlparse(base_url).scheme + "://" + urlparse(base_url).netloc
-                    ):
+                    if not click_target_in_scope(base_url, href, is_in_scope):
                         continue
 
                     # セッションを終了させるリンク（logout/signout 等）はクリックしない。

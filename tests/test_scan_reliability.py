@@ -180,7 +180,7 @@ class _SpaMarkerCrawlBrowser(_FakeCrawlBrowser):
     async def collect_links_rich(self, base_url, same_domain=False):
         return []
 
-    async def explore_spa_interactions(self, page, url, max_clicks=20):
+    async def explore_spa_interactions(self, page, url, max_clicks=20, **kwargs):
         self.explore_calls += 1
         return []
 
@@ -210,7 +210,7 @@ class _SpaHydrationCrawlBrowser(_FakeCrawlBrowser):
             return [{"action": "", "inputs": [{"name": "q", "type": "text"}]}]
         return []
 
-    async def explore_spa_interactions(self, page, url, max_clicks=20):
+    async def explore_spa_interactions(self, page, url, max_clicks=20, **kwargs):
         self.events.append("explore")
         return []
 
@@ -235,7 +235,7 @@ class _SpaRouteDiscoveryBrowser(_FakeCrawlBrowser):
     async def find_forms(self):
         return []
 
-    async def explore_spa_interactions(self, page, url, max_clicks=20):
+    async def explore_spa_interactions(self, page, url, max_clicks=20, **kwargs):
         return [self.route]
 
     async def settle_spa(self):
@@ -273,7 +273,7 @@ class _LateSpaTargetBrowser(_FakeCrawlBrowser):
             "viewport": {"w": 1280, "h": 800},
         }]
 
-    async def explore_spa_interactions(self, page, url, max_clicks=20):
+    async def explore_spa_interactions(self, page, url, max_clicks=20, **kwargs):
         return []
 
     async def settle_spa(self):
@@ -298,7 +298,7 @@ class _ExternalRedirectSpaBrowser(_FakeCrawlBrowser):
     async def collect_links_rich(self, base_url, same_domain=False):
         return []
 
-    async def explore_spa_interactions(self, page, url, max_clicks=20):
+    async def explore_spa_interactions(self, page, url, max_clicks=20, **kwargs):
         return []
 
     async def settle_spa(self):
@@ -390,11 +390,33 @@ class EngineScanGapTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(engine.spa_crawl)
         self.assertTrue(browser.spa_settle)
-        # 初回ページの同一イテレーション後段で SPA 探索が動く。
-        self.assertEqual(browser.explore_calls, 1)
-        # settle は初回ページで2回: 自動有効化直後の hydration 待ち（Codex #104 P1）と、
-        # クリック探索後の in-flight XHR 待ち。
+        # 自動有効化（既定）はクリック探索を read-only 運用にするため、opt-in が無ければ
+        # explore は呼ばない（Codex #104 P1）。settle と harvest は継続。
+        self.assertEqual(browser.explore_calls, 0)
+        # settle は初回ページで2回: 自動有効化直後の hydration 待ち＋harvest 前の XHR 待ち。
         self.assertEqual(browser.settle_calls, 2)
+
+    async def test_auto_enabled_spa_click_exploration_requires_opt_in(self):
+        # allow_state_changing_probes の opt-in があればクリック探索を行う（Codex #104 P1）。
+        engine = self._engine(depth=1, allow_state_changing_probes=True)
+        browser = _SpaMarkerCrawlBrowser()
+        engine._browser = browser
+
+        await engine._phase_crawl()
+
+        self.assertTrue(engine.spa_crawl)
+        self.assertEqual(browser.explore_calls, 1)
+
+    async def test_explicit_spa_crawl_click_exploration_runs_without_probe_opt_in(self):
+        # 明示 --spa-crawl は自動有効化ではないので opt-in 無しでもクリック探索する。
+        engine = self._engine(depth=1, spa_crawl=True)
+        browser = _SpaMarkerCrawlBrowser()
+        engine._browser = browser
+
+        await engine._phase_crawl()
+
+        self.assertTrue(engine.spa_crawl)
+        self.assertEqual(browser.explore_calls, 1)
 
     async def test_auto_spa_opt_out_keeps_crawl_disabled(self):
         engine = self._engine(depth=1, auto_spa_crawl=False)
@@ -436,7 +458,7 @@ class EngineScanGapTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_spa_route_enqueue_respects_depth_limit(self):
         # --depth 1 では探索ルートを訪問しない（通常リンクと同じ深度ガード・Codex #104 P2）。
-        engine = self._engine(depth=1)
+        engine = self._engine(depth=1, allow_state_changing_probes=True)
         engine._browser = _SpaRouteDiscoveryBrowser()
 
         await engine._phase_crawl()
@@ -446,7 +468,7 @@ class EngineScanGapTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_spa_route_enqueue_allowed_within_depth(self):
         # depth=2 なら初回ページ(depth0)の探索ルートは depth1 として巡回対象になる。
-        engine = self._engine(depth=2)
+        engine = self._engine(depth=2, allow_state_changing_probes=True)
         engine._browser = _SpaRouteDiscoveryBrowser()
 
         await engine._phase_crawl()
