@@ -132,13 +132,24 @@ def normalize_url_for_key(url: str) -> str:
         # （slash 非依存の帰結として容認）。クエリ値/ fragment は不変。
         query_str = "&".join(item for _, item in kept)
         norm_path = parsed.path if (query_str or keep_frag) else parsed.path.rstrip("/")
-        return urlunsplit(
+        # 元 URL に明示的な `?`（空クエリ含む）があったかを保持する。urlsplit は /p と /p?
+        # を両方 query="" で表し urlunsplit は両方 /p に潰すため、アプリが両者を区別すると
+        # 誤って同一 checkpoint キーになり片方を skip する（Codex #103 P2）。volatile 除去で
+        # query が空になった場合も元に `?` があれば保持する。had_query_delim/query_str/keep_frag は
+        # 正規化後も不変なので冪等。
+        had_query_delim = bool(parsed.query) or ("?" in url.split("#", 1)[0])
+        base = urlunsplit(
             parsed._replace(
-                scheme=raw_scheme,
-                path=norm_path,
-                query=query_str,
-                fragment=keep_frag,
+                scheme=raw_scheme, path=norm_path, query="", fragment=""
             )
         )
+        if query_str:
+            q = "?" + query_str
+        elif had_query_delim:
+            q = "?"
+        else:
+            q = ""
+        frag = "#" + keep_frag if keep_frag else ""
+        return base + q + frag
     except Exception:
         return url

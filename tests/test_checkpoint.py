@@ -170,7 +170,9 @@ class StateTests(unittest.TestCase):
             "findings": [],
         })
 
-        self.assertEqual(state.target_url, "https://h/start")
+        # 揮発 nonce は除去されるが、元 URL の明示的な `?` は保持する（/p と /p? を
+        # 区別・Codex #103 P2）。
+        self.assertEqual(state.target_url, "https://h/start?")
 
     def test_v5_migration_trims_path_but_keeps_query_value_slash(self):
         old_url = "https://h/action/?z=/admin/&a=1"

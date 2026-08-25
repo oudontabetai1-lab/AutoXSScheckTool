@@ -267,3 +267,16 @@ def test_spa_fragment_path_slash_is_distinct_and_idempotent():
     for u in ("http://h/app/#/admin", "http://h/app/?nonce=1699999999#/route",
               "http://h/app/?nonce=1699999999", "http://h/a/"):
         assert n(n(u)) == n(u)
+
+
+def test_empty_query_delimiter_is_preserved_and_idempotent():
+    from wscan.url_normalize import normalize_url_for_key as n
+    # /p と /p? は区別する（明示的空クエリ・Codex #103 P2）。
+    assert n("http://h/p") != n("http://h/p?")
+    assert n("http://h/p") == "http://h/p"
+    assert n("http://h/p?") == "http://h/p?"
+    # volatile のみで query が空になっても元に ? があれば保持。
+    assert n("http://h/p?nonce=1699999999") == "http://h/p?"
+    # 冪等。
+    for u in ("http://h/p?", "http://h/p?nonce=1699999999", "http://h/p?nonce=1#/r"):
+        assert n(n(u)) == n(u)
