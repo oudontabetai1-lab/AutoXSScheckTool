@@ -2391,6 +2391,15 @@ class BrowserManager:
         except Exception:
             pass
 
+        # 相対 href/routing 属性の解決基準はドキュメントの effective base URI。
+        # <base href> があるとブラウザはそれ基準で解決するので、渡された base_url
+        # （landed_url）ではなく document.baseURI を使う。取得失敗時は base_url へ
+        # フォールバックする（Codex #104 P1）。
+        try:
+            effective_base = await page.evaluate("() => document.baseURI") or base_url
+        except Exception:
+            effective_base = base_url
+
         # Collect interactive elements to click
         selectors = [
             "a[data-href]",
@@ -2438,7 +2447,7 @@ class BrowserManager:
                                 if looks_like_url_ref(_v):
                                     route_ref = _v
                                 break
-                    if not click_target_in_scope(base_url, route_ref, is_in_scope):
+                    if not click_target_in_scope(effective_base, route_ref, is_in_scope):
                         continue
 
                     # セッションを終了させるリンク（logout/signout 等）はクリックしない。
@@ -2465,7 +2474,7 @@ class BrowserManager:
                         if su not in seen_urls:
                             seen_urls.add(su)
                             # Resolve relative URLs
-                            full = urljoin(base_url, su)
+                            full = urljoin(effective_base, su)
                             discovered.append(full)
 
                     # Navigate back to not get lost
@@ -2485,7 +2494,7 @@ class BrowserManager:
         try:
             spa_urls = await page.evaluate("window.__wscan_spa_urls || []")
             for su in spa_urls:
-                full = urljoin(base_url, su)
+                full = urljoin(effective_base, su)
                 if full not in seen_urls:
                     seen_urls.add(full)
                     discovered.append(full)
