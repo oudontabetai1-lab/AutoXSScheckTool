@@ -83,8 +83,10 @@ class NotificationManager:
     # ──────────────────────────────────────────────────────────────────────────
 
     async def notify_finding(self, finding: "Finding", target_url: str = "") -> None:
-        """重大度閾値を超えた Finding を通知する。重複は送信しない。"""
+        """確証済みかつ重大度閾値以上の Finding を通知する。"""
         if not self.enabled:
+            return
+        if not finding.verified:
             return
         rank = _SEVERITY_RANK.get(finding.severity, 99)
         if rank > self._min_rank:

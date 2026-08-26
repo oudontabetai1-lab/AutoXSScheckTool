@@ -90,6 +90,7 @@ class SarifExporter:
         """
         rules = self._build_rules(findings)
         results = [self._finding_to_result(f) for f in findings]
+        confirmed_total = sum(1 for f in findings if f.get("verified") is True)
 
         return {
             "$schema": _SARIF_SCHEMA,
@@ -110,7 +111,9 @@ class SarifExporter:
                     "results": results,
                     "properties": {
                         "target": target_url,
-                        "total_findings": len(findings),
+                        "total_findings": confirmed_total,
+                        "hypothesis_findings": len(findings) - confirmed_total,
+                        "total_results": len(findings),
                     },
                 }
             ],
@@ -154,7 +157,9 @@ class SarifExporter:
         """Finding dict を SARIF result エントリに変換する。"""
         ct = f.get("check_type", "unknown")
         severity = f.get("severity", "medium")
-        level = _SEVERITY_TO_LEVEL.get(severity, "warning")
+        verified = f.get("verified") is True
+        # 未確証 result は残すが、CI の脆弱性ゲート対象にはしない。
+        level = _SEVERITY_TO_LEVEL.get(severity, "warning") if verified else "note"
         url = f.get("url", "")
         evidence = f.get("evidence", "")
         field_name = f.get("field_name", "")
@@ -193,7 +198,7 @@ class SarifExporter:
                 "confidence":       confidence,
                 "field_name":       field_name,
                 "payload":          payload,
-                "verified":         f.get("verified", True),
+                "verified":         verified,
                 # verified=False でも「実際に再現できず」と「例外で検証未実行(要手動確認)」を
                 # SARIF 消費側が区別できるよう、理由を持つ note も出力する。
                 "verification_note": f.get("verification_note", ""),

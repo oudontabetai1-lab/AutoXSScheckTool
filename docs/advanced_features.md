@@ -375,9 +375,12 @@ GitHub Advanced Security / VS Code / Azure DevOps 等の CI ツールにネイ�
 | `check_type` | `ruleId` + `tool.driver.rules[].id` |
 | `severity` (critical/high) | `level: error` |
 | `severity` (medium) | `level: warning` |
+| `verified=false` | 重大度にかかわらず `level: note` |
 | `url` | `locations[0].physicalLocation.artifactLocation.uri` |
 | `evidence` + `field_name` + `payload` | `message.text` |
 | `cvss_score`, `confidence`, `compliance_refs` | `properties` |
+
+通常層（確実性重視）では `verified=true` の Finding だけを確証 (confirmed) 件数として扱います。未確証 (hypothesis) も SARIF result から削除せず、`verification_state` を保持したまま `level: note` に下げるため、CI ゲートと人手レビューを分離できます。
 
 ### 使い方
 
@@ -400,10 +403,12 @@ python main.py scan --no-sarif https://target.example.com
 
 ### 実装
 
-- `NotificationManager.notify_finding()` — Finding ごとの通知（重複防止あり）
+- `NotificationManager.notify_finding()` — `verified=true` かつ重大度閾値以上の Finding のみ通知（重複防止あり）
 - `NotificationManager.notify_scan_complete()` — スキャン完了サマリー通知
 - `_record_finding()` に `asyncio.ensure_future()` でフックを注入（スキャン処理をブロックしない）
 - Slack Block Kit 形式 + 汎用 JSON の両対応
+
+未確証 (hypothesis) はレポートと SARIF に残りますが、Finding 通知は送信しません。
 
 ### 使い方
 

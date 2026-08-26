@@ -631,7 +631,7 @@ Finding は「検出した」という一点だけでなく、出自、再現状
 | フィールド | 値 | 読み方 |
 | --- | --- | --- |
 | `source` | `scanner` / `agent` | 決定論スキャナ由来か Agent の独自解釈か |
-| `verified` | bool | Finding を保持する互換フラグ。`true` は再現済みまたは検証不能で保持、`false` は非再現または検証 skip |
+| `verified` | bool | `verification_state` から派生する読み取り専用値。`reproduced` のときだけ `true` |
 | `verification_state` | `reproduced` / `assumed` / `unreproduced` / `skipped` / 空 | 2回目の検証結果。空は旧 Finding で、従来どおり `reproduced/assumed` と表示 |
 | `confidence` | `confirmed` / `likely` / `tentative` | 証拠の強さ。重要度 `severity` とは別軸 |
 | `evidence_type` | 例: `xss_dialog`, `sqli_error` | どの構造化シグナルで判定したか |
@@ -644,6 +644,8 @@ HTML レポートでは、`source=agent` の Finding を次のバッジで区別
 - バッジなし: 通常の決定論スキャナ由来。
 
 通常スキャナの再検証表示は、`reproduced`（再現済み）、`〜 推定（再検証未実行）`（検証不能だが検出を残す）、`⚠ 要確認`（非再現または検証 skip）に分かれます。`assumed` は Finding を消しませんが、再現済みを意味しません。
+
+通常層（確実性重視）のレポートでは、`verified=true` を **確証 (confirmed)** として主件数・重大度別件数に数え、それ以外を **未確証 (hypothesis)** の別枠に表示します。Finding 一覧と証拠は未確証も含めて全件を保持します。SARIF も全 result を出力しますが、未確証の `level` は `note` です。
 
 Agent Finding は変換時に `source=agent`、`verified=false` となります。`severity` が高くても、Agent 未確証バッジがあれば証拠、Request/Response、再現手順を人手で確認してください。逆に通常 Finding でも `verification_state=assumed`、`confidence=tentative`、`verified=false` のいずれかなら確証済みとは扱いません。
 
@@ -730,12 +732,12 @@ output/<timestamp>/
 
 | 出力 | 用途 |
 | --- | --- |
-| `report.html` | 自己完結型 HTML。Finding、証拠、Agent バッジ、実行条件、**カバレッジ表＋観測性メトリクス**（到達/未到達 URL と理由、試行結果、403/429 ブロック、劣化・脱落した probe/wave）。0 findings が「安全」を意味するとは限らないため、検査できなかった範囲を明示します |
+| `report.html` | 自己完結型 HTML。確証と未確証を別件数で表示し、Finding 一覧・証拠・Agent バッジ、実行条件、**カバレッジ表＋観測性メトリクス**（到達/未到達 URL と理由、試行結果、403/429 ブロック、劣化・脱落した probe/wave）を保持します。0 confirmed が「安全」を意味するとは限らないため、未確証と検査できなかった範囲も確認します |
 | `report_executive.html` | 管理層向けサマリー |
 | `report_developer.html` | 開発者向け詳細・修正観点 |
 | `evidence.json` | Finding と証跡の機械可読 JSON |
 | `reproduction.json`, `reproduce.sh` | 再現情報とコマンド |
-| `report.sarif` | SARIF 2.1.0。`properties.source` 等を含む |
+| `report.sarif` | SARIF 2.1.0。全 Finding を result 化し、未確証は `level: note`。`properties.source` 等を含む |
 | `remediation_plan.md`, `remediation_tasks.json` | 修正計画とタスク |
 | `http_requests.jsonl`, `payloads.jsonl` | 通信・投入ペイロード監査ログ。秘匿ヘッダ等はマスク |
 | `scan_config.json` | 実行設定スナップショット。秘匿値は伏字 |
@@ -750,7 +752,7 @@ python3 main.py scan https://example.com \
   --notify-severity high
 ```
 
-Finding 検出時に Slack Incoming Webhook または汎用 JSON POST エンドポイントへ通知します。通知失敗でスキャン本体は停止しません。serve の通知設定はポータルから管理します。
+確証済み Finding（`verified=true`）が通知重大度以上のときだけ Slack Incoming Webhook または汎用 JSON POST エンドポイントへ通知します。未確証はレポートに残りますが Finding 通知は送りません。通知失敗でスキャン本体は停止しません。serve の通知設定はポータルから管理します。
 
 ### REST / WebSocket
 

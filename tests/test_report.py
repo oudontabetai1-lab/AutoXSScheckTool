@@ -7,6 +7,39 @@ from wscan.scanners.base import Finding
 
 
 class ReportGeneratorTests(unittest.TestCase):
+    def test_headline_and_severity_counts_only_include_confirmed_findings(self):
+        findings = [
+            Finding(
+                check_type="sqli", severity="high",
+                url="http://fixture.test/confirmed", field_name="q",
+                payload="'", evidence="confirmed evidence",
+                verification_state="reproduced",
+            ),
+            Finding(
+                check_type="xss", severity="critical",
+                url="http://fixture.test/hypothesis", field_name="name",
+                payload="<svg/onload=alert(1)>", evidence="hypothesis evidence",
+                verification_state="assumed",
+            ),
+        ]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            html = ReportGenerator(Path(tmp)).generate(
+                target="http://fixture.test", findings=findings,
+                visited_urls=[f.url for f in findings], checks=["sqli", "xss"],
+            ).read_text(encoding="utf-8")
+
+        self.assertIn('<div class="count total-count">1</div>', html)
+        self.assertIn('<div class="label">確証 (Confirmed)</div>', html)
+        self.assertIn('<div class="label">未確証 (Hypothesis)</div>', html)
+        self.assertIn('<div class="count critical-count">0</div>', html)
+        self.assertIn('<div class="count high-count">1</div>', html)
+        # 一覧からは未確証を削除せず、両方の証拠と区分バッジを表示する。
+        self.assertIn("confirmed evidence", html)
+        self.assertIn("hypothesis evidence", html)
+        self.assertIn("✅ 確証", html)
+        self.assertIn("⚠ 要確認", html)
+
     def test_verification_states_have_distinct_labels_and_badges(self):
         def finding(field_name, state, note=""):
             data = dict(
