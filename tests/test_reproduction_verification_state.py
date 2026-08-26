@@ -20,10 +20,11 @@ class ReproductionVerificationStateTests(unittest.TestCase):
         self.assertEqual(item["verification_note"], "要手動確認")
 
     def test_assumed_and_reproduced_distinguishable(self):
-        # verified が同値(True)でも state で reproduced/assumed を区別できる。
+        # reproduced のみ verified=True、assumed は verified=False。state も保持する。
         a = _finding_to_repro_item(_finding("assumed"), 1)
         r = _finding_to_repro_item(_finding("reproduced"), 2)
-        self.assertEqual(a["verified"], r["verified"])
+        self.assertFalse(a["verified"])
+        self.assertTrue(r["verified"])
         self.assertNotEqual(a["verification_state"], r["verification_state"])
 
     def test_skipped_and_unreproduced_distinguishable(self):

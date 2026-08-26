@@ -60,8 +60,8 @@ def _finding_to_repro_item(finding: Finding, item_id: int) -> dict:
         "severity": finding.severity,
         "confidence": finding.confidence,
         "verified": finding.verified,
-        # verified の boolean だけだと reproduced/assumed（共に True）・unreproduced/skipped
-        # （共に False）が潰れる。再現可否を確かめる operator 向け成果物なので state と note も出す。
+        # boolean だけでは assumed/unreproduced/skipped（いずれも False）が潰れる。
+        # 再現可否を確かめる operator 向け成果物なので state と note も出す。
         "verification_state": getattr(finding, "verification_state", ""),
         "verification_note": getattr(finding, "verification_note", ""),
         "url": finding.url,

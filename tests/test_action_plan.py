@@ -17,6 +17,7 @@ class ActionPlanTests(unittest.TestCase):
             payload="<script>alert(1)</script>",
             evidence="JavaScript dialog fired",
             confidence="confirmed",
+            verification_state="reproduced",
             evidence_type="xss_dialog",
             reproduction_steps=["Open search", "Submit payload"],
         )
@@ -108,6 +109,7 @@ class ActionPlanTests(unittest.TestCase):
                 evidence="Dialog from search form",
                 confidence="confirmed",
                 verified=True,
+                verification_state="reproduced",
                 evidence_type="xss_dialog",
                 reproduction_steps=["Open /", "Submit q"],
             ),
@@ -120,6 +122,7 @@ class ActionPlanTests(unittest.TestCase):
                 evidence="Dialog from query parameter",
                 confidence="confirmed",
                 verified=True,
+                verification_state="reproduced",
                 evidence_type="xss_dialog",
                 reproduction_steps=["Open /search", "Submit q"],
             ),
@@ -146,6 +149,7 @@ class ActionPlanTests(unittest.TestCase):
                 evidence="Auth bypass via username",
                 confidence="confirmed",
                 verified=True,
+                verification_state="reproduced",
                 evidence_type="sqli_auth_bypass",
                 evidence_details={
                     "original_url": "http://fixture.test/login",
@@ -161,6 +165,7 @@ class ActionPlanTests(unittest.TestCase):
                 evidence="Auth bypass via password",
                 confidence="confirmed",
                 verified=True,
+                verification_state="reproduced",
                 evidence_type="sqli_auth_bypass",
                 evidence_details={
                     "original_url": "http://fixture.test/login",
@@ -192,6 +197,7 @@ class ActionPlanTests(unittest.TestCase):
             evidence="Low-privilege user could submit role change form",
             confidence="confirmed",
             verified=True,
+            verification_state="reproduced",
         )
 
         with tempfile.TemporaryDirectory() as tmp:

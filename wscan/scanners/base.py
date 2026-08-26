@@ -364,6 +364,14 @@ class Finding:
         # Finding）ここで上書きされず、"" が旧 Finding 専用として保たれる。
         if self.verification_state is None:
             self.verification_state = "reproduced" if self.dialog_confirmed else "assumed"
+        if self.verification_state:
+            self.verified = self.verification_state == "reproduced"
+
+    def apply_verification(self, state: str, note: str = "") -> None:
+        """検証結果を単一チョークポイントで反映する。state を正本にし verified を派生させる。"""
+        self.verification_state = state
+        self.verified = state == "reproduced"
+        self.verification_note = note
 
     @classmethod
     def from_dict(cls, data: dict) -> "Finding":
@@ -375,6 +383,10 @@ class Finding:
         resp = dict(data.get("response", {}) or {})
         if data.get("response_body_excerpt") and "body" not in resp:
             resp["body"] = data.get("response_body_excerpt", "")
+        verification_state = data.get("verification_state", "")
+        # verified のみを持つ旧 Finding は state を空のまま保ち、確証済みへ昇格させない。
+        if not verification_state and "verified" in data:
+            verification_state = ""
         return cls(
             check_type=data.get("check_type", ""),
             severity=data.get("severity", "medium"),
@@ -390,7 +402,7 @@ class Finding:
             timestamp=data.get("timestamp", time.time()),
             verified=bool(data.get("verified", True)),
             verification_note=data.get("verification_note", ""),
-            verification_state=data.get("verification_state", ""),
+            verification_state=verification_state,
             confidence=data.get("confidence", "tentative"),
             evidence_type=data.get("evidence_type", ""),
             evidence_details=dict(data.get("evidence_details", {}) or {}),

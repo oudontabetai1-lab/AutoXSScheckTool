@@ -46,7 +46,7 @@ class ReportGeneratorTests(unittest.TestCase):
         self.assertIn(">reproduced/assumed</div>", html)
         self.assertIn("〜 推定（再検証未実行）", html)
         self.assertEqual(html.count('class="badge-assumed"'), 1)
-        self.assertEqual(html.count("⚠ 要確認"), 2)
+        self.assertEqual(html.count("⚠ 要確認"), 3)
 
     def test_assumed_with_verified_false_labeled_assumed_not_unreproduced(self):
         # Agent 仮説等は verified=False かつ state="assumed"（一度も retry していない）。
@@ -67,10 +67,9 @@ class ReportGeneratorTests(unittest.TestCase):
         self.assertIn(">assumed (not re-verified)</div>", html)
         # この finding を "not reproduced" とは表示しない。
         self.assertNotIn(">not reproduced</div>", html)
-        # バッジも state 優先: verified=False+assumed は 推定バッジで、⚠要確認（検証失敗/未実行の
-        # 警告）は付けない（一度も retry していない Agent 仮説等）。
+        # 未再検証であることを推定バッジと ⚠要確認の両方で明示する。
         self.assertIn('class="badge-assumed"', html)
-        self.assertNotIn("⚠ 要確認", html)
+        self.assertIn("⚠ 要確認", html)
 
     def test_remediation_summary_html_renders_verification_state(self):
         # HTML レポートの remediation summary が task/review 行に verify state を出す
@@ -90,10 +89,10 @@ class ReportGeneratorTests(unittest.TestCase):
                 target="http://h", findings=findings,
                 visited_urls=["http://h/"], checks=["sqli", "xss"],
             ).read_text(encoding="utf-8")
-        # actionable task（assumed）に verify state と要手動確認バッジ。
-        self.assertIn("verify: assumed", html)
-        self.assertIn("⚠ 要手動確認", html)
-        # review-only（skipped）行に verify state。
+        # assumed/skipped はともに finding を保持し、review-only に state を出す。
+        self.assertIn("Remediation Summary (0 tasks)", html)
+        self.assertIn("Review-only Signals (2)", html)
+        self.assertIn("verify=assumed", html)
         self.assertIn("verify=skipped", html)
 
     def test_agent_findings_have_origin_and_verification_badges(self):
@@ -153,6 +152,7 @@ class ReportGeneratorTests(unittest.TestCase):
                 evidence="Dialog from search form",
                 confidence="confirmed",
                 verified=True,
+                verification_state="reproduced",
                 evidence_type="xss_dialog",
                 reproduction_steps=["Open /", "Submit q"],
             ),
@@ -165,6 +165,7 @@ class ReportGeneratorTests(unittest.TestCase):
                 evidence="Dialog from query parameter",
                 confidence="confirmed",
                 verified=True,
+                verification_state="reproduced",
                 evidence_type="xss_dialog",
                 reproduction_steps=["Open /search", "Submit q"],
             ),

@@ -6,46 +6,40 @@ from wscan.scanners.base import Finding
 
 
 def _finding(state, confidence="confirmed", verified=True, field_name="q"):
-    f = Finding(
+    return Finding(
         check_type="sqli", severity="high", url="http://h/a", field_name=field_name,
         payload="'", evidence="SQL error", evidence_type="sqli_error",
-        confidence=confidence, verified=verified,
+        confidence=confidence, verified=verified, verification_state=state,
     )
-    f.verification_state = state
-    return f
 
 
 class ActionPlanVerificationStateTests(unittest.TestCase):
-    def test_task_exports_state_and_flags_assumed(self):
+    def test_assumed_is_retained_as_review_item(self):
         plan = build_action_plan([_finding("assumed")])
-        self.assertEqual(len(plan["tasks"]), 1)
-        task = plan["tasks"][0]
-        self.assertEqual(task["verification_state"], "assumed")
-        # assumed は「消さない（タスクとして残す）が要手動確認」を明示。
-        self.assertTrue(task["needs_confirmation"])
+        self.assertEqual(len(plan["tasks"]), 0)
+        self.assertEqual(len(plan["review_items"]), 1)
+        self.assertEqual(plan["review_items"][0]["verification_state"], "assumed")
+        self.assertFalse(plan["review_items"][0]["verified"])
 
-    def test_needs_confirmation_spans_grouped_findings(self):
-        # 同一 group（同 check/field/evidence）で reproduced と assumed が混在する場合、
-        # 代表が reproduced でも group にひとつでも assumed があれば needs_confirmation=True。
+    def test_reproduced_and_assumed_split_without_dropping_either(self):
         plan = build_action_plan([_finding("reproduced"), _finding("assumed")])
-        self.assertEqual(len(plan["tasks"]), 1)  # 同 group=1タスク（related にまとまる）
-        self.assertTrue(plan["tasks"][0]["needs_confirmation"])
+        self.assertEqual(len(plan["tasks"]), 1)
+        self.assertEqual(len(plan["review_items"]), 1)
+        self.assertEqual(plan["tasks"][0]["verification_state"], "reproduced")
+        self.assertEqual(plan["review_items"][0]["verification_state"], "assumed")
 
     def test_reproduced_not_flagged(self):
         task = build_action_plan([_finding("reproduced")])["tasks"][0]
         self.assertEqual(task["verification_state"], "reproduced")
         self.assertFalse(task["needs_confirmation"])
 
-    def test_assumed_and_reproduced_distinguishable_in_task_data(self):
-        # 同じ severity/confidence/verified でも state で区別できる（"indistinguishable" 解消）。
-        # 別フィールドにして別タスクへ（同一 group にまとめられないように）。
-        tasks = build_action_plan([
+    def test_assumed_and_reproduced_distinguishable_in_plan_data(self):
+        plan = build_action_plan([
             _finding("assumed", field_name="a"),
             _finding("reproduced", confidence="likely", field_name="b"),
-        ])["tasks"]
-        states = {t["verification_state"] for t in tasks}
-        self.assertIn("assumed", states)
-        self.assertIn("reproduced", states)
+        ])
+        self.assertEqual(plan["tasks"][0]["verification_state"], "reproduced")
+        self.assertEqual(plan["review_items"][0]["verification_state"], "assumed")
 
     def test_review_item_exports_state(self):
         # verified=False は review-only。そこにも state を出す。
