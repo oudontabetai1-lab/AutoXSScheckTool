@@ -101,7 +101,7 @@ def url_looks_like_login(url: str) -> bool:
     クエリ値には適用しない。browser.is_on_login_page の空 login_url 分岐と本関数を共有して
     「login ページか」と「login ページへの意図的訪問か」の判定を対称化する。
     """
-    from urllib.parse import urlparse, parse_qs
+    from urllib.parse import urlparse
     parsed = urlparse((url or "").lower())
     if _path_has_login_hint(parsed.path):
         return True
@@ -114,15 +114,11 @@ def url_looks_like_login(url: str) -> bool:
         frag_path = frag.split("?", 1)[0]
         if _path_has_login_hint(frag_path):
             return True
-    # クエリルータ（例 ``/index.php?route=account/login``）は**既知のルーティング param 名**の値だけ
-    # login ルートとして判定する。``next=/login`` 等の redirect 値は対象外にして、無関係ページを
-    # login と誤判定しない（#108: query-route は拾うが redirect 値は拾わない）。
-    if parsed.query:
-        params = parse_qs(parsed.query)
-        for name in _ROUTE_PARAM_NAMES:
-            for val in params.get(name, []):
-                if _path_has_login_hint("/" + val.strip("/")):
-                    return True
+    # クエリ param（``?route=…`` / ``?page=…`` 等）は**アプリのルータ仕様を知らないと曖昧**で、
+    # どの param 名も content になりうる（#108 で next/q/page 等の false positive が続いた）。
+    # そこで **login_url 未設定の heuristic では query を判定に使わない**（曖昧さを閉じる）。
+    # クエリ符号化された login ルート（例 ``/index.php?route=account/login``）は、login_url を
+    # 明示設定した場合に _is_login_target_url の完全一致分岐（query param を厳密照合）で扱う。
     return False
 
 
