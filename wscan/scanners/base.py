@@ -338,7 +338,7 @@ class Finding:
     dialog_confirmed: bool = False   # True when JS alert() was actually triggered
     dialog_message: str = ""         # The alert message that appeared
     timestamp: float = field(default_factory=time.time)
-    verified: bool = True            # False = could not reproduce on second attempt
+    _legacy_verified: bool = False   # 空 state の旧 Finding から復元した値のみ保持
     verification_note: str = ""      # Reason when verified=False
     confidence: str = "tentative"   # "confirmed" | "likely" | "tentative"
     evidence_type: str = ""          # Structured signal, e.g. xss_dialog, sqli_error
@@ -364,13 +364,17 @@ class Finding:
         # Finding）ここで上書きされず、"" が旧 Finding 専用として保たれる。
         if self.verification_state is None:
             self.verification_state = "reproduced" if self.dialog_confirmed else "assumed"
+
+    @property
+    def verified(self) -> bool:
+        """verification_state を正本とする read-only の派生値。"""
         if self.verification_state:
-            self.verified = self.verification_state == "reproduced"
+            return self.verification_state == "reproduced"
+        return self._legacy_verified
 
     def apply_verification(self, state: str, note: str = "") -> None:
-        """検証結果を単一チョークポイントで反映する。state を正本にし verified を派生させる。"""
+        """検証結果を反映する。verification_state を正本とする。"""
         self.verification_state = state
-        self.verified = state == "reproduced"
         self.verification_note = note
 
     @classmethod
@@ -387,7 +391,7 @@ class Finding:
         # verified のみを持つ旧 Finding は state を空のまま保ち、確証済みへ昇格させない。
         if not verification_state and "verified" in data:
             verification_state = ""
-        return cls(
+        finding_data = dict(
             check_type=data.get("check_type", ""),
             severity=data.get("severity", "medium"),
             url=data.get("url", ""),
@@ -400,7 +404,6 @@ class Finding:
             dialog_confirmed=bool(data.get("dialog_confirmed", False)),
             dialog_message=data.get("dialog_message", ""),
             timestamp=data.get("timestamp", time.time()),
-            verified=bool(data.get("verified", True)),
             verification_note=data.get("verification_note", ""),
             verification_state=verification_state,
             confidence=data.get("confidence", "tentative"),
@@ -420,6 +423,9 @@ class Finding:
             injection_form_index=int(data.get("injection_form_index", 0) or 0),
             injection_dom_index=int(data.get("injection_dom_index", -1)),
         )
+        if not verification_state:
+            finding_data["_legacy_verified"] = bool(data.get("verified", True))
+        return cls(**finding_data)
 
     @property
     def cvss_vector(self) -> str:

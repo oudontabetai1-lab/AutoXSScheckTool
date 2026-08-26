@@ -126,6 +126,15 @@ class FindingInjectionProvenanceTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(finding.verified)
         self.assertEqual(finding.verification_note, "")
 
+    def test_verified_is_read_only(self):
+        finding = Finding(
+            check_type="sqli", severity="high", url="http://h/a",
+            field_name="q", payload="'", evidence="e",
+        )
+
+        with self.assertRaises(AttributeError):
+            finding.verified = True
+
     def test_from_dict_empty_state_preserves_legacy_verified_without_promotion(self):
         base = {
             "check_type": "sqli", "severity": "high", "url": "http://h/a",

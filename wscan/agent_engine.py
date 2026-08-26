@@ -60,7 +60,6 @@ def _convert_agent_findings(agent_findings: list) -> list:
             field_name=af.field_name,
             payload=af.payload,
             evidence=af.evidence,
-            verified=False,
             source="agent",
             agent_verified=getattr(af, "agent_verified", False),
         )

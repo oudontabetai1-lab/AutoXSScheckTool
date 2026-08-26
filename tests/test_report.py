@@ -8,25 +8,27 @@ from wscan.scanners.base import Finding
 
 class ReportGeneratorTests(unittest.TestCase):
     def test_verification_states_have_distinct_labels_and_badges(self):
-        def finding(field_name, state, verified=True, note=""):
-            return Finding(
+        def finding(field_name, state, note=""):
+            data = dict(
                 check_type="xss",
                 severity="high",
                 url=f"http://fixture.test/{field_name}",
                 field_name=field_name,
                 payload="<svg/onload=alert(1)>",
                 evidence=f"{state or 'legacy'} evidence",
-                verified=verified,
                 verification_state=state,
                 verification_note=note,
                 evidence_type="xss_reflection",
             )
+            if not state:
+                return Finding.from_dict({**data, "verified": True})
+            return Finding(**data)
 
         findings = [
             finding("reproduced", "reproduced"),
             finding("assumed", "assumed"),
-            finding("unreproduced", "unreproduced", verified=False),
-            finding("skipped", "skipped", verified=False, note="要手動確認"),
+            finding("unreproduced", "unreproduced"),
+            finding("skipped", "skipped", note="要手動確認"),
             finding("legacy", ""),
         ]
 
@@ -56,7 +58,7 @@ class ReportGeneratorTests(unittest.TestCase):
             check_type="xss", severity="high",
             url="http://fixture.test/agent", field_name="q",
             payload="<svg/onload=alert(1)>", evidence="agent hypothesis",
-            verified=False, verification_state="assumed",
+            verification_state="assumed",
             evidence_type="xss_reflection",
         )
         with tempfile.TemporaryDirectory() as tmp:
@@ -81,7 +83,7 @@ class ReportGeneratorTests(unittest.TestCase):
                     verification_state="assumed"),
             Finding(check_type="xss", severity="high", url="http://h/b",
                     field_name="r", payload="<x>", evidence="reflected",
-                    evidence_type="xss_reflection", verified=False,
+                    evidence_type="xss_reflection",
                     verification_state="skipped"),
         ]
         with tempfile.TemporaryDirectory() as tmp:
@@ -151,7 +153,6 @@ class ReportGeneratorTests(unittest.TestCase):
                 payload="<script>alert(1)</script>",
                 evidence="Dialog from search form",
                 confidence="confirmed",
-                verified=True,
                 verification_state="reproduced",
                 evidence_type="xss_dialog",
                 reproduction_steps=["Open /", "Submit q"],
@@ -164,7 +165,6 @@ class ReportGeneratorTests(unittest.TestCase):
                 payload="<script>alert(1)</script>",
                 evidence="Dialog from query parameter",
                 confidence="confirmed",
-                verified=True,
                 verification_state="reproduced",
                 evidence_type="xss_dialog",
                 reproduction_steps=["Open /search", "Submit q"],
@@ -177,7 +177,6 @@ class ReportGeneratorTests(unittest.TestCase):
                 payload="<script>alert(1)</script>",
                 evidence="Reflected but not reproduced",
                 confidence="tentative",
-                verified=False,
                 evidence_type="xss_reflection",
                 reproduction_steps=["Open /dom", "Submit next"],
             ),

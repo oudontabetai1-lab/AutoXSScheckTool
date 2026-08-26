@@ -5,17 +5,17 @@ from wscan.reproduction import _finding_to_repro_item
 from wscan.scanners.base import Finding
 
 
-def _finding(state, verified=True, note=""):
+def _finding(state, note=""):
     return Finding(
         check_type="sqli", severity="high", url="http://h/a", field_name="q",
         payload="'", evidence="SQL error", evidence_type="sqli_error",
-        verified=verified, verification_state=state, verification_note=note,
+        verification_state=state, verification_note=note,
     )
 
 
 class ReproductionVerificationStateTests(unittest.TestCase):
     def test_repro_item_includes_state_and_note(self):
-        item = _finding_to_repro_item(_finding("skipped", verified=False, note="要手動確認"), 1)
+        item = _finding_to_repro_item(_finding("skipped", note="要手動確認"), 1)
         self.assertEqual(item["verification_state"], "skipped")
         self.assertEqual(item["verification_note"], "要手動確認")
 
@@ -29,8 +29,8 @@ class ReproductionVerificationStateTests(unittest.TestCase):
 
     def test_skipped_and_unreproduced_distinguishable(self):
         # verified が同値(False)でも state で skipped/unreproduced を区別できる。
-        s = _finding_to_repro_item(_finding("skipped", verified=False), 1)
-        u = _finding_to_repro_item(_finding("unreproduced", verified=False), 2)
+        s = _finding_to_repro_item(_finding("skipped"), 1)
+        u = _finding_to_repro_item(_finding("unreproduced"), 2)
         self.assertEqual(s["verified"], u["verified"])
         self.assertNotEqual(s["verification_state"], u["verification_state"])
 

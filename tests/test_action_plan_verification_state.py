@@ -5,11 +5,11 @@ from wscan.action_plan import build_action_plan
 from wscan.scanners.base import Finding
 
 
-def _finding(state, confidence="confirmed", verified=True, field_name="q"):
+def _finding(state, confidence="confirmed", field_name="q"):
     return Finding(
         check_type="sqli", severity="high", url="http://h/a", field_name=field_name,
         payload="'", evidence="SQL error", evidence_type="sqli_error",
-        confidence=confidence, verified=verified, verification_state=state,
+        confidence=confidence, verification_state=state,
     )
 
 
@@ -43,7 +43,7 @@ class ActionPlanVerificationStateTests(unittest.TestCase):
 
     def test_review_item_exports_state(self):
         # verified=False は review-only。そこにも state を出す。
-        plan = build_action_plan([_finding("unreproduced", verified=False)])
+        plan = build_action_plan([_finding("unreproduced")])
         self.assertEqual(len(plan["review_items"]), 1)
         self.assertEqual(plan["review_items"][0]["verification_state"], "unreproduced")
 
@@ -52,8 +52,8 @@ class ActionPlanVerificationStateTests(unittest.TestCase):
         # （verified=False で潰さない）。
         from wscan.action_plan import _build_markdown
         plan = build_action_plan([
-            _finding("unreproduced", verified=False, field_name="a"),
-            _finding("skipped", verified=False, field_name="b"),
+            _finding("unreproduced", field_name="a"),
+            _finding("skipped", field_name="b"),
         ])
         md = _build_markdown(plan["tasks"], plan["review_items"])
         self.assertIn("- Verification: unreproduced", md)
@@ -64,8 +64,8 @@ class ActionPlanVerificationStateTests(unittest.TestCase):
         # 代表 1 つでなく group 内の全 state を出す（片方の経路を見落とさない）。
         from wscan.action_plan import _build_markdown
         plan = build_action_plan([
-            _finding("unreproduced", verified=False, field_name="q"),
-            _finding("skipped", verified=False, field_name="q"),
+            _finding("unreproduced", field_name="q"),
+            _finding("skipped", field_name="q"),
         ])
         self.assertEqual(len(plan["review_items"]), 1)  # 同 group=1 item
         self.assertEqual(

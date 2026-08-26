@@ -73,6 +73,7 @@ class MonitorPayloadEventTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(monitor.api_findings[0]["verification_state"], "assumed")
 
         f.verification_state = "reproduced"
+        self.assertTrue(f.to_dict()["verified"])
         await monitor.emit_finding_update(f.to_dict())
 
         # 蓄積は増えず（重複しない）、同一 finding の state が更新される。
