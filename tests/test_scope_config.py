@@ -100,10 +100,14 @@ class ScopeConfigTests(unittest.TestCase):
         )
         self.assertFalse(engine._is_login_target_url("http://app.test/index.php"))
 
-    def test_is_login_target_url_false_without_login_url(self):
+    def test_is_login_target_url_heuristic_without_login_url(self):
+        # login_url 未設定でも /login 等の login-looking URL は「意図的な訪問」と認識する（FLOW-001）。
+        # これがないと post-auth crawl が /login の正規巡回を「セッション失効」と誤判定して落とす。
+        # 非 login ページは False のまま（そこへの redirect は本物の失効として扱える）。
         engine = self._engine()
 
-        self.assertFalse(engine._is_login_target_url("http://app.test/login"))
+        self.assertTrue(engine._is_login_target_url("http://app.test/login"))
+        self.assertFalse(engine._is_login_target_url("http://app.test/dashboard"))
 
     def test_exclude_url_path_wildcard_matches_subtree(self):
         engine = self._engine(exclude_urls=["/dontScan/*"])
