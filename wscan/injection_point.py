@@ -235,6 +235,8 @@ class InjectionPoint:
     parameter_id: str
     display_name: str = ""
     method: str = ""
+    action: str = ""
+    labels: str = ""
     form_index: int = 0
     dom_index: int = -1
     template_id: str = ""
@@ -288,6 +290,9 @@ class InjectionPoint:
         form_index: int = 0,
         source: str = "crawl",
         dom_index: int = -1,
+        method: str = "",
+        action: str = "",
+        labels: str = "",
     ) -> "InjectionPoint":
         """従来フォーム用の注入点を作る。"""
         return cls(
@@ -297,6 +302,9 @@ class InjectionPoint:
             display_name=field_name,
             form_index=form_index,
             dom_index=dom_index,
+            method=str(method or "").upper(),
+            action=str(action or ""),
+            labels=str(labels or ""),
             source=source,
         )
 

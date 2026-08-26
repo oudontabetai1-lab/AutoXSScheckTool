@@ -568,6 +568,8 @@ class SQLiScanner(BaseScanner):
         明示して回帰を防ぐ。JSON は常に base の共有 transport を使う。
         """
         if baseline and ip.location != "json_body":
+            if not self.may_scan_injection_point(ip):
+                return "", {}
             if ip.location == "url_param":
                 return await self.browser.test_url_param(
                     ip.url, ip.parameter_id, payload

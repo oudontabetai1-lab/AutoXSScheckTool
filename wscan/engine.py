@@ -27,6 +27,7 @@ import hashlib
 import json
 import os
 import re
+import warnings
 import xml.etree.ElementTree as _ET
 from collections import Counter, deque
 from contextvars import ContextVar
@@ -34,6 +35,8 @@ from dataclasses import dataclass, field as dc_field
 from pathlib import Path
 from typing import Optional
 from urllib.parse import urlparse, urljoin, parse_qs, urlsplit
+
+from wscan.state_profile import VALID_PROFILES
 
 # ---------------------------------------------------------------------------
 # Per-worker browser context variable
@@ -535,6 +538,8 @@ class ScanEngine:
         # Opt-in for intrusive, potentially state-changing probes (e.g. privesc
         # verb tampering with POST/PUT/PATCH). Off by default for safety.
         allow_state_changing_probes: bool = False,
+        # 注入リクエストの状態変更プロファイル。既定は従来挙動を維持する。
+        state_profile: str = "unrestricted",
         # ①: SPA crawl enhancement
         spa_crawl: bool = False,
         auto_spa_crawl: bool = True,
@@ -626,6 +631,15 @@ class ScanEngine:
         self.auto_register = auto_register
         self.auto_register_count = auto_register_count
         self.allow_state_changing_probes = allow_state_changing_probes
+        canonical_state_profile = str(state_profile or "").strip().lower()
+        if canonical_state_profile not in VALID_PROFILES:
+            warnings.warn(
+                f"Unknown state_profile {state_profile!r}; falling back to 'unrestricted'.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            canonical_state_profile = "unrestricted"
+        self.state_profile = canonical_state_profile
         # account_sessions: resolved at run time — list of {"username":, "cookies":, "role":}
         self.account_sessions: list = []
         # ①: SPA crawl
@@ -1028,6 +1042,7 @@ class ScanEngine:
             sleep_factor=self.sleep_factor,
             exclude_fields=self.exclude_fields,
             enabled_checks=self.checks,
+            state_profile=self.state_profile,
         )
 
         # State
@@ -1772,6 +1787,11 @@ class ScanEngine:
                 ) or hasattr(scanner, "scan_page_context")
                 if not has_page_impl:
                     continue
+                # state profile: 常時状態変更 scanner（graphql/mass_assignment 等）の page-level
+                # scan_page は宣言メソッド不問で POST を出すため、profile で事前に skip する。
+                _page_gate = getattr(scanner, "may_run_page_scanner", None)
+                if callable(_page_gate) and not _page_gate(url):
+                    continue
                 try:
                     self._api_auth_failed = url_auth_failed
                     before_count = len(self.all_findings)
@@ -1998,12 +2018,20 @@ class ScanEngine:
         form_index: int,
         is_url_param: bool,
         dom_index: int = -1,
+        field: Optional[dict] = None,
     ):
         """従来 form/URL parameter から InjectionPoint を一意に生成する。"""
         if is_url_param:
             return InjectionPoint.for_url_param(url, field_name)
+        form_meta = field or {}
         return InjectionPoint.for_form(
-            url, field_name, form_index, dom_index=dom_index
+            url,
+            field_name,
+            form_index,
+            dom_index=dom_index,
+            method=form_meta.get("_form_method", ""),
+            action=form_meta.get("_form_action", ""),
+            labels=form_meta.get("_form_labels", ""),
         )
 
     def _checkpoint_is_done_ip(self, ip, check: str) -> bool:
@@ -4657,6 +4685,9 @@ class ScanEngine:
                 if hasattr(scanner, "scan_page_context"):
                     page_findings = await scanner.scan_page_context(page)
                 else:
+                    _page_gate = getattr(scanner, "may_run_page_scanner", None)
+                    if callable(_page_gate) and not _page_gate(page.url):
+                        continue
                     page_findings = await scanner.scan_page(page.url)
                 page_findings = page_findings or []
                 for f in page_findings:
@@ -4813,7 +4844,11 @@ class ScanEngine:
         for fi, form in enumerate(forms):
             dom_idx = form.get("index", fi)
             for inp in form.get("inputs", []):
-                field_queue.append((fi, dom_idx, inp, False))
+                field = dict(inp)
+                field["_form_method"] = form.get("method") or "GET"
+                field["_form_action"] = form.get("action") or page.url
+                field["_form_labels"] = form.get("labels") or ""
+                field_queue.append((fi, dom_idx, field, False))
         for param in page.url_params:
             field_queue.append((0, 0, {"name": param, "type": "text"}, True))
 
@@ -4939,6 +4974,19 @@ class ScanEngine:
 
             # Build a per-field payload map for each relevant check type
             for check_name in [c for c in ("xss", "sqli", "ssti") if c in self.scanners]:
+                scanner = self.scanners[check_name]
+                multi_ip = InjectionPoint.for_form(
+                    page.url,
+                    f"multi[{fi}]",
+                    fi,
+                    dom_index=dom_idx,
+                    method=form.get("method") or "GET",
+                    action=form.get("action") or page.url,
+                    labels=form.get("labels") or "",
+                )
+                may_scan_ip = getattr(scanner, "may_scan_injection_point", None)
+                if callable(may_scan_ip) and not may_scan_ip(multi_ip):
+                    continue
                 field_payloads: dict = {}
 
                 for inp in inputs:
@@ -5090,7 +5138,7 @@ class ScanEngine:
         """Run enabled scanners on a single field, guided by the attack plan."""
         field_name = field.get("name", "unknown")
         ip = self._injection_point_for(
-            url, field_name, form_index, is_url_param, dom_index
+            url, field_name, form_index, is_url_param, dom_index, field
         )
         location = "URL param" if is_url_param else "form field"
 
@@ -5119,6 +5167,26 @@ class ScanEngine:
         for check_name in ordered_checks:
             scanner = self.scanners.get(check_name)
             if scanner is None:
+                continue
+
+            requires_preflight = getattr(
+                scanner, "requires_state_profile_preflight", None
+            )
+            may_scan_ip = getattr(scanner, "may_scan_injection_point", None)
+            if (
+                callable(requires_preflight)
+                and requires_preflight()
+                and callable(may_scan_ip)
+                and not may_scan_ip(ip)
+            ):
+                self._record_scan_matrix(
+                    url=url,
+                    field_name=field_name,
+                    check_name=check_name,
+                    status="skipped",
+                    location=location,
+                    note=f"Skipped by state profile: {self.state_profile}.",
+                )
                 continue
 
             # 再開可能スキャン: 既に完了した (url, field, location, check) 単位は飛ばす
@@ -5310,8 +5378,22 @@ class ScanEngine:
         """
         field_name = field.get("name", "unknown")
         ip = self._injection_point_for(
-            url, field_name, form_index, is_url_param, dom_index
+            url, field_name, form_index, is_url_param, dom_index, field
         )
+
+        # state profile: adaptive も同じ preflight を適用する（DOMXSS/StoredXSS 等は
+        # 独自 _apply_payload/browser 送信で base の _apply_ip を通らないため）。
+        _gated_checks = []
+        for _cn in check_names:
+            _sc = self.scanners.get(_cn)
+            _pf = getattr(_sc, "requires_state_profile_preflight", None)
+            _ms = getattr(_sc, "may_scan_injection_point", None)
+            if callable(_pf) and _pf() and callable(_ms) and not _ms(ip):
+                continue
+            _gated_checks.append(_cn)
+        check_names = _gated_checks
+        if not check_names:
+            return None
 
         # provider 自体が使えない場合はフォールバック完了として収束させる。
         # 個別 generate() の一時失敗とは分離し、可用性 probe は scan 中に一度だけ行う。
@@ -5850,6 +5932,34 @@ class ScanEngine:
         """
         from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
         import re as _re
+
+        # state profile: 検証再送も profile に従う。復元 finding の再構築 ip は method/action
+        # metadata を欠く（GET 既定になる）ため、finding が実際に送った request の method/url で
+        # 判定する（unrestricted checkpoint を read-only/controlled-write で resume した際に、
+        # 破壊的 POST finding が verify で再送されるのを防ぐ）。method 既知時のみ gate する。
+        from wscan.state_profile import may_submit as _may_submit
+        _req = f.request or {}
+        # 常時状態変更 scanner（deserialization/nosql/graphql/mass_assignment/prototype_pollution）は
+        # request に method を持たなくても POST 相当。宣言メソッド不問で POST として判定する。
+        _vscanner = self.scanners.get(
+            "graphql" if f.check_type.startswith("graphql_")
+            else "jwt" if f.check_type.startswith("jwt_")
+            else "privesc" if f.check_type.startswith("privesc_")
+            else f.check_type
+        )
+        _forced_post = bool(getattr(_vscanner, "ALWAYS_STATE_CHANGING", False))
+        _req_method = ("POST" if _forced_post else "") or _req.get("method") or f.injection_method or ""
+        _req_target = _req.get("url") or f.url
+        if _req_method and not _may_submit(
+            getattr(self, "state_profile", "unrestricted"),
+            method=_req_method,
+            action=f"{_req_target} {f.url}",
+        ):
+            errors = getattr(self, "wave_errors", None)
+            if errors is None:
+                self.wave_errors = errors = []
+            errors.append(f"state_change_skipped:verify:{f.check_type}")
+            return "assumed"  # profile がこの再送を許さない → penalize しない terminal state
 
         if f.check_type.startswith("graphql_"):
             scanner_key = "graphql"

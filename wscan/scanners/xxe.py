@@ -5,6 +5,7 @@ that attempt to read local files via SYSTEM entities, trigger out-of-band
 DNS lookups, or cause Billion-Laughs-style entity expansion.
 """
 import re
+from dataclasses import replace
 from typing import TYPE_CHECKING
 
 import httpx
@@ -62,6 +63,17 @@ class XXEScanner(BaseScanner):
     def __init__(self, engine: "ScanEngine"):
         super().__init__(engine)
         self._checked_urls: set[str] = set()
+
+    async def scan_injection_point(
+        self,
+        ip,
+        field: dict,
+    ) -> list[Finding]:
+        """XXE はフォーム method に関係なく XML を POST するため明示 gate する。"""
+        post_ip = replace(ip, method="POST", action=ip.action or ip.url)
+        if not self.may_scan_injection_point(post_ip):
+            return []
+        return await super().scan_injection_point(ip, field)
 
     async def _post_xml(self, url: str, payload: str) -> tuple[str, int, float]:
         timeout = getattr(self.engine, "timeout", 15)

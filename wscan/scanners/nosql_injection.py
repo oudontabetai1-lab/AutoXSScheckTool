@@ -66,6 +66,7 @@ class NoSQLInjectionScanner(BaseScanner):
     """NoSQL injection scanner targeting MongoDB operator injection."""
 
     CHECK_TYPE = "nosql"
+    ALWAYS_STATE_CHANGING = True
     SEVERITY = "high"
     # json_body の NoSQL 攻撃は pointer に**構造化オペレータ**(dict `{"$ne": ...}`)を入れる戦略が
     # 必要で、文字列 payload をそのまま送ると `"field": "{...}"` になり検出できない（偽陰性）。

@@ -46,6 +46,7 @@ class FileUploadScanner(BaseScanner):
     """Insecure file upload vulnerability scanner."""
 
     CHECK_TYPE = "file_upload"
+    ALWAYS_STATE_CHANGING = True
     SEVERITY = "critical"
 
     def __init__(self, engine: "ScanEngine"):

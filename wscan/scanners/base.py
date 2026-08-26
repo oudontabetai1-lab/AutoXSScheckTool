@@ -573,6 +573,17 @@ class BaseScanner(ABC):
     CHECK_TYPE = "base"
     SEVERITY = "medium"
     SUPPORTS_JSON_BODY = False
+    # 送信先の宣言メソッドに関わらず常に状態変更 HTTP（POST 等）を出すスキャナ。
+    # 独自 transport（_test_raw_post/_test_json_body/graphql/mass_assignment 等）を持つため、
+    # state profile gate は ip の宣言メソッドでなく POST として扱う（read-only で確実に skip）。
+    ALWAYS_STATE_CHANGING = False
+    # scan_injection_point の内部でフォーム送信し得る検査。engine の事前 gate 用。
+    STATE_PROFILE_PREFLIGHT_CHECKS = frozenset({
+        "sqli", "xss", "os", "nosql", "ssti", "deserialization", "ldap",
+        "path_traversal", "ssrf", "open_redirect", "header_injection",
+        "mail_header", "dom_xss", "stored_xss", "file_upload", "xxe",
+        "race_condition",
+    })
 
     def __init__(self, engine: "ScanEngine"):
         self.engine = engine
@@ -597,6 +608,63 @@ class BaseScanner(ABC):
             except Exception:
                 return
         errors.append(note)
+
+    def may_scan_injection_point(
+        self,
+        ip: InjectionPoint,
+        *,
+        record_skip: bool = True,
+    ) -> bool:
+        """注入点を state profile で判定し、除外を観測ログへ残す。"""
+        from wscan.state_profile import may_submit
+
+        if getattr(self, "ALWAYS_STATE_CHANGING", False):
+            # 宣言メソッド不問で POST 相当として判定（url を破壊判定に含める）。
+            method = "POST"
+            action = f"{ip.action or ''} {ip.url or ''}".strip()
+            labels = ip.labels
+        elif ip.location == "url_param":
+            method, action, labels = "GET", ip.url, ""
+        else:
+            # crawl metadata を取得できない旧経路は GET 相当として互換性を保つ。
+            method = ip.method or "GET"
+            # 送信先は form action だけでなく ip.url のこともある（例 XXE は _post_xml(url) で
+            # ip.url へ POST する）。破壊判定は action と url の両方を見る（benign action・
+            # destructive url のフォームを controlled-write が見逃さないため）。
+            action = f"{ip.action or ''} {ip.url or ''}".strip()
+            labels = ip.labels
+        allowed = may_submit(
+            getattr(getattr(self, "engine", None), "state_profile", "unrestricted"),
+            method=method,
+            action=action,
+            labels=labels,
+        )
+        if not allowed and record_skip:
+            self._record_scan_note(f"state_change_skipped:{self.CHECK_TYPE}")
+        return allowed
+
+    def requires_state_profile_preflight(self) -> bool:
+        """共有 dispatcher を迂回する送信もある注入検査なら True。"""
+        return self.CHECK_TYPE in self.STATE_PROFILE_PREFLIGHT_CHECKS
+
+    def may_run_page_scanner(self, url: str, *, record_skip: bool = True) -> bool:
+        """page-level scan（scan_page）を state profile で判定する。
+
+        常時状態変更スキャナ（graphql/mass_assignment/prototype_pollution 等）は POST 相当で
+        判定し、read-only では skip する。read-only な page scanner（header 等）は許可。
+        """
+        from wscan.state_profile import may_submit
+
+        if not getattr(self, "ALWAYS_STATE_CHANGING", False):
+            return True
+        allowed = may_submit(
+            getattr(getattr(self, "engine", None), "state_profile", "unrestricted"),
+            method="POST",
+            action=url,
+        )
+        if not allowed and record_skip:
+            self._record_scan_note(f"state_change_skipped:{self.CHECK_TYPE}")
+        return allowed
 
     def _record_probe_status(self, response) -> None:
         """受信済み httpx 応答の status をエンジンへ例外安全に渡す。"""
@@ -662,6 +730,8 @@ class BaseScanner(ABC):
         # 生む（0007 D1 は「記録を足すだけ・挙動不変」が不変条件。Codex #101）。json transport の
         # 脱落記録は `_apply_json_payload` の**既存**の swallow 点（transport_error/unexecutable_template）
         # に限る。form/url の例外は従来どおりスキャナ側（baseline_unavailable 等）へ伝播させる。
+        if not self.may_scan_injection_point(ip):
+            return "", {}
         if ip.location == "json_body":
             if not self.SUPPORTS_JSON_BODY:
                 return "", {}

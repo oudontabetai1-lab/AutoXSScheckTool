@@ -122,11 +122,13 @@ class ChainScanner:
         sleep_factor: float = 1.0,
         exclude_fields: Optional[set] = None,
         enabled_checks: Optional[list] = None,
+        state_profile: str = "unrestricted",
     ):
         self.browser = browser
         self.sleep_factor = sleep_factor
         self.exclude_fields = exclude_fields or set()
         self.enabled_checks = set(enabled_checks or ["xss"])
+        self.state_profile = state_profile or "unrestricted"
         self.probes: list[ChainProbe] = []
 
     # ------------------------------------------------------------------
@@ -220,6 +222,15 @@ class ChainScanner:
                         uid = self._make_uid(page.url, field_name, ptype)
                         payload = self._make_payload(ptype, uid)
 
+                        # state profile: POST/書込みフォームの反復送信は profile に従う。
+                        from wscan.state_profile import may_submit as _may_submit
+                        _fmethod = (form.get("method") or "GET").upper()
+                        if not _may_submit(
+                            self.state_profile, method=_fmethod,
+                            action=form.get("action") or page.url,
+                            labels=form.get("labels") or "",
+                        ):
+                            continue
                         self.browser.reset_dialog()
                         ok = await self.browser.navigate(page.url)
                         if not ok:

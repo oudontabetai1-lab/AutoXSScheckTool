@@ -136,6 +136,7 @@ class MailHeaderInjectionScanner(BaseScanner):
     """Mail header injection scanner targeting email-related form fields (IPA 1.8)."""
 
     CHECK_TYPE = "mail_header"
+    ALWAYS_STATE_CHANGING = True
     SEVERITY = "high"
     SUPPORTS_JSON_BODY = False
 
