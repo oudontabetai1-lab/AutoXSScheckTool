@@ -241,3 +241,33 @@ def test_gate_uses_url_when_action_is_benign():
     # unrestricted は常に許可。
     engine.state_profile = "unrestricted"
     assert scanner.may_scan_injection_point(ip, record_skip=False) is True
+
+
+def test_always_state_changing_scanner_gated_as_post():
+    # 常時状態変更 scanner（deserialization 等）は GET url_param でも read-only で skip（#109 P1）。
+    from wscan.scanners.deserialization import DeserializationScanner
+    from wscan.scanners.sqli import SQLiScanner
+
+    ip = InjectionPoint.for_url_param("http://t/api", "q")
+    eng_ro = SimpleNamespace(state_profile="read-only", wave_errors=[])
+    d = DeserializationScanner.__new__(DeserializationScanner)
+    d.engine = eng_ro
+    assert d.may_scan_injection_point(ip, record_skip=False) is False
+    # unrestricted は許可。
+    d.engine = SimpleNamespace(state_profile="unrestricted", wave_errors=[])
+    assert d.may_scan_injection_point(ip, record_skip=False) is True
+    # 通常 scanner（GET url_param）は read-only でも許可（実 GET）。
+    sq = SQLiScanner.__new__(SQLiScanner)
+    sq.engine = eng_ro
+    assert sq.may_scan_injection_point(ip, record_skip=False) is True
+
+
+def test_page_level_always_state_changing_gated():
+    # page-level 常時状態変更 scanner（graphql）は read-only で scan_page を skip（#109 P1）。
+    from wscan.scanners.graphql import GraphQLScanner
+
+    g = GraphQLScanner.__new__(GraphQLScanner)
+    g.engine = SimpleNamespace(state_profile="read-only", wave_errors=[])
+    assert g.may_run_page_scanner("http://t/graphql", record_skip=False) is False
+    g.engine = SimpleNamespace(state_profile="unrestricted", wave_errors=[])
+    assert g.may_run_page_scanner("http://t/graphql", record_skip=False) is True

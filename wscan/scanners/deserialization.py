@@ -106,6 +106,7 @@ class DeserializationScanner(BaseScanner):
     """Insecure deserialization detection scanner."""
 
     CHECK_TYPE = "deserialization"
+    ALWAYS_STATE_CHANGING = True
     SEVERITY = "critical"
     SUPPORTS_JSON_BODY = True
 

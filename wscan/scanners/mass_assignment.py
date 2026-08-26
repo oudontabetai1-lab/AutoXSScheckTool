@@ -108,6 +108,7 @@ class MassAssignmentScanner(BaseScanner):
 
     HAS_PAGE_LEVEL = True
     CHECK_TYPE = "mass_assignment"
+    ALWAYS_STATE_CHANGING = True
     SEVERITY = "high"
 
     def __init__(self, engine: "ScanEngine"):

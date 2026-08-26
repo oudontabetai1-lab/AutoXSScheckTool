@@ -1776,6 +1776,11 @@ class ScanEngine:
                 ) or hasattr(scanner, "scan_page_context")
                 if not has_page_impl:
                     continue
+                # state profile: 常時状態変更 scanner（graphql/mass_assignment 等）の page-level
+                # scan_page は宣言メソッド不問で POST を出すため、profile で事前に skip する。
+                _page_gate = getattr(scanner, "may_run_page_scanner", None)
+                if callable(_page_gate) and not _page_gate(url):
+                    continue
                 try:
                     self._api_auth_failed = url_auth_failed
                     before_count = len(self.all_findings)
@@ -4669,6 +4674,9 @@ class ScanEngine:
                 if hasattr(scanner, "scan_page_context"):
                     page_findings = await scanner.scan_page_context(page)
                 else:
+                    _page_gate = getattr(scanner, "may_run_page_scanner", None)
+                    if callable(_page_gate) and not _page_gate(page.url):
+                        continue
                     page_findings = await scanner.scan_page(page.url)
                 page_findings = page_findings or []
                 for f in page_findings:
@@ -5906,7 +5914,16 @@ class ScanEngine:
         # 破壊的 POST finding が verify で再送されるのを防ぐ）。method 既知時のみ gate する。
         from wscan.state_profile import may_submit as _may_submit
         _req = f.request or {}
-        _req_method = _req.get("method") or f.injection_method or ""
+        # 常時状態変更 scanner（deserialization/nosql/graphql/mass_assignment/prototype_pollution）は
+        # request に method を持たなくても POST 相当。宣言メソッド不問で POST として判定する。
+        _vscanner = self.scanners.get(
+            "graphql" if f.check_type.startswith("graphql_")
+            else "jwt" if f.check_type.startswith("jwt_")
+            else "privesc" if f.check_type.startswith("privesc_")
+            else f.check_type
+        )
+        _forced_post = bool(getattr(_vscanner, "ALWAYS_STATE_CHANGING", False))
+        _req_method = ("POST" if _forced_post else "") or _req.get("method") or f.injection_method or ""
         _req_target = _req.get("url") or f.url
         if _req_method and not _may_submit(
             getattr(self, "state_profile", "unrestricted"),

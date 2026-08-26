@@ -205,6 +205,7 @@ class GraphQLScanner(BaseScanner):
 
     HAS_PAGE_LEVEL = True
     CHECK_TYPE = "graphql"
+    ALWAYS_STATE_CHANGING = True
     SEVERITY = "medium"
 
     def __init__(self, engine: "ScanEngine"):
