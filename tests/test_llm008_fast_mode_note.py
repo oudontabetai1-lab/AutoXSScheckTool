@@ -28,3 +28,13 @@ def test_fast_note_llm_override_reachable_state():
     )
     assert "LLM=claude" in n
     assert "planner=off" in n
+
+
+def test_fast_mode_llm_respects_explicit_selection():
+    # 明示 --llm は（ollama 含め）維持、既定 provider のみ none 化（LLM-008: 案内を actionable に）。
+    assert main._fast_mode_llm("ollama", explicit=True) == "ollama"
+    assert main._fast_mode_llm("ollama", explicit=False) == "none"
+    assert main._fast_mode_llm("claude", explicit=False) == "claude"
+    assert main._fast_mode_llm("claude", explicit=True) == "claude"
+    # 既定 provider が config で claude 等でも同様（default 引数で判定）
+    assert main._fast_mode_llm("claude", explicit=False, default="claude") == "none"

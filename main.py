@@ -201,6 +201,15 @@ def _fast_mode_deterministic_note(
     )
 
 
+def _fast_mode_llm(current: str, *, explicit: bool, default: str = "ollama") -> str:
+    """FAST MODE の LLM 決定（純粋）。--llm を明示したら（ollama 含め）尊重し、既定 provider の
+    ときだけ none へ落とす。明示指定を尊重しないと ``--fast --llm ollama`` が none 化して
+    「--llm で維持可」の案内が破綻する（LLM-008）。"""
+    if explicit:
+        return current
+    return "none" if current == default else current
+
+
 def _coerce_popup_header_intercept(value, default: bool = False) -> bool:
     """popup 初回ヘッダ傍受の明示 opt-in 値を安全に bool 化する。"""
     if isinstance(value, bool):
@@ -2014,7 +2023,10 @@ async def run_scan(args):
         if args.max_forms   == _FORMS_DEFAULT:  args.max_forms   = 3
         if args.concurrency == _CONC_DEFAULT:   args.concurrency = 2
         if args.checks      == _CHECKS_DEFAULT: args.checks      = ["sqli", "xss"]
-        if args.llm         == _LLM_DEFAULT:    args.llm         = "none"
+        _llm_explicit = any(
+            a == "--llm" or a.startswith("--llm=") for a in sys.argv
+        )
+        args.llm = _fast_mode_llm(args.llm, explicit=_llm_explicit, default=_LLM_DEFAULT)
         if not args.headless:                   args.headless    = True
         if not getattr(args, "no_planner",        False): args.no_planner        = True
         if not getattr(args, "no_waf_detection",  False): args.no_waf_detection  = True
