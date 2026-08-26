@@ -5613,6 +5613,16 @@ class ScanEngine:
                 )
                 console.print()
 
+    def _notify_defer_until_verify(self, f: Finding) -> bool:
+        """検出時通知を保留し verify 後に通知すべきか。
+
+        _phase_verify が最終 state を確定する finding（verifiable かつ非 dialog）は True。
+        これらは confidence=confirmed 起点で reproduced でも後で unreproduced へ落ちうるため、
+        検出時に confirmed 通知せず、reproduced 確定後にのみ通知する。dialog 確証や
+        非 verifiable（mail_header の OOB 等）は verify を通らないので検出時に通知する。
+        """
+        return f.check_type in self._VERIFIABLE_CHECKS and not f.dialog_confirmed
+
     def _record_finding(self, f: Finding, source: str = ""):
         if f is None:
             return
@@ -5627,7 +5637,10 @@ class ScanEngine:
         # so the branch above is skipped for normal scanner findings — but console
         # output, webhook, payload learning, and flag scanning were never triggered
         # because the old early-return prevented reaching this code.
-        if self._notifier:
+        # verify で最終 state が確定する finding（verifiable かつ非 dialog）は検出時に通知しない。
+        # confidence=confirmed 起点で reproduced になっていても _phase_verify が unreproduced/
+        # skipped へ落としうるため、早期の confirmed 誤通知を避け、確定後（reproduced 分岐）に通知する。
+        if self._notifier and not self._notify_defer_until_verify(f):
             # fire-and-forget せず task を保持し、scan 終了前に並行 drain する。
             self._notify_tasks.append(
                 asyncio.ensure_future(
