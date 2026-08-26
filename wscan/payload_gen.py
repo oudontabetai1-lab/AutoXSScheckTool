@@ -18,6 +18,9 @@ from .llm_client import complete_text
 console = Console()
 
 _active_role: ContextVar[str | None] = ContextVar("pg_active_role", default=None)
+# LLM-001: 標準掃射で「決定論 default を先頭寄り」に置く数。first-hit が強い決定論証拠で
+# 止まりやすくしつつ、LLM を bulk default より前に残して cap での全滅を防ぐ（比例的）。
+_DETERMINISTIC_LEAD = 6
 
 
 def _format_prompt_template(template: str, *, field_name: str, url: str) -> str:
@@ -300,7 +303,12 @@ class PayloadGenerator:
                     # デフォルトのうち未収録のものを末尾に追加
                     seen = set(expanded)
                     tail = [p for p in defaults if p not in seen]
-                    return expanded + tail
+                    # LLM-001: 決定論 default を先頭寄りにして first-hit が弱い LLM 反射で
+                    # 止まるのを防ぐ。LLM は LEAD 個の default の後・残り default の前に置き、
+                    # cap で LLM が全滅しないようにする（LLM-only 脆弱性は adaptive も補完）。
+                    lead = tail[:_DETERMINISTIC_LEAD]
+                    rest = tail[_DETERMINISTIC_LEAD:]
+                    return lead + expanded + rest
 
         # LLM なし/失敗 → デフォルトペイロードをエンコード展開して返す
         return expand_payloads(defaults, check_type, max_variants_per_payload=1, max_total=40)
