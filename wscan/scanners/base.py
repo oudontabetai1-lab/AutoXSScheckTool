@@ -619,7 +619,10 @@ class BaseScanner(ABC):
         else:
             # crawl metadata を取得できない旧経路は GET 相当として互換性を保つ。
             method = ip.method or "GET"
-            action = ip.action or ip.url
+            # 送信先は form action だけでなく ip.url のこともある（例 XXE は _post_xml(url) で
+            # ip.url へ POST する）。破壊判定は action と url の両方を見る（benign action・
+            # destructive url のフォームを controlled-write が見逃さないため）。
+            action = f"{ip.action or ''} {ip.url or ''}".strip()
             labels = ip.labels
         allowed = may_submit(
             getattr(getattr(self, "engine", None), "state_profile", "unrestricted"),

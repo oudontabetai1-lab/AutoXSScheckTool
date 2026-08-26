@@ -245,6 +245,18 @@ class RaceConditionScanner(BaseScanner):
                 "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
             )
 
+        # state profile gate: page-level burst は捕捉済み POST を 8 回リプレイするため、
+        # _scan_field の事前 gate を通らない。ここで profile を適用し、read-only や
+        # controlled-write の破壊的操作（purchase/transfer 等）の反復送信を防ぐ。
+        from wscan.state_profile import may_submit
+        if not may_submit(
+            getattr(self.engine, "state_profile", "unrestricted"),
+            method=method,
+            action=url,
+        ):
+            self._record_scan_note(f"state_change_skipped:{self.CHECK_TYPE}")
+            return []
+
         try:
             responses = await self._send_burst(url, method, body, headers)
         except Exception as exc:

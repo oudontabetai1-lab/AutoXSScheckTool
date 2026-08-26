@@ -204,3 +204,40 @@ def test_dashboard_selector_defaults_and_scan_payload_are_wired():
     assert 'id="cfgStateProfile"' in html
     assert "state_profile: document.getElementById('cfgStateProfile').value" in html
     assert "if (cfg.state_profile) document.getElementById('cfgStateProfile').value" in html
+
+
+@pytest.mark.parametrize("action", ["/deleteAccount", "/payments", "/checkoutSession",
+                                    "/account/delete", "/transferFunds", "/removeItems"])
+def test_looks_destructive_matches_identifier_style_urls(action):
+    # camelCase/複数形の identifier も破壊語として検出する（#109 P2）。
+    from wscan.state_profile import looks_destructive
+    assert looks_destructive(method="POST", action=action) is True
+
+
+@pytest.mark.parametrize("action", ["/submit-payload", "/login", "/search", "/pages", "/render"])
+def test_looks_destructive_ignores_non_destructive_identifiers(action):
+    # payload 等の無関係 identifier を破壊語と誤検出しない。
+    from wscan.state_profile import looks_destructive
+    assert looks_destructive(method="POST", action=action) is False
+
+
+class _ConcreteScanner(BaseScanner):
+    CHECK_TYPE = "xxe"
+
+    async def scan_field(self, url, form_index, field, is_url_param):  # pragma: no cover
+        return []
+
+
+def test_gate_uses_url_when_action_is_benign():
+    # action が benign でも url が destructive なら controlled-write は送信しない（#109 P1・XXE 経路）。
+    engine = SimpleNamespace(state_profile="controlled-write", wave_errors=[])
+    scanner = _ConcreteScanner.__new__(_ConcreteScanner)  # __init__ を回避（engine 属性のみ必要）
+    scanner.engine = engine
+    ip = InjectionPoint.for_form(
+        "http://fixture.test/account/delete", "xml", 0,
+        method="POST", action="http://fixture.test/submit", labels="",
+    )
+    assert scanner.may_scan_injection_point(ip, record_skip=False) is False
+    # unrestricted は常に許可。
+    engine.state_profile = "unrestricted"
+    assert scanner.may_scan_injection_point(ip, record_skip=False) is True
