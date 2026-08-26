@@ -164,3 +164,19 @@ def test_planner_query_redacts_percent_encoded_fragment_identifier():
                                 target_url="https://host/app#/%74enant-42")
     assert "tenant-42" not in q
     assert "Open" in q and "Detail" in q
+
+
+def test_planner_query_purpose_hint_vocab_is_clean():
+    # root では固定語彙 purpose_hint のみを送る。全語彙が識別子を含まず素通りすることを固定。
+    for hint in (
+        "authentication / login form",
+        "administration panel",
+        "search / query interface",
+        "e-commerce / checkout form",
+        "general web form",
+    ):
+        q = build_planner_web_query(hint, target_url="https://internal.example/tenant-42")
+        assert q.startswith("web application vulnerability")
+        assert "internal.example" not in q and "tenant-42" not in q
+        # 語彙の単語は残る（`/` は構造文字として落ちるが単語は通る）
+        assert "form" in q or "panel" in q or "interface" in q
