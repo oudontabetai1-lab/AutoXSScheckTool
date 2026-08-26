@@ -25,6 +25,17 @@ _HEADERS = {
 _DDG_ENDPOINT = "https://html.duckduckgo.com/html/"
 
 
+def build_planner_web_query(tech_hints: str) -> str:
+    """planner の web intel クエリを組む（純粋・匿名化）。
+
+    LLM-007: 検査対象の host/URL を外部検索へ送らない。技術ヒント（フレームワーク名等）だけで
+    汎用検索し、対象を特定できる情報（host・URL・IP）は含めない。呼び出し側で tech_hints から
+    host/URL を除いて渡すこと。
+    """
+    hints = " ".join((tech_hints or "").split())
+    return ("web application vulnerability " + hints).strip()
+
+
 async def search_web(query: str, max_results: int = 5) -> str:
     """
     Search DuckDuckGo and return top result titles + snippets as plain text.

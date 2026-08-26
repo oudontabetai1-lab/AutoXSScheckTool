@@ -533,11 +533,11 @@ Consider stored / second-order attacks carefully:
 
         # ── Web intelligence enrichment (optional) ───────────────────────
         if self.enable_web_browsing:
-            from .llm_web_tools import search_web
+            from .llm_web_tools import search_web, build_planner_web_query
             try:
+                # LLM-007: 対象 host/URL を外部検索へ送らない（匿名化）。技術ヒントのみで検索する。
                 tech_hints = " ".join(t for t in [title, purpose_hint] if t)
-                host = url.split("/")[2] if "//" in url else url
-                query = f"web application vulnerability {tech_hints} {host}"
+                query = build_planner_web_query(tech_hints)
                 web_ctx = await search_web(query, max_results=3)
                 from rich.console import Console as _C
                 _C().print(
