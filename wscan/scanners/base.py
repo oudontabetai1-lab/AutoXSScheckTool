@@ -363,7 +363,11 @@ class Finding:
         # reproduced/unreproduced/skipped に上書き）。from_dict は空文字を明示的に渡すため（旧
         # Finding）ここで上書きされず、"" が旧 Finding 専用として保たれる。
         if self.verification_state is None:
-            self.verification_state = "reproduced" if self.dialog_confirmed else "assumed"
+            # dialog 発火＝実行確証、confidence=="confirmed"＝決定的証拠を持つ非 dialog
+            # プロデューサ（例: mail_header の OOB 到達確証）は reproduced 扱い。
+            # それ以外は assumed（verifiable check は _phase_verify が後で上書きする）。
+            decisive = self.dialog_confirmed or self.confidence == "confirmed"
+            self.verification_state = "reproduced" if decisive else "assumed"
 
     @property
     def verified(self) -> bool:
