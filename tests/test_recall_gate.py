@@ -2,6 +2,10 @@
 
 ブラウザ非依存。見逃し0（recall 100%）ゲートの合否・分母の数え方・target_check 絞り込みを固定。
 """
+import dataclasses
+
+import pytest
+
 from wscan.recall_gate import compute_recall, spec_key, RecallReport
 
 
@@ -71,10 +75,9 @@ def test_spec_key_normalizes_missing_fields():
 
 
 def test_report_is_frozen_dataclass():
+    # frozen dataclass への代入は FrozenInstanceError を送出する。broad except で握りつぶすと
+    # 不変性が壊れてもテストが通ってしまうため、期待例外を明示して assert する。
     r = compute_recall([_spec("xss", "/a")], [("xss", "/a", "q")])
     assert isinstance(r, RecallReport)
-    try:
-        r.matched_total = 0  # frozen
-        assert False, "should be immutable"
-    except Exception:
-        pass
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        r.matched_total = 0  # type: ignore[misc]

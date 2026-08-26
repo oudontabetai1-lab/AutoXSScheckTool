@@ -219,9 +219,12 @@ class EndToEndRealisticScanTests(unittest.TestCase):
                 )
 
     def test_recall_gate_is_100_percent(self):
-        # ADR-0016 / PRINCIPLE-001: 固定 ground truth に対し recall 100% を単一のリリースゲート
-        # として要求する（有効化した CHECKS のみを分母にする）。個別 subTest の集約＋recall 数値と
-        # 見逃し一覧を1メッセージで surface する。
+        # ADR-0016 / PRINCIPLE-001: 固定 ground truth に対し recall 100% を要求する
+        # （有効化した CHECKS のみを分母にする）。個別 subTest の集約＋recall 数値と見逃し一覧を
+        # 1メッセージで surface する。
+        # 注: この assert は E2E scan が実走したとき（WSCAN_E2E=1）に blocking。現状 CI の E2E step
+        # は browser 安定化中のため continue-on-error（apt mirror 403 対策の既存判断）＝PR を
+        # ブロックしない。CI で真に blocking な recall ゲートにするかは別途 infra 判断（Task 0015）。
         report = compute_recall(EXPECTED_FINDINGS, self.reported, target_checks=CHECKS)
         self.assertTrue(
             report.is_complete,

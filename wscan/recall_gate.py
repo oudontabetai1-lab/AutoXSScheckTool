@@ -1,7 +1,9 @@
 """見逃し0（recall）ゲートの純粋ロジック（0015 PRINCIPLE-001 / ADR-0016）。
 
 ADR-0016 は「見逃し（false negative）最小化・製品目標0」を第一目的とし、固定 ground truth に
-対する **recall 100% をリリースゲート**にすると定めた。本モジュールは、フィクスチャの
+対する recall 100% をリリースゲートにすると定めた。本モジュールはその**判定ロジック**を提供する
+（enforcement は E2E scan が実走する箇所＝WSCAN_E2E 有効時。CI を真に blocking にするかは別途
+infra 判断）。フィクスチャの
 `EXPECTED_FINDINGS`（各 spec は `check`/`path`/`field`/`note`）と、実スキャンが報告した
 `(check, path, field)` の集合から recall を算出する純粋関数群。
 
