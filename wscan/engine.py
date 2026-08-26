@@ -4274,6 +4274,23 @@ class ScanEngine:
 
     # ── Post-authentication re-crawl ──────────────────────────────────────
 
+    @staticmethod
+    def _postauth_seed_urls(landing_url: str, target_url: str) -> list[str]:
+        """post-auth crawl の seed を末尾 slash 正規化して重複排除する（純粋）。
+
+        landing_url は rstrip 済みだが target_url は生（末尾 slash 差あり得る）なので、
+        両者を rstrip("/") で揃えてから dedup する。揃えないと ``http://s`` と ``http://s/``
+        が別 seed として queue され root を二度 crawl する（FLOW-002）。
+        """
+        seen: set = set()
+        out: list[str] = []
+        for u in (landing_url, target_url):
+            n = (u or "").rstrip("/")
+            if n and n not in seen:
+                seen.add(n)
+                out.append(n)
+        return out
+
     async def _phase_crawl_postauth(self) -> list:
         """
         Re-crawl the application with the authenticated session gained via SQL
@@ -4347,7 +4364,7 @@ class ScanEngine:
         auth_visited: set = set()
         queue: deque = deque()
 
-        for seed in {landing_url, self.target_url}:
+        for seed in self._postauth_seed_urls(landing_url, self.target_url):
             if seed and seed not in auth_visited and not self._is_url_excluded(seed):
                 auth_visited.add(seed)
                 queue.append((seed, 0, None))
@@ -4468,7 +4485,7 @@ class ScanEngine:
                 url_cap = max(200, self.depth * 50)
                 for entry in link_entries:
                     link = entry["url"]
-                    clean = link.split("#")[0].split("?")[0]
+                    clean = link.split("#")[0].split("?")[0].rstrip("/")
                     if len(auth_visited) >= url_cap:
                         break
                     if clean not in auth_visited and not self._is_url_excluded(clean):
