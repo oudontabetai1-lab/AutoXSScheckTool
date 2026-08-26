@@ -42,3 +42,13 @@ def test_state_overrides_legacy_verified_boolean():
     assert finding_dict_confirmed({"verification_state": "assumed", "verified": True}) is False
     # 逆に reproduced なら stale な verified=False より state を優先し confirmed。
     assert finding_dict_confirmed({"verification_state": "reproduced", "verified": False}) is True
+
+
+def test_agent_source_dict_without_state_is_hypothesis():
+    # 生 AgentFinding dict（source=agent, verified/state 無し）は confirmed 既定に落とさない（#107 P2 防御）。
+    assert finding_dict_confirmed({"source": "agent", "agent_verified": False}) is False
+    # 旧スキャナ dict（source 非 agent）は従来の confirmed 既定を保つ。
+    assert finding_dict_confirmed({"source": "scanner"}) is True
+    # 明示 state/verified は source より優先。
+    assert finding_dict_confirmed({"source": "agent", "verification_state": "reproduced"}) is True
+    assert finding_dict_confirmed({"source": "agent", "verified": True}) is True

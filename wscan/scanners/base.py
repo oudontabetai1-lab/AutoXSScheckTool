@@ -339,6 +339,12 @@ def finding_dict_confirmed(d: dict) -> bool:
     v = d.get("verified")
     if isinstance(v, bool):
         return v
+    # state も verified も無い dict。Agent 由来は本質的に未確証＝hypothesis 扱い
+    # （legacy の confirmed 既定は旧スキャナ dict のためのもの）。現状 Agent finding は
+    # _convert_agent_findings→Finding 経由で state を持つが、生 AgentFinding dict が
+    # 将来 SARIF/件数へ渡っても誤って confirmed 化しないよう防御する。
+    if d.get("source") == "agent":
+        return False
     return True
 
 
