@@ -5754,6 +5754,13 @@ class ScanEngine:
                 )
             elif state == "reproduced":
                 finding.apply_verification("reproduced", "")
+                # 検出時は assumed(verified=False)で通知ゲートに弾かれた verifiable finding が、
+                # ここで reproduced へ昇格する。確証時に通知する（dedup 済のものは再送されない）。
+                _notifier = getattr(self, "_notifier", None)
+                if _notifier:
+                    asyncio.ensure_future(
+                        _notifier.notify_finding(finding, getattr(self, "target_url", ""))
+                    )
                 console.print(
                     f"  [green][CONFIRMED][/green] {finding.check_type.upper()} "
                     f"on [yellow]{finding.field_name}[/yellow]: reproduced"

@@ -34,6 +34,29 @@ class NotificationManagerTests(unittest.IsolatedAsyncioTestCase):
         sent_payload = manager._send.await_args.args[0]
         self.assertEqual(sent_payload["field_name"], "confirmed")
 
+    async def test_promotion_to_reproduced_notifies_once(self):
+        # 検出時 assumed で弾かれた finding が検証で reproduced に昇格したら通知される。
+        # 再送（dedup 済）は起きない＝#107 P1 の回帰ガード。
+        manager = NotificationManager(
+            webhook_url="https://webhook.invalid/test",
+            min_severity="high",
+        )
+        manager._send = AsyncMock()
+        f = self._finding("assumed", "promote")
+
+        # 検出時（assumed）: 通知ゲートで弾かれる
+        await manager.notify_finding(f)
+        manager._send.assert_not_awaited()
+
+        # 検証で reproduced へ昇格 → 通知される
+        f.apply_verification("reproduced", "")
+        await manager.notify_finding(f)
+        manager._send.assert_awaited_once()
+
+        # 同一 finding の再通知は dedup で送られない
+        await manager.notify_finding(f)
+        manager._send.assert_awaited_once()
+
 
 if __name__ == "__main__":
     unittest.main()
