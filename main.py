@@ -182,7 +182,8 @@ def _fast_mode_deterministic_note(
     """FAST MODE が決定論寄りに落とした機能を明示する1行（LLM-008）。
 
     --fast は既定と組み合わさると LLM/planner/AI 分析を無効化するため、実行前に何が off に
-    なったかを明示して「LLM 無効化が隠れる」のを防ぐ。各機能は個別フラグで上書き可能。
+    なったかを明示して「LLM 無効化が隠れる」のを防ぐ。上書き可能なのは LLM（--llm）のみで、
+    他は fast が強制 off にする（enable フラグ無し）ことを正確に案内する。
     """
     parts = [
         f"LLM={llm}",
@@ -191,7 +192,13 @@ def _fast_mode_deterministic_note(
         "WAF検出=" + ("off" if no_waf_detection else "on"),
         "sitemap=" + ("off" if no_sitemap_crawl else "on"),
     ]
-    return "決定論寄り: " + " / ".join(parts) + "（各 --llm 等で個別上書き可）"
+    # 上書き可能性を正確に案内する: LLM のみ --llm で維持できる（preset は既定 ollama のときだけ
+    # none にするため）。planner/AI分析/WAF検出/sitemap は fast が強制 off にし enable フラグも
+    # 無いため、維持したい場合は --fast を使わない（誤った「個別上書き可」を書かない・LLM-008）。
+    return (
+        "決定論寄り: " + " / ".join(parts)
+        + "（LLM は --llm で維持可。planner/AI分析/WAF検出/sitemap は fast で off＝維持は --fast 非使用）"
+    )
 
 
 def _coerce_popup_header_intercept(value, default: bool = False) -> bool:

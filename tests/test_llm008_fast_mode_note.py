@@ -7,6 +7,7 @@ import main
 
 
 def test_fast_note_lists_disabled_features():
+    # 実際の --fast 状態（LLM=none・他は強制 off）を明示する。
     n = main._fast_mode_deterministic_note(
         llm="none", no_planner=True, no_ai_analysis=True,
         no_waf_detection=True, no_sitemap_crawl=True,
@@ -14,15 +15,16 @@ def test_fast_note_lists_disabled_features():
     assert "LLM=none" in n
     assert "planner=off" in n
     assert "AI分析=off" in n
-    assert "個別上書き" in n  # 上書き可能であることを案内
+    # 正確な上書き案内: LLM のみ維持可、他は fast で off。誤った「各個別上書き可」は書かない。
+    assert "--llm で維持可" in n
+    assert "個別上書き可" not in n
 
 
-def test_fast_note_reflects_overrides_on():
-    # 個別フラグで再有効化した場合は on と表示（隠さない）。
+def test_fast_note_llm_override_reachable_state():
+    # --fast --llm claude の到達可能状態: LLM=claude だが planner 等は off のまま。
     n = main._fast_mode_deterministic_note(
-        llm="claude", no_planner=False, no_ai_analysis=False,
-        no_waf_detection=False, no_sitemap_crawl=False,
+        llm="claude", no_planner=True, no_ai_analysis=True,
+        no_waf_detection=True, no_sitemap_crawl=True,
     )
     assert "LLM=claude" in n
-    assert "planner=on" in n
-    assert "AI分析=on" in n
+    assert "planner=off" in n
