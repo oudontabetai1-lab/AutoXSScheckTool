@@ -573,6 +573,13 @@ class BaseScanner(ABC):
     CHECK_TYPE = "base"
     SEVERITY = "medium"
     SUPPORTS_JSON_BODY = False
+    # scan_injection_point の内部でフォーム送信し得る検査。engine の事前 gate 用。
+    STATE_PROFILE_PREFLIGHT_CHECKS = frozenset({
+        "sqli", "xss", "os", "nosql", "ssti", "deserialization", "ldap",
+        "path_traversal", "ssrf", "open_redirect", "header_injection",
+        "mail_header", "dom_xss", "stored_xss", "file_upload", "xxe",
+        "race_condition",
+    })
 
     def __init__(self, engine: "ScanEngine"):
         self.engine = engine
@@ -597,6 +604,36 @@ class BaseScanner(ABC):
             except Exception:
                 return
         errors.append(note)
+
+    def may_scan_injection_point(
+        self,
+        ip: InjectionPoint,
+        *,
+        record_skip: bool = True,
+    ) -> bool:
+        """注入点を state profile で判定し、除外を観測ログへ残す。"""
+        from wscan.state_profile import may_submit
+
+        if ip.location == "url_param":
+            method, action, labels = "GET", ip.url, ""
+        else:
+            # crawl metadata を取得できない旧経路は GET 相当として互換性を保つ。
+            method = ip.method or "GET"
+            action = ip.action or ip.url
+            labels = ip.labels
+        allowed = may_submit(
+            getattr(getattr(self, "engine", None), "state_profile", "unrestricted"),
+            method=method,
+            action=action,
+            labels=labels,
+        )
+        if not allowed and record_skip:
+            self._record_scan_note(f"state_change_skipped:{self.CHECK_TYPE}")
+        return allowed
+
+    def requires_state_profile_preflight(self) -> bool:
+        """共有 dispatcher を迂回する送信もある注入検査なら True。"""
+        return self.CHECK_TYPE in self.STATE_PROFILE_PREFLIGHT_CHECKS
 
     def _record_probe_status(self, response) -> None:
         """受信済み httpx 応答の status をエンジンへ例外安全に渡す。"""
@@ -662,6 +699,8 @@ class BaseScanner(ABC):
         # 生む（0007 D1 は「記録を足すだけ・挙動不変」が不変条件。Codex #101）。json transport の
         # 脱落記録は `_apply_json_payload` の**既存**の swallow 点（transport_error/unexecutable_template）
         # に限る。form/url の例外は従来どおりスキャナ側（baseline_unavailable 等）へ伝播させる。
+        if not self.may_scan_injection_point(ip):
+            return "", {}
         if ip.location == "json_body":
             if not self.SUPPORTS_JSON_BODY:
                 return "", {}

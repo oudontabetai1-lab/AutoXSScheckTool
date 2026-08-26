@@ -1467,10 +1467,22 @@ class BrowserManager:
                             });
                         });
                         if (inputs.length > 0) {
+                            const submit = form.querySelector('[type=submit], button');
+                            const submitAction = submit ? submit.getAttribute('formaction') : '';
+                            const submitMethod = submit ? submit.getAttribute('formmethod') : '';
+                            const labels = Array.from(form.querySelectorAll(
+                                'button, input[type=submit], input[type=image]'
+                            )).flatMap(el => [
+                                el.innerText, el.value, el.getAttribute('aria-label'),
+                                el.name, el.id, el.getAttribute('formaction')
+                            ]).filter(Boolean).join(' ');
                             results.push({
                                 index: fi,
-                                action: form.action || window.location.href,
-                                method: (form.method || 'GET').toUpperCase(),
+                                action: submitAction
+                                    ? new URL(submitAction, window.location.href).href
+                                    : (form.action || window.location.href),
+                                method: (submitMethod || form.method || 'GET').toUpperCase(),
+                                labels,
                                 inputs: inputs,
                             });
                         }

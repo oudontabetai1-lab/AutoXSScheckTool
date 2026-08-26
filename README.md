@@ -320,6 +320,7 @@ python3 main.py scan URL [options]
 | `--mfa-email-imap-ssl true\|false` | 未指定（実行時 `true`） | IMAP SSL |
 | `--include-registration` | 登録フォームを除外 | 登録/サインアップも検査 |
 | `--allow-state-changing-probes` | 無効 | 状態変更し得る権限昇格プローブを許可 |
+| `--state-profile unrestricted\|controlled-write\|read-only` | `unrestricted` | 注入フォームの送信方針。既定は従来どおり全送信 |
 | `--accounts USER:PASS,...` | 空 | 複数アカウント権限昇格検査 |
 | `--accounts-file FILE` | 空 | `accounts:` 配列を持つ YAML |
 | `--auto-register` | 無効 | テストアカウント自動登録 |
@@ -488,6 +489,7 @@ python3 main.py import-payloads [options]
 | `scan.target_urls` | list[str] | `[]` | `--target-url`, `--target-urls-file` / スコープ・除外 |
 | `scan.access_urls` | list[str] | `[]` | `--access-url`, `--access-urls-file` / スコープ・除外 |
 | `scan.manual_crawl_file` | str | `""` | `--manual-crawl` / 手動巡回 |
+| `scan.state_profile` | enum | `unrestricted` | `--state-profile` / 状態変更プロファイル |
 | `scan.request_delay` | float | `0.5` | `--delay` / 基本設定 |
 | `scan.navigation_retries` | int | `2` | `--navigation-retries` / 基本設定 |
 
@@ -777,6 +779,8 @@ python3 main.py scan https://example.com \
 ログイン成否は URL 変化だけでなく、ログインフォーム残存、失敗メッセージ、MFA 画面残留も確認します。Cookie を直接渡す場合は `--cookie` / `--cookie-file`、垂直権限昇格は `--low-priv-cookies` / `--low-priv-cookie-file`、複数アカウントは `--accounts` / `--accounts-file` を使用します。
 
 `--allow-state-changing-probes` は POST/PUT/PATCH 等の状態変更を伴う可能性があります。変更してよい検証環境に限って有効にしてください。
+
+通常層の注入検査では、状態変更プロファイルをダッシュボードまたは `--state-profile` で選べます。既定の `unrestricted` は既存の検出力と挙動を維持し、POST を含む全フォームを送信します。`controlled-write` は通常の POST 注入を続けながら、action・送信ボタン・URL に delete/remove/purchase/pay/transfer/send/logout などの破壊語がある操作を除外します。`read-only` は POST/PUT/PATCH/DELETE を送らず、GET/URL パラメータの検査だけを続けます。除外は Finding ではなく Observability の `state_change_skipped:<check>` に記録されるため、0 findings を「検査済みで安全」と解釈せず、見逃し範囲と合わせて確認してください。
 
 ### MFA
 

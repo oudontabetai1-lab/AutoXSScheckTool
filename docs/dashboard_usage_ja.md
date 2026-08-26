@@ -128,6 +128,8 @@ Target URL を入力し、目的に近いプロファイルを選びます。
 
 機能フラグの「SPA自動有効化（検出時）」は既定 ON です。初回ページに Angular / React / Next.js / Vue / Nuxt の固有マーカーがある場合だけ「SPA クロール」を自動で有効化し、通常層の確実性を保つため一般的なページ構成だけでは有効化しません。CLI の opt-out は `--no-auto-spa` です。「SPA クロール (React/Vue/Angular)」を明示的に ON にした場合は自動判定の設定より優先されます。
 
+「機能」タブの「状態変更プロファイル」は注入フォームの送信方針です。既定の `unrestricted` は従来どおり POST を含む全フォームを検査します。`controlled-write` は delete/remove/purchase/pay/transfer/send/logout などの破壊語を action・ボタン・URL に含む書込みを除外し、通常の POST 注入は続けます。`read-only` は POST/PUT/PATCH/DELETE を送信せず GET/URL パラメータだけを検査します。除外は Event/レポートの Observability に `state_change_skipped` として残るため、通常層の確実性を判断するときは未送信件数も確認してください。
+
 SPA クロールでは、(1) `history.pushState`/`replaceState` をフックし、ナビゲーション要素（nav リンク・タブ・`data-route` ボタンなど）をクリックして仮想ルートを発見しクロール対象に追加、(2) 描画確定待ち（`networkidle` 上限付き＋ルート要素の描画完了）で `<app-root>` が空のまま抽出されるのを防止、(3) 描画中に観測した攻撃スコープ内の GET API/XHR エンドポイント（クエリ付き。例: `/rest/products/search?q=`）を攻撃対象へ自動追加し URL パラメータとして注入検査、を行います。通常のリンクだけでは辿れない SPA でも検査対象が広がります。
 
 ### 認証とスコープ

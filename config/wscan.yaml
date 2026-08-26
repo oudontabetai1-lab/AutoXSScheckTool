@@ -37,6 +37,10 @@ scan:
   # 変更を加えても安全な検証環境に対してのみ true にする。
   # allow_state_changing_probes: false
 
+  # 注入フォームの状態変更プロファイル。既定は従来挙動を維持する unrestricted。
+  # controlled-write は破壊的操作を除外し、read-only は POST/PUT/PATCH/DELETE を送信しない。
+  state_profile: unrestricted
+
   # 除外URLプレフィックス
   exclude_urls: []
 

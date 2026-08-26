@@ -72,6 +72,7 @@ def _load_config(path: Path = _CONFIG_PATH) -> dict:
     cfg["access_urls"]             = list(s.get("access_urls",    []))
     cfg["manual_crawl_file"]       = str(s.get("manual_crawl_file", "") or "")
     cfg["allow_state_changing_probes"] = bool(s.get("allow_state_changing_probes", False))
+    cfg["state_profile"]           = str(s.get("state_profile", "unrestricted") or "unrestricted")
 
     cfg["headless"]                = bool(b.get("headless", False))
     cfg["proxy"]                   = str(b.get("proxy", "") or "")
@@ -964,6 +965,16 @@ Examples:
             "verb tampering with POST/PUT/PATCH against blocked privileged URLs. "
             "Off by default; only enable against systems you are authorised to "
             "modify (a staging/test environment)."
+        ),
+    )
+    scan.add_argument(
+        "--state-profile",
+        choices=("unrestricted", "controlled-write", "read-only"),
+        default=_CFG.get("state_profile", "unrestricted"),
+        help=(
+            "Control injection submissions that may change server state: "
+            "unrestricted (default, legacy behaviour), controlled-write "
+            "(skip destructive-looking writes), or read-only (skip POST/PUT/PATCH/DELETE)."
         ),
     )
     scan.add_argument(
@@ -2257,6 +2268,7 @@ async def run_scan(args):
             auto_register=getattr(args, "auto_register", False),
             auto_register_count=getattr(args, "auto_register_count", 2),
             allow_state_changing_probes=getattr(args, "allow_state_changing_probes", False),
+            state_profile=getattr(args, "state_profile", "unrestricted"),
             # ①: SPA crawl
             spa_crawl=getattr(args, "spa_crawl", False),
             auto_spa_crawl=getattr(args, "auto_spa_crawl", True),
@@ -2564,6 +2576,7 @@ async def run_serve(args):
         "target_urls": "\n".join(_CFG.get("target_urls", []) or []),
         "access_urls": "\n".join(_CFG.get("access_urls", []) or []),
         "manual_crawl_file": _CFG.get("manual_crawl_file", ""),
+        "state_profile": _CFG.get("state_profile", "unrestricted"),
         "toggles": {
             "headless": _CFG.get("headless", False),
             "skip_registration": _CFG.get("skip_registration", True),
@@ -2894,6 +2907,10 @@ async def run_serve(args):
                         "allow_state_changing_probes",
                         _CFG.get("allow_state_changing_probes", False),
                     )
+                ),
+                state_profile=cfg.get(
+                    "state_profile",
+                    _CFG.get("state_profile", "unrestricted"),
                 ),
                 seed_urls=seed_urls or None,
                 additional_report_findings=agent_findings or None,

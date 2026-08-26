@@ -1389,6 +1389,15 @@ body {
           <div class="cfg-toggle on" id="tog-auto_spa_crawl" onclick="toggleCfg('auto_spa_crawl')">SPA自動有効化（検出時）</div>
           <div class="cfg-toggle off" id="tog-interactive_crawl_review" onclick="toggleCfg('interactive_crawl_review')" title="巡回完了後に画面一覧を確認し、再巡回・手動巡回追加を選べる">🔍 巡回レビュー (検査前に画面確認)</div>
         </div>
+        <div class="cfg-field" style="margin-top:16px;max-width:420px">
+          <label>状態変更プロファイル</label>
+          <select id="cfgStateProfile">
+            <option value="unrestricted">unrestricted（既定・従来どおり全送信）</option>
+            <option value="controlled-write">controlled-write（破壊的な書込みを除外）</option>
+            <option value="read-only">read-only（状態変更リクエストを送信しない）</option>
+          </select>
+          <div class="cfg-field-hint">除外した注入点は Observability の state_change_skipped に記録されます。</div>
+        </div>
         <div class="cfg-section-title" style="margin-top:20px">CTFモード</div>
         <div class="cfg-toggle-row">
           <div class="cfg-toggle off" id="tog-ctf_mode" onclick="toggleCfg('ctf_mode')">CTFモード (フラグ自動検出)</div>
@@ -2854,6 +2863,7 @@ function submitScanConfig() {
     enable_payload_learning: cfgToggles.enable_payload_learning,
     enable_community_payloads: cfgToggles.community_payloads,
     enable_sitemap_crawl:  cfgToggles.enable_sitemap_crawl,
+    state_profile: document.getElementById('cfgStateProfile').value,
     enable_llm_web_browsing: cfgToggles.enable_llm_web_browsing,
     ctf_mode:    cfgToggles.ctf_mode,
     ctf_flag_pattern: document.getElementById('cfgCtfFlagPattern').value.trim(),
@@ -3080,6 +3090,7 @@ function applyImportedConfig(cfg) {
   setVal('cfgCookies', cfg.cookies);
   setVal('cfgLowPrivCookies', cfg.low_priv_cookies);
   setVal('cfgAutoRegisterCount', cfg.auto_register_count);
+  setVal('cfgStateProfile', cfg.state_profile);
   if (Array.isArray(cfg.exclude_fields)) setVal('cfgExcludeFields', cfg.exclude_fields.join(', '));
   else setVal('cfgExcludeFields', cfg.exclude_fields);
   if (Array.isArray(cfg.exclude_urls)) setVal('cfgExcludeUrls', cfg.exclude_urls.join('\n'));
@@ -3203,6 +3214,7 @@ function saveConfigToStorage() {
       tls_client_pfx: document.getElementById('cfgTlsClientPfx').value,
       tls_client_cert_password: document.getElementById('cfgTlsClientCertPassword').value,
       tls_ca_cert: document.getElementById('cfgTlsCaCert').value,
+      state_profile: document.getElementById('cfgStateProfile').value,
       toggles: {...cfgToggles},
       llm: document.getElementById('cfgLlm').value,
       ollama_model: document.getElementById('cfgOllamaModel').value,
@@ -3264,6 +3276,7 @@ function loadConfigFromStorage() {
     if (cfg.tls_client_pfx) document.getElementById('cfgTlsClientPfx').value = cfg.tls_client_pfx;
     if (cfg.tls_client_cert_password) document.getElementById('cfgTlsClientCertPassword').value = cfg.tls_client_cert_password;
     if (cfg.tls_ca_cert) document.getElementById('cfgTlsCaCert').value = cfg.tls_ca_cert;
+    if (cfg.state_profile) document.getElementById('cfgStateProfile').value = cfg.state_profile;
     if (cfg.toggles) Object.assign(cfgToggles, cfg.toggles);
     if (cfg.llm) { document.getElementById('cfgLlm').value = cfg.llm; }
     if (cfg.ollama_model) document.getElementById('cfgOllamaModel').value = cfg.ollama_model;
@@ -3293,6 +3306,7 @@ function loadConfigFromStorage() {
     if (cfg.access_urls) document.getElementById('cfgAccessUrls').value = cfg.access_urls;
     if (cfg.ctf_flag_pattern) document.getElementById('cfgCtfFlagPattern').value = cfg.ctf_flag_pattern;
     if (cfg.manual_crawl_file) document.getElementById('cfgManualCrawlFile').value = cfg.manual_crawl_file;
+    if (cfg.state_profile) document.getElementById('cfgStateProfile').value = cfg.state_profile;
     if (cfg.manual_crawl_output) document.getElementById('manualCrawlOutput').value = cfg.manual_crawl_output;
     if (cfg.flows && cfg.flows.length) restoreFlows(cfg.flows);
     // Restore toggle UI
@@ -3321,6 +3335,7 @@ async function loadDefaultConfigFromServer() {
     if (cfg.max_forms != null) document.getElementById('cfgMaxForms').value = cfg.max_forms;
     if (cfg.request_delay != null) document.getElementById('cfgDelay').value = cfg.request_delay;
     if (cfg.navigation_retries != null) document.getElementById('cfgNavigationRetries').value = cfg.navigation_retries;
+    if (cfg.state_profile) document.getElementById('cfgStateProfile').value = cfg.state_profile;
     if (cfg.proxy != null) document.getElementById('cfgProxy').value = cfg.proxy;
     if (cfg.tls_client_cert != null) document.getElementById('cfgTlsClientCert').value = cfg.tls_client_cert;
     if (cfg.tls_client_key != null) document.getElementById('cfgTlsClientKey').value = cfg.tls_client_key;

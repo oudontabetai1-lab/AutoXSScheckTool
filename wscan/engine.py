@@ -27,6 +27,7 @@ import hashlib
 import json
 import os
 import re
+import warnings
 import xml.etree.ElementTree as _ET
 from collections import Counter, deque
 from contextvars import ContextVar
@@ -34,6 +35,8 @@ from dataclasses import dataclass, field as dc_field
 from pathlib import Path
 from typing import Optional
 from urllib.parse import urlparse, urljoin, parse_qs, urlsplit
+
+from wscan.state_profile import VALID_PROFILES
 
 # ---------------------------------------------------------------------------
 # Per-worker browser context variable
@@ -535,6 +538,8 @@ class ScanEngine:
         # Opt-in for intrusive, potentially state-changing probes (e.g. privesc
         # verb tampering with POST/PUT/PATCH). Off by default for safety.
         allow_state_changing_probes: bool = False,
+        # 注入リクエストの状態変更プロファイル。既定は従来挙動を維持する。
+        state_profile: str = "unrestricted",
         # ①: SPA crawl enhancement
         spa_crawl: bool = False,
         auto_spa_crawl: bool = True,
@@ -626,6 +631,15 @@ class ScanEngine:
         self.auto_register = auto_register
         self.auto_register_count = auto_register_count
         self.allow_state_changing_probes = allow_state_changing_probes
+        canonical_state_profile = str(state_profile or "").strip().lower()
+        if canonical_state_profile not in VALID_PROFILES:
+            warnings.warn(
+                f"Unknown state_profile {state_profile!r}; falling back to 'unrestricted'.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            canonical_state_profile = "unrestricted"
+        self.state_profile = canonical_state_profile
         # account_sessions: resolved at run time — list of {"username":, "cookies":, "role":}
         self.account_sessions: list = []
         # ①: SPA crawl
@@ -1988,12 +2002,20 @@ class ScanEngine:
         form_index: int,
         is_url_param: bool,
         dom_index: int = -1,
+        field: Optional[dict] = None,
     ):
         """従来 form/URL parameter から InjectionPoint を一意に生成する。"""
         if is_url_param:
             return InjectionPoint.for_url_param(url, field_name)
+        form_meta = field or {}
         return InjectionPoint.for_form(
-            url, field_name, form_index, dom_index=dom_index
+            url,
+            field_name,
+            form_index,
+            dom_index=dom_index,
+            method=form_meta.get("_form_method", ""),
+            action=form_meta.get("_form_action", ""),
+            labels=form_meta.get("_form_labels", ""),
         )
 
     def _checkpoint_is_done_ip(self, ip, check: str) -> bool:
@@ -4803,7 +4825,11 @@ class ScanEngine:
         for fi, form in enumerate(forms):
             dom_idx = form.get("index", fi)
             for inp in form.get("inputs", []):
-                field_queue.append((fi, dom_idx, inp, False))
+                field = dict(inp)
+                field["_form_method"] = form.get("method") or "GET"
+                field["_form_action"] = form.get("action") or page.url
+                field["_form_labels"] = form.get("labels") or ""
+                field_queue.append((fi, dom_idx, field, False))
         for param in page.url_params:
             field_queue.append((0, 0, {"name": param, "type": "text"}, True))
 
@@ -4929,6 +4955,19 @@ class ScanEngine:
 
             # Build a per-field payload map for each relevant check type
             for check_name in [c for c in ("xss", "sqli", "ssti") if c in self.scanners]:
+                scanner = self.scanners[check_name]
+                multi_ip = InjectionPoint.for_form(
+                    page.url,
+                    f"multi[{fi}]",
+                    fi,
+                    dom_index=dom_idx,
+                    method=form.get("method") or "GET",
+                    action=form.get("action") or page.url,
+                    labels=form.get("labels") or "",
+                )
+                may_scan_ip = getattr(scanner, "may_scan_injection_point", None)
+                if callable(may_scan_ip) and not may_scan_ip(multi_ip):
+                    continue
                 field_payloads: dict = {}
 
                 for inp in inputs:
@@ -5080,7 +5119,7 @@ class ScanEngine:
         """Run enabled scanners on a single field, guided by the attack plan."""
         field_name = field.get("name", "unknown")
         ip = self._injection_point_for(
-            url, field_name, form_index, is_url_param, dom_index
+            url, field_name, form_index, is_url_param, dom_index, field
         )
         location = "URL param" if is_url_param else "form field"
 
@@ -5109,6 +5148,26 @@ class ScanEngine:
         for check_name in ordered_checks:
             scanner = self.scanners.get(check_name)
             if scanner is None:
+                continue
+
+            requires_preflight = getattr(
+                scanner, "requires_state_profile_preflight", None
+            )
+            may_scan_ip = getattr(scanner, "may_scan_injection_point", None)
+            if (
+                callable(requires_preflight)
+                and requires_preflight()
+                and callable(may_scan_ip)
+                and not may_scan_ip(ip)
+            ):
+                self._record_scan_matrix(
+                    url=url,
+                    field_name=field_name,
+                    check_name=check_name,
+                    status="skipped",
+                    location=location,
+                    note=f"Skipped by state profile: {self.state_profile}.",
+                )
                 continue
 
             # 再開可能スキャン: 既に完了した (url, field, location, check) 単位は飛ばす
@@ -5300,7 +5359,7 @@ class ScanEngine:
         """
         field_name = field.get("name", "unknown")
         ip = self._injection_point_for(
-            url, field_name, form_index, is_url_param, dom_index
+            url, field_name, form_index, is_url_param, dom_index, field
         )
 
         # provider 自体が使えない場合はフォールバック完了として収束させる。
