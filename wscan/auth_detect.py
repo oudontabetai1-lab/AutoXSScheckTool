@@ -76,17 +76,36 @@ def _norm(url: str) -> str:
 _LOGIN_URL_KEYWORDS = ("/login", "/signin", "/sign-in", "/auth/login", "/account/login")
 
 
-def url_looks_like_login(url: str) -> bool:
-    """URL 全体（fragment 含む）が login ページ様か判定する（純粋）。
+def _path_has_login_hint(path: str) -> bool:
+    """パス成分が login ルート様か（``/login`` 完全一致 or ``/account/login`` 等の末尾一致）。"""
+    path = (path or "").rstrip("/")
+    if not path:
+        return False
+    for kw in _LOGIN_URL_KEYWORDS:
+        if path == kw or path.endswith(kw):
+            return True
+    return False
 
-    ``on_login_page`` は ``urlparse(...).path`` だけを見るため SPA の hash ルート
-    （例 ``/#/login``）を拾えない。本関数は browser.is_on_login_page の空 login_url
-    分岐と同一の「URL 末尾/クエリ/フラグメントに login 語」heuristic を提供し、
+
+def url_looks_like_login(url: str) -> bool:
+    """URL の**ルート成分**（path＋SPA hash ルート fragment）が login ページ様か（純粋）。
+
+    ``on_login_page`` は path だけを見るため SPA の hash ルート（例 ``/#/login``）を拾えない。
+    一方で URL 全体の部分文字列一致にすると、``/dashboard?next=/login`` のような**クエリ値**に
+    login パスを含む無関係ページまで login と誤判定し、本物の失効（→/login redirect）検知を
+    抑止してしまう。そこで path と hash ルート fragment のみに heuristic を適用し、任意の
+    クエリ値には適用しない。browser.is_on_login_page の空 login_url 分岐と本関数を共有して
     「login ページか」と「login ページへの意図的訪問か」の判定を対称化する。
     """
-    current = (url or "").rstrip("/").lower()
-    for kw in _LOGIN_URL_KEYWORDS:
-        if current.endswith(kw) or (kw + "?") in current or (kw + "#") in current:
+    from urllib.parse import urlparse
+    parsed = urlparse((url or "").lower())
+    if _path_has_login_hint(parsed.path):
+        return True
+    frag = parsed.fragment
+    if frag:
+        # SPA の hash ルート（例 ``#/login`` / ``#/login?redirect=x``）は先頭の path 部だけ見る。
+        frag_path = frag.split("?", 1)[0]
+        if _path_has_login_hint(frag_path):
             return True
     return False
 

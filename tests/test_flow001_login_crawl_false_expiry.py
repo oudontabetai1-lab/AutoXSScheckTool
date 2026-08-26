@@ -42,6 +42,8 @@ def test_hash_routed_spa_login_recognized():
     assert eng._is_login_target_url("https://app.test/#/login") is True
     # 非 login の hash ルートは False（そこへの redirect は失効として扱える）。
     assert eng._is_login_target_url("https://app.test/#/dashboard") is False
+    # クエリ値に /login を含む無関係ページは login target でない（真の失効検知を抑止しない）。
+    assert eng._is_login_target_url("https://app.test/dashboard?next=/login") is False
 
 
 def test_shared_heuristic_matches_browser_keywords():
@@ -50,5 +52,7 @@ def test_shared_heuristic_matches_browser_keywords():
               "http://s/auth/login", "http://s/account/login",
               "http://s/#/login", "http://s/login?next=/x", "http://s/login#top"):
         assert url_looks_like_login(u) is True, u
-    for u in ("http://s/dashboard", "http://s/login-history", "http://s/#/home"):
+    # クエリ値に login パスを含む無関係 URL は login と誤判定しない（#108 Codex P2）。
+    for u in ("http://s/dashboard", "http://s/login-history", "http://s/#/home",
+              "http://s/dashboard?next=/login", "http://s/report?source=https://idp/login"):
         assert url_looks_like_login(u) is False, u
