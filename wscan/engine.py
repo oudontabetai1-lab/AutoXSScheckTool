@@ -5758,9 +5758,9 @@ class ScanEngine:
                 # ここで reproduced へ昇格する。確証時に通知する（dedup 済のものは再送されない）。
                 _notifier = getattr(self, "_notifier", None)
                 if _notifier:
-                    asyncio.ensure_future(
-                        _notifier.notify_finding(finding, getattr(self, "target_url", ""))
-                    )
+                    # 昇格通知は fire-and-forget にせず await して確実に送る（shutdown で
+                    # 未完了タスクが cancel される取りこぼしを防ぐ）。dedup 済は再送されない。
+                    await _notifier.notify_finding(finding, getattr(self, "target_url", ""))
                 console.print(
                     f"  [green][CONFIRMED][/green] {finding.check_type.upper()} "
                     f"on [yellow]{finding.field_name}[/yellow]: reproduced"
@@ -6116,15 +6116,18 @@ class ScanEngine:
 
         # L: スキャン完了通知
         if self._notifier and self._notifier.notify_complete:
+            # 完了サマリーは confirmed(verified) のみを脆弱性として数える（ADR-0015 D3）。
+            _confirmed = [_f for _f in self.all_findings if _f.verified]
             _counts: dict[str, int] = {}
-            for _f in self.all_findings:
+            for _f in _confirmed:
                 _counts[_f.severity] = _counts.get(_f.severity, 0) + 1
             _summary = {
-                "total": len(self.all_findings),
+                "total": len(_confirmed),
                 "critical": _counts.get("critical", 0),
                 "high":     _counts.get("high", 0),
                 "medium":   _counts.get("medium", 0),
                 "low":      _counts.get("low", 0),
+                "hypothesis": len(self.all_findings) - len(_confirmed),
             }
             try:
                 import asyncio as _asyncio

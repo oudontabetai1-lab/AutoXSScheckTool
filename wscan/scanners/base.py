@@ -323,6 +323,22 @@ def finding_dedup_key_for(finding: "Finding") -> tuple:
     )
 
 
+def finding_dict_confirmed(d: dict) -> bool:
+    """to_dict 由来 dict が確証(reproduced)か判定する。
+
+    verified(bool) があればそれを正本にし、無ければ verification_state から派生
+    （"reproduced" のみ True）。両方欠く旧 dict は従来の confirmed 既定(True)を保つ
+    （後方互換＝古い dict を未確証へ格下げしない）。
+    """
+    v = d.get("verified")
+    if isinstance(v, bool):
+        return v
+    state = d.get("verification_state")
+    if state:
+        return state == "reproduced"
+    return True
+
+
 @dataclass
 class Finding:
     """A security vulnerability finding."""

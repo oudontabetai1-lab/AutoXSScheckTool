@@ -75,6 +75,9 @@ _SARIF_SCHEMA = (
 )
 
 
+from wscan.scanners.base import finding_dict_confirmed
+
+
 class SarifExporter:
     """SARIF 2.1.0 ドキュメントを生成するエクスポーター。"""
 
@@ -90,7 +93,7 @@ class SarifExporter:
         """
         rules = self._build_rules(findings)
         results = [self._finding_to_result(f) for f in findings]
-        confirmed_total = sum(1 for f in findings if f.get("verified") is True)
+        confirmed_total = sum(1 for f in findings if finding_dict_confirmed(f))
 
         return {
             "$schema": _SARIF_SCHEMA,
@@ -157,7 +160,7 @@ class SarifExporter:
         """Finding dict を SARIF result エントリに変換する。"""
         ct = f.get("check_type", "unknown")
         severity = f.get("severity", "medium")
-        verified = f.get("verified") is True
+        verified = finding_dict_confirmed(f)
         # 未確証 result は残すが、CI の脆弱性ゲート対象にはしない。
         level = _SEVERITY_TO_LEVEL.get(severity, "warning") if verified else "note"
         url = f.get("url", "")
