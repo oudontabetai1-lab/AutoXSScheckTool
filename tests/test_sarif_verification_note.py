@@ -36,8 +36,7 @@ class SarifVerificationNoteTests(unittest.TestCase):
         )
 
     def test_verification_state_exported_distinguishes_assumed_from_reproduced(self):
-        # assumed は verified=True・note 空なので、SARIF で reproduced と区別できる唯一の値が
-        # verification_state。両者が同一に潰れないことを守る。
+        # reproduced のみ verified=True、assumed は verified=False。state も保持する。
         reproduced = {
             "check_type": "sqli", "url": "http://h/a", "field_name": "b",
             "payload": "'", "severity": "high", "verified": True,
@@ -45,15 +44,15 @@ class SarifVerificationNoteTests(unittest.TestCase):
         }
         assumed = {
             "check_type": "sqli", "url": "http://h/a", "field_name": "b",
-            "payload": "'", "severity": "high", "verified": True,
+            "payload": "'", "severity": "high", "verified": False,
             "verification_state": "assumed",
         }
         rprops = SarifExporter._finding_to_result(reproduced)["properties"]
         aprops = SarifExporter._finding_to_result(assumed)["properties"]
         self.assertEqual(rprops["verification_state"], "reproduced")
         self.assertEqual(aprops["verification_state"], "assumed")
-        # verified が同値でも state で区別できる。
-        self.assertEqual(rprops["verified"], aprops["verified"])
+        self.assertTrue(rprops["verified"])
+        self.assertFalse(aprops["verified"])
         self.assertNotEqual(
             rprops["verification_state"], aprops["verification_state"]
         )

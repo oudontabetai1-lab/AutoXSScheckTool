@@ -91,23 +91,64 @@ class FindingInjectionProvenanceTests(unittest.IsolatedAsyncioTestCase):
     def test_direct_finding_construction_gets_state_legacy_stays_empty(self):
         # record_finding を通らない直接構築（ChainScanner/GraphQL 等）も __post_init__ で
         # 非空 state を得る。dialog→reproduced／非dialog→assumed。
-        self.assertEqual(
-            Finding(check_type="graphql_dos", severity="high", url="http://h/g",
-                    field_name="q", payload="x", evidence="e").verification_state,
-            "assumed",
+        non_dialog = Finding(
+            check_type="graphql_dos", severity="high", url="http://h/g",
+            field_name="q", payload="x", evidence="e",
         )
-        self.assertEqual(
-            Finding(check_type="xss", severity="high", url="http://h/x",
-                    field_name="q", payload="<script>", evidence="e",
-                    dialog_confirmed=True).verification_state,
-            "reproduced",
+        self.assertEqual(non_dialog.verification_state, "assumed")
+        self.assertFalse(non_dialog.verified)
+
+        dialog = Finding(
+            check_type="xss", severity="high", url="http://h/x",
+            field_name="q", payload="<script>", evidence="e",
+            dialog_confirmed=True,
         )
+        self.assertEqual(dialog.verification_state, "reproduced")
+        self.assertTrue(dialog.verified)
+
         # from_dict の旧 Finding（キー欠落）は空文字のまま＝旧 Finding 専用に予約。
         legacy = Finding.from_dict({
             "check_type": "sqli", "severity": "high", "url": "http://h/a",
             "field_name": "q", "payload": "'", "evidence": "e",
         })
         self.assertEqual(legacy.verification_state, "")
+
+    def test_apply_verification_derives_verified_from_state(self):
+        finding = Finding(
+            check_type="sqli", severity="high", url="http://h/a",
+            field_name="q", payload="'", evidence="e",
+            verification_state="reproduced",
+        )
+
+        finding.apply_verification("assumed")
+
+        self.assertEqual(finding.verification_state, "assumed")
+        self.assertFalse(finding.verified)
+        self.assertEqual(finding.verification_note, "")
+
+    def test_verified_is_read_only(self):
+        finding = Finding(
+            check_type="sqli", severity="high", url="http://h/a",
+            field_name="q", payload="'", evidence="e",
+        )
+
+        with self.assertRaises(AttributeError):
+            finding.verified = True
+
+    def test_from_dict_empty_state_preserves_legacy_verified_without_promotion(self):
+        base = {
+            "check_type": "sqli", "severity": "high", "url": "http://h/a",
+            "field_name": "q", "payload": "'", "evidence": "legacy",
+            "verification_state": "",
+        }
+
+        unverified = Finding.from_dict({**base, "verified": False})
+        verified = Finding.from_dict({**base, "verified": True})
+
+        self.assertEqual(unverified.verification_state, "")
+        self.assertFalse(unverified.verified)
+        self.assertEqual(verified.verification_state, "")
+        self.assertTrue(verified.verified)
 
     async def test_record_finding_stamps_verification_state(self):
         # 新規 finding は必ず非空 state（空は旧 Finding 専用）。dialog 発火=reproduced、

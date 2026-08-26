@@ -167,7 +167,7 @@ class VerificationStateTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(reproduced.verification_state, "reproduced")
         self.assertEqual(reproduced.verification_note, "")
 
-        self.assertTrue(assumed.verified)
+        self.assertFalse(assumed.verified)
         self.assertEqual(assumed.verification_state, "assumed")
         self.assertEqual(assumed.verification_note, "")
 

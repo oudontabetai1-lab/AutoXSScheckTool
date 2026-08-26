@@ -5749,30 +5749,27 @@ class ScanEngine:
                 # （false positive 疑い）とは別文言で理由を残す。finding は削除せず manual
                 # review 扱いにする（過検知を消さない＝検出力は落とさない）。CONFIRMED
                 # （reproduced）には決して落とさない。
-                finding.verified = False
-                finding.verification_state = "skipped"
-                finding.verification_note = "検証が例外で実行できず未再現（要手動確認）"
+                finding.apply_verification(
+                    "skipped", "検証が例外で実行できず未再現（要手動確認）"
+                )
             elif state == "reproduced":
-                finding.verified = True
-                finding.verification_state = "reproduced"
-                finding.verification_note = ""
+                finding.apply_verification("reproduced", "")
                 console.print(
                     f"  [green][CONFIRMED][/green] {finding.check_type.upper()} "
                     f"on [yellow]{finding.field_name}[/yellow]: reproduced"
                 )
             elif state == "assumed":
                 # 検証不能は finding を落とさない従来方針を維持しつつ、実再現とは分ける。
-                finding.verified = True
-                finding.verification_state = "assumed"
-                finding.verification_note = ""
+                finding.apply_verification("assumed", "")
                 console.print(
                     f"  [yellow][ASSUMED][/yellow] {finding.check_type.upper()} "
                     f"on [yellow]{finding.field_name}[/yellow]: kept (not re-verified)"
                 )
             else:
-                finding.verified = False
-                finding.verification_state = "unreproduced"
-                finding.verification_note = "2回目の試行で再現できませんでした (possible false positive)"
+                finding.apply_verification(
+                    "unreproduced",
+                    "2回目の試行で再現できませんでした (possible false positive)",
+                )
                 console.print(
                     f"  [yellow][UNCONFIRMED][/yellow] {finding.check_type.upper()} "
                     f"on [yellow]{finding.field_name}[/yellow]: not reproduced"

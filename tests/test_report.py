@@ -8,25 +8,27 @@ from wscan.scanners.base import Finding
 
 class ReportGeneratorTests(unittest.TestCase):
     def test_verification_states_have_distinct_labels_and_badges(self):
-        def finding(field_name, state, verified=True, note=""):
-            return Finding(
+        def finding(field_name, state, note=""):
+            data = dict(
                 check_type="xss",
                 severity="high",
                 url=f"http://fixture.test/{field_name}",
                 field_name=field_name,
                 payload="<svg/onload=alert(1)>",
                 evidence=f"{state or 'legacy'} evidence",
-                verified=verified,
                 verification_state=state,
                 verification_note=note,
                 evidence_type="xss_reflection",
             )
+            if not state:
+                return Finding.from_dict({**data, "verified": True})
+            return Finding(**data)
 
         findings = [
             finding("reproduced", "reproduced"),
             finding("assumed", "assumed"),
-            finding("unreproduced", "unreproduced", verified=False),
-            finding("skipped", "skipped", verified=False, note="要手動確認"),
+            finding("unreproduced", "unreproduced"),
+            finding("skipped", "skipped", note="要手動確認"),
             finding("legacy", ""),
         ]
 
@@ -46,7 +48,7 @@ class ReportGeneratorTests(unittest.TestCase):
         self.assertIn(">reproduced/assumed</div>", html)
         self.assertIn("〜 推定（再検証未実行）", html)
         self.assertEqual(html.count('class="badge-assumed"'), 1)
-        self.assertEqual(html.count("⚠ 要確認"), 2)
+        self.assertEqual(html.count("⚠ 要確認"), 3)
 
     def test_assumed_with_verified_false_labeled_assumed_not_unreproduced(self):
         # Agent 仮説等は verified=False かつ state="assumed"（一度も retry していない）。
@@ -56,7 +58,7 @@ class ReportGeneratorTests(unittest.TestCase):
             check_type="xss", severity="high",
             url="http://fixture.test/agent", field_name="q",
             payload="<svg/onload=alert(1)>", evidence="agent hypothesis",
-            verified=False, verification_state="assumed",
+            verification_state="assumed",
             evidence_type="xss_reflection",
         )
         with tempfile.TemporaryDirectory() as tmp:
@@ -67,10 +69,9 @@ class ReportGeneratorTests(unittest.TestCase):
         self.assertIn(">assumed (not re-verified)</div>", html)
         # この finding を "not reproduced" とは表示しない。
         self.assertNotIn(">not reproduced</div>", html)
-        # バッジも state 優先: verified=False+assumed は 推定バッジで、⚠要確認（検証失敗/未実行の
-        # 警告）は付けない（一度も retry していない Agent 仮説等）。
+        # 未再検証であることを推定バッジと ⚠要確認の両方で明示する。
         self.assertIn('class="badge-assumed"', html)
-        self.assertNotIn("⚠ 要確認", html)
+        self.assertIn("⚠ 要確認", html)
 
     def test_remediation_summary_html_renders_verification_state(self):
         # HTML レポートの remediation summary が task/review 行に verify state を出す
@@ -82,7 +83,7 @@ class ReportGeneratorTests(unittest.TestCase):
                     verification_state="assumed"),
             Finding(check_type="xss", severity="high", url="http://h/b",
                     field_name="r", payload="<x>", evidence="reflected",
-                    evidence_type="xss_reflection", verified=False,
+                    evidence_type="xss_reflection",
                     verification_state="skipped"),
         ]
         with tempfile.TemporaryDirectory() as tmp:
@@ -90,10 +91,10 @@ class ReportGeneratorTests(unittest.TestCase):
                 target="http://h", findings=findings,
                 visited_urls=["http://h/"], checks=["sqli", "xss"],
             ).read_text(encoding="utf-8")
-        # actionable task（assumed）に verify state と要手動確認バッジ。
-        self.assertIn("verify: assumed", html)
-        self.assertIn("⚠ 要手動確認", html)
-        # review-only（skipped）行に verify state。
+        # assumed/skipped はともに finding を保持し、review-only に state を出す。
+        self.assertIn("Remediation Summary (0 tasks)", html)
+        self.assertIn("Review-only Signals (2)", html)
+        self.assertIn("verify=assumed", html)
         self.assertIn("verify=skipped", html)
 
     def test_agent_findings_have_origin_and_verification_badges(self):
@@ -152,7 +153,7 @@ class ReportGeneratorTests(unittest.TestCase):
                 payload="<script>alert(1)</script>",
                 evidence="Dialog from search form",
                 confidence="confirmed",
-                verified=True,
+                verification_state="reproduced",
                 evidence_type="xss_dialog",
                 reproduction_steps=["Open /", "Submit q"],
             ),
@@ -164,7 +165,7 @@ class ReportGeneratorTests(unittest.TestCase):
                 payload="<script>alert(1)</script>",
                 evidence="Dialog from query parameter",
                 confidence="confirmed",
-                verified=True,
+                verification_state="reproduced",
                 evidence_type="xss_dialog",
                 reproduction_steps=["Open /search", "Submit q"],
             ),
@@ -176,7 +177,6 @@ class ReportGeneratorTests(unittest.TestCase):
                 payload="<script>alert(1)</script>",
                 evidence="Reflected but not reproduced",
                 confidence="tentative",
-                verified=False,
                 evidence_type="xss_reflection",
                 reproduction_steps=["Open /dom", "Submit next"],
             ),

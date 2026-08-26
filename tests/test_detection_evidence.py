@@ -204,7 +204,9 @@ class DetectionEvidenceTests(unittest.TestCase):
         restored = Finding.from_dict(data)
 
         self.assertEqual(data["verification_state"], "assumed")
+        self.assertFalse(data["verified"])
         self.assertEqual(restored.verification_state, "assumed")
+        self.assertFalse(restored.verified)
 
     def test_dedup_key_preserves_distinct_evidence_types_on_same_input(self):
         finding = Finding(

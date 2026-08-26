@@ -17,6 +17,7 @@ class ActionPlanTests(unittest.TestCase):
             payload="<script>alert(1)</script>",
             evidence="JavaScript dialog fired",
             confidence="confirmed",
+            verification_state="reproduced",
             evidence_type="xss_dialog",
             reproduction_steps=["Open search", "Submit payload"],
         )
@@ -43,7 +44,6 @@ class ActionPlanTests(unittest.TestCase):
             payload="<script>alert(1)</script>",
             evidence="Reflected in HTML text but execution was not reproduced",
             confidence="tentative",
-            verified=False,
             evidence_type="xss_reflection",
             reproduction_steps=["Open page", "Submit payload"],
         )
@@ -69,7 +69,6 @@ class ActionPlanTests(unittest.TestCase):
                 payload="<script>alert(1)</script>",
                 evidence="Reflected but not reproduced",
                 confidence="tentative",
-                verified=False,
                 evidence_type="xss_reflection",
                 evidence_details={"context": "html_text"},
             ),
@@ -81,7 +80,6 @@ class ActionPlanTests(unittest.TestCase):
                 payload="<script>alert(1)</script>",
                 evidence="Reflected again but not reproduced",
                 confidence="tentative",
-                verified=False,
                 evidence_type="xss_reflection",
                 evidence_details={"context": "html_text"},
             ),
@@ -107,7 +105,7 @@ class ActionPlanTests(unittest.TestCase):
                 payload="<script>alert(1)</script>",
                 evidence="Dialog from search form",
                 confidence="confirmed",
-                verified=True,
+                verification_state="reproduced",
                 evidence_type="xss_dialog",
                 reproduction_steps=["Open /", "Submit q"],
             ),
@@ -119,7 +117,7 @@ class ActionPlanTests(unittest.TestCase):
                 payload="<script>alert(1)</script>",
                 evidence="Dialog from query parameter",
                 confidence="confirmed",
-                verified=True,
+                verification_state="reproduced",
                 evidence_type="xss_dialog",
                 reproduction_steps=["Open /search", "Submit q"],
             ),
@@ -145,7 +143,7 @@ class ActionPlanTests(unittest.TestCase):
                 payload="' OR '1'='1",
                 evidence="Auth bypass via username",
                 confidence="confirmed",
-                verified=True,
+                verification_state="reproduced",
                 evidence_type="sqli_auth_bypass",
                 evidence_details={
                     "original_url": "http://fixture.test/login",
@@ -160,7 +158,7 @@ class ActionPlanTests(unittest.TestCase):
                 payload="' OR '1'='1",
                 evidence="Auth bypass via password",
                 confidence="confirmed",
-                verified=True,
+                verification_state="reproduced",
                 evidence_type="sqli_auth_bypass",
                 evidence_details={
                     "original_url": "http://fixture.test/login",
@@ -191,7 +189,7 @@ class ActionPlanTests(unittest.TestCase):
             payload="low-privilege session submitted form",
             evidence="Low-privilege user could submit role change form",
             confidence="confirmed",
-            verified=True,
+            verification_state="reproduced",
         )
 
         with tempfile.TemporaryDirectory() as tmp:
