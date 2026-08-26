@@ -40,11 +40,11 @@ def _known_target_identifiers(
     """既知の検査対象 URL から、クエリから除くべき識別子（host・host:port・IP）を抽出。
 
     ヒューリスティックでは捕まらない単一ラベルの内部 host（例 `intranet`）や、区切り無しで
-    現れる path/query 由来の識別子（例 `tenant-42`）も、対象が既知なら確実に落とせる。
+    現れる path/query/fragment 由来の識別子（例 `tenant-42`、SPA hash route）も、対象が既知なら確実に落とせる。
 
     返り値は `(host_ids, exact_ids)`:
       - `host_ids`  … host・host:port。subdomain/port 付きも拾うため **部分一致**で使う。
-      - `exact_ids` … path segment・query 値。一般語の巻き込みを避けるため **完全一致**で使う。
+      - `exact_ids` … path segment・query の key/値・fragment route。一般語の巻き込みを避け **完全一致**で使う。
     いずれも純粋・小文字正規化。"""
     empty: tuple[frozenset[str], frozenset[str]] = (frozenset(), frozenset())
     if not target_url:
@@ -68,6 +68,12 @@ def _known_target_identifiers(
                 token = token.strip().lower()
                 if len(token) >= 2:
                     exact_ids.add(token)  # 対象固有の query 識別子
+        # fragment（SPA の hash-router `#/`・`#!/` 由来の route も対象固有識別子）
+        frag = (parsed.fragment or "").lstrip("#!/")
+        for seg in frag.replace("?", "/").replace("&", "/").split("/"):
+            seg = seg.strip().lower()
+            if len(seg) >= 2:
+                exact_ids.add(seg)
     except Exception:
         return empty
     return (frozenset(host_ids), frozenset(exact_ids))

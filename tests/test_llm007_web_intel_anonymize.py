@@ -121,3 +121,11 @@ def test_planner_query_path_redaction_is_exact_token_only():
     q = build_planner_web_query("administrator dashboard",
                                 target_url="https://host/admin")
     assert "administrator" in q  # 'admin' を含むが完全一致でないので残る
+
+
+def test_planner_query_redacts_spa_hash_route_identifier():
+    # SPA hash-router のルート由来の対象固有識別子（proactive: fragment も既知対象として redact）
+    q = build_planner_web_query("Tenant tenant-42 View",
+                                target_url="https://host/app#/tenants/tenant-42")
+    assert "tenant-42" not in q
+    assert "Tenant" in q and "View" in q
