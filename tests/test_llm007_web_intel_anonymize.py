@@ -140,3 +140,27 @@ def test_planner_query_rejects_compound_hash_route_token():
     # C#/C++/F# は末尾特殊文字なので通る
     q2 = build_planner_web_query("C# C++ F# WordPress")
     assert "C#" in q2 and "C++" in q2 and "F#" in q2 and "WordPress" in q2
+
+
+def test_planner_query_redacts_multiword_query_value():
+    # `?account=Acme+Corp` は parse_qsl で 'acme corp' になるが title は Acme/Corp に分割される
+    # → 語単位でも redact（Codex P2#6）
+    q = build_planner_web_query("Report Acme Corp Summary",
+                                target_url="https://host/r?account=Acme+Corp")
+    assert "Acme" not in q and "Corp" not in q
+    assert "Report" in q and "Summary" in q
+
+
+def test_planner_query_redacts_percent_encoded_path_identifier():
+    # `/%74enant-42` は decode すると `tenant-42`。title は decode 済み表示なので一致させる（P2#7）
+    q = build_planner_web_query("View tenant-42 Page",
+                                target_url="https://host/%74enant-42")
+    assert "tenant-42" not in q
+    assert "View" in q and "Page" in q
+
+
+def test_planner_query_redacts_percent_encoded_fragment_identifier():
+    q = build_planner_web_query("Open tenant-42 Detail",
+                                target_url="https://host/app#/%74enant-42")
+    assert "tenant-42" not in q
+    assert "Open" in q and "Detail" in q

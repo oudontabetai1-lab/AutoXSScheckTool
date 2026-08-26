@@ -52,29 +52,37 @@ def _known_target_identifiers(
         return empty
     host_ids: set[str] = set()
     exact_ids: set[str] = set()
+
+    def _add_exact(raw: str) -> None:
+        # 値そのものと、空白区切りの各語を exact_ids へ（`Acme Corp` のような複数語 identifier は
+        # title 側で `Acme`/`Corp` に分割されるため、語単位でも落とす）。純粋・小文字化。
+        raw = raw.strip().lower()
+        if len(raw) >= 2:
+            exact_ids.add(raw)
+        for part in raw.split():
+            if len(part) >= 2:
+                exact_ids.add(part)
+
     try:
+        from urllib.parse import parse_qsl, unquote
+
         parsed = urlparse(target_url if "://" in target_url else "//" + target_url, scheme="")
         host = (parsed.hostname or "").strip().lower()
         if len(host) >= 2:
             host_ids.add(host)
             if parsed.port:
                 host_ids.add(f"{host}:{parsed.port}")
-        for seg in (parsed.path or "").split("/"):
-            seg = seg.strip().lower()
-            if len(seg) >= 2:
-                exact_ids.add(seg)  # 対象固有の path segment（tenant-42 等）
-        from urllib.parse import parse_qsl
+        # path/fragment は %エンコードを解いてから抽出（title は decode 済みで表示されるため
+        # `%74enant-42` を `tenant-42` に一致させる）。query は parse_qsl が decode 済み。
+        for seg in unquote(parsed.path or "").split("/"):
+            _add_exact(seg)  # 対象固有の path segment（tenant-42 等）
         for key, val in parse_qsl(parsed.query or "", keep_blank_values=False):
-            for token in (key, val):
-                token = token.strip().lower()
-                if len(token) >= 2:
-                    exact_ids.add(token)  # 対象固有の query 識別子
+            _add_exact(key)
+            _add_exact(val)  # 対象固有の query 識別子（複数語＝Acme Corp も語単位で）
         # fragment（SPA の hash-router `#/`・`#!/` 由来の route も対象固有識別子）
-        frag = (parsed.fragment or "").lstrip("#!/")
+        frag = unquote(parsed.fragment or "").lstrip("#!/")
         for seg in frag.replace("?", "/").replace("&", "/").split("/"):
-            seg = seg.strip().lower()
-            if len(seg) >= 2:
-                exact_ids.add(seg)
+            _add_exact(seg)
     except Exception:
         return empty
     return (frozenset(host_ids), frozenset(exact_ids))
