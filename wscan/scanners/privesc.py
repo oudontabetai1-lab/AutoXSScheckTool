@@ -1183,11 +1183,18 @@ class PrivEscScanner(BaseScanner):
         if not probes:
             return findings
 
+        from wscan.state_profile import may_submit as _may_submit
+        _profile = getattr(self.engine, "state_profile", "unrestricted")
         for form in forms:
             method = (form.get("method") or "GET").upper()
             if method == "GET":
                 continue
             action_url = self._action_url(page.url, form)
+            # state profile: 低権限セッションでの状態変更フォーム送信も profile に従う。
+            if not _may_submit(_profile, method=method, action=action_url,
+                               labels=form.get("labels") or ""):
+                self._record_scan_note(f"state_change_skipped:{self.CHECK_TYPE}")
+                continue
             action_path = urlparse(action_url).path
             if not ACTION_PATH_RE.search(action_path):
                 continue

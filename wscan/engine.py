@@ -1042,6 +1042,7 @@ class ScanEngine:
             sleep_factor=self.sleep_factor,
             exclude_fields=self.exclude_fields,
             enabled_checks=self.checks,
+            state_profile=self.state_profile,
         )
 
         # State
@@ -5369,6 +5370,20 @@ class ScanEngine:
         ip = self._injection_point_for(
             url, field_name, form_index, is_url_param, dom_index, field
         )
+
+        # state profile: adaptive も同じ preflight を適用する（DOMXSS/StoredXSS 等は
+        # 独自 _apply_payload/browser 送信で base の _apply_ip を通らないため）。
+        _gated_checks = []
+        for _cn in check_names:
+            _sc = self.scanners.get(_cn)
+            _pf = getattr(_sc, "requires_state_profile_preflight", None)
+            _ms = getattr(_sc, "may_scan_injection_point", None)
+            if callable(_pf) and _pf() and callable(_ms) and not _ms(ip):
+                continue
+            _gated_checks.append(_cn)
+        check_names = _gated_checks
+        if not check_names:
+            return None
 
         # provider 自体が使えない場合はフォールバック完了として収束させる。
         # 個別 generate() の一時失敗とは分離し、可用性 probe は scan 中に一度だけ行う。
