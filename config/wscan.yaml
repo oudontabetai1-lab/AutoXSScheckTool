@@ -108,6 +108,10 @@ llm:
   #    指定し、API キーは WSCAN_LLM_API_KEY（無ければ OPENAI_API_KEY）で渡す。
   provider: ollama
 
+  # LLM 呼び出しの並列度上限 (0=自動: ollama/none は 1、cloud は 3)。planner のページ単位
+  # LLM call を絞り、ローカルモデルの timeout 連発を防ぐ。ブラウザ worker 数とは独立。
+  concurrency: 0
+
   # LLM API 1回あたりのタイムアウト秒数と、一時失敗時の最大リトライ回数
   timeout_seconds: 30
   max_retries: 2

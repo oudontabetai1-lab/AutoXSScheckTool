@@ -460,6 +460,18 @@ def _adaptive_checkpoint_check(check_name: str) -> str:
 # Scan Engine
 # ---------------------------------------------------------------------------
 
+def _default_llm_concurrency(provider: str) -> int:
+    """LLM 並列度の既定（純粋）。ローカル（ollama）や none は 1、cloud は 3 から。
+
+    planner はページ単位 LLM call を asyncio.gather で一括するため、ローカルモデルでは
+    同時多発で 75s timeout を繰り返す（LLM-005）。ブラウザ worker 数と LLM 並列度を分離する。
+    """
+    prov = (provider or "").strip().lower()
+    if prov in ("ollama", "none", ""):
+        return 1
+    return 3
+
+
 class ScanEngine:
     """Main scanning engine — 4-phase pipeline."""
 
@@ -540,6 +552,9 @@ class ScanEngine:
         allow_state_changing_probes: bool = False,
         # 注入リクエストの状態変更プロファイル。既定は従来挙動を維持する。
         state_profile: str = "unrestricted",
+        # LLM 並列度の上限（0=provider から自動: ollama/none=1, cloud=3）。planner の
+        # ページ単位 LLM call を semaphore で絞り、ローカルモデルの timeout 連発を防ぐ（LLM-005）。
+        llm_concurrency: int = 0,
         # ①: SPA crawl enhancement
         spa_crawl: bool = False,
         auto_spa_crawl: bool = True,
@@ -1024,6 +1039,9 @@ class ScanEngine:
         # provider の恒久的な不達は scan 中に一度だけ判定する。並列 field が
         # 同時に初回 adaptive へ到達しても probe を重複させない。
         self._adaptive_llm_available: Optional[bool] = None
+        # LLM-005: LLM 並列度上限（0=auto）と遅延生成する semaphore。
+        self.llm_concurrency = int(llm_concurrency or 0)
+        self._llm_semaphore = None
         self._adaptive_llm_availability_lock = asyncio.Lock()
 
         # OOB（帯域外）メール受信シンク。環境変数（WSCAN_OOB_*）から構築し、
@@ -3500,6 +3518,15 @@ class ScanEngine:
     # Phase 2: Plan
     # =========================================================================
 
+    def _get_llm_semaphore(self):
+        """LLM 呼び出しの並列度を絞る semaphore を遅延生成する（実行ループへ束縛）。"""
+        if self._llm_semaphore is None:
+            limit = self.llm_concurrency or _default_llm_concurrency(
+                getattr(self.payload_gen, "provider", "none")
+            )
+            self._llm_semaphore = asyncio.Semaphore(max(1, int(limit)))
+        return self._llm_semaphore
+
     async def _phase_plan(self, pages: list) -> dict:
         """Build per-page attack plans with cross-page awareness, then confirm with user."""
         console.print(Rule("[bold cyan] Phase 2 / 4  ·  Attack Planning [/bold cyan]", style="cyan"))
@@ -3595,14 +3622,15 @@ class ScanEngine:
                     self.json_injection_points, self.api_seed_requests, origin=_origin
                 ),
             )
-            plan = await self.attack_planner.analyze_page(
-                url=page.url,
-                page_html=page.html,
-                forms=page.forms[:self.max_forms],
-                url_params=page.url_params,
-                site_map=site_map,
-                fingerprint=planner_fingerprint,
-            )
+            async with self._get_llm_semaphore():
+                plan = await self.attack_planner.analyze_page(
+                    url=page.url,
+                    page_html=page.html,
+                    forms=page.forms[:self.max_forms],
+                    url_params=page.url_params,
+                    site_map=site_map,
+                    fingerprint=planner_fingerprint,
+                )
             if self.monitor:
                 await self.monitor.emit_status(f"Plan: {plan.page_purpose[:60]}")
             return page.url, plan

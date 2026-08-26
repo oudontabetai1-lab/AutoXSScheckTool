@@ -73,6 +73,7 @@ def _load_config(path: Path = _CONFIG_PATH) -> dict:
     cfg["manual_crawl_file"]       = str(s.get("manual_crawl_file", "") or "")
     cfg["allow_state_changing_probes"] = bool(s.get("allow_state_changing_probes", False))
     cfg["state_profile"]           = str(s.get("state_profile", "unrestricted") or "unrestricted")
+    cfg["llm_concurrency"]         = int(l.get("concurrency", 0) or 0)
 
     cfg["headless"]                = bool(b.get("headless", False))
     cfg["proxy"]                   = str(b.get("proxy", "") or "")
@@ -1222,6 +1223,14 @@ Examples:
         ),
     )
     scan.add_argument(
+        "--llm-concurrency", type=int, default=_CFG.get("llm_concurrency", 0), metavar="N",
+        help=(
+            "LLM 呼び出しの並列度上限 (0=自動: ollama/none は 1、cloud は 3)。planner の "
+            "ページ単位 LLM call を絞り、ローカルモデルの timeout 連発を防ぐ。ブラウザ worker "
+            "数 (--concurrency) とは独立。"
+        ),
+    )
+    scan.add_argument(
         "--fast", "-F", action="store_true", default=False,
         help=(
             "高速スキャンモード (ベストエフォート): ペイロード上限 12・深さ 1・遅延 0 で "
@@ -2313,6 +2322,7 @@ async def run_scan(args):
             auto_register_count=getattr(args, "auto_register_count", 2),
             allow_state_changing_probes=getattr(args, "allow_state_changing_probes", False),
             state_profile=getattr(args, "state_profile", "unrestricted"),
+            llm_concurrency=getattr(args, "llm_concurrency", 0),
             # ①: SPA crawl
             spa_crawl=getattr(args, "spa_crawl", False),
             auto_spa_crawl=getattr(args, "auto_spa_crawl", True),
@@ -2956,6 +2966,7 @@ async def run_serve(args):
                     "state_profile",
                     _CFG.get("state_profile", "unrestricted"),
                 ),
+                llm_concurrency=int(cfg.get("llm_concurrency", _CFG.get("llm_concurrency", 0)) or 0),
                 seed_urls=seed_urls or None,
                 additional_report_findings=agent_findings or None,
                 manual_crawl_path=cfg.get("manual_crawl_file", "") or "",
