@@ -30,8 +30,9 @@ _DDG_ENDPOINT = "https://html.duckduckgo.com/html/"
 # port/query/fragment）は多様で列挙しきれない（Codex が同一関数で host→path/port→相対 path と
 # 3度指摘）。逆に「素のプレーンな技術語トークンだけ通す」＝URL 構造文字（. : / @ ? # 等）を含む
 # トークンは構造的に全て弾く、という安全側の設計にする。`C#`/`C++`/`ASP-NET` 等は許容、
-# `Node.js`/`ASP.NET` はドットで巻き込まれ落ちる（over-strip 許容）。
-_WEB_QUERY_TECH_TOKEN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9+#-]*$")
+# `Node.js`/`ASP.NET` はドットで巻き込まれ落ちる（over-strip 許容）。`#`/`+` は末尾のみ許可＝
+# `C#`/`C++`/`F#` は通すが、SPA の複合ハッシュルート `app#tenant-42`（中間に `#`）は弾く。
+_WEB_QUERY_TECH_TOKEN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]*[#+]*$")
 
 
 def _known_target_identifiers(

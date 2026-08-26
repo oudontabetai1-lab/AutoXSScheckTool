@@ -129,3 +129,14 @@ def test_planner_query_redacts_spa_hash_route_identifier():
                                 target_url="https://host/app#/tenants/tenant-42")
     assert "tenant-42" not in q
     assert "Tenant" in q and "View" in q
+
+
+def test_planner_query_rejects_compound_hash_route_token():
+    # `#` を末尾のみ許可＝中間に `#` を持つ複合ハッシュルートを弾く（Codex P2#5）
+    q = build_planner_web_query("View app#tenant-42 Page",
+                                target_url="https://host/app#tenant-42")
+    assert "app#tenant-42" not in q and "tenant-42" not in q
+    assert "View" in q and "Page" in q
+    # C#/C++/F# は末尾特殊文字なので通る
+    q2 = build_planner_web_query("C# C++ F# WordPress")
+    assert "C#" in q2 and "C++" in q2 and "F#" in q2 and "WordPress" in q2
