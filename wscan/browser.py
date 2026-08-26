@@ -2320,10 +2320,10 @@ class BrowserManager:
             if login_path and cur_path == login_path:
                 return True
         else:
-            # Heuristic: URL contains login/signin/auth keywords
-            for kw in ("/login", "/signin", "/sign-in", "/auth/login", "/account/login"):
-                if current.endswith(kw) or (kw + "?") in current or (kw + "#") in current:
-                    return True
+            # Heuristic: URL contains login/signin/auth keywords（engine._is_login_target_url
+            # と同一判定を共有し、「login ページか」と「意図的訪問か」を対称化する）。
+            from wscan import auth_detect
+            return auth_detect.url_looks_like_login(current)
         return False
 
     async def create_worker(self) -> "WorkerBrowser":

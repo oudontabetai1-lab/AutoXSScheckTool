@@ -1375,8 +1375,18 @@ class ScanEngine:
         every login-page visit as expiry, re-authenticate, and navigate away —
         leaving the login form itself never inspected.
         """
-        if not self.login_url or not url:
+        if not url:
             return False
+        if not self.login_url:
+            # login_url 未設定時は heuristic で「login ページへの意図的訪問」を認識する。
+            # is_on_login_page の空 login_url 分岐（/login 等のパス語で判定）と対称にし、
+            # 正規に /login を巡回する際に「セッション失効」と誤判定して post-auth crawl
+            # から落とすのを防ぐ（FLOW-001）。redirect（intended≠login）は依然 expiry 判定される。
+            from wscan import auth_detect
+            # 全 URL heuristic（fragment 含む）で判定し、SPA の hash ルート（/#/login）も
+            # login target として認識する。browser.is_on_login_page と対称（path だけ見る
+            # on_login_page では hash ルートを取りこぼす）。
+            return auth_detect.url_looks_like_login(url)
         current = urlparse(url.rstrip("/").lower())
         target = urlparse(self.login_url.rstrip("/").lower())
         # The host AND path must match: a different origin that merely shares the

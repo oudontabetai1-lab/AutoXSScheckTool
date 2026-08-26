@@ -73,6 +73,55 @@ def _norm(url: str) -> str:
     return (url or "").rstrip("/").lower()
 
 
+_LOGIN_URL_KEYWORDS = ("/login", "/signin", "/sign-in", "/auth/login", "/account/login")
+# クエリルータの param 名（値がルートを表す）。redirect 系（next/redirect/return/url/...）は
+# 含めない＝redirect 値を login と誤判定しないため（#108）。
+# 検索用 param（q/query/search 等）はルータでないため含めない（/search?q=/login を誤判定しない）。
+_ROUTE_PARAM_NAMES = ("route", "page", "action", "controller", "module", "mod", "do", "view", "option")
+
+
+def _path_has_login_hint(path: str) -> bool:
+    """パス成分が login ルート様か（``/login`` 完全一致 or ``/account/login`` 等の末尾一致）。"""
+    path = (path or "").rstrip("/")
+    if not path:
+        return False
+    for kw in _LOGIN_URL_KEYWORDS:
+        if path == kw or path.endswith(kw):
+            return True
+    return False
+
+
+def url_looks_like_login(url: str) -> bool:
+    """URL の**ルート成分**（path＋SPA hash ルート fragment）が login ページ様か（純粋）。
+
+    ``on_login_page`` は path だけを見るため SPA の hash ルート（例 ``/#/login``）を拾えない。
+    一方で URL 全体の部分文字列一致にすると、``/dashboard?next=/login`` のような**クエリ値**に
+    login パスを含む無関係ページまで login と誤判定し、本物の失効（→/login redirect）検知を
+    抑止してしまう。そこで path と hash ルート fragment のみに heuristic を適用し、任意の
+    クエリ値には適用しない。browser.is_on_login_page の空 login_url 分岐と本関数を共有して
+    「login ページか」と「login ページへの意図的訪問か」の判定を対称化する。
+    """
+    from urllib.parse import urlparse
+    parsed = urlparse((url or "").lower())
+    if _path_has_login_hint(parsed.path):
+        return True
+    frag = parsed.fragment
+    # SPA の hash ルータ形式（``#/login`` / ``#!/login``）だけをルートとして扱う。
+    # 通常のドキュメントアンカー（``#examples/login`` 等）はルートでないので除外する。
+    if frag.startswith("!/"):
+        frag = frag[1:]
+    if frag.startswith("/"):
+        frag_path = frag.split("?", 1)[0]
+        if _path_has_login_hint(frag_path):
+            return True
+    # クエリ param（``?route=…`` / ``?page=…`` 等）は**アプリのルータ仕様を知らないと曖昧**で、
+    # どの param 名も content になりうる（#108 で next/q/page 等の false positive が続いた）。
+    # そこで **login_url 未設定の heuristic では query を判定に使わない**（曖昧さを閉じる）。
+    # クエリ符号化された login ルート（例 ``/index.php?route=account/login``）は、login_url を
+    # 明示設定した場合に _is_login_target_url の完全一致分岐（query param を厳密照合）で扱う。
+    return False
+
+
 def on_login_page(current_url: str, login_url: str) -> bool:
     """現在 URL がログインページに見えるか。``browser.is_on_login_page`` の純粋版。"""
     current = _norm(current_url)
