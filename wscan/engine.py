@@ -712,6 +712,8 @@ class ScanEngine:
             )
         else:
             self._notifier = None
+        # 保留中の per-finding 通知タスク（shutdown 前に並行 drain する）
+        self._notify_tasks: list = []
         # C: CMS 検出結果 (crawl時に設定)
         self.detected_cms = None
         self._cms_origin: str = ""
@@ -2455,6 +2457,9 @@ class ScanEngine:
             # Agent Finding は認可済みスコープ内だけ、決定論 Finding の生成・検証を
             # 変えずに追加する。source の異なる同一 Finding は意図的に併記する。
             self._merge_additional_report_findings()
+
+            # 保留中の per-finding 通知を並行 drain（shutdown で cancel される取りこぼし防止）。
+            await self._drain_notifications()
 
             # ── Phase 4: Report ──────────────────────────────────────────
             if self.monitor: await self.monitor.emit_phase("report")
@@ -5623,8 +5628,11 @@ class ScanEngine:
         # output, webhook, payload learning, and flag scanning were never triggered
         # because the old early-return prevented reaching this code.
         if self._notifier:
-            asyncio.ensure_future(
-                self._notifier.notify_finding(f, self.target_url)
+            # fire-and-forget せず task を保持し、scan 終了前に並行 drain する。
+            self._notify_tasks.append(
+                asyncio.ensure_future(
+                    self._notifier.notify_finding(f, self.target_url)
+                )
             )
         label = f.check_type.upper()
         loc = f" on [yellow]{source}[/yellow]" if source else ""
@@ -5695,6 +5703,19 @@ class ScanEngine:
         "security_headers",
     })
 
+    async def _drain_notifications(self) -> None:
+        """保留中の per-finding 通知タスクを並行 drain する。
+
+        検出時・検証昇格時の通知は ensure_future で非ブロッキングに投げ、ここで
+        まとめて gather する。await 直列化（低速 webhook で verify が最大10秒×件数
+        ブロックし watchdog 終了）を避けつつ、shutdown 前の取りこぼしを防ぐ。
+        """
+        tasks = [t for t in getattr(self, "_notify_tasks", []) if t is not None]
+        self._notify_tasks = []
+        if tasks:
+            import asyncio as _asyncio
+            await _asyncio.gather(*tasks, return_exceptions=True)
+
     async def _phase_verify(self):
         """
         Re-inject each finding's exact payload to confirm the vulnerability
@@ -5758,9 +5779,14 @@ class ScanEngine:
                 # ここで reproduced へ昇格する。確証時に通知する（dedup 済のものは再送されない）。
                 _notifier = getattr(self, "_notifier", None)
                 if _notifier:
-                    # 昇格通知は fire-and-forget にせず await して確実に送る（shutdown で
-                    # 未完了タスクが cancel される取りこぼしを防ぐ）。dedup 済は再送されない。
-                    await _notifier.notify_finding(finding, getattr(self, "target_url", ""))
+                    # 昇格通知を task として保持（await で verify を直列ブロックしない）。
+                    # scan 終了前に _drain_notifications() が並行 drain するため取りこぼさない。
+                    # dedup 済は再送されない。
+                    getattr(self, "_notify_tasks", []).append(
+                        asyncio.ensure_future(
+                            _notifier.notify_finding(finding, getattr(self, "target_url", ""))
+                        )
+                    )
                 console.print(
                     f"  [green][CONFIRMED][/green] {finding.check_type.upper()} "
                     f"on [yellow]{finding.field_name}[/yellow]: reproduced"
