@@ -176,6 +176,24 @@ def _load_config(path: Path = _CONFIG_PATH) -> dict:
 _CFG = _load_config()
 
 
+def _fast_mode_deterministic_note(
+    *, llm, no_planner, no_ai_analysis, no_waf_detection, no_sitemap_crawl
+) -> str:
+    """FAST MODE が決定論寄りに落とした機能を明示する1行（LLM-008）。
+
+    --fast は既定と組み合わさると LLM/planner/AI 分析を無効化するため、実行前に何が off に
+    なったかを明示して「LLM 無効化が隠れる」のを防ぐ。各機能は個別フラグで上書き可能。
+    """
+    parts = [
+        f"LLM={llm}",
+        "planner=" + ("off" if no_planner else "on"),
+        "AI分析=" + ("off" if no_ai_analysis else "on"),
+        "WAF検出=" + ("off" if no_waf_detection else "on"),
+        "sitemap=" + ("off" if no_sitemap_crawl else "on"),
+    ]
+    return "決定論寄り: " + " / ".join(parts) + "（各 --llm 等で個別上書き可）"
+
+
 def _coerce_popup_header_intercept(value, default: bool = False) -> bool:
     """popup 初回ヘッダ傍受の明示 opt-in 値を安全に bool 化する。"""
     if isinstance(value, bool):
@@ -1999,7 +2017,14 @@ async def run_scan(args):
         args.delay = 0.0  # fast mode forces zero delay
         console.print(
             "[bold yellow]⚡ FAST MODE[/bold yellow] — "
-            f"ペイロード上限 {args.max_payloads}、遅延 0、深さ {args.depth}"
+            f"ペイロード上限 {args.max_payloads}、遅延 0、深さ {args.depth}\n"
+            "  ↳ " + _fast_mode_deterministic_note(
+                llm=args.llm,
+                no_planner=getattr(args, "no_planner", False),
+                no_ai_analysis=getattr(args, "no_ai_analysis", False),
+                no_waf_detection=getattr(args, "no_waf_detection", False),
+                no_sitemap_crawl=getattr(args, "no_sitemap_crawl", False),
+            )
         )
 
     await _resolve_ollama_model(args, console)
