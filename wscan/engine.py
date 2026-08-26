@@ -4276,19 +4276,21 @@ class ScanEngine:
 
     @staticmethod
     def _postauth_seed_urls(landing_url: str, target_url: str) -> list[str]:
-        """post-auth crawl の seed を末尾 slash 正規化して重複排除する（純粋）。
-
-        landing_url は rstrip 済みだが target_url は生（末尾 slash 差あり得る）なので、
-        両者を rstrip("/") で揃えてから dedup する。揃えないと ``http://s`` と ``http://s/``
-        が別 seed として queue され root を二度 crawl する（FLOW-002）。
+        """post-auth crawl の seed を末尾 slash **キー**で dedup しつつ、navigation 用に
+        **元 URL を保持**して返す（純粋）。landing_url(rstrip 済) と target_url(生) が末尾 slash 差で
+        別 seed になり root を二度 crawl する FLOW-002 を、キー dedup で防ぐ。ただし navigation URL は
+        書き換えない（/app/ と /app が別リソースの slash-sensitive サーバを壊さない）。
         """
         seen: set = set()
         out: list[str] = []
-        for u in (landing_url, target_url):
-            n = (u or "").rstrip("/")
-            if n and n not in seen:
-                seen.add(n)
-                out.append(n)
+        # target_url を先に（原 URL の末尾 slash を navigation で保つ）。dedup は
+        # 末尾 slash 除去の**キー**でのみ行い、queue へは**元 URL** を返す（slash-sensitive な
+        # サーバで navigation URL を書き換えない）。同一ページの二重 seed（root 二度 crawl）だけ防ぐ。
+        for u in (target_url, landing_url):
+            key = (u or "").rstrip("/")
+            if key and key not in seen:
+                seen.add(key)
+                out.append(u)
         return out
 
     async def _phase_crawl_postauth(self) -> list:
@@ -4365,8 +4367,9 @@ class ScanEngine:
         queue: deque = deque()
 
         for seed in self._postauth_seed_urls(landing_url, self.target_url):
-            if seed and seed not in auth_visited and not self._is_url_excluded(seed):
-                auth_visited.add(seed)
+            seed_key = seed.rstrip("/")
+            if seed_key and seed_key not in auth_visited and not self._is_url_excluded(seed):
+                auth_visited.add(seed_key)  # dedup はキー、navigation は元 URL
                 queue.append((seed, 0, None))
 
         while queue:
@@ -4485,11 +4488,12 @@ class ScanEngine:
                 url_cap = max(200, self.depth * 50)
                 for entry in link_entries:
                     link = entry["url"]
-                    clean = link.split("#")[0].split("?")[0].rstrip("/")
+                    clean = link.split("#")[0].split("?")[0]
+                    clean_key = clean.rstrip("/")
                     if len(auth_visited) >= url_cap:
                         break
-                    if clean not in auth_visited and not self._is_url_excluded(clean):
-                        auth_visited.add(clean)
+                    if clean_key not in auth_visited and not self._is_url_excluded(clean):
+                        auth_visited.add(clean_key)  # dedup はキー、queue は元 URL（slash 保持）
                         # queued post-auth URL を scan-level state にも残し、abort 時に
                         # coverage が pending を unreached(not attempted)へ分類できるようにする
                         # （main crawl と同型・Codex #102）。
