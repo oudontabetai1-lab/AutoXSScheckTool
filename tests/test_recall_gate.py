@@ -81,3 +81,21 @@ def test_report_is_frozen_dataclass():
     assert isinstance(r, RecallReport)
     with pytest.raises(dataclasses.FrozenInstanceError):
         r.matched_total = 0  # type: ignore[misc]
+
+
+def test_report_nested_state_is_snapshot_immutable():
+    # 呼び出し側が元 spec / by_check を後から変更しても report は不変（P3）
+    spec = _spec("xss", "/a", note="orig")
+    expected = [spec, _spec("sqli", "/b")]
+    r = compute_recall(expected, [])  # 両方 miss
+    # 元 spec を破壊的に変更しても describe() は変わらない
+    spec["note"] = "MUTATED"
+    spec["check"] = "zzz"
+    assert "MUTATED" not in r.describe()
+    assert "orig" in r.describe()
+    # by_check は read-only view
+    with pytest.raises(TypeError):
+        r.by_check["xss"] = (9, 9)  # type: ignore[index]
+    # missed 要素も read-only view
+    with pytest.raises(TypeError):
+        r.missed[0]["check"] = "zzz"  # type: ignore[index]

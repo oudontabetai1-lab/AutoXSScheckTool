@@ -16,6 +16,7 @@ E2E 側はこの `RecallReport` を使って `recall == 1.0` を単一ゲート�
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from types import MappingProxyType
 from typing import Iterable, Mapping, Optional, Sequence
 
 # spec の一意キー（E2E の突合と同一：check_type × path × field）
@@ -108,9 +109,14 @@ def compute_recall(
         else:
             missed.append(spec)
 
+    # 返り値は真に不変にする: missed は呼び出し側 spec dict の参照を持たないようコピーして
+    # read-only view にし、by_check も read-only view にする（frozen dataclass の totals と
+    # describe() が後から矛盾しないように）。
+    frozen_missed = tuple(MappingProxyType(dict(spec)) for spec in missed)
+    frozen_by_check = MappingProxyType({c: (m, t) for c, (m, t) in by_check.items()})
     return RecallReport(
         expected_total=len(seen),
         matched_total=matched_total,
-        missed=tuple(missed),
-        by_check={c: (m, t) for c, (m, t) in by_check.items()},
+        missed=frozen_missed,
+        by_check=frozen_by_check,
     )
