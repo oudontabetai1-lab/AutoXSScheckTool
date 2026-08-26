@@ -4275,7 +4275,7 @@ class ScanEngine:
     # ── Post-authentication re-crawl ──────────────────────────────────────
 
     @staticmethod
-    def _postauth_seed_urls(landing_url: str, target_url: str) -> list[str]:
+    def _postauth_seed_urls(landing_url: str, target_url: str, is_excluded=None) -> list[str]:
         """post-auth crawl の seed を末尾 slash **キー**で dedup しつつ、navigation 用に
         **元 URL を保持**して返す（純粋）。landing_url(rstrip 済) と target_url(生) が末尾 slash 差で
         別 seed になり root を二度 crawl する FLOW-002 を、キー dedup で防ぐ。ただし navigation URL は
@@ -4287,8 +4287,14 @@ class ScanEngine:
         # 末尾 slash 除去の**キー**でのみ行い、queue へは**元 URL** を返す（slash-sensitive な
         # サーバで navigation URL を書き換えない）。同一ページの二重 seed（root 二度 crawl）だけ防ぐ。
         for u in (target_url, landing_url):
-            key = (u or "").rstrip("/")
-            if key and key not in seen:
+            if not u:
+                continue
+            # 除外候補は key を消費させない（target が除外・landing が許可の同一 key で、
+            # 許可 landing を取りこぼさない）。除外判定は caller の predicate を使う。
+            if is_excluded is not None and is_excluded(u):
+                continue
+            key = u.rstrip("/")
+            if key not in seen:
                 seen.add(key)
                 out.append(u)
         return out
@@ -4366,7 +4372,9 @@ class ScanEngine:
         auth_visited: set = set()
         queue: deque = deque()
 
-        for seed in self._postauth_seed_urls(landing_url, self.target_url):
+        for seed in self._postauth_seed_urls(
+            landing_url, self.target_url, is_excluded=self._is_url_excluded
+        ):
             seed_key = seed.rstrip("/")
             if seed_key and seed_key not in auth_visited and not self._is_url_excluded(seed):
                 auth_visited.add(seed_key)  # dedup はキー、navigation は元 URL

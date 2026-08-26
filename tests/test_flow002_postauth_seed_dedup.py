@@ -26,3 +26,15 @@ def test_seed_handles_empty_landing():
     f = ScanEngine._postauth_seed_urls
     assert f("", "http://site/") == ["http://site/"]  # 元 slash 保持
     assert f("http://site/x", "") == ["http://site/x"]
+
+
+def test_excluded_candidate_does_not_consume_key():
+    # target /app/ が除外・landing /app が許可の同一 key で、許可 landing を取りこぼさない（#110 P2）。
+    f = ScanEngine._postauth_seed_urls
+    excl = lambda u: u == "http://site/app/"
+    assert f("http://site/app", "http://site/app/", is_excluded=excl) == ["http://site/app"]
+    # 逆（landing 除外・target 許可）も target が残る
+    excl2 = lambda u: u == "http://site/app"
+    assert f("http://site/app", "http://site/app/", is_excluded=excl2) == ["http://site/app/"]
+    # 両方除外 -> 空
+    assert f("http://site/app", "http://site/app/", is_excluded=lambda u: True) == []
