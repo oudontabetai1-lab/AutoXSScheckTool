@@ -179,12 +179,17 @@ class NotificationManager:
         high = summary.get("high", 0)
         medium = summary.get("medium", 0)
         low = summary.get("low", 0)
+        hypothesis = summary.get("hypothesis", 0)
 
-        status_emoji = "🔴" if critical > 0 else ("🟠" if high > 0 else "🟡" if medium > 0 else "🟢")
+        # confirmed が無くても未確証があれば緑にせず、その存在を明示する（見落とし防止）。
+        status_emoji = (
+            "🔴" if critical > 0 else "🟠" if high > 0 else "🟡" if medium > 0
+            else "🔵" if hypothesis > 0 else "🟢"
+        )
         text = f"{status_emoji} *スキャン完了*: {target_url}"
         details = [
             f"🔴 Critical: {critical}　🟠 High: {high}　🟡 Medium: {medium}　🟢 Low: {low}",
-            f"合計: {total} 件",
+            f"確証: {total} 件　🔵 未確証(hypothesis): {hypothesis} 件",
         ]
         if report_path:
             details.append(f"レポート: `{report_path}`")

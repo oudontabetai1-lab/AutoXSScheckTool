@@ -57,6 +57,17 @@ class NotificationManagerTests(unittest.IsolatedAsyncioTestCase):
         await manager.notify_finding(f)
         manager._send.assert_awaited_once()
 
+    async def test_completion_payload_shows_hypothesis_when_no_confirmed(self):
+        # 確証0・未確証ありの完了通知は緑にならず未確証を明示する（#107 P2）。
+        payload = NotificationManager._build_complete_payload(
+            {"total": 0, "critical": 0, "high": 0, "medium": 0, "low": 0, "hypothesis": 2},
+            "http://fixture.test/", "", "",
+        )
+        import json
+        blob = json.dumps(payload, ensure_ascii=False)
+        self.assertIn("未確証", blob)
+        self.assertIn("🔵", blob)
+
 
 if __name__ == "__main__":
     unittest.main()
