@@ -1383,7 +1383,10 @@ class ScanEngine:
             # 正規に /login を巡回する際に「セッション失効」と誤判定して post-auth crawl
             # から落とすのを防ぐ（FLOW-001）。redirect（intended≠login）は依然 expiry 判定される。
             from wscan import auth_detect
-            return auth_detect.on_login_page(url, "")
+            # 全 URL heuristic（fragment 含む）で判定し、SPA の hash ルート（/#/login）も
+            # login target として認識する。browser.is_on_login_page と対称（path だけ見る
+            # on_login_page では hash ルートを取りこぼす）。
+            return auth_detect.url_looks_like_login(url)
         current = urlparse(url.rstrip("/").lower())
         target = urlparse(self.login_url.rstrip("/").lower())
         # The host AND path must match: a different origin that merely shares the

@@ -33,3 +33,22 @@ def test_configured_login_url_behavior_preserved():
     eng = _eng("http://site/signin")
     assert eng._is_login_target_url("http://site/signin") is True
     assert eng._is_login_target_url("http://site/other") is False
+
+
+def test_hash_routed_spa_login_recognized():
+    # SPA の hash ルート login（/#/login）も意図的訪問と認識する（#108 Codex P2）。
+    # is_on_login_page は全 URL を見て True、path だけ見る on_login_page では取りこぼす非対称を解消。
+    eng = _eng("")
+    assert eng._is_login_target_url("https://app.test/#/login") is True
+    # 非 login の hash ルートは False（そこへの redirect は失効として扱える）。
+    assert eng._is_login_target_url("https://app.test/#/dashboard") is False
+
+
+def test_shared_heuristic_matches_browser_keywords():
+    from wscan.auth_detect import url_looks_like_login
+    for u in ("http://s/login", "http://s/signin", "http://s/sign-in",
+              "http://s/auth/login", "http://s/account/login",
+              "http://s/#/login", "http://s/login?next=/x", "http://s/login#top"):
+        assert url_looks_like_login(u) is True, u
+    for u in ("http://s/dashboard", "http://s/login-history", "http://s/#/home"):
+        assert url_looks_like_login(u) is False, u

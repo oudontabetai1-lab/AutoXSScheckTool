@@ -73,6 +73,24 @@ def _norm(url: str) -> str:
     return (url or "").rstrip("/").lower()
 
 
+_LOGIN_URL_KEYWORDS = ("/login", "/signin", "/sign-in", "/auth/login", "/account/login")
+
+
+def url_looks_like_login(url: str) -> bool:
+    """URL 全体（fragment 含む）が login ページ様か判定する（純粋）。
+
+    ``on_login_page`` は ``urlparse(...).path`` だけを見るため SPA の hash ルート
+    （例 ``/#/login``）を拾えない。本関数は browser.is_on_login_page の空 login_url
+    分岐と同一の「URL 末尾/クエリ/フラグメントに login 語」heuristic を提供し、
+    「login ページか」と「login ページへの意図的訪問か」の判定を対称化する。
+    """
+    current = (url or "").rstrip("/").lower()
+    for kw in _LOGIN_URL_KEYWORDS:
+        if current.endswith(kw) or (kw + "?") in current or (kw + "#") in current:
+            return True
+    return False
+
+
 def on_login_page(current_url: str, login_url: str) -> bool:
     """現在 URL がログインページに見えるか。``browser.is_on_login_page`` の純粋版。"""
     current = _norm(current_url)
