@@ -50,11 +50,13 @@ def test_shared_heuristic_matches_browser_keywords():
     from wscan.auth_detect import url_looks_like_login
     for u in ("http://s/login", "http://s/signin", "http://s/sign-in",
               "http://s/auth/login", "http://s/account/login",
-              "http://s/#/login", "http://s/login?next=/x", "http://s/login#top",
+              "http://s/#/login", "http://s/#!/login", "http://s/login?next=/x", "http://s/login#top",
               "http://s/index.php?route=account/login"):  # 既知ルーティング param（#108）
         assert url_looks_like_login(u) is True, u
     # クエリ値に login パスを含む無関係 URL は login と誤判定しない（#108 Codex P2）。
     for u in ("http://s/dashboard", "http://s/login-history", "http://s/#/home",
               "http://s/dashboard?next=/login", "http://s/report?source=https://idp/login",
-              "http://s/index.php?route=account/dashboard"):  # ルーティング param でも非 login 値は False
+              "http://s/index.php?route=account/dashboard",  # ルーティング param でも非 login 値は False
+              "http://s/docs#examples/login",   # 通常アンカーはルートでない（#108）
+              "http://s/search?q=/login"):      # 検索 param はルータでない（#108）
         assert url_looks_like_login(u) is False, u

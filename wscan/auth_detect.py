@@ -76,7 +76,8 @@ def _norm(url: str) -> str:
 _LOGIN_URL_KEYWORDS = ("/login", "/signin", "/sign-in", "/auth/login", "/account/login")
 # クエリルータの param 名（値がルートを表す）。redirect 系（next/redirect/return/url/...）は
 # 含めない＝redirect 値を login と誤判定しないため（#108）。
-_ROUTE_PARAM_NAMES = ("route", "page", "action", "controller", "module", "mod", "do", "view", "option", "q")
+# 検索用 param（q/query/search 等）はルータでないため含めない（/search?q=/login を誤判定しない）。
+_ROUTE_PARAM_NAMES = ("route", "page", "action", "controller", "module", "mod", "do", "view", "option")
 
 
 def _path_has_login_hint(path: str) -> bool:
@@ -105,10 +106,13 @@ def url_looks_like_login(url: str) -> bool:
     if _path_has_login_hint(parsed.path):
         return True
     frag = parsed.fragment
-    if frag:
-        # SPA の hash ルート（例 ``#/login`` / ``#/login?redirect=x``）は先頭の path 部だけ見る。
+    # SPA の hash ルータ形式（``#/login`` / ``#!/login``）だけをルートとして扱う。
+    # 通常のドキュメントアンカー（``#examples/login`` 等）はルートでないので除外する。
+    if frag.startswith("!/"):
+        frag = frag[1:]
+    if frag.startswith("/"):
         frag_path = frag.split("?", 1)[0]
-        if _path_has_login_hint("/" + frag_path.strip("/")):
+        if _path_has_login_hint(frag_path):
             return True
     # クエリルータ（例 ``/index.php?route=account/login``）は**既知のルーティング param 名**の値だけ
     # login ルートとして判定する。``next=/login`` 等の redirect 値は対象外にして、無関係ページを
