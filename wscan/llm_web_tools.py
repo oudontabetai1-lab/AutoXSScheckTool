@@ -12,6 +12,7 @@ No API key is required.  All requests use httpx with standard async patterns.
 from __future__ import annotations
 
 import re
+from urllib.parse import urlparse
 import httpx
 
 _TIMEOUT = 20.0
@@ -36,15 +37,40 @@ _WEB_QUERY_HOSTISH = re.compile(
 )
 
 
-def build_planner_web_query(tech_hints: str) -> str:
+def _known_target_identifiers(target_url: str) -> list[str]:
+    """既知の検査対象 URL から、クエリから除くべき識別子（host・host:port・IP）を抽出。
+
+    ヒューリスティックでは捕まらない単一ラベルの内部 host（例 `intranet`）も、対象が既知なら
+    確実に落とせる。純粋関数。"""
+    if not target_url:
+        return []
+    ids: list[str] = []
+    try:
+        parsed = urlparse(target_url if "://" in target_url else "//" + target_url, scheme="")
+        host = (parsed.hostname or "").strip().lower()
+        if len(host) >= 2:
+            ids.append(host)
+            if parsed.port:
+                ids.append(f"{host}:{parsed.port}")
+    except Exception:
+        return []
+    return ids
+
+
+def build_planner_web_query(tech_hints: str, target_url: str = "") -> str:
     """planner の web intel クエリを組む（純粋・匿名化）。
 
     LLM-007: 検査対象の host/URL/IP を外部検索へ送らない。tech_hints は untrusted な
-    ページ title を含みうるため、URL/host/IP らしきトークンを token 単位で除去してから
-    汎用クエリを組む（安全側で over-strip する）。scheme 無し・path/port 付きの host も落とす。
+    ページ title を含みうるため二段構えで落とす:
+      (1) 既知の対象 host（`target_url` 由来）を明示 redact — 単一ラベルの内部 host も確実に。
+      (2) URL/IP/ドット連結ラベル/host:port らしきトークンをヒューリスティックで除去（防御的・over-strip）。
     """
+    known = _known_target_identifiers(target_url)
     safe: list[str] = []
     for tok in (tech_hints or "").split():
+        low = tok.lower()
+        if known and any(kid in low for kid in known):
+            continue  # 既知の対象 host/host:port を含むトークンは落とす
         if _WEB_QUERY_URL_LIKE.search(tok) or _WEB_QUERY_HOSTISH.search(tok):
             continue  # host/URL/IP/scheme-less host は落とす
         safe.append(tok)

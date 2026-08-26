@@ -537,7 +537,7 @@ Consider stored / second-order attacks carefully:
             try:
                 # LLM-007: 対象 host/URL を外部検索へ送らない（匿名化）。技術ヒントのみで検索する。
                 tech_hints = " ".join(t for t in [title, purpose_hint] if t)
-                query = build_planner_web_query(tech_hints)
+                query = build_planner_web_query(tech_hints, target_url=url)
                 web_ctx = await search_web(query, max_results=3)
                 from rich.console import Console as _C
                 _C().print(

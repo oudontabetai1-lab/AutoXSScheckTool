@@ -57,3 +57,22 @@ def test_planner_query_strips_schemeless_host_with_path_or_port():
         assert "8443" not in q and "8080" not in q, hint
         assert "/admin" not in q, hint
         assert "Admin" in q and "Panel" in q, hint  # 非識別トークンは残す
+
+
+def test_planner_query_redacts_known_single_label_host():
+    # ヒューリスティックでは捕まらない単一ラベル内部 host も、対象既知なら落とす（Codex 示唆）
+    q = build_planner_web_query("Admin intranet Dashboard", target_url="http://intranet/admin")
+    assert "intranet" not in q.lower()
+    assert "Admin" in q and "Dashboard" in q
+
+
+def test_planner_query_redacts_known_host_with_port():
+    q = build_planner_web_query("Portal myhost Login", target_url="http://myhost:8443/app")
+    assert "myhost" not in q.lower()
+    assert "Portal" in q and "Login" in q
+
+
+def test_planner_query_target_url_optional():
+    # target_url 無しでも従来通り動く（後方互換）
+    q = build_planner_web_query("Django REST")
+    assert q == "web application vulnerability Django REST"
