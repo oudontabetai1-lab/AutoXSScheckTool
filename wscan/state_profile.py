@@ -1,4 +1,12 @@
-"""状態変更を伴う注入リクエストの送信可否を判定する純粋関数。"""
+"""状態変更を伴う注入リクエストの送信可否を判定する純粋関数。
+
+既知の限界（best-effort）: 判定はフォームの宣言メソッド（GET/POST）と action/URL の
+静的メタデータに基づく。フォームが GET を宣言しつつボタンハンドラが JS の fetch()/XHR で
+POST を発行する SPA 形態は、静的メタデータからは GET に見えるため read-only でも送信され得る。
+JS 由来の書き込みを厳密に止めるにはネットワーク層での実リクエスト遮断が必要だが、既存の
+CDP/route ヘッダ注入機構との干渉リスクが高いため本実装では扱わない（将来対応）。宣言メソッドが
+POST/PUT/PATCH/DELETE のフォーム・XXE の url POST・race の捕捉 POST・検証再送は gate 済み。
+"""
 
 from __future__ import annotations
 

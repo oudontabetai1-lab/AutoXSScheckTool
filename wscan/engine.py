@@ -5900,6 +5900,25 @@ class ScanEngine:
         from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
         import re as _re
 
+        # state profile: 検証再送も profile に従う。復元 finding の再構築 ip は method/action
+        # metadata を欠く（GET 既定になる）ため、finding が実際に送った request の method/url で
+        # 判定する（unrestricted checkpoint を read-only/controlled-write で resume した際に、
+        # 破壊的 POST finding が verify で再送されるのを防ぐ）。method 既知時のみ gate する。
+        from wscan.state_profile import may_submit as _may_submit
+        _req = f.request or {}
+        _req_method = _req.get("method") or f.injection_method or ""
+        _req_target = _req.get("url") or f.url
+        if _req_method and not _may_submit(
+            getattr(self, "state_profile", "unrestricted"),
+            method=_req_method,
+            action=f"{_req_target} {f.url}",
+        ):
+            errors = getattr(self, "wave_errors", None)
+            if errors is None:
+                self.wave_errors = errors = []
+            errors.append(f"state_change_skipped:verify:{f.check_type}")
+            return "assumed"  # profile がこの再送を許さない → penalize しない terminal state
+
         if f.check_type.startswith("graphql_"):
             scanner_key = "graphql"
         elif f.check_type.startswith("jwt_"):
