@@ -61,7 +61,7 @@ def test_planner_query_strips_schemeless_host_with_path_or_port():
 
 def test_planner_query_redacts_known_single_label_host():
     # ヒューリスティックでは捕まらない単一ラベル内部 host も、対象既知なら落とす（Codex 示唆）
-    q = build_planner_web_query("Admin intranet Dashboard", target_url="http://intranet/admin")
+    q = build_planner_web_query("Admin intranet Dashboard", target_url="http://intranet/")
     assert "intranet" not in q.lower()
     assert "Admin" in q and "Dashboard" in q
 
@@ -99,3 +99,25 @@ def test_planner_query_allowlist_drops_any_url_structural_token():
         q = build_planner_web_query(f"Admin {bad} Page")
         assert bad not in q, bad
         assert "Admin" in q and "Page" in q
+
+
+def test_planner_query_redacts_bare_path_segment():
+    # 区切り無しで title に現れる target 固有の path segment（Codex P2#4）
+    q = build_planner_web_query("Tenant tenant-42 Overview",
+                                target_url="https://host/tenant-42")
+    assert "tenant-42" not in q
+    assert "Tenant" in q and "Overview" in q  # 一般語は残す
+
+
+def test_planner_query_redacts_query_identifier():
+    q = build_planner_web_query("Report acct-99 Summary",
+                                target_url="https://host/r?account=acct-99")
+    assert "acct-99" not in q
+    assert "Report" in q and "Summary" in q
+
+
+def test_planner_query_path_redaction_is_exact_token_only():
+    # 完全一致のみ＝path segment を部分に含むだけの一般語は巻き込まない
+    q = build_planner_web_query("administrator dashboard",
+                                target_url="https://host/admin")
+    assert "administrator" in q  # 'admin' を含むが完全一致でないので残る

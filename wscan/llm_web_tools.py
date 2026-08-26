@@ -34,24 +34,43 @@ _DDG_ENDPOINT = "https://html.duckduckgo.com/html/"
 _WEB_QUERY_TECH_TOKEN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9+#-]*$")
 
 
-def _known_target_identifiers(target_url: str) -> list[str]:
+def _known_target_identifiers(
+    target_url: str,
+) -> tuple[frozenset[str], frozenset[str]]:
     """既知の検査対象 URL から、クエリから除くべき識別子（host・host:port・IP）を抽出。
 
-    ヒューリスティックでは捕まらない単一ラベルの内部 host（例 `intranet`）も、対象が既知なら
-    確実に落とせる。純粋関数。"""
+    ヒューリスティックでは捕まらない単一ラベルの内部 host（例 `intranet`）や、区切り無しで
+    現れる path/query 由来の識別子（例 `tenant-42`）も、対象が既知なら確実に落とせる。
+
+    返り値は `(host_ids, exact_ids)`:
+      - `host_ids`  … host・host:port。subdomain/port 付きも拾うため **部分一致**で使う。
+      - `exact_ids` … path segment・query 値。一般語の巻き込みを避けるため **完全一致**で使う。
+    いずれも純粋・小文字正規化。"""
+    empty: tuple[frozenset[str], frozenset[str]] = (frozenset(), frozenset())
     if not target_url:
-        return []
-    ids: list[str] = []
+        return empty
+    host_ids: set[str] = set()
+    exact_ids: set[str] = set()
     try:
         parsed = urlparse(target_url if "://" in target_url else "//" + target_url, scheme="")
         host = (parsed.hostname or "").strip().lower()
         if len(host) >= 2:
-            ids.append(host)
+            host_ids.add(host)
             if parsed.port:
-                ids.append(f"{host}:{parsed.port}")
+                host_ids.add(f"{host}:{parsed.port}")
+        for seg in (parsed.path or "").split("/"):
+            seg = seg.strip().lower()
+            if len(seg) >= 2:
+                exact_ids.add(seg)  # 対象固有の path segment（tenant-42 等）
+        from urllib.parse import parse_qsl
+        for key, val in parse_qsl(parsed.query or "", keep_blank_values=False):
+            for token in (key, val):
+                token = token.strip().lower()
+                if len(token) >= 2:
+                    exact_ids.add(token)  # 対象固有の query 識別子
     except Exception:
-        return []
-    return ids
+        return empty
+    return (frozenset(host_ids), frozenset(exact_ids))
 
 
 def build_planner_web_query(tech_hints: str, target_url: str = "") -> str:
@@ -59,16 +78,19 @@ def build_planner_web_query(tech_hints: str, target_url: str = "") -> str:
 
     LLM-007: 検査対象の host/URL/path を外部検索へ送らない。tech_hints は untrusted な
     ページ title を含みうるため二段構えで落とす:
-      (1) 既知の対象 host（`target_url` 由来）を明示 redact — 単一ラベルの内部 host も確実に。
+      (1) 既知の対象 host / path segment / query 識別子（`target_url` 由来）を明示 redact
+          — 単一ラベル host も、区切り無しで現れる path/query 値（tenant-42 等）も確実に。
       (2) アローリスト: 素のプレーンな技術語トークンだけ通す。URL 構造文字（. : / @ ? # 等）を
           含むトークンは構造的に全て弾く＝host/path/port/query/fragment を一括で除去（安全側）。
     """
-    known = _known_target_identifiers(target_url)
+    host_ids, exact_ids = _known_target_identifiers(target_url)
     safe: list[str] = []
     for tok in (tech_hints or "").split():
         low = tok.lower()
-        if known and any(kid in low for kid in known):
-            continue  # 既知の対象 host/host:port を含むトークンは落とす
+        if host_ids and any(h in low for h in host_ids):
+            continue  # 既知の対象 host/host:port を含むトークンは落とす（部分一致）
+        if low in exact_ids:
+            continue  # 既知の対象 path segment / query 識別子（区切り無しの tenant-42 等）
         if not _WEB_QUERY_TECH_TOKEN.match(tok):
             continue  # URL 構造文字を含む（host/path/port/query/fragment）トークンは弾く
         safe.append(tok)
