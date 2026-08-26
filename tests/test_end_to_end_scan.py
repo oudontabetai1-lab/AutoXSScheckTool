@@ -41,6 +41,7 @@ from tests.fixtures.realistic_site import (
 )
 from tests.fixtures.spa_app import app as spa_app
 from wscan.engine import ScanEngine
+from wscan.recall_gate import compute_recall
 
 # Injection checks whose detection is deterministic over HTTP/Chromium.
 CHECKS = ["xss", "sqli", "ssti", "path_traversal", "open_redirect", "header_injection"]
@@ -216,6 +217,16 @@ class EndToEndRealisticScanTests(unittest.TestCase):
                     f"{spec['path']} (field '{spec['field']}') — {spec['note']}. "
                     f"Reported instead: {sorted(self.reported)}",
                 )
+
+    def test_recall_gate_is_100_percent(self):
+        # ADR-0016 / PRINCIPLE-001: 固定 ground truth に対し recall 100% を単一のリリースゲート
+        # として要求する（有効化した CHECKS のみを分母にする）。個別 subTest の集約＋recall 数値と
+        # 見逃し一覧を1メッセージで surface する。
+        report = compute_recall(EXPECTED_FINDINGS, self.reported, target_checks=CHECKS)
+        self.assertTrue(
+            report.is_complete,
+            "RECALL REGRESSION (見逃し発生):\n" + report.describe(),
+        )
 
     def test_detected_vulnerabilities_survive_verification(self):
         # The engine re-checks findings in its verify phase; a planted, truly
