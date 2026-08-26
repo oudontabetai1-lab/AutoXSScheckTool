@@ -41,3 +41,19 @@ def test_planner_query_strips_bare_host_and_ip():
     assert "internal.example" not in q
     assert "10.0.0.5" not in q
     assert "Login" in q and "Django" in q
+
+
+def test_planner_query_strips_schemeless_host_with_path_or_port():
+    # scheme 無しで path/port が付く host は fullmatch を素通りしていた（Codex P2 #2）
+    for hint in (
+        "Admin internal.example/admin Panel",
+        "Admin internal.example:8443 Panel",
+        "Admin 10.0.0.5/admin Panel",
+        "Admin 10.0.0.5:8080 Panel",
+    ):
+        q = build_planner_web_query(hint)
+        assert "internal.example" not in q, hint
+        assert "10.0.0.5" not in q, hint
+        assert "8443" not in q and "8080" not in q, hint
+        assert "/admin" not in q, hint
+        assert "Admin" in q and "Panel" in q, hint  # 非識別トークンは残す

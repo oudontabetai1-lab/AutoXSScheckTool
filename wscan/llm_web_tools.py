@@ -25,11 +25,15 @@ _HEADERS = {
 _DDG_ENDPOINT = "https://html.duckduckgo.com/html/"
 
 
+# host/URL/IP らしさは token 内の「部分一致」で判定する（fullmatch だと path/port 付き
+# `internal.example/admin`・`internal.example:8443`・`10.0.0.5/admin` が素通りする）。
+# Node.js 等の技術名も巻き込むが、host 漏洩を確実に防ぐため安全側で落とす（over-strip 許容）。
 _WEB_QUERY_URL_LIKE = re.compile(r"://|@")
-_WEB_QUERY_IP_LIKE = re.compile(r"^\d{1,3}(?:\.\d{1,3}){3}$")
-# ドットで連結された識別子（host.tld / a.b.c）。Node.js 等の技術名も巻き込むが、host 漏洩を
-# 確実に防ぐため安全側で落とす（over-strip 許容）。
-_WEB_QUERY_DOTTED = re.compile(r"^[\w-]+(?:\.[\w-]+)+$")
+_WEB_QUERY_HOSTISH = re.compile(
+    r"\d{1,3}(?:\.\d{1,3}){3}"                # IPv4（token 内のどこでも）
+    r"|[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)+"    # ドット連結ラベル host.tld / a.b.c（同上）
+    r"|[A-Za-z0-9_-]+:\d{2,5}(?![A-Za-z])"     # host:port（単一ラベル host も含む）
+)
 
 
 def build_planner_web_query(tech_hints: str) -> str:
@@ -37,19 +41,12 @@ def build_planner_web_query(tech_hints: str) -> str:
 
     LLM-007: 検査対象の host/URL/IP を外部検索へ送らない。tech_hints は untrusted な
     ページ title を含みうるため、URL/host/IP らしきトークンを token 単位で除去してから
-    汎用クエリを組む（安全側で over-strip する）。
+    汎用クエリを組む（安全側で over-strip する）。scheme 無し・path/port 付きの host も落とす。
     """
     safe: list[str] = []
     for tok in (tech_hints or "").split():
-        bare = tok.strip(".,;:!?()[]{}\"'")
-        if not bare:
-            continue
-        if (
-            _WEB_QUERY_URL_LIKE.search(tok)
-            or _WEB_QUERY_IP_LIKE.match(bare)
-            or _WEB_QUERY_DOTTED.match(bare)
-        ):
-            continue  # host/URL/IP/dotted-identifier は落とす
+        if _WEB_QUERY_URL_LIKE.search(tok) or _WEB_QUERY_HOSTISH.search(tok):
+            continue  # host/URL/IP/scheme-less host は落とす
         safe.append(tok)
     return ("web application vulnerability " + " ".join(safe)).strip()
 
