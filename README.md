@@ -351,6 +351,7 @@ python3 main.py scan URL [options]
 | `--no-adaptive-payloads` | adaptive 有効 | LLM 適応ラウンドを無効化 |
 | `--no-sitemap-crawl` | 有効 | sitemap/robots シードを無効化 |
 | `-j, --concurrency N` | `1` | 攻撃フェーズの並列ブラウザ数。推奨 2〜4 |
+| `--llm-concurrency N` | `0`（自動） | LLM 呼び出しの並列度上限。0=自動（ollama/none は 1、cloud は 3）。planner のページ単位 LLM call を絞りローカルモデルの timeout 連発を防ぐ。ブラウザ worker 数とは独立 |
 | `-F, --fast` | `false` | 深さ1、上限12、遅延0等の高速プリセット |
 | `--max-payloads N` | `0`（無制限） | フィールド×チェックの標準ペイロード上限 |
 | `--delay SECS` | `0.5` | リクエスト間隔 |
