@@ -330,12 +330,15 @@ def finding_dict_confirmed(d: dict) -> bool:
     （"reproduced" のみ True）。両方欠く旧 dict は従来の confirmed 既定(True)を保つ
     （後方互換＝古い dict を未確証へ格下げしない）。
     """
-    v = d.get("verified")
-    if isinstance(v, bool):
-        return v
+    # verification_state を先に見る（正本）。非空 state は state から判定し、
+    # 旧 dict で state="assumed" と旧既定 verified=True が同居しても未確証に分類する
+    # （Finding.from_dict/__post_init__ と整合）。state 欠落/空のときだけ legacy bool。
     state = d.get("verification_state")
     if state:
         return state == "reproduced"
+    v = d.get("verified")
+    if isinstance(v, bool):
+        return v
     return True
 
 

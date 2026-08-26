@@ -35,3 +35,10 @@ def test_sarif_unverified_is_note_and_excluded_from_confirmed_total():
     assert run["results"][0]["level"] == "note"
     assert run["properties"]["total_findings"] == 0
     assert run["properties"]["hypothesis_findings"] == 1
+
+
+def test_state_overrides_legacy_verified_boolean():
+    # 旧 dict で state="assumed" と旧既定 verified=True が同居しても未確証（#107 P1）。
+    assert finding_dict_confirmed({"verification_state": "assumed", "verified": True}) is False
+    # 逆に reproduced なら stale な verified=False より state を優先し confirmed。
+    assert finding_dict_confirmed({"verification_state": "reproduced", "verified": False}) is True
