@@ -76,3 +76,26 @@ def test_planner_query_target_url_optional():
     # target_url 無しでも従来通り動く（後方互換）
     q = build_planner_web_query("Django REST")
     assert q == "web application vulnerability Django REST"
+
+
+def test_planner_query_strips_relative_path_token():
+    # 相対 path も host も持たないが機微な path（Codex P2#3）
+    q = build_planner_web_query("Admin /internal/tenant-42 Dashboard",
+                                target_url="http://host/internal/tenant-42")
+    assert "tenant-42" not in q
+    assert "/internal" not in q and "internal/tenant" not in q
+    assert "Admin" in q and "Dashboard" in q
+
+
+def test_planner_query_allows_plain_tech_tokens():
+    # アローリストは素の技術語（C#/C++ 含む）を通す
+    q = build_planner_web_query("WordPress C# C++ nginx")
+    assert "WordPress" in q and "nginx" in q
+    assert "C#" in q and "C++" in q
+
+
+def test_planner_query_allowlist_drops_any_url_structural_token():
+    for bad in ("path?a=b", "a#frag/x", "user@host", "seg/ment", "a=b&c=d"):
+        q = build_planner_web_query(f"Admin {bad} Page")
+        assert bad not in q, bad
+        assert "Admin" in q and "Page" in q

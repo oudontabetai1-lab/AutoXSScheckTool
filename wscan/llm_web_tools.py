@@ -26,15 +26,12 @@ _HEADERS = {
 _DDG_ENDPOINT = "https://html.duckduckgo.com/html/"
 
 
-# host/URL/IP らしさは token 内の「部分一致」で判定する（fullmatch だと path/port 付き
-# `internal.example/admin`・`internal.example:8443`・`10.0.0.5/admin` が素通りする）。
-# Node.js 等の技術名も巻き込むが、host 漏洩を確実に防ぐため安全側で落とす（over-strip 許容）。
-_WEB_QUERY_URL_LIKE = re.compile(r"://|@")
-_WEB_QUERY_HOSTISH = re.compile(
-    r"\d{1,3}(?:\.\d{1,3}){3}"                # IPv4（token 内のどこでも）
-    r"|[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)+"    # ドット連結ラベル host.tld / a.b.c（同上）
-    r"|[A-Za-z0-9_-]+:\d{2,5}(?![A-Za-z])"     # host:port（単一ラベル host も含む）
-)
+# 匿名化はブロックリスト（危険な形を列挙）ではなくアローリストで行う。URL 文法（host/path/
+# port/query/fragment）は多様で列挙しきれない（Codex が同一関数で host→path/port→相対 path と
+# 3度指摘）。逆に「素のプレーンな技術語トークンだけ通す」＝URL 構造文字（. : / @ ? # 等）を含む
+# トークンは構造的に全て弾く、という安全側の設計にする。`C#`/`C++`/`ASP-NET` 等は許容、
+# `Node.js`/`ASP.NET` はドットで巻き込まれ落ちる（over-strip 許容）。
+_WEB_QUERY_TECH_TOKEN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9+#-]*$")
 
 
 def _known_target_identifiers(target_url: str) -> list[str]:
@@ -60,10 +57,11 @@ def _known_target_identifiers(target_url: str) -> list[str]:
 def build_planner_web_query(tech_hints: str, target_url: str = "") -> str:
     """planner の web intel クエリを組む（純粋・匿名化）。
 
-    LLM-007: 検査対象の host/URL/IP を外部検索へ送らない。tech_hints は untrusted な
+    LLM-007: 検査対象の host/URL/path を外部検索へ送らない。tech_hints は untrusted な
     ページ title を含みうるため二段構えで落とす:
       (1) 既知の対象 host（`target_url` 由来）を明示 redact — 単一ラベルの内部 host も確実に。
-      (2) URL/IP/ドット連結ラベル/host:port らしきトークンをヒューリスティックで除去（防御的・over-strip）。
+      (2) アローリスト: 素のプレーンな技術語トークンだけ通す。URL 構造文字（. : / @ ? # 等）を
+          含むトークンは構造的に全て弾く＝host/path/port/query/fragment を一括で除去（安全側）。
     """
     known = _known_target_identifiers(target_url)
     safe: list[str] = []
@@ -71,8 +69,8 @@ def build_planner_web_query(tech_hints: str, target_url: str = "") -> str:
         low = tok.lower()
         if known and any(kid in low for kid in known):
             continue  # 既知の対象 host/host:port を含むトークンは落とす
-        if _WEB_QUERY_URL_LIKE.search(tok) or _WEB_QUERY_HOSTISH.search(tok):
-            continue  # host/URL/IP/scheme-less host は落とす
+        if not _WEB_QUERY_TECH_TOKEN.match(tok):
+            continue  # URL 構造文字を含む（host/path/port/query/fragment）トークンは弾く
         safe.append(tok)
     return ("web application vulnerability " + " ".join(safe)).strip()
 
