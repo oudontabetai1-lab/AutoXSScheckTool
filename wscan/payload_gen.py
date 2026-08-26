@@ -8,6 +8,7 @@ import os
 import re
 import httpx
 from contextlib import contextmanager
+from contextvars import ContextVar
 from typing import Callable, Optional
 
 from rich.console import Console
@@ -15,6 +16,8 @@ from rich.console import Console
 from .llm_client import complete_text
 
 console = Console()
+
+_active_role: ContextVar[str | None] = ContextVar("pg_active_role", default=None)
 
 
 def _format_prompt_template(template: str, *, field_name: str, url: str) -> str:
@@ -59,11 +62,11 @@ class PayloadGenerator:
         # ``openai_compatible``（tsuzumi2 等の外部 OpenAI 互換）は内部的には
         # ``openai`` と同じ経路で処理する。
         self.provider = llm_endpoint.canonical_provider(provider)
-        self.ollama_model = ollama_model
+        self._ollama_model = ollama_model
         self.ollama_url = ollama_url
-        self.openai_model = openai_model
-        self.gemini_model = gemini_model
-        self.claude_model = claude_model
+        self._openai_model = openai_model
+        self._gemini_model = gemini_model
+        self._claude_model = claude_model
         self.llm_timeout_seconds = float(llm_timeout_seconds)
         self.llm_max_retries = max(0, int(llm_max_retries))
         self.default_payloads = default_payloads or {}
@@ -77,19 +80,55 @@ class PayloadGenerator:
         self._anthropic_client = None
         self._llm_available: Optional[bool] = None
 
+    @property
+    def claude_model(self) -> str:
+        role = _active_role.get()
+        if role:
+            model = self.role_models.get(role) or self.role_models.get("default")
+            if model:
+                return model
+        return self._claude_model
+
+    @property
+    def openai_model(self) -> str:
+        role = _active_role.get()
+        if role:
+            model = self.role_models.get(role) or self.role_models.get("default")
+            if model:
+                return model
+        return self._openai_model
+
+    @property
+    def gemini_model(self) -> str:
+        role = _active_role.get()
+        if role:
+            model = self.role_models.get(role) or self.role_models.get("default")
+            if model:
+                return model
+        return self._gemini_model
+
+    @property
+    def ollama_model(self) -> str:
+        role = _active_role.get()
+        if role:
+            model = self.role_models.get(role) or self.role_models.get("default")
+            if model:
+                return model
+        return self._ollama_model
+
     def get_model(self, role: str = "payload") -> str:
         """Return the configured model for a role, falling back to the provider default."""
         role_model = self.role_models.get(role) or self.role_models.get("default")
         if role_model:
             return role_model
         if self.provider == "claude":
-            return self.claude_model
+            return self._claude_model
         if self.provider == "openai":
-            return self.openai_model
+            return self._openai_model
         if self.provider == "gemini":
-            return self.gemini_model
+            return self._gemini_model
         if self.provider == "ollama":
-            return self.ollama_model
+            return self._ollama_model
         return ""
 
     def role_model_summary(self) -> dict:
@@ -98,27 +137,15 @@ class PayloadGenerator:
 
     @contextmanager
     def use_role(self, role: str):
-        """Temporarily expose a role-specific model through legacy attributes."""
+        """Expose a role-specific model in the current task context."""
         if self.provider == "none":
             yield
             return
-        attr = {
-            "claude": "claude_model",
-            "openai": "openai_model",
-            "gemini": "gemini_model",
-            "ollama": "ollama_model",
-        }.get(self.provider)
-        if not attr:
-            yield
-            return
-        original = getattr(self, attr)
-        model = self.get_model(role)
-        if model:
-            setattr(self, attr, model)
+        token = _active_role.set(role)
         try:
             yield
         finally:
-            setattr(self, attr, original)
+            _active_role.reset(token)
 
     # ------------------------------------------------------------------
     # Client / availability helpers
