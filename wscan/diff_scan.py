@@ -92,6 +92,7 @@ def diff(old: list[dict], new: list[dict]) -> DiffResult:
     -------
     DiffResult
     """
+    # 差分は変化検知を優先し、confirmed / hypothesis 分離は未対応（別 increment）。
     old_map: dict[tuple, dict] = {_finding_key(f): f for f in old}
     new_map: dict[tuple, dict] = {_finding_key(f): f for f in new}
 

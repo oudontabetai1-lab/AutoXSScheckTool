@@ -1,0 +1,54 @@
+"""finding_dict_confirmed の解決規則と SARIF 後方互換の回帰（#107 Codex P2）。
+
+verified 欠落の旧 dict や verification_state だけの dict を未確証へ格下げしない。
+"""
+from wscan.scanners.base import finding_dict_confirmed
+from wscan.sarif import SarifExporter
+
+
+def test_resolution_rules():
+    assert finding_dict_confirmed({"verified": True}) is True
+    assert finding_dict_confirmed({"verified": False, "verification_state": "assumed"}) is False
+    # verified 欠落 + state=reproduced → confirmed（冗長 bool が無くても格下げしない）
+    assert finding_dict_confirmed({"verification_state": "reproduced"}) is True
+    assert finding_dict_confirmed({"verification_state": "assumed"}) is False
+    # verified も state も無い旧 dict → 従来の confirmed 既定を保つ
+    assert finding_dict_confirmed({}) is True
+
+
+def test_sarif_legacy_reproduced_without_verified_is_confirmed():
+    d = {
+        "check_type": "sqli", "severity": "high", "url": "u", "field_name": "q",
+        "payload": "p", "evidence": "e", "verification_state": "reproduced",
+    }
+    run = SarifExporter().export([d], target_url="t")["runs"][0]
+    assert run["results"][0]["level"] == "error"
+    assert run["properties"]["total_findings"] == 1
+
+
+def test_sarif_unverified_is_note_and_excluded_from_confirmed_total():
+    d = {
+        "check_type": "sqli", "severity": "high", "url": "u", "field_name": "q",
+        "payload": "p", "evidence": "e", "verified": False, "verification_state": "assumed",
+    }
+    run = SarifExporter().export([d], target_url="t")["runs"][0]
+    assert run["results"][0]["level"] == "note"
+    assert run["properties"]["total_findings"] == 0
+    assert run["properties"]["hypothesis_findings"] == 1
+
+
+def test_state_overrides_legacy_verified_boolean():
+    # 旧 dict で state="assumed" と旧既定 verified=True が同居しても未確証（#107 P1）。
+    assert finding_dict_confirmed({"verification_state": "assumed", "verified": True}) is False
+    # 逆に reproduced なら stale な verified=False より state を優先し confirmed。
+    assert finding_dict_confirmed({"verification_state": "reproduced", "verified": False}) is True
+
+
+def test_agent_source_dict_without_state_is_hypothesis():
+    # 生 AgentFinding dict（source=agent, verified/state 無し）は confirmed 既定に落とさない（#107 P2 防御）。
+    assert finding_dict_confirmed({"source": "agent", "agent_verified": False}) is False
+    # 旧スキャナ dict（source 非 agent）は従来の confirmed 既定を保つ。
+    assert finding_dict_confirmed({"source": "scanner"}) is True
+    # 明示 state/verified は source より優先。
+    assert finding_dict_confirmed({"source": "agent", "verification_state": "reproduced"}) is True
+    assert finding_dict_confirmed({"source": "agent", "verified": True}) is True

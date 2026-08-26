@@ -5,6 +5,31 @@ from wscan.sarif import SarifExporter
 
 
 class SarifVerificationNoteTests(unittest.TestCase):
+    def test_result_level_and_counts_separate_confirmed_from_hypothesis(self):
+        reproduced = {
+            "check_type": "sqli", "url": "http://h/confirmed", "field_name": "q",
+            "payload": "'", "severity": "high", "verified": True,
+            "verification_state": "reproduced",
+        }
+        assumed = {
+            "check_type": "xss", "url": "http://h/hypothesis", "field_name": "name",
+            "payload": "<svg>", "severity": "critical", "verified": False,
+            "verification_state": "assumed",
+        }
+
+        run = SarifExporter().export([reproduced, assumed])["runs"][0]
+
+        self.assertEqual(run["results"][0]["level"], "error")
+        self.assertEqual(run["results"][1]["level"], "note")
+        self.assertEqual(
+            run["results"][1]["properties"]["verification_state"], "assumed"
+        )
+        # result は全件保持し、脆弱性件数だけを確証基準にする。
+        self.assertEqual(len(run["results"]), 2)
+        self.assertEqual(run["properties"]["total_findings"], 1)
+        self.assertEqual(run["properties"]["hypothesis_findings"], 1)
+        self.assertEqual(run["properties"]["total_results"], 2)
+
     def test_result_properties_include_verification_note(self):
         # verified=False でも「例外で検証未実行(要手動確認)」の理由が SARIF 消費側へ届く。
         skip = {

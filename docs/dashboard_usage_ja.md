@@ -249,7 +249,7 @@ Finding では、重要度だけでなく確証と出自を確認します。
 | URL / Field | どのページ、パラメータ、入力欄、ヘッダか |
 | Evidence | alert 発火、レスポンス差分、エラー、ヘッダ等 |
 | Request / Response | 実際の投入と応答 |
-| `verified` | Finding を保持する互換フラグ。`true` でも `assumed` の場合がある |
+| `verified` | `verification_state` から派生する読み取り専用値。`reproduced` のときだけ `true` |
 | `verification_state` | `reproduced`（再現済み）/ `assumed`（推定・再検証未実行）/ `unreproduced`（非再現）/ `skipped`（検証 skip）。空は旧 Finding |
 | `confidence` | `confirmed` / `likely` / `tentative` |
 | `evidence_type` | 判定に使った構造化シグナル |
@@ -266,6 +266,8 @@ HTML レポートのバッジ:
 
 `severity=critical` でも Agent 未確証なら確証済みとは扱いません。通常 Finding でも `verification_state=assumed`、`confidence=tentative`、`verified=false` の場合は追加確認が必要です。
 
+通常層（確実性重視）の HTML レポートは、`verified=true` を **確証 (confirmed)** として主件数・重大度別件数に数え、それ以外を **未確証 (hypothesis)** として別表示します。未確証も Finding 一覧から削除されず、Evidence と再現情報を確認できます。SARIF でも全 result を保持しますが、未確証の `level` は `note` です。
+
 ## 10. レポートと証跡を確認する
 
 完了後、ポータルの履歴から HTML、JSON、ダウンロードを開けます。ファイルは `output/<日時>/` に保存されます。
@@ -277,7 +279,7 @@ HTML レポートのバッジ:
 | `report_developer.html` | 開発者向け詳細 |
 | `evidence.json` | Finding と証跡 JSON |
 | `reproduction.json`, `reproduce.sh` | 再現情報 |
-| `report.sarif` | CI/CD 用 SARIF。`source` 等を保持 |
+| `report.sarif` | CI/CD 用 SARIF。全 Finding を保持し、未確証は `level: note` |
 | `remediation_plan.md`, `remediation_tasks.json` | 修正計画とタスク |
 | `http_requests.jsonl`, `payloads.jsonl` | 通信と投入ペイロードの監査ログ |
 | `scan_config.json` | 実行設定。秘匿値は伏字 |

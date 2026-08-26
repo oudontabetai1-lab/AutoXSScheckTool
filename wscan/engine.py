@@ -712,6 +712,8 @@ class ScanEngine:
             )
         else:
             self._notifier = None
+        # 保留中の per-finding 通知タスク（shutdown 前に並行 drain する）
+        self._notify_tasks: list = []
         # C: CMS 検出結果 (crawl時に設定)
         self.detected_cms = None
         self._cms_origin: str = ""
@@ -2455,6 +2457,9 @@ class ScanEngine:
             # Agent Finding は認可済みスコープ内だけ、決定論 Finding の生成・検証を
             # 変えずに追加する。source の異なる同一 Finding は意図的に併記する。
             self._merge_additional_report_findings()
+
+            # 保留中の per-finding 通知を並行 drain（shutdown で cancel される取りこぼし防止）。
+            await self._drain_notifications()
 
             # ── Phase 4: Report ──────────────────────────────────────────
             if self.monitor: await self.monitor.emit_phase("report")
@@ -5608,6 +5613,16 @@ class ScanEngine:
                 )
                 console.print()
 
+    def _notify_defer_until_verify(self, f: Finding) -> bool:
+        """検出時通知を保留し verify 後に通知すべきか。
+
+        _phase_verify が最終 state を確定する finding（verifiable かつ非 dialog）は True。
+        これらは confidence=confirmed 起点で reproduced でも後で unreproduced へ落ちうるため、
+        検出時に confirmed 通知せず、reproduced 確定後にのみ通知する。dialog 確証や
+        非 verifiable（mail_header の OOB 等）は verify を通らないので検出時に通知する。
+        """
+        return f.check_type in self._VERIFIABLE_CHECKS and not f.dialog_confirmed
+
     def _record_finding(self, f: Finding, source: str = ""):
         if f is None:
             return
@@ -5622,9 +5637,15 @@ class ScanEngine:
         # so the branch above is skipped for normal scanner findings — but console
         # output, webhook, payload learning, and flag scanning were never triggered
         # because the old early-return prevented reaching this code.
-        if self._notifier:
-            asyncio.ensure_future(
-                self._notifier.notify_finding(f, self.target_url)
+        # verify で最終 state が確定する finding（verifiable かつ非 dialog）は検出時に通知しない。
+        # confidence=confirmed 起点で reproduced になっていても _phase_verify が unreproduced/
+        # skipped へ落としうるため、早期の confirmed 誤通知を避け、確定後（reproduced 分岐）に通知する。
+        if self._notifier and not self._notify_defer_until_verify(f):
+            # fire-and-forget せず task を保持し、scan 終了前に並行 drain する。
+            self._notify_tasks.append(
+                asyncio.ensure_future(
+                    self._notifier.notify_finding(f, self.target_url)
+                )
             )
         label = f.check_type.upper()
         loc = f" on [yellow]{source}[/yellow]" if source else ""
@@ -5695,6 +5716,19 @@ class ScanEngine:
         "security_headers",
     })
 
+    async def _drain_notifications(self) -> None:
+        """保留中の per-finding 通知タスクを並行 drain する。
+
+        検出時・検証昇格時の通知は ensure_future で非ブロッキングに投げ、ここで
+        まとめて gather する。await 直列化（低速 webhook で verify が最大10秒×件数
+        ブロックし watchdog 終了）を避けつつ、shutdown 前の取りこぼしを防ぐ。
+        """
+        tasks = [t for t in getattr(self, "_notify_tasks", []) if t is not None]
+        self._notify_tasks = []
+        if tasks:
+            import asyncio as _asyncio
+            await _asyncio.gather(*tasks, return_exceptions=True)
+
     async def _phase_verify(self):
         """
         Re-inject each finding's exact payload to confirm the vulnerability
@@ -5754,6 +5788,18 @@ class ScanEngine:
                 )
             elif state == "reproduced":
                 finding.apply_verification("reproduced", "")
+                # 検出時は assumed(verified=False)で通知ゲートに弾かれた verifiable finding が、
+                # ここで reproduced へ昇格する。確証時に通知する（dedup 済のものは再送されない）。
+                _notifier = getattr(self, "_notifier", None)
+                if _notifier:
+                    # 昇格通知を task として保持（await で verify を直列ブロックしない）。
+                    # scan 終了前に _drain_notifications() が並行 drain するため取りこぼさない。
+                    # dedup 済は再送されない。
+                    getattr(self, "_notify_tasks", []).append(
+                        asyncio.ensure_future(
+                            _notifier.notify_finding(finding, getattr(self, "target_url", ""))
+                        )
+                    )
                 console.print(
                     f"  [green][CONFIRMED][/green] {finding.check_type.upper()} "
                     f"on [yellow]{finding.field_name}[/yellow]: reproduced"
@@ -6109,15 +6155,18 @@ class ScanEngine:
 
         # L: スキャン完了通知
         if self._notifier and self._notifier.notify_complete:
+            # 完了サマリーは confirmed(verified) のみを脆弱性として数える（ADR-0015 D3）。
+            _confirmed = [_f for _f in self.all_findings if _f.verified]
             _counts: dict[str, int] = {}
-            for _f in self.all_findings:
+            for _f in _confirmed:
                 _counts[_f.severity] = _counts.get(_f.severity, 0) + 1
             _summary = {
-                "total": len(self.all_findings),
+                "total": len(_confirmed),
                 "critical": _counts.get("critical", 0),
                 "high":     _counts.get("high", 0),
                 "medium":   _counts.get("medium", 0),
                 "low":      _counts.get("low", 0),
+                "hypothesis": len(self.all_findings) - len(_confirmed),
             }
             try:
                 import asyncio as _asyncio

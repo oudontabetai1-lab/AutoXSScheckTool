@@ -912,14 +912,21 @@ class MonitorServer:
 
         @app.get("/api/v1/scan/results")
         async def api_scan_results():
-            """findings + metadata をまとめて返す (CI/CD パイプライン用)。"""
+            """findings + metadata をまとめて返す (CI/CD パイプライン用)。
+
+            件数は confirmed(verified) のみを脆弱性として数える（ADR-0015 D3）。
+            findings 配列は未確証も含めて全件返し、verification_state で区別する。
+            """
+            from wscan.scanners.base import finding_dict_confirmed
+            confirmed = [f for f in self.api_findings if finding_dict_confirmed(f)]
             return JSONResponse({
                 "scan_id": self.api_scan_id,
                 "status": self.api_scan_status,
                 "findings": self.api_findings,
-                "findings_count": len(self.api_findings),
-                "critical_count": sum(1 for f in self.api_findings if f.get("severity") == "critical"),
-                "high_count": sum(1 for f in self.api_findings if f.get("severity") == "high"),
+                "findings_count": len(confirmed),
+                "hypothesis_count": len(self.api_findings) - len(confirmed),
+                "critical_count": sum(1 for f in confirmed if f.get("severity") == "critical"),
+                "high_count": sum(1 for f in confirmed if f.get("severity") == "high"),
                 "report_available": bool(self.api_report_path and Path(self.api_report_path).exists()),
             })
 
@@ -1431,12 +1438,19 @@ class MonitorServer:
                 min_severity=cfg["min_severity"],
                 notify_complete=cfg["notify_complete"],
             )
+            # 完了サマリーは confirmed(verified) のみを脆弱性として数える（ADR-0015 D3）。
+            from wscan.scanners.base import finding_dict_confirmed
+            confirmed = [f for f in self.api_findings if finding_dict_confirmed(f)]
             sev = {"critical": 0, "high": 0, "medium": 0, "low": 0}
-            for f in self.api_findings:
-                s = (f.get("severity") or "").lower()
-                if s in sev:
-                    sev[s] += 1
-            summary = {"total": len(self.api_findings), **sev}
+            for f in confirmed:
+                sv = (f.get("severity") or "").lower()
+                if sv in sev:
+                    sev[sv] += 1
+            summary = {
+                "total": len(confirmed),
+                **sev,
+                "hypothesis": len(self.api_findings) - len(confirmed),
+            }
             await mgr.notify_scan_complete(
                 summary,
                 target_url=self.api_target,

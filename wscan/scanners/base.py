@@ -323,6 +323,31 @@ def finding_dedup_key_for(finding: "Finding") -> tuple:
     )
 
 
+def finding_dict_confirmed(d: dict) -> bool:
+    """to_dict 由来 dict が確証(reproduced)か判定する。
+
+    verified(bool) があればそれを正本にし、無ければ verification_state から派生
+    （"reproduced" のみ True）。両方欠く旧 dict は従来の confirmed 既定(True)を保つ
+    （後方互換＝古い dict を未確証へ格下げしない）。
+    """
+    # verification_state を先に見る（正本）。非空 state は state から判定し、
+    # 旧 dict で state="assumed" と旧既定 verified=True が同居しても未確証に分類する
+    # （Finding.from_dict/__post_init__ と整合）。state 欠落/空のときだけ legacy bool。
+    state = d.get("verification_state")
+    if state:
+        return state == "reproduced"
+    v = d.get("verified")
+    if isinstance(v, bool):
+        return v
+    # state も verified も無い dict。Agent 由来は本質的に未確証＝hypothesis 扱い
+    # （legacy の confirmed 既定は旧スキャナ dict のためのもの）。現状 Agent finding は
+    # _convert_agent_findings→Finding 経由で state を持つが、生 AgentFinding dict が
+    # 将来 SARIF/件数へ渡っても誤って confirmed 化しないよう防御する。
+    if d.get("source") == "agent":
+        return False
+    return True
+
+
 @dataclass
 class Finding:
     """A security vulnerability finding."""

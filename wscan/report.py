@@ -384,10 +384,13 @@ class ReportGenerator:
         observability = observability or {}
         coverage = coverage or {}
         scan_date = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        total = len(findings)
+        confirmed_findings = [f for f in findings if f.verified]
+        hypothesis_findings = [f for f in findings if not f.verified]
+        total = len(confirmed_findings)
+        hypothesis_total = len(hypothesis_findings)
         counts = {}
         for sev in ["critical", "high", "medium", "low"]:
-            counts[sev] = sum(1 for f in findings if f.severity == sev)
+            counts[sev] = sum(1 for f in confirmed_findings if f.severity == sev)
 
         findings_html = ""
         for i, f in enumerate(findings):
@@ -415,16 +418,7 @@ class ReportGenerator:
                 extra_badges += '<span class="badge-multi">⚡ MultiParam</span>'
             if "[AdaptiveAI]" in f.evidence:
                 extra_badges += '<span class="badge-ai">🧠 AdaptiveAI</span>'
-            # assumed は推定バッジに加え、未再検証であることを ⚠要確認でも明示する。
-            # unreproduced/skipped と state 空の旧 Finding は従来どおり ⚠要確認にする。
-            f_state = getattr(f, "verification_state", "")
-            if f_state == "assumed":
-                extra_badges += '<span class="badge-assumed">〜 推定（再検証未実行）</span>'
-                if not getattr(f, "verified", True):
-                    extra_badges += '<span class="badge-unconfirmed">⚠ 要確認</span>'
-            elif f_state in ("unreproduced", "skipped") or not getattr(f, "verified", True):
-                note = self._escape(getattr(f, "verification_note", ""))
-                extra_badges += f'<span class="badge-unconfirmed" title="{note}">⚠ 要確認</span>'
+            extra_badges += self._verification_badges_html(f)
             # E: 信頼度バッジ
             conf = getattr(f, "confidence", "tentative")
             conf_labels = {"confirmed": ("✔ 確認済", "#276749"), "likely": ("〜 可能性高", "#744210"), "tentative": ("? 暫定", "#4a5568")}
@@ -594,6 +588,7 @@ body {{ font-family: 'Segoe UI', system-ui, -apple-system, sans-serif; backgroun
 .badge-ai {{ background:#44337a; color:#e9d8fd; padding:2px 8px; border-radius:10px; font-size:0.72rem; font-weight:700; }}
 .badge-agent {{ background:#6b46c1; color:#faf5ff; padding:2px 8px; border-radius:10px; font-size:0.72rem; font-weight:700; }}
 .badge-agent-verified {{ background:#276749; color:#f0fff4; padding:2px 8px; border-radius:10px; font-size:0.72rem; font-weight:700; }}
+.badge-confirmed {{ background:#276749; color:#f0fff4; padding:2px 8px; border-radius:10px; font-size:0.72rem; font-weight:700; }}
 .badge-unconfirmed {{ background:#d97706; color:#fff; padding:2px 8px; border-radius:10px; font-size:0.72rem; font-weight:700; cursor:help; }}
 .badge-assumed {{ background:#854d0e; color:#fef9c3; padding:2px 8px; border-radius:10px; font-size:0.72rem; font-weight:700; }}
 .badge-confidence {{ color:#fff; padding:2px 8px; border-radius:10px; font-size:0.72rem; font-weight:700; }}
@@ -782,7 +777,11 @@ body {{ font-family: 'Segoe UI', system-ui, -apple-system, sans-serif; backgroun
     <div class="summary-grid">
         <div class="summary-card">
             <div class="count total-count">{total}</div>
-            <div class="label">Total Findings</div>
+            <div class="label">確証 (Confirmed)</div>
+        </div>
+        <div class="summary-card">
+            <div class="count" style="color:#d97706">{hypothesis_total}</div>
+            <div class="label">未確証 (Hypothesis)</div>
         </div>
         <div class="summary-card">
             <div class="count critical-count">{counts.get('critical', 0)}</div>
@@ -1657,6 +1656,18 @@ document.querySelectorAll('.plan-payloads-toggle').forEach(btn => {{
             )
         return '<span class="badge-agent">🤖 Agent発見（LLM独自解釈・未確証）</span>'
 
+    def _verification_badges_html(self, finding: Finding) -> str:
+        """確証と未確証を verified の派生値で明示する。"""
+        if finding.verified:
+            return '<span class="badge-confirmed">✅ 確証</span>'
+        state = finding.verification_state
+        assumed = (
+            '<span class="badge-assumed">〜 推定（再検証未実行）</span>'
+            if state == "assumed" else ""
+        )
+        note = self._escape(finding.verification_note)
+        return assumed + f'<span class="badge-unconfirmed" title="未確証: {note}">⚠ 要確認</span>'
+
     # =========================================================================
     # F: Executive Report
     # =========================================================================
@@ -1668,16 +1679,19 @@ document.querySelectorAll('.plan-payloads-toggle').forEach(btn => {{
     ) -> str:
         """経営層向け: サマリーカード・リスク分布・コンプライアンス適合率・推奨事項。"""
         scan_date = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        counts = {sev: sum(1 for f in findings if f.severity == sev)
+        confirmed_findings = [f for f in findings if f.verified]
+        hypothesis_findings = [f for f in findings if not f.verified]
+        counts = {sev: sum(1 for f in confirmed_findings if f.severity == sev)
                   for sev in ["critical", "high", "medium", "low", "info"]}
-        total = len(findings)
+        total = len(confirmed_findings)
+        hypothesis_total = len(hypothesis_findings)
         agent_total = sum(
             1 for f in findings if getattr(f, "source", "scanner") == "agent"
         )
-        agent_verified_total = sum(
+        agent_confirmed_total = sum(
             1 for f in findings
             if getattr(f, "source", "scanner") == "agent"
-            and getattr(f, "agent_verified", False)
+            and f.verified
         )
         agent_summary_html = ""
         if agent_total:
@@ -1686,18 +1700,18 @@ document.querySelectorAll('.plan-payloads-toggle').forEach(btn => {{
               <div class="exec-count" style="color:#6b46c1">{agent_total}</div>
               <div class="exec-label">🤖 Agent発見（LLM独自解釈）</div>
               <div style="font-size:.75rem;color:#718096;margin-top:6px">
-                決定論的にも再現確認済み: {agent_verified_total} / 未確証: {agent_total - agent_verified_total}
+                確証: {agent_confirmed_total} / 未確証: {agent_total - agent_confirmed_total}
               </div>
             </div>"""
 
         # リスクスコア (CVSS重み付き平均)
-        cvss_scores = [getattr(f, "cvss_score", 0.0) for f in findings]
+        cvss_scores = [getattr(f, "cvss_score", 0.0) for f in confirmed_findings]
         avg_cvss = (sum(cvss_scores) / len(cvss_scores)) if cvss_scores else 0.0
 
         # コンプライアンス違反タイプ集計
         top10_violations: dict[str, int] = {}
         pci_violations: dict[str, int] = {}
-        for f in findings:
+        for f in confirmed_findings:
             refs = getattr(f, "compliance_refs", None) or {}
             if callable(getattr(refs, "get", None)):
                 for ref in refs.get("owasp_top10", []):
@@ -1781,7 +1795,11 @@ ul li{{margin:4px 0;font-size:.9rem}} .footer{{text-align:center;color:#a0aec0;f
     </div>
     <div class="exec-card">
       <div class="exec-count" style="color:#4299e1">{total}</div>
-      <div class="exec-label">Total Findings</div>
+      <div class="exec-label">確証 (Confirmed)</div>
+    </div>
+    <div class="exec-card">
+      <div class="exec-count" style="color:#d97706">{hypothesis_total}</div>
+      <div class="exec-label">未確証 (Hypothesis)</div>
     </div>
     <div class="exec-card">
       <div class="exec-count" style="color:#805ad5">{avg_cvss:.1f}</div>
@@ -1823,13 +1841,15 @@ ul li{{margin:4px 0;font-size:.9rem}} .footer{{text-align:center;color:#a0aec0;f
     ) -> str:
         """開発者向け: チェックリスト形式・修正コード例・重要度別ソート。"""
         scan_date = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        confirmed_total = sum(1 for f in findings if f.verified)
+        hypothesis_total = len(findings) - confirmed_total
 
         items_html = ""
         for i, f in enumerate(findings):
             color = SEVERITY_COLORS.get(f.severity, "#718096")
             is_agent = getattr(f, "source", "scanner") == "agent"
             source_class = " finding-item-agent" if is_agent else ""
-            source_badges = self._agent_badges_html(f)
+            source_badges = self._agent_badges_html(f) + self._verification_badges_html(f)
             ai_fix = getattr(f, "ai_fix", "") or ""
             ai_fix_html = ""
             if ai_fix:
@@ -1910,12 +1930,15 @@ body{{font-family:'Segoe UI',system-ui,sans-serif;background:#f7f8fa;color:#1a20
 .fixed-badge{{background:#2b6cb0;color:#ebf8ff;padding:2px 6px;border-radius:8px;font-size:.7rem;font-weight:700}}
 .badge-agent{{background:#6b46c1;color:#faf5ff;padding:2px 8px;border-radius:10px;font-size:.72rem;font-weight:700}}
 .badge-agent-verified{{background:#276749;color:#f0fff4;padding:2px 8px;border-radius:10px;font-size:.72rem;font-weight:700}}
+.badge-confirmed{{background:#276749;color:#f0fff4;padding:2px 8px;border-radius:10px;font-size:.72rem;font-weight:700}}
+.badge-unconfirmed{{background:#d97706;color:#fff;padding:2px 8px;border-radius:10px;font-size:.72rem;font-weight:700}}
+.badge-assumed{{background:#854d0e;color:#fef9c3;padding:2px 8px;border-radius:10px;font-size:.72rem;font-weight:700}}
 .diff-bar{{background:#ebf8ff;border:1px solid #bee3f8;border-radius:8px;padding:10px 16px;margin-bottom:16px;font-size:.9rem}}
 .footer{{text-align:center;color:#a0aec0;font-size:.75rem;padding:20px}}
 </style></head><body>
 <div class="hdr">
   <h1>Developer Security Checklist</h1>
-  <div class="sub">{self._escape(target)} &nbsp;|&nbsp; {scan_date} &nbsp;|&nbsp; {len(findings)} 件の検出</div>
+  <div class="sub">{self._escape(target)} &nbsp;|&nbsp; {scan_date} &nbsp;|&nbsp; 確証 {confirmed_total} 件 / 未確証 {hypothesis_total} 件</div>
 </div>
 <div class="container">
   {diff_summary}
