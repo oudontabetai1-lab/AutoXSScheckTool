@@ -25,3 +25,19 @@ def test_planner_query_generic_when_no_hints():
 def test_planner_query_collapses_whitespace():
     q = build_planner_web_query("  Django   REST  ")
     assert q == "web application vulnerability Django REST"
+
+
+def test_planner_query_strips_url_embedded_in_hints():
+    # untrusted なページ title に URL が混ざるケース（Codex P2）
+    q = build_planner_web_query("Admin https://internal.example/admin Panel")
+    assert "internal.example" not in q
+    assert "http" not in q.lower()
+    assert "//" not in q
+    assert "Admin" in q and "Panel" in q  # 非識別トークンは残す
+
+
+def test_planner_query_strips_bare_host_and_ip():
+    q = build_planner_web_query("Login internal.example 10.0.0.5 Django")
+    assert "internal.example" not in q
+    assert "10.0.0.5" not in q
+    assert "Login" in q and "Django" in q

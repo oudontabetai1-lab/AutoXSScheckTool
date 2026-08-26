@@ -25,15 +25,33 @@ _HEADERS = {
 _DDG_ENDPOINT = "https://html.duckduckgo.com/html/"
 
 
+_WEB_QUERY_URL_LIKE = re.compile(r"://|@")
+_WEB_QUERY_IP_LIKE = re.compile(r"^\d{1,3}(?:\.\d{1,3}){3}$")
+# ドットで連結された識別子（host.tld / a.b.c）。Node.js 等の技術名も巻き込むが、host 漏洩を
+# 確実に防ぐため安全側で落とす（over-strip 許容）。
+_WEB_QUERY_DOTTED = re.compile(r"^[\w-]+(?:\.[\w-]+)+$")
+
+
 def build_planner_web_query(tech_hints: str) -> str:
     """planner の web intel クエリを組む（純粋・匿名化）。
 
-    LLM-007: 検査対象の host/URL を外部検索へ送らない。技術ヒント（フレームワーク名等）だけで
-    汎用検索し、対象を特定できる情報（host・URL・IP）は含めない。呼び出し側で tech_hints から
-    host/URL を除いて渡すこと。
+    LLM-007: 検査対象の host/URL/IP を外部検索へ送らない。tech_hints は untrusted な
+    ページ title を含みうるため、URL/host/IP らしきトークンを token 単位で除去してから
+    汎用クエリを組む（安全側で over-strip する）。
     """
-    hints = " ".join((tech_hints or "").split())
-    return ("web application vulnerability " + hints).strip()
+    safe: list[str] = []
+    for tok in (tech_hints or "").split():
+        bare = tok.strip(".,;:!?()[]{}\"'")
+        if not bare:
+            continue
+        if (
+            _WEB_QUERY_URL_LIKE.search(tok)
+            or _WEB_QUERY_IP_LIKE.match(bare)
+            or _WEB_QUERY_DOTTED.match(bare)
+        ):
+            continue  # host/URL/IP/dotted-identifier は落とす
+        safe.append(tok)
+    return ("web application vulnerability " + " ".join(safe)).strip()
 
 
 async def search_web(query: str, max_results: int = 5) -> str:
