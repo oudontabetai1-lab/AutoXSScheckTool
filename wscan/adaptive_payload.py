@@ -678,11 +678,14 @@ class AdaptivePayloadEngine:
             return None
         import asyncio
         full = ""
+        # run_in_executor はワーカースレッドへ ContextVar を伝播しないため、role 解決済み
+        # モデルを async 文脈（use_role("adaptive") 内）でここで確定してから executor へ渡す。
+        _model = getattr(self.pg, "claude_model", "claude-haiku-4-5-20251001")
         try:
             def _stream_sync():
                 nonlocal full
                 with client.messages.stream(
-                    model=getattr(self.pg, "claude_model", "claude-haiku-4-5-20251001"),
+                    model=_model,
                     max_tokens=1000,
                     messages=[{"role": "user", "content": prompt}],
                 ) as stream:
