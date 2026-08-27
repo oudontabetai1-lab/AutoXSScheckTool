@@ -41,6 +41,7 @@ from tests.fixtures.realistic_site import (
 )
 from tests.fixtures.spa_app import app as spa_app
 from wscan.engine import ScanEngine
+from wscan.recall_gate import compute_recall
 
 # Injection checks whose detection is deterministic over HTTP/Chromium.
 CHECKS = ["xss", "sqli", "ssti", "path_traversal", "open_redirect", "header_injection"]
@@ -82,6 +83,13 @@ def _chromium_available() -> bool:
         return True
     except Exception:
         return False
+
+
+# 単一の権威 probe: browser 起動可否を import 時に一度だけ評価する。decorator（collection 時）と
+# 環境 gate の assert（execution 時）が別々に probe すると、transient な launch 失敗で「recall
+# クラスだけ skip・gate は pass」の空振りが起きうる。両者で同じ結果を使い、不一致を無くす
+# （DECISION-CI-RECALL=C：blocking nightly gate が recall assertion 未実行のまま緑になるのを防ぐ）。
+_CHROMIUM_OK = _chromium_available()
 
 
 # Upper bound on the whole crawl→attack→verify pipeline. A real hang (e.g. a
@@ -144,9 +152,27 @@ async def _run_spa_json_scan(port: int, output_dir: str):
     return engine
 
 
+# ADR-0016 / PRINCIPLE-001（DECISION-CI-RECALL=C）の空振り防止:
+# WSCAN_E2E=1 を明示した（＝blocking な nightly recall gate 実行中）のに Chromium が
+# 起動不能なら、E2E クラスの skip で pytest が緑になり recall assertion が空振りする。
+# この gate クラスは _CHROMIUM_OK（recall クラスの skip 判定と同一の権威 probe）を **skip 条件に
+# せず** WSCAN_E2E=1 でのみ有効化し、
+# 起動不能を skip でなく **失敗** に変える（install 成功後の launch 不能：欠落ライブラリ/
+# sandbox 失敗/破損 exe も含めて捕捉）。
+@unittest.skipUnless(_e2e_enabled(), "set WSCAN_E2E=1 to run the end-to-end browser scan")
+class EndToEndEnvironmentGateTests(unittest.TestCase):
+    def test_chromium_must_be_launchable_when_e2e_requested(self):
+        self.assertTrue(
+            _CHROMIUM_OK,
+            "WSCAN_E2E=1 (blocking recall gate) but Chromium is not launchable — "
+            "the E2E recall assertion cannot run. Failing loudly instead of "
+            "letting the suite skip and report green.",
+        )
+
+
 @unittest.skipUnless(_e2e_enabled(), "set WSCAN_E2E=1 to run the end-to-end browser scan")
 @unittest.skipUnless(
-    _chromium_available(),
+    _CHROMIUM_OK,
     "Playwright Chromium browser is not installed (run: playwright install chromium)",
 )
 class EndToEndRealisticScanTests(unittest.TestCase):
@@ -217,6 +243,20 @@ class EndToEndRealisticScanTests(unittest.TestCase):
                     f"Reported instead: {sorted(self.reported)}",
                 )
 
+    def test_recall_gate_is_100_percent(self):
+        # ADR-0016 / PRINCIPLE-001: 固定 ground truth に対し recall 100% を要求する
+        # （有効化した CHECKS のみを分母にする）。個別 subTest の集約＋recall 数値と見逃し一覧を
+        # 1メッセージで surface する。
+        # enforcement（DECISION-CI-RECALL=C）: この assert は E2E scan 実走時（WSCAN_E2E=1）に
+        # blocking。PR CI の E2E step は apt mirror 403 で不安定なため非 blocking のまま維持し、
+        # recall ゲートは専用の nightly workflow（.github/workflows/nightly-recall.yml、
+        # WSCAN_E2E=1・blocking）で担保する＝ADR-0016 の release gate を定期実行で確実に回す。
+        report = compute_recall(EXPECTED_FINDINGS, self.reported, target_checks=CHECKS)
+        self.assertTrue(
+            report.is_complete,
+            "RECALL REGRESSION (見逃し発生):\n" + report.describe(),
+        )
+
     def test_detected_vulnerabilities_survive_verification(self):
         # The engine re-checks findings in its verify phase; a planted, truly
         # reproducible vulnerability should not be marked unverified.
@@ -249,7 +289,7 @@ class EndToEndRealisticScanTests(unittest.TestCase):
 
 @unittest.skipUnless(_e2e_enabled(), "set WSCAN_E2E=1 to run the end-to-end browser scan")
 @unittest.skipUnless(
-    _chromium_available(),
+    _CHROMIUM_OK,
     "Playwright Chromium browser is not installed (run: playwright install chromium)",
 )
 class EndToEndSpaJsonSqlInjectionTests(unittest.TestCase):
