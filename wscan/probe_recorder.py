@@ -62,15 +62,21 @@ class LedgerManifest:
     by_outcome: dict = field(default_factory=dict)
     write_errors: list = field(default_factory=list)  # list[dict]: {error, role, outcome}
 
-    def record(self, role, outcome, *, write_ok: bool, error: str = "") -> None:
-        """1 試行を集計へ反映する（純粋）。成功/失敗いずれも件数内訳へ加算し、失敗は error も残す。"""
+    def record(self, role, outcome, *, write_ok: bool, error: str = "",
+               attempt_id: str = "") -> None:
+        """1 試行を集計へ反映する（純粋）。成功/失敗いずれも件数内訳へ加算し、失敗は error も残す。
+
+        `attempt_id` を error に添えると、resume 時に「行は永続化されたが flush/close で失敗した」
+        不確実失敗を jsonl の行と突合して二重計上を防げる。"""
         self.total += 1
         rk = _role_key(role)
         ok = _outcome_key(outcome)
         self.by_role[rk] = self.by_role.get(rk, 0) + 1
         self.by_outcome[ok] = self.by_outcome.get(ok, 0) + 1
         if not write_ok:
-            self.write_errors.append({"error": error or "write_failed", "role": rk, "outcome": ok})
+            self.write_errors.append(
+                {"error": error or "write_failed", "role": rk, "outcome": ok,
+                 "attempt_id": attempt_id})
 
     @property
     def had_write_error(self) -> bool:
@@ -103,6 +109,7 @@ class ProbeLedger:
         self.manifest = LedgerManifest()
         self._recovery_failed = False
         self._needs_repair = False
+        self._persisted_ids: set = set()
         self._path: Optional[Path] = None
         if enabled and output_dir:
             self._path = Path(output_dir) / LEDGER_FILENAME
@@ -166,6 +173,7 @@ class ProbeLedger:
             self._repair_unterminated_tail(data)
             if self._recovery_failed:
                 return
+            persisted_ids = set()
             try:
                 with open(self._path, encoding="utf-8") as fh:
                     for line in fh:
@@ -178,7 +186,10 @@ class ProbeLedger:
                             continue  # 壊れた行はスキップ
                         if not isinstance(rec, dict):
                             continue  # object でない JSON（null/[] 等）はスキップ
-                        seq_part = str(rec.get("attempt_id", "")).rpartition(":")[2]
+                        aid = str(rec.get("attempt_id", ""))
+                        if aid:
+                            persisted_ids.add(aid)
+                        seq_part = aid.rpartition(":")[2]
                         if seq_part.isdigit():
                             max_seq = max(max_seq, int(seq_part))
                         # 永続化済み＝成功。内訳へ加算。
@@ -186,6 +197,7 @@ class ProbeLedger:
             except OSError:
                 self._recovery_failed = True
                 return
+            self._persisted_ids = persisted_ids
         # 前 run の manifest から失敗試行を内訳ごと復元（jsonl の有無に関わらず）。
         manifest_path = self._path.with_name(MANIFEST_FILENAME)
         prior_total = 0
@@ -197,12 +209,26 @@ class ProbeLedger:
                 self._recovery_failed = True
                 return
             if isinstance(prior, dict):
-                prior_total = int(prior.get("total") or 0)
-                for entry in prior.get("write_errors", []) or []:
+                # 型が壊れた/legacy な manifest フィールドで crash させず recovery_failed に倒す。
+                try:
+                    prior_total = int(prior.get("total") or 0)
+                except (ValueError, TypeError):
+                    self._recovery_failed = True
+                    return
+                errs = prior.get("write_errors", []) or []
+                if not isinstance(errs, list):
+                    self._recovery_failed = True
+                    return
+                for entry in errs:
                     if isinstance(entry, dict):
+                        aid = str(entry.get("attempt_id", ""))
+                        # 不確実失敗の突合: 行が永続化されているなら成功として既に計上済み＝二重計上しない。
+                        if aid and aid in self._persisted_ids:
+                            continue
                         self.manifest.record(entry.get("role", ""), entry.get("outcome"),
-                                             write_ok=False, error=str(entry.get("error", "")))
-                    else:  # legacy: 文字列のみ
+                                             write_ok=False, error=str(entry.get("error", "")),
+                                             attempt_id=aid)
+                    else:  # legacy: 文字列のみ（attempt_id 不明＝突合不能なので計上）
                         self.manifest.record("", None, write_ok=False, error=str(entry))
         # 失敗試行も ID を消費している（trailing failure は jsonl 最大 seq を超える）。
         # prior_total は前 run の発行 ID 総数＝max seq。stale manifest も考慮して max を取る。
@@ -222,21 +248,20 @@ class ProbeLedger:
         """
         if not (self.enabled and self._path is not None):
             return True
-        # 直前の write が partial prefix を残した可能性があるときは、次の write の前に末尾を修復する
-        # （修復せず追記すると prefix へ連結して壊れた行を「永続化済み」と誤計上する）。
-        if self._needs_repair and not self._recovery_failed:
-            with self._lock:
+        # 修復チェック・recovery 判定・write・集計を **同一 critical section** で行う。
+        # 別 lock に分けると、並列 worker で「A が partial を残して失敗する前に B が _needs_repair を
+        # False と観測し、修復せず prefix へ追記する」競合が起きる（Codex 指摘）。
+        with self._lock:
+            if self._needs_repair and not self._recovery_failed:
                 self._repair_tail_now()
                 self._needs_repair = False
-        if self._recovery_failed:
-            with self._lock:
+            if self._recovery_failed:
                 self.manifest.record(record.role, record.outcome, write_ok=False,
-                                     error="ledger_recovery_failed")
-            return False
-        line = to_jsonl_line(record)
-        write_ok = True
-        error = ""
-        with self._lock:
+                                     error="ledger_recovery_failed", attempt_id=record.attempt_id)
+                return False
+            line = to_jsonl_line(record)
+            write_ok = True
+            error = ""
             try:
                 with open(self._path, "a", encoding="utf-8") as fh:
                     fh.write(line + "\n")
@@ -244,7 +269,8 @@ class ProbeLedger:
                 write_ok = False
                 error = f"{type(exc).__name__}: {exc}"
                 self._needs_repair = True
-            self.manifest.record(record.role, record.outcome, write_ok=write_ok, error=error)
+            self.manifest.record(record.role, record.outcome, write_ok=write_ok, error=error,
+                                 attempt_id=record.attempt_id)
         return write_ok
 
     def write_manifest(self) -> bool:
