@@ -1,0 +1,91 @@
+"""probe 台帳 recorder のユニットテスト（0032-B）。
+
+attempt_id の決定論・append-only 追記・manifest 集計・**書込み失敗を握りつぶさない**を固定。
+"""
+import json
+
+from wscan.probe_ledger import (
+    ProbeAttemptRecord,
+    ProbeOutcome,
+    ProbeRole,
+    RequestRecord,
+    Transport,
+)
+from wscan.probe_recorder import (
+    LEDGER_FILENAME,
+    MANIFEST_FILENAME,
+    LedgerManifest,
+    ProbeLedger,
+)
+
+
+def _rec(ledger, role, outcome=None):
+    return ProbeAttemptRecord(
+        scan_id=ledger.scan_id, attempt_id=ledger.next_attempt_id(),
+        role=role, check="xss", outcome=outcome,
+        request=RequestRecord(method="GET", url="http://h/a", transport=Transport.HTTPX),
+    )
+
+
+def test_attempt_id_monotonic_and_deterministic(tmp_path):
+    led = ProbeLedger(tmp_path, "scanA")
+    assert led.next_attempt_id() == "scanA:000001"
+    assert led.next_attempt_id() == "scanA:000002"
+
+
+def test_append_writes_jsonl_lines(tmp_path):
+    led = ProbeLedger(tmp_path, "s")
+    assert led.append(_rec(led, ProbeRole.BASELINE, ProbeOutcome.NO_MATCH))
+    assert led.append(_rec(led, ProbeRole.ATTACK, ProbeOutcome.MATCHED))
+    path = tmp_path / LEDGER_FILENAME
+    lines = [json.loads(l) for l in path.read_text(encoding="utf-8").splitlines() if l.strip()]
+    assert len(lines) == 2
+    assert lines[0]["role"] == "baseline" and lines[1]["outcome"] == "matched"
+
+
+def test_manifest_tallies_role_and_outcome(tmp_path):
+    led = ProbeLedger(tmp_path, "s")
+    led.append(_rec(led, ProbeRole.BASELINE, ProbeOutcome.NO_MATCH))
+    led.append(_rec(led, ProbeRole.ATTACK, ProbeOutcome.MATCHED))
+    led.append(_rec(led, ProbeRole.ATTACK, ProbeOutcome.BLOCKED))
+    m = led.manifest.to_dict()
+    assert m["total"] == 3
+    assert m["by_role"] == {"baseline": 1, "attack": 2}
+    assert m["by_outcome"] == {"no_match": 1, "matched": 1, "blocked": 1}
+    assert m["had_write_error"] is False
+
+
+def test_write_failure_is_not_swallowed(tmp_path):
+    # 親ディレクトリが存在しない出力先＝open が OSError → append は False、manifest に error
+    bad_dir = tmp_path / "does_not_exist"
+    led = ProbeLedger(bad_dir, "s")
+    ok = led.append(_rec(led, ProbeRole.ATTACK, ProbeOutcome.MATCHED))
+    assert ok is False
+    assert led.manifest.had_write_error is True
+    assert led.manifest.total == 1  # 欠落として計上（0 に丸めない）
+
+
+def test_disabled_ledger_is_noop(tmp_path):
+    led = ProbeLedger(tmp_path, "s", enabled=False)
+    assert led.append(_rec(led, ProbeRole.ATTACK, ProbeOutcome.MATCHED)) is True
+    assert not (tmp_path / LEDGER_FILENAME).exists()
+    assert led.manifest.total == 0  # 無効時は集計しない（operator 選択＝失敗でない）
+
+
+def test_write_manifest_file(tmp_path):
+    led = ProbeLedger(tmp_path, "scanZ")
+    led.append(_rec(led, ProbeRole.VERIFY, ProbeOutcome.MATCHED))
+    assert led.write_manifest() is True
+    data = json.loads((tmp_path / MANIFEST_FILENAME).read_text(encoding="utf-8"))
+    assert data["scan_id"] == "scanZ"
+    assert data["total"] == 1 and data["ledger"] == LEDGER_FILENAME
+
+
+def test_ledger_manifest_pure_record():
+    # LedgerManifest 単体（I/O 非依存）の集計・失敗計上
+    m = LedgerManifest()
+    m.record(ProbeRole.ATTACK, ProbeOutcome.MATCHED, write_ok=True)
+    m.record(ProbeRole.ATTACK, None, write_ok=False, error="disk full")
+    assert m.total == 2
+    assert m.by_outcome["matched"] == 1 and m.by_outcome["unrecorded"] == 1
+    assert m.had_write_error and m.write_errors == ["disk full"]
