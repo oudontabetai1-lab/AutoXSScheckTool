@@ -89,3 +89,44 @@ def test_ledger_manifest_pure_record():
     assert m.total == 2
     assert m.by_outcome["matched"] == 1 and m.by_outcome["unrecorded"] == 1
     assert m.had_write_error and m.write_errors == ["disk full"]
+
+
+def test_resume_restores_sequence_and_manifest(tmp_path):
+    # 1st run: 3 試行を記録
+    led1 = ProbeLedger(tmp_path, "sResume")
+    led1.append(_rec(led1, ProbeRole.BASELINE, ProbeOutcome.NO_MATCH))
+    led1.append(_rec(led1, ProbeRole.ATTACK, ProbeOutcome.MATCHED))
+    led1.append(_rec(led1, ProbeRole.ATTACK, ProbeOutcome.BLOCKED))
+    # resume: 同じ output dir / scan_id で再構築
+    led2 = ProbeLedger(tmp_path, "sResume")
+    # seq は継続＝重複 ID を出さない
+    assert led2.next_attempt_id() == "sResume:000004"
+    # manifest は既存3件を含む（post-resume だけの過少集計でない）
+    m = led2.manifest.to_dict()
+    assert m["total"] == 3
+    assert m["by_role"] == {"baseline": 1, "attack": 2}
+    assert m["by_outcome"] == {"no_match": 1, "matched": 1, "blocked": 1}
+
+
+def test_resume_append_does_not_duplicate_ids(tmp_path):
+    led1 = ProbeLedger(tmp_path, "s")
+    for _ in range(2):
+        led1.append(_rec(led1, ProbeRole.ATTACK, ProbeOutcome.MATCHED))
+    led2 = ProbeLedger(tmp_path, "s")
+    led2.append(_rec(led2, ProbeRole.ATTACK, ProbeOutcome.NO_MATCH))  # should be :000003
+    import json as _json
+    ids = [
+        _json.loads(l)["attempt_id"]
+        for l in (tmp_path / LEDGER_FILENAME).read_text(encoding="utf-8").splitlines() if l.strip()
+    ]
+    assert ids == ["s:000001", "s:000002", "s:000003"]
+    assert len(ids) == len(set(ids))  # 重複なし
+
+
+def test_resume_skips_corrupt_lines(tmp_path):
+    path = tmp_path / LEDGER_FILENAME
+    path.write_text('{"attempt_id":"s:000005","role":"attack","outcome":"matched"}\n'
+                    'not-json-garbage\n', encoding="utf-8")
+    led = ProbeLedger(tmp_path, "s")
+    assert led.next_attempt_id() == "s:000006"   # 壊れ行は無視、最大 seq=5 を継承
+    assert led.manifest.to_dict()["total"] == 1  # 有効行のみ集計

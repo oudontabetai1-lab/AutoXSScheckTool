@@ -87,10 +87,42 @@ class ProbeLedger:
         self._path: Optional[Path] = None
         if enabled and output_dir:
             self._path = Path(output_dir) / LEDGER_FILENAME
+            # resume: 既存台帳から seq と manifest を復元してから新規試行を受ける
+            # （attempt_id の重複＝相関 ID 衝突と、post-resume だけの過少 manifest を防ぐ）。
+            self._restore_from_existing()
 
     @property
     def path(self) -> Optional[Path]:
         return self._path
+
+    def _restore_from_existing(self) -> None:
+        """既存 `probe_attempts.jsonl` から seq 最大値と manifest を再構築する（resume 安定）。
+
+        壊れた行は best-effort でスキップ。前 run で write に失敗した試行はそもそも file に無いため
+        復元対象外（永続化済みのみが台帳の正本）。"""
+        if self._path is None or not self._path.exists():
+            return
+        max_seq = 0
+        try:
+            with open(self._path, encoding="utf-8") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        rec = json.loads(line)
+                    except ValueError:
+                        continue  # 壊れた行はスキップ
+                    seq_part = str(rec.get("attempt_id", "")).rpartition(":")[2]
+                    if seq_part.isdigit():
+                        max_seq = max(max_seq, int(seq_part))
+                    # 既存レコードは永続化済み＝write_ok。role/outcome は文字列のまま集計。
+                    self.manifest.record(
+                        rec.get("role", ""), rec.get("outcome"), write_ok=True
+                    )
+        except OSError:
+            return
+        self._seq = max_seq
 
     def next_attempt_id(self) -> str:
         """次の attempt_id を払い出す（単調増加・決定論・thread-safe）。"""
