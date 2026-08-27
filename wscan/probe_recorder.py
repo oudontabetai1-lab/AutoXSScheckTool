@@ -5,19 +5,25 @@
 払い出し、outcome/role 別の件数と **書込み失敗** を manifest に残す。
 
 最上位契約（Task 0032）:
-- **No evidence, no COMPLETE**: 必須証跡の書込みに失敗したら握りつぶさず manifest に error を
-  残す（`append` は False を返し、`had_write_error` が立つ）。scan 完了判定はこれを見る。
+- **No evidence, no COMPLETE**: 証跡の書込みに失敗したら握りつぶさず manifest に残す。scan 完了
+  判定は `evidence_incomplete` を見る。
 - **Evidence for every outcome**: matched だけでなく no-match/blocked/skipped/timeout/error も
   記録する（呼び出し側が outcome を付けて append する）。
 
-resume 耐久性（crash/interrupt に耐える append-only 正本）:
-- 不完全な末尾行は **parse して**、完全な JSON なら delimiter を補い保持、壊れた断片だけ truncate。
-- 既存正本の **復元に失敗したら以後の append を止める**（`_seq=0` のまま ID 再発行/欠落を防ぐ）。
-- 失敗試行は role/outcome 付きで manifest に残し、resume で **件数内訳ごと**復元する。
+**durability モデル（0032-B, DECISION: 簡素化＝単一 source-of-truth）**:
+台帳の write 失敗は稀（disk 異常）で、その試行の証跡は失われる。二源（成功=jsonl / 失敗=manifest）を
+突合する複雑さを避け、次の単純な規律にする:
+- **jsonl が唯一の正本**（成功試行の source of truth）。
+- **write 失敗＝即 quarantine**: 以後の append を拒否し、run を evidence-incomplete とする
+  （書けない＝EVIDENCE_INCOMPLETE と整合）。部分 tail への追記・継続はしない。
+- **resume**: 成功件数は jsonl から再構築（単一 source）。前 run の不完全さ（write 失敗/欠落）は
+  **1 個の欠落マーカー**として持ち越し `evidence_incomplete` を維持する（失敗試行の厳密な内訳を
+  跨 run で再構成しない＝reconciliation を持たない）。新規 append は許可（disk が回復していれば継続）。
+- crash 対策: 末尾の不完全行は parse-aware に修復（完全 JSON は delimiter を補い保持、断片は truncate）。
+  manifest は temp+os.replace で原子的に置換。
 
-I/O（ファイル追記・manifest 書出し）はここに閉じ、判定・件数ロジックは純粋な `LedgerManifest`
-（下）と `probe_ledger` の純粋関数へ委譲する（I/O と判定の分離規約）。recorder を scanner/engine の
-全 transport 送信経路へ配線するのは後続増分（0032-C）。
+I/O はここに閉じ、集計は純粋 `LedgerManifest` へ分離する（I/O と判定の分離規約）。全 transport
+送信経路への配線は後続増分（0032-C）。
 """
 from __future__ import annotations
 
@@ -52,35 +58,33 @@ def _outcome_key(outcome) -> str:
 
 @dataclass
 class LedgerManifest:
-    """台帳の集計（純粋・I/O 非依存）。件数・欠落・書込み失敗を保持し 0 Finding を安全へ丸めない。
-
-    `write_errors` は **role/outcome を含む dict のリスト**（失敗試行の内訳を resume で失わないため）。
-    """
+    """台帳の集計（純粋・I/O 非依存）。件数・欠落・書込み失敗を保持し 0 Finding を安全へ丸めない。"""
 
     total: int = 0
     by_role: dict = field(default_factory=dict)
     by_outcome: dict = field(default_factory=dict)
     write_errors: list = field(default_factory=list)  # list[dict]: {error, role, outcome}
 
-    def record(self, role, outcome, *, write_ok: bool, error: str = "",
-               attempt_id: str = "") -> None:
-        """1 試行を集計へ反映する（純粋）。成功/失敗いずれも件数内訳へ加算し、失敗は error も残す。
-
-        `attempt_id` を error に添えると、resume 時に「行は永続化されたが flush/close で失敗した」
-        不確実失敗を jsonl の行と突合して二重計上を防げる。"""
+    def record(self, role, outcome, *, write_ok: bool, error: str = "") -> None:
+        """1 試行を集計へ反映する（純粋）。成功/失敗いずれも件数内訳へ加算し、失敗は error も残す。"""
         self.total += 1
         rk = _role_key(role)
         ok = _outcome_key(outcome)
         self.by_role[rk] = self.by_role.get(rk, 0) + 1
         self.by_outcome[ok] = self.by_outcome.get(ok, 0) + 1
         if not write_ok:
-            self.write_errors.append(
-                {"error": error or "write_failed", "role": rk, "outcome": ok,
-                 "attempt_id": attempt_id})
+            self.write_errors.append({"error": error or "write_failed", "role": rk, "outcome": ok})
+
+    def note_gap(self, reason: str) -> None:
+        """resume で検出した欠落（件数内訳は不明）を 1 マーカーとして残す。
+
+        跨 run で失敗試行の厳密な内訳は再構成せず、`had_write_error` を維持する目的（No evidence,
+        no COMPLETE のゲートを前 run の不完全さで倒し続ける）。件数（total 等）は動かさない。"""
+        self.write_errors.append({"error": reason, "role": "", "outcome": "gap"})
 
     @property
     def had_write_error(self) -> bool:
-        """証跡書込みに失敗があったか（No evidence, no COMPLETE の判定に使う）。"""
+        """証跡の欠落/書込み失敗があったか（No evidence, no COMPLETE の判定に使う）。"""
         return bool(self.write_errors)
 
     def to_dict(self) -> dict:
@@ -97,8 +101,8 @@ class ProbeLedger:
     """append-only な probe 台帳 writer。scan 単位。thread-safe（並列ワーカー対応）。
 
     attempt_id は `derive_attempt_id(scan_id, seq)` で決定論的に払い出す（resume 安定）。
-    `append` は JSONL 1 行を追記し、失敗しても例外を投げず manifest に error を残して False を返す。
-    既存正本の復元に失敗した場合は `recovery_failed` が立ち、以後の append を拒否する。
+    台帳 write に失敗すると **quarantine** し（`quarantined=True`）、以後の append を拒否する。
+    `evidence_incomplete` は run が証跡を取り切れなかったか（＝No evidence, no COMPLETE のゲート）。
     """
 
     def __init__(self, output_dir, scan_id: str, *, enabled: bool = True) -> None:
@@ -107,13 +111,10 @@ class ProbeLedger:
         self._seq = 0
         self._lock = threading.Lock()
         self.manifest = LedgerManifest()
-        self._recovery_failed = False
-        self._needs_repair = False
-        self._persisted_ids: set = set()
+        self._quarantined = False
         self._path: Optional[Path] = None
         if enabled and output_dir:
             self._path = Path(output_dir) / LEDGER_FILENAME
-            # resume: 既存台帳から seq/manifest を復元してから新規試行を受ける
             self._restore_from_existing()
 
     @property
@@ -121,59 +122,56 @@ class ProbeLedger:
         return self._path
 
     @property
-    def recovery_failed(self) -> bool:
-        """既存正本の復元に失敗したか（True の間 append は拒否＝ID 再発行/欠落を防ぐ）。"""
-        return self._recovery_failed
+    def quarantined(self) -> bool:
+        """台帳 write に失敗して隔離中か（True の間 append は拒否）。"""
+        return self._quarantined
 
-    def _repair_unterminated_tail(self, data: bytes) -> None:
-        """末尾が改行で終わらない場合、末尾行を parse して完全なら delimiter を補い、
-        壊れた断片だけ truncate する（interrupted write の完全レコードを失わない）。"""
+    @property
+    def evidence_incomplete(self) -> bool:
+        """証跡を取り切れなかったか（write 失敗 or 前 run の欠落 or resume 検出の行欠落）。"""
+        return self._quarantined or self.manifest.had_write_error
+
+    # ── restore ──────────────────────────────────────────────────────────
+    def _repair_unterminated_tail(self, data: bytes) -> bool:
+        """末尾が改行で終わらない場合、末尾行を parse して完全な object なら delimiter を補い、
+        壊れた断片だけ truncate する。修復 I/O に失敗したら False（quarantine 側で扱う）。"""
         if not data or data.endswith(b"\n"):
-            return
+            return True
         nl = data.rfind(b"\n")
         tail = data[nl + 1:]
-        keep_tail = False
         try:
-            keep_tail = isinstance(json.loads(tail.decode("utf-8")), dict)  # 完全な object のみ残す
+            keep = isinstance(json.loads(tail.decode("utf-8")), dict)
         except (ValueError, UnicodeDecodeError):
-            keep_tail = False
+            keep = False
         try:
-            if keep_tail:
+            if keep:
                 with open(self._path, "ab") as fh:
                     fh.write(b"\n")
             else:
                 with open(self._path, "rb+") as fh:
-                    fh.truncate(nl + 1)  # nl==-1 なら 0（全体が partial）
+                    fh.truncate(nl + 1)  # nl==-1 なら 0
         except OSError:
-            self._recovery_failed = True
-
-    def _repair_tail_now(self) -> None:
-        """現在のファイルを読み直して末尾行を修復する（same-process の write 失敗後に呼ぶ）。"""
-        if self._path is None:
-            return
-        try:
-            data = self._path.read_bytes()
-        except OSError:
-            self._recovery_failed = True
-            return
-        self._repair_unterminated_tail(data)
+            return False
+        return True
 
     def _restore_from_existing(self) -> None:
-        """既存台帳から seq/manifest を復元する（resume 安定）。復元不能なら recovery_failed。"""
+        """既存台帳から seq/manifest を復元する（単一 source＝jsonl）。前 run の不完全さは 1 マーカーで継承。"""
         if self._path is None:
             return
         max_seq = 0
+        restored_rows = 0
         if self._path.exists():
             try:
                 data = self._path.read_bytes()
             except OSError:
-                # 既存正本を読めない＝安全に続けられない。以後の append を止める。
-                self._recovery_failed = True
+                # 既存正本を読めない＝以後の append を止める（ID 再発行/欠落を防ぐ）
+                self._quarantined = True
+                self.manifest.note_gap("ledger_unreadable_on_resume")
                 return
-            self._repair_unterminated_tail(data)
-            if self._recovery_failed:
+            if not self._repair_unterminated_tail(data):
+                self._quarantined = True
+                self.manifest.note_gap("ledger_tail_repair_failed")
                 return
-            persisted_ids = set()
             try:
                 with open(self._path, encoding="utf-8") as fh:
                     for line in fh:
@@ -185,55 +183,46 @@ class ProbeLedger:
                         except ValueError:
                             continue  # 壊れた行はスキップ
                         if not isinstance(rec, dict):
-                            continue  # object でない JSON（null/[] 等）はスキップ
-                        aid = str(rec.get("attempt_id", ""))
-                        if aid:
-                            persisted_ids.add(aid)
-                        seq_part = aid.rpartition(":")[2]
+                            continue  # object でない JSON はスキップ
+                        seq_part = str(rec.get("attempt_id", "")).rpartition(":")[2]
                         if seq_part.isdigit():
                             max_seq = max(max_seq, int(seq_part))
-                        # 永続化済み＝成功。内訳へ加算。
+                        restored_rows += 1
                         self.manifest.record(rec.get("role", ""), rec.get("outcome"), write_ok=True)
             except OSError:
-                self._recovery_failed = True
+                self._quarantined = True
+                self.manifest.note_gap("ledger_read_failed_on_resume")
                 return
-            self._persisted_ids = persisted_ids
-        # 前 run の manifest から失敗試行を内訳ごと復元（jsonl の有無に関わらず）。
+        self._seq = max_seq
+        # 前 run の manifest から「不完全だった事実」だけを継承する（内訳の再構成はしない）。
         manifest_path = self._path.with_name(MANIFEST_FILENAME)
-        prior_total = 0
         if manifest_path.exists():
             try:
                 prior = json.loads(manifest_path.read_text(encoding="utf-8"))
             except (OSError, ValueError):
-                # 既存 manifest が壊れて読めない＝欠落状態を復元できない。止める。
-                self._recovery_failed = True
+                # 既存 manifest が読めない/壊れている＝欠落状態を復元できない
+                self.manifest.note_gap("prior_manifest_unreadable")
                 return
-            if isinstance(prior, dict):
-                # 型が壊れた/legacy な manifest フィールドで crash させず recovery_failed に倒す。
-                try:
-                    prior_total = int(prior.get("total") or 0)
-                except (ValueError, TypeError):
-                    self._recovery_failed = True
-                    return
-                errs = prior.get("write_errors", []) or []
-                if not isinstance(errs, list):
-                    self._recovery_failed = True
-                    return
-                for entry in errs:
-                    if isinstance(entry, dict):
-                        aid = str(entry.get("attempt_id", ""))
-                        # 不確実失敗の突合: 行が永続化されているなら成功として既に計上済み＝二重計上しない。
-                        if aid and aid in self._persisted_ids:
-                            continue
-                        self.manifest.record(entry.get("role", ""), entry.get("outcome"),
-                                             write_ok=False, error=str(entry.get("error", "")),
-                                             attempt_id=aid)
-                    else:  # legacy: 文字列のみ（attempt_id 不明＝突合不能なので計上）
-                        self.manifest.record("", None, write_ok=False, error=str(entry))
-        # 失敗試行も ID を消費している（trailing failure は jsonl 最大 seq を超える）。
-        # prior_total は前 run の発行 ID 総数＝max seq。stale manifest も考慮して max を取る。
-        self._seq = max(max_seq, prior_total)
+            if not isinstance(prior, dict):
+                # 非 object の manifest は破損とみなす
+                self.manifest.note_gap("prior_manifest_not_object")
+                return
+            # seq は前 run の発行 ID 総数（=max seq）も考慮（trailing failure/stale jsonl 対策）
+            try:
+                prior_total = int(prior.get("total") or 0)
+            except (ValueError, TypeError):
+                prior_total = 0
+                self.manifest.note_gap("prior_manifest_bad_total")
+            self._seq = max(self._seq, prior_total)
+            # 前 run が不完全（write 失敗）だった事実を継承（内訳は再構成しない）。
+            errs = prior.get("write_errors")
+            if errs:  # 非空 list/その他 truthy を「不完全あり」とみなす
+                self.manifest.note_gap("prior_run_evidence_incomplete")
+            if prior_total > restored_rows:
+                # 例: jsonl が外部で削除/truncate されたのに manifest は多い＝行が失われている
+                self.manifest.note_gap("ledger_rows_missing_on_resume")
 
+    # ── append / manifest ────────────────────────────────────────────────
     def next_attempt_id(self) -> str:
         """次の attempt_id を払い出す（単調増加・決定論・thread-safe）。"""
         with self._lock:
@@ -241,40 +230,34 @@ class ProbeLedger:
             return derive_attempt_id(self.scan_id, self._seq)
 
     def append(self, record: ProbeAttemptRecord) -> bool:
-        """試行レコードを台帳へ追記する。成功で True。失敗は manifest に残し False（例外は投げない）。
+        """試行レコードを台帳へ追記する。成功で True。
 
-        無効（enabled=False / 出力先なし）のときは no-op で True。既存正本の復元に失敗している
-        （recovery_failed）ときは、ID 再発行/欠落を避けるため書込まず失敗として記録し False を返す。
+        無効（enabled=False / 出力先なし）は no-op で True。quarantine 中（過去の write 失敗）は
+        書込まず失敗として記録し False。write 失敗時は quarantine して以後の append を拒否する
+        （部分 tail への連結を構造的に防ぐ）。判定・write・集計は同一 critical section で行う。
         """
         if not (self.enabled and self._path is not None):
             return True
-        # 修復チェック・recovery 判定・write・集計を **同一 critical section** で行う。
-        # 別 lock に分けると、並列 worker で「A が partial を残して失敗する前に B が _needs_repair を
-        # False と観測し、修復せず prefix へ追記する」競合が起きる（Codex 指摘）。
         with self._lock:
-            if self._needs_repair and not self._recovery_failed:
-                self._repair_tail_now()
-                self._needs_repair = False
-            if self._recovery_failed:
+            if self._quarantined:
                 self.manifest.record(record.role, record.outcome, write_ok=False,
-                                     error="ledger_recovery_failed", attempt_id=record.attempt_id)
+                                     error="ledger_quarantined")
                 return False
             line = to_jsonl_line(record)
-            write_ok = True
-            error = ""
             try:
                 with open(self._path, "a", encoding="utf-8") as fh:
                     fh.write(line + "\n")
-            except OSError as exc:  # 書込み失敗は握りつぶさず可視化＋末尾修復を予約（partial 対策）
-                write_ok = False
-                error = f"{type(exc).__name__}: {exc}"
-                self._needs_repair = True
-            self.manifest.record(record.role, record.outcome, write_ok=write_ok, error=error,
-                                 attempt_id=record.attempt_id)
-        return write_ok
+            except OSError as exc:
+                # write 失敗＝この試行の証跡は失われた。以後の append を止める（quarantine）。
+                self._quarantined = True
+                self.manifest.record(record.role, record.outcome, write_ok=False,
+                                     error=f"{type(exc).__name__}: {exc}")
+                return False
+            self.manifest.record(record.role, record.outcome, write_ok=True)
+            return True
 
     def write_manifest(self) -> bool:
-        """manifest を JSON で書き出す。scan 完了時に件数・欠落・書込み失敗を残す。"""
+        """manifest を JSON で原子的に書き出す（temp+os.replace）。scan 完了時に件数・欠落を残す。"""
         if not (self.enabled and self._path is not None):
             return False
         manifest_path = self._path.with_name(MANIFEST_FILENAME)
@@ -284,9 +267,8 @@ class ProbeLedger:
                 data = self.manifest.to_dict()
                 data["scan_id"] = self.scan_id
                 data["ledger"] = LEDGER_FILENAME
-                data["recovery_failed"] = self._recovery_failed
-            # 原子的置換: 完全な payload を temp へ書いてから rename する。中断で partial manifest を
-            # 残すと次 resume が復元失敗扱いで全 append を止めてしまうため（jsonl は無傷なのに）。
+                data["quarantined"] = self._quarantined
+                data["evidence_incomplete"] = self.evidence_incomplete
             tmp_path.write_text(
                 json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True),
                 encoding="utf-8",

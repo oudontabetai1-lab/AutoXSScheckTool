@@ -1,8 +1,12 @@
-"""probe 台帳 recorder のユニットテスト（0032-B）。
+"""probe 台帳 recorder のユニットテスト（0032-B・簡素化 durability モデル）。
 
-attempt_id の決定論・append-only 追記・manifest 集計・**書込み失敗を握りつぶさない**を固定。
+単一 source（jsonl）＋write 失敗＝quarantine の規律を固定する:
+attempt_id 決定論・append-only 追記・manifest 集計・**write 失敗で quarantine・以後 append 拒否**・
+resume 復元（seq/内訳）・crash 耐久（末尾修復・非 object・破損 manifest は note_gap で evidence
+incomplete、crash させない）・並列 thread-safe。
 """
 import json
+import threading
 
 from wscan.probe_ledger import (
     ProbeAttemptRecord,
@@ -27,6 +31,7 @@ def _rec(ledger, role, outcome=None):
     )
 
 
+# ── basics ────────────────────────────────────────────────────────────────
 def test_attempt_id_monotonic_and_deterministic(tmp_path):
     led = ProbeLedger(tmp_path, "scanA")
     assert led.next_attempt_id() == "scanA:000001"
@@ -37,8 +42,8 @@ def test_append_writes_jsonl_lines(tmp_path):
     led = ProbeLedger(tmp_path, "s")
     assert led.append(_rec(led, ProbeRole.BASELINE, ProbeOutcome.NO_MATCH))
     assert led.append(_rec(led, ProbeRole.ATTACK, ProbeOutcome.MATCHED))
-    path = tmp_path / LEDGER_FILENAME
-    lines = [json.loads(l) for l in path.read_text(encoding="utf-8").splitlines() if l.strip()]
+    lines = [json.loads(l) for l in (tmp_path / LEDGER_FILENAME)
+             .read_text(encoding="utf-8").splitlines() if l.strip()]
     assert len(lines) == 2
     assert lines[0]["role"] == "baseline" and lines[1]["outcome"] == "matched"
 
@@ -55,256 +60,168 @@ def test_manifest_tallies_role_and_outcome(tmp_path):
     assert m["had_write_error"] is False
 
 
-def test_write_failure_is_not_swallowed(tmp_path):
-    # 親ディレクトリが存在しない出力先＝open が OSError → append は False、manifest に error
-    bad_dir = tmp_path / "does_not_exist"
-    led = ProbeLedger(bad_dir, "s")
-    ok = led.append(_rec(led, ProbeRole.ATTACK, ProbeOutcome.MATCHED))
-    assert ok is False
-    assert led.manifest.had_write_error is True
-    assert led.manifest.total == 1  # 欠落として計上（0 に丸めない）
-
-
 def test_disabled_ledger_is_noop(tmp_path):
     led = ProbeLedger(tmp_path, "s", enabled=False)
     assert led.append(_rec(led, ProbeRole.ATTACK, ProbeOutcome.MATCHED)) is True
     assert not (tmp_path / LEDGER_FILENAME).exists()
-    assert led.manifest.total == 0  # 無効時は集計しない（operator 選択＝失敗でない）
+    assert led.manifest.total == 0
 
 
-def test_write_manifest_file(tmp_path):
-    led = ProbeLedger(tmp_path, "scanZ")
+def test_write_manifest_atomic_leaves_no_tmp(tmp_path):
+    led = ProbeLedger(tmp_path, "s")
     led.append(_rec(led, ProbeRole.VERIFY, ProbeOutcome.MATCHED))
     assert led.write_manifest() is True
+    assert (tmp_path / MANIFEST_FILENAME).exists()
+    assert not (tmp_path / (MANIFEST_FILENAME + ".tmp")).exists()
     data = json.loads((tmp_path / MANIFEST_FILENAME).read_text(encoding="utf-8"))
-    assert data["scan_id"] == "scanZ"
-    assert data["total"] == 1 and data["ledger"] == LEDGER_FILENAME
+    assert data["total"] == 1 and data["evidence_incomplete"] is False
 
 
-def test_ledger_manifest_pure_record():
-    # LedgerManifest 単体（I/O 非依存）の集計・失敗計上
+# ── write failure → quarantine ──────────────────────────────────────────────
+def test_write_failure_quarantines_and_blocks(tmp_path):
+    # 親 dir 不在の出力先＝open が OSError → quarantine、以後 append は拒否
+    led = ProbeLedger(tmp_path / "does_not_exist", "s")
+    assert led.append(_rec(led, ProbeRole.ATTACK, ProbeOutcome.MATCHED)) is False
+    assert led.quarantined is True
+    assert led.evidence_incomplete is True
+    assert led.append(_rec(led, ProbeRole.ATTACK, ProbeOutcome.NO_MATCH)) is False
+    assert any(e["error"] == "ledger_quarantined" for e in led.manifest.write_errors)
+
+
+def test_ledger_manifest_pure_record_and_note_gap():
     m = LedgerManifest()
     m.record(ProbeRole.ATTACK, ProbeOutcome.MATCHED, write_ok=True)
     m.record(ProbeRole.ATTACK, None, write_ok=False, error="disk full")
     assert m.total == 2
     assert m.by_outcome["matched"] == 1 and m.by_outcome["unrecorded"] == 1
     assert m.had_write_error
-    assert m.write_errors == [{"error": "disk full", "role": "attack",
-                               "outcome": "unrecorded", "attempt_id": ""}]
+    assert m.write_errors[-1] == {"error": "disk full", "role": "attack", "outcome": "unrecorded"}
+    before = m.total
+    m.note_gap("prior_run_evidence_incomplete")
+    assert m.total == before and m.had_write_error  # 件数は動かさず gate を立てる
 
 
+# ── resume ──────────────────────────────────────────────────────────────────
 def test_resume_restores_sequence_and_manifest(tmp_path):
-    # 1st run: 3 試行を記録
     led1 = ProbeLedger(tmp_path, "sResume")
     led1.append(_rec(led1, ProbeRole.BASELINE, ProbeOutcome.NO_MATCH))
     led1.append(_rec(led1, ProbeRole.ATTACK, ProbeOutcome.MATCHED))
     led1.append(_rec(led1, ProbeRole.ATTACK, ProbeOutcome.BLOCKED))
-    # resume: 同じ output dir / scan_id で再構築
     led2 = ProbeLedger(tmp_path, "sResume")
-    # seq は継続＝重複 ID を出さない
     assert led2.next_attempt_id() == "sResume:000004"
-    # manifest は既存3件を含む（post-resume だけの過少集計でない）
     m = led2.manifest.to_dict()
     assert m["total"] == 3
     assert m["by_role"] == {"baseline": 1, "attack": 2}
     assert m["by_outcome"] == {"no_match": 1, "matched": 1, "blocked": 1}
 
 
-def test_resume_append_does_not_duplicate_ids(tmp_path):
+def test_resume_no_duplicate_ids(tmp_path):
     led1 = ProbeLedger(tmp_path, "s")
     for _ in range(2):
         led1.append(_rec(led1, ProbeRole.ATTACK, ProbeOutcome.MATCHED))
     led2 = ProbeLedger(tmp_path, "s")
-    led2.append(_rec(led2, ProbeRole.ATTACK, ProbeOutcome.NO_MATCH))  # should be :000003
-    import json as _json
-    ids = [
-        _json.loads(l)["attempt_id"]
-        for l in (tmp_path / LEDGER_FILENAME).read_text(encoding="utf-8").splitlines() if l.strip()
-    ]
+    led2.append(_rec(led2, ProbeRole.ATTACK, ProbeOutcome.NO_MATCH))
+    ids = [json.loads(l)["attempt_id"]
+           for l in (tmp_path / LEDGER_FILENAME).read_text(encoding="utf-8").splitlines() if l.strip()]
     assert ids == ["s:000001", "s:000002", "s:000003"]
-    assert len(ids) == len(set(ids))  # 重複なし
+    assert len(ids) == len(set(ids))
 
 
-def test_resume_skips_corrupt_lines(tmp_path):
-    path = tmp_path / LEDGER_FILENAME
-    path.write_text('{"attempt_id":"s:000005","role":"attack","outcome":"matched"}\n'
-                    'not-json-garbage\n', encoding="utf-8")
-    led = ProbeLedger(tmp_path, "s")
-    assert led.next_attempt_id() == "s:000006"   # 壊れ行は無視、最大 seq=5 を継承
-    assert led.manifest.to_dict()["total"] == 1  # 有効行のみ集計
-
-
-def test_resume_repairs_unterminated_tail(tmp_path):
-    # 前 append が改行前に中断＝末尾 partial 行。次の append が壊れた行を作らないよう truncate。
+def test_resume_repairs_invalid_tail(tmp_path):
     path = tmp_path / LEDGER_FILENAME
     path.write_bytes(
         b'{"attempt_id":"s:000001","role":"attack","outcome":"matched"}\n'
-        b'{"attempt_id":"s:000002","role":"attack"'  # 改行なしの partial
+        b'{"attempt_id":"s:000002","role":"attack"'  # 不完全
     )
     led = ProbeLedger(tmp_path, "s")
-    # partial は落ちるので seq は完全行の最大=1 を継ぐ→次は 000002
     assert led.next_attempt_id() == "s:000002"
-    led.append(_rec(led, ProbeRole.ATTACK, ProbeOutcome.MATCHED))
-    import json as _json
+    led.append(_rec(led, ProbeRole.ATTACK, ProbeOutcome.NO_MATCH))
     lines = [l for l in path.read_text(encoding="utf-8").splitlines() if l.strip()]
-    # 全行が有効 JSON（連結による破損なし）
     for l in lines:
-        _json.loads(l)
-    assert len(lines) == 2  # 完全行1 + 新規1（partial は truncate 済み）
-
-
-def test_resume_preserves_prior_write_errors(tmp_path):
-    # 前 run: append 失敗を記録し manifest を書き出す
-    bad = tmp_path / "nope"
-    led1 = ProbeLedger(bad, "s")
-    assert led1.append(_rec(led1, ProbeRole.ATTACK, ProbeOutcome.MATCHED)) is False
-    assert led1.manifest.had_write_error
-    # manifest を書ける場所へ（jsonl は書けなかったが manifest は別途残ると想定）
-    # ここでは手動で manifest を tmp_path に置いて resume 復元を検証
-    import json as _json
-    (tmp_path / MANIFEST_FILENAME).write_text(
-        _json.dumps({"write_errors": ["OSError: disk full"], "total": 1}), encoding="utf-8")
-    # resume: jsonl は空でも prior manifest の write_errors を継承（legacy 文字列は dict へ）
-    led2 = ProbeLedger(tmp_path, "s")
-    assert led2.manifest.had_write_error is True   # gate をすり抜けさせない
-    assert any(e["error"] == "OSError: disk full" for e in led2.manifest.write_errors)
-    assert led2.manifest.total == 1
+        json.loads(l)
+    assert len(lines) == 2
 
 
 def test_resume_keeps_complete_tail_without_newline(tmp_path):
-    # 末尾が「改行なしだが完全な JSON レコード」なら truncate せず delimiter を補い残す（Codex P1）
     path = tmp_path / LEDGER_FILENAME
     path.write_bytes(
         b'{"attempt_id":"s:000001","role":"attack","outcome":"matched"}\n'
-        b'{"attempt_id":"s:000002","role":"attack","outcome":"no_match"}'  # 完全だが改行なし
+        b'{"attempt_id":"s:000002","role":"attack","outcome":"no_match"}'
     )
     led = ProbeLedger(tmp_path, "s")
-    assert led.next_attempt_id() == "s:000003"  # 000002 を失わず継承
-    import json as _json
+    assert led.next_attempt_id() == "s:000003"
     lines = [l for l in path.read_text(encoding="utf-8").splitlines() if l.strip()]
-    assert len(lines) == 2
-    assert _json.loads(lines[1])["attempt_id"] == "s:000002"
+    assert len(lines) == 2 and json.loads(lines[1])["attempt_id"] == "s:000002"
 
 
-def test_recovery_read_failure_blocks_appends(tmp_path):
-    # 既存正本を読めない（ここでは path が dir）＝復元不能→append を拒否し ID 再発行を防ぐ（Codex P1）
-    (tmp_path / LEDGER_FILENAME).mkdir()
-    led = ProbeLedger(tmp_path, "s")
-    assert led.recovery_failed is True
-    ok = led.append(_rec(led, ProbeRole.ATTACK, ProbeOutcome.MATCHED))
-    assert ok is False
-    assert led.manifest.had_write_error
-    assert any(e["error"] == "ledger_recovery_failed" for e in led.manifest.write_errors)
-
-
-def test_resume_restores_failed_attempt_breakdowns(tmp_path):
-    # 前 run の失敗試行の role/outcome 内訳を resume で復元（Codex P2・内訳の内部整合）
-    import json as _json
-    (tmp_path / MANIFEST_FILENAME).write_text(_json.dumps({
-        "total": 1,
-        "write_errors": [{"error": "disk full", "role": "attack", "outcome": "matched"}],
-    }), encoding="utf-8")
-    led = ProbeLedger(tmp_path, "s")
-    m = led.manifest.to_dict()
-    assert m["total"] == 1
-    assert m["by_role"] == {"attack": 1}
-    assert m["by_outcome"] == {"matched": 1}
-    assert m["had_write_error"] is True
-
-
-def test_repair_before_write_after_partial_failure(tmp_path):
-    # 直前の write が partial prefix を残したケース：次 append の前に修復し、連結破損を防ぐ（Codex P1）
-    import json as _json
-    led = ProbeLedger(tmp_path, "s")
-    led.append(_rec(led, ProbeRole.ATTACK, ProbeOutcome.MATCHED))  # 1 clean line
-    with open(tmp_path / LEDGER_FILENAME, "a", encoding="utf-8") as fh:
-        fh.write('{"attempt_id":"s:000099","role":"attack"')  # partial prefix, no newline
-    led._needs_repair = True  # write 失敗が予約したのと同じ状態
-    led.append(_rec(led, ProbeRole.ATTACK, ProbeOutcome.NO_MATCH))
-    lines = [l for l in (tmp_path / LEDGER_FILENAME).read_text(encoding="utf-8").splitlines() if l.strip()]
-    for l in lines:
-        _json.loads(l)  # 連結破損なし＝全行有効
-    assert len(lines) == 2  # 1st clean + new（partial は修復で truncate）
-
-
-def test_write_manifest_atomic_leaves_no_tmp(tmp_path):
-    # 原子的置換＝.tmp を残さず完全な manifest（Codex P1: 中断で partial manifest を残さない）
-    import json as _json
-    led = ProbeLedger(tmp_path, "s")
-    led.append(_rec(led, ProbeRole.VERIFY, ProbeOutcome.MATCHED))
-    assert led.write_manifest() is True
-    assert (tmp_path / MANIFEST_FILENAME).exists()
-    assert not (tmp_path / (MANIFEST_FILENAME + ".tmp")).exists()
-    data = _json.loads((tmp_path / MANIFEST_FILENAME).read_text(encoding="utf-8"))
-    assert data["total"] == 1 and data["recovery_failed"] is False
-
-
-def test_restore_skips_non_object_json_without_crash(tmp_path):
-    # object でない有効 JSON（null/[]）で construction が crash しないこと（Codex P2）
+def test_resume_skips_non_object_json_without_crash(tmp_path):
     (tmp_path / LEDGER_FILENAME).write_text(
         'null\n[]\n"str"\n{"attempt_id":"s:000003","role":"attack","outcome":"matched"}\n',
         encoding="utf-8")
-    led = ProbeLedger(tmp_path, "s")  # AttributeError で落ちない
+    led = ProbeLedger(tmp_path, "s")
     assert led.next_attempt_id() == "s:000004"
-    assert led.manifest.to_dict()["total"] == 1  # 有効 object のみ集計
+    assert led.manifest.to_dict()["total"] == 1
 
 
-def test_resume_reconciles_uncertain_failure_with_persisted_row(tmp_path):
-    # 行は永続化されたが flush/close で失敗＝manifest に error・jsonl に行。resume で二重計上しない（Codex P2）
-    import json as _json
+def test_resume_unreadable_ledger_quarantines(tmp_path):
+    (tmp_path / LEDGER_FILENAME).mkdir()
+    led = ProbeLedger(tmp_path, "s")
+    assert led.quarantined is True and led.evidence_incomplete is True
+    assert led.append(_rec(led, ProbeRole.ATTACK, ProbeOutcome.MATCHED)) is False
+
+
+# ── resume: 前 run の不完全さ/破損 manifest を crash させず evidence_incomplete に ──
+def test_resume_prior_incomplete_preserves_gate(tmp_path):
     (tmp_path / LEDGER_FILENAME).write_text(
         '{"attempt_id":"s:000001","role":"attack","outcome":"matched"}\n', encoding="utf-8")
-    (tmp_path / MANIFEST_FILENAME).write_text(_json.dumps({
-        "total": 1,
-        "write_errors": [{"error": "flush failed", "role": "attack",
-                          "outcome": "matched", "attempt_id": "s:000001"}],
+    (tmp_path / MANIFEST_FILENAME).write_text(json.dumps({
+        "total": 2, "write_errors": [{"error": "disk full", "role": "attack", "outcome": "matched"}],
     }), encoding="utf-8")
     led = ProbeLedger(tmp_path, "s")
-    m = led.manifest.to_dict()
-    assert m["total"] == 1                     # 行と error を二重計上しない
-    assert m["by_role"] == {"attack": 1}
-    assert m["by_outcome"] == {"matched": 1}
-    assert m["had_write_error"] is False       # 実際は永続化済み＝欠落でない
+    assert led.evidence_incomplete is True         # gate をすり抜けさせない
+    assert led.next_attempt_id() == "s:000003"      # seq は prior total を継ぐ
 
 
-def test_resume_counts_error_when_row_absent(tmp_path):
-    # 対になる jsonl 行が無い error は本物の欠落＝計上する
-    import json as _json
-    (tmp_path / MANIFEST_FILENAME).write_text(_json.dumps({
-        "total": 1,
-        "write_errors": [{"error": "disk full", "role": "attack",
-                          "outcome": "matched", "attempt_id": "s:000009"}],
-    }), encoding="utf-8")
+def test_resume_detects_missing_rows(tmp_path):
+    # manifest total > 実在 jsonl 行＝行が失われている → evidence_incomplete（Codex P1）
+    (tmp_path / LEDGER_FILENAME).write_text(
+        '{"attempt_id":"s:000001","role":"attack","outcome":"matched"}\n', encoding="utf-8")
+    (tmp_path / MANIFEST_FILENAME).write_text(json.dumps({"total": 3, "write_errors": []}),
+                                              encoding="utf-8")
     led = ProbeLedger(tmp_path, "s")
-    assert led.manifest.had_write_error is True
-    assert led.manifest.to_dict()["by_role"] == {"attack": 1}
+    assert led.evidence_incomplete is True
+    assert any(e["error"] == "ledger_rows_missing_on_resume" for e in led.manifest.write_errors)
 
 
-def test_restore_malformed_manifest_fields_recovery_failed(tmp_path):
-    # 型が壊れた manifest（非数値 total / 非 list write_errors）で crash せず recovery_failed（Codex P2）
-    for bad in ({"total": "abc", "write_errors": []},
-                {"total": 1, "write_errors": "notalist"}):
-        import json as _json, shutil
-        d = tmp_path / f"c{abs(hash(str(bad)))%1000}"
-        d.mkdir()
-        (d / MANIFEST_FILENAME).write_text(_json.dumps(bad), encoding="utf-8")
-        led = ProbeLedger(d, "s")  # crash しない
-        assert led.recovery_failed is True
-        assert led.append(_rec(led, ProbeRole.ATTACK, ProbeOutcome.MATCHED)) is False
+def test_resume_non_object_manifest_marks_incomplete(tmp_path):
+    # 非 object manifest（[]/null）で crash せず evidence_incomplete（Codex P2）
+    (tmp_path / MANIFEST_FILENAME).write_text("[]", encoding="utf-8")
+    led = ProbeLedger(tmp_path, "s")
+    assert led.evidence_incomplete is True
+    assert any(e["error"] == "prior_manifest_not_object" for e in led.manifest.write_errors)
 
 
+def test_resume_malformed_manifest_total_marks_incomplete(tmp_path):
+    (tmp_path / MANIFEST_FILENAME).write_text(
+        json.dumps({"total": "abc", "write_errors": []}), encoding="utf-8")
+    led = ProbeLedger(tmp_path, "s")
+    assert any(e["error"] == "prior_manifest_bad_total" for e in led.manifest.write_errors)
+
+
+# ── concurrency ─────────────────────────────────────────────────────────────
 def test_concurrent_appends_are_thread_safe(tmp_path):
-    # 並列 worker: 全行が有効 JSON・ID 重複なし（Codex P1: 単一 critical section）
-    import json as _json
-    import threading
     led = ProbeLedger(tmp_path, "s")
+
     def worker():
         for _ in range(20):
             led.append(_rec(led, ProbeRole.ATTACK, ProbeOutcome.MATCHED))
+
     threads = [threading.Thread(target=worker) for _ in range(6)]
-    for t in threads: t.start()
-    for t in threads: t.join()
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
     lines = [l for l in (tmp_path / LEDGER_FILENAME).read_text(encoding="utf-8").splitlines() if l.strip()]
     assert len(lines) == 120
-    ids = [_json.loads(l)["attempt_id"] for l in lines]  # 全行 valid JSON
-    assert len(ids) == len(set(ids))  # ID 重複なし
+    ids = [json.loads(l)["attempt_id"] for l in lines]
+    assert len(ids) == len(set(ids))
