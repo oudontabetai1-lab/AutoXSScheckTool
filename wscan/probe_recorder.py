@@ -168,8 +168,9 @@ class ProbeLedger:
         if rec.get("scan_id") != self.scan_id:
             return False  # foreign/missing scan_id＝別ファイル or 破損
         aid = str(rec.get("attempt_id", ""))
-        if not aid or not aid.rpartition(":")[2].isdigit():
-            return False  # attempt_id の連番が無い/壊れている
+        head, sep, seq = aid.rpartition(":")
+        if not sep or head != self.scan_id or not seq.isdigit():
+            return False  # attempt_id が `<scan_id>:<seq>` 形でない（foreign prefix/壊れ連番）
         if rec.get("role") not in _VALID_ROLES:
             return False  # 語彙外の role
         return True
@@ -268,12 +269,13 @@ class ProbeLedger:
                 self.manifest.record(record.role, record.outcome, write_ok=False,
                                      error="ledger_quarantined")
                 return False
-            line = to_jsonl_line(record)
             try:
+                line = to_jsonl_line(record)
                 with open(self._path, "a", encoding="utf-8") as fh:
                     fh.write(line + "\n")
-            except OSError as exc:
-                # write 失敗＝この試行の証跡は失われた。以後の append を止める（quarantine）。
+            except (OSError, ValueError, UnicodeError) as exc:
+                # write/直列化/エンコード失敗（不正 UTF-8・lone surrogate 等）＝証跡は失われた。
+                # 以後の append を止める（quarantine）。
                 self._quarantined = True
                 self.manifest.record(record.role, record.outcome, write_ok=False,
                                      error=f"{type(exc).__name__}: {exc}")
@@ -299,6 +301,8 @@ class ProbeLedger:
                 encoding="utf-8",
             )
             os.replace(tmp_path, manifest_path)
+            # 一過性の書出し失敗から回復＝完全な manifest が永続化された。sticky flag を解除。
+            self._manifest_write_failed = False
             return True
         except OSError:
             # manifest を永続化できない＝完了証跡が残らない。gate を倒す（caller が返り値を見落として

@@ -285,3 +285,37 @@ def test_ledger_row_with_bad_utf8_quarantines(tmp_path):
     led = ProbeLedger(tmp_path, "s")  # crash しない
     assert led.quarantined is True and led.evidence_incomplete is True
     assert led.append(_rec(led, ProbeRole.ATTACK, ProbeOutcome.MATCHED)) is False
+
+
+def test_manifest_write_failure_flag_clears_on_success(tmp_path):
+    # 一過性の manifest 書出し失敗→回復（retry 成功）で sticky flag が解除される（Codex P1）
+    led = ProbeLedger(tmp_path, "s")
+    led.append(_rec(led, ProbeRole.ATTACK, ProbeOutcome.MATCHED))
+    (tmp_path / MANIFEST_FILENAME).mkdir()          # os.replace 先が dir＝失敗
+    assert led.write_manifest() is False
+    assert led.evidence_incomplete is True
+    (tmp_path / MANIFEST_FILENAME).rmdir()          # 障害解消
+    assert led.write_manifest() is True
+    assert led.evidence_incomplete is False         # 回復＝incomplete を引きずらない
+
+
+def test_foreign_attempt_id_prefix_rejected(tmp_path):
+    # attempt_id の prefix が scan_id と一致しない行は不正＝gap（Codex P1）
+    (tmp_path / LEDGER_FILENAME).write_text(
+        '{"scan_id":"s","attempt_id":"other:999999","role":"attack","outcome":"matched"}\n'
+        '{"scan_id":"s","attempt_id":"s:000001","role":"attack","outcome":"matched"}\n',
+        encoding="utf-8")
+    led = ProbeLedger(tmp_path, "s")
+    assert led.manifest.to_dict()["total"] == 1     # foreign prefix は数えない
+    assert led.evidence_incomplete is True
+    assert led.next_attempt_id() == "s:000002"
+
+
+def test_append_lone_surrogate_quarantines(tmp_path):
+    # 文字列フィールドの lone surrogate で encode 失敗→crash させず quarantine（Codex P2）
+    led = ProbeLedger(tmp_path, "s")
+    bad = ProbeAttemptRecord(
+        scan_id="s", attempt_id=led.next_attempt_id(), role=ProbeRole.ATTACK,
+        rationale="lonely \ud800 surrogate")
+    assert led.append(bad) is False
+    assert led.quarantined is True and led.evidence_incomplete is True
