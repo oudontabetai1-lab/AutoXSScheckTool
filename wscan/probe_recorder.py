@@ -112,6 +112,7 @@ class ProbeLedger:
         self._lock = threading.Lock()
         self.manifest = LedgerManifest()
         self._quarantined = False
+        self._manifest_write_failed = False
         self._path: Optional[Path] = None
         if enabled and output_dir:
             self._path = Path(output_dir) / LEDGER_FILENAME
@@ -128,8 +129,10 @@ class ProbeLedger:
 
     @property
     def evidence_incomplete(self) -> bool:
-        """証跡を取り切れなかったか（write 失敗 or 前 run の欠落 or resume 検出の行欠落）。"""
-        return self._quarantined or self.manifest.had_write_error
+        """証跡を取り切れなかったか（write 失敗 or 前 run の欠落 or resume 検出の行欠落 or
+        manifest 書出し失敗）。No evidence, no COMPLETE のリリースゲート。"""
+        return (self._quarantined or self._manifest_write_failed
+                or self.manifest.had_write_error)
 
     # ── restore ──────────────────────────────────────────────────────────
     def _repair_unterminated_tail(self, data: bytes) -> bool:
@@ -172,6 +175,7 @@ class ProbeLedger:
                 self._quarantined = True
                 self.manifest.note_gap("ledger_tail_repair_failed")
                 return
+            skipped = 0
             try:
                 with open(self._path, encoding="utf-8") as fh:
                     for line in fh:
@@ -181,8 +185,10 @@ class ProbeLedger:
                         try:
                             rec = json.loads(line)
                         except ValueError:
-                            continue  # 壊れた行はスキップ
+                            skipped += 1
+                            continue  # 壊れた行はスキップ（＝正本の破損＝証跡欠落）
                         if not isinstance(rec, dict):
+                            skipped += 1
                             continue  # object でない JSON はスキップ
                         seq_part = str(rec.get("attempt_id", "")).rpartition(":")[2]
                         if seq_part.isdigit():
@@ -193,6 +199,9 @@ class ProbeLedger:
                 self._quarantined = True
                 self.manifest.note_gap("ledger_read_failed_on_resume")
                 return
+            if skipped:
+                # 破損/非 object 行が正本にある＝証跡欠落。gate を倒す（No evidence, no COMPLETE）。
+                self.manifest.note_gap("ledger_rows_skipped_on_resume")
         self._seq = max_seq
         # 前 run の manifest から「不完全だった事実」だけを継承する（内訳の再構成はしない）。
         manifest_path = self._path.with_name(MANIFEST_FILENAME)
@@ -276,4 +285,7 @@ class ProbeLedger:
             os.replace(tmp_path, manifest_path)
             return True
         except OSError:
+            # manifest を永続化できない＝完了証跡が残らない。gate を倒す（caller が返り値を見落として
+            # も evidence_incomplete で COMPLETE を防ぐ）。
+            self._manifest_write_failed = True
             return False

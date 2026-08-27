@@ -161,6 +161,9 @@ def test_resume_skips_non_object_json_without_crash(tmp_path):
     led = ProbeLedger(tmp_path, "s")
     assert led.next_attempt_id() == "s:000004"
     assert led.manifest.to_dict()["total"] == 1
+    # 破損/非 object 行は証跡欠落＝gate を倒す（Codex P1）
+    assert led.evidence_incomplete is True
+    assert any(e["error"] == "ledger_rows_skipped_on_resume" for e in led.manifest.write_errors)
 
 
 def test_resume_unreadable_ledger_quarantines(tmp_path):
@@ -225,3 +228,22 @@ def test_concurrent_appends_are_thread_safe(tmp_path):
     assert len(lines) == 120
     ids = [json.loads(l)["attempt_id"] for l in lines]
     assert len(ids) == len(set(ids))
+
+
+def test_manifest_write_failure_marks_incomplete(tmp_path):
+    # 最終 manifest 書出しが失敗したら evidence_incomplete を立てる（Codex P1）
+    led = ProbeLedger(tmp_path, "s")
+    led.append(_rec(led, ProbeRole.ATTACK, ProbeOutcome.MATCHED))
+    # manifest の出力先ディレクトリを消して write を失敗させる
+    import shutil
+    shutil.rmtree(tmp_path)
+    assert led.write_manifest() is False
+    assert led.evidence_incomplete is True
+
+
+def test_resume_non_utf8_manifest_handled(tmp_path):
+    # 非 UTF-8 manifest でも crash せず prior_manifest_unreadable（UnicodeDecodeError は ValueError 系）
+    (tmp_path / MANIFEST_FILENAME).write_bytes(b"\xff\xfe not utf8 \x80")
+    led = ProbeLedger(tmp_path, "s")  # crash しない
+    assert led.evidence_incomplete is True
+    assert any(e["error"] == "prior_manifest_unreadable" for e in led.manifest.write_errors)
