@@ -209,3 +209,40 @@ def test_resume_restores_failed_attempt_breakdowns(tmp_path):
     assert m["by_role"] == {"attack": 1}
     assert m["by_outcome"] == {"matched": 1}
     assert m["had_write_error"] is True
+
+
+def test_repair_before_write_after_partial_failure(tmp_path):
+    # 直前の write が partial prefix を残したケース：次 append の前に修復し、連結破損を防ぐ（Codex P1）
+    import json as _json
+    led = ProbeLedger(tmp_path, "s")
+    led.append(_rec(led, ProbeRole.ATTACK, ProbeOutcome.MATCHED))  # 1 clean line
+    with open(tmp_path / LEDGER_FILENAME, "a", encoding="utf-8") as fh:
+        fh.write('{"attempt_id":"s:000099","role":"attack"')  # partial prefix, no newline
+    led._needs_repair = True  # write 失敗が予約したのと同じ状態
+    led.append(_rec(led, ProbeRole.ATTACK, ProbeOutcome.NO_MATCH))
+    lines = [l for l in (tmp_path / LEDGER_FILENAME).read_text(encoding="utf-8").splitlines() if l.strip()]
+    for l in lines:
+        _json.loads(l)  # 連結破損なし＝全行有効
+    assert len(lines) == 2  # 1st clean + new（partial は修復で truncate）
+
+
+def test_write_manifest_atomic_leaves_no_tmp(tmp_path):
+    # 原子的置換＝.tmp を残さず完全な manifest（Codex P1: 中断で partial manifest を残さない）
+    import json as _json
+    led = ProbeLedger(tmp_path, "s")
+    led.append(_rec(led, ProbeRole.VERIFY, ProbeOutcome.MATCHED))
+    assert led.write_manifest() is True
+    assert (tmp_path / MANIFEST_FILENAME).exists()
+    assert not (tmp_path / (MANIFEST_FILENAME + ".tmp")).exists()
+    data = _json.loads((tmp_path / MANIFEST_FILENAME).read_text(encoding="utf-8"))
+    assert data["total"] == 1 and data["recovery_failed"] is False
+
+
+def test_restore_skips_non_object_json_without_crash(tmp_path):
+    # object でない有効 JSON（null/[]）で construction が crash しないこと（Codex P2）
+    (tmp_path / LEDGER_FILENAME).write_text(
+        'null\n[]\n"str"\n{"attempt_id":"s:000003","role":"attack","outcome":"matched"}\n',
+        encoding="utf-8")
+    led = ProbeLedger(tmp_path, "s")  # AttributeError で落ちない
+    assert led.next_attempt_id() == "s:000004"
+    assert led.manifest.to_dict()["total"] == 1  # 有効 object のみ集計

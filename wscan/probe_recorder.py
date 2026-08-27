@@ -22,6 +22,7 @@ I/O（ファイル追記・manifest 書出し）はここに閉じ、判定・�
 from __future__ import annotations
 
 import json
+import os
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -101,6 +102,7 @@ class ProbeLedger:
         self._lock = threading.Lock()
         self.manifest = LedgerManifest()
         self._recovery_failed = False
+        self._needs_repair = False
         self._path: Optional[Path] = None
         if enabled and output_dir:
             self._path = Path(output_dir) / LEDGER_FILENAME
@@ -125,8 +127,7 @@ class ProbeLedger:
         tail = data[nl + 1:]
         keep_tail = False
         try:
-            json.loads(tail.decode("utf-8"))
-            keep_tail = True  # delimiter 欠落だけの完全レコード → 残す
+            keep_tail = isinstance(json.loads(tail.decode("utf-8")), dict)  # 完全な object のみ残す
         except (ValueError, UnicodeDecodeError):
             keep_tail = False
         try:
@@ -138,6 +139,17 @@ class ProbeLedger:
                     fh.truncate(nl + 1)  # nl==-1 なら 0（全体が partial）
         except OSError:
             self._recovery_failed = True
+
+    def _repair_tail_now(self) -> None:
+        """現在のファイルを読み直して末尾行を修復する（same-process の write 失敗後に呼ぶ）。"""
+        if self._path is None:
+            return
+        try:
+            data = self._path.read_bytes()
+        except OSError:
+            self._recovery_failed = True
+            return
+        self._repair_unterminated_tail(data)
 
     def _restore_from_existing(self) -> None:
         """既存台帳から seq/manifest を復元する（resume 安定）。復元不能なら recovery_failed。"""
@@ -164,6 +176,8 @@ class ProbeLedger:
                             rec = json.loads(line)
                         except ValueError:
                             continue  # 壊れた行はスキップ
+                        if not isinstance(rec, dict):
+                            continue  # object でない JSON（null/[] 等）はスキップ
                         seq_part = str(rec.get("attempt_id", "")).rpartition(":")[2]
                         if seq_part.isdigit():
                             max_seq = max(max_seq, int(seq_part))
@@ -208,6 +222,12 @@ class ProbeLedger:
         """
         if not (self.enabled and self._path is not None):
             return True
+        # 直前の write が partial prefix を残した可能性があるときは、次の write の前に末尾を修復する
+        # （修復せず追記すると prefix へ連結して壊れた行を「永続化済み」と誤計上する）。
+        if self._needs_repair and not self._recovery_failed:
+            with self._lock:
+                self._repair_tail_now()
+                self._needs_repair = False
         if self._recovery_failed:
             with self._lock:
                 self.manifest.record(record.role, record.outcome, write_ok=False,
@@ -216,14 +236,14 @@ class ProbeLedger:
         line = to_jsonl_line(record)
         write_ok = True
         error = ""
-        try:
-            with self._lock:
+        with self._lock:
+            try:
                 with open(self._path, "a", encoding="utf-8") as fh:
                     fh.write(line + "\n")
-        except OSError as exc:  # 書込み失敗は握りつぶさず可視化
-            write_ok = False
-            error = f"{type(exc).__name__}: {exc}"
-        with self._lock:
+            except OSError as exc:  # 書込み失敗は握りつぶさず可視化＋末尾修復を予約（partial 対策）
+                write_ok = False
+                error = f"{type(exc).__name__}: {exc}"
+                self._needs_repair = True
             self.manifest.record(record.role, record.outcome, write_ok=write_ok, error=error)
         return write_ok
 
@@ -232,16 +252,20 @@ class ProbeLedger:
         if not (self.enabled and self._path is not None):
             return False
         manifest_path = self._path.with_name(MANIFEST_FILENAME)
+        tmp_path = manifest_path.with_name(MANIFEST_FILENAME + ".tmp")
         try:
             with self._lock:
                 data = self.manifest.to_dict()
                 data["scan_id"] = self.scan_id
                 data["ledger"] = LEDGER_FILENAME
                 data["recovery_failed"] = self._recovery_failed
-            manifest_path.write_text(
+            # 原子的置換: 完全な payload を temp へ書いてから rename する。中断で partial manifest を
+            # 残すと次 resume が復元失敗扱いで全 append を止めてしまうため（jsonl は無傷なのに）。
+            tmp_path.write_text(
                 json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True),
                 encoding="utf-8",
             )
+            os.replace(tmp_path, manifest_path)
             return True
         except OSError:
             return False
