@@ -23,10 +23,11 @@ from __future__ import annotations
 import dataclasses
 import hashlib
 import json
-import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
 from typing import Optional
+
+from wscan.request_logger import is_sensitive_header, redact_text, redact_url
 
 
 class ProbeRole(str, Enum):
@@ -64,19 +65,6 @@ class Transport(str, Enum):
     DOM = "dom"
 
 
-# redact 対象の機微ヘッダ名（値を伏せる）。小文字で比較する。
-_SENSITIVE_HEADERS = frozenset({
-    "authorization", "proxy-authorization", "cookie", "set-cookie",
-    "x-api-key", "x-auth-token", "x-csrf-token",
-})
-# 値パターンで伏せる機微トークン（key=value 形式・bearer）。
-_SENSITIVE_KV = re.compile(
-    r"(?i)\b(token|secret|password|passwd|pwd|api[_-]?key|access[_-]?token|refresh[_-]?token|session[_-]?id)\b(\s*[=:]\s*)(\S+)"
-)
-_BEARER = re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._\-]+")
-_REDACTED = "<redacted>"
-
-
 def sha256_hex(body) -> str:
     """body（str/bytes/None）の SHA-256 16 進。証跡の完全性検証・重複検出に使う純粋関数。"""
     if body is None:
@@ -98,20 +86,22 @@ def body_length(body) -> int:
 def redact_excerpt(text: Optional[str], cap: int = 512) -> str:
     """機微値を伏せ、長さを cap で切詰めた excerpt を返す（純粋・保守的）。
 
-    Privacy is part of evidence integrity: token/Cookie/secret を素で残さない。
-    伏せ方は保守側（over-redact 許容）。行単位で機微ヘッダ名の値を伏せ、key=value やbearer の
-    機微値も伏せる。redaction ポリシー拡張（PII 等）は後続増分。"""
+    Privacy is part of evidence integrity: token/Cookie/secret を素で残さない。redaction は
+    **`request_logger` の正典**（#90 R13）へ委譲する＝独自の機微集合/正規表現を持たない:
+      - ヘッダ行（`Name: value`）は `is_sensitive_header`（静的＋runtime 登録＝カスタム認証ヘッダも）で
+        名前判定し値を伏せる。
+      - それ以外の行は `redact_text`（urlencoded の `key=value` と **JSON の `"key":"value"`** 両対応）
+        で機微ボディ値を伏せる。
+    最後に cap で切詰める。redaction ポリシー拡張は正典側で一元的に行う。"""
     if not text:
         return ""
     lines_out = []
     for line in text.splitlines():
         name, sep, rest = line.partition(":")
-        if sep and name.strip().lower() in _SENSITIVE_HEADERS:
-            lines_out.append(f"{name}:{' ' if rest[:1] == ' ' else ''}{_REDACTED}")
+        if sep and is_sensitive_header(name.strip()):
+            lines_out.append(f"{name}:{' ' if rest[:1] == ' ' else ''}<redacted>")
             continue
-        line = _SENSITIVE_KV.sub(lambda m: f"{m.group(1)}{m.group(2)}{_REDACTED}", line)
-        line = _BEARER.sub("bearer " + _REDACTED, line)
-        lines_out.append(line)
+        lines_out.append(redact_text(line))
     redacted = "\n".join(lines_out)
     if len(redacted) > cap:
         redacted = redacted[:cap] + "…"
@@ -194,6 +184,12 @@ def to_jsonl_line(record: ProbeAttemptRecord) -> str:
 
     Enum は str 継承のため値へ直列化される。改行を含まない 1 行を保証する。"""
     payload = dataclasses.asdict(record)
+    # 永続化境界で URL クエリの機微値を伏せる（?access_token=... 等が redirect/callback/GET
+    # probe から生で残らないように。正典 request_logger.redact_url へ委譲）。
+    if payload.get("request") and payload["request"].get("url"):
+        payload["request"]["url"] = redact_url(payload["request"]["url"])
+    if payload.get("response") and payload["response"].get("final_url"):
+        payload["response"]["final_url"] = redact_url(payload["response"]["final_url"])
     line = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
     # 念のため（body_excerpt 等に改行が残っても）1 行不変条件を守る
     return line.replace("\n", "\\n")

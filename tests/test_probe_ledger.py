@@ -112,3 +112,39 @@ def test_records_are_frozen():
     r = ProbeAttemptRecord(scan_id="s", attempt_id="a", role=ProbeRole.BASELINE)
     with pytest.raises(dataclasses.FrozenInstanceError):
         r.scan_id = "z"  # type: ignore[misc]
+
+
+def test_redact_json_credential_fields():
+    # JSON body の quoted key/value（Codex P1）。request_logger 正典の JSON 対応へ委譲。
+    out = redact_excerpt('{"password":"hunter2","access_token":"abc123","q":"safe"}')
+    assert "hunter2" not in out and "abc123" not in out
+    assert "<redacted>" in out
+    assert "safe" in out  # 非機微は残る
+
+
+def test_redact_custom_registered_sensitive_header():
+    # runtime 登録したカスタム認証ヘッダ（Codex P2・#90 R13 の正典 registry を共有）
+    from wscan.request_logger import register_sensitive_headers, clear_sensitive_headers
+    try:
+        register_sensitive_headers(["X-Company-Auth"])
+        out = redact_excerpt("X-Company-Auth: opaquecredential\nUser-Agent: wscan")
+        assert "opaquecredential" not in out
+        assert "<redacted>" in out
+        assert "User-Agent: wscan" in out
+    finally:
+        clear_sensitive_headers()
+
+
+def test_jsonl_redacts_url_query_credentials():
+    # request.url / response.final_url のクエリ機微値を永続化境界で伏せる（Codex P2）
+    rec = ProbeAttemptRecord(
+        scan_id="s", attempt_id="s:1", role=ProbeRole.ATTACK,
+        request=RequestRecord(method="GET", url="http://h/cb?access_token=abc123&q=1",
+                              transport=Transport.HTTPX),
+        response=ResponseRecord(status=302, final_url="http://h/next?token=zzz999"),
+    )
+    line = to_jsonl_line(rec)
+    assert "abc123" not in line and "zzz999" not in line
+    assert "<redacted>" in line
+    import json as _json
+    assert _json.loads(line)["request"]["url"].startswith("http://h/cb?")

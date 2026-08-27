@@ -107,6 +107,18 @@ def _redact_url(url):
     return f"{base}?{_redact_text(query)}"
 
 
+def redact_text(text):
+    """機微ボディ値（urlencoded / JSON）をマスクする正典の公開 API（#90 R13 の共有点）。
+
+    probe 証跡台帳など他モジュールが独自 redaction を持たずにここへ委譲するための公開入口。"""
+    return _redact_text(text)
+
+
+def redact_url(url):
+    """URL クエリの機微パラメータ値をマスクする正典の公開 API（redact_text と同じ意図）。"""
+    return _redact_url(url)
+
+
 class RequestLogger:
     """リクエスト/ペイロードを JSONL ファイルへ追記するロガー。"""
 
