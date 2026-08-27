@@ -30,12 +30,20 @@ jobs:
 
       # apt mirror(packages.microsoft.com) の断続 403 対策に軽いリトライを噛ませる。
       # nightly は PR を塞がないため、恒久失敗時はこの job のみ赤くなる（PR CI は無関係）。
+      # 3回リトライしても失敗したら **step を失敗させる**（exit 1）。ループ最後のコマンドの
+      # 終了コードで success 扱いになると、browser 不在で E2E が skip され、blocking gate が
+      # 実走せず緑になってしまう（＝recall ゲートが空振り）ため。
       - name: Install Chromium for Playwright
         run: |
           for i in 1 2 3; do
-            playwright install --with-deps chromium && break
-            echo "playwright install failed (attempt $i); retrying..." && sleep 15
+            if playwright install --with-deps chromium; then
+              exit 0
+            fi
+            echo "playwright install failed (attempt $i/3); retrying..." >&2
+            sleep 15
           done
+          echo "playwright install failed after 3 attempts" >&2
+          exit 1
 
       # blocking: recall ゲート（test_recall_gate_is_100_percent 他）を含む E2E を実走する。
       - name: End-to-end recall gate (blocking)
