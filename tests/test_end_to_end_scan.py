@@ -85,6 +85,13 @@ def _chromium_available() -> bool:
         return False
 
 
+# 単一の権威 probe: browser 起動可否を import 時に一度だけ評価する。decorator（collection 時）と
+# 環境 gate の assert（execution 時）が別々に probe すると、transient な launch 失敗で「recall
+# クラスだけ skip・gate は pass」の空振りが起きうる。両者で同じ結果を使い、不一致を無くす
+# （DECISION-CI-RECALL=C：blocking nightly gate が recall assertion 未実行のまま緑になるのを防ぐ）。
+_CHROMIUM_OK = _chromium_available()
+
+
 # Upper bound on the whole crawl→attack→verify pipeline. A real hang (e.g. a
 # verifier that never returns) then fails the test instead of wedging the suite.
 SCAN_TIMEOUT_S = 900  # payload mutation wave + XSS 発火トリガ層/追加フィクスチャ分の余裕
@@ -148,14 +155,15 @@ async def _run_spa_json_scan(port: int, output_dir: str):
 # ADR-0016 / PRINCIPLE-001（DECISION-CI-RECALL=C）の空振り防止:
 # WSCAN_E2E=1 を明示した（＝blocking な nightly recall gate 実行中）のに Chromium が
 # 起動不能なら、E2E クラスの skip で pytest が緑になり recall assertion が空振りする。
-# この gate クラスは _chromium_available() を **skip 条件にせず** WSCAN_E2E=1 でのみ有効化し、
+# この gate クラスは _CHROMIUM_OK（recall クラスの skip 判定と同一の権威 probe）を **skip 条件に
+# せず** WSCAN_E2E=1 でのみ有効化し、
 # 起動不能を skip でなく **失敗** に変える（install 成功後の launch 不能：欠落ライブラリ/
 # sandbox 失敗/破損 exe も含めて捕捉）。
 @unittest.skipUnless(_e2e_enabled(), "set WSCAN_E2E=1 to run the end-to-end browser scan")
 class EndToEndEnvironmentGateTests(unittest.TestCase):
     def test_chromium_must_be_launchable_when_e2e_requested(self):
         self.assertTrue(
-            _chromium_available(),
+            _CHROMIUM_OK,
             "WSCAN_E2E=1 (blocking recall gate) but Chromium is not launchable — "
             "the E2E recall assertion cannot run. Failing loudly instead of "
             "letting the suite skip and report green.",
@@ -164,7 +172,7 @@ class EndToEndEnvironmentGateTests(unittest.TestCase):
 
 @unittest.skipUnless(_e2e_enabled(), "set WSCAN_E2E=1 to run the end-to-end browser scan")
 @unittest.skipUnless(
-    _chromium_available(),
+    _CHROMIUM_OK,
     "Playwright Chromium browser is not installed (run: playwright install chromium)",
 )
 class EndToEndRealisticScanTests(unittest.TestCase):
@@ -281,7 +289,7 @@ class EndToEndRealisticScanTests(unittest.TestCase):
 
 @unittest.skipUnless(_e2e_enabled(), "set WSCAN_E2E=1 to run the end-to-end browser scan")
 @unittest.skipUnless(
-    _chromium_available(),
+    _CHROMIUM_OK,
     "Playwright Chromium browser is not installed (run: playwright install chromium)",
 )
 class EndToEndSpaJsonSqlInjectionTests(unittest.TestCase):
