@@ -19,6 +19,7 @@ from wscan.injection_point import (
     redact_known_secrets,
     sibling_string_values,
 )
+from wscan.verification_model import VerificationState
 
 if TYPE_CHECKING:
     from wscan.engine import ScanEngine
@@ -335,7 +336,7 @@ def finding_dict_confirmed(d: dict) -> bool:
     # （Finding.from_dict/__post_init__ と整合）。state 欠落/空のときだけ legacy bool。
     state = d.get("verification_state")
     if state:
-        return state == "reproduced"
+        return state == VerificationState.REPRODUCED
     v = d.get("verified")
     if isinstance(v, bool):
         return v
@@ -392,13 +393,17 @@ class Finding:
             # プロデューサ（例: mail_header の OOB 到達確証）は reproduced 扱い。
             # それ以外は assumed（verifiable check は _phase_verify が後で上書きする）。
             decisive = self.dialog_confirmed or self.confidence == "confirmed"
-            self.verification_state = "reproduced" if decisive else "assumed"
+            self.verification_state = (
+                VerificationState.REPRODUCED.value
+                if decisive
+                else VerificationState.ASSUMED.value
+            )
 
     @property
     def verified(self) -> bool:
         """verification_state を正本とする read-only の派生値。"""
         if self.verification_state:
-            return self.verification_state == "reproduced"
+            return self.verification_state == VerificationState.REPRODUCED
         return self._legacy_verified
 
     def apply_verification(self, state: str, note: str = "") -> None:
