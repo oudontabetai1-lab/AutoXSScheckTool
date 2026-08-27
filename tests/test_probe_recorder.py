@@ -130,7 +130,7 @@ def test_resume_no_duplicate_ids(tmp_path):
 def test_resume_repairs_invalid_tail(tmp_path):
     path = tmp_path / LEDGER_FILENAME
     path.write_bytes(
-        b'{"attempt_id":"s:000001","role":"attack","outcome":"matched"}\n'
+        b'{"scan_id":"s","attempt_id":"s:000001","role":"attack","outcome":"matched"}\n'
         b'{"attempt_id":"s:000002","role":"attack"'  # 不完全
     )
     led = ProbeLedger(tmp_path, "s")
@@ -145,8 +145,8 @@ def test_resume_repairs_invalid_tail(tmp_path):
 def test_resume_keeps_complete_tail_without_newline(tmp_path):
     path = tmp_path / LEDGER_FILENAME
     path.write_bytes(
-        b'{"attempt_id":"s:000001","role":"attack","outcome":"matched"}\n'
-        b'{"attempt_id":"s:000002","role":"attack","outcome":"no_match"}'
+        b'{"scan_id":"s","attempt_id":"s:000001","role":"attack","outcome":"matched"}\n'
+        b'{"scan_id":"s","attempt_id":"s:000002","role":"attack","outcome":"no_match"}'
     )
     led = ProbeLedger(tmp_path, "s")
     assert led.next_attempt_id() == "s:000003"
@@ -156,7 +156,7 @@ def test_resume_keeps_complete_tail_without_newline(tmp_path):
 
 def test_resume_skips_non_object_json_without_crash(tmp_path):
     (tmp_path / LEDGER_FILENAME).write_text(
-        'null\n[]\n"str"\n{"attempt_id":"s:000003","role":"attack","outcome":"matched"}\n',
+        'null\n[]\n"str"\n{"scan_id":"s","attempt_id":"s:000003","role":"attack","outcome":"matched"}\n',
         encoding="utf-8")
     led = ProbeLedger(tmp_path, "s")
     assert led.next_attempt_id() == "s:000004"
@@ -176,7 +176,7 @@ def test_resume_unreadable_ledger_quarantines(tmp_path):
 # ── resume: 前 run の不完全さ/破損 manifest を crash させず evidence_incomplete に ──
 def test_resume_prior_incomplete_preserves_gate(tmp_path):
     (tmp_path / LEDGER_FILENAME).write_text(
-        '{"attempt_id":"s:000001","role":"attack","outcome":"matched"}\n', encoding="utf-8")
+        '{"scan_id":"s","attempt_id":"s:000001","role":"attack","outcome":"matched"}\n', encoding="utf-8")
     (tmp_path / MANIFEST_FILENAME).write_text(json.dumps({
         "total": 2, "write_errors": [{"error": "disk full", "role": "attack", "outcome": "matched"}],
     }), encoding="utf-8")
@@ -188,7 +188,7 @@ def test_resume_prior_incomplete_preserves_gate(tmp_path):
 def test_resume_detects_missing_rows(tmp_path):
     # manifest total > 実在 jsonl 行＝行が失われている → evidence_incomplete（Codex P1）
     (tmp_path / LEDGER_FILENAME).write_text(
-        '{"attempt_id":"s:000001","role":"attack","outcome":"matched"}\n', encoding="utf-8")
+        '{"scan_id":"s","attempt_id":"s:000001","role":"attack","outcome":"matched"}\n', encoding="utf-8")
     (tmp_path / MANIFEST_FILENAME).write_text(json.dumps({"total": 3, "write_errors": []}),
                                               encoding="utf-8")
     led = ProbeLedger(tmp_path, "s")
@@ -247,3 +247,41 @@ def test_resume_non_utf8_manifest_handled(tmp_path):
     led = ProbeLedger(tmp_path, "s")  # crash しない
     assert led.evidence_incomplete is True
     assert any(e["error"] == "prior_manifest_unreadable" for e in led.manifest.write_errors)
+
+
+def test_truncated_tail_marks_evidence_gap(tmp_path):
+    # 不完全な末尾断片を truncate＝実行済み probe の証跡喪失→evidence_incomplete（Codex P1）
+    path = tmp_path / LEDGER_FILENAME
+    path.write_bytes(
+        b'{"scan_id":"s","attempt_id":"s:000001","role":"attack","outcome":"matched"}\n'
+        b'{"scan_id":"s","attempt_id":"s:000002","role":"att'  # 不完全断片
+    )
+    led = ProbeLedger(tmp_path, "s")
+    assert led.evidence_incomplete is True
+    assert any(e["error"] == "ledger_tail_truncated" for e in led.manifest.write_errors)
+
+
+def test_schema_invalid_rows_are_gaps(tmp_path):
+    # {} / foreign scan_id / 壊れ attempt_id / 語彙外 role は成功に数えず gap（Codex P1）
+    (tmp_path / LEDGER_FILENAME).write_text(
+        '{}\n'
+        '{"scan_id":"OTHER","attempt_id":"x:000001","role":"attack"}\n'          # foreign scan
+        '{"scan_id":"s","attempt_id":"nobadseq","role":"attack"}\n'              # 壊れ id
+        '{"scan_id":"s","attempt_id":"s:000002","role":"bogus"}\n'               # 語彙外 role
+        '{"scan_id":"s","attempt_id":"s:000003","role":"attack","outcome":"matched"}\n',  # valid
+        encoding="utf-8")
+    led = ProbeLedger(tmp_path, "s")
+    assert led.manifest.to_dict()["total"] == 1        # valid 1 件のみ成功計上
+    assert led.evidence_incomplete is True             # 破損行あり＝gate
+    assert led.next_attempt_id() == "s:000004"
+
+
+def test_ledger_row_with_bad_utf8_quarantines(tmp_path):
+    # jsonl 行の不正バイト列で iteration が UnicodeDecodeError→crash させず quarantine（Codex P2）
+    (tmp_path / LEDGER_FILENAME).write_bytes(
+        b'{"scan_id":"s","attempt_id":"s:000001","role":"attack","outcome":"matched"}\n'
+        b'{"bad": "\xff\xfe not utf8"}\n'
+    )
+    led = ProbeLedger(tmp_path, "s")  # crash しない
+    assert led.quarantined is True and led.evidence_incomplete is True
+    assert led.append(_rec(led, ProbeRole.ATTACK, ProbeOutcome.MATCHED)) is False

@@ -45,6 +45,8 @@ from wscan.probe_ledger import (
 LEDGER_FILENAME = "probe_attempts.jsonl"
 MANIFEST_FILENAME = "probe_attempts_manifest.json"
 
+_VALID_ROLES = frozenset(r.value for r in ProbeRole)
+
 
 def _role_key(role) -> str:
     return role.value if isinstance(role, ProbeRole) else str(role)
@@ -153,8 +155,23 @@ class ProbeLedger:
             else:
                 with open(self._path, "rb+") as fh:
                     fh.truncate(nl + 1)  # nl==-1 なら 0
+                # 実行済み probe の不完全な証跡を捨てた＝欠落として gate を倒す。
+                self.manifest.note_gap("ledger_tail_truncated")
         except OSError:
             return False
+        return True
+
+    def _valid_row(self, rec) -> bool:
+        """復元行が正本レコードとして妥当か（identity と語彙）。破損行を成功に数えないための門番。"""
+        if not isinstance(rec, dict):
+            return False
+        if rec.get("scan_id") != self.scan_id:
+            return False  # foreign/missing scan_id＝別ファイル or 破損
+        aid = str(rec.get("attempt_id", ""))
+        if not aid or not aid.rpartition(":")[2].isdigit():
+            return False  # attempt_id の連番が無い/壊れている
+        if rec.get("role") not in _VALID_ROLES:
+            return False  # 語彙外の role
         return True
 
     def _restore_from_existing(self) -> None:
@@ -187,15 +204,14 @@ class ProbeLedger:
                         except ValueError:
                             skipped += 1
                             continue  # 壊れた行はスキップ（＝正本の破損＝証跡欠落）
-                        if not isinstance(rec, dict):
+                        if not self._valid_row(rec):
                             skipped += 1
-                            continue  # object でない JSON はスキップ
-                        seq_part = str(rec.get("attempt_id", "")).rpartition(":")[2]
-                        if seq_part.isdigit():
-                            max_seq = max(max_seq, int(seq_part))
+                            continue  # schema 不正（非 object/foreign scan_id/壊れ id/語彙外 role）
+                        max_seq = max(max_seq, int(str(rec["attempt_id"]).rpartition(":")[2]))
                         restored_rows += 1
                         self.manifest.record(rec.get("role", ""), rec.get("outcome"), write_ok=True)
-            except OSError:
+            except (OSError, UnicodeDecodeError):
+                # 読取り不能/不正バイト列＝正本を信頼できない。以後の append を止める。
                 self._quarantined = True
                 self.manifest.note_gap("ledger_read_failed_on_resume")
                 return
