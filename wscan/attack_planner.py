@@ -533,11 +533,16 @@ Consider stored / second-order attacks carefully:
 
         # ── Web intelligence enrichment (optional) ───────────────────────
         if self.enable_web_browsing:
-            from .llm_web_tools import search_web
+            from .llm_web_tools import search_web, build_planner_web_query
             try:
-                tech_hints = " ".join(t for t in [title, purpose_hint] if t)
-                host = url.split("/")[2] if "//" in url else url
-                query = f"web application vulnerability {tech_hints} {host}"
+                # LLM-007: 外部検索（DuckDuckGo）へ対象を特定できる情報を送らない。
+                # 生の page title は untrusted な描画テキストで、host/path/query 等の対象識別子が
+                # 任意の表現で混ざりうる（エンコード・複数語・複合ルート…列挙不能）。そこで root
+                # では **信頼できるソースのみ**を送る＝`_guess_purpose` の固定語彙 purpose_hint だけを
+                # クエリ材料にし、生 title は渡さない（フレームワーク等の技術文脈は prompt 側の
+                # fingerprint が別途担う）。build_planner_web_query の sanitize は多層防御として維持。
+                tech_hints = purpose_hint or ""
+                query = build_planner_web_query(tech_hints, target_url=url)
                 web_ctx = await search_web(query, max_results=3)
                 from rich.console import Console as _C
                 _C().print(

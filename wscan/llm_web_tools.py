@@ -12,6 +12,7 @@ No API key is required.  All requests use httpx with standard async patterns.
 from __future__ import annotations
 
 import re
+from urllib.parse import urlparse
 import httpx
 
 _TIMEOUT = 20.0
@@ -23,6 +24,92 @@ _HEADERS = {
 
 # DuckDuckGo "lite" HTML endpoint — works without JS or API key
 _DDG_ENDPOINT = "https://html.duckduckgo.com/html/"
+
+
+# 匿名化はブロックリスト（危険な形を列挙）ではなくアローリストで行う。URL 文法（host/path/
+# port/query/fragment）は多様で列挙しきれない（Codex が同一関数で host→path/port→相対 path と
+# 3度指摘）。逆に「素のプレーンな技術語トークンだけ通す」＝URL 構造文字（. : / @ ? # 等）を含む
+# トークンは構造的に全て弾く、という安全側の設計にする。`C#`/`C++`/`ASP-NET` 等は許容、
+# `Node.js`/`ASP.NET` はドットで巻き込まれ落ちる（over-strip 許容）。`#`/`+` は末尾のみ許可＝
+# `C#`/`C++`/`F#` は通すが、SPA の複合ハッシュルート `app#tenant-42`（中間に `#`）は弾く。
+_WEB_QUERY_TECH_TOKEN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9-]*[#+]*$")
+
+
+def _known_target_identifiers(
+    target_url: str,
+) -> tuple[frozenset[str], frozenset[str]]:
+    """既知の検査対象 URL から、クエリから除くべき識別子（host・host:port・IP）を抽出。
+
+    ヒューリスティックでは捕まらない単一ラベルの内部 host（例 `intranet`）や、区切り無しで
+    現れる path/query/fragment 由来の識別子（例 `tenant-42`、SPA hash route）も、対象が既知なら確実に落とせる。
+
+    返り値は `(host_ids, exact_ids)`:
+      - `host_ids`  … host・host:port。subdomain/port 付きも拾うため **部分一致**で使う。
+      - `exact_ids` … path segment・query の key/値・fragment route。一般語の巻き込みを避け **完全一致**で使う。
+    いずれも純粋・小文字正規化。"""
+    empty: tuple[frozenset[str], frozenset[str]] = (frozenset(), frozenset())
+    if not target_url:
+        return empty
+    host_ids: set[str] = set()
+    exact_ids: set[str] = set()
+
+    def _add_exact(raw: str) -> None:
+        # 値そのものと、空白区切りの各語を exact_ids へ（`Acme Corp` のような複数語 identifier は
+        # title 側で `Acme`/`Corp` に分割されるため、語単位でも落とす）。純粋・小文字化。
+        raw = raw.strip().lower()
+        if len(raw) >= 2:
+            exact_ids.add(raw)
+        for part in raw.split():
+            if len(part) >= 2:
+                exact_ids.add(part)
+
+    try:
+        from urllib.parse import parse_qsl, unquote
+
+        parsed = urlparse(target_url if "://" in target_url else "//" + target_url, scheme="")
+        host = (parsed.hostname or "").strip().lower()
+        if len(host) >= 2:
+            host_ids.add(host)
+            if parsed.port:
+                host_ids.add(f"{host}:{parsed.port}")
+        # path/fragment は %エンコードを解いてから抽出（title は decode 済みで表示されるため
+        # `%74enant-42` を `tenant-42` に一致させる）。query は parse_qsl が decode 済み。
+        for seg in unquote(parsed.path or "").split("/"):
+            _add_exact(seg)  # 対象固有の path segment（tenant-42 等）
+        for key, val in parse_qsl(parsed.query or "", keep_blank_values=False):
+            _add_exact(key)
+            _add_exact(val)  # 対象固有の query 識別子（複数語＝Acme Corp も語単位で）
+        # fragment（SPA の hash-router `#/`・`#!/` 由来の route も対象固有識別子）
+        frag = unquote(parsed.fragment or "").lstrip("#!/")
+        for seg in frag.replace("?", "/").replace("&", "/").split("/"):
+            _add_exact(seg)
+    except Exception:
+        return empty
+    return (frozenset(host_ids), frozenset(exact_ids))
+
+
+def build_planner_web_query(tech_hints: str, target_url: str = "") -> str:
+    """planner の web intel クエリを組む（純粋・匿名化）。
+
+    LLM-007: 検査対象の host/URL/path を外部検索へ送らない。tech_hints は untrusted な
+    ページ title を含みうるため二段構えで落とす:
+      (1) 既知の対象 host / path segment / query 識別子（`target_url` 由来）を明示 redact
+          — 単一ラベル host も、区切り無しで現れる path/query 値（tenant-42 等）も確実に。
+      (2) アローリスト: 素のプレーンな技術語トークンだけ通す。URL 構造文字（. : / @ ? # 等）を
+          含むトークンは構造的に全て弾く＝host/path/port/query/fragment を一括で除去（安全側）。
+    """
+    host_ids, exact_ids = _known_target_identifiers(target_url)
+    safe: list[str] = []
+    for tok in (tech_hints or "").split():
+        low = tok.lower()
+        if host_ids and any(h in low for h in host_ids):
+            continue  # 既知の対象 host/host:port を含むトークンは落とす（部分一致）
+        if low in exact_ids:
+            continue  # 既知の対象 path segment / query 識別子（区切り無しの tenant-42 等）
+        if not _WEB_QUERY_TECH_TOKEN.match(tok):
+            continue  # URL 構造文字を含む（host/path/port/query/fragment）トークンは弾く
+        safe.append(tok)
+    return ("web application vulnerability " + " ".join(safe)).strip()
 
 
 async def search_web(query: str, max_results: int = 5) -> str:
