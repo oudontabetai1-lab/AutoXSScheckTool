@@ -10,9 +10,14 @@
 - **Evidence for every outcome**: matched だけでなく no-match/blocked/skipped/timeout/error も
   記録する（呼び出し側が outcome を付けて append する）。
 
-I/O（ファイル追記・manifest 書出し）はここに閉じ、判定・件数ロジックは純粋な
-`LedgerManifest`（下）と `probe_ledger` の純粋関数へ委譲する（I/O と判定の分離規約）。
-recorder を scanner/engine の全 transport 送信経路へ配線するのは後続増分（0032-C）。
+resume 耐久性（crash/interrupt に耐える append-only 正本）:
+- 不完全な末尾行は **parse して**、完全な JSON なら delimiter を補い保持、壊れた断片だけ truncate。
+- 既存正本の **復元に失敗したら以後の append を止める**（`_seq=0` のまま ID 再発行/欠落を防ぐ）。
+- 失敗試行は role/outcome 付きで manifest に残し、resume で **件数内訳ごと**復元する。
+
+I/O（ファイル追記・manifest 書出し）はここに閉じ、判定・件数ロジックは純粋な `LedgerManifest`
+（下）と `probe_ledger` の純粋関数へ委譲する（I/O と判定の分離規約）。recorder を scanner/engine の
+全 transport 送信経路へ配線するのは後続増分（0032-C）。
 """
 from __future__ import annotations
 
@@ -34,26 +39,37 @@ LEDGER_FILENAME = "probe_attempts.jsonl"
 MANIFEST_FILENAME = "probe_attempts_manifest.json"
 
 
+def _role_key(role) -> str:
+    return role.value if isinstance(role, ProbeRole) else str(role)
+
+
+def _outcome_key(outcome) -> str:
+    if isinstance(outcome, ProbeOutcome):
+        return outcome.value
+    return str(outcome) if outcome else "unrecorded"
+
+
 @dataclass
 class LedgerManifest:
-    """台帳の集計（純粋・I/O 非依存）。件数・欠落・書込み失敗を保持し 0 Finding を安全へ丸めない。"""
+    """台帳の集計（純粋・I/O 非依存）。件数・欠落・書込み失敗を保持し 0 Finding を安全へ丸めない。
+
+    `write_errors` は **role/outcome を含む dict のリスト**（失敗試行の内訳を resume で失わないため）。
+    """
 
     total: int = 0
     by_role: dict = field(default_factory=dict)
     by_outcome: dict = field(default_factory=dict)
-    write_errors: list = field(default_factory=list)
+    write_errors: list = field(default_factory=list)  # list[dict]: {error, role, outcome}
 
-    def record(self, role: ProbeRole, outcome: Optional[ProbeOutcome], *, write_ok: bool,
-               error: str = "") -> None:
-        """1 試行を集計へ反映する（純粋）。write_ok=False は欠落として error を残す。"""
+    def record(self, role, outcome, *, write_ok: bool, error: str = "") -> None:
+        """1 試行を集計へ反映する（純粋）。成功/失敗いずれも件数内訳へ加算し、失敗は error も残す。"""
         self.total += 1
-        role_key = role.value if isinstance(role, ProbeRole) else str(role)
-        self.by_role[role_key] = self.by_role.get(role_key, 0) + 1
-        out_key = (outcome.value if isinstance(outcome, ProbeOutcome)
-                   else (str(outcome) if outcome else "unrecorded"))
-        self.by_outcome[out_key] = self.by_outcome.get(out_key, 0) + 1
+        rk = _role_key(role)
+        ok = _outcome_key(outcome)
+        self.by_role[rk] = self.by_role.get(rk, 0) + 1
+        self.by_outcome[ok] = self.by_outcome.get(ok, 0) + 1
         if not write_ok:
-            self.write_errors.append(error or "write_failed")
+            self.write_errors.append({"error": error or "write_failed", "role": rk, "outcome": ok})
 
     @property
     def had_write_error(self) -> bool:
@@ -74,8 +90,8 @@ class ProbeLedger:
     """append-only な probe 台帳 writer。scan 単位。thread-safe（並列ワーカー対応）。
 
     attempt_id は `derive_attempt_id(scan_id, seq)` で決定論的に払い出す（resume 安定）。
-    `append` は JSONL 1 行を追記し、失敗しても例外を投げず manifest に error を残して False を返す
-    （証跡の欠落を可視化するため）。
+    `append` は JSONL 1 行を追記し、失敗しても例外を投げず manifest に error を残して False を返す。
+    既存正本の復元に失敗した場合は `recovery_failed` が立ち、以後の append を拒否する。
     """
 
     def __init__(self, output_dir, scan_id: str, *, enabled: bool = True) -> None:
@@ -84,45 +100,60 @@ class ProbeLedger:
         self._seq = 0
         self._lock = threading.Lock()
         self.manifest = LedgerManifest()
+        self._recovery_failed = False
         self._path: Optional[Path] = None
         if enabled and output_dir:
             self._path = Path(output_dir) / LEDGER_FILENAME
-            # resume: 既存台帳から seq と manifest を復元してから新規試行を受ける
-            # （attempt_id の重複＝相関 ID 衝突と、post-resume だけの過少 manifest を防ぐ）。
+            # resume: 既存台帳から seq/manifest を復元してから新規試行を受ける
             self._restore_from_existing()
 
     @property
     def path(self) -> Optional[Path]:
         return self._path
 
-    def _restore_from_existing(self) -> None:
-        """既存台帳から seq/manifest を再構築する（resume 安定）。
+    @property
+    def recovery_failed(self) -> bool:
+        """既存正本の復元に失敗したか（True の間 append は拒否＝ID 再発行/欠落を防ぐ）。"""
+        return self._recovery_failed
 
-        3 点を守る:
-        - **不完全な末尾行の修復**: 前 append が改行前に中断すると末尾が partial JSON になる。
-          次の append がそこへ連結すると 1 行が壊れるため、restore 時に最後の改行以降を truncate
-          して行境界を清潔にする（partial な試行は永続化未完＝正本から落として良い）。
-        - **seq 継承**: 有効行の attempt_id 最大 seq を継ぐ（相関 ID 重複を防ぐ）。
-        - **prior write error の継承**: 前 run の manifest に残る write_errors を merge する。
-          jsonl の成功行だけから作ると had_write_error=False になり No-evidence-no-COMPLETE gate を
-          すり抜けるため（成功行は file に、失敗行は manifest にしか無い）。
-        壊れた行は best-effort でスキップ。"""
+    def _repair_unterminated_tail(self, data: bytes) -> None:
+        """末尾が改行で終わらない場合、末尾行を parse して完全なら delimiter を補い、
+        壊れた断片だけ truncate する（interrupted write の完全レコードを失わない）。"""
+        if not data or data.endswith(b"\n"):
+            return
+        nl = data.rfind(b"\n")
+        tail = data[nl + 1:]
+        keep_tail = False
+        try:
+            json.loads(tail.decode("utf-8"))
+            keep_tail = True  # delimiter 欠落だけの完全レコード → 残す
+        except (ValueError, UnicodeDecodeError):
+            keep_tail = False
+        try:
+            if keep_tail:
+                with open(self._path, "ab") as fh:
+                    fh.write(b"\n")
+            else:
+                with open(self._path, "rb+") as fh:
+                    fh.truncate(nl + 1)  # nl==-1 なら 0（全体が partial）
+        except OSError:
+            self._recovery_failed = True
+
+    def _restore_from_existing(self) -> None:
+        """既存台帳から seq/manifest を復元する（resume 安定）。復元不能なら recovery_failed。"""
         if self._path is None:
             return
-        # 1) jsonl が有れば: 不完全な末尾行を truncate して行境界を修復＋seq/manifest 再構築
+        max_seq = 0
         if self._path.exists():
             try:
                 data = self._path.read_bytes()
             except OSError:
-                data = b""
-            if data and not data.endswith(b"\n"):
-                nl = data.rfind(b"\n")
-                try:
-                    with open(self._path, "rb+") as fh:
-                        fh.truncate(nl + 1)  # nl==-1 なら 0（全体が partial）
-                except OSError:
-                    pass
-            max_seq = 0
+                # 既存正本を読めない＝安全に続けられない。以後の append を止める。
+                self._recovery_failed = True
+                return
+            self._repair_unterminated_tail(data)
+            if self._recovery_failed:
+                return
             try:
                 with open(self._path, encoding="utf-8") as fh:
                     for line in fh:
@@ -136,25 +167,32 @@ class ProbeLedger:
                         seq_part = str(rec.get("attempt_id", "")).rpartition(":")[2]
                         if seq_part.isdigit():
                             max_seq = max(max_seq, int(seq_part))
-                        # 既存レコードは永続化済み＝write_ok。role/outcome は文字列のまま集計。
-                        self.manifest.record(
-                            rec.get("role", ""), rec.get("outcome"), write_ok=True
-                        )
-                self._seq = max_seq
+                        # 永続化済み＝成功。内訳へ加算。
+                        self.manifest.record(rec.get("role", ""), rec.get("outcome"), write_ok=True)
             except OSError:
-                pass
-        # 2) 前 run の manifest から write_errors を継承（jsonl の有無に関わらず）。
-        #    全 append 失敗で jsonl が無くても、証跡欠落を resume で消さない。
+                self._recovery_failed = True
+                return
+        # 前 run の manifest から失敗試行を内訳ごと復元（jsonl の有無に関わらず）。
         manifest_path = self._path.with_name(MANIFEST_FILENAME)
+        prior_total = 0
         if manifest_path.exists():
             try:
                 prior = json.loads(manifest_path.read_text(encoding="utf-8"))
             except (OSError, ValueError):
-                prior = None
+                # 既存 manifest が壊れて読めない＝欠落状態を復元できない。止める。
+                self._recovery_failed = True
+                return
             if isinstance(prior, dict):
-                for err in prior.get("write_errors", []) or []:
-                    self.manifest.write_errors.append(err)
-                    self.manifest.total += 1  # 失敗試行も総数へ（file には無い）
+                prior_total = int(prior.get("total") or 0)
+                for entry in prior.get("write_errors", []) or []:
+                    if isinstance(entry, dict):
+                        self.manifest.record(entry.get("role", ""), entry.get("outcome"),
+                                             write_ok=False, error=str(entry.get("error", "")))
+                    else:  # legacy: 文字列のみ
+                        self.manifest.record("", None, write_ok=False, error=str(entry))
+        # 失敗試行も ID を消費している（trailing failure は jsonl 最大 seq を超える）。
+        # prior_total は前 run の発行 ID 総数＝max seq。stale manifest も考慮して max を取る。
+        self._seq = max(max_seq, prior_total)
 
     def next_attempt_id(self) -> str:
         """次の attempt_id を払い出す（単調増加・決定論・thread-safe）。"""
@@ -165,10 +203,16 @@ class ProbeLedger:
     def append(self, record: ProbeAttemptRecord) -> bool:
         """試行レコードを台帳へ追記する。成功で True。失敗は manifest に残し False（例外は投げない）。
 
-        無効（enabled=False / 出力先なし）のときは何もしない no-op で True を返す（operator の
-        選択であって失敗ではない＝manifest も更新しない）。"""
+        無効（enabled=False / 出力先なし）のときは no-op で True。既存正本の復元に失敗している
+        （recovery_failed）ときは、ID 再発行/欠落を避けるため書込まず失敗として記録し False を返す。
+        """
         if not (self.enabled and self._path is not None):
             return True
+        if self._recovery_failed:
+            with self._lock:
+                self.manifest.record(record.role, record.outcome, write_ok=False,
+                                     error="ledger_recovery_failed")
+            return False
         line = to_jsonl_line(record)
         write_ok = True
         error = ""
@@ -193,6 +237,7 @@ class ProbeLedger:
                 data = self.manifest.to_dict()
                 data["scan_id"] = self.scan_id
                 data["ledger"] = LEDGER_FILENAME
+                data["recovery_failed"] = self._recovery_failed
             manifest_path.write_text(
                 json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True),
                 encoding="utf-8",

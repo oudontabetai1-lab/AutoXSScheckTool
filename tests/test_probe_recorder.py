@@ -88,7 +88,8 @@ def test_ledger_manifest_pure_record():
     m.record(ProbeRole.ATTACK, None, write_ok=False, error="disk full")
     assert m.total == 2
     assert m.by_outcome["matched"] == 1 and m.by_outcome["unrecorded"] == 1
-    assert m.had_write_error and m.write_errors == ["disk full"]
+    assert m.had_write_error
+    assert m.write_errors == [{"error": "disk full", "role": "attack", "outcome": "unrecorded"}]
 
 
 def test_resume_restores_sequence_and_manifest(tmp_path):
@@ -162,8 +163,49 @@ def test_resume_preserves_prior_write_errors(tmp_path):
     import json as _json
     (tmp_path / MANIFEST_FILENAME).write_text(
         _json.dumps({"write_errors": ["OSError: disk full"], "total": 1}), encoding="utf-8")
-    # resume: jsonl は空でも prior manifest の write_errors を継承
+    # resume: jsonl は空でも prior manifest の write_errors を継承（legacy 文字列は dict へ）
     led2 = ProbeLedger(tmp_path, "s")
     assert led2.manifest.had_write_error is True   # gate をすり抜けさせない
-    assert "OSError: disk full" in led2.manifest.write_errors
+    assert any(e["error"] == "OSError: disk full" for e in led2.manifest.write_errors)
     assert led2.manifest.total == 1
+
+
+def test_resume_keeps_complete_tail_without_newline(tmp_path):
+    # 末尾が「改行なしだが完全な JSON レコード」なら truncate せず delimiter を補い残す（Codex P1）
+    path = tmp_path / LEDGER_FILENAME
+    path.write_bytes(
+        b'{"attempt_id":"s:000001","role":"attack","outcome":"matched"}\n'
+        b'{"attempt_id":"s:000002","role":"attack","outcome":"no_match"}'  # 完全だが改行なし
+    )
+    led = ProbeLedger(tmp_path, "s")
+    assert led.next_attempt_id() == "s:000003"  # 000002 を失わず継承
+    import json as _json
+    lines = [l for l in path.read_text(encoding="utf-8").splitlines() if l.strip()]
+    assert len(lines) == 2
+    assert _json.loads(lines[1])["attempt_id"] == "s:000002"
+
+
+def test_recovery_read_failure_blocks_appends(tmp_path):
+    # 既存正本を読めない（ここでは path が dir）＝復元不能→append を拒否し ID 再発行を防ぐ（Codex P1）
+    (tmp_path / LEDGER_FILENAME).mkdir()
+    led = ProbeLedger(tmp_path, "s")
+    assert led.recovery_failed is True
+    ok = led.append(_rec(led, ProbeRole.ATTACK, ProbeOutcome.MATCHED))
+    assert ok is False
+    assert led.manifest.had_write_error
+    assert any(e["error"] == "ledger_recovery_failed" for e in led.manifest.write_errors)
+
+
+def test_resume_restores_failed_attempt_breakdowns(tmp_path):
+    # 前 run の失敗試行の role/outcome 内訳を resume で復元（Codex P2・内訳の内部整合）
+    import json as _json
+    (tmp_path / MANIFEST_FILENAME).write_text(_json.dumps({
+        "total": 1,
+        "write_errors": [{"error": "disk full", "role": "attack", "outcome": "matched"}],
+    }), encoding="utf-8")
+    led = ProbeLedger(tmp_path, "s")
+    m = led.manifest.to_dict()
+    assert m["total"] == 1
+    assert m["by_role"] == {"attack": 1}
+    assert m["by_outcome"] == {"matched": 1}
+    assert m["had_write_error"] is True
