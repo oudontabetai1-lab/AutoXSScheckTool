@@ -96,33 +96,65 @@ class ProbeLedger:
         return self._path
 
     def _restore_from_existing(self) -> None:
-        """既存 `probe_attempts.jsonl` から seq 最大値と manifest を再構築する（resume 安定）。
+        """既存台帳から seq/manifest を再構築する（resume 安定）。
 
-        壊れた行は best-effort でスキップ。前 run で write に失敗した試行はそもそも file に無いため
-        復元対象外（永続化済みのみが台帳の正本）。"""
-        if self._path is None or not self._path.exists():
+        3 点を守る:
+        - **不完全な末尾行の修復**: 前 append が改行前に中断すると末尾が partial JSON になる。
+          次の append がそこへ連結すると 1 行が壊れるため、restore 時に最後の改行以降を truncate
+          して行境界を清潔にする（partial な試行は永続化未完＝正本から落として良い）。
+        - **seq 継承**: 有効行の attempt_id 最大 seq を継ぐ（相関 ID 重複を防ぐ）。
+        - **prior write error の継承**: 前 run の manifest に残る write_errors を merge する。
+          jsonl の成功行だけから作ると had_write_error=False になり No-evidence-no-COMPLETE gate を
+          すり抜けるため（成功行は file に、失敗行は manifest にしか無い）。
+        壊れた行は best-effort でスキップ。"""
+        if self._path is None:
             return
-        max_seq = 0
-        try:
-            with open(self._path, encoding="utf-8") as fh:
-                for line in fh:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        rec = json.loads(line)
-                    except ValueError:
-                        continue  # 壊れた行はスキップ
-                    seq_part = str(rec.get("attempt_id", "")).rpartition(":")[2]
-                    if seq_part.isdigit():
-                        max_seq = max(max_seq, int(seq_part))
-                    # 既存レコードは永続化済み＝write_ok。role/outcome は文字列のまま集計。
-                    self.manifest.record(
-                        rec.get("role", ""), rec.get("outcome"), write_ok=True
-                    )
-        except OSError:
-            return
-        self._seq = max_seq
+        # 1) jsonl が有れば: 不完全な末尾行を truncate して行境界を修復＋seq/manifest 再構築
+        if self._path.exists():
+            try:
+                data = self._path.read_bytes()
+            except OSError:
+                data = b""
+            if data and not data.endswith(b"\n"):
+                nl = data.rfind(b"\n")
+                try:
+                    with open(self._path, "rb+") as fh:
+                        fh.truncate(nl + 1)  # nl==-1 なら 0（全体が partial）
+                except OSError:
+                    pass
+            max_seq = 0
+            try:
+                with open(self._path, encoding="utf-8") as fh:
+                    for line in fh:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            rec = json.loads(line)
+                        except ValueError:
+                            continue  # 壊れた行はスキップ
+                        seq_part = str(rec.get("attempt_id", "")).rpartition(":")[2]
+                        if seq_part.isdigit():
+                            max_seq = max(max_seq, int(seq_part))
+                        # 既存レコードは永続化済み＝write_ok。role/outcome は文字列のまま集計。
+                        self.manifest.record(
+                            rec.get("role", ""), rec.get("outcome"), write_ok=True
+                        )
+                self._seq = max_seq
+            except OSError:
+                pass
+        # 2) 前 run の manifest から write_errors を継承（jsonl の有無に関わらず）。
+        #    全 append 失敗で jsonl が無くても、証跡欠落を resume で消さない。
+        manifest_path = self._path.with_name(MANIFEST_FILENAME)
+        if manifest_path.exists():
+            try:
+                prior = json.loads(manifest_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                prior = None
+            if isinstance(prior, dict):
+                for err in prior.get("write_errors", []) or []:
+                    self.manifest.write_errors.append(err)
+                    self.manifest.total += 1  # 失敗試行も総数へ（file には無い）
 
     def next_attempt_id(self) -> str:
         """次の attempt_id を払い出す（単調増加・決定論・thread-safe）。"""

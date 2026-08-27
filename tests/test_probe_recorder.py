@@ -130,3 +130,40 @@ def test_resume_skips_corrupt_lines(tmp_path):
     led = ProbeLedger(tmp_path, "s")
     assert led.next_attempt_id() == "s:000006"   # 壊れ行は無視、最大 seq=5 を継承
     assert led.manifest.to_dict()["total"] == 1  # 有効行のみ集計
+
+
+def test_resume_repairs_unterminated_tail(tmp_path):
+    # 前 append が改行前に中断＝末尾 partial 行。次の append が壊れた行を作らないよう truncate。
+    path = tmp_path / LEDGER_FILENAME
+    path.write_bytes(
+        b'{"attempt_id":"s:000001","role":"attack","outcome":"matched"}\n'
+        b'{"attempt_id":"s:000002","role":"attack"'  # 改行なしの partial
+    )
+    led = ProbeLedger(tmp_path, "s")
+    # partial は落ちるので seq は完全行の最大=1 を継ぐ→次は 000002
+    assert led.next_attempt_id() == "s:000002"
+    led.append(_rec(led, ProbeRole.ATTACK, ProbeOutcome.MATCHED))
+    import json as _json
+    lines = [l for l in path.read_text(encoding="utf-8").splitlines() if l.strip()]
+    # 全行が有効 JSON（連結による破損なし）
+    for l in lines:
+        _json.loads(l)
+    assert len(lines) == 2  # 完全行1 + 新規1（partial は truncate 済み）
+
+
+def test_resume_preserves_prior_write_errors(tmp_path):
+    # 前 run: append 失敗を記録し manifest を書き出す
+    bad = tmp_path / "nope"
+    led1 = ProbeLedger(bad, "s")
+    assert led1.append(_rec(led1, ProbeRole.ATTACK, ProbeOutcome.MATCHED)) is False
+    assert led1.manifest.had_write_error
+    # manifest を書ける場所へ（jsonl は書けなかったが manifest は別途残ると想定）
+    # ここでは手動で manifest を tmp_path に置いて resume 復元を検証
+    import json as _json
+    (tmp_path / MANIFEST_FILENAME).write_text(
+        _json.dumps({"write_errors": ["OSError: disk full"], "total": 1}), encoding="utf-8")
+    # resume: jsonl は空でも prior manifest の write_errors を継承
+    led2 = ProbeLedger(tmp_path, "s")
+    assert led2.manifest.had_write_error is True   # gate をすり抜けさせない
+    assert "OSError: disk full" in led2.manifest.write_errors
+    assert led2.manifest.total == 1
