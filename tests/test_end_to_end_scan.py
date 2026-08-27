@@ -145,6 +145,23 @@ async def _run_spa_json_scan(port: int, output_dir: str):
     return engine
 
 
+# ADR-0016 / PRINCIPLE-001（DECISION-CI-RECALL=C）の空振り防止:
+# WSCAN_E2E=1 を明示した（＝blocking な nightly recall gate 実行中）のに Chromium が
+# 起動不能なら、E2E クラスの skip で pytest が緑になり recall assertion が空振りする。
+# この gate クラスは _chromium_available() を **skip 条件にせず** WSCAN_E2E=1 でのみ有効化し、
+# 起動不能を skip でなく **失敗** に変える（install 成功後の launch 不能：欠落ライブラリ/
+# sandbox 失敗/破損 exe も含めて捕捉）。
+@unittest.skipUnless(_e2e_enabled(), "set WSCAN_E2E=1 to run the end-to-end browser scan")
+class EndToEndEnvironmentGateTests(unittest.TestCase):
+    def test_chromium_must_be_launchable_when_e2e_requested(self):
+        self.assertTrue(
+            _chromium_available(),
+            "WSCAN_E2E=1 (blocking recall gate) but Chromium is not launchable — "
+            "the E2E recall assertion cannot run. Failing loudly instead of "
+            "letting the suite skip and report green.",
+        )
+
+
 @unittest.skipUnless(_e2e_enabled(), "set WSCAN_E2E=1 to run the end-to-end browser scan")
 @unittest.skipUnless(
     _chromium_available(),
