@@ -222,9 +222,10 @@ class EndToEndRealisticScanTests(unittest.TestCase):
         # ADR-0016 / PRINCIPLE-001: 固定 ground truth に対し recall 100% を要求する
         # （有効化した CHECKS のみを分母にする）。個別 subTest の集約＋recall 数値と見逃し一覧を
         # 1メッセージで surface する。
-        # 注: この assert は E2E scan が実走したとき（WSCAN_E2E=1）に blocking。現状 CI の E2E step
-        # は browser 安定化中のため continue-on-error（apt mirror 403 対策の既存判断）＝PR を
-        # ブロックしない。CI で真に blocking な recall ゲートにするかは別途 infra 判断（Task 0015）。
+        # enforcement（DECISION-CI-RECALL=C）: この assert は E2E scan 実走時（WSCAN_E2E=1）に
+        # blocking。PR CI の E2E step は apt mirror 403 で不安定なため非 blocking のまま維持し、
+        # recall ゲートは専用の nightly workflow（.github/workflows/nightly-recall.yml、
+        # WSCAN_E2E=1・blocking）で担保する＝ADR-0016 の release gate を定期実行で確実に回す。
         report = compute_recall(EXPECTED_FINDINGS, self.reported, target_checks=CHECKS)
         self.assertTrue(
             report.is_complete,
