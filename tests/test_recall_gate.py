@@ -83,19 +83,25 @@ def test_report_is_frozen_dataclass():
         r.matched_total = 0  # type: ignore[misc]
 
 
-def test_report_nested_state_is_snapshot_immutable():
-    # 呼び出し側が元 spec / by_check を後から変更しても report は不変（P3）
+def test_report_is_snapshot_isolated_from_inputs():
+    # 呼び出し側が元 spec を後から変更しても report は不変（snapshot 分離・P3 の失敗シナリオ）
     spec = _spec("xss", "/a", note="orig")
     expected = [spec, _spec("sqli", "/b")]
     r = compute_recall(expected, [])  # 両方 miss
-    # 元 spec を破壊的に変更しても describe() は変わらない
     spec["note"] = "MUTATED"
     spec["check"] = "zzz"
     assert "MUTATED" not in r.describe()
     assert "orig" in r.describe()
-    # by_check は read-only view
-    with pytest.raises(TypeError):
-        r.by_check["xss"] = (9, 9)  # type: ignore[index]
-    # missed 要素も read-only view
-    with pytest.raises(TypeError):
-        r.missed[0]["check"] = "zzz"  # type: ignore[index]
+
+
+def test_report_is_json_serializable():
+    # 素の dict/tuple/str/int のみ＝dataclasses.asdict→json.dumps 可（P2: serializable 契約）
+    import dataclasses
+    import json
+
+    r = compute_recall([_spec("xss", "/a"), _spec("sqli", "/b")], [("xss", "/a", "q")])
+    payload = json.dumps(dataclasses.asdict(r))
+    round_tripped = json.loads(payload)
+    assert round_tripped["expected_total"] == 2
+    assert round_tripped["matched_total"] == 1
+    assert round_tripped["by_check"]["xss"] == [1, 1]  # tuple → JSON list

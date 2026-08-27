@@ -17,7 +17,6 @@ E2E 側はこの `RecallReport` を使って `recall == 1.0` を単一ゲート�
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from types import MappingProxyType
 from typing import Iterable, Mapping, Optional, Sequence
 
 # spec の一意キー（E2E の突合と同一：check_type × path × field）
@@ -35,7 +34,13 @@ def spec_key(spec: Mapping[str, str]) -> FindingKey:
 
 @dataclass(frozen=True)
 class RecallReport:
-    """target check 群に対する recall（見逃し）測定結果。純粋・シリアライズ可能。"""
+    """target check 群に対する recall（見逃し）測定結果。
+
+    frozen dataclass（属性は再束縛不可）。入れ子コレクション（missed/by_check）は構築時に
+    呼び出し側入力から**コピー**するため、入力を後から変更しても report は変わらない（snapshot
+    分離）。素の dict/tuple/str/int のみで構成し **JSON 直列化可能**（`dataclasses.asdict` 可）。
+    ※ 深い不変化（read-only view）は直列化と両立しないため採らない＝内部 dict の直接改変は
+    防がない（snapshot 分離で入力汚染は防ぐ）。"""
 
     expected_total: int
     matched_total: int
@@ -110,14 +115,14 @@ def compute_recall(
         else:
             missed.append(spec)
 
-    # 返り値は真に不変にする: missed は呼び出し側 spec dict の参照を持たないようコピーして
-    # read-only view にし、by_check も read-only view にする（frozen dataclass の totals と
-    # describe() が後から矛盾しないように）。
-    frozen_missed = tuple(MappingProxyType(dict(spec)) for spec in missed)
-    frozen_by_check = MappingProxyType({c: (m, t) for c, (m, t) in by_check.items()})
+    # snapshot 分離＋シリアライズ可能を両立する: missed は呼び出し側 spec dict を**コピー**して
+    # 参照を持たない（呼び出し側が後から expected を変更しても report は不変）。型は素の dict/tuple
+    # のままにし JSON 直列化を保つ（MappingProxyType は json.dumps/asdict 不可のため使わない）。
+    snapshot_missed = tuple(dict(spec) for spec in missed)
+    snapshot_by_check = {c: (m, t) for c, (m, t) in by_check.items()}
     return RecallReport(
         expected_total=len(seen),
         matched_total=matched_total,
-        missed=frozen_missed,
-        by_check=frozen_by_check,
+        missed=snapshot_missed,
+        by_check=snapshot_by_check,
     )
