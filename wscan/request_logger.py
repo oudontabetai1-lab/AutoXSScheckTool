@@ -78,7 +78,8 @@ _KEYS_ALT = "|".join(re.escape(k) for k in _SENSITIVE_BODY_KEYS)
 # urlencoded: <key>=<value>  （key が機微トークンを含むとき value をマスク）
 _RE_URLENCODED = re.compile(rf"(?i)([^&=?\s]*(?:{_KEYS_ALT})[^&=]*)=[^&]*")
 # JSON: "<key>": "<value>"
-_RE_JSON = re.compile(rf'(?i)("(?:[^"\\]*(?:{_KEYS_ALT})[^"\\]*)"\s*:\s*)"[^"]*"')
+# 値は escape-aware（`\"` を含む JSON scalar 全体を伏せる。`"[^"]*"` だと `\"` で切れて末尾漏れ）
+_RE_JSON = re.compile(rf'(?i)("(?:[^"\\]*(?:{_KEYS_ALT})[^"\\]*)"\s*:\s*)"(?:\\.|[^"\\])*"')
 
 
 def _redact_headers(headers: dict) -> dict:
@@ -99,12 +100,50 @@ def _redact_text(text):
     return text
 
 
+_RE_URL_SCHEME = re.compile(r"(?i)^[a-z][a-z0-9+.\-]*://")
+
+
 def _redact_url(url):
-    """URL のクエリ文字列に含まれる機微パラメータ値をマスクする。"""
-    if not isinstance(url, str) or "?" not in url:
+    """URL の機微値をマスクする（クエリ・フラグメント・userinfo）。
+
+    OAuth implicit 等はトークンを **fragment**（`#access_token=...`）に載せ、`user:pass@host` の
+    **userinfo** も資格情報。クエリだけでなくこれらも永続化前に伏せる。"""
+    if not isinstance(url, str) or not url:
         return url
-    base, _, query = url.partition("?")
-    return f"{base}?{_redact_text(query)}"
+    result = url
+    # userinfo: scheme://user:pass@host → 資格情報を伏せる
+    m = _RE_URL_SCHEME.match(result)
+    if m:
+        after = result[m.end():]
+        cut = [i for i in (after.find("/"), after.find("?"), after.find("#")) if i != -1]
+        authority_end = min(cut) if cut else len(after)
+        authority = after[:authority_end]
+        if "@" in authority:
+            host = authority.rpartition("@")[2]
+            result = result[:m.end()] + _REDACTED + "@" + host + after[authority_end:]
+    # query（? 以降。# があれば分離してフラグメントも処理）
+    if "?" in result:
+        base, _, rest = result.partition("?")
+        query, hsep, frag = rest.partition("#")
+        result = f"{base}?{_redact_text(query)}"
+        if hsep:
+            result += f"#{_redact_text(frag)}"
+    elif "#" in result:
+        base, _, frag = result.partition("#")
+        result = f"{base}#{_redact_text(frag)}"
+    return result
+
+
+def redact_text(text):
+    """機微ボディ値（urlencoded / JSON）をマスクする正典の公開 API（#90 R13 の共有点）。
+
+    probe 証跡台帳など他モジュールが独自 redaction を持たずにここへ委譲するための公開入口。"""
+    return _redact_text(text)
+
+
+def redact_url(url):
+    """URL クエリの機微パラメータ値をマスクする正典の公開 API（redact_text と同じ意図）。"""
+    return _redact_url(url)
 
 
 class RequestLogger:
