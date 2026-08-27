@@ -148,3 +148,26 @@ def test_jsonl_redacts_url_query_credentials():
     assert "<redacted>" in line
     import json as _json
     assert _json.loads(line)["request"]["url"].startswith("http://h/cb?")
+
+
+def test_redact_escaped_quote_json_credential():
+    # `\"` を含む JSON scalar 全体を伏せる（Codex P1 追撃・escape-aware）
+    out = redact_excerpt(r'{"password":"abc\"secret-tail","q":"safe"}')
+    assert "secret-tail" not in out
+    assert "abc" not in out or "<redacted>" in out
+    assert "safe" in out
+
+
+def test_jsonl_redacts_url_fragment_and_userinfo():
+    # OAuth implicit の fragment token と userinfo を永続化境界で伏せる（Codex P2 追撃）
+    rec = ProbeAttemptRecord(
+        scan_id="s", attempt_id="s:1", role=ProbeRole.ATTACK,
+        request=RequestRecord(method="GET", url="http://user:pass@host/p?token=leak&id=5",
+                              transport=Transport.HTTPX),
+        response=ResponseRecord(status=200, final_url="https://app/cb#access_token=abc123&state=ok"),
+    )
+    line = to_jsonl_line(rec)
+    assert "abc123" not in line       # fragment token
+    assert "user:pass" not in line    # userinfo
+    assert "leak" not in line         # query token
+    assert "state" in line and "id=5" in line  # 非機微は残る
