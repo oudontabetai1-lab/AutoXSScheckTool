@@ -297,7 +297,8 @@ class PayloadGenerator:
                 if self.enable_web_browsing:
                     from .llm_web_tools import research_vulnerability
                     try:
-                        web_ctx = await research_vulnerability(check_type, url)
+                        # LLM-007: 対象 URL/host を外部検索へ送らない。check_type の汎用検索のみ。
+                        web_ctx = await research_vulnerability(check_type, "")
                         prompt = (
                             f"{web_ctx}\n\n"
                             f"Use the above web intelligence to generate more targeted payloads.\n\n"
