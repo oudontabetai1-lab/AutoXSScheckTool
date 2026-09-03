@@ -216,7 +216,7 @@ class GraphQLScanner(BaseScanner):
         capabilities=(
             CarrierCapability(
                 carrier=Carrier.QUERY, state=CapabilityState.UNSUPPORTED,
-                reason="GraphQL endpoint 特化",
+                reason="注入対象は GraphQL operation/variables＝graphql carrier で表現。URL query へは注入しない",
             ),
             CarrierCapability(
                 carrier=Carrier.FORM, state=CapabilityState.UNSUPPORTED,
@@ -224,7 +224,7 @@ class GraphQLScanner(BaseScanner):
             ),
             CarrierCapability(
                 carrier=Carrier.JSON, state=CapabilityState.UNSUPPORTED,
-                reason="GraphQL endpoint 特化",
+                reason="query/variables は graphql carrier で表現。transport は JSON だが汎用 JSON body 値注入ではない",
             ),
             CarrierCapability(
                 carrier=Carrier.XML, state=CapabilityState.UNSUPPORTED,

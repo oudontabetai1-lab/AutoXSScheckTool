@@ -391,12 +391,19 @@ class PrivEscScanner(BaseScanner):
                 reason="page/response 解析でありパラメータ注入をしない",
             ),
             CarrierCapability(
-                carrier=Carrier.HEADER, state=CapabilityState.UNSUPPORTED,
-                reason="page/response 解析でありパラメータ注入をしない",
+                # _BYPASS_HEADERS（X-Forwarded-For/Host, X-Real-IP 等）と _REWRITE_HEADERS
+                # （X-Original-URL/X-Rewrite-URL）を _raw_request で注入し 401/403 access-control
+                # bypass を検査するため supported。
+                carrier=Carrier.HEADER, state=CapabilityState.SUPPORTED,
+                value_kinds=frozenset({ValueKind.STRING}),
+                transports=frozenset({TransportKind.HTTPX}),
+                payload_shapes=frozenset({PayloadShape.SCALAR}),
             ),
             CarrierCapability(
+                # identity 切替のため multi-account の認証 cookie を持ち回るだけで、
+                # cookie 値へ攻撃 payload を注入するわけではない。
                 carrier=Carrier.COOKIE, state=CapabilityState.UNSUPPORTED,
-                reason="page/response 解析でありパラメータ注入をしない",
+                reason="identity 切替の認証 cookie を持ち回るが cookie 値へ payload 注入はしない",
             ),
             CarrierCapability(
                 carrier=Carrier.PATH, state=CapabilityState.UNSUPPORTED,

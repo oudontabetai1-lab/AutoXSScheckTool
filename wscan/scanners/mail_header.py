@@ -168,9 +168,12 @@ class MailHeaderInjectionScanner(BaseScanner):
                 task="0035-D",
             ),
             CarrierCapability(
-                carrier=Carrier.MULTIPART, state=CapabilityState.PLANNED,
-                reason="mail header injection の carrier 別 dispatcher は未接続",
-                task="0035-D",
+                # multipart/form-data 必須フォームには payload を非ファイル part
+                # ((None, value)) として client.post(files=...) で送るため supported。
+                carrier=Carrier.MULTIPART, state=CapabilityState.SUPPORTED,
+                value_kinds=frozenset({ValueKind.STRING}),
+                transports=frozenset({TransportKind.HTTPX}),
+                payload_shapes=frozenset({PayloadShape.SCALAR}),
             ),
             CarrierCapability(
                 carrier=Carrier.HEADER, state=CapabilityState.PLANNED,
