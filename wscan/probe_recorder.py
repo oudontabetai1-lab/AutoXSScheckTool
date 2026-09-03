@@ -46,6 +46,7 @@ LEDGER_FILENAME = "probe_attempts.jsonl"
 MANIFEST_FILENAME = "probe_attempts_manifest.json"
 
 _VALID_ROLES = frozenset(r.value for r in ProbeRole)
+_VALID_OUTCOMES = frozenset(o.value for o in ProbeOutcome)
 
 
 def _role_key(role) -> str:
@@ -173,6 +174,9 @@ class ProbeLedger:
             return False  # attempt_id が `<scan_id>:<seq>` 形でない（foreign prefix/壊れ連番）
         if rec.get("role") not in _VALID_ROLES:
             return False  # 語彙外の role
+        outcome = rec.get("outcome")
+        if outcome is not None and outcome not in _VALID_OUTCOMES:
+            return False  # 語彙外の outcome（null は未記録として許容）
         return True
 
     def _restore_from_existing(self) -> None:
@@ -219,6 +223,9 @@ class ProbeLedger:
             if skipped:
                 # 破損/非 object 行が正本にある＝証跡欠落。gate を倒す（No evidence, no COMPLETE）。
                 self.manifest.note_gap("ledger_rows_skipped_on_resume")
+            if max_seq > restored_rows:
+                # 連番に穴（例: 並列 worker が id を採番・永続化する前に crash）＝試行の欠落。
+                self.manifest.note_gap("ledger_sequence_hole")
         self._seq = max_seq
         # 前 run の manifest から「不完全だった事実」だけを継承する（内訳の再構成はしない）。
         manifest_path = self._path.with_name(MANIFEST_FILENAME)
@@ -291,6 +298,10 @@ class ProbeLedger:
         tmp_path = manifest_path.with_name(MANIFEST_FILENAME + ".tmp")
         try:
             with self._lock:
+                # これから書く manifest が回復後の状態を表すよう、snapshot 前に sticky flag を
+                # 楽観的に解除する（成功すれば evidence_incomplete は真の gap のみを反映）。失敗したら
+                # 下の except で再度立てる。順序を逆にすると回復済みでも incomplete が永続化される。
+                self._manifest_write_failed = False
                 data = self.manifest.to_dict()
                 data["scan_id"] = self.scan_id
                 data["ledger"] = LEDGER_FILENAME
@@ -301,11 +312,10 @@ class ProbeLedger:
                 encoding="utf-8",
             )
             os.replace(tmp_path, manifest_path)
-            # 一過性の書出し失敗から回復＝完全な manifest が永続化された。sticky flag を解除。
-            self._manifest_write_failed = False
             return True
-        except OSError:
-            # manifest を永続化できない＝完了証跡が残らない。gate を倒す（caller が返り値を見落として
-            # も evidence_incomplete で COMPLETE を防ぐ）。
-            self._manifest_write_failed = True
+        except (OSError, UnicodeError):
+            # manifest を永続化できない（I/O or lone surrogate 等の encode 失敗）＝完了証跡が残らない。
+            # gate を倒す（caller が返り値を見落としても evidence_incomplete で COMPLETE を防ぐ）。
+            with self._lock:
+                self._manifest_write_failed = True
             return False

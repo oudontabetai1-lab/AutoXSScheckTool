@@ -319,3 +319,42 @@ def test_append_lone_surrogate_quarantines(tmp_path):
         rationale="lonely \ud800 surrogate")
     assert led.append(bad) is False
     assert led.quarantined is True and led.evidence_incomplete is True
+
+
+def test_resume_detects_sequence_hole(tmp_path):
+    # 連番の穴（:000001 が無く :000002 のみ）＝並列採番後の crash 等→evidence_incomplete（Codex P1）
+    (tmp_path / LEDGER_FILENAME).write_text(
+        '{"scan_id":"s","attempt_id":"s:000002","role":"attack","outcome":"matched"}\n',
+        encoding="utf-8")
+    led = ProbeLedger(tmp_path, "s")
+    assert led.evidence_incomplete is True
+    assert any(e["error"] == "ledger_sequence_hole" for e in led.manifest.write_errors)
+
+
+def test_resume_rejects_foreign_outcome(tmp_path):
+    # 語彙外 outcome の行は成功に数えず gap（Codex P1）
+    (tmp_path / LEDGER_FILENAME).write_text(
+        '{"scan_id":"s","attempt_id":"s:000001","role":"attack","outcome":"bogus"}\n',
+        encoding="utf-8")
+    led = ProbeLedger(tmp_path, "s")
+    assert led.manifest.to_dict()["total"] == 0       # 成功に数えない
+    assert led.evidence_incomplete is True
+
+
+def test_manifest_retry_persists_complete_state(tmp_path):
+    # 一過性の manifest 書出し失敗→retry 成功で、永続化 manifest は complete（Codex P2）
+    led = ProbeLedger(tmp_path, "s")
+    led.append(_rec(led, ProbeRole.ATTACK, ProbeOutcome.MATCHED))
+    led._manifest_write_failed = True  # 直前の write_manifest が一過性失敗したと仮定
+    assert led.write_manifest() is True
+    assert led.evidence_incomplete is False           # 回復＝complete
+    data = json.loads((tmp_path / MANIFEST_FILENAME).read_text(encoding="utf-8"))
+    assert data["evidence_incomplete"] is False        # 永続化された manifest も complete
+
+
+def test_manifest_encode_failure_marks_incomplete(tmp_path):
+    # scan_id に lone surrogate → write_text が UnicodeEncodeError → incomplete（crash させない）（Codex P2）
+    led = ProbeLedger(tmp_path, "s\ud800bad")
+    led.append(_rec(led, ProbeRole.ATTACK, ProbeOutcome.MATCHED))
+    assert led.write_manifest() is False
+    assert led.evidence_incomplete is True
