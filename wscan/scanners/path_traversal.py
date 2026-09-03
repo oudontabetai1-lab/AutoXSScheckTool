@@ -50,12 +50,14 @@ class PathTraversalScanner(BaseScanner):
                 carrier=Carrier.QUERY, state=CapabilityState.SUPPORTED,
                 value_kinds=frozenset({ValueKind.STRING}),
                 transports=frozenset({TransportKind.PLAYWRIGHT}),
+                browser_required=True,
                 payload_shapes=frozenset({PayloadShape.SCALAR}),
             ),
             CarrierCapability(
                 carrier=Carrier.FORM, state=CapabilityState.SUPPORTED,
                 value_kinds=frozenset({ValueKind.STRING}),
                 transports=frozenset({TransportKind.PLAYWRIGHT}),
+                browser_required=True,
                 payload_shapes=frozenset({PayloadShape.SCALAR}),
             ),
             CarrierCapability(

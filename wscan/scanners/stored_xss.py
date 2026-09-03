@@ -123,7 +123,6 @@ class StoredXSSScanner(BaseScanner):
                 task="0035-D",
             ),
         ),
-        prerequisites=frozenset({Prerequisite.BROWSER}),
         cost=CostClass.HIGH,
     )
 

@@ -55,6 +55,12 @@ class TransportKind(str, Enum):
     DOM = "dom"                # ブラウザ DOM 観測（dom_xss）
 
 
+# 実ブラウザを要する transport（browser_required と整合させる）
+BROWSER_TRANSPORTS: frozenset[TransportKind] = frozenset(
+    {TransportKind.PLAYWRIGHT, TransportKind.DOM}
+)
+
+
 class PayloadShape(str, Enum):
     SCALAR = "scalar"           # 文字列/数値をそのまま埋め込む
     STRUCTURED = "structured"   # object/array 構造（nosql $ne, graphql variables 等）
@@ -164,6 +170,17 @@ def validate_scanner_contract(check: str, contract: ScannerContract) -> list[str
             # dispatch が scalar/structured/binary を選べるよう payload_shapes も必須にする。
             if not cap.payload_shapes:
                 errors.append(f"{check}:{cap.carrier.value}: supported but no payload_shapes")
+            # transport が browser 系のみ（Playwright/DOM）なら browser_required を True に。
+            # browserless フィルタが「browser 無しで実行可」と誤認しないため。
+            if cap.transports and cap.transports <= BROWSER_TRANSPORTS and not cap.browser_required:
+                errors.append(
+                    f"{check}:{cap.carrier.value}: browser-only transport but browser_required=False"
+                )
+            # 逆に browser_required=True なら browser transport を1つは宣言する。
+            if cap.browser_required and not (cap.transports & BROWSER_TRANSPORTS):
+                errors.append(
+                    f"{check}:{cap.carrier.value}: browser_required but no browser transport"
+                )
         else:  # unsupported / planned
             if not cap.reason:
                 errors.append(f"{check}:{cap.carrier.value}: {cap.state.value} but no reason")

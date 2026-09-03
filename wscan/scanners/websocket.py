@@ -110,7 +110,6 @@ class WebSocketScanner(BaseScanner):
                 payload_shapes=frozenset({PayloadShape.SCALAR}),
             ),
         ),
-        prerequisites=frozenset({Prerequisite.BROWSER}),
         state_change=StateChangeClass.CONDITIONAL,
         cost=CostClass.HIGH,
     )

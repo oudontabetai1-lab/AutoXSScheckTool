@@ -155,7 +155,6 @@ class PrototypePollutionScanner(BaseScanner):
                 reason="prototype pollution の現行 probe 対象外",
             ),
         ),
-        prerequisites=frozenset({Prerequisite.BROWSER}),
         state_change=StateChangeClass.ALWAYS,
         cost=CostClass.HIGH,
     )
