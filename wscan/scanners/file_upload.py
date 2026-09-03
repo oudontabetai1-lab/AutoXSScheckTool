@@ -72,9 +72,12 @@ class FileUploadScanner(BaseScanner):
                 reason="file upload は multipart 特化",
             ),
             CarrierCapability(
+                # _form_action_url() が browser.navigate()/page.evaluate() で form action を
+                # 解決してから _upload_file() の HTTPX POST を送るため browser 必須。
                 carrier=Carrier.MULTIPART, state=CapabilityState.SUPPORTED,
                 value_kinds=frozenset({ValueKind.BINARY, ValueKind.STRING}),
-                transports=frozenset({TransportKind.HTTPX}),
+                transports=frozenset({TransportKind.PLAYWRIGHT, TransportKind.HTTPX}),
+                browser_required=True,
                 payload_shapes=frozenset({PayloadShape.BINARY}),
             ),
             CarrierCapability(

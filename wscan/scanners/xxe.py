@@ -111,9 +111,12 @@ class XXEScanner(BaseScanner):
                 reason="XXE は XML document 特化",
             ),
         ),
+        state_change=StateChangeClass.ALWAYS,
         cost=CostClass.HIGH,
     )
 
+    # scan_injection_point が method に関係なく XML を POST するため常時状態変更。
+    ALWAYS_STATE_CHANGING = True
     SEVERITY = "high"
 
     def __init__(self, engine: "ScanEngine"):

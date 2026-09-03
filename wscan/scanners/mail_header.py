@@ -146,15 +146,19 @@ class MailHeaderInjectionScanner(BaseScanner):
         execution_kinds=frozenset({ExecutionKind.FIELD_INJECTION}),
         capabilities=(
             CarrierCapability(
+                # _apply_payload が browser.test_url_param/navigate+fill_and_submit_form で
+                # 送るため browser 必須。
                 carrier=Carrier.QUERY, state=CapabilityState.SUPPORTED,
                 value_kinds=frozenset({ValueKind.STRING}),
-                transports=frozenset({TransportKind.HTTPX, TransportKind.PLAYWRIGHT}),
+                transports=frozenset({TransportKind.PLAYWRIGHT}),
+                browser_required=True,
                 payload_shapes=frozenset({PayloadShape.SCALAR}),
             ),
             CarrierCapability(
                 carrier=Carrier.FORM, state=CapabilityState.SUPPORTED,
                 value_kinds=frozenset({ValueKind.STRING}),
-                transports=frozenset({TransportKind.HTTPX, TransportKind.PLAYWRIGHT}),
+                transports=frozenset({TransportKind.PLAYWRIGHT}),
+                browser_required=True,
                 payload_shapes=frozenset({PayloadShape.SCALAR}),
             ),
             CarrierCapability(
@@ -169,10 +173,12 @@ class MailHeaderInjectionScanner(BaseScanner):
             ),
             CarrierCapability(
                 # multipart/form-data 必須フォームには payload を非ファイル part
-                # ((None, value)) として client.post(files=...) で送るため supported。
+                # ((None, value)) として client.post(files=...) で送るが、action は
+                # _extract_form()（browser navigate/evaluate）で解決するため browser 必須。
                 carrier=Carrier.MULTIPART, state=CapabilityState.SUPPORTED,
                 value_kinds=frozenset({ValueKind.STRING}),
-                transports=frozenset({TransportKind.HTTPX}),
+                transports=frozenset({TransportKind.PLAYWRIGHT, TransportKind.HTTPX}),
+                browser_required=True,
                 payload_shapes=frozenset({PayloadShape.SCALAR}),
             ),
             CarrierCapability(

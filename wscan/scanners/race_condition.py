@@ -66,9 +66,12 @@ class RaceConditionScanner(BaseScanner):
             CarrierCapability(
                 # scan_field が form fields を urlencode し _send_burst() で 8 回連続 POST して
                 # race condition を検査するため supported。
+                # _form_request_template() が browser.navigate()/page.evaluate() で form を取得し
+                # てから _send_burst() の HTTPX burst を送るため browser 必須。
                 carrier=Carrier.FORM, state=CapabilityState.SUPPORTED,
                 value_kinds=frozenset({ValueKind.STRING}),
-                transports=frozenset({TransportKind.HTTPX}),
+                transports=frozenset({TransportKind.PLAYWRIGHT, TransportKind.HTTPX}),
+                browser_required=True,
                 payload_shapes=frozenset({PayloadShape.SCALAR}),
             ),
             CarrierCapability(

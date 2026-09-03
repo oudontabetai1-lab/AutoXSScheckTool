@@ -170,11 +170,12 @@ def validate_scanner_contract(check: str, contract: ScannerContract) -> list[str
             # dispatch が scalar/structured/binary を選べるよう payload_shapes も必須にする。
             if not cap.payload_shapes:
                 errors.append(f"{check}:{cap.carrier.value}: supported but no payload_shapes")
-            # transport が browser 系のみ（Playwright/DOM）なら browser_required を True に。
-            # browserless フィルタが「browser 無しで実行可」と誤認しないため。
-            if cap.transports and cap.transports <= BROWSER_TRANSPORTS and not cap.browser_required:
+            # transport が browser 系（Playwright/DOM）を1つでも含むなら browser_required を True に。
+            # httpx を併記していても実経路が browser を通る（navigate/fill_and_submit で form 取得等）
+            # 場合があり、browserless フィルタが「browser 無しで実行可」と誤認しないため。
+            if (cap.transports & BROWSER_TRANSPORTS) and not cap.browser_required:
                 errors.append(
-                    f"{check}:{cap.carrier.value}: browser-only transport but browser_required=False"
+                    f"{check}:{cap.carrier.value}: browser transport but browser_required=False"
                 )
             # 逆に browser_required=True なら browser transport を1つは宣言する。
             if cap.browser_required and not (cap.transports & BROWSER_TRANSPORTS):
