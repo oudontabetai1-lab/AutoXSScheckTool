@@ -116,9 +116,15 @@ class PrototypePollutionScanner(BaseScanner):
                 reason="prototype pollution の現行 probe 対象外",
             ),
             CarrierCapability(
-                carrier=Carrier.JSON, state=CapabilityState.PLANNED,
-                reason="base JSON flag と共通 dispatch は未接続（server-side 独自経路あり）",
-                task="0035-D",
+                # _scan_server_side()→_probe_server_template() が api_seed テンプレの
+                # method/content-type で JSON body を送り server-side prototype pollution を
+                # 検査するため supported。base の SUPPORTS_JSON_BODY 経路ではなく独自 HTTPX 送信
+                # なので、旧フラグ一致 test では mass_assignment と同じ既知例外にする。
+                carrier=Carrier.JSON, state=CapabilityState.SUPPORTED,
+                value_kinds=frozenset({ValueKind.OBJECT}),
+                transports=frozenset({TransportKind.HTTPX}),
+                payload_shapes=frozenset({PayloadShape.STRUCTURED}),
+                structured_payload=True,
             ),
             CarrierCapability(
                 carrier=Carrier.XML, state=CapabilityState.UNSUPPORTED,

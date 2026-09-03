@@ -7,7 +7,7 @@ from wscan.scanner_contract import (
 )
 
 # SUPPORTS_JSON_BODY 実値と JSON carrier supported の一致を免除する既知例外
-_JSON_FLAG_ALLOWLIST = {"mass_assignment"}  # api_seed 経由で JSON を扱うが base json 経路は使わない
+_JSON_FLAG_ALLOWLIST = {"mass_assignment", "prototype_pollution"}  # api_seed 経由で JSON を扱うが base json 経路は使わない
 
 
 def _contracts():
@@ -65,3 +65,10 @@ def test_capability_matrix_shape():
         for carrier, cell in row["carriers"].items():
             assert cell["symbol"] in {"s", "P", "U", "?"}
             assert cell["symbol"] != "?", f"{check}:{carrier} unclassified"
+            # capability の全次元がセルに載っていること（下流の再構成用）
+            for key in ("transports", "payload_shapes", "value_kinds"):
+                assert isinstance(cell[key], list), f"{check}:{carrier} {key}"
+            assert isinstance(cell["browser_required"], bool)
+            assert isinstance(cell["structured_payload"], bool)
+            if cell["symbol"] == "s":  # supported は payload_shapes を必ず持つ
+                assert cell["payload_shapes"], f"{check}:{carrier} supported without payload_shapes"

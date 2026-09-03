@@ -161,6 +161,9 @@ def validate_scanner_contract(check: str, contract: ScannerContract) -> list[str
                 errors.append(f"{check}:{cap.carrier.value}: supported but no value_kinds")
             if not cap.transports:
                 errors.append(f"{check}:{cap.carrier.value}: supported but no transports")
+            # dispatch が scalar/structured/binary を選べるよう payload_shapes も必須にする。
+            if not cap.payload_shapes:
+                errors.append(f"{check}:{cap.carrier.value}: supported but no payload_shapes")
         else:  # unsupported / planned
             if not cap.reason:
                 errors.append(f"{check}:{cap.carrier.value}: {cap.state.value} but no reason")
@@ -199,7 +202,13 @@ def build_capability_matrix(contracts: dict[str, ScannerContract]) -> dict:
                 "state": cap.state.value if cap else "unclassified",
                 "reason": cap.reason if cap else "",
                 "task": cap.task if cap else "",
+                # 宣言された capability を下流（0034 scorecard/dispatcher）が完全再構成できるよう
+                # value_kinds だけでなく transports/payload_shapes/browser_required/structured_payload も出す。
                 "value_kinds": sorted(vk.value for vk in (cap.value_kinds if cap else frozenset())),
+                "transports": sorted(t.value for t in (cap.transports if cap else frozenset())),
+                "payload_shapes": sorted(s.value for s in (cap.payload_shapes if cap else frozenset())),
+                "browser_required": bool(cap.browser_required) if cap else False,
+                "structured_payload": bool(cap.structured_payload) if cap else False,
             }
         rows[check] = {
             "execution_kinds": sorted(e.value for e in contract.execution_kinds),
