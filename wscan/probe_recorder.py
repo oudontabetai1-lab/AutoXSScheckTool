@@ -170,7 +170,9 @@ class ProbeLedger:
             return False  # foreign/missing scan_id＝別ファイル or 破損
         aid = str(rec.get("attempt_id", ""))
         head, sep, seq = aid.rpartition(":")
-        if not sep or head != self.scan_id or not seq.isdigit():
+        # seq は ASCII 数字かつ長さ上限内（`²` 等の非 ASCII 数字や int() 変換上限超の巨大桁を弾く）。
+        if (not sep or head != self.scan_id
+                or not (seq.isascii() and seq.isdigit()) or len(seq) > 15):
             return False  # attempt_id が `<scan_id>:<seq>` 形でない（foreign prefix/壊れ連番）
         if rec.get("role") not in _VALID_ROLES:
             return False  # 語彙外の role
@@ -198,6 +200,8 @@ class ProbeLedger:
                 self.manifest.note_gap("ledger_tail_repair_failed")
                 return
             skipped = 0
+            duplicates = 0
+            seen_seqs: set = set()
             try:
                 with open(self._path, encoding="utf-8") as fh:
                     for line in fh:
@@ -212,7 +216,12 @@ class ProbeLedger:
                         if not self._valid_row(rec):
                             skipped += 1
                             continue  # schema 不正（非 object/foreign scan_id/壊れ id/語彙外 role）
-                        max_seq = max(max_seq, int(str(rec["attempt_id"]).rpartition(":")[2]))
+                        seq = int(str(rec["attempt_id"]).rpartition(":")[2])  # _valid_row 済で安全
+                        max_seq = max(max_seq, seq)
+                        if seq in seen_seqs:
+                            duplicates += 1  # 同一 attempt_id の重複＝正本の破損
+                        else:
+                            seen_seqs.add(seq)
                         restored_rows += 1
                         self.manifest.record(rec.get("role", ""), rec.get("outcome"), write_ok=True)
             except (OSError, UnicodeDecodeError):
@@ -223,8 +232,12 @@ class ProbeLedger:
             if skipped:
                 # 破損/非 object 行が正本にある＝証跡欠落。gate を倒す（No evidence, no COMPLETE）。
                 self.manifest.note_gap("ledger_rows_skipped_on_resume")
-            if max_seq > restored_rows:
+            if duplicates:
+                # 同一 attempt_id の重複＝正本の破損（穴を隠しうる）。
+                self.manifest.note_gap("ledger_duplicate_attempt_id")
+            if max_seq > len(seen_seqs):
                 # 連番に穴（例: 並列 worker が id を採番・永続化する前に crash）＝試行の欠落。
+                # 重複が穴を隠さないよう **distinct 連番数** と比較する。
                 self.manifest.note_gap("ledger_sequence_hole")
         self._seq = max_seq
         # 前 run の manifest から「不完全だった事実」だけを継承する（内訳の再構成はしない）。
@@ -275,6 +288,11 @@ class ProbeLedger:
             if self._quarantined:
                 self.manifest.record(record.role, record.outcome, write_ok=False,
                                      error="ledger_quarantined")
+                return False
+            if record.scan_id != self.scan_id:
+                # 別 scan のレコードを誤って渡された＝混入を正本へ書かない（呼び出し側バグ）。
+                self.manifest.record(record.role, record.outcome, write_ok=False,
+                                     error="foreign_scan_record")
                 return False
             try:
                 line = to_jsonl_line(record)

@@ -358,3 +358,39 @@ def test_manifest_encode_failure_marks_incomplete(tmp_path):
     led.append(_rec(led, ProbeRole.ATTACK, ProbeOutcome.MATCHED))
     assert led.write_manifest() is False
     assert led.evidence_incomplete is True
+
+
+def test_append_rejects_foreign_scan_record(tmp_path):
+    # 別 scan のレコードを渡されたら正本へ書かず gap（Codex P1）
+    led = ProbeLedger(tmp_path, "s")
+    foreign = ProbeAttemptRecord(scan_id="OTHER", attempt_id="OTHER:000001",
+                                 role=ProbeRole.ATTACK, outcome=ProbeOutcome.MATCHED)
+    assert led.append(foreign) is False
+    assert led.evidence_incomplete is True
+    assert not (tmp_path / LEDGER_FILENAME).exists() or \
+        "OTHER" not in (tmp_path / LEDGER_FILENAME).read_text(encoding="utf-8")
+
+
+def test_resume_detects_duplicate_attempt_ids(tmp_path):
+    # 重複 attempt_id は穴を隠しうる＝distinct 連番数で穴も重複も検知（Codex P1）
+    (tmp_path / LEDGER_FILENAME).write_text(
+        '{"scan_id":"s","attempt_id":"s:000001","role":"attack","outcome":"matched"}\n'
+        '{"scan_id":"s","attempt_id":"s:000003","role":"attack","outcome":"matched"}\n'
+        '{"scan_id":"s","attempt_id":"s:000003","role":"attack","outcome":"matched"}\n',  # dup
+        encoding="utf-8")
+    led = ProbeLedger(tmp_path, "s")
+    assert led.evidence_incomplete is True
+    errs = {e["error"] for e in led.manifest.write_errors}
+    assert "ledger_duplicate_attempt_id" in errs
+    assert "ledger_sequence_hole" in errs  # :000002 の穴も検知（重複に隠されない）
+
+
+def test_resume_rejects_unparseable_seq_suffix(tmp_path):
+    # isdigit だが int() 不能な suffix（非 ASCII 上付き数字）は valid にせず gap（Codex P2）
+    (tmp_path / LEDGER_FILENAME).write_text(
+        '{"scan_id":"s","attempt_id":"s:\u00b2","role":"attack","outcome":"matched"}\n'
+        '{"scan_id":"s","attempt_id":"s:000001","role":"attack","outcome":"matched"}\n',
+        encoding="utf-8")
+    led = ProbeLedger(tmp_path, "s")  # crash しない
+    assert led.manifest.to_dict()["total"] == 1  # 不正 seq 行は成功に数えない
+    assert led.evidence_incomplete is True
