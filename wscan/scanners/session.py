@@ -9,6 +9,12 @@ Per-page check that inspects cookies set by the application and flags ones that:
 """
 from typing import TYPE_CHECKING
 
+from wscan.scanner_contract import (
+    CapabilityState, Carrier, CarrierCapability, CostClass, ExecutionKind,
+    PayloadShape, Prerequisite, ScannerContract, StateChangeClass, TransportKind,
+    ValueKind,
+)
+
 from .base import BaseScanner, Finding
 
 if TYPE_CHECKING:
@@ -34,6 +40,54 @@ class SessionScanner(BaseScanner):
 
     HAS_PAGE_LEVEL = True
     CHECK_TYPE = "session"
+    CONTRACT = ScannerContract(
+        execution_kinds=frozenset({ExecutionKind.PAGE_ANALYSIS}),
+        capabilities=(
+            CarrierCapability(
+                carrier=Carrier.QUERY, state=CapabilityState.UNSUPPORTED,
+                reason="page/response 解析でありパラメータ注入をしない",
+            ),
+            CarrierCapability(
+                carrier=Carrier.FORM, state=CapabilityState.UNSUPPORTED,
+                reason="page/response 解析でありパラメータ注入をしない",
+            ),
+            CarrierCapability(
+                carrier=Carrier.JSON, state=CapabilityState.UNSUPPORTED,
+                reason="page/response 解析でありパラメータ注入をしない",
+            ),
+            CarrierCapability(
+                carrier=Carrier.XML, state=CapabilityState.UNSUPPORTED,
+                reason="page/response 解析でありパラメータ注入をしない",
+            ),
+            CarrierCapability(
+                carrier=Carrier.MULTIPART, state=CapabilityState.UNSUPPORTED,
+                reason="page/response 解析でありパラメータ注入をしない",
+            ),
+            CarrierCapability(
+                carrier=Carrier.HEADER, state=CapabilityState.UNSUPPORTED,
+                reason="page/response 解析でありパラメータ注入をしない",
+            ),
+            CarrierCapability(
+                carrier=Carrier.COOKIE, state=CapabilityState.UNSUPPORTED,
+                reason="cookie を解析するが注入しない",
+            ),
+            CarrierCapability(
+                carrier=Carrier.PATH, state=CapabilityState.UNSUPPORTED,
+                reason="page/response 解析でありパラメータ注入をしない",
+            ),
+            CarrierCapability(
+                carrier=Carrier.GRAPHQL, state=CapabilityState.UNSUPPORTED,
+                reason="page/response 解析でありパラメータ注入をしない",
+            ),
+            CarrierCapability(
+                carrier=Carrier.WEBSOCKET, state=CapabilityState.UNSUPPORTED,
+                reason="page/response 解析でありパラメータ注入をしない",
+            ),
+        ),
+        state_change=StateChangeClass.READ_ONLY,
+        cost=CostClass.LOW,
+    )
+
     SEVERITY = "medium"
 
     def __init__(self, engine: "ScanEngine"):

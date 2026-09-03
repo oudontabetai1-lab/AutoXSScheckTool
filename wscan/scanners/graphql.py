@@ -24,6 +24,12 @@ from urllib.parse import urljoin, urlparse
 
 import httpx
 
+from wscan.scanner_contract import (
+    CapabilityState, Carrier, CarrierCapability, CostClass, ExecutionKind,
+    PayloadShape, Prerequisite, ScannerContract, StateChangeClass, TransportKind,
+    ValueKind,
+)
+
 from .base import BaseScanner, Finding
 
 if TYPE_CHECKING:
@@ -205,6 +211,57 @@ class GraphQLScanner(BaseScanner):
 
     HAS_PAGE_LEVEL = True
     CHECK_TYPE = "graphql"
+    CONTRACT = ScannerContract(
+        execution_kinds=frozenset({ExecutionKind.PAGE_ANALYSIS, ExecutionKind.PROTOCOL_MESSAGE}),
+        capabilities=(
+            CarrierCapability(
+                carrier=Carrier.QUERY, state=CapabilityState.UNSUPPORTED,
+                reason="GraphQL endpoint 特化",
+            ),
+            CarrierCapability(
+                carrier=Carrier.FORM, state=CapabilityState.UNSUPPORTED,
+                reason="GraphQL endpoint 特化",
+            ),
+            CarrierCapability(
+                carrier=Carrier.JSON, state=CapabilityState.UNSUPPORTED,
+                reason="GraphQL endpoint 特化",
+            ),
+            CarrierCapability(
+                carrier=Carrier.XML, state=CapabilityState.UNSUPPORTED,
+                reason="GraphQL endpoint 特化",
+            ),
+            CarrierCapability(
+                carrier=Carrier.MULTIPART, state=CapabilityState.UNSUPPORTED,
+                reason="GraphQL endpoint 特化",
+            ),
+            CarrierCapability(
+                carrier=Carrier.HEADER, state=CapabilityState.UNSUPPORTED,
+                reason="GraphQL endpoint 特化",
+            ),
+            CarrierCapability(
+                carrier=Carrier.COOKIE, state=CapabilityState.UNSUPPORTED,
+                reason="GraphQL endpoint 特化",
+            ),
+            CarrierCapability(
+                carrier=Carrier.PATH, state=CapabilityState.UNSUPPORTED,
+                reason="GraphQL endpoint 特化",
+            ),
+            CarrierCapability(
+                carrier=Carrier.GRAPHQL, state=CapabilityState.SUPPORTED,
+                value_kinds=frozenset({ValueKind.STRING, ValueKind.OBJECT}),
+                transports=frozenset({TransportKind.HTTPX}),
+                payload_shapes=frozenset({PayloadShape.STRUCTURED}),
+                structured_payload=True,
+            ),
+            CarrierCapability(
+                carrier=Carrier.WEBSOCKET, state=CapabilityState.UNSUPPORTED,
+                reason="GraphQL endpoint 特化",
+            ),
+        ),
+        state_change=StateChangeClass.ALWAYS,
+        cost=CostClass.HIGH,
+    )
+
     ALWAYS_STATE_CHANGING = True
     SEVERITY = "medium"
 

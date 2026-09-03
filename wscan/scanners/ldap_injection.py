@@ -8,6 +8,12 @@ from typing import TYPE_CHECKING
 
 from wscan.injection_point import InjectionPoint
 
+from wscan.scanner_contract import (
+    CapabilityState, Carrier, CarrierCapability, CostClass, ExecutionKind,
+    PayloadShape, Prerequisite, ScannerContract, StateChangeClass, TransportKind,
+    ValueKind,
+)
+
 from .base import BaseScanner, Finding
 
 if TYPE_CHECKING:
@@ -47,6 +53,65 @@ class LDAPScanner(BaseScanner):
     """LDAP filter injection scanner."""
 
     CHECK_TYPE = "ldap"
+    CONTRACT = ScannerContract(
+        execution_kinds=frozenset({ExecutionKind.FIELD_INJECTION}),
+        capabilities=(
+            CarrierCapability(
+                carrier=Carrier.QUERY, state=CapabilityState.SUPPORTED,
+                value_kinds=frozenset({ValueKind.STRING}),
+                transports=frozenset({TransportKind.PLAYWRIGHT}),
+                payload_shapes=frozenset({PayloadShape.SCALAR}),
+            ),
+            CarrierCapability(
+                carrier=Carrier.FORM, state=CapabilityState.SUPPORTED,
+                value_kinds=frozenset({ValueKind.STRING}),
+                transports=frozenset({TransportKind.PLAYWRIGHT}),
+                payload_shapes=frozenset({PayloadShape.SCALAR}),
+            ),
+            CarrierCapability(
+                carrier=Carrier.JSON, state=CapabilityState.SUPPORTED,
+                value_kinds=frozenset({ValueKind.STRING}),
+                transports=frozenset({TransportKind.HTTPX}),
+                payload_shapes=frozenset({PayloadShape.SCALAR}),
+            ),
+            CarrierCapability(
+                carrier=Carrier.XML, state=CapabilityState.PLANNED,
+                reason="carrier 別 dispatcher は未接続",
+                task="0035-D",
+            ),
+            CarrierCapability(
+                carrier=Carrier.MULTIPART, state=CapabilityState.PLANNED,
+                reason="carrier 別 dispatcher は未接続",
+                task="0035-D",
+            ),
+            CarrierCapability(
+                carrier=Carrier.HEADER, state=CapabilityState.PLANNED,
+                reason="carrier 別 dispatcher は未接続",
+                task="0035-D",
+            ),
+            CarrierCapability(
+                carrier=Carrier.COOKIE, state=CapabilityState.PLANNED,
+                reason="carrier 別 dispatcher は未接続",
+                task="0035-D",
+            ),
+            CarrierCapability(
+                carrier=Carrier.PATH, state=CapabilityState.PLANNED,
+                reason="carrier 別 dispatcher は未接続",
+                task="0035-D",
+            ),
+            CarrierCapability(
+                carrier=Carrier.GRAPHQL, state=CapabilityState.PLANNED,
+                reason="carrier 別 dispatcher は未接続",
+                task="0035-D",
+            ),
+            CarrierCapability(
+                carrier=Carrier.WEBSOCKET, state=CapabilityState.PLANNED,
+                reason="carrier 別 dispatcher は未接続",
+                task="0035-D",
+            ),
+        ),
+    )
+
     SEVERITY = "high"
     SUPPORTS_JSON_BODY = True
 

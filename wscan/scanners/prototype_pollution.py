@@ -22,6 +22,12 @@ from typing import Any, TYPE_CHECKING
 
 import httpx
 
+from wscan.scanner_contract import (
+    CapabilityState, Carrier, CarrierCapability, CostClass, ExecutionKind,
+    PayloadShape, Prerequisite, ScannerContract, StateChangeClass, TransportKind,
+    ValueKind,
+)
+
 from .base import BaseScanner, Finding, merge_template_headers
 
 if TYPE_CHECKING:
@@ -95,6 +101,59 @@ class PrototypePollutionScanner(BaseScanner):
 
     HAS_PAGE_LEVEL = True
     CHECK_TYPE = "prototype_pollution"
+    CONTRACT = ScannerContract(
+        execution_kinds=frozenset({ExecutionKind.PAGE_ANALYSIS}),
+        capabilities=(
+            CarrierCapability(
+                carrier=Carrier.QUERY, state=CapabilityState.SUPPORTED,
+                value_kinds=frozenset({ValueKind.STRING}),
+                transports=frozenset({TransportKind.DOM, TransportKind.PLAYWRIGHT}),
+                payload_shapes=frozenset({PayloadShape.SCALAR}),
+                browser_required=True,
+            ),
+            CarrierCapability(
+                carrier=Carrier.FORM, state=CapabilityState.UNSUPPORTED,
+                reason="prototype pollution の現行 probe 対象外",
+            ),
+            CarrierCapability(
+                carrier=Carrier.JSON, state=CapabilityState.PLANNED,
+                reason="base JSON flag と共通 dispatch は未接続（server-side 独自経路あり）",
+                task="0035-D",
+            ),
+            CarrierCapability(
+                carrier=Carrier.XML, state=CapabilityState.UNSUPPORTED,
+                reason="prototype pollution の現行 probe 対象外",
+            ),
+            CarrierCapability(
+                carrier=Carrier.MULTIPART, state=CapabilityState.UNSUPPORTED,
+                reason="prototype pollution の現行 probe 対象外",
+            ),
+            CarrierCapability(
+                carrier=Carrier.HEADER, state=CapabilityState.UNSUPPORTED,
+                reason="prototype pollution の現行 probe 対象外",
+            ),
+            CarrierCapability(
+                carrier=Carrier.COOKIE, state=CapabilityState.UNSUPPORTED,
+                reason="prototype pollution の現行 probe 対象外",
+            ),
+            CarrierCapability(
+                carrier=Carrier.PATH, state=CapabilityState.UNSUPPORTED,
+                reason="prototype pollution の現行 probe 対象外",
+            ),
+            CarrierCapability(
+                carrier=Carrier.GRAPHQL, state=CapabilityState.UNSUPPORTED,
+                reason="prototype pollution の現行 probe 対象外",
+            ),
+            CarrierCapability(
+                carrier=Carrier.WEBSOCKET, state=CapabilityState.UNSUPPORTED,
+                reason="prototype pollution の現行 probe 対象外",
+            ),
+        ),
+        prerequisites=frozenset({Prerequisite.BROWSER}),
+        state_change=StateChangeClass.ALWAYS,
+        cost=CostClass.HIGH,
+    )
+
     ALWAYS_STATE_CHANGING = True
     SEVERITY = "high"
 
