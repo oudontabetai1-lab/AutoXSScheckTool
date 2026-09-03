@@ -52,8 +52,12 @@ class CORSScanner(BaseScanner):
                 reason="page/response 解析でありパラメータ注入をしない",
             ),
             CarrierCapability(
-                carrier=Carrier.HEADER, state=CapabilityState.UNSUPPORTED,
-                reason="page/response 解析でありパラメータ注入をしない",
+                # scan_page が _get_with_origin() で canary Origin ヘッダを HTTPX 注入し
+                # arbitrary Origin reflection を検査するため supported。
+                carrier=Carrier.HEADER, state=CapabilityState.SUPPORTED,
+                value_kinds=frozenset({ValueKind.STRING}),
+                transports=frozenset({TransportKind.HTTPX}),
+                payload_shapes=frozenset({PayloadShape.SCALAR}),
             ),
             CarrierCapability(
                 carrier=Carrier.COOKIE, state=CapabilityState.UNSUPPORTED,

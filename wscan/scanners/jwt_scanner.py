@@ -185,12 +185,19 @@ class JWTScanner(BaseScanner):
                 reason="page/response 解析でありパラメータ注入をしない",
             ),
             CarrierCapability(
-                carrier=Carrier.HEADER, state=CapabilityState.UNSUPPORTED,
-                reason="page/response 解析でありパラメータ注入をしない",
+                # _probe_token() が改変 JWT を Authorization: Bearer ヘッダとして HTTPX 送信し
+                # kid/alg none 等の受理を検査するため supported。
+                carrier=Carrier.HEADER, state=CapabilityState.SUPPORTED,
+                value_kinds=frozenset({ValueKind.STRING}),
+                transports=frozenset({TransportKind.HTTPX}),
+                payload_shapes=frozenset({PayloadShape.SCALAR}),
             ),
             CarrierCapability(
-                carrier=Carrier.COOKIE, state=CapabilityState.UNSUPPORTED,
-                reason="cookie を解析するが注入しない",
+                # _probe_token() は改変 JWT を token/jwt/access_token cookie としても送るため supported。
+                carrier=Carrier.COOKIE, state=CapabilityState.SUPPORTED,
+                value_kinds=frozenset({ValueKind.STRING}),
+                transports=frozenset({TransportKind.HTTPX}),
+                payload_shapes=frozenset({PayloadShape.SCALAR}),
             ),
             CarrierCapability(
                 carrier=Carrier.PATH, state=CapabilityState.UNSUPPORTED,

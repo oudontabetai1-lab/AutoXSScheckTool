@@ -367,8 +367,12 @@ class PrivEscScanner(BaseScanner):
         execution_kinds=frozenset({ExecutionKind.PAGE_ANALYSIS}),
         capabilities=(
             CarrierCapability(
-                carrier=Carrier.QUERY, state=CapabilityState.UNSUPPORTED,
-                reason="page/response 解析でありパラメータ注入をしない",
+                # scan_page が _test_param_idor()/_mutate_uuid() で ID 系クエリ値を
+                # 差し替え HTTPX 送信し IDOR を検査するため supported。
+                carrier=Carrier.QUERY, state=CapabilityState.SUPPORTED,
+                value_kinds=frozenset({ValueKind.STRING}),
+                transports=frozenset({TransportKind.HTTPX}),
+                payload_shapes=frozenset({PayloadShape.SCALAR}),
             ),
             CarrierCapability(
                 carrier=Carrier.FORM, state=CapabilityState.UNSUPPORTED,

@@ -88,9 +88,14 @@ class NoSQLInjectionScanner(BaseScanner):
                 payload_shapes=frozenset({PayloadShape.SCALAR}),
             ),
             CarrierCapability(
-                carrier=Carrier.JSON, state=CapabilityState.PLANNED,
-                reason="JSON body 検出改修は 0012/0035-D",
-                task="0035-D",
+                # scan_injection_point()→_test_json_body() が MongoDB 演算子 object を
+                # JSON body として HTTPX 送信し nosql_json_error を検出するため supported。
+                # base の SUPPORTS_JSON_BODY/pointer dispatch は未接続なので旧フラグ一致 test の既知例外。
+                carrier=Carrier.JSON, state=CapabilityState.SUPPORTED,
+                value_kinds=frozenset({ValueKind.OBJECT}),
+                transports=frozenset({TransportKind.HTTPX}),
+                payload_shapes=frozenset({PayloadShape.STRUCTURED}),
+                structured_payload=True,
             ),
             CarrierCapability(
                 carrier=Carrier.XML, state=CapabilityState.PLANNED,
