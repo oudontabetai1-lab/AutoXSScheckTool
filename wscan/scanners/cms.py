@@ -59,8 +59,12 @@ class CmsScanner(BaseScanner):
                 reason="page/response 解析でありパラメータ注入をしない",
             ),
             CarrierCapability(
-                carrier=Carrier.PATH, state=CapabilityState.UNSUPPORTED,
-                reason="page/response 解析でありパラメータ注入をしない",
+                # scan_page が _GENERIC_PATHS/CMS 別パス（/.env, /wp-config.php.bak 等）を
+                # origin へ付与し HTTPX GET して露出ファイルを検出するため supported。
+                carrier=Carrier.PATH, state=CapabilityState.SUPPORTED,
+                value_kinds=frozenset({ValueKind.STRING}),
+                transports=frozenset({TransportKind.HTTPX}),
+                payload_shapes=frozenset({PayloadShape.SCALAR}),
             ),
             CarrierCapability(
                 carrier=Carrier.GRAPHQL, state=CapabilityState.UNSUPPORTED,

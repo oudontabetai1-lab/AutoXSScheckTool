@@ -375,8 +375,12 @@ class PrivEscScanner(BaseScanner):
                 payload_shapes=frozenset({PayloadShape.SCALAR}),
             ),
             CarrierCapability(
-                carrier=Carrier.FORM, state=CapabilityState.UNSUPPORTED,
-                reason="page/response 解析でありパラメータ注入をしない",
+                # _test_state_changing_forms() が特権フォームを _request_form() で送信し
+                # privesc_action を検査するため supported。
+                carrier=Carrier.FORM, state=CapabilityState.SUPPORTED,
+                value_kinds=frozenset({ValueKind.STRING}),
+                transports=frozenset({TransportKind.HTTPX}),
+                payload_shapes=frozenset({PayloadShape.SCALAR}),
             ),
             CarrierCapability(
                 carrier=Carrier.JSON, state=CapabilityState.UNSUPPORTED,
@@ -406,8 +410,12 @@ class PrivEscScanner(BaseScanner):
                 reason="identity 切替の認証 cookie を持ち回るが cookie 値へ payload 注入はしない",
             ),
             CarrierCapability(
-                carrier=Carrier.PATH, state=CapabilityState.UNSUPPORTED,
-                reason="page/response 解析でありパラメータ注入をしない",
+                # _test_horizontal_privesc() が path の数値/UUID セグメントを差し替え、
+                # _test_forbidden_bypass() が path 正規化変種を送って path-based IDOR/bypass を検査。
+                carrier=Carrier.PATH, state=CapabilityState.SUPPORTED,
+                value_kinds=frozenset({ValueKind.STRING}),
+                transports=frozenset({TransportKind.HTTPX}),
+                payload_shapes=frozenset({PayloadShape.SCALAR}),
             ),
             CarrierCapability(
                 carrier=Carrier.GRAPHQL, state=CapabilityState.UNSUPPORTED,

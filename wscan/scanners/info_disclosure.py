@@ -125,8 +125,12 @@ class InfoDisclosureScanner(BaseScanner):
                 reason="page/response 解析でありパラメータ注入をしない",
             ),
             CarrierCapability(
-                carrier=Carrier.PATH, state=CapabilityState.UNSUPPORTED,
-                reason="page/response 解析でありパラメータ注入をしない",
+                # scan_page→_check_sensitive_files() が _SENSITIVE_PATHS 各エントリを
+                # HTTPX GET し露出ファイルを検出するため supported。
+                carrier=Carrier.PATH, state=CapabilityState.SUPPORTED,
+                value_kinds=frozenset({ValueKind.STRING}),
+                transports=frozenset({TransportKind.HTTPX}),
+                payload_shapes=frozenset({PayloadShape.SCALAR}),
             ),
             CarrierCapability(
                 carrier=Carrier.GRAPHQL, state=CapabilityState.UNSUPPORTED,

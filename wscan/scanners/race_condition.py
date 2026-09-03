@@ -57,15 +57,19 @@ class RaceConditionScanner(BaseScanner):
     HAS_PAGE_LEVEL = True
     CHECK_TYPE = "race_condition"
     CONTRACT = ScannerContract(
-        execution_kinds=frozenset({ExecutionKind.PAGE_ANALYSIS}),
+        execution_kinds=frozenset({ExecutionKind.PAGE_ANALYSIS, ExecutionKind.FIELD_INJECTION}),
         capabilities=(
             CarrierCapability(
                 carrier=Carrier.QUERY, state=CapabilityState.UNSUPPORTED,
                 reason="page/response 解析でありパラメータ注入をしない",
             ),
             CarrierCapability(
-                carrier=Carrier.FORM, state=CapabilityState.UNSUPPORTED,
-                reason="page/response 解析でありパラメータ注入をしない",
+                # scan_field が form fields を urlencode し _send_burst() で 8 回連続 POST して
+                # race condition を検査するため supported。
+                carrier=Carrier.FORM, state=CapabilityState.SUPPORTED,
+                value_kinds=frozenset({ValueKind.STRING}),
+                transports=frozenset({TransportKind.HTTPX}),
+                payload_shapes=frozenset({PayloadShape.SCALAR}),
             ),
             CarrierCapability(
                 carrier=Carrier.JSON, state=CapabilityState.UNSUPPORTED,

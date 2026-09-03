@@ -244,7 +244,7 @@ class GraphQLScanner(BaseScanner):
             ),
             CarrierCapability(
                 carrier=Carrier.PATH, state=CapabilityState.UNSUPPORTED,
-                reason="GraphQL endpoint 特化",
+                reason="_GRAPHQL_PATHS は endpoint 探索で findings を生まない。path carrier への注入検査ではない",
             ),
             CarrierCapability(
                 carrier=Carrier.GRAPHQL, state=CapabilityState.SUPPORTED,
