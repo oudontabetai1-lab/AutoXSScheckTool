@@ -30,22 +30,14 @@ def parse_pointer(pointer: str) -> list[str]:
     return [unescape_token(token) for token in pointer[1:].split("/")]
 
 
-def _structure_signature(value: Any) -> str:
-    """値を除いた構造シグネチャ（純粋・決定論）。
+def _structure_type(value: Any) -> Any:
+    """値を除いた構造を **JSON 直列化可能な型ツリー**へ写す（純粋・決定論）。
 
-    dict はキー集合と各値の構造、list は要素構造の集合（長さ非依存）、scalar は型名で
-    表す。**値そのものは含めない**ので、nonce/timestamp/秘匿値に依存せず run 跨ぎで安定。
+    dict はキー→型構造の object、list は要素型構造の重複を畳んだ array（長さ非依存）、
+    scalar は型名文字列。**値そのものは含めない**ので nonce/timestamp/秘匿値に依存しない。
+    JSON の object/array/string は型が異なるため、後段の ``json.dumps`` で単射に直列化できる
+    （区切り文字を含むキーでも衝突しない）。
     """
-    if isinstance(value, dict):
-        inner = ",".join(
-            f"{escape_token(str(key))}:{_structure_signature(value[key])}"
-            for key in sorted(value, key=str)
-        )
-        return "{" + inner + "}"
-    if isinstance(value, (list, tuple)):
-        # 要素構造の重複を畳んで長さ非依存にする（[a,a,b] と [a,b] を同一視）。
-        elems = sorted({_structure_signature(item) for item in value})
-        return "[" + ",".join(elems) + "]"
     if isinstance(value, bool):
         return "bool"
     if value is None:
@@ -54,6 +46,15 @@ def _structure_signature(value: Any) -> str:
         return "int"
     if isinstance(value, float):
         return "number"
+    if isinstance(value, dict):
+        return {str(key): _structure_type(val) for key, val in value.items()}
+    if isinstance(value, (list, tuple)):
+        # 要素型構造の重複を正準 JSON で畳んで長さ非依存にする（[a,a,b] と [a,b] を同一視）。
+        deduped: dict[str, Any] = {}
+        for item in value:
+            struct = _structure_type(item)
+            deduped[json.dumps(struct, sort_keys=True, ensure_ascii=True)] = struct
+        return [deduped[key] for key in sorted(deduped)]
     return "str"
 
 
@@ -61,9 +62,13 @@ def structure_digest(value: Any) -> str:
     """request template 等の値抜き構造ダイジェスト（16 桁 hex・純粋）。
 
     秘匿値・可変値を含めないため provenance/相関に安全に使える（本文の平文は残さない）。
+    型ツリーを ``json.dumps(sort_keys=True)`` で正準化してからハッシュするので、区切り文字を
+    含むキーでも単射（キー順非依存・list 長非依存）。
     """
-    signature = _structure_signature(value)
-    return hashlib.sha256(signature.encode("utf-8")).hexdigest()[:16]
+    canonical = json.dumps(
+        _structure_type(value), sort_keys=True, separators=(",", ":"), ensure_ascii=True
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
 
 
 def compute_operation_id(method: str, route: str, operation_token: str = "") -> str:

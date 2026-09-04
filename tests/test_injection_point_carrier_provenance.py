@@ -126,3 +126,11 @@ def test_compute_operation_id_without_token_has_no_trailing_separator():
     assert compute_operation_id("GET", "http://x/a") == compute_operation_id(
         "GET", "http://x/a", ""
     )
+
+
+def test_structure_digest_is_injective_across_delimiter_keys():
+    # 区切り文字を含むキーで衝突しない（P2）: {"a":1,"b":2} と {"a:int,b":3} は別 digest。
+    assert structure_digest({"a": 1, "b": 2}) != structure_digest({"a:int,b": 3})
+    # 入れ子・array 型でも object/array/scalar の型差が保たれる
+    assert structure_digest({"a": [1]}) != structure_digest({"a": {"0": 1}})
+    assert structure_digest({"a": "x"}) != structure_digest({"a": ["x"]})
