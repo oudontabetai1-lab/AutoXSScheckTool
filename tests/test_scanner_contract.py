@@ -117,6 +117,10 @@ def test_render_capability_matrix_html():
         assert f"<th>{carrier.value}</th>" in out
     # 未実装セルが色で可視化される（unsupported の背景色が使われている）
     assert "#e9ecef" in out  # unsupported
+    # `s` は「宣言のみ・E2E 未接続」の但し書きを凡例・集計に保持する（Codex P2）。
+    # 「実際にその carrier を突いた」と誤認させない。
+    assert "E2E 未接続" in out
+    assert ">s=supported<" not in out  # 素の「supported」だけの凡例にはしない
     # 実在する unsupported の reason が cell tooltip(title) に載る
     sample_reason = None
     for check, cls in SCANNERS.items():

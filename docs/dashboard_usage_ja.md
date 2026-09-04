@@ -291,7 +291,7 @@ HTML レポートと Evidence を確認し、必要なら再現物で人手検�
 
 通常層（確実性重視）の HTML レポートでは、Observability の直後に Coverage（到達性カバレッジ）を表示します。到達/未到達 URL と理由、検査試行の状態別件数、HTTP 403/429 のブロック数を確認してください。0 findings でも、未到達やブロックがあれば攻撃面を十分に検査できていない可能性があります。
 
-Coverage セクション内には「検査カバレッジ（in-scope の scanner）」に続けて、折りたたみ式の **Scanner capability matrix**（今回実行対象の scanner × 入力経路 carrier）を表示します。各セルの記号（`s`=supported/`P`=planned/`U`=unsupported/`?`=未分類）で「その検査がどの経路を突けるか」が分かり、未実装セルは色分けされます。セルにマウスを重ねると value kind・transport・未対応理由が表示され、「なぜこの経路を検査できなかったか」を確認できます。全 scanner 分の一覧が必要なときは CLI の `capability-matrix` サブコマンドを使ってください（0035）。
+Coverage セクション内には「検査カバレッジ（in-scope の scanner）」に続けて、折りたたみ式の **Scanner capability matrix**（今回実行対象の scanner × 入力経路 carrier）を表示します。各セルの記号（`s`=supported（宣言のみ・E2E 未接続）/`P`=planned/`U`=unsupported/`?`=未分類）で「その検査がどの経路を突けるか」が分かり、未実装セルは色分けされます。`s` は capability を宣言していることを示すだけで、その carrier を実際に突いた（E2E 検証済み）という意味ではない点に注意してください。セルにマウスを重ねると value kind・transport・未対応理由が表示され、「なぜこの経路を検査できなかったか」を確認できます。全 scanner 分の一覧が必要なときは CLI の `capability-matrix` サブコマンドを使ってください（0035）。
 
 ## 11. 長時間スキャンと再開
 

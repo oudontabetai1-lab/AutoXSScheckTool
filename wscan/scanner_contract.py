@@ -314,8 +314,10 @@ def render_capability_matrix_markdown(matrix: dict) -> str:
 
 
 # HTML セル記号→(ラベル, 背景色)。未実装セル（U/P/?）を色で可視化する（0035-E）。
+# `s` は _cell()/Markdown renderer と同義で「宣言された capability（E2E 未接続）」であり、
+# 「実際にその carrier を突いた」ことは意味しない。誤認防止のため凡例・集計にこの但し書きを保持する。
 _CELL_STYLE = {
-    "s": ("supported", "#e6f4ea", "#1e7e34"),
+    "s": ("supported（宣言のみ・E2E 未接続）", "#e6f4ea", "#1e7e34"),
     "P": ("planned", "#fff3cd", "#856404"),
     "U": ("unsupported", "#e9ecef", "#6c757d"),
     "?": ("unclassified", "#fde2e1", "#b00020"),
@@ -377,9 +379,10 @@ def render_capability_matrix_html(matrix: dict) -> str:
         f"{esc(sym)}={esc(label)}</span>"
         for sym, (label, bg, fg) in _CELL_STYLE.items()
     )
+    # `s` は「宣言のみ・E2E 未接続」なので「実際に検査した」と誤読されないよう明記する。
     summary = (
-        f"supported {counts.get('s', 0)} / planned {counts.get('P', 0)} / "
-        f"unsupported {counts.get('U', 0)}"
+        f"supported（宣言のみ・E2E 未接続） {counts.get('s', 0)} / "
+        f"planned {counts.get('P', 0)} / unsupported {counts.get('U', 0)}"
         + (f" / unclassified {counts['?']}" if counts.get("?") else "")
     )
     return (
