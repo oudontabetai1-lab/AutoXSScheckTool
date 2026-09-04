@@ -1276,7 +1276,14 @@ class ScanEngine:
                 available_prereqs.add("browser")
             if getattr(self, "oob_sink", None):
                 available_prereqs.add("oob_sink")
-            if getattr(self, "api_seed_requests", None):
+            # api_spec は「テンプレートが存在する」ではなく「scanner が実際に消費できる
+            # mutation テンプレート（POST/PUT/PATCH）が1つ以上ある」ことを条件にする。
+            # GET/DELETE のみの seed では mass_assignment.scan_page が probe を送らないため、
+            # runnable と偽らない（Codex P2）。
+            if any(
+                (getattr(t, "method", "") or "").upper() in ("POST", "PUT", "PATCH")
+                for t in (getattr(self, "api_seed_requests", []) or [])
+            ):
                 available_prereqs.add("api_spec")
             if (
                 getattr(self, "login_url", "")

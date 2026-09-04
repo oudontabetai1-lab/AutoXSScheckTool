@@ -139,7 +139,7 @@ def test_prerequisite_coverage_all_available_when_env_satisfies():
 
 
 def test_coverage_summary_flags_prerequisite_missing_for_api_spec():
-    """mass_assignment は api_spec 前提。API 仕様シード無しなら前提不足に出る（0016）。"""
+    """mass_assignment は api_spec 前提。消費可能な mutation テンプレートが無ければ前提不足（0016）。"""
     from types import SimpleNamespace
     from wscan.engine import ScanEngine
     engine = SimpleNamespace(
@@ -151,10 +151,28 @@ def test_coverage_summary_flags_prerequisite_missing_for_api_spec():
     names = [m["check"] for m in pc["prerequisite_missing"]]
     assert "mass_assignment" in names
 
-    engine.api_seed_requests = [{"url": "http://t/api"}]  # 設定 → 充足
+    # POST テンプレート（mass_assignment が消費できる）→ 充足
+    engine.api_seed_requests = [SimpleNamespace(url="http://t/api", method="POST")]
     pc2 = ScanEngine.coverage_summary(engine)["prerequisite_coverage"]
     names2 = [m["check"] for m in pc2["prerequisite_missing"]]
     assert "mass_assignment" not in names2
+
+
+def test_coverage_summary_api_spec_needs_consumable_mutation_template():
+    """GET/DELETE のみの seed は mass_assignment が消費できず、api_spec は充足しない（Codex P2）。"""
+    from types import SimpleNamespace
+    from wscan.engine import ScanEngine
+    engine = SimpleNamespace(
+        checks=["mass_assignment"], scanners={"mass_assignment": object()},
+        api_seed_requests=[
+            SimpleNamespace(url="http://t/api", method="GET"),
+            SimpleNamespace(url="http://t/api/1", method="DELETE"),
+        ],
+        visited_urls=set(), reached_urls=set(), scan_matrix=[], all_findings=[],
+    )
+    pc = ScanEngine.coverage_summary(engine)["prerequisite_coverage"]
+    # 非空 seed でも消費可能な POST/PUT/PATCH が無いので前提不足のまま。
+    assert "mass_assignment" in [m["check"] for m in pc["prerequisite_missing"]]
 
 
 def test_prerequisite_coverage_read_only_skips_state_changing():
