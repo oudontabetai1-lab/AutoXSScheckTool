@@ -85,6 +85,8 @@ class SessionScanner(BaseScanner):
             ),
         ),
         state_change=StateChangeClass.READ_ONLY,
+        # scan_page が cookie を browser._context.cookies() からのみ取得するため browser 必須。
+        prerequisites=frozenset({Prerequisite.BROWSER}),
         cost=CostClass.LOW,
     )
 

@@ -104,9 +104,12 @@ class WebSocketScanner(BaseScanner):
                 reason="WS message 特化",
             ),
             CarrierCapability(
+                # scan_page が browser.page で WS を観測し page.evaluate() で socket を張って
+                # メッセージを送るため browser 必須。
                 carrier=Carrier.WEBSOCKET, state=CapabilityState.SUPPORTED,
                 value_kinds=frozenset({ValueKind.STRING}),
-                transports=frozenset({TransportKind.WEBSOCKET}),
+                transports=frozenset({TransportKind.PLAYWRIGHT, TransportKind.WEBSOCKET}),
+                browser_required=True,
                 payload_shapes=frozenset({PayloadShape.SCALAR}),
             ),
         ),

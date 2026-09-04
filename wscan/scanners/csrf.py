@@ -76,6 +76,9 @@ class CSRFScanner(BaseScanner):
             ),
         ),
         state_change=StateChangeClass.READ_ONLY,
+        # scan_page の form 列挙が browser.page.evaluate のみ（capture fallback 無し）で
+        # browser 無しでは全 CSRF 検査が黙って空になるため browser 必須。
+        prerequisites=frozenset({Prerequisite.BROWSER}),
         cost=CostClass.LOW,
     )
 
