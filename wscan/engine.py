@@ -99,9 +99,10 @@ def _coverage_summary_text(coverage: dict) -> str:
     # 「既定 scan は少数 check だけ＝残りは未検査」を末尾要約でも見えるようにする。
     cc = coverage.get("check_coverage") or {}
     if cc:
+        # 「in-scope（実行対象）」であって「実行済み」ではない（到達不能でも scope には入る）。
         text += (
             f" / checks {int(cc.get('selected_count', 0) or 0)}/"
-            f"{int(cc.get('registry_total', 0) or 0)} run "
+            f"{int(cc.get('registry_total', 0) or 0)} in-scope "
             f"({cc.get('coverage_status', '')})"
         )
     return text
@@ -1240,9 +1241,15 @@ class ScanEngine:
         try:
             from .scanners import SCANNERS as _all_scanners
             from .check_coverage import compute_check_coverage
+            # in-scope は「実際に instantiate された scanner 集合」を正本にする。self.checks は
+            # ユーザ選択（設定スコープ）で、Cookie 認証時に auto-enable される cms/privesc 等は
+            # checks に入らず scanners にだけ現れるため、scanners を使うと取りこぼさない。
+            in_scope = list((getattr(self, "scanners", None) or {}).keys()) or (
+                getattr(self, "checks", []) or []
+            )
             check_coverage = compute_check_coverage(
                 _all_scanners.keys(),
-                getattr(self, "checks", []) or [],
+                in_scope,
                 contracts={
                     name: getattr(cls, "CONTRACT", None)
                     for name, cls in _all_scanners.items()

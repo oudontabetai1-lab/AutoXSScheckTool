@@ -64,5 +64,26 @@ def test_coverage_summary_text_appends_check_coverage_when_present():
         "selected_count": 3, "registry_total": 36, "coverage_status": "PARTIAL",
     })
     assert _coverage_summary_text(withcc) == (
-        "Coverage: reached URLs=1 / attempts=4 / blocked=2 / checks 3/36 run (PARTIAL)"
+        "Coverage: reached URLs=1 / attempts=4 / blocked=2 / checks 3/36 in-scope (PARTIAL)"
     )
+
+
+def test_coverage_html_renders_check_coverage(tmp_path):
+    from wscan.report import ReportGenerator
+    coverage = {
+        "reached_count": 1, "attempts": 4, "findings_total": 0,
+        "http_status": {"total": 4, "blocked": 0},
+        "by_status": {}, "reached_urls": [], "unreached": [],
+        "check_coverage": {
+            "registry_total": 36, "selected_count": 3, "coverage_status": "PARTIAL",
+            "not_selected": ["cms", "cors", "csrf"],
+        },
+    }
+    html = ReportGenerator(tmp_path)._build_coverage_html(coverage)
+    assert "検査カバレッジ（in-scope の scanner）" in html
+    assert "<strong>3</strong>" in html and "<strong>36</strong>" in html
+    assert "PARTIAL" in html
+    # 未実行の検査名が出る
+    assert "cms" in html and "cors" in html
+    # PARTIAL 警告（0件≠安全）
+    assert "「安全」とは限りません" in html
