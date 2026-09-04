@@ -87,5 +87,17 @@ def test_render_capability_matrix_markdown():
     # 凡例と集計セクション
     assert "凡例:" in md
     assert "## 集計" in md
+    # 非対応/予定の理由が markdown に出る（--json 不要で「なぜ検査できないか」が読める）
+    assert "## 非対応・予定の理由" in md
+    # 実在する unsupported の reason が本文に含まれる
+    sample_reason = None
+    for check, cls in SCANNERS.items():
+        for cap in cls.CONTRACT.capabilities:
+            if cap.state.value in ("unsupported", "planned") and cap.reason:
+                sample_reason = cap.reason
+                break
+        if sample_reason:
+            break
+    assert sample_reason and sample_reason in md
     # JSON dict のみから生成（元 matrix に無いキーを勝手に作らない）
     assert md.count("| " + next(iter(SCANNERS)) + " |") >= 0

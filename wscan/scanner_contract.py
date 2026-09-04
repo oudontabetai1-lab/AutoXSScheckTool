@@ -255,9 +255,10 @@ def render_capability_matrix_markdown(matrix: dict) -> str:
         "| scanner | state_change | " + " | ".join(carriers) + " |",
         "|---|---|" + "|".join(["---"] * len(carriers)) + "|",
     ]
-    # 集計と planned 収集
+    # 集計・planned 収集・非対応/予定の理由収集（primary use case = 「なぜ検査できないか」）
     counts: dict[str, int] = {}
     planned_by_task: dict[str, list[str]] = {}
+    reasons_by_scanner: dict[str, list[str]] = {}
     for check in sorted(scanners):
         row = scanners[check]
         cells = row.get("carriers", {})
@@ -267,9 +268,17 @@ def render_capability_matrix_markdown(matrix: dict) -> str:
             sym = cell.get("symbol", "?")
             symbols.append(sym)
             counts[sym] = counts.get(sym, 0) + 1
-            if cell.get("state") == "planned":
+            state = cell.get("state")
+            if state == "planned":
                 task = cell.get("task") or "(no task)"
                 planned_by_task.setdefault(task, []).append(f"{check}.{carrier}")
+            if state in ("planned", "unsupported"):
+                reason = cell.get("reason") or ""
+                suffix = f"（planned: {cell.get('task') or 'no task'}）" if state == "planned" else ""
+                if reason:
+                    reasons_by_scanner.setdefault(check, []).append(
+                        f"- `{carrier}` — {reason}{suffix}"
+                    )
         lines.append(
             f"| {check} | {row.get('state_change', '')} | " + " | ".join(symbols) + " |"
         )
@@ -290,4 +299,14 @@ def render_capability_matrix_markdown(matrix: dict) -> str:
         for task in sorted(planned_by_task):
             cells = ", ".join(sorted(planned_by_task[task]))
             lines.append(f"- **{task}**: {cells}")
+    if reasons_by_scanner:
+        lines += [
+            "",
+            "## 非対応・予定の理由（なぜその carrier を検査できないか）",
+            "",
+        ]
+        for check in sorted(reasons_by_scanner):
+            lines.append(f"### {check}")
+            lines.extend(reasons_by_scanner[check])
+            lines.append("")
     return "\n".join(lines) + "\n"
