@@ -68,6 +68,24 @@ def test_coverage_summary_text_appends_check_coverage_when_present():
     )
 
 
+def test_coverage_summary_text_appends_prerequisite_warnings():
+    """前提不足/state profile skip 数を console 要約へ併記する（--no-monitor/バッチ観測性・0016）。"""
+    from wscan.engine import _coverage_summary_text
+    base = {"reached_count": 0, "attempts": 0, "http_status": {"blocked": 0}}
+    # 前提不足も skip も無ければ従来どおり（noise を出さない）
+    quiet = dict(base, prerequisite_coverage={
+        "prerequisite_missing_count": 0, "state_profile_skipped_count": 0,
+    })
+    assert "unmet-prereq" not in _coverage_summary_text(quiet)
+    assert "profile-skipped" not in _coverage_summary_text(quiet)
+    # 警告があれば件数を併記
+    warned = dict(base, prerequisite_coverage={
+        "prerequisite_missing_count": 2, "state_profile_skipped_count": 3,
+    })
+    text = _coverage_summary_text(warned)
+    assert "unmet-prereq 2" in text and "profile-skipped 3" in text
+
+
 def test_coverage_html_renders_check_coverage(tmp_path):
     from wscan.report import ReportGenerator
     coverage = {

@@ -105,6 +105,16 @@ def _coverage_summary_text(coverage: dict) -> str:
             f"{int(cc.get('registry_total', 0) or 0)} in-scope "
             f"({cc.get('coverage_status', '')})"
         )
+    # 前提会計（0016）: 選択されても前提不足/state profile skip で実質検査できない check 数を
+    # 併記する。--no-monitor/バッチ/CI では HTML を見ないため console 行が唯一のシグナル
+    # （monitor 非依存の観測性）。警告があるときだけ出して常態の noise を避ける。
+    pc = coverage.get("prerequisite_coverage") or {}
+    unmet = int(pc.get("prerequisite_missing_count", 0) or 0)
+    skipped = int(pc.get("state_profile_skipped_count", 0) or 0)
+    if unmet:
+        text += f" / unmet-prereq {unmet}"
+    if skipped:
+        text += f" / profile-skipped {skipped}"
     return text
 
 
