@@ -771,6 +771,17 @@ class BaseScanner(ABC):
         cap = self.CONTRACT.capability(carrier)
         if cap is None or cap.state != CapabilityState.SUPPORTED:
             return DispatchResult(state=DispatchState.UNSUPPORTED, carrier=carrier)
+        # capability は supported でも、facade がこの scanner でこの carrier を送信できる
+        # driver を持つとは限らない（例: race_condition/stored_xss は FORM supported だが
+        # 標準 _apply_payload を持たず _apply_ip が AttributeError／nosql は JSON supported だが
+        # SUPPORTS_JSON_BODY=False で base json 経路が無い）。crash させず UNEXECUTABLE で
+        # 明示する（各 scanner の _dispatch_send adapter 追加＝driver 化は 0035-D）。
+        if not self._dispatch_driver_available(ip):
+            return DispatchResult(
+                state=DispatchState.UNEXECUTABLE,
+                carrier=carrier,
+                note="facade に互換 driver 無し（独自 transport・0035-D で _dispatch_send 化）",
+            )
         # _apply_ip と同じ gate。事前分類では観測ログを増やさない。
         if not self.may_scan_injection_point(ip, record_skip=False):
             return DispatchResult(state=DispatchState.BLOCKED, carrier=carrier)
@@ -778,6 +789,24 @@ class BaseScanner(ABC):
         # 送信・例外伝播・attempt 記録は _dispatch_send（既定は _apply_ip）へ委譲する。
         source, pair = await self._dispatch_send(ip, payload)
         return self._finalize_dispatch(carrier, source, pair)
+
+    def _dispatch_driver_available(self, ip: "InjectionPoint") -> bool:
+        """facade がこの scanner でこの carrier を送信できる driver を持つか（純粋判定）。
+
+        - `_dispatch_send` を override していれば custom driver あり（DOMXSSScanner 等）。
+        - json_body は base 経路が SUPPORTS_JSON_BODY に依存する。
+        - form/url_param は標準 `_apply_payload` の実装が必要（page scanner は持たない）。
+        """
+        # 独自 _dispatch_send / 独自 _apply_ip を持つなら custom driver あり。
+        if type(self)._dispatch_send is not BaseScanner._dispatch_send:
+            return True
+        if type(self)._apply_ip is not BaseScanner._apply_ip:
+            return True
+        # 標準 _apply_ip 経由: json は base 経路（SUPPORTS_JSON_BODY）、form/url_param は
+        # 標準 _apply_payload の実装が必要。
+        if ip.location == "json_body":
+            return bool(self.SUPPORTS_JSON_BODY)
+        return callable(getattr(self, "_apply_payload", None))
 
     async def _dispatch_send(self, ip: "InjectionPoint", payload) -> tuple[str, dict]:
         """dispatch facade の送信プリミティブ（既定は標準 _apply_ip）。

@@ -208,3 +208,22 @@ async def test_dispatch_send_override_preserves_dom_xss_argument_order():
     assert seen["payload"] == "ATTACK"
     assert seen["form_index"] == 3
     assert seen["is_url_param"] is False
+
+
+@pytest.mark.asyncio
+async def test_dispatch_unexecutable_when_no_compatible_driver():
+    """CONTRACT が supported でも facade に互換 driver が無い scanner（標準 _apply_payload 無し・
+    _dispatch_send 未 override）は crash せず UNEXECUTABLE を返す（0035-C レビュー2）。"""
+    class _NoDriverScanner(_FakeScanner):
+        # _FakeScanner の _apply_ip override を外し、_apply_payload も持たない構成にする。
+        _apply_ip = BaseScanner._apply_ip  # 標準 _apply_ip（_apply_payload を呼ぶ）
+
+    scanner = _NoDriverScanner()
+    # _apply_payload を確実に消す（BaseScanner にも無い）
+    assert not callable(getattr(scanner, "_apply_payload", None))
+    ip = InjectionPoint.for_form("http://t/", "f")
+
+    result = await scanner.dispatch(ip, "x")
+
+    assert result.state is DispatchState.UNEXECUTABLE
+    assert result.carrier is Carrier.FORM
