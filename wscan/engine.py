@@ -1241,11 +1241,14 @@ class ScanEngine:
         try:
             from .scanners import SCANNERS as _all_scanners
             from .check_coverage import compute_check_coverage
-            # in-scope は「実際に instantiate された scanner 集合」を正本にする。self.checks は
-            # ユーザ選択（設定スコープ）で、Cookie 認証時に auto-enable される cms/privesc 等は
-            # checks に入らず scanners にだけ現れるため、scanners を使うと取りこぼさない。
-            in_scope = list((getattr(self, "scanners", None) or {}).keys()) or (
-                getattr(self, "checks", []) or []
+            # 診断入力は self.checks（設定スコープ）と self.scanners（実 instantiate）の **union**。
+            # scanners だけだと config の誤記 check（例 [xss, xs] の xs）が instantiate されず
+            # unknown_selected に出ないため誤設定が隠れる。checks だけだと Cookie 認証で
+            # auto-enable される cms/privesc（checks に無く scanners にだけ現れる）を取りこぼす。
+            # union なら auto-enable も unknown 誤記も両方 compute_check_coverage へ渡る。
+            in_scope = sorted(
+                set(getattr(self, "checks", []) or [])
+                | set((getattr(self, "scanners", None) or {}).keys())
             )
             check_coverage = compute_check_coverage(
                 _all_scanners.keys(),

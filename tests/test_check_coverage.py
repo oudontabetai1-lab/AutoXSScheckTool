@@ -87,3 +87,19 @@ def test_coverage_html_renders_check_coverage(tmp_path):
     assert "cms" in html and "cors" in html
     # PARTIAL 警告（0件≠安全）
     assert "「安全」とは限りません" in html
+
+
+def test_coverage_summary_union_surfaces_unknown_and_autoenabled():
+    """coverage_summary の check_coverage は checks(設定) と scanners(実体) の union を使い、
+    誤記 check（unknown_selected）と auto-enable scanner（selected）の両方を取りこぼさない。"""
+    from types import SimpleNamespace
+    from wscan.engine import ScanEngine
+
+    engine = SimpleNamespace(
+        checks=["xss", "xs"],                 # xs は誤記（registry 外）
+        scanners={"xss": object(), "privesc": object()},  # privesc は auto-enable（checks 外）
+        visited_urls=set(), reached_urls=set(), scan_matrix=[], all_findings=[],
+    )
+    cc = ScanEngine.coverage_summary(engine)["check_coverage"]
+    assert "xs" in cc["unknown_selected"]          # 誤記が診断に出る
+    assert "xss" in cc["selected"] and "privesc" in cc["selected"]  # auto-enable も in-scope
