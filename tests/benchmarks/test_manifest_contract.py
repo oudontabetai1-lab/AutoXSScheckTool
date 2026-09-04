@@ -146,3 +146,34 @@ def test_unknown_top_level_key_and_type_mismatch_are_rejected():
         _load(unknown)
     with pytest.raises(ManifestError):
         _load(wrong_type)
+
+
+def test_gap_metadata_without_gate_gap_is_rejected():
+    # gap があるのに gate!=gap だと overall_status が gap を無視して誤って COMPLETE に
+    # なりうるため拒否する（P1）。
+    data = _manifest()
+    data["cases"][1]["gap"] = {
+        "reason": "not yet implemented",
+        "owner_task": "0034-C",
+        "deadline": "2026-12-31",
+    }
+    # gate は observed のまま（gap を付けても gate=gap にしていない）
+    with pytest.raises(ManifestError):
+        _load(data)
+
+
+def test_twin_with_different_check_is_rejected():
+    # vulnerable(xss) と safe(sqli) が twin になると per-check breakdown が破綻するため拒否（P2）。
+    other = next(c for c in ("sqli", "os", "ssrf") if c in REGISTRY_KEYS)
+    data = _manifest()
+    data["cases"][1]["check"] = other
+    with pytest.raises(ManifestError):
+        _load(data)
+
+
+def test_duplicate_taxonomy_label_is_rejected():
+    # taxonomy の重複ラベルは breakdown を二重計上し分母を suite 総数超過にするため拒否（P2）。
+    data = _manifest()
+    data["cases"][0]["taxonomy"] = ["reflected", "reflected"]
+    with pytest.raises(ManifestError):
+        _load(data)

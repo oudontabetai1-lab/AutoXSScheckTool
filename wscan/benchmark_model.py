@@ -467,6 +467,12 @@ def _string_tuple(data: Mapping[str, Any], key: str, label: str) -> tuple[str, .
     value = data.get(key, [])
     if not isinstance(value, (list, tuple)) or any(not isinstance(item, str) for item in value):
         raise ManifestError(f"{label}.{key} must be a list of strings")
+    # 重複ラベルは breakdown を二重計上させ分母を suite 総数超過にするため拒否する。
+    seen: set[str] = set()
+    for item in value:
+        if item in seen:
+            raise ManifestError(f"{label}.{key} has duplicate label: {item}")
+        seen.add(item)
     return tuple(value)
 
 
@@ -558,6 +564,10 @@ def _load_case(value: Any, index: int, registry_keys: frozenset[str]) -> Benchma
     gap = _load_gap(data.get("gap"), f"{label}.gap")
     if gate == GateKind.GAP and gap is None:
         raise ManifestError(f"{label}.gap is required when gate=gap")
+    # gap メタデータがあるのに gate!=gap だと overall_status が gap を無視し
+    # 完了 suite を誤って COMPLETE と報告するため、不整合な manifest を拒否する。
+    if gap is not None and gate != GateKind.GAP:
+        raise ManifestError(f"{label}.gap requires gate=gap")
     return BenchmarkCase(
         case_id=_required_string(data, "case_id", label),
         expected=_enum_value(ExpectedOutcome, data.get("expected"), f"{label}.expected"),
@@ -587,12 +597,22 @@ def _validate_twins(cases: Sequence[BenchmarkCase]) -> None:
                 raise ManifestError(f"case {case.case_id} twin must be expected=safe")
             if twin.twin_id != case.case_id:
                 raise ManifestError(f"case {case.case_id} twin must reference it back")
+            if twin.check != case.check:
+                raise ManifestError(
+                    f"case {case.case_id} twin must target the same check: "
+                    f"{case.check} vs {twin.check}"
+                )
         elif case.twin_id:
             twin = by_id.get(case.twin_id)
             if twin is None or twin.expected != ExpectedOutcome.VULNERABLE:
                 raise ManifestError(f"safe case {case.case_id} twin must be expected=vulnerable")
             if twin.twin_id != case.case_id:
                 raise ManifestError(f"safe case {case.case_id} twin must reference it back")
+            if twin.check != case.check:
+                raise ManifestError(
+                    f"safe case {case.case_id} twin must target the same check: "
+                    f"{case.check} vs {twin.check}"
+                )
 
 
 def load_manifest(data: dict[str, Any], *, registry_keys: frozenset[str]) -> BenchmarkSuite:
