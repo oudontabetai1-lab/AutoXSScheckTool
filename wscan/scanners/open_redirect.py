@@ -13,6 +13,12 @@ from urllib.parse import parse_qs, urlparse, urljoin
 
 from wscan.injection_point import InjectionPoint
 
+from wscan.scanner_contract import (
+    CapabilityState, Carrier, CarrierCapability, CostClass, ExecutionKind,
+    PayloadShape, Prerequisite, ScannerContract, StateChangeClass, TransportKind,
+    ValueKind,
+)
+
 from .base import BaseScanner, Finding
 
 if TYPE_CHECKING:
@@ -106,6 +112,59 @@ class OpenRedirectScanner(BaseScanner):
     """Open redirect scanner — tests redirect-named parameters (IPA 1.11)."""
 
     CHECK_TYPE = "open_redirect"
+    CONTRACT = ScannerContract(
+        execution_kinds=frozenset({ExecutionKind.FIELD_INJECTION}),
+        capabilities=(
+            CarrierCapability(
+                carrier=Carrier.QUERY, state=CapabilityState.SUPPORTED,
+                value_kinds=frozenset({ValueKind.STRING}),
+                transports=frozenset({TransportKind.PLAYWRIGHT}),
+                browser_required=True,
+                payload_shapes=frozenset({PayloadShape.SCALAR}),
+            ),
+            CarrierCapability(
+                carrier=Carrier.FORM, state=CapabilityState.SUPPORTED,
+                value_kinds=frozenset({ValueKind.STRING}),
+                transports=frozenset({TransportKind.PLAYWRIGHT}),
+                browser_required=True,
+                payload_shapes=frozenset({PayloadShape.SCALAR}),
+            ),
+            CarrierCapability(
+                carrier=Carrier.JSON, state=CapabilityState.PLANNED,
+                reason="JSON body 検出改修は 0012/0035-D",
+                task="0035-D",
+            ),
+            CarrierCapability(
+                carrier=Carrier.XML, state=CapabilityState.UNSUPPORTED,
+                reason="redirect param 特化",
+            ),
+            CarrierCapability(
+                carrier=Carrier.MULTIPART, state=CapabilityState.UNSUPPORTED,
+                reason="redirect param 特化",
+            ),
+            CarrierCapability(
+                carrier=Carrier.HEADER, state=CapabilityState.UNSUPPORTED,
+                reason="redirect param 特化",
+            ),
+            CarrierCapability(
+                carrier=Carrier.COOKIE, state=CapabilityState.UNSUPPORTED,
+                reason="redirect param 特化",
+            ),
+            CarrierCapability(
+                carrier=Carrier.PATH, state=CapabilityState.UNSUPPORTED,
+                reason="redirect param 特化",
+            ),
+            CarrierCapability(
+                carrier=Carrier.GRAPHQL, state=CapabilityState.UNSUPPORTED,
+                reason="redirect param 特化",
+            ),
+            CarrierCapability(
+                carrier=Carrier.WEBSOCKET, state=CapabilityState.UNSUPPORTED,
+                reason="redirect param 特化",
+            ),
+        ),
+    )
+
     SEVERITY = "medium"
     SUPPORTS_JSON_BODY = False
 

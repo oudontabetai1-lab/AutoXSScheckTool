@@ -41,6 +41,12 @@ from urllib.parse import parse_qs, urlencode, urljoin, urlparse, urlunparse
 
 import httpx
 
+from wscan.scanner_contract import (
+    CapabilityState, Carrier, CarrierCapability, CostClass, ExecutionKind,
+    PayloadShape, Prerequisite, ScannerContract, StateChangeClass, TransportKind,
+    ValueKind,
+)
+
 from .base import BaseScanner, Finding
 
 if TYPE_CHECKING:
@@ -357,6 +363,73 @@ class PrivEscScanner(BaseScanner):
 
     HAS_PAGE_LEVEL = True
     CHECK_TYPE = "privesc"
+    CONTRACT = ScannerContract(
+        execution_kinds=frozenset({ExecutionKind.PAGE_ANALYSIS}),
+        capabilities=(
+            CarrierCapability(
+                # scan_page が _test_param_idor()/_mutate_uuid() で ID 系クエリ値を
+                # 差し替え HTTPX 送信し IDOR を検査するため supported。
+                carrier=Carrier.QUERY, state=CapabilityState.SUPPORTED,
+                value_kinds=frozenset({ValueKind.STRING}),
+                transports=frozenset({TransportKind.HTTPX}),
+                payload_shapes=frozenset({PayloadShape.SCALAR}),
+            ),
+            CarrierCapability(
+                # _test_state_changing_forms() が特権フォームを _request_form() で送信し
+                # privesc_action を検査するため supported。
+                carrier=Carrier.FORM, state=CapabilityState.SUPPORTED,
+                value_kinds=frozenset({ValueKind.STRING}),
+                transports=frozenset({TransportKind.HTTPX}),
+                payload_shapes=frozenset({PayloadShape.SCALAR}),
+            ),
+            CarrierCapability(
+                carrier=Carrier.JSON, state=CapabilityState.UNSUPPORTED,
+                reason="page/response 解析でありパラメータ注入をしない",
+            ),
+            CarrierCapability(
+                carrier=Carrier.XML, state=CapabilityState.UNSUPPORTED,
+                reason="page/response 解析でありパラメータ注入をしない",
+            ),
+            CarrierCapability(
+                carrier=Carrier.MULTIPART, state=CapabilityState.UNSUPPORTED,
+                reason="page/response 解析でありパラメータ注入をしない",
+            ),
+            CarrierCapability(
+                # _BYPASS_HEADERS（X-Forwarded-For/Host, X-Real-IP 等）と _REWRITE_HEADERS
+                # （X-Original-URL/X-Rewrite-URL）を _raw_request で注入し 401/403 access-control
+                # bypass を検査するため supported。
+                carrier=Carrier.HEADER, state=CapabilityState.SUPPORTED,
+                value_kinds=frozenset({ValueKind.STRING}),
+                transports=frozenset({TransportKind.HTTPX}),
+                payload_shapes=frozenset({PayloadShape.SCALAR}),
+            ),
+            CarrierCapability(
+                # identity 切替のため multi-account の認証 cookie を持ち回るだけで、
+                # cookie 値へ攻撃 payload を注入するわけではない。
+                carrier=Carrier.COOKIE, state=CapabilityState.UNSUPPORTED,
+                reason="identity 切替の認証 cookie を持ち回るが cookie 値へ payload 注入はしない",
+            ),
+            CarrierCapability(
+                # _test_horizontal_privesc() が path の数値/UUID セグメントを差し替え、
+                # _test_forbidden_bypass() が path 正規化変種を送って path-based IDOR/bypass を検査。
+                carrier=Carrier.PATH, state=CapabilityState.SUPPORTED,
+                value_kinds=frozenset({ValueKind.STRING}),
+                transports=frozenset({TransportKind.HTTPX}),
+                payload_shapes=frozenset({PayloadShape.SCALAR}),
+            ),
+            CarrierCapability(
+                carrier=Carrier.GRAPHQL, state=CapabilityState.UNSUPPORTED,
+                reason="page/response 解析でありパラメータ注入をしない",
+            ),
+            CarrierCapability(
+                carrier=Carrier.WEBSOCKET, state=CapabilityState.UNSUPPORTED,
+                reason="page/response 解析でありパラメータ注入をしない",
+            ),
+        ),
+        state_change=StateChangeClass.CONDITIONAL,
+        cost=CostClass.HIGH,
+    )
+
     SEVERITY = "high"
 
     def __init__(self, engine: "ScanEngine"):

@@ -25,6 +25,12 @@ import httpx
 
 from wscan.injection_point import InjectionPoint
 
+from wscan.scanner_contract import (
+    CapabilityState, Carrier, CarrierCapability, CostClass, ExecutionKind,
+    PayloadShape, Prerequisite, ScannerContract, StateChangeClass, TransportKind,
+    ValueKind,
+)
+
 from .base import BaseScanner, Finding
 from ..waf_bypass import crlf_bypass_variants
 
@@ -136,6 +142,77 @@ class MailHeaderInjectionScanner(BaseScanner):
     """Mail header injection scanner targeting email-related form fields (IPA 1.8)."""
 
     CHECK_TYPE = "mail_header"
+    CONTRACT = ScannerContract(
+        execution_kinds=frozenset({ExecutionKind.FIELD_INJECTION}),
+        capabilities=(
+            CarrierCapability(
+                # _submit_probe の primary は _apply_payload_raw：url_param は URL から action を
+                # 組み client.get() で送る httpx 経路（cookie も browser 不在を許容）で browserless 可。
+                # WSCAN_OOB_* 設定時は _scan_oob() が oob_sink で mail_header_oob を確証するため OOB も含む。
+                carrier=Carrier.QUERY, state=CapabilityState.SUPPORTED,
+                value_kinds=frozenset({ValueKind.STRING}),
+                transports=frozenset({TransportKind.HTTPX, TransportKind.OOB}),
+                payload_shapes=frozenset({PayloadShape.SCALAR}),
+            ),
+            CarrierCapability(
+                # _apply_payload_raw は _extract_form()（browser）で action/fields を取得してから
+                # client.post(data=) の httpx で送るため、transport は PLAYWRIGHT＋HTTPX で browser 必須。
+                carrier=Carrier.FORM, state=CapabilityState.SUPPORTED,
+                value_kinds=frozenset({ValueKind.STRING}),
+                transports=frozenset({TransportKind.PLAYWRIGHT, TransportKind.HTTPX, TransportKind.OOB}),
+                browser_required=True,
+                payload_shapes=frozenset({PayloadShape.SCALAR}),
+            ),
+            CarrierCapability(
+                carrier=Carrier.JSON, state=CapabilityState.PLANNED,
+                reason="JSON body 検出改修は 0012/0035-D",
+                task="0035-D",
+            ),
+            CarrierCapability(
+                carrier=Carrier.XML, state=CapabilityState.PLANNED,
+                reason="mail header injection の carrier 別 dispatcher は未接続",
+                task="0035-D",
+            ),
+            CarrierCapability(
+                # multipart/form-data 必須フォームには payload を非ファイル part
+                # ((None, value)) として client.post(files=...) で送るが、action は
+                # _extract_form()（browser navigate/evaluate）で解決するため browser 必須。
+                carrier=Carrier.MULTIPART, state=CapabilityState.SUPPORTED,
+                value_kinds=frozenset({ValueKind.STRING}),
+                transports=frozenset({TransportKind.PLAYWRIGHT, TransportKind.HTTPX, TransportKind.OOB}),
+                browser_required=True,
+                payload_shapes=frozenset({PayloadShape.SCALAR}),
+            ),
+            CarrierCapability(
+                carrier=Carrier.HEADER, state=CapabilityState.PLANNED,
+                reason="mail header injection の carrier 別 dispatcher は未接続",
+                task="0035-D",
+            ),
+            CarrierCapability(
+                carrier=Carrier.COOKIE, state=CapabilityState.PLANNED,
+                reason="mail header injection の carrier 別 dispatcher は未接続",
+                task="0035-D",
+            ),
+            CarrierCapability(
+                carrier=Carrier.PATH, state=CapabilityState.PLANNED,
+                reason="mail header injection の carrier 別 dispatcher は未接続",
+                task="0035-D",
+            ),
+            CarrierCapability(
+                carrier=Carrier.GRAPHQL, state=CapabilityState.PLANNED,
+                reason="mail header injection の carrier 別 dispatcher は未接続",
+                task="0035-D",
+            ),
+            CarrierCapability(
+                carrier=Carrier.WEBSOCKET, state=CapabilityState.PLANNED,
+                reason="mail header injection の carrier 別 dispatcher は未接続",
+                task="0035-D",
+            ),
+        ),
+        state_change=StateChangeClass.ALWAYS,
+        cost=CostClass.HIGH,
+    )
+
     ALWAYS_STATE_CHANGING = True
     SEVERITY = "high"
     SUPPORTS_JSON_BODY = False

@@ -21,6 +21,12 @@ import httpx
 
 from wscan.injection_point import InjectionPoint
 
+from wscan.scanner_contract import (
+    CapabilityState, Carrier, CarrierCapability, CostClass, ExecutionKind,
+    PayloadShape, Prerequisite, ScannerContract, StateChangeClass, TransportKind,
+    ValueKind,
+)
+
 from .base import BaseScanner, Finding
 
 if TYPE_CHECKING:
@@ -66,6 +72,73 @@ class NoSQLInjectionScanner(BaseScanner):
     """NoSQL injection scanner targeting MongoDB operator injection."""
 
     CHECK_TYPE = "nosql"
+    CONTRACT = ScannerContract(
+        execution_kinds=frozenset({ExecutionKind.FIELD_INJECTION}),
+        capabilities=(
+            CarrierCapability(
+                carrier=Carrier.QUERY, state=CapabilityState.SUPPORTED,
+                value_kinds=frozenset({ValueKind.STRING}),
+                transports=frozenset({TransportKind.PLAYWRIGHT}),
+                browser_required=True,
+                payload_shapes=frozenset({PayloadShape.SCALAR}),
+            ),
+            CarrierCapability(
+                carrier=Carrier.FORM, state=CapabilityState.SUPPORTED,
+                value_kinds=frozenset({ValueKind.STRING}),
+                transports=frozenset({TransportKind.PLAYWRIGHT}),
+                browser_required=True,
+                payload_shapes=frozenset({PayloadShape.SCALAR}),
+            ),
+            CarrierCapability(
+                # scan_injection_point()→_test_json_body() が MongoDB 演算子 object を
+                # JSON body として HTTPX 送信し nosql_json_error を検出するため supported。
+                # base の SUPPORTS_JSON_BODY/pointer dispatch は未接続なので旧フラグ一致 test の既知例外。
+                carrier=Carrier.JSON, state=CapabilityState.SUPPORTED,
+                value_kinds=frozenset({ValueKind.OBJECT}),
+                transports=frozenset({TransportKind.HTTPX}),
+                payload_shapes=frozenset({PayloadShape.STRUCTURED}),
+                structured_payload=True,
+            ),
+            CarrierCapability(
+                carrier=Carrier.XML, state=CapabilityState.PLANNED,
+                reason="carrier 別 dispatcher は未接続",
+                task="0035-D",
+            ),
+            CarrierCapability(
+                carrier=Carrier.MULTIPART, state=CapabilityState.PLANNED,
+                reason="carrier 別 dispatcher は未接続",
+                task="0035-D",
+            ),
+            CarrierCapability(
+                carrier=Carrier.HEADER, state=CapabilityState.PLANNED,
+                reason="carrier 別 dispatcher は未接続",
+                task="0035-D",
+            ),
+            CarrierCapability(
+                carrier=Carrier.COOKIE, state=CapabilityState.PLANNED,
+                reason="carrier 別 dispatcher は未接続",
+                task="0035-D",
+            ),
+            CarrierCapability(
+                carrier=Carrier.PATH, state=CapabilityState.PLANNED,
+                reason="carrier 別 dispatcher は未接続",
+                task="0035-D",
+            ),
+            CarrierCapability(
+                carrier=Carrier.GRAPHQL, state=CapabilityState.PLANNED,
+                reason="carrier 別 dispatcher は未接続",
+                task="0035-D",
+            ),
+            CarrierCapability(
+                carrier=Carrier.WEBSOCKET, state=CapabilityState.PLANNED,
+                reason="carrier 別 dispatcher は未接続",
+                task="0035-D",
+            ),
+        ),
+        state_change=StateChangeClass.ALWAYS,
+        cost=CostClass.HIGH,
+    )
+
     ALWAYS_STATE_CHANGING = True
     SEVERITY = "high"
     # json_body の NoSQL 攻撃は pointer に**構造化オペレータ**(dict `{"$ne": ...}`)を入れる戦略が

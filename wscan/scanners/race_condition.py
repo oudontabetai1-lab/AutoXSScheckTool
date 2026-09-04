@@ -14,6 +14,12 @@ from urllib.parse import urlencode, urljoin
 
 import httpx
 
+from wscan.scanner_contract import (
+    CapabilityState, Carrier, CarrierCapability, CostClass, ExecutionKind,
+    PayloadShape, Prerequisite, ScannerContract, StateChangeClass, TransportKind,
+    ValueKind,
+)
+
 from .base import BaseScanner, Finding
 
 if TYPE_CHECKING:
@@ -50,6 +56,62 @@ class RaceConditionScanner(BaseScanner):
 
     HAS_PAGE_LEVEL = True
     CHECK_TYPE = "race_condition"
+    CONTRACT = ScannerContract(
+        execution_kinds=frozenset({ExecutionKind.PAGE_ANALYSIS, ExecutionKind.FIELD_INJECTION}),
+        capabilities=(
+            CarrierCapability(
+                carrier=Carrier.QUERY, state=CapabilityState.UNSUPPORTED,
+                reason="page/response 解析でありパラメータ注入をしない",
+            ),
+            CarrierCapability(
+                # scan_field が form fields を urlencode し _send_burst() で 8 回連続 POST して
+                # race condition を検査するため supported。
+                # _form_request_template() が browser.navigate()/page.evaluate() で form を取得し
+                # てから _send_burst() の HTTPX burst を送るため browser 必須。
+                carrier=Carrier.FORM, state=CapabilityState.SUPPORTED,
+                value_kinds=frozenset({ValueKind.STRING}),
+                transports=frozenset({TransportKind.PLAYWRIGHT, TransportKind.HTTPX}),
+                browser_required=True,
+                payload_shapes=frozenset({PayloadShape.SCALAR}),
+            ),
+            CarrierCapability(
+                carrier=Carrier.JSON, state=CapabilityState.UNSUPPORTED,
+                reason="page/response 解析でありパラメータ注入をしない",
+            ),
+            CarrierCapability(
+                carrier=Carrier.XML, state=CapabilityState.UNSUPPORTED,
+                reason="page/response 解析でありパラメータ注入をしない",
+            ),
+            CarrierCapability(
+                carrier=Carrier.MULTIPART, state=CapabilityState.UNSUPPORTED,
+                reason="page/response 解析でありパラメータ注入をしない",
+            ),
+            CarrierCapability(
+                carrier=Carrier.HEADER, state=CapabilityState.UNSUPPORTED,
+                reason="page/response 解析でありパラメータ注入をしない",
+            ),
+            CarrierCapability(
+                carrier=Carrier.COOKIE, state=CapabilityState.UNSUPPORTED,
+                reason="page/response 解析でありパラメータ注入をしない",
+            ),
+            CarrierCapability(
+                carrier=Carrier.PATH, state=CapabilityState.UNSUPPORTED,
+                reason="page/response 解析でありパラメータ注入をしない",
+            ),
+            CarrierCapability(
+                carrier=Carrier.GRAPHQL, state=CapabilityState.UNSUPPORTED,
+                reason="page/response 解析でありパラメータ注入をしない",
+            ),
+            CarrierCapability(
+                carrier=Carrier.WEBSOCKET, state=CapabilityState.UNSUPPORTED,
+                reason="page/response 解析でありパラメータ注入をしない",
+            ),
+        ),
+        prerequisites=frozenset({Prerequisite.SECOND_REQUEST}),
+        state_change=StateChangeClass.CONDITIONAL,
+        cost=CostClass.HIGH,
+    )
+
     SEVERITY = "high"
 
     def __init__(self, engine: "ScanEngine"):

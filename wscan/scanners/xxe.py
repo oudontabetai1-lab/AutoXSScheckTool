@@ -10,6 +10,12 @@ from typing import TYPE_CHECKING
 
 import httpx
 
+from wscan.scanner_contract import (
+    CapabilityState, Carrier, CarrierCapability, CostClass, ExecutionKind,
+    PayloadShape, Prerequisite, ScannerContract, StateChangeClass, TransportKind,
+    ValueKind,
+)
+
 from .base import BaseScanner, Finding
 
 if TYPE_CHECKING:
@@ -58,6 +64,59 @@ class XXEScanner(BaseScanner):
     """XML External Entity injection scanner."""
 
     CHECK_TYPE = "xxe"
+    CONTRACT = ScannerContract(
+        execution_kinds=frozenset({ExecutionKind.FIELD_INJECTION}),
+        capabilities=(
+            CarrierCapability(
+                carrier=Carrier.QUERY, state=CapabilityState.UNSUPPORTED,
+                reason="XXE は XML document 特化",
+            ),
+            CarrierCapability(
+                carrier=Carrier.FORM, state=CapabilityState.UNSUPPORTED,
+                reason="XXE は XML document 特化",
+            ),
+            CarrierCapability(
+                carrier=Carrier.JSON, state=CapabilityState.UNSUPPORTED,
+                reason="XXE は XML document 特化",
+            ),
+            CarrierCapability(
+                carrier=Carrier.XML, state=CapabilityState.SUPPORTED,
+                value_kinds=frozenset({ValueKind.STRING, ValueKind.OBJECT}),
+                transports=frozenset({TransportKind.HTTPX}),
+                payload_shapes=frozenset({PayloadShape.STRUCTURED}),
+                structured_payload=True,
+            ),
+            CarrierCapability(
+                carrier=Carrier.MULTIPART, state=CapabilityState.UNSUPPORTED,
+                reason="XXE は XML document 特化",
+            ),
+            CarrierCapability(
+                carrier=Carrier.HEADER, state=CapabilityState.UNSUPPORTED,
+                reason="XXE は XML document 特化",
+            ),
+            CarrierCapability(
+                carrier=Carrier.COOKIE, state=CapabilityState.UNSUPPORTED,
+                reason="XXE は XML document 特化",
+            ),
+            CarrierCapability(
+                carrier=Carrier.PATH, state=CapabilityState.UNSUPPORTED,
+                reason="XXE は XML document 特化",
+            ),
+            CarrierCapability(
+                carrier=Carrier.GRAPHQL, state=CapabilityState.UNSUPPORTED,
+                reason="XXE は XML document 特化",
+            ),
+            CarrierCapability(
+                carrier=Carrier.WEBSOCKET, state=CapabilityState.UNSUPPORTED,
+                reason="XXE は XML document 特化",
+            ),
+        ),
+        state_change=StateChangeClass.ALWAYS,
+        cost=CostClass.HIGH,
+    )
+
+    # scan_injection_point が method に関係なく XML を POST するため常時状態変更。
+    ALWAYS_STATE_CHANGING = True
     SEVERITY = "high"
 
     def __init__(self, engine: "ScanEngine"):

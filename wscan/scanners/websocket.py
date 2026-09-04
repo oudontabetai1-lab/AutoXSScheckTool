@@ -24,6 +24,12 @@ import re
 import time
 from typing import TYPE_CHECKING
 
+from wscan.scanner_contract import (
+    CapabilityState, Carrier, CarrierCapability, CostClass, ExecutionKind,
+    PayloadShape, Prerequisite, ScannerContract, StateChangeClass, TransportKind,
+    ValueKind,
+)
+
 from .base import BaseScanner, Finding
 
 if TYPE_CHECKING:
@@ -58,6 +64,61 @@ class WebSocketScanner(BaseScanner):
 
     HAS_PAGE_LEVEL = True
     CHECK_TYPE = "websocket"
+    CONTRACT = ScannerContract(
+        execution_kinds=frozenset({ExecutionKind.PAGE_ANALYSIS, ExecutionKind.PROTOCOL_MESSAGE}),
+        capabilities=(
+            CarrierCapability(
+                carrier=Carrier.QUERY, state=CapabilityState.UNSUPPORTED,
+                reason="WS message 特化",
+            ),
+            CarrierCapability(
+                carrier=Carrier.FORM, state=CapabilityState.UNSUPPORTED,
+                reason="WS message 特化",
+            ),
+            CarrierCapability(
+                carrier=Carrier.JSON, state=CapabilityState.UNSUPPORTED,
+                reason="WS message 特化",
+            ),
+            CarrierCapability(
+                carrier=Carrier.XML, state=CapabilityState.UNSUPPORTED,
+                reason="WS message 特化",
+            ),
+            CarrierCapability(
+                carrier=Carrier.MULTIPART, state=CapabilityState.UNSUPPORTED,
+                reason="WS message 特化",
+            ),
+            CarrierCapability(
+                carrier=Carrier.HEADER, state=CapabilityState.UNSUPPORTED,
+                reason="WS message 特化",
+            ),
+            CarrierCapability(
+                carrier=Carrier.COOKIE, state=CapabilityState.UNSUPPORTED,
+                reason="WS message 特化",
+            ),
+            CarrierCapability(
+                carrier=Carrier.PATH, state=CapabilityState.UNSUPPORTED,
+                reason="WS message 特化",
+            ),
+            CarrierCapability(
+                carrier=Carrier.GRAPHQL, state=CapabilityState.UNSUPPORTED,
+                reason="WS message 特化",
+            ),
+            CarrierCapability(
+                # scan_page が browser.page で WS を観測し page.evaluate() で socket を張って
+                # メッセージを送るため browser 必須。_build_inject_messages() は観測 JSON frame を
+                # clone して field を差し替えた object（json.dumps）も送るため OBJECT/STRUCTURED も含む。
+                carrier=Carrier.WEBSOCKET, state=CapabilityState.SUPPORTED,
+                value_kinds=frozenset({ValueKind.STRING, ValueKind.OBJECT}),
+                transports=frozenset({TransportKind.PLAYWRIGHT, TransportKind.WEBSOCKET}),
+                browser_required=True,
+                payload_shapes=frozenset({PayloadShape.SCALAR, PayloadShape.STRUCTURED}),
+                structured_payload=True,
+            ),
+        ),
+        state_change=StateChangeClass.CONDITIONAL,
+        cost=CostClass.HIGH,
+    )
+
     SEVERITY = "high"
 
     def __init__(self, engine: "ScanEngine"):

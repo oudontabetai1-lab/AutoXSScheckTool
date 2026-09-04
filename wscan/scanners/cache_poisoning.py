@@ -22,6 +22,12 @@ from urllib.parse import urlparse, urlunparse
 
 import httpx
 
+from wscan.scanner_contract import (
+    CapabilityState, Carrier, CarrierCapability, CostClass, ExecutionKind,
+    PayloadShape, Prerequisite, ScannerContract, StateChangeClass, TransportKind,
+    ValueKind,
+)
+
 from .base import BaseScanner, Finding
 
 if TYPE_CHECKING:
@@ -150,6 +156,58 @@ class CachePoisoningScanner(BaseScanner):
 
     HAS_PAGE_LEVEL = True
     CHECK_TYPE = "cache_poisoning"
+    CONTRACT = ScannerContract(
+        execution_kinds=frozenset({ExecutionKind.PAGE_ANALYSIS}),
+        capabilities=(
+            CarrierCapability(
+                carrier=Carrier.QUERY, state=CapabilityState.UNSUPPORTED,
+                reason="cache header/path probe 以外は注入しない",
+            ),
+            CarrierCapability(
+                carrier=Carrier.FORM, state=CapabilityState.UNSUPPORTED,
+                reason="cache header/path probe 以外は注入しない",
+            ),
+            CarrierCapability(
+                carrier=Carrier.JSON, state=CapabilityState.UNSUPPORTED,
+                reason="cache header/path probe 以外は注入しない",
+            ),
+            CarrierCapability(
+                carrier=Carrier.XML, state=CapabilityState.UNSUPPORTED,
+                reason="cache header/path probe 以外は注入しない",
+            ),
+            CarrierCapability(
+                carrier=Carrier.MULTIPART, state=CapabilityState.UNSUPPORTED,
+                reason="cache header/path probe 以外は注入しない",
+            ),
+            CarrierCapability(
+                carrier=Carrier.HEADER, state=CapabilityState.SUPPORTED,
+                value_kinds=frozenset({ValueKind.STRING}),
+                transports=frozenset({TransportKind.HTTPX}),
+                payload_shapes=frozenset({PayloadShape.SCALAR}),
+            ),
+            CarrierCapability(
+                carrier=Carrier.COOKIE, state=CapabilityState.UNSUPPORTED,
+                reason="cache header/path probe 以外は注入しない",
+            ),
+            CarrierCapability(
+                carrier=Carrier.PATH, state=CapabilityState.SUPPORTED,
+                value_kinds=frozenset({ValueKind.STRING}),
+                transports=frozenset({TransportKind.HTTPX}),
+                payload_shapes=frozenset({PayloadShape.SCALAR}),
+            ),
+            CarrierCapability(
+                carrier=Carrier.GRAPHQL, state=CapabilityState.UNSUPPORTED,
+                reason="cache header/path probe 以外は注入しない",
+            ),
+            CarrierCapability(
+                carrier=Carrier.WEBSOCKET, state=CapabilityState.UNSUPPORTED,
+                reason="cache header/path probe 以外は注入しない",
+            ),
+        ),
+        state_change=StateChangeClass.CONDITIONAL,
+        cost=CostClass.HIGH,
+    )
+
     SEVERITY = "high"
 
     def __init__(self, engine: "ScanEngine"):

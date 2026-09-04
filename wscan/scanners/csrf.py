@@ -4,6 +4,12 @@ Detects missing CSRF token protection in POST forms (IPA: 1.6 CSRF).
 """
 from typing import TYPE_CHECKING
 
+from wscan.scanner_contract import (
+    CapabilityState, Carrier, CarrierCapability, CostClass, ExecutionKind,
+    PayloadShape, Prerequisite, ScannerContract, StateChangeClass, TransportKind,
+    ValueKind,
+)
+
 from .base import BaseScanner, Finding
 
 if TYPE_CHECKING:
@@ -25,6 +31,57 @@ class CSRFScanner(BaseScanner):
 
     HAS_PAGE_LEVEL = True
     CHECK_TYPE = "csrf"
+    CONTRACT = ScannerContract(
+        execution_kinds=frozenset({ExecutionKind.PAGE_ANALYSIS}),
+        capabilities=(
+            CarrierCapability(
+                carrier=Carrier.QUERY, state=CapabilityState.UNSUPPORTED,
+                reason="page/response 解析でありパラメータ注入をしない",
+            ),
+            CarrierCapability(
+                carrier=Carrier.FORM, state=CapabilityState.UNSUPPORTED,
+                reason="page/response 解析でありパラメータ注入をしない",
+            ),
+            CarrierCapability(
+                carrier=Carrier.JSON, state=CapabilityState.UNSUPPORTED,
+                reason="page/response 解析でありパラメータ注入をしない",
+            ),
+            CarrierCapability(
+                carrier=Carrier.XML, state=CapabilityState.UNSUPPORTED,
+                reason="page/response 解析でありパラメータ注入をしない",
+            ),
+            CarrierCapability(
+                carrier=Carrier.MULTIPART, state=CapabilityState.UNSUPPORTED,
+                reason="page/response 解析でありパラメータ注入をしない",
+            ),
+            CarrierCapability(
+                carrier=Carrier.HEADER, state=CapabilityState.UNSUPPORTED,
+                reason="page/response 解析でありパラメータ注入をしない",
+            ),
+            CarrierCapability(
+                carrier=Carrier.COOKIE, state=CapabilityState.UNSUPPORTED,
+                reason="page/response 解析でありパラメータ注入をしない",
+            ),
+            CarrierCapability(
+                carrier=Carrier.PATH, state=CapabilityState.UNSUPPORTED,
+                reason="page/response 解析でありパラメータ注入をしない",
+            ),
+            CarrierCapability(
+                carrier=Carrier.GRAPHQL, state=CapabilityState.UNSUPPORTED,
+                reason="page/response 解析でありパラメータ注入をしない",
+            ),
+            CarrierCapability(
+                carrier=Carrier.WEBSOCKET, state=CapabilityState.UNSUPPORTED,
+                reason="page/response 解析でありパラメータ注入をしない",
+            ),
+        ),
+        state_change=StateChangeClass.READ_ONLY,
+        # scan_page の form 列挙が browser.page.evaluate のみ（capture fallback 無し）で
+        # browser 無しでは全 CSRF 検査が黙って空になるため browser 必須。
+        prerequisites=frozenset({Prerequisite.BROWSER}),
+        cost=CostClass.LOW,
+    )
+
     SEVERITY = "medium"
 
     async def scan_field(

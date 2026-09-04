@@ -25,6 +25,12 @@ from typing import TYPE_CHECKING
 
 import httpx
 
+from wscan.scanner_contract import (
+    CapabilityState, Carrier, CarrierCapability, CostClass, ExecutionKind,
+    PayloadShape, Prerequisite, ScannerContract, StateChangeClass, TransportKind,
+    ValueKind,
+)
+
 from .base import BaseScanner, Finding
 
 if TYPE_CHECKING:
@@ -87,6 +93,58 @@ class RequestSmugglingScanner(BaseScanner):
 
     HAS_PAGE_LEVEL = True
     CHECK_TYPE = "request_smuggling"
+    CONTRACT = ScannerContract(
+        execution_kinds=frozenset({ExecutionKind.PAGE_ANALYSIS}),
+        capabilities=(
+            CarrierCapability(
+                carrier=Carrier.QUERY, state=CapabilityState.UNSUPPORTED,
+                reason="HTTP request framing header 特化",
+            ),
+            CarrierCapability(
+                carrier=Carrier.FORM, state=CapabilityState.UNSUPPORTED,
+                reason="HTTP request framing header 特化",
+            ),
+            CarrierCapability(
+                carrier=Carrier.JSON, state=CapabilityState.UNSUPPORTED,
+                reason="HTTP request framing header 特化",
+            ),
+            CarrierCapability(
+                carrier=Carrier.XML, state=CapabilityState.UNSUPPORTED,
+                reason="HTTP request framing header 特化",
+            ),
+            CarrierCapability(
+                carrier=Carrier.MULTIPART, state=CapabilityState.UNSUPPORTED,
+                reason="HTTP request framing header 特化",
+            ),
+            CarrierCapability(
+                carrier=Carrier.HEADER, state=CapabilityState.SUPPORTED,
+                value_kinds=frozenset({ValueKind.STRING}),
+                transports=frozenset({TransportKind.HTTPX}),
+                payload_shapes=frozenset({PayloadShape.SCALAR}),
+            ),
+            CarrierCapability(
+                carrier=Carrier.COOKIE, state=CapabilityState.UNSUPPORTED,
+                reason="HTTP request framing header 特化",
+            ),
+            CarrierCapability(
+                carrier=Carrier.PATH, state=CapabilityState.PLANNED,
+                reason="raw path probe は 0035-D で接続",
+                task="0035-D",
+            ),
+            CarrierCapability(
+                carrier=Carrier.GRAPHQL, state=CapabilityState.UNSUPPORTED,
+                reason="HTTP request framing header 特化",
+            ),
+            CarrierCapability(
+                carrier=Carrier.WEBSOCKET, state=CapabilityState.UNSUPPORTED,
+                reason="HTTP request framing header 特化",
+            ),
+        ),
+        prerequisites=frozenset({Prerequisite.SECOND_REQUEST}),
+        state_change=StateChangeClass.ALWAYS,
+        cost=CostClass.HIGH,
+    )
+
     ALWAYS_STATE_CHANGING = True
     SEVERITY = "high"
 
