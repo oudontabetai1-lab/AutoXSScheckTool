@@ -168,10 +168,17 @@ def case_classification(
 
 
 def _result_index(results: Iterable[CaseResult]) -> dict[str, CaseResult]:
-    """case_id ごとに最初の result を採用し、重複による二重計上を防ぐ。"""
+    """case_id ごとに一意な result を索引する。
+
+    同一 case に複数 result があると（例: 成功後の timeout/retry 失敗）、順序依存で
+    後続の terminal 状態を取りこぼし、未完了なのに COMPLETE を誤報告しうる。よって
+    重複を silently 統合せず ValueError で拒否し、runner に一意な最終結果を強制する。
+    """
     indexed: dict[str, CaseResult] = {}
     for result in results:
-        indexed.setdefault(result.case_id, result)
+        if result.case_id in indexed:
+            raise ValueError(f"duplicate CaseResult for case_id: {result.case_id}")
+        indexed[result.case_id] = result
     return indexed
 
 

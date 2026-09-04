@@ -105,17 +105,26 @@ def test_zero_denominators_are_none_not_vacuous_success():
     assert metrics["confirmed"]["recall_denominator"] == 0
 
 
-def test_duplicate_case_results_are_counted_once():
+def test_conflicting_duplicate_case_results_are_rejected():
+    # 同一 case に複数 result（成功後の timeout 等）は順序依存で terminal 状態を隠すため拒否（P1）。
     case = _case("vulnerable", ExpectedOutcome.VULNERABLE)
-    duplicate_results = (
+    conflicting = (
+        CaseResult("vulnerable", CaseExecutionState.COMPLETED, True, True),
+        CaseResult("vulnerable", CaseExecutionState.TIMEOUT),
+    )
+    with pytest.raises(ValueError):
+        compute_metrics((case,), conflicting)
+
+
+def test_identical_duplicate_case_results_are_also_rejected():
+    # 同一内容の重複でも一意契約違反として拒否する（順序非依存を保証）。
+    case = _case("vulnerable", ExpectedOutcome.VULNERABLE)
+    identical = (
         CaseResult("vulnerable", CaseExecutionState.COMPLETED, True, True),
         CaseResult("vulnerable", CaseExecutionState.COMPLETED, True, True),
     )
-
-    metrics = compute_metrics((case,), duplicate_results)
-
-    assert metrics["candidate"]["tp"] == 1
-    assert metrics["confirmed"]["tp"] == 1
+    with pytest.raises(ValueError):
+        compute_metrics((case,), identical)
 
 
 def test_overall_status_incomplete_invalid_and_complete():
