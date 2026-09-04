@@ -103,3 +103,19 @@ def test_coverage_summary_union_surfaces_unknown_and_autoenabled():
     cc = ScanEngine.coverage_summary(engine)["check_coverage"]
     assert "xs" in cc["unknown_selected"]          # 誤記が診断に出る
     assert "xss" in cc["selected"] and "privesc" in cc["selected"]  # auto-enable も in-scope
+
+
+def test_coverage_html_warns_on_unknown_configured_checks(tmp_path):
+    from wscan.report import ReportGenerator
+    coverage = {
+        "reached_count": 0, "attempts": 0, "findings_total": 0,
+        "http_status": {}, "by_status": {}, "reached_urls": [], "unreached": [],
+        "check_coverage": {
+            "registry_total": 36, "selected_count": 36, "coverage_status": "COMPLETE",
+            "not_selected": [], "unknown_selected": ["xs"],
+        },
+    }
+    html = ReportGenerator(tmp_path)._build_coverage_html(coverage)
+    # COMPLETE でも誤記 xs が設定警告として出る
+    assert "未知の検査名" in html
+    assert "xs" in html

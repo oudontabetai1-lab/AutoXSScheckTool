@@ -1589,11 +1589,22 @@ document.querySelectorAll('.plan-payloads-toggle').forEach(btn => {{
                     "登録 scanner の一部のみが検査対象です。未実行の検査があるため、"
                     "Findings が 0 でも「安全」とは限りません。</p>"
                 )
+            # 設定に未知の検査名（誤記等）があれば、全 check 選択でも COMPLETE 表示に紛れて
+            # 無視されるため、設定警告として明示する（config は argparse choices 未検証）。
+            unknown_selected = cc.get("unknown_selected", []) or []
+            unknown_html = ""
+            if unknown_selected:
+                names = ", ".join(f"<code>{self._escape(c)}</code>" for c in unknown_selected)
+                unknown_html = (
+                    '<p style="color:#b00">設定に未知の検査名（誤記の可能性）があり無視されました: '
+                    f"{names}</p>"
+                )
             check_coverage_html = (
                 '<h3 style="margin-top:14px">検査カバレッジ（in-scope の scanner）</h3>'
                 f"<p>検査対象: <strong>{cc_sel}</strong> / <strong>{cc_total}</strong> 種類 "
                 f"(<strong>{cc_status}</strong>)</p>"
                 f"{cc_warning}"
+                f"{unknown_html}"
                 f"<p>未実行（未選択）の検査: {not_selected_html}</p>"
             )
 
