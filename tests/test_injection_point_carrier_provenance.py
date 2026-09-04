@@ -61,6 +61,16 @@ def test_carrier_unknown_location_raises():
         _ = ip.carrier
 
 
+@pytest.mark.parametrize("alias", ["query", "json"])
+def test_carrier_rejects_vocabulary_aliases(alias):
+    # "query"/"json" は carrier 語彙の alias であり InjectionPoint.location ではない。
+    # stable_key_parts/legacy_is_url_param が canonical 3 種しか認識しないため、carrier も
+    # alias を拒否して 3 者を一致させる（P2）。
+    ip = InjectionPoint(location=alias, url="http://x", parameter_id="q")
+    with pytest.raises(ValueError):
+        _ = ip.carrier
+
+
 # ── 加算フィールドの既定値と pass-through ────────────────────────────────
 
 def test_provenance_fields_default_empty():

@@ -7,8 +7,19 @@ from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any
 
-from .scanner_contract import LOCATION_TO_CARRIER, Carrier, ValueKind
+from .scanner_contract import Carrier, ValueKind
 from .url_normalize import normalize_url_for_key
+
+# InjectionPoint.location の canonical 値だけを carrier へ写す。scanner_contract の
+# LOCATION_TO_CARRIER は "query"/"json" 等の alias も含むが、InjectionPoint の他メソッド
+# （stable_key_parts / legacy_is_url_param）は canonical な url_param/form/json_body しか
+# 認識しない。carrier だけが alias を受理すると 3 者が食い違う（query 点を JSON として
+# checkpoint する等）ため、ここでは canonical 3 種のみを許可し alias は拒否する。
+_CANONICAL_LOCATION_CARRIER: dict[str, Carrier] = {
+    "url_param": Carrier.QUERY,
+    "form": Carrier.FORM,
+    "json_body": Carrier.JSON,
+}
 
 
 def unescape_token(token: str) -> str:
@@ -313,9 +324,9 @@ class InjectionPoint:
 
     @property
     def carrier(self) -> Carrier:
-        """location を 0035 の共通 carrier 語彙へ写す（各所で個別変換しない）。"""
+        """canonical location を 0035 の共通 carrier 語彙へ写す（alias は拒否）。"""
         try:
-            return LOCATION_TO_CARRIER[self.location]
+            return _CANONICAL_LOCATION_CARRIER[self.location]
         except KeyError:
             raise ValueError(f"carrier 未対応の location: {self.location!r}")
 
