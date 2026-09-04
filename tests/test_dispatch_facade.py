@@ -228,3 +228,26 @@ async def test_dispatch_unexecutable_when_no_compatible_driver():
 
     assert result.state is DispatchState.UNEXECUTABLE
     assert result.carrier is Carrier.FORM
+
+
+@pytest.mark.asyncio
+async def test_policy_block_precedes_driver_classification():
+    """driver 不在の supported carrier でも policy が拒否するなら BLOCKED（＋skip 記録）を優先し、
+    UNEXECUTABLE で観測ログを落とさない（0035-C レビュー4・順序）。"""
+    # driver 不在（標準 _apply_ip・_apply_payload 無し）かつ controlled-write で拒否される
+    # 破壊的 FORM を用意する。
+    class _NoDriverScanner(_FakeScanner):
+        _apply_ip = BaseScanner._apply_ip
+
+    scanner = _NoDriverScanner()
+    scanner.engine.state_profile = "controlled-write"
+    assert not callable(getattr(scanner, "_apply_payload", None))
+    ip = InjectionPoint.for_form(
+        "http://t/account/delete", "confirm",
+        method="POST", action="http://t/account/delete",
+    )
+
+    result = await scanner.dispatch(ip, "yes")
+
+    assert result.state is DispatchState.BLOCKED  # UNEXECUTABLE ではない
+    assert scanner.engine.wave_errors == ["state_change_skipped:fake"]

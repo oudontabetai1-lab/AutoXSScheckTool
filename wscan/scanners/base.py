@@ -771,6 +771,13 @@ class BaseScanner(ABC):
         cap = self.CONTRACT.capability(carrier)
         if cap is None or cap.state != CapabilityState.SUPPORTED:
             return DispatchResult(state=DispatchState.UNSUPPORTED, carrier=carrier)
+        # policy gate は driver 分類より **先** に置く。driver 不在でも policy が拒否するなら
+        # BLOCKED（＋state_change_skipped 記録）を優先し、UNEXECUTABLE で観測ログを落とさない。
+        # BLOCKED では即 return し _apply_ip を呼ばないため、ここで skip を1回記録する
+        # （record_skip 既定=True）。pass 時は may_scan が True を返し記録しないので、後続
+        # _apply_ip の再評価と合わせても二重記録は起きない。
+        if not self.may_scan_injection_point(ip):
+            return DispatchResult(state=DispatchState.BLOCKED, carrier=carrier)
         # capability は supported でも、facade がこの scanner でこの carrier を送信できる
         # driver を持つとは限らない（例: race_condition/stored_xss は FORM supported だが
         # 標準 _apply_payload を持たず _apply_ip が AttributeError／nosql は JSON supported だが
@@ -782,12 +789,6 @@ class BaseScanner(ABC):
                 carrier=carrier,
                 note="facade に互換 driver 無し（独自 transport・0035-D で _dispatch_send 化）",
             )
-        # _apply_ip と同じ gate。BLOCKED では即 return し _apply_ip を呼ばないため、ここで
-        # skip を1回記録する（record_skip 既定=True）。抑制すると legacy _apply_ip 経路と違い
-        # blocked が engine.wave_errors に残らず観測不能になる。pass 時は may_scan が True を
-        # 返し記録しないので、後続 _apply_ip の再評価と合わせても二重記録は起きない。
-        if not self.may_scan_injection_point(ip):
-            return DispatchResult(state=DispatchState.BLOCKED, carrier=carrier)
 
         # 送信・例外伝播・attempt 記録は _dispatch_send（既定は _apply_ip）へ委譲する。
         source, pair = await self._dispatch_send(ip, payload)
