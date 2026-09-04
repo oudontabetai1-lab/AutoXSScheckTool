@@ -146,18 +146,19 @@ class MailHeaderInjectionScanner(BaseScanner):
         execution_kinds=frozenset({ExecutionKind.FIELD_INJECTION}),
         capabilities=(
             CarrierCapability(
-                # _apply_payload が browser.test_url_param/navigate+fill_and_submit_form で
-                # 送るため browser 必須。
+                # _submit_probe の primary は _apply_payload_raw：url_param は URL から action を
+                # 組み client.get() で送る httpx 経路（cookie も browser 不在を許容）で browserless 可。
                 carrier=Carrier.QUERY, state=CapabilityState.SUPPORTED,
                 value_kinds=frozenset({ValueKind.STRING}),
-                transports=frozenset({TransportKind.PLAYWRIGHT}),
-                browser_required=True,
+                transports=frozenset({TransportKind.HTTPX}),
                 payload_shapes=frozenset({PayloadShape.SCALAR}),
             ),
             CarrierCapability(
+                # _apply_payload_raw は _extract_form()（browser）で action/fields を取得してから
+                # client.post(data=) の httpx で送るため、transport は PLAYWRIGHT＋HTTPX で browser 必須。
                 carrier=Carrier.FORM, state=CapabilityState.SUPPORTED,
                 value_kinds=frozenset({ValueKind.STRING}),
-                transports=frozenset({TransportKind.PLAYWRIGHT}),
+                transports=frozenset({TransportKind.PLAYWRIGHT, TransportKind.HTTPX}),
                 browser_required=True,
                 payload_shapes=frozenset({PayloadShape.SCALAR}),
             ),
