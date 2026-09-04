@@ -134,3 +134,19 @@ def test_structure_digest_is_injective_across_delimiter_keys():
     # 入れ子・array 型でも object/array/scalar の型差が保たれる
     assert structure_digest({"a": [1]}) != structure_digest({"a": {"0": 1}})
     assert structure_digest({"a": "x"}) != structure_digest({"a": ["x"]})
+
+
+def test_structure_digest_preserves_heterogeneous_array_order():
+    # JSON 配列は順序付き: 異種要素の順序が違えば別 digest（P2）。
+    forward = structure_digest({"steps": [{"put": 1}, {"delete": "x"}]})
+    reverse = structure_digest({"steps": [{"delete": "x"}, {"put": 1}]})
+    assert forward != reverse
+    # 同種の繰り返しは畳んで長さ非依存のまま
+    assert structure_digest({"a": [1, 1]}) == structure_digest({"a": [1]})
+
+
+def test_compute_operation_id_treats_token_as_opaque():
+    # JSON-RPC method 等で空白が識別子の一部になりうるため strip しない（P2）。
+    assert compute_operation_id("POST", "http://x", "login") != compute_operation_id(
+        "POST", "http://x", " login "
+    )

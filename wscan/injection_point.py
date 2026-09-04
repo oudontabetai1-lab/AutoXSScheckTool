@@ -49,12 +49,16 @@ def _structure_type(value: Any) -> Any:
     if isinstance(value, dict):
         return {str(key): _structure_type(val) for key, val in value.items()}
     if isinstance(value, (list, tuple)):
-        # 要素型構造の重複を正準 JSON で畳んで長さ非依存にする（[a,a,b] と [a,b] を同一視）。
+        # 重複する型構造は畳むが **first-seen 順を保持**する。JSON 配列は順序付きで、
+        # [{"put":...},{"delete":...}] と逆順は別 operation を表しうるため sort しない。
+        # 同種の繰り返し（[a,a,b]→[a,b]）だけ畳んで長さ非依存にする。
         deduped: dict[str, Any] = {}
         for item in value:
             struct = _structure_type(item)
-            deduped[json.dumps(struct, sort_keys=True, ensure_ascii=True)] = struct
-        return [deduped[key] for key in sorted(deduped)]
+            key = json.dumps(struct, sort_keys=True, ensure_ascii=True)
+            if key not in deduped:
+                deduped[key] = struct
+        return list(deduped.values())
     return "str"
 
 
@@ -80,7 +84,9 @@ def compute_operation_id(method: str, route: str, operation_token: str = "") -> 
     区別したいときに、呼び出し側が安定トークンを与えて識別できる。
     """
     parts = [str(method or "").upper(), normalize_url_for_key(route or "")]
-    token = str(operation_token or "").strip()
+    # operation_token は JSON-RPC method 等で空白が識別子の一部になりうるため **opaque**
+    # に扱う（strip しない）。空文字のときだけ付けない（末尾区切りを避ける）。
+    token = str(operation_token or "")
     if token:
         parts.append(token)
     return " ".join(parts)
