@@ -233,10 +233,10 @@ Agent は LLM がページを観察し、操作、ペイロード選択、結果
 
 ## 6. CLI リファレンス
 
-現在のサブコマンドは次の 9 個です。
+現在のサブコマンドは次の 10 個です。
 
 ```text
-scan agent triage serve setup batch record manual-crawl import-payloads
+scan agent triage serve setup batch record manual-crawl import-payloads capability-matrix
 ```
 
 正確なローカル既定値は `config/wscan.yaml` の影響を受けます。実行環境では次も確認してください。
@@ -470,6 +470,23 @@ python3 main.py import-payloads [options]
 | `--check xss,sqli` | 全対応ソース | 取り込む種別を限定 |
 
 取り込み時だけネットワークを使用し、スキャン時は生成済み YAML を読みます。
+
+### `capability-matrix` — 検査 capability の一覧表示
+
+各 scanner が入力経路（carrier: query/form/json/xml/multipart/header/cookie/path/graphql/websocket）
+ごとに何を検査できるかの一覧を表示します。`s`=対応（E2E 未接続）、`P`=予定、`U`=非対応。
+「このツールがどの入力種別に何を検査できるか／なぜできないか」を確認できます。
+
+```bash
+python3 main.py capability-matrix            # Markdown 表で表示
+python3 main.py capability-matrix --json     # JSON で出力
+python3 main.py capability-matrix -o cap.md  # ファイルへ書き出し
+```
+
+| オプション | 既定 | 内容 |
+| --- | --- | --- |
+| `--json` | 無効 | Markdown ではなく JSON で出力 |
+| `--output`, `-o FILE` | 標準出力 | ファイルへ書き出し |
 
 ## 7. 設定リファレンス
 
