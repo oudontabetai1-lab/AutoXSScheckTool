@@ -256,6 +256,11 @@ def test_coverage_summary_aggregates_matrix_urls_and_http_status():
     )
 
     summary = ScanEngine.coverage_summary(engine)
+    # check_coverage（0016 追加）は別途検証し、既存キーは完全一致で守る。
+    check_cov = summary.pop("check_coverage", None)
+    assert isinstance(check_cov, dict) and check_cov.get("coverage_status") in {
+        "COMPLETE", "PARTIAL", "INCOMPLETE",
+    }
 
     assert summary == {
         "reached_urls": ["http://fixture.test/a", "http://fixture.test/b"],
@@ -447,7 +452,9 @@ def test_coverage_summary_handles_empty_matrix_and_missing_browser():
         all_findings=[],
     )
 
-    assert ScanEngine.coverage_summary(engine) == {
+    _summary = ScanEngine.coverage_summary(engine)
+    _summary.pop("check_coverage", None)  # 0016 追加キーは別扱い
+    assert _summary == {
         "reached_urls": [],
         "reached_count": 0,
         "attempts": 0,

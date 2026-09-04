@@ -89,12 +89,22 @@ def _top_severity(findings) -> str:
 
 def _coverage_summary_text(coverage: dict) -> str:
     """到達性カバレッジの console 1行要約を組み立てる純粋関数。"""
-    return (
+    text = (
         "Coverage: "
         f"reached URLs={int(coverage.get('reached_count', 0) or 0)} / "
         f"attempts={int(coverage.get('attempts', 0) or 0)} / "
         f"blocked={int((coverage.get('http_status', {}) or {}).get('blocked', 0) or 0)}"
     )
+    # check レベル coverage（0016）があれば「36 中 N 実行（STATUS）」を併記し、
+    # 「既定 scan は少数 check だけ＝残りは未検査」を末尾要約でも見えるようにする。
+    cc = coverage.get("check_coverage") or {}
+    if cc:
+        text += (
+            f" / checks {int(cc.get('selected_count', 0) or 0)}/"
+            f"{int(cc.get('registry_total', 0) or 0)} run "
+            f"({cc.get('coverage_status', '')})"
+        )
+    return text
 
 
 def _coverage_allowed_hosts(
@@ -1224,6 +1234,22 @@ class ScanEngine:
             pass
 
         reached_urls = sorted(str(url) for url in reached_url_set)
+        # check レベル coverage（0016）: registry の全 scanner のうち何が選択され、何が
+        # 未実行か。「既定 scan は少数 check だけ＝残りは未検査」を可視化し「0件＝安全」の
+        # 誤解を防ぐ（純粋集計・巡回挙動は不変）。
+        try:
+            from .scanners import SCANNERS as _all_scanners
+            from .check_coverage import compute_check_coverage
+            check_coverage = compute_check_coverage(
+                _all_scanners.keys(),
+                getattr(self, "checks", []) or [],
+                contracts={
+                    name: getattr(cls, "CONTRACT", None)
+                    for name, cls in _all_scanners.items()
+                },
+            )
+        except Exception:
+            check_coverage = {}
         return {
             "reached_urls": reached_urls,
             "reached_count": len(reached_url_set),
@@ -1233,6 +1259,7 @@ class ScanEngine:
             "unreached": unreached,
             "unreached_count": len(unreached),
             "http_status": http_status,
+            "check_coverage": check_coverage,
         }
 
     def _scan_matrix_for_display(self) -> list[dict]:
