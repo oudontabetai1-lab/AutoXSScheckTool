@@ -1570,11 +1570,50 @@ document.querySelectorAll('.plan-payloads-toggle').forEach(btn => {{
                 "十分に検査できていない可能性があります</p>"
             )
 
+        # check レベル coverage（0016）: in-scope の scanner 数と未実行（未選択）の検査を出す。
+        # 「in-scope＝実行対象」であって「実行済み」ではない点をラベルで明確にする。
+        cc = coverage.get("check_coverage", {}) or {}
+        check_coverage_html = ""
+        if cc:
+            cc_status = self._escape(cc.get("coverage_status", ""))
+            cc_sel = self._escape(cc.get("selected_count", 0))
+            cc_total = self._escape(cc.get("registry_total", 0))
+            not_selected = cc.get("not_selected", []) or []
+            not_selected_html = ", ".join(
+                f"<code>{self._escape(c)}</code>" for c in not_selected
+            ) or "なし"
+            cc_warning = ""
+            if cc.get("coverage_status") in ("PARTIAL", "INCOMPLETE"):
+                cc_warning = (
+                    '<p style="color:#b45309">'
+                    "登録 scanner の一部のみが検査対象です。未実行の検査があるため、"
+                    "Findings が 0 でも「安全」とは限りません。</p>"
+                )
+            # 設定に未知の検査名（誤記等）があれば、全 check 選択でも COMPLETE 表示に紛れて
+            # 無視されるため、設定警告として明示する（config は argparse choices 未検証）。
+            unknown_selected = cc.get("unknown_selected", []) or []
+            unknown_html = ""
+            if unknown_selected:
+                names = ", ".join(f"<code>{self._escape(c)}</code>" for c in unknown_selected)
+                unknown_html = (
+                    '<p style="color:#b00">設定に未知の検査名（誤記の可能性）があり無視されました: '
+                    f"{names}</p>"
+                )
+            check_coverage_html = (
+                '<h3 style="margin-top:14px">検査カバレッジ（in-scope の scanner）</h3>'
+                f"<p>検査対象: <strong>{cc_sel}</strong> / <strong>{cc_total}</strong> 種類 "
+                f"(<strong>{cc_status}</strong>)</p>"
+                f"{cc_warning}"
+                f"{unknown_html}"
+                f"<p>未実行（未選択）の検査: {not_selected_html}</p>"
+            )
+
         return f"""
         <div class="section coverage-section">
             <h2>Coverage（到達性カバレッジ）</h2>
             <p>到達 URL: <strong>{reached_count}</strong> 件 / 試行: <strong>{attempts}</strong> 件 /
             Findings: <strong>{findings_total}</strong> 件</p>
+            {check_coverage_html}
             <h3 style="margin-top:14px">試行結果（by_status）</h3>
             <ul>{by_status_html}</ul>
             <h3 style="margin-top:14px">HTTP status</h3>
