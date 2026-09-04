@@ -105,6 +105,79 @@ def test_coverage_summary_union_surfaces_unknown_and_autoenabled():
     assert "xss" in cc["selected"] and "privesc" in cc["selected"]  # auto-enable も in-scope
 
 
+def test_prerequisite_coverage_classifies_runnable_and_missing():
+    from wscan.check_coverage import compute_prerequisite_coverage
+    from types import SimpleNamespace as NS
+    contracts = {
+        "needs_api": NS(prerequisites=[NS(value="api_spec")]),
+        "needs_browser": NS(prerequisites=[NS(value="browser")]),
+        "no_contract": None,
+    }
+    out = compute_prerequisite_coverage(
+        ["needs_api", "needs_browser", "no_contract"],
+        contracts,
+        available_prerequisites={"browser", "second_request"},
+    )
+    # browser は充足 → runnable。api_spec は欠落 → missing（理由付き）。CONTRACT 無しは除外。
+    assert out["runnable"] == ["needs_browser"]
+    assert out["prerequisite_missing_count"] == 1
+    m = out["prerequisite_missing"][0]
+    assert m["check"] == "needs_api"
+    assert m["missing_prerequisites"] == ["api_spec"]
+    assert m["reasons"] and "API 仕様" in m["reasons"][0]
+
+
+def test_prerequisite_coverage_all_available_when_env_satisfies():
+    from wscan.check_coverage import compute_prerequisite_coverage
+    from types import SimpleNamespace as NS
+    contracts = {"needs_oob": NS(prerequisites=[NS(value="oob_sink")])}
+    out = compute_prerequisite_coverage(
+        ["needs_oob"], contracts, available_prerequisites={"oob_sink"}
+    )
+    assert out["runnable"] == ["needs_oob"]
+    assert out["prerequisite_missing"] == []
+
+
+def test_coverage_summary_flags_prerequisite_missing_for_api_spec():
+    """mass_assignment は api_spec 前提。API 仕様シード無しなら前提不足に出る（0016）。"""
+    from types import SimpleNamespace
+    from wscan.engine import ScanEngine
+    engine = SimpleNamespace(
+        checks=["mass_assignment"], scanners={"mass_assignment": object()},
+        api_seed_requests=[],  # 未設定 → api_spec 欠落
+        visited_urls=set(), reached_urls=set(), scan_matrix=[], all_findings=[],
+    )
+    pc = ScanEngine.coverage_summary(engine)["prerequisite_coverage"]
+    names = [m["check"] for m in pc["prerequisite_missing"]]
+    assert "mass_assignment" in names
+
+    engine.api_seed_requests = [{"url": "http://t/api"}]  # 設定 → 充足
+    pc2 = ScanEngine.coverage_summary(engine)["prerequisite_coverage"]
+    names2 = [m["check"] for m in pc2["prerequisite_missing"]]
+    assert "mass_assignment" not in names2
+
+
+def test_coverage_html_renders_prerequisite_missing(tmp_path):
+    from wscan.report import ReportGenerator
+    coverage = {
+        "reached_count": 0, "attempts": 0, "findings_total": 0,
+        "http_status": {}, "by_status": {}, "reached_urls": [], "unreached": [],
+        "prerequisite_coverage": {
+            "prerequisite_missing": [
+                {"check": "mass_assignment", "missing_prerequisites": ["api_spec"],
+                 "reasons": ["API 仕様シード未設定（--api-spec の OpenAPI/Postman）"]},
+            ],
+        },
+    }
+    html = ReportGenerator(tmp_path)._build_coverage_html(coverage)
+    assert "前提不足で実行条件が満たされない検査" in html
+    assert "mass_assignment" in html and "API 仕様" in html
+    # 前提不足が無ければ節ごと省略
+    coverage["prerequisite_coverage"] = {"prerequisite_missing": []}
+    html2 = ReportGenerator(tmp_path)._build_coverage_html(coverage)
+    assert "前提不足で実行条件が満たされない検査" not in html2
+
+
 def test_coverage_summary_includes_scoped_capability_matrix():
     """coverage_summary は in-scope の scanner に限定した capability_matrix を出す（0035-E）。
     全 registry(36) を毎回出さず、実際に動かした検査の carrier 射程だけを供給する。"""

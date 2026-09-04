@@ -1260,6 +1260,34 @@ class ScanEngine:
             )
         except Exception:
             check_coverage = {}
+        # prerequisite 会計（0016）: in-scope でも前提（OOB/API仕様/認証/複数account）が
+        # 無ければ実質検査できない。理由付きで残し 0 findings=安全 の誤解を防ぐ（選択会計とは別軸）。
+        try:
+            from .check_coverage import compute_prerequisite_coverage
+            # 通常スキャンは browser と second_request を常に満たす。環境依存の前提だけ検出する。
+            available_prereqs = {"browser", "second_request"}
+            if getattr(self, "oob_sink", None):
+                available_prereqs.add("oob_sink")
+            if getattr(self, "api_seed_requests", None):
+                available_prereqs.add("api_spec")
+            if (
+                getattr(self, "login_url", "")
+                or getattr(self, "cookies", "")
+                or getattr(self, "cookie_list", None)
+            ):
+                available_prereqs.add("auth_session")
+            if len(getattr(self, "accounts", []) or []) >= 2:
+                available_prereqs.add("multi_account")
+            prerequisite_coverage = compute_prerequisite_coverage(
+                (check_coverage or {}).get("selected", []) or in_scope,
+                {
+                    name: getattr(cls, "CONTRACT", None)
+                    for name, cls in _all_scanners.items()
+                },
+                available_prereqs,
+            )
+        except Exception:
+            prerequisite_coverage = {}
         # capability matrix（0035-E）: in-scope の scanner × carrier を report へ供給する。
         # check_coverage と同じ in_scope に限定＝「今回動かした検査」の carrier 射程だけ出す
         # （全 36 を毎回出すと noise）。CONTRACT 未宣言 scanner は除外（build 側が要求）。
@@ -1286,6 +1314,7 @@ class ScanEngine:
             "unreached_count": len(unreached),
             "http_status": http_status,
             "check_coverage": check_coverage,
+            "prerequisite_coverage": prerequisite_coverage,
             "capability_matrix": capability_matrix,
         }
 

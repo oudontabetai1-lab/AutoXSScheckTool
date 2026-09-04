@@ -70,3 +70,62 @@ def compute_check_coverage(
         "coverage_status": status,
         "checks": checks,
     }
+
+
+# Prerequisite 値 → 未充足時の理由（利用者向け・どう設定すれば動くか）。
+_PREREQUISITE_REASONS = {
+    "auth_session": "認証セッション未設定（--login-url / --auth-user / cookie 等）",
+    "oob_sink": "OOB メール受信シンク未設定（WSCAN_OOB_*）",
+    "multi_account": "複数アカウント未設定（--accounts に 2 件以上）",
+    "api_spec": "API 仕様シード未設定（--api-spec の OpenAPI/Postman）",
+    "second_request": "複数リクエスト前提（通常スキャンでは自動的に満たされる）",
+    "browser": "実ブラウザ必須（通常スキャンでは常時利用可能）",
+}
+
+
+def compute_prerequisite_coverage(
+    selected_checks: Iterable[str],
+    contracts: Mapping[str, Any] | None,
+    available_prerequisites: Iterable[str],
+) -> dict:
+    """in-scope の各 scanner の前提充足を会計する（純粋・0016）。
+
+    選択されていても前提（OOB シンク・API 仕様・認証・複数アカウント等）が無ければ
+    実質検査できない。これを「前提不足」として *理由付きで* 残し、0 findings＝安全 の
+    誤解を防ぐ（選択の会計＝compute_check_coverage とは別軸）。
+
+    - ``selected_checks``: 今回 in-scope の check 名。
+    - ``contracts``: check -> ScannerContract。CONTRACT 無し check は判定不能として除外。
+    - ``available_prerequisites``: engine 環境が満たす Prerequisite 値の集合
+      （通常スキャンでは browser/second_request を常に含める）。
+
+    返り値: ``runnable``（前提充足）と ``prerequisite_missing``（欠落 check と理由）。
+    """
+    available = {str(p) for p in (available_prerequisites or set())}
+    runnable: list[str] = []
+    missing: list[dict] = []
+    for check in sorted({str(c) for c in selected_checks}):
+        contract = (contracts or {}).get(check)
+        if contract is None:
+            continue
+        prereqs = sorted(
+            getattr(p, "value", str(p))
+            for p in getattr(contract, "prerequisites", set()) or set()
+        )
+        need = [p for p in prereqs if p not in available]
+        if need:
+            missing.append(
+                {
+                    "check": check,
+                    "missing_prerequisites": need,
+                    "reasons": [_PREREQUISITE_REASONS.get(p, p) for p in need],
+                }
+            )
+        else:
+            runnable.append(check)
+    return {
+        "runnable": runnable,
+        "runnable_count": len(runnable),
+        "prerequisite_missing": missing,
+        "prerequisite_missing_count": len(missing),
+    }
