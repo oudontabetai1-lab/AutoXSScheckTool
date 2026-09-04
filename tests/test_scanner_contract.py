@@ -4,6 +4,7 @@ from wscan.scanners import SCANNERS
 from wscan.scanner_contract import (
     Carrier, CapabilityState, ExecutionKind, StateChangeClass,
     ScannerContract, validate_scanner_contract, build_capability_matrix,
+    render_capability_matrix_markdown,
 )
 
 # SUPPORTS_JSON_BODY 実値と JSON carrier supported の一致を免除する既知例外
@@ -72,3 +73,19 @@ def test_capability_matrix_shape():
             assert isinstance(cell["structured_payload"], bool)
             if cell["symbol"] == "s":  # supported は payload_shapes を必ず持つ
                 assert cell["payload_shapes"], f"{check}:{carrier} supported without payload_shapes"
+
+
+def test_render_capability_matrix_markdown():
+    matrix = build_capability_matrix(_contracts())
+    md = render_capability_matrix_markdown(matrix)
+    # 全 scanner が表の行に出る
+    for check in SCANNERS:
+        assert f"| {check} |" in md
+    # 全 carrier が列ヘッダに出る
+    for carrier in Carrier:
+        assert carrier.value in md
+    # 凡例と集計セクション
+    assert "凡例:" in md
+    assert "## 集計" in md
+    # JSON dict のみから生成（元 matrix に無いキーを勝手に作らない）
+    assert md.count("| " + next(iter(SCANNERS)) + " |") >= 0

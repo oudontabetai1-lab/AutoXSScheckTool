@@ -236,3 +236,58 @@ def build_capability_matrix(contracts: dict[str, ScannerContract]) -> dict:
             "carriers": cells,
         }
     return {"carriers": carriers, "scanners": rows}
+
+
+def render_capability_matrix_markdown(matrix: dict) -> str:
+    """capability matrix（build_capability_matrix の出力）を人間向け Markdown へ整形（純粋）。
+
+    行=scanner・列=carrier のセル記号表（s=supported/E2E 未接続, P=planned, U=unsupported,
+    ?=未分類）＋凡例＋planned の task 別一覧を出す。JSON dict だけから生成し再計算しない。
+    """
+    carriers = list(matrix.get("carriers", []))
+    scanners = matrix.get("scanners", {})
+    lines = [
+        "# Scanner capability matrix",
+        "",
+        "各 scanner が入力経路（carrier）ごとに何を検査できるかの一覧。",
+        "凡例: `s`=supported（E2E 未接続）, `P`=planned, `U`=unsupported, `?`=未分類。",
+        "",
+        "| scanner | state_change | " + " | ".join(carriers) + " |",
+        "|---|---|" + "|".join(["---"] * len(carriers)) + "|",
+    ]
+    # 集計と planned 収集
+    counts: dict[str, int] = {}
+    planned_by_task: dict[str, list[str]] = {}
+    for check in sorted(scanners):
+        row = scanners[check]
+        cells = row.get("carriers", {})
+        symbols = []
+        for carrier in carriers:
+            cell = cells.get(carrier, {})
+            sym = cell.get("symbol", "?")
+            symbols.append(sym)
+            counts[sym] = counts.get(sym, 0) + 1
+            if cell.get("state") == "planned":
+                task = cell.get("task") or "(no task)"
+                planned_by_task.setdefault(task, []).append(f"{check}.{carrier}")
+        lines.append(
+            f"| {check} | {row.get('state_change', '')} | " + " | ".join(symbols) + " |"
+        )
+    lines += [
+        "",
+        "## 集計",
+        "",
+        "| 記号 | 意味 | 件数 |",
+        "|---|---|---:|",
+        f"| s | supported（E2E 未接続） | {counts.get('s', 0)} |",
+        f"| P | planned | {counts.get('P', 0)} |",
+        f"| U | unsupported | {counts.get('U', 0)} |",
+    ]
+    if counts.get("?"):
+        lines.append(f"| ? | 未分類 | {counts['?']} |")
+    if planned_by_task:
+        lines += ["", "## Planned（task 別）", ""]
+        for task in sorted(planned_by_task):
+            cells = ", ".join(sorted(planned_by_task[task]))
+            lines.append(f"- **{task}**: {cells}")
+    return "\n".join(lines) + "\n"

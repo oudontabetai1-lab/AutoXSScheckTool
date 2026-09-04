@@ -1699,6 +1699,20 @@ Examples:
         help="HTTP proxy URL for the manual crawl browser",
     )
 
+    # ── capability-matrix subcommand（scanner capability の可視化・0035） ──
+    cap_matrix = sub.add_parser(
+        "capability-matrix",
+        help="全 scanner の carrier 別 capability matrix を表示する（0035）",
+    )
+    cap_matrix.add_argument(
+        "--json", action="store_true", default=False,
+        help="Markdown ではなく JSON で出力する",
+    )
+    cap_matrix.add_argument(
+        "--output", "-o", metavar="FILE", default="",
+        help="標準出力ではなくファイルへ書き出す",
+    )
+
     args = parser.parse_args()
     args.ollama_model_explicit = any(
         a == "--ollama-model" or a.startswith("--ollama-model=")
@@ -3382,6 +3396,31 @@ async def run_manual_crawl(args):
         console.print(f"[red]手動巡回中にエラーが発生しました: {exc}[/red]")
 
 
+def run_capability_matrix(args):
+    """全 scanner の carrier 別 capability matrix を Markdown / JSON で出力する（0035）。"""
+    import json as _json
+
+    from wscan.scanners import SCANNERS
+    from wscan.scanner_contract import (
+        build_capability_matrix,
+        render_capability_matrix_markdown,
+    )
+
+    matrix = build_capability_matrix({c: cls.CONTRACT for c, cls in SCANNERS.items()})
+    if getattr(args, "json", False):
+        text = _json.dumps(matrix, ensure_ascii=False, indent=2)
+    else:
+        text = render_capability_matrix_markdown(matrix)
+
+    output = (getattr(args, "output", "") or "").strip()
+    if output:
+        with open(output, "w", encoding="utf-8") as fh:
+            fh.write(text if text.endswith("\n") else text + "\n")
+        print(f"capability matrix を書き出しました: {output}")
+    else:
+        print(text)
+
+
 def run_import_payloads(args):
     """公開ペイロード集を取得して community_payloads.yaml を生成する。"""
     from rich.console import Console
@@ -3445,6 +3484,8 @@ def main():
             asyncio.run(run_batch(args))
         elif args.command == "import-payloads":
             run_import_payloads(args)
+        elif args.command == "capability-matrix":
+            run_capability_matrix(args)
         else:
             asyncio.run(run_scan(args))
     except KeyboardInterrupt:
