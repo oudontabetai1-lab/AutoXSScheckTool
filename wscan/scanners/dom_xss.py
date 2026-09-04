@@ -477,6 +477,21 @@ class DOMXSSScanner(BaseScanner):
 
         return False
 
+    async def _dispatch_send(self, ip: "InjectionPoint", payload) -> tuple[str, dict]:
+        """dispatch facade の送信 override（0035-C）。
+
+        DOMXSS の _apply_payload は独自シグネチャ (url, field_name, payload, form_index,
+        is_url_param) で base の _apply_ip 呼び出し順と異なるため、base の _dispatch_send
+        （_apply_ip 経由）だと引数が取り違わる。ここで正しい順で自前 _apply_payload を呼び、
+        試行台帳へも記録して標準経路と観測を揃える（送信のみ・DOM hook/検出は scan 本体側）。
+        """
+        source, pair = await self._apply_payload(
+            ip.url, ip.parameter_id, payload,
+            ip.submit_index, ip.legacy_is_url_param(),
+        )
+        self._record_attempt(ip, payload, source, pair)
+        return source, pair
+
     async def _apply_payload(
         self,
         url: str,

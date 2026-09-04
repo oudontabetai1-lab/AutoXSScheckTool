@@ -5,12 +5,40 @@ import pytest
 
 from wscan.dispatch_result import DispatchState
 from wscan.injection_point import InjectionPoint
-from wscan.scanner_contract import Carrier, TransportKind
+from wscan.scanner_contract import (
+    CapabilityState,
+    Carrier,
+    CarrierCapability,
+    ExecutionKind,
+    PayloadShape,
+    ScannerContract,
+    TransportKind,
+    ValueKind,
+)
 from wscan.scanners.base import BaseScanner
+
+
+def _supported_cap(carrier: Carrier, transport: TransportKind) -> CarrierCapability:
+    return CarrierCapability(
+        carrier=carrier,
+        state=CapabilityState.SUPPORTED,
+        value_kinds=frozenset({ValueKind.STRING}),
+        transports=frozenset({transport}),
+        payload_shapes=frozenset({PayloadShape.SCALAR}),
+    )
 
 
 class _FakeScanner(BaseScanner):
     CHECK_TYPE = "fake"
+    # capability guard を通すため query/form を supported にした最小 CONTRACT（JSON は非宣言＝
+    # capability()=None → UNSUPPORTED）。registry 非登録の test fake なので validate 対象外。
+    CONTRACT = ScannerContract(
+        execution_kinds=frozenset({ExecutionKind.FIELD_INJECTION}),
+        capabilities=(
+            _supported_cap(Carrier.QUERY, TransportKind.PLAYWRIGHT),
+            _supported_cap(Carrier.FORM, TransportKind.PLAYWRIGHT),
+        ),
+    )
 
     def __init__(self, apply_result=("", {}), apply_error=None):
         engine = SimpleNamespace(
@@ -37,6 +65,14 @@ class _FakeScanner(BaseScanner):
 
 class _JsonFakeScanner(_FakeScanner):
     SUPPORTS_JSON_BODY = True
+    CONTRACT = ScannerContract(
+        execution_kinds=frozenset({ExecutionKind.FIELD_INJECTION}),
+        capabilities=(
+            _supported_cap(Carrier.QUERY, TransportKind.PLAYWRIGHT),
+            _supported_cap(Carrier.FORM, TransportKind.PLAYWRIGHT),
+            _supported_cap(Carrier.JSON, TransportKind.HTTPX),
+        ),
+    )
 
 
 @pytest.mark.asyncio
@@ -128,3 +164,47 @@ async def test_dispatch_rejects_noncanonical_location_before_apply(alias):
         await scanner.dispatch(ip, "x")
 
     assert scanner.apply_calls == []
+
+
+@pytest.mark.asyncio
+async def test_dispatch_returns_unsupported_for_page_scanner_carrier():
+    """page scanner（CONTRACT で query/form unsupported・_apply_payload 無し）に dispatch を
+    query で呼んでも _apply_ip へ達して AttributeError にならず UNSUPPORTED を返す（0035-C レビュー）。"""
+    from wscan.scanners.clickjacking import ClickjackingScanner
+
+    scanner = ClickjackingScanner.__new__(ClickjackingScanner)
+    scanner.engine = SimpleNamespace(state_profile="unrestricted", attempt_ledger=None)
+    scanner.monitor = None
+    ip = InjectionPoint.for_url_param("http://x", "q")
+
+    result = await scanner.dispatch(ip, "PAYLOAD")
+
+    assert result.state is DispatchState.UNSUPPORTED
+
+
+@pytest.mark.asyncio
+async def test_dispatch_send_override_preserves_dom_xss_argument_order():
+    """DOMXSSScanner の独自 _apply_payload シグネチャ (url, field_name, payload, form_index,
+    is_url_param) を facade が正しい順で呼ぶ（base の _apply_ip 順ではない）（0035-C レビュー）。"""
+    from wscan.scanners.dom_xss import DOMXSSScanner
+
+    scanner = DOMXSSScanner.__new__(DOMXSSScanner)
+    scanner.engine = SimpleNamespace(state_profile="unrestricted", attempt_ledger=None)
+    scanner.monitor = None
+    seen = {}
+
+    async def fake_apply(url, field_name, payload, form_index=0, is_url_param=False):
+        seen.update(field_name=field_name, payload=payload, form_index=form_index,
+                    is_url_param=is_url_param)
+        return "SRC", {"request": {}, "response": {}}
+
+    scanner._apply_payload = fake_apply
+    ip = InjectionPoint.for_form("http://x", "myfield", form_index=3)
+
+    result = await scanner.dispatch(ip, "ATTACK")
+
+    assert result.state is DispatchState.SENT
+    assert seen["field_name"] == "myfield"
+    assert seen["payload"] == "ATTACK"
+    assert seen["form_index"] == 3
+    assert seen["is_url_param"] is False

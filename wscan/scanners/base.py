@@ -761,21 +761,45 @@ class BaseScanner(ABC):
         ここでは追加で結果を DispatchState へ分類し、carrier/transport/legacy pair を
         typed に載せるだけ。まだ誰も必須にしない（既存 scanner は _apply_ip を使い続ける）。
         """
+        from wscan.dispatch_result import DispatchResult, DispatchState
+        from wscan.scanner_contract import CapabilityState
+
+        carrier = ip.carrier
+        # この scanner の CONTRACT が当該 carrier を supported と宣言していなければ送信しない。
+        # page scanner（clickjacking 等）は _apply_payload を持たず、SUPPORTS_JSON_BODY だけ見て
+        # いた旧版は query/form で _apply_ip→AttributeError になった。capability を正本に判定する。
+        cap = self.CONTRACT.capability(carrier)
+        if cap is None or cap.state != CapabilityState.SUPPORTED:
+            return DispatchResult(state=DispatchState.UNSUPPORTED, carrier=carrier)
+        # _apply_ip と同じ gate。事前分類では観測ログを増やさない。
+        if not self.may_scan_injection_point(ip, record_skip=False):
+            return DispatchResult(state=DispatchState.BLOCKED, carrier=carrier)
+
+        # 送信・例外伝播・attempt 記録は _dispatch_send（既定は _apply_ip）へ委譲する。
+        source, pair = await self._dispatch_send(ip, payload)
+        return self._finalize_dispatch(carrier, source, pair)
+
+    async def _dispatch_send(self, ip: "InjectionPoint", payload) -> tuple[str, dict]:
+        """dispatch facade の送信プリミティブ（既定は標準 _apply_ip）。
+
+        独自 transport の scanner（DOMXSSScanner 等・_apply_payload のシグネチャが標準と
+        異なり _apply_ip を通らない）はこのメソッドだけ override すれば、gate/capability/
+        分類は base の dispatch() を共有できる。
+        """
+        return await self._apply_ip(ip, payload)
+
+    def _finalize_dispatch(self, carrier, source: str, pair: dict) -> "DispatchResult":
+        """(source, pair) を DispatchResult へ分類する共通ヘルパ（純粋・0035-C）。
+
+        独自 transport を持つ scanner（DOMXSSScanner 等）の dispatch override も、送信後は
+        これを使って分類を統一する。
+        """
         from wscan.dispatch_result import (
             DispatchResult,
             DispatchState,
             transport_hint_for,
         )
 
-        carrier = ip.carrier
-        # _apply_ip と同じ gate。事前分類では観測ログを増やさない。
-        if not self.may_scan_injection_point(ip, record_skip=False):
-            return DispatchResult(state=DispatchState.BLOCKED, carrier=carrier)
-        if ip.location == "json_body" and not self.SUPPORTS_JSON_BODY:
-            return DispatchResult(state=DispatchState.UNSUPPORTED, carrier=carrier)
-
-        # 送信・例外伝播・attempt 記録は既存 dispatch に委譲する。
-        source, pair = await self._apply_ip(ip, payload)
         if pair:
             return DispatchResult(
                 state=DispatchState.SENT,
@@ -784,7 +808,6 @@ class BaseScanner(ABC):
                 pair=pair,
                 transport=transport_hint_for(carrier),
             )
-
         # 現状の legacy pair だけでは unexecutable と transport failure を区別できない。
         return DispatchResult(
             state=DispatchState.TRANSPORT_ERROR,
