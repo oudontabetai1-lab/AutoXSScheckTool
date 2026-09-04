@@ -780,6 +780,13 @@ Examples:
         ),
     )
     scan.add_argument(
+        "--all-checks", action="store_true", default=False,
+        help=(
+            "登録済みの全 scanner を実行する（--checks を上書き）。既定 scan は少数 check "
+            "だけなので、全検査カバレッジを一度に得たいときに使う（0016）。"
+        ),
+    )
+    scan.add_argument(
         "--depth", "-d", type=int, default=_CFG.get("depth", 2), metavar="N",
         help=f"Crawl depth (default: {_CFG.get('depth', 2)})",
     )
@@ -2192,6 +2199,10 @@ async def run_scan(args):
 
     # Build checks list (add dom_xss if requested, allow wizard to have updated args.checks)
     checks_list = list(args.checks)
+    # --all-checks: 登録済み全 scanner を実行対象にする（--checks を上書き・0016）。
+    if getattr(args, "all_checks", False):
+        from wscan.scanners import SCANNERS as _ALL_SCANNERS
+        checks_list = list(_ALL_SCANNERS.keys())
     if getattr(args, "dom_xss", False) and "dom_xss" not in checks_list:
         checks_list.append("dom_xss")
 
