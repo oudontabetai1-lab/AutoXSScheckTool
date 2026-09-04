@@ -754,6 +754,103 @@ class BaseScanner(ABC):
         self._record_attempt(ip, payload, source, pair)
         return source, pair
 
+    async def dispatch(self, ip: "InjectionPoint", payload) -> "DispatchResult":
+        """既存 _apply_ip をラップし typed DispatchResult を返す facade（0035-C・加算）。
+
+        挙動は _apply_ip と同一（送信・例外伝播・attempt 記録は _apply_ip に委譲）。
+        ここでは追加で結果を DispatchState へ分類し、carrier/transport/legacy pair を
+        typed に載せるだけ。まだ誰も必須にしない（既存 scanner は _apply_ip を使い続ける）。
+        """
+        from wscan.dispatch_result import DispatchResult, DispatchState
+        from wscan.scanner_contract import CapabilityState
+
+        carrier = ip.carrier
+        # この scanner の CONTRACT が当該 carrier を supported と宣言していなければ送信しない。
+        # page scanner（clickjacking 等）は _apply_payload を持たず、SUPPORTS_JSON_BODY だけ見て
+        # いた旧版は query/form で _apply_ip→AttributeError になった。capability を正本に判定する。
+        cap = self.CONTRACT.capability(carrier)
+        if cap is None or cap.state != CapabilityState.SUPPORTED:
+            return DispatchResult(state=DispatchState.UNSUPPORTED, carrier=carrier)
+        # policy gate は driver 分類より **先** に置く。driver 不在でも policy が拒否するなら
+        # BLOCKED（＋state_change_skipped 記録）を優先し、UNEXECUTABLE で観測ログを落とさない。
+        # BLOCKED では即 return し _apply_ip を呼ばないため、ここで skip を1回記録する
+        # （record_skip 既定=True）。pass 時は may_scan が True を返し記録しないので、後続
+        # _apply_ip の再評価と合わせても二重記録は起きない。
+        if not self.may_scan_injection_point(ip):
+            return DispatchResult(state=DispatchState.BLOCKED, carrier=carrier)
+        # capability は supported でも、facade がこの scanner でこの carrier を送信できる
+        # driver を持つとは限らない（例: race_condition/stored_xss は FORM supported だが
+        # 標準 _apply_payload を持たず _apply_ip が AttributeError／nosql は JSON supported だが
+        # SUPPORTS_JSON_BODY=False で base json 経路が無い）。crash させず UNEXECUTABLE で
+        # 明示する（各 scanner の _dispatch_send adapter 追加＝driver 化は 0035-D）。
+        if not self._dispatch_driver_available(ip):
+            return DispatchResult(
+                state=DispatchState.UNEXECUTABLE,
+                carrier=carrier,
+                note="facade に互換 driver 無し（独自 transport・0035-D で _dispatch_send 化）",
+            )
+
+        # 送信・例外伝播・attempt 記録は _dispatch_send（既定は _apply_ip）へ委譲する。
+        source, pair = await self._dispatch_send(ip, payload)
+        return self._finalize_dispatch(carrier, source, pair)
+
+    def _dispatch_driver_available(self, ip: "InjectionPoint") -> bool:
+        """facade がこの scanner でこの carrier を送信できる driver を持つか（純粋判定）。
+
+        - `_dispatch_send` を override していれば custom driver あり（DOMXSSScanner 等）。
+        - json_body は base 経路が SUPPORTS_JSON_BODY に依存する。
+        - form/url_param は標準 `_apply_payload` の実装が必要（page scanner は持たない）。
+        """
+        # 独自 _dispatch_send / 独自 _apply_ip を持つなら custom driver あり。
+        if type(self)._dispatch_send is not BaseScanner._dispatch_send:
+            return True
+        if type(self)._apply_ip is not BaseScanner._apply_ip:
+            return True
+        # 標準 _apply_ip 経由: json は base 経路（SUPPORTS_JSON_BODY）、form/url_param は
+        # 標準 _apply_payload の実装が必要。
+        if ip.location == "json_body":
+            return bool(self.SUPPORTS_JSON_BODY)
+        return callable(getattr(self, "_apply_payload", None))
+
+    async def _dispatch_send(self, ip: "InjectionPoint", payload) -> tuple[str, dict]:
+        """dispatch facade の送信プリミティブ（既定は標準 _apply_ip）。
+
+        独自 transport の scanner（DOMXSSScanner 等・_apply_payload のシグネチャが標準と
+        異なり _apply_ip を通らない）はこのメソッドだけ override すれば、gate/capability/
+        分類は base の dispatch() を共有できる。
+        """
+        return await self._apply_ip(ip, payload)
+
+    def _finalize_dispatch(self, carrier, source: str, pair: dict) -> "DispatchResult":
+        """(source, pair) を DispatchResult へ分類する共通ヘルパ（純粋・0035-C）。
+
+        独自 transport を持つ scanner（DOMXSSScanner 等）の dispatch override も、送信後は
+        これを使って分類を統一する。
+        """
+        from wscan.dispatch_result import (
+            DispatchResult,
+            DispatchState,
+            transport_hint_for,
+        )
+
+        if pair:
+            return DispatchResult(
+                state=DispatchState.SENT,
+                carrier=carrier,
+                source=source,
+                pair=pair,
+                transport=transport_hint_for(carrier),
+            )
+        # 現状の legacy pair だけでは unexecutable と transport failure を区別できない。
+        return DispatchResult(
+            state=DispatchState.TRANSPORT_ERROR,
+            carrier=carrier,
+            source=source,
+            pair=pair,
+            transport=transport_hint_for(carrier),
+            note="empty result after gates (json unexecutable/transport 未区別)",
+        )
+
     def _record_attempt(self, ip: "InjectionPoint", payload, source: str, pair: dict) -> None:
         """(注入点, check) 単位で payload→応答メタを試行台帳へ蓄積する（best-effort）。"""
         ledger = getattr(getattr(self, "engine", None), "attempt_ledger", None)
