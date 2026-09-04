@@ -968,6 +968,10 @@ class ScanEngine:
             request_logger=self.request_logger,
             mfa_solver=self._mfa_solver,
         )
+        # ブラウザ初期化が成功したかを追跡する。init() 失敗（Chromium 不在等）でも finally で
+        # partial report を出すため、browser 前提の scanner（csrf/session 等）を「実行できた」と
+        # 誤分類しないよう coverage 会計で参照する（0016 前提会計）。
+        self._browser_ready = False
         # SPA モード時は navigate() 成功後に描画確定待ち(settle_spa)を行う。crawl だけ
         # でなく attack フェーズの navigate でも待つことで、非同期描画フォームの取りこぼしを防ぐ。
         self._browser.spa_settle = bool(self.spa_crawl)
@@ -1264,8 +1268,12 @@ class ScanEngine:
         # 無ければ実質検査できない。理由付きで残し 0 findings=安全 の誤解を防ぐ（選択会計とは別軸）。
         try:
             from .check_coverage import compute_prerequisite_coverage
-            # 通常スキャンは browser と second_request を常に満たす。環境依存の前提だけ検出する。
-            available_prereqs = {"browser", "second_request"}
+            # second_request はブラウザ非依存で常に満たせる。browser は init 成功時のみ充足と
+            # みなす（init 失敗でも finally で partial report を出すため、csrf/session 等を
+            # 「実行できた」と誤分類しない・Codex P2）。
+            available_prereqs = {"second_request"}
+            if getattr(self, "_browser_ready", False):
+                available_prereqs.add("browser")
             if getattr(self, "oob_sink", None):
                 available_prereqs.add("oob_sink")
             if getattr(self, "api_seed_requests", None):
@@ -2424,6 +2432,7 @@ class ScanEngine:
 
         try:
             await self._browser.init()
+            self._browser_ready = True  # init 成功後のみ browser 前提を「充足」とみなす
             # coverage の blocked カウンタ用 origin フィルタは、pre-auth ログインフロー等の
             # 最初のトラフィックより前に main browser へ設定する（Codex #102 P2）。
             _configure_network_coverage_hosts(

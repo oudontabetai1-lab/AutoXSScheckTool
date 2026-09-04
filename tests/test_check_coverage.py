@@ -202,6 +202,26 @@ def test_coverage_summary_read_only_profile_flags_state_changing_skip():
     assert "mass_assignment" not in [m["check"] for m in pc["prerequisite_missing"]]
 
 
+def test_coverage_summary_browser_prereq_gated_on_init_success():
+    """browser 前提（csrf 等）は _browser.init() 成功時のみ充足とみなす（Codex P2）。
+    init 失敗（Chromium 不在）でも finally で partial report を出すため、実行できていない
+    browser scanner を runnable と偽らない。"""
+    from types import SimpleNamespace
+    from wscan.engine import ScanEngine
+    engine = SimpleNamespace(
+        checks=["csrf"], scanners={"csrf": object()},
+        _browser_ready=False,  # init 失敗相当
+        visited_urls=set(), reached_urls=set(), scan_matrix=[], all_findings=[],
+    )
+    pc = ScanEngine.coverage_summary(engine)["prerequisite_coverage"]
+    assert "csrf" in [m["check"] for m in pc["prerequisite_missing"]]
+
+    engine._browser_ready = True  # init 成功 → runnable
+    pc2 = ScanEngine.coverage_summary(engine)["prerequisite_coverage"]
+    assert "csrf" in pc2["runnable"]
+    assert "csrf" not in [m["check"] for m in pc2["prerequisite_missing"]]
+
+
 def test_coverage_html_renders_prerequisite_missing(tmp_path):
     from wscan.report import ReportGenerator
     coverage = {
