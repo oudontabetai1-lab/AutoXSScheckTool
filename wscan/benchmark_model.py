@@ -131,6 +131,15 @@ class CaseResult:
     candidate_match: bool = False
     confirmed_match: bool = False
 
+    def __post_init__(self) -> None:
+        # confirmed は candidate の部分集合（検出できた候補だけが隔離再現で確証されうる）。
+        # confirmed_match=True かつ candidate_match=False は矛盾（candidate FN + confirmed TP に
+        # なり overall_status が誤って COMPLETE を返しうる）ため構築時に拒否する。
+        if self.confirmed_match and not self.candidate_match:
+            raise ValueError(
+                f"case {self.case_id}: confirmed_match=True requires candidate_match=True"
+            )
+
 
 class ManifestError(ValueError):
     """benchmark manifest が schema または不変条件に違反している。"""
@@ -377,6 +386,12 @@ def _display(value: Any) -> str:
     return "null" if value is None else str(value)
 
 
+def _md_cell(value: Any) -> str:
+    """Markdown table セル用に区切り文字・改行を無害化する（表崩れ/行注入を防ぐ）。"""
+    text = str(value)
+    return text.replace("\\", "\\\\").replace("|", "\\|").replace("\r", " ").replace("\n", " ")
+
+
 def scorecard_to_markdown(scorecard: dict[str, Any]) -> str:
     """既に集計済みの JSON dict だけを読み、人間向け Markdown を生成する。"""
     counts = scorecard["case_counts"]
@@ -384,7 +399,7 @@ def scorecard_to_markdown(scorecard: dict[str, Any]) -> str:
         "# E2E benchmark scorecard",
         "",
         f"- Overall status: **{scorecard['overall_status']}**",
-        f"- Run ID: `{scorecard['run_id']}`",
+        f"- Run ID: `{_md_cell(scorecard['run_id'])}`",
         f"- Cases: planned={counts['planned']}, completed={counts['completed']}, "
         f"incomplete={counts['incomplete']}",
         "",
@@ -415,7 +430,7 @@ def scorecard_to_markdown(scorecard: dict[str, Any]) -> str:
             for tier in ("candidate", "confirmed"):
                 metric = tier_metrics[tier]
                 lines.append(
-                    f"| {dimension} | {key} | {tier} | {metric['tp']} | {metric['fn']} "
+                    f"| {dimension} | {_md_cell(key)} | {tier} | {metric['tp']} | {metric['fn']} "
                     f"| {metric['fp']} | {metric['tn']} | {_display(metric['recall'])} "
                     f"| {_display(metric['precision'])} |"
                 )

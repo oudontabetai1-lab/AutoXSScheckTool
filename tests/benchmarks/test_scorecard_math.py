@@ -180,3 +180,41 @@ def test_scorecard_is_json_serializable_and_markdown_uses_its_metrics():
     assert "0.0" in markdown
     assert "PARTIAL" in markdown
     assert "| check | xss | candidate |" in markdown
+
+
+def test_confirmed_match_without_candidate_is_rejected():
+    # confirmed ⊆ candidate（P1）: confirmed_match=True かつ candidate_match=False は矛盾。
+    with pytest.raises(ValueError):
+        CaseResult(
+            "c",
+            CaseExecutionState.COMPLETED,
+            candidate_match=False,
+            confirmed_match=True,
+        )
+
+
+def test_markdown_escapes_pipe_and_newline_in_breakdown_keys():
+    # taxonomy/mode に | や改行があっても Markdown table を壊さない（P2）。
+    tier = {
+        "tp": 0, "fn": 0, "fp": 0, "tn": 0,
+        "recall": None, "precision": None,
+        "recall_denominator": 0, "precision_denominator": 0,
+    }
+    scorecard = {
+        "run_id": "r|x",
+        "overall_status": "PARTIAL",
+        "case_counts": {"planned": 0, "completed": 0, "incomplete": 0},
+        "metrics": {"candidate": dict(tier), "confirmed": dict(tier)},
+        "breakdowns": {
+            "check": {}, "carrier": {},
+            "taxonomy": {"a|b": {"candidate": dict(tier), "confirmed": dict(tier)}},
+            "mode": {},
+        },
+    }
+    md = scorecard_to_markdown(scorecard)
+    # エスケープ済みで、生の "a|b" 由来の余分な列区切りが出ない
+    assert "a\\|b" in md
+    assert "r\\|x" in md
+    # taxonomy 行は candidate/confirmed の2行だけ（| による列注入・改行による行注入が無い）
+    rows = [ln for ln in md.splitlines() if ln.startswith("| taxonomy |")]
+    assert len(rows) == 2
