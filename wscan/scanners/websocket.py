@@ -105,12 +105,14 @@ class WebSocketScanner(BaseScanner):
             ),
             CarrierCapability(
                 # scan_page が browser.page で WS を観測し page.evaluate() で socket を張って
-                # メッセージを送るため browser 必須。
+                # メッセージを送るため browser 必須。_build_inject_messages() は観測 JSON frame を
+                # clone して field を差し替えた object（json.dumps）も送るため OBJECT/STRUCTURED も含む。
                 carrier=Carrier.WEBSOCKET, state=CapabilityState.SUPPORTED,
-                value_kinds=frozenset({ValueKind.STRING}),
+                value_kinds=frozenset({ValueKind.STRING, ValueKind.OBJECT}),
                 transports=frozenset({TransportKind.PLAYWRIGHT, TransportKind.WEBSOCKET}),
                 browser_required=True,
-                payload_shapes=frozenset({PayloadShape.SCALAR}),
+                payload_shapes=frozenset({PayloadShape.SCALAR, PayloadShape.STRUCTURED}),
+                structured_payload=True,
             ),
         ),
         state_change=StateChangeClass.CONDITIONAL,
