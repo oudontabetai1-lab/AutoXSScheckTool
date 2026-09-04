@@ -157,6 +157,51 @@ def test_coverage_summary_flags_prerequisite_missing_for_api_spec():
     assert "mass_assignment" not in names2
 
 
+def test_prerequisite_coverage_read_only_skips_state_changing():
+    """read-only は state_change=always の scanner を skip として計上する（Codex P1）。"""
+    from wscan.check_coverage import compute_prerequisite_coverage
+    from types import SimpleNamespace as NS
+    contracts = {
+        "mass_assignment": NS(state_change=NS(value="always"),
+                              prerequisites=[NS(value="api_spec")]),
+        "xss": NS(state_change=NS(value="conditional"), prerequisites=[]),
+    }
+    # read-only + api_spec 充足でも mass_assignment は profile skip（前提充足より優先）。
+    out = compute_prerequisite_coverage(
+        ["mass_assignment", "xss"], contracts,
+        available_prerequisites={"api_spec", "browser"},
+        state_profile="read-only",
+    )
+    skipped = [s["check"] for s in out["state_profile_skipped"]]
+    assert "mass_assignment" in skipped
+    assert out["state_profile_skipped"][0]["reason"]  # 理由が付く
+    assert "mass_assignment" not in [m["check"] for m in out["prerequisite_missing"]]
+    assert out["runnable"] == ["xss"]  # conditional は skip されない
+
+    # unrestricted では profile skip しない（api_spec 充足なら runnable）。
+    out2 = compute_prerequisite_coverage(
+        ["mass_assignment"], contracts,
+        available_prerequisites={"api_spec"}, state_profile="unrestricted",
+    )
+    assert out2["state_profile_skipped"] == []
+    assert out2["runnable"] == ["mass_assignment"]
+
+
+def test_coverage_summary_read_only_profile_flags_state_changing_skip():
+    from types import SimpleNamespace
+    from wscan.engine import ScanEngine
+    engine = SimpleNamespace(
+        checks=["mass_assignment"], scanners={"mass_assignment": object()},
+        api_seed_requests=[{"url": "http://t/api"}],  # 前提は充足させる
+        state_profile="read-only",
+        visited_urls=set(), reached_urls=set(), scan_matrix=[], all_findings=[],
+    )
+    pc = ScanEngine.coverage_summary(engine)["prerequisite_coverage"]
+    # 前提は充足だが read-only で skip → state_profile_skipped に出る
+    assert "mass_assignment" in [s["check"] for s in pc["state_profile_skipped"]]
+    assert "mass_assignment" not in [m["check"] for m in pc["prerequisite_missing"]]
+
+
 def test_coverage_html_renders_prerequisite_missing(tmp_path):
     from wscan.report import ReportGenerator
     coverage = {
@@ -167,15 +212,20 @@ def test_coverage_html_renders_prerequisite_missing(tmp_path):
                 {"check": "mass_assignment", "missing_prerequisites": ["api_spec"],
                  "reasons": ["API 仕様シード未設定（--api-spec の OpenAPI/Postman）"]},
             ],
+            "state_profile_skipped": [
+                {"check": "graphql", "reason": "state profile 'read-only' は状態変更を伴う検査を送信しません＝probe 未投入"},
+            ],
         },
     }
     html = ReportGenerator(tmp_path)._build_coverage_html(coverage)
-    assert "前提不足で実行条件が満たされない検査" in html
+    assert "実行条件が満たされない検査" in html
     assert "mass_assignment" in html and "API 仕様" in html
-    # 前提不足が無ければ節ごと省略
-    coverage["prerequisite_coverage"] = {"prerequisite_missing": []}
+    # state profile skip も同じ表に併記される
+    assert "graphql" in html and "state profile" in html
+    # どちらも無ければ節ごと省略
+    coverage["prerequisite_coverage"] = {"prerequisite_missing": [], "state_profile_skipped": []}
     html2 = ReportGenerator(tmp_path)._build_coverage_html(coverage)
-    assert "前提不足で実行条件が満たされない検査" not in html2
+    assert "実行条件が満たされない検査" not in html2
 
 
 def test_coverage_summary_includes_scoped_capability_matrix():

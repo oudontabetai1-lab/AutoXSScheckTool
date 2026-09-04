@@ -1285,6 +1285,7 @@ class ScanEngine:
                     for name, cls in _all_scanners.items()
                 },
                 available_prereqs,
+                state_profile=getattr(self, "state_profile", "unrestricted"),
             )
         except Exception:
             prerequisite_coverage = {}

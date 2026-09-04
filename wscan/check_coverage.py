@@ -87,26 +87,52 @@ def compute_prerequisite_coverage(
     selected_checks: Iterable[str],
     contracts: Mapping[str, Any] | None,
     available_prerequisites: Iterable[str],
+    *,
+    state_profile: str = "unrestricted",
 ) -> dict:
-    """in-scope の各 scanner の前提充足を会計する（純粋・0016）。
+    """in-scope の各 scanner の実行条件充足を会計する（純粋・0016）。
 
-    選択されていても前提（OOB シンク・API 仕様・認証・複数アカウント等）が無ければ
-    実質検査できない。これを「前提不足」として *理由付きで* 残し、0 findings＝安全 の
-    誤解を防ぐ（選択の会計＝compute_check_coverage とは別軸）。
+    選択されていても (a) 前提（OOB シンク・API 仕様・認証・複数アカウント等）が無い、
+    (b) state profile が状態変更 check を skip する、のいずれかなら実質検査できない。
+    これを *理由付きで* 残し、0 findings＝安全 の誤解を防ぐ（選択の会計＝
+    compute_check_coverage とは別軸）。
 
     - ``selected_checks``: 今回 in-scope の check 名。
     - ``contracts``: check -> ScannerContract。CONTRACT 無し check は判定不能として除外。
     - ``available_prerequisites``: engine 環境が満たす Prerequisite 値の集合
       （通常スキャンでは browser/second_request を常に含める）。
+    - ``state_profile``: 実行時の state profile（unrestricted/controlled-write/read-only）。
+      ``read-only`` は state_change=always の scanner を確実に skip する（may_submit と一致）。
+      ``controlled-write`` は action/label 依存で会計時に確定できないため skip 計上しない
+      （過小申告を避けるより誤申告を避ける＝実際に走り得るものを skipped と偽らない）。
 
-    返り値: ``runnable``（前提充足）と ``prerequisite_missing``（欠落 check と理由）。
+    返り値: ``runnable``（実行条件充足）／``prerequisite_missing``（欠落前提と理由）／
+    ``state_profile_skipped``（profile により skip される check と理由）。profile skip は
+    前提不足より優先（前提が揃っても profile で走らないため）。
     """
     available = {str(p) for p in (available_prerequisites or set())}
+    profile = str(state_profile or "unrestricted").strip().lower()
     runnable: list[str] = []
     missing: list[dict] = []
+    profile_skipped: list[dict] = []
     for check in sorted({str(c) for c in selected_checks}):
         contract = (contracts or {}).get(check)
         if contract is None:
+            continue
+        state_change = getattr(
+            getattr(contract, "state_change", None), "value", ""
+        )
+        # (b) profile skip を先に判定（前提が揃っても走らないため優先）。
+        if profile == "read-only" and state_change == "always":
+            profile_skipped.append(
+                {
+                    "check": check,
+                    "reason": (
+                        f"state profile '{profile}' は状態変更を伴う検査（state_change=always）を"
+                        "送信しません＝probe 未投入"
+                    ),
+                }
+            )
             continue
         prereqs = sorted(
             getattr(p, "value", str(p))
@@ -128,4 +154,6 @@ def compute_prerequisite_coverage(
         "runnable_count": len(runnable),
         "prerequisite_missing": missing,
         "prerequisite_missing_count": len(missing),
+        "state_profile_skipped": profile_skipped,
+        "state_profile_skipped_count": len(profile_skipped),
     }

@@ -1608,26 +1608,45 @@ document.querySelectorAll('.plan-payloads-toggle').forEach(btn => {{
                 f"<p>未実行（未選択）の検査: {not_selected_html}</p>"
             )
 
-        # prerequisite 会計（0016）: 選択されたが前提不足で実質検査できない check を理由付きで出す。
-        # 「選択済み＝検査済み」ではない点を明示し、0 findings=安全 の誤解を防ぐ。
+        # prerequisite 会計（0016）: 選択されたが実行条件（前提／state profile）を満たさず
+        # 実質検査できない check を理由付きで出す。「選択済み＝検査済み」ではない点を明示し、
+        # 0 findings=安全 の誤解を防ぐ。前提不足と state profile skip を1表に併記する。
         prereq_html = ""
         pcov = coverage.get("prerequisite_coverage", {}) or {}
         missing = pcov.get("prerequisite_missing", []) or []
-        if missing:
+        profile_skipped = pcov.get("state_profile_skipped", []) or []
+        unmet_rows = [
+            (
+                (m or {}).get("check", ""),
+                "前提不足",
+                ", ".join((m or {}).get("reasons", []) or []),
+            )
+            for m in missing
+            if isinstance(m, dict)
+        ] + [
+            (
+                (s or {}).get("check", ""),
+                "state profile",
+                (s or {}).get("reason", ""),
+            )
+            for s in profile_skipped
+            if isinstance(s, dict)
+        ]
+        if unmet_rows:
             rows = "".join(
                 "<tr>"
-                f"<td><code>{self._escape((m or {}).get('check', ''))}</code></td>"
-                f"<td>{self._escape(', '.join((m or {}).get('reasons', []) or []))}</td>"
+                f"<td><code>{self._escape(check)}</code></td>"
+                f"<td>{self._escape(kind)}</td>"
+                f"<td>{self._escape(reason)}</td>"
                 "</tr>"
-                for m in missing
-                if isinstance(m, dict)
+                for check, kind, reason in unmet_rows
             )
             prereq_html = (
-                '<h3 style="margin-top:14px">前提不足で実行条件が満たされない検査</h3>'
+                '<h3 style="margin-top:14px">実行条件が満たされない検査</h3>'
                 '<p style="color:#b45309">以下の検査は選択されていますが、前提（認証・OOB・API 仕様・'
-                "複数アカウント等）が未設定のため実質的に検査できていない可能性があります。"
-                "Findings が 0 でも「安全」とは限りません。</p>"
-                '<div class="table-wrap"><table><thead><tr><th>検査</th><th>不足している前提</th>'
+                "複数アカウント等）の未設定、または state profile による状態変更検査の skip のため、"
+                "実質的に検査できていない可能性があります。Findings が 0 でも「安全」とは限りません。</p>"
+                '<div class="table-wrap"><table><thead><tr><th>検査</th><th>種別</th><th>理由</th>'
                 f"</tr></thead><tbody>{rows}</tbody></table></div>"
             )
 
