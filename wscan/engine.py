@@ -968,6 +968,10 @@ class ScanEngine:
             request_logger=self.request_logger,
             mfa_solver=self._mfa_solver,
         )
+        # ブラウザ初期化が成功したかを追跡する。init() 失敗（Chromium 不在等）でも finally で
+        # partial report を出すため、browser 前提の scanner（csrf/session 等）を「実行できた」と
+        # 誤分類しないよう coverage 会計で参照する（0016 前提会計）。
+        self._browser_ready = False
         # SPA モード時は navigate() 成功後に描画確定待ち(settle_spa)を行う。crawl だけ
         # でなく attack フェーズの navigate でも待つことで、非同期描画フォームの取りこぼしを防ぐ。
         self._browser.spa_settle = bool(self.spa_crawl)
@@ -1260,6 +1264,46 @@ class ScanEngine:
             )
         except Exception:
             check_coverage = {}
+        # prerequisite 会計（0016）: in-scope でも前提（OOB/API仕様/認証/複数account）が
+        # 無ければ実質検査できない。理由付きで残し 0 findings=安全 の誤解を防ぐ（選択会計とは別軸）。
+        try:
+            from .check_coverage import compute_prerequisite_coverage
+            # second_request はブラウザ非依存で常に満たせる。browser は init 成功時のみ充足と
+            # みなす（init 失敗でも finally で partial report を出すため、csrf/session 等を
+            # 「実行できた」と誤分類しない・Codex P2）。
+            available_prereqs = {"second_request"}
+            if getattr(self, "_browser_ready", False):
+                available_prereqs.add("browser")
+            if getattr(self, "oob_sink", None):
+                available_prereqs.add("oob_sink")
+            # api_spec は「テンプレートが存在する」ではなく「scanner が実際に消費できる
+            # mutation テンプレート（POST/PUT/PATCH）が1つ以上ある」ことを条件にする。
+            # GET/DELETE のみの seed では mass_assignment.scan_page が probe を送らないため、
+            # runnable と偽らない（Codex P2）。
+            if any(
+                (getattr(t, "method", "") or "").upper() in ("POST", "PUT", "PATCH")
+                for t in (getattr(self, "api_seed_requests", []) or [])
+            ):
+                available_prereqs.add("api_spec")
+            if (
+                getattr(self, "login_url", "")
+                or getattr(self, "cookies", "")
+                or getattr(self, "cookie_list", None)
+            ):
+                available_prereqs.add("auth_session")
+            if len(getattr(self, "accounts", []) or []) >= 2:
+                available_prereqs.add("multi_account")
+            prerequisite_coverage = compute_prerequisite_coverage(
+                (check_coverage or {}).get("selected", []) or in_scope,
+                {
+                    name: getattr(cls, "CONTRACT", None)
+                    for name, cls in _all_scanners.items()
+                },
+                available_prereqs,
+                state_profile=getattr(self, "state_profile", "unrestricted"),
+            )
+        except Exception:
+            prerequisite_coverage = {}
         # capability matrix（0035-E）: in-scope の scanner × carrier を report へ供給する。
         # check_coverage と同じ in_scope に限定＝「今回動かした検査」の carrier 射程だけ出す
         # （全 36 を毎回出すと noise）。CONTRACT 未宣言 scanner は除外（build 側が要求）。
@@ -1286,6 +1330,7 @@ class ScanEngine:
             "unreached_count": len(unreached),
             "http_status": http_status,
             "check_coverage": check_coverage,
+            "prerequisite_coverage": prerequisite_coverage,
             "capability_matrix": capability_matrix,
         }
 
@@ -2394,6 +2439,7 @@ class ScanEngine:
 
         try:
             await self._browser.init()
+            self._browser_ready = True  # init 成功後のみ browser 前提を「充足」とみなす
             # coverage の blocked カウンタ用 origin フィルタは、pre-auth ログインフロー等の
             # 最初のトラフィックより前に main browser へ設定する（Codex #102 P2）。
             _configure_network_coverage_hosts(
