@@ -148,9 +148,10 @@ class MailHeaderInjectionScanner(BaseScanner):
             CarrierCapability(
                 # _submit_probe の primary は _apply_payload_raw：url_param は URL から action を
                 # 組み client.get() で送る httpx 経路（cookie も browser 不在を許容）で browserless 可。
+                # WSCAN_OOB_* 設定時は _scan_oob() が oob_sink で mail_header_oob を確証するため OOB も含む。
                 carrier=Carrier.QUERY, state=CapabilityState.SUPPORTED,
                 value_kinds=frozenset({ValueKind.STRING}),
-                transports=frozenset({TransportKind.HTTPX}),
+                transports=frozenset({TransportKind.HTTPX, TransportKind.OOB}),
                 payload_shapes=frozenset({PayloadShape.SCALAR}),
             ),
             CarrierCapability(
@@ -158,7 +159,7 @@ class MailHeaderInjectionScanner(BaseScanner):
                 # client.post(data=) の httpx で送るため、transport は PLAYWRIGHT＋HTTPX で browser 必須。
                 carrier=Carrier.FORM, state=CapabilityState.SUPPORTED,
                 value_kinds=frozenset({ValueKind.STRING}),
-                transports=frozenset({TransportKind.PLAYWRIGHT, TransportKind.HTTPX}),
+                transports=frozenset({TransportKind.PLAYWRIGHT, TransportKind.HTTPX, TransportKind.OOB}),
                 browser_required=True,
                 payload_shapes=frozenset({PayloadShape.SCALAR}),
             ),
@@ -178,7 +179,7 @@ class MailHeaderInjectionScanner(BaseScanner):
                 # _extract_form()（browser navigate/evaluate）で解決するため browser 必須。
                 carrier=Carrier.MULTIPART, state=CapabilityState.SUPPORTED,
                 value_kinds=frozenset({ValueKind.STRING}),
-                transports=frozenset({TransportKind.PLAYWRIGHT, TransportKind.HTTPX}),
+                transports=frozenset({TransportKind.PLAYWRIGHT, TransportKind.HTTPX, TransportKind.OOB}),
                 browser_required=True,
                 payload_shapes=frozenset({PayloadShape.SCALAR}),
             ),
