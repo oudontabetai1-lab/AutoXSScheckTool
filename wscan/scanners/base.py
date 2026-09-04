@@ -782,8 +782,11 @@ class BaseScanner(ABC):
                 carrier=carrier,
                 note="facade に互換 driver 無し（独自 transport・0035-D で _dispatch_send 化）",
             )
-        # _apply_ip と同じ gate。事前分類では観測ログを増やさない。
-        if not self.may_scan_injection_point(ip, record_skip=False):
+        # _apply_ip と同じ gate。BLOCKED では即 return し _apply_ip を呼ばないため、ここで
+        # skip を1回記録する（record_skip 既定=True）。抑制すると legacy _apply_ip 経路と違い
+        # blocked が engine.wave_errors に残らず観測不能になる。pass 時は may_scan が True を
+        # 返し記録しないので、後続 _apply_ip の再評価と合わせても二重記録は起きない。
+        if not self.may_scan_injection_point(ip):
             return DispatchResult(state=DispatchState.BLOCKED, carrier=carrier)
 
         # 送信・例外伝播・attempt 記録は _dispatch_send（既定は _apply_ip）へ委譲する。

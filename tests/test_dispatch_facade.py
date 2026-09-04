@@ -122,7 +122,8 @@ async def test_dispatch_blocked_by_state_profile_does_not_send_or_log_twice():
     assert result.state is DispatchState.BLOCKED
     assert result.carrier is Carrier.FORM
     assert scanner.apply_calls == []
-    assert scanner.engine.wave_errors == []
+    # legacy _apply_ip 経路と同じく blocked を観測ログへ1回だけ残す（0035-C レビュー3）。
+    assert scanner.engine.wave_errors == ["state_change_skipped:fake"]
 
 
 @pytest.mark.asyncio
