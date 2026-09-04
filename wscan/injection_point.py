@@ -1,11 +1,13 @@
 """注入点を表す純粋な内部モデルと JSON Pointer ヘルパー。"""
 from __future__ import annotations
 
+import hashlib
 import json
 from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any
 
+from .scanner_contract import LOCATION_TO_CARRIER, Carrier, ValueKind
 from .url_normalize import normalize_url_for_key
 
 
@@ -26,6 +28,57 @@ def parse_pointer(pointer: str) -> list[str]:
     if not pointer.startswith("/"):
         raise ValueError("JSON Pointer は '/' で始まる必要があります")
     return [unescape_token(token) for token in pointer[1:].split("/")]
+
+
+def _structure_signature(value: Any) -> str:
+    """値を除いた構造シグネチャ（純粋・決定論）。
+
+    dict はキー集合と各値の構造、list は要素構造の集合（長さ非依存）、scalar は型名で
+    表す。**値そのものは含めない**ので、nonce/timestamp/秘匿値に依存せず run 跨ぎで安定。
+    """
+    if isinstance(value, dict):
+        inner = ",".join(
+            f"{escape_token(str(key))}:{_structure_signature(value[key])}"
+            for key in sorted(value, key=str)
+        )
+        return "{" + inner + "}"
+    if isinstance(value, (list, tuple)):
+        # 要素構造の重複を畳んで長さ非依存にする（[a,a,b] と [a,b] を同一視）。
+        elems = sorted({_structure_signature(item) for item in value})
+        return "[" + ",".join(elems) + "]"
+    if isinstance(value, bool):
+        return "bool"
+    if value is None:
+        return "null"
+    if isinstance(value, int):
+        return "int"
+    if isinstance(value, float):
+        return "number"
+    return "str"
+
+
+def structure_digest(value: Any) -> str:
+    """request template 等の値抜き構造ダイジェスト（16 桁 hex・純粋）。
+
+    秘匿値・可変値を含めないため provenance/相関に安全に使える（本文の平文は残さない）。
+    """
+    signature = _structure_signature(value)
+    return hashlib.sha256(signature.encode("utf-8")).hexdigest()[:16]
+
+
+def compute_operation_id(method: str, route: str, operation_token: str = "") -> str:
+    """resume 安全な安定 operation identity（純粋・決定論）。
+
+    method / 正規化 route / 呼び出し側が渡す安定な operation_token（GraphQL operation 名や
+    JSON-RPC method 等）だけから作る。**値由来の nonce/timestamp は入れない**ので checkpoint
+    resume を壊さない。同一 (method,url,pointer) で operation が値に埋まる多重 operation を
+    区別したいときに、呼び出し側が安定トークンを与えて識別できる。
+    """
+    parts = [str(method or "").upper(), normalize_url_for_key(route or "")]
+    token = str(operation_token or "").strip()
+    if token:
+        parts.append(token)
+    return " ".join(parts)
 
 
 def build_pointer(tokens: list[str]) -> str:
@@ -241,6 +294,19 @@ class InjectionPoint:
     dom_index: int = -1
     template_id: str = ""
     source: str = ""
+    # 0035-B 加算（provenance・すべて既定値でキー/挙動に非影響）:
+    value_kind: ValueKind = ValueKind.UNKNOWN
+    operation_id: str = ""          # 安定 operation identity（compute_operation_id）
+    template_source: str = ""       # crawl / spa / har / openapi / manual / proxy
+    template_digest: str = ""       # 機微値を除いた構造ダイジェスト（structure_digest）
+
+    @property
+    def carrier(self) -> Carrier:
+        """location を 0035 の共通 carrier 語彙へ写す（各所で個別変換しない）。"""
+        try:
+            return LOCATION_TO_CARRIER[self.location]
+        except KeyError:
+            raise ValueError(f"carrier 未対応の location: {self.location!r}")
 
     @property
     def submit_index(self) -> int:
@@ -293,6 +359,10 @@ class InjectionPoint:
         method: str = "",
         action: str = "",
         labels: str = "",
+        value_kind: ValueKind = ValueKind.UNKNOWN,
+        operation_id: str = "",
+        template_source: str = "",
+        template_digest: str = "",
     ) -> "InjectionPoint":
         """従来フォーム用の注入点を作る。"""
         return cls(
@@ -306,6 +376,10 @@ class InjectionPoint:
             action=str(action or ""),
             labels=str(labels or ""),
             source=source,
+            value_kind=value_kind,
+            operation_id=operation_id,
+            template_source=template_source,
+            template_digest=template_digest,
         )
 
     @classmethod
@@ -314,6 +388,10 @@ class InjectionPoint:
         url: str,
         param_name: str,
         source: str = "crawl",
+        value_kind: ValueKind = ValueKind.UNKNOWN,
+        operation_id: str = "",
+        template_source: str = "",
+        template_digest: str = "",
     ) -> "InjectionPoint":
         """従来 URL パラメータ用の注入点を作る。"""
         return cls(
@@ -322,6 +400,10 @@ class InjectionPoint:
             parameter_id=param_name,
             display_name=param_name,
             source=source,
+            value_kind=value_kind,
+            operation_id=operation_id,
+            template_source=template_source,
+            template_digest=template_digest,
         )
 
     @classmethod
@@ -334,6 +416,10 @@ class InjectionPoint:
         display_name: str = "",
         template_id: str = "",
         source: str = "spa",
+        value_kind: ValueKind = ValueKind.UNKNOWN,
+        operation_id: str = "",
+        template_source: str = "",
+        template_digest: str = "",
     ) -> "InjectionPoint":
         """JSON body 用の注入点を作る。"""
         tokens = parse_pointer(pointer)
@@ -346,4 +432,8 @@ class InjectionPoint:
             method=method.upper(),
             template_id=template_id,
             source=source,
+            value_kind=value_kind,
+            operation_id=operation_id,
+            template_source=template_source,
+            template_digest=template_digest,
         )
