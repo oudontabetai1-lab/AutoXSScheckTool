@@ -1,12 +1,25 @@
 """注入点を表す純粋な内部モデルと JSON Pointer ヘルパー。"""
 from __future__ import annotations
 
+import hashlib
 import json
 from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any
 
+from .scanner_contract import Carrier, ValueKind
 from .url_normalize import normalize_url_for_key
+
+# InjectionPoint.location の canonical 値だけを carrier へ写す。scanner_contract の
+# LOCATION_TO_CARRIER は "query"/"json" 等の alias も含むが、InjectionPoint の他メソッド
+# （stable_key_parts / legacy_is_url_param）は canonical な url_param/form/json_body しか
+# 認識しない。carrier だけが alias を受理すると 3 者が食い違う（query 点を JSON として
+# checkpoint する等）ため、ここでは canonical 3 種のみを許可し alias は拒否する。
+_CANONICAL_LOCATION_CARRIER: dict[str, Carrier] = {
+    "url_param": Carrier.QUERY,
+    "form": Carrier.FORM,
+    "json_body": Carrier.JSON,
+}
 
 
 def unescape_token(token: str) -> str:
@@ -26,6 +39,68 @@ def parse_pointer(pointer: str) -> list[str]:
     if not pointer.startswith("/"):
         raise ValueError("JSON Pointer は '/' で始まる必要があります")
     return [unescape_token(token) for token in pointer[1:].split("/")]
+
+
+def _structure_type(value: Any) -> Any:
+    """値を除いた構造を **JSON 直列化可能な型ツリー**へ写す（純粋・決定論）。
+
+    dict はキー→型構造の object、list は要素型構造の重複を畳んだ array（長さ非依存）、
+    scalar は型名文字列。**値そのものは含めない**ので nonce/timestamp/秘匿値に依存しない。
+    JSON の object/array/string は型が異なるため、後段の ``json.dumps`` で単射に直列化できる
+    （区切り文字を含むキーでも衝突しない）。
+    """
+    if isinstance(value, bool):
+        return "bool"
+    if value is None:
+        return "null"
+    if isinstance(value, int):
+        return "int"
+    if isinstance(value, float):
+        return "number"
+    if isinstance(value, dict):
+        return {str(key): _structure_type(val) for key, val in value.items()}
+    if isinstance(value, (list, tuple)):
+        # 重複する型構造は畳むが **first-seen 順を保持**する。JSON 配列は順序付きで、
+        # [{"put":...},{"delete":...}] と逆順は別 operation を表しうるため sort しない。
+        # 同種の繰り返し（[a,a,b]→[a,b]）だけ畳んで長さ非依存にする。
+        deduped: dict[str, Any] = {}
+        for item in value:
+            struct = _structure_type(item)
+            key = json.dumps(struct, sort_keys=True, ensure_ascii=True)
+            if key not in deduped:
+                deduped[key] = struct
+        return list(deduped.values())
+    return "str"
+
+
+def structure_digest(value: Any) -> str:
+    """request template 等の値抜き構造ダイジェスト（16 桁 hex・純粋）。
+
+    秘匿値・可変値を含めないため provenance/相関に安全に使える（本文の平文は残さない）。
+    型ツリーを ``json.dumps(sort_keys=True)`` で正準化してからハッシュするので、区切り文字を
+    含むキーでも単射（キー順非依存・list 長非依存）。
+    """
+    canonical = json.dumps(
+        _structure_type(value), sort_keys=True, separators=(",", ":"), ensure_ascii=True
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
+
+
+def compute_operation_id(method: str, route: str, operation_token: str = "") -> str:
+    """resume 安全な安定 operation identity（純粋・決定論）。
+
+    method / 正規化 route / 呼び出し側が渡す安定な operation_token（GraphQL operation 名や
+    JSON-RPC method 等）だけから作る。**値由来の nonce/timestamp は入れない**ので checkpoint
+    resume を壊さない。同一 (method,url,pointer) で operation が値に埋まる多重 operation を
+    区別したいときに、呼び出し側が安定トークンを与えて識別できる。
+    """
+    parts = [str(method or "").upper(), normalize_url_for_key(route or "")]
+    # operation_token は JSON-RPC method 等で空白が識別子の一部になりうるため **opaque**
+    # に扱う（strip しない）。空文字のときだけ付けない（末尾区切りを避ける）。
+    token = str(operation_token or "")
+    if token:
+        parts.append(token)
+    return " ".join(parts)
 
 
 def build_pointer(tokens: list[str]) -> str:
@@ -241,6 +316,19 @@ class InjectionPoint:
     dom_index: int = -1
     template_id: str = ""
     source: str = ""
+    # 0035-B 加算（provenance・すべて既定値でキー/挙動に非影響）:
+    value_kind: ValueKind = ValueKind.UNKNOWN
+    operation_id: str = ""          # 安定 operation identity（compute_operation_id）
+    template_source: str = ""       # crawl / spa / har / openapi / manual / proxy
+    template_digest: str = ""       # 機微値を除いた構造ダイジェスト（structure_digest）
+
+    @property
+    def carrier(self) -> Carrier:
+        """canonical location を 0035 の共通 carrier 語彙へ写す（alias は拒否）。"""
+        try:
+            return _CANONICAL_LOCATION_CARRIER[self.location]
+        except KeyError:
+            raise ValueError(f"carrier 未対応の location: {self.location!r}")
 
     @property
     def submit_index(self) -> int:
@@ -293,6 +381,10 @@ class InjectionPoint:
         method: str = "",
         action: str = "",
         labels: str = "",
+        value_kind: ValueKind = ValueKind.UNKNOWN,
+        operation_id: str = "",
+        template_source: str = "",
+        template_digest: str = "",
     ) -> "InjectionPoint":
         """従来フォーム用の注入点を作る。"""
         return cls(
@@ -306,6 +398,10 @@ class InjectionPoint:
             action=str(action or ""),
             labels=str(labels or ""),
             source=source,
+            value_kind=value_kind,
+            operation_id=operation_id,
+            template_source=template_source,
+            template_digest=template_digest,
         )
 
     @classmethod
@@ -314,6 +410,10 @@ class InjectionPoint:
         url: str,
         param_name: str,
         source: str = "crawl",
+        value_kind: ValueKind = ValueKind.UNKNOWN,
+        operation_id: str = "",
+        template_source: str = "",
+        template_digest: str = "",
     ) -> "InjectionPoint":
         """従来 URL パラメータ用の注入点を作る。"""
         return cls(
@@ -322,6 +422,10 @@ class InjectionPoint:
             parameter_id=param_name,
             display_name=param_name,
             source=source,
+            value_kind=value_kind,
+            operation_id=operation_id,
+            template_source=template_source,
+            template_digest=template_digest,
         )
 
     @classmethod
@@ -334,6 +438,10 @@ class InjectionPoint:
         display_name: str = "",
         template_id: str = "",
         source: str = "spa",
+        value_kind: ValueKind = ValueKind.UNKNOWN,
+        operation_id: str = "",
+        template_source: str = "",
+        template_digest: str = "",
     ) -> "InjectionPoint":
         """JSON body 用の注入点を作る。"""
         tokens = parse_pointer(pointer)
@@ -346,4 +454,8 @@ class InjectionPoint:
             method=method.upper(),
             template_id=template_id,
             source=source,
+            value_kind=value_kind,
+            operation_id=operation_id,
+            template_source=template_source,
+            template_digest=template_digest,
         )
