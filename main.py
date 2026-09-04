@@ -1797,6 +1797,30 @@ def _effective_open_report(args) -> bool:
     return True
 
 
+def _effective_checks(args) -> list[str]:
+    """`scan` が実際に実行する check 一覧を解決する（表示と実行の一元ソース）。
+
+    表示（起動バナー・auto-config 行）と実行（engine へ渡す checks_list）が
+    構造的に食い違わないよう、``--all-checks``（登録済み全 scanner で ``--checks`` を上書き）
+    と ``--dom-xss``（dom_xss を追加）の解決をここへ集約する。呼び出し時の args を都度読むので、
+    auto-config ウィザードが ``args.checks`` を更新した後に呼んでも正しい実効値を返す。
+    """
+    if getattr(args, "all_checks", False):
+        from wscan.scanners import SCANNERS as _ALL_SCANNERS
+        checks = list(_ALL_SCANNERS.keys())
+    else:
+        checks = list(getattr(args, "checks", None) or [])
+    if getattr(args, "dom_xss", False) and "dom_xss" not in checks:
+        checks.append("dom_xss")
+    return checks
+
+
+def _checks_display(args) -> str:
+    """起動バナー等に出す実効 check の表示文字列（空なら IPA 既定を示す）。"""
+    checks = _effective_checks(args)
+    return ", ".join(checks) if checks else "all IPA checks"
+
+
 def _agent_exit_code(result) -> int:
     """Agent 結果だけを対象に CLI 終了コードを決める純粋関数。
 
@@ -2078,7 +2102,7 @@ async def run_scan(args):
 
     await _resolve_ollama_model(args, console)
 
-    checks_display = ', '.join(args.checks) if args.checks else "all IPA checks"
+    checks_display = _checks_display(args)  # --all-checks/--dom-xss を反映した実効表示
     planner_display = "off" if getattr(args, "no_planner", False) else "on (AI-driven)"
     concurrency_val = getattr(args, "concurrency", 1)
     concurrency_display = (
@@ -2120,7 +2144,7 @@ async def run_scan(args):
         if _wizard_result is not None:
             apply_to_args(_wizard_result, args)
             # Rebuild checks display after wizard
-            checks_display = ', '.join(args.checks) if args.checks else "all IPA checks"
+            checks_display = _checks_display(args)
             console.print(f"[cyan]Auto-config applied:[/cyan] checks=[green]{checks_display}[/green]  "
                           f"depth=[blue]{args.depth}[/blue]")
 
@@ -2197,14 +2221,9 @@ async def run_scan(args):
             f"[cyan]{len(access_urls)}[/cyan] access-only"
         )
 
-    # Build checks list (add dom_xss if requested, allow wizard to have updated args.checks)
-    checks_list = list(args.checks)
-    # --all-checks: 登録済み全 scanner を実行対象にする（--checks を上書き・0016）。
-    if getattr(args, "all_checks", False):
-        from wscan.scanners import SCANNERS as _ALL_SCANNERS
-        checks_list = list(_ALL_SCANNERS.keys())
-    if getattr(args, "dom_xss", False) and "dom_xss" not in checks_list:
-        checks_list.append("dom_xss")
+    # Build checks list（表示と同じ _effective_checks で解決＝banner と engine が食い違わない）。
+    # --all-checks は --checks を上書き（0016）、--dom-xss は dom_xss を追加。wizard 更新後の args を読む。
+    checks_list = _effective_checks(args)
 
     # A: Build accounts list from --accounts or --accounts-file
     import yaml as _yaml
