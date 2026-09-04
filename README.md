@@ -753,7 +753,7 @@ output/<timestamp>/
 
 | 出力 | 用途 |
 | --- | --- |
-| `report.html` | 自己完結型 HTML。確証と未確証を別件数で表示し、Finding 一覧・証拠・Agent バッジ、実行条件、**カバレッジ表＋観測性メトリクス**（到達/未到達 URL と理由、試行結果、403/429 ブロック、劣化・脱落した probe/wave）を保持します。0 confirmed が「安全」を意味するとは限らないため、未確証と検査できなかった範囲も確認します |
+| `report.html` | 自己完結型 HTML。確証と未確証を別件数で表示し、Finding 一覧・証拠・Agent バッジ、実行条件、**カバレッジ表＋観測性メトリクス**（到達/未到達 URL と理由、試行結果、403/429 ブロック、劣化・脱落した probe/wave、in-scope scanner × carrier の **capability matrix**）を保持します。0 confirmed が「安全」を意味するとは限らないため、未確証と検査できなかった範囲も確認します |
 | `report_executive.html` | 管理層向けサマリー |
 | `report_developer.html` | 開発者向け詳細・修正観点 |
 | `evidence.json` | Finding と証跡の機械可読 JSON |

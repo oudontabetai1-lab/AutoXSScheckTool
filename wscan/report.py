@@ -1608,12 +1608,24 @@ document.querySelectorAll('.plan-payloads-toggle').forEach(btn => {{
                 f"<p>未実行（未選択）の検査: {not_selected_html}</p>"
             )
 
+        # capability matrix（0035-E）: in-scope の scanner × carrier の射程を可視化する。
+        # 純粋 renderer が生成した安全な HTML 断片をそのまま埋める（空 matrix では空文字）。
+        capability_matrix_html = ""
+        cap_matrix = coverage.get("capability_matrix", {}) or {}
+        if cap_matrix:
+            try:
+                from .scanner_contract import render_capability_matrix_html
+                capability_matrix_html = render_capability_matrix_html(cap_matrix)
+            except Exception:
+                capability_matrix_html = ""
+
         return f"""
         <div class="section coverage-section">
             <h2>Coverage（到達性カバレッジ）</h2>
             <p>到達 URL: <strong>{reached_count}</strong> 件 / 試行: <strong>{attempts}</strong> 件 /
             Findings: <strong>{findings_total}</strong> 件</p>
             {check_coverage_html}
+            {capability_matrix_html}
             <h3 style="margin-top:14px">試行結果（by_status）</h3>
             <ul>{by_status_html}</ul>
             <h3 style="margin-top:14px">HTTP status</h3>

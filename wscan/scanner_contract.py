@@ -8,6 +8,7 @@ contract test に使うだけで、dispatch 実装への配線は 0035-C 以降�
 """
 from __future__ import annotations
 
+import html
 from dataclasses import dataclass
 from enum import Enum
 
@@ -310,3 +311,87 @@ def render_capability_matrix_markdown(matrix: dict) -> str:
             lines.extend(reasons_by_scanner[check])
             lines.append("")
     return "\n".join(lines) + "\n"
+
+
+# HTML セル記号→(ラベル, 背景色)。未実装セル（U/P/?）を色で可視化する（0035-E）。
+_CELL_STYLE = {
+    "s": ("supported", "#e6f4ea", "#1e7e34"),
+    "P": ("planned", "#fff3cd", "#856404"),
+    "U": ("unsupported", "#e9ecef", "#6c757d"),
+    "?": ("unclassified", "#fde2e1", "#b00020"),
+}
+
+
+def render_capability_matrix_html(matrix: dict) -> str:
+    """capability matrix（build_capability_matrix の出力）を HTML 断片へ整形（純粋）。
+
+    行=scanner・列=carrier の記号グリッド。未実装セル（U/P/?）を色分けし、各セルの
+    `title` 属性へ state/value_kinds/transports/reason を載せる（hover で「なぜ検査できないか」）。
+    レポートの coverage セクションへ埋める用途。空 matrix では空文字を返す（セクションごと省略）。
+    JSON dict だけから生成し再計算しない。scanner_contract 内で self.escape に依存しないよう
+    stdlib html.escape を使う（純粋・テスト容易）。
+    """
+    scanners = matrix.get("scanners", {}) or {}
+    carriers = list(matrix.get("carriers", []) or [])
+    if not scanners or not carriers:
+        return ""
+
+    def esc(value) -> str:
+        return html.escape(str(value), quote=True)
+
+    header = "".join(f"<th>{esc(c)}</th>" for c in carriers)
+    counts: dict[str, int] = {}
+    body_rows = []
+    for check in sorted(scanners):
+        row = scanners[check]
+        cells_meta = row.get("carriers", {}) or {}
+        tds = []
+        for carrier in carriers:
+            cell = cells_meta.get(carrier, {}) or {}
+            sym = cell.get("symbol", "?")
+            counts[sym] = counts.get(sym, 0) + 1
+            _label, bg, fg = _CELL_STYLE.get(sym, _CELL_STYLE["?"])
+            vks = ", ".join(cell.get("value_kinds", []) or []) or "-"
+            trs = ", ".join(cell.get("transports", []) or []) or "-"
+            reason = cell.get("reason", "") or ""
+            task = cell.get("task", "") or ""
+            title = f"{cell.get('state', '')}; value_kinds={vks}; transports={trs}"
+            if reason:
+                title += f"; reason={reason}"
+            if task:
+                title += f"; task={task}"
+            tds.append(
+                f'<td title="{esc(title)}" '
+                f'style="background:{bg};color:{fg};text-align:center;font-weight:600">'
+                f"{esc(sym)}</td>"
+            )
+        body_rows.append(
+            f"<tr><th style=\"text-align:left\">{esc(check)}</th>"
+            f"<td style=\"text-align:center\">{esc(row.get('state_change', ''))}</td>"
+            + "".join(tds)
+            + "</tr>"
+        )
+
+    legend = " ".join(
+        f'<span style="background:{bg};color:{fg};padding:1px 6px;border-radius:3px">'
+        f"{esc(sym)}={esc(label)}</span>"
+        for sym, (label, bg, fg) in _CELL_STYLE.items()
+    )
+    summary = (
+        f"supported {counts.get('s', 0)} / planned {counts.get('P', 0)} / "
+        f"unsupported {counts.get('U', 0)}"
+        + (f" / unclassified {counts['?']}" if counts.get("?") else "")
+    )
+    return (
+        '<details style="margin-top:14px"><summary style="cursor:pointer;font-weight:600">'
+        "Scanner capability matrix（in-scope の scanner × carrier）</summary>"
+        f'<p style="margin:6px 0">凡例: {legend}</p>'
+        f"<p>{esc(summary)}</p>"
+        '<div class="table-wrap"><table><thead><tr><th>scanner</th><th>state_change</th>'
+        f"{header}</tr></thead><tbody>"
+        + "".join(body_rows)
+        + "</tbody></table></div>"
+        '<p style="color:#666;font-size:0.9em">セル記号の詳細（value_kinds/transports/理由）は'
+        "各セルにマウスを重ねると表示されます。</p>"
+        "</details>"
+    )

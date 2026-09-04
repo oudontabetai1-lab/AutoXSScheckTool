@@ -4,7 +4,7 @@ from wscan.scanners import SCANNERS
 from wscan.scanner_contract import (
     Carrier, CapabilityState, ExecutionKind, StateChangeClass,
     ScannerContract, validate_scanner_contract, build_capability_matrix,
-    render_capability_matrix_markdown,
+    render_capability_matrix_markdown, render_capability_matrix_html,
 )
 
 # SUPPORTS_JSON_BODY 実値と JSON carrier supported の一致を免除する既知例外
@@ -101,3 +101,63 @@ def test_render_capability_matrix_markdown():
     assert sample_reason and sample_reason in md
     # JSON dict のみから生成（元 matrix に無いキーを勝手に作らない）
     assert md.count("| " + next(iter(SCANNERS)) + " |") >= 0
+
+
+def test_render_capability_matrix_html():
+    matrix = build_capability_matrix(_contracts())
+    out = render_capability_matrix_html(matrix)
+    # collapsible セクション・凡例・表がある
+    assert "<details" in out and "</details>" in out
+    assert "凡例:" in out
+    assert "<table>" in out
+    # 全 scanner が行に、全 carrier が列ヘッダに出る
+    for check in SCANNERS:
+        assert f">{check}<" in out
+    for carrier in Carrier:
+        assert f"<th>{carrier.value}</th>" in out
+    # 未実装セルが色で可視化される（unsupported の背景色が使われている）
+    assert "#e9ecef" in out  # unsupported
+    # 実在する unsupported の reason が cell tooltip(title) に載る
+    sample_reason = None
+    for check, cls in SCANNERS.items():
+        for cap in cls.CONTRACT.capabilities:
+            if cap.state.value in ("unsupported", "planned") and cap.reason:
+                sample_reason = cap.reason
+                break
+        if sample_reason:
+            break
+    assert sample_reason and f"reason={sample_reason}" in _unescape_titles(out)
+
+
+def _unescape_titles(html_text: str) -> str:
+    import html as _h
+    return _h.unescape(html_text)
+
+
+def test_render_capability_matrix_html_escapes_and_handles_empty():
+    # 空 matrix はセクションごと省略（空文字）
+    assert render_capability_matrix_html({}) == ""
+    assert render_capability_matrix_html({"carriers": [], "scanners": {}}) == ""
+    # 悪意ある reason/scanner 名でも HTML を壊さない（属性/本文ともエスケープ）
+    evil = {
+        "carriers": ["query"],
+        "scanners": {
+            "x<script>": {
+                "state_change": "read-only",
+                "carriers": {
+                    "query": {
+                        "symbol": "U",
+                        "state": "unsupported",
+                        "reason": '"><img src=x onerror=alert(1)>',
+                        "task": "",
+                        "value_kinds": ["string"],
+                        "transports": [],
+                    }
+                },
+            }
+        },
+    }
+    out = render_capability_matrix_html(evil)
+    assert "<script>" not in out
+    assert "onerror=alert(1)>" not in out  # 生の属性ブレイクアウトが無い
+    assert "&lt;script&gt;" in out
