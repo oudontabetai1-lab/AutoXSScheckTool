@@ -754,6 +754,47 @@ class BaseScanner(ABC):
         self._record_attempt(ip, payload, source, pair)
         return source, pair
 
+    async def dispatch(self, ip: "InjectionPoint", payload) -> "DispatchResult":
+        """既存 _apply_ip をラップし typed DispatchResult を返す facade（0035-C・加算）。
+
+        挙動は _apply_ip と同一（送信・例外伝播・attempt 記録は _apply_ip に委譲）。
+        ここでは追加で結果を DispatchState へ分類し、carrier/transport/legacy pair を
+        typed に載せるだけ。まだ誰も必須にしない（既存 scanner は _apply_ip を使い続ける）。
+        """
+        from wscan.dispatch_result import (
+            DispatchResult,
+            DispatchState,
+            transport_hint_for,
+        )
+
+        carrier = ip.carrier
+        # _apply_ip と同じ gate。事前分類では観測ログを増やさない。
+        if not self.may_scan_injection_point(ip, record_skip=False):
+            return DispatchResult(state=DispatchState.BLOCKED, carrier=carrier)
+        if ip.location == "json_body" and not self.SUPPORTS_JSON_BODY:
+            return DispatchResult(state=DispatchState.UNSUPPORTED, carrier=carrier)
+
+        # 送信・例外伝播・attempt 記録は既存 dispatch に委譲する。
+        source, pair = await self._apply_ip(ip, payload)
+        if pair:
+            return DispatchResult(
+                state=DispatchState.SENT,
+                carrier=carrier,
+                source=source,
+                pair=pair,
+                transport=transport_hint_for(carrier),
+            )
+
+        # 現状の legacy pair だけでは unexecutable と transport failure を区別できない。
+        return DispatchResult(
+            state=DispatchState.TRANSPORT_ERROR,
+            carrier=carrier,
+            source=source,
+            pair=pair,
+            transport=transport_hint_for(carrier),
+            note="empty result after gates (json unexecutable/transport 未区別)",
+        )
+
     def _record_attempt(self, ip: "InjectionPoint", payload, source: str, pair: dict) -> None:
         """(注入点, check) 単位で payload→応答メタを試行台帳へ蓄積する（best-effort）。"""
         ledger = getattr(getattr(self, "engine", None), "attempt_ledger", None)
