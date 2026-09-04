@@ -1260,6 +1260,22 @@ class ScanEngine:
             )
         except Exception:
             check_coverage = {}
+        # capability matrix（0035-E）: in-scope の scanner × carrier を report へ供給する。
+        # check_coverage と同じ in_scope に限定＝「今回動かした検査」の carrier 射程だけ出す
+        # （全 36 を毎回出すと noise）。CONTRACT 未宣言 scanner は除外（build 側が要求）。
+        try:
+            from .scanner_contract import build_capability_matrix as _build_cap_matrix
+            _scoped_contracts = {
+                name: getattr(_all_scanners[name], "CONTRACT")
+                for name in in_scope
+                if name in _all_scanners
+                and getattr(_all_scanners[name], "CONTRACT", None) is not None
+            }
+            capability_matrix = (
+                _build_cap_matrix(_scoped_contracts) if _scoped_contracts else {}
+            )
+        except Exception:
+            capability_matrix = {}
         return {
             "reached_urls": reached_urls,
             "reached_count": len(reached_url_set),
@@ -1270,6 +1286,7 @@ class ScanEngine:
             "unreached_count": len(unreached),
             "http_status": http_status,
             "check_coverage": check_coverage,
+            "capability_matrix": capability_matrix,
         }
 
     def _scan_matrix_for_display(self) -> list[dict]:

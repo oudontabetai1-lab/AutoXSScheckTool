@@ -105,6 +105,45 @@ def test_coverage_summary_union_surfaces_unknown_and_autoenabled():
     assert "xss" in cc["selected"] and "privesc" in cc["selected"]  # auto-enable も in-scope
 
 
+def test_coverage_summary_includes_scoped_capability_matrix():
+    """coverage_summary は in-scope の scanner に限定した capability_matrix を出す（0035-E）。
+    全 registry(36) を毎回出さず、実際に動かした検査の carrier 射程だけを供給する。"""
+    from types import SimpleNamespace
+    from wscan.engine import ScanEngine
+
+    engine = SimpleNamespace(
+        checks=["xss"],                          # 実在＋CONTRACT あり
+        scanners={"xss": object(), "privesc": object()},  # privesc は auto-enable
+        visited_urls=set(), reached_urls=set(), scan_matrix=[], all_findings=[],
+    )
+    cm = ScanEngine.coverage_summary(engine)["capability_matrix"]
+    assert cm and "scanners" in cm and "carriers" in cm
+    # in-scope（xss, privesc）だけ。全 36 は出さない。
+    assert set(cm["scanners"].keys()) == {"xss", "privesc"}
+    # carrier 語彙は全 carrier を列に持つ（build_capability_matrix の契約）
+    from wscan.scanner_contract import Carrier
+    assert set(cm["carriers"]) == {c.value for c in Carrier}
+
+
+def test_coverage_html_renders_capability_matrix_when_present(tmp_path):
+    from wscan.report import ReportGenerator
+    from wscan.scanner_contract import build_capability_matrix
+    from wscan.scanners import SCANNERS
+    matrix = build_capability_matrix({"xss": SCANNERS["xss"].CONTRACT})
+    coverage = {
+        "reached_count": 0, "attempts": 0, "findings_total": 0,
+        "http_status": {}, "by_status": {}, "reached_urls": [], "unreached": [],
+        "capability_matrix": matrix,
+    }
+    html = ReportGenerator(tmp_path)._build_coverage_html(coverage)
+    assert "Scanner capability matrix" in html
+    assert ">xss<" in html
+    # matrix 無しでは節ごと省略（矛盾表示を作らない）
+    coverage.pop("capability_matrix")
+    html2 = ReportGenerator(tmp_path)._build_coverage_html(coverage)
+    assert "Scanner capability matrix" not in html2
+
+
 def test_coverage_html_warns_on_unknown_configured_checks(tmp_path):
     from wscan.report import ReportGenerator
     coverage = {
