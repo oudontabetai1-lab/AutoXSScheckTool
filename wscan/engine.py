@@ -6434,6 +6434,7 @@ class ScanEngine:
                     self.all_findings,
                     target_url=self.target_url,
                     output_path=self.output_dir / "report.sarif",
+                    coverage=self.coverage_summary(),  # 検査カバレッジを SARIF へ（0016）
                 )
                 sarif_out = str(sarif_path)
                 console.print(f"  [dim]SARIF:   [/dim] {sarif_path}")

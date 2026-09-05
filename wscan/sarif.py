@@ -86,14 +86,30 @@ class SarifExporter:
         findings: list[dict],
         target_url: str = "",
         tool_version: str = "1.0.0",
+        coverage: dict | None = None,
     ) -> dict:
         """
         findings_dicts (Finding.to_dict() の出力リスト) から
         SARIF 2.1.0 ドキュメントを生成して返す。
+
+        ``coverage``（engine.coverage_summary() の出力）を渡すと、run properties へ
+        検査カバレッジ補助情報（registered/selected/not_selected/前提不足/state profile skip）
+        を出す。SARIF 消費側が「0 findings＝安全ではない・未実行の検査がある」を判別できる
+        （0016 観測性）。未指定なら従来どおり（後方互換）。
         """
         rules = self._build_rules(findings)
         results = [self._finding_to_result(f) for f in findings]
         confirmed_total = sum(1 for f in findings if finding_dict_confirmed(f))
+
+        properties: dict = {
+            "target": target_url,
+            "total_findings": confirmed_total,
+            "hypothesis_findings": len(findings) - confirmed_total,
+            "total_results": len(findings),
+        }
+        coverage_props = self._build_coverage_properties(coverage)
+        if coverage_props:
+            properties["coverage"] = coverage_props
 
         return {
             "$schema": _SARIF_SCHEMA,
@@ -112,15 +128,44 @@ class SarifExporter:
                         "WEBROOT": {"uri": target_url or "https://unknown/"}
                     },
                     "results": results,
-                    "properties": {
-                        "target": target_url,
-                        "total_findings": confirmed_total,
-                        "hypothesis_findings": len(findings) - confirmed_total,
-                        "total_results": len(findings),
-                    },
+                    "properties": properties,
                 }
             ],
         }
+
+    @staticmethod
+    def _build_coverage_properties(coverage: dict | None) -> dict:
+        """coverage_summary から SARIF run properties 用の補助情報を組む（純粋）。
+
+        registered/selected/not_selected（check_coverage）と、前提不足・state profile skip
+        （prerequisite_coverage）を SARIF 消費側向けに平坦化する。coverage 無し/空なら空 dict。
+        """
+        if not coverage:
+            return {}
+        cc = coverage.get("check_coverage") or {}
+        pc = coverage.get("prerequisite_coverage") or {}
+        props: dict = {}
+        if cc:
+            props["check_coverage"] = {
+                "registry_total": cc.get("registry_total", 0),
+                "selected": cc.get("selected", []),
+                "selected_count": cc.get("selected_count", 0),
+                "not_selected": cc.get("not_selected", []),
+                "coverage_status": cc.get("coverage_status", ""),
+                "unknown_selected": cc.get("unknown_selected", []),
+            }
+        if pc:
+            props["prerequisite_missing"] = [
+                (m or {}).get("check", "")
+                for m in (pc.get("prerequisite_missing") or [])
+                if isinstance(m, dict)
+            ]
+            props["state_profile_skipped"] = [
+                (s or {}).get("check", "")
+                for s in (pc.get("state_profile_skipped") or [])
+                if isinstance(s, dict)
+            ]
+        return props
 
     # ── helpers ───────────────────────────────────────────────────────────────
 
@@ -239,11 +284,12 @@ def write_sarif(
     target_url: str,
     output_path: "Path | str",
     tool_version: str = "1.0.0",
+    coverage: dict | None = None,
 ) -> Path:
     """
     Finding オブジェクトのリスト (または to_dict() 済み dict のリスト) を
     SARIF ファイルとして output_path に書き出す。
-    書き出したパスを返す。
+    書き出したパスを返す。``coverage`` を渡すと run properties へ検査カバレッジを出す（0016）。
     """
     # Finding オブジェクト (to_dict メソッド持ち) → dict に変換
     findings_dicts: list[dict] = []
@@ -254,7 +300,9 @@ def write_sarif(
             findings_dicts.append(f)
 
     exporter = SarifExporter()
-    sarif_doc = exporter.export(findings_dicts, target_url=target_url, tool_version=tool_version)
+    sarif_doc = exporter.export(
+        findings_dicts, target_url=target_url, tool_version=tool_version, coverage=coverage
+    )
 
     out = Path(output_path)
     out.parent.mkdir(parents=True, exist_ok=True)
