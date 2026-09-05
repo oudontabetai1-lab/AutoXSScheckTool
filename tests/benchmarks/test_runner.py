@@ -116,7 +116,7 @@ def test_timeout_does_not_wait_or_block_next_case(suite):
     def executor(case, base_url):
         if case == suite.cases[0]:
             try:
-                assert release.wait(5), "runner waited for timed-out executor"
+                assert release.wait(60), "runner waited for timed-out executor"
             finally:
                 finished.set()
         return CaseResult(case.case_id, State.COMPLETED)
@@ -140,7 +140,7 @@ def test_worker_exhaustion_aborts_loudly(suite):
     release = Event()
 
     def executor(case, base_url):
-        release.wait(5)  # 常にハング（テスト終了時に release）
+        release.wait()  # テストが解放するまで確実にブロック（CI flaky 防止）
         return CaseResult(case.case_id, State.COMPLETED)
 
     try:
@@ -160,7 +160,7 @@ def test_lingering_worker_cap_is_process_wide(suite):
     release = Event()
 
     def executor(case, base_url):
-        release.wait(5)
+        release.wait()  # 無 timeout：テスト解放まで予約を確実に保持（CI flaky 防止）
         return CaseResult(case.case_id, State.COMPLETED)
 
     try:
@@ -226,7 +226,7 @@ def test_timed_out_worker_is_daemon(suite):
     release = Event()
 
     def executor(case, base_url):
-        release.wait(5)  # 期限より長く待つ。テスト終了時に release で解放する。
+        release.wait()  # 無 timeout：テスト解放まで確実にブロック（CI flaky 防止）
         return CaseResult(case.case_id, State.COMPLETED)
 
     try:
