@@ -29,10 +29,6 @@ gaps:
     reason: E2E benchmark ground truth 未整備（vulnerable/safe twin case が未作成）
     owner_task: "0034"
     deadline: "2026-12-31"
-  dom_xss:
-    reason: E2E benchmark ground truth 未整備（vulnerable/safe twin case が未作成）
-    owner_task: "0034"
-    deadline: "2026-12-31"
   file_upload:
     reason: E2E benchmark ground truth 未整備（vulnerable/safe twin case が未作成）
     owner_task: "0034"
@@ -73,14 +69,6 @@ gaps:
     reason: E2E benchmark ground truth 未整備（vulnerable/safe twin case が未作成）
     owner_task: "0034"
     deadline: "2026-12-31"
-  nosql:
-    reason: E2E benchmark ground truth 未整備（vulnerable/safe twin case が未作成）
-    owner_task: "0034"
-    deadline: "2026-12-31"
-  os:
-    reason: E2E benchmark ground truth 未整備（vulnerable/safe twin case が未作成）
-    owner_task: "0034"
-    deadline: "2026-12-31"
   privesc:
     reason: E2E benchmark ground truth 未整備（vulnerable/safe twin case が未作成）
     owner_task: "0034"
@@ -110,10 +98,6 @@ gaps:
     owner_task: "0034"
     deadline: "2026-12-31"
   sri:
-    reason: E2E benchmark ground truth 未整備（vulnerable/safe twin case が未作成）
-    owner_task: "0034"
-    deadline: "2026-12-31"
-  ssrf:
     reason: E2E benchmark ground truth 未整備（vulnerable/safe twin case が未作成）
     owner_task: "0034"
     deadline: "2026-12-31"

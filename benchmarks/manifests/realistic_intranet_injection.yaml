@@ -1,0 +1,90 @@
+schema_version: 1
+suite_id: realistic_intranet_injection
+fixture_id: realistic_intranet
+runner_profile: scan_engine
+mode: normal-deterministic
+source_kind: first_party
+# realistic_intranet の HTTP 注入系（field carrier）を実採点する（0034-R3・page系は scorer 未対応の
+# ため後回し＝#134 の _SCOREABLE_CARRIERS={query,form}）。carrier/location は fixture の一次情報
+# （GET クエリ=url_param / POST フォーム=form）で宣言し、実 injection_location は E2E で検証する。
+# EXPECTED_FINDINGS（脆弱）と SAFE_ENDPOINTS（安全ツイン=検出禁止）を正本にする。
+cases:
+  # ── OS コマンド注入（GET host= / url_param）─────────────────────────────
+  - case_id: realistic_intranet_injection.ping.host.vulnerable
+    expected: vulnerable
+    check: os
+    request: {method: GET, path: /tools/ping}
+    injection: {carrier: query, parameter_id: host, value_kind: string}
+    match: {path: /tools/ping, field: host, location: url_param}
+    twin_id: realistic_intranet_injection.dns_lookup.name.safe
+    taxonomy: [command_injection, unauthenticated]
+    gate: observed
+  - case_id: realistic_intranet_injection.dns_lookup.name.safe
+    expected: safe
+    check: os
+    request: {method: GET, path: /tools/dns-lookup}
+    injection: {carrier: query, parameter_id: name, value_kind: string}
+    match: {path: /tools/dns-lookup, field: name, location: url_param}
+    twin_id: realistic_intranet_injection.ping.host.vulnerable
+    taxonomy: [command_injection, unauthenticated]
+    gate: observed
+
+  # ── SSRF（GET url= / url_param）─────────────────────────────────────────
+  - case_id: realistic_intranet_injection.webhook.url.vulnerable
+    expected: vulnerable
+    check: ssrf
+    request: {method: GET, path: /integrations/webhook-test}
+    injection: {carrier: query, parameter_id: url, value_kind: string}
+    match: {path: /integrations/webhook-test, field: url, location: url_param}
+    twin_id: realistic_intranet_injection.avatar.image_url.safe
+    taxonomy: [ssrf, unauthenticated]
+    gate: observed
+  - case_id: realistic_intranet_injection.avatar.image_url.safe
+    expected: safe
+    check: ssrf
+    request: {method: GET, path: /integrations/avatar-fetch}
+    injection: {carrier: query, parameter_id: image_url, value_kind: string}
+    match: {path: /integrations/avatar-fetch, field: image_url, location: url_param}
+    twin_id: realistic_intranet_injection.webhook.url.vulnerable
+    taxonomy: [ssrf, unauthenticated]
+    gate: observed
+
+  # ── NoSQL 注入（POST form username / form）──────────────────────────────
+  - case_id: realistic_intranet_injection.admin_login.username.vulnerable
+    expected: vulnerable
+    check: nosql
+    request: {method: POST, path: /admin/login}
+    injection: {carrier: form, parameter_id: username, value_kind: string}
+    match: {path: /admin/login, field: username, location: form}
+    twin_id: realistic_intranet_injection.portal_signin.username.safe
+    taxonomy: [nosql_injection, unauthenticated]
+    gate: observed
+  - case_id: realistic_intranet_injection.portal_signin.username.safe
+    expected: safe
+    check: nosql
+    request: {method: POST, path: /portal/signin}
+    injection: {carrier: form, parameter_id: username, value_kind: string}
+    match: {path: /portal/signin, field: username, location: form}
+    twin_id: realistic_intranet_injection.admin_login.username.vulnerable
+    taxonomy: [nosql_injection, unauthenticated]
+    gate: observed
+
+  # ── DOM XSS（GET tab= / url_param）──────────────────────────────────────
+  - case_id: realistic_intranet_injection.widget.tab.vulnerable
+    expected: vulnerable
+    check: dom_xss
+    request: {method: GET, path: /dashboard/widget}
+    injection: {carrier: query, parameter_id: tab, value_kind: string}
+    match: {path: /dashboard/widget, field: tab, location: url_param}
+    twin_id: realistic_intranet_injection.profile.bio.safe
+    taxonomy: [dom_xss, unauthenticated]
+    gate: observed
+  - case_id: realistic_intranet_injection.profile.bio.safe
+    expected: safe
+    check: dom_xss
+    request: {method: GET, path: /dashboard/profile}
+    injection: {carrier: query, parameter_id: bio, value_kind: string}
+    match: {path: /dashboard/profile, field: bio, location: url_param}
+    twin_id: realistic_intranet_injection.widget.tab.vulnerable
+    taxonomy: [dom_xss, unauthenticated]
+    gate: observed
