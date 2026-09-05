@@ -423,6 +423,16 @@ class NetworkCapture:
         self.pairs.clear()
         self._pending.clear()
 
+    def has_request_activity(self) -> bool:
+        """clear() 以降に HTTP リクエストが送信されたか（送達の証拠）。
+
+        on_request で `_pending` に入り、応答が来れば `pairs` へ移る。応答前に
+        navigation が中断されても `_pending` に残るため、両方を見れば「送信済み」を
+        取りこぼさない（Codex #137 P2: click() が post-dispatch の navigation 待ちで
+        raise しても、リクエスト自体は送信済み＝送達成功と判定できる）。
+        """
+        return bool(self.pairs or self._pending)
+
     def status_summary(self) -> dict:
         """スキャン全体で捕捉した HTTP status を集計する。"""
         return bucketize_status_counts(self.status_counts)
@@ -1663,11 +1673,13 @@ class BrowserManager:
             pair = self.network.best_pair_for_page(action_url) or self.network.latest() or {}
             return source, pair
         except Exception as e:
-            # 例外を握りつぶし空 pair を返す。送達失敗の観測フラグは dispatch 状態で決める
-            # （0007 D1・Codex #137 P2）: submit dispatch 前の例外（fill/評価失敗）＝未送達（False）、
-            # dispatch 後（wait_for_load_state/get_page_source が slow/streaming 応答で失敗）＝
-            # 送達済みを維持（True）。前 probe の値が漏れないよう local dispatched で判定する。
-            self.last_probe_delivered = dispatched
+            # 例外を握りつぶし空 pair を返す。送達判定は「リクエストが送信されたか」を正本にする
+            # （0007 D1・Codex #137 P2）。Playwright の click() は post-dispatch の navigation 待ちを
+            # 含むため、リクエスト送信後に slow/interrupted navigation で click() 自体が raise しうる。
+            # その場合 dispatched=True に到達しないが、network capture にリクエストが残るので送達成功と
+            # 判定する。dispatch 前の例外（fill/評価失敗＝リクエスト未送信）のみ未送達（False）。
+            # network.clear() は本メソッド冒頭で呼ぶため、ここでの activity は当 probe の submit に由来。
+            self.last_probe_delivered = dispatched or self.network.has_request_activity()
             source = await self.get_page_source()
             return source, {}
 
