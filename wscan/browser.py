@@ -1622,8 +1622,11 @@ class BrowserManager:
 
             # Check whether the form was found before attempting submit
             if not result or not result.get("success"):
-                # フォーム/フィールド不在は transport 失敗ではない（ページ到達済み）。stale フラグを
-                # 残さないよう明示的に True（未送達扱いにして transport_error を偽記録しない）。
+                # フォーム不在は transport 失敗ではない。スキャナは各 param を form/url 両経路で
+                # speculative に probe するため、URL param エンドポイントを「form field」として試すと
+                # 日常的に form 不在になる（正常動作）。ここを未送達扱いにすると _degraded_checks が
+                # check 粒度で当該 check の tested を全除外し、無関係な url_param safe twin まで
+                # NOT_REACHED 化して benchmark を壊す。stale を残さないよう True を明示する。
                 self.last_probe_delivered = True
                 source = await self.get_page_source()
                 return source, {}
@@ -1795,13 +1798,15 @@ class BrowserManager:
         new_query = urlencode({k: v[0] for k, v in params.items()})
         test_url = urlunparse(parsed._replace(query=new_query))
 
-        # 「送達成功」＝HTTP 応答を受け取れたか。4xx/5xx 応答は *送達済み*（サーバに届き応答が
-        # 返った）＝True で扱う。error-based SQLi 等は payload が 500/エラーページを誘発して検出する
-        # ため、HTTP エラー応答を「未送達」と混同すると正常検査を transport_error に化けさせ偽陽性を
-        # 生む。真の未送達（transport 例外・応答なし）でのみ False にする。navigate は応答があれば
-        # last_navigation_status に status を残し、例外/応答なしのときだけ None を残す（判定不関与・0007 D1）。
-        _nav_ok = await self.navigate(test_url)
-        self.last_probe_delivered = bool(_nav_ok) or self.last_navigation_status is not None
+        # 送達フラグは form 経路（fill_and_submit_form）の *沈黙 swallow* 観測専用（#134 の対象）。
+        # URL param 経路はここで True にリセットするだけで navigate 結果から未送達を導かない。理由:
+        # ssti/open_redirect 等は payload 次第で goto が正常に例外/応答なしになる（不正 URL・非HTTP
+        # redirect 先など payload 単位の通常挙動）。これを未送達として transport_error に刻むと、
+        # check 粒度の _degraded_checks が当該 check の tested を全除外し、無関係な url_param safe twin
+        # まで NOT_REACHED 化して benchmark を壊す（実測で確認）。リセットで直前 form probe の False が
+        # url probe に漏れる stale も防ぐ。URL param の送達観測は payload 粒度が要る別課題。
+        self.last_probe_delivered = True
+        await self.navigate(test_url)
         _nav_wait = 0.1 * self.sleep_factor
         if _nav_wait > 0:
             await asyncio.sleep(_nav_wait)

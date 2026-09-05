@@ -192,33 +192,36 @@ class _FakeUrlParamBrowser:
 
 
 class UrlParamDeliveryFlagTests(unittest.IsolatedAsyncioTestCase):
-    """`test_url_param` の送達フラグ: HTTP エラー *応答* を「未送達」と誤判定しない（#134 P1・FP ガード）。
+    """`test_url_param` は送達フラグを常に True にリセットする（url param は本フラグで観測しない）。
 
-    error-based SQLi 等は payload が 500/エラーページを誘発して検出するため、HTTP 4xx/5xx 応答を
-    未送達扱いにすると正常検査が transport_error に化け、degraded_checks が exercised から除外して
-    benchmark の TP/TN が壊れる（安全ツイン fixture で FP 増）。真の未送達（応答なし）でのみ False。
+    送達フラグは form 経路（fill_and_submit_form）の沈黙 swallow 観測専用（#134 の対象）。URL param
+    経路は navigate 結果から未送達を導かない: ssti/open_redirect 等は payload 次第で goto が正常に
+    例外/応答なしになり（payload 単位の通常挙動）、これを未送達として刻むと check 粒度の
+    degraded_checks が当該 check の tested を全除外し無関係な url_param safe twin まで NOT_REACHED 化して
+    benchmark を壊す（実測で確認）。リセットで直前 form probe の False が漏れる stale も防ぐ。
     """
 
-    async def _run(self, *, nav_ok, nav_status):
+    async def _run(self, *, nav_ok, nav_status, prior=False):
         from wscan.browser import BrowserManager
 
         fake = _FakeUrlParamBrowser(nav_ok=nav_ok, nav_status=nav_status)
+        fake.last_probe_delivered = prior  # 直前 probe が残した値
         await BrowserManager.test_url_param(fake, "http://x/products", "category", "'")
         return fake.last_probe_delivered
 
-    async def test_2xx_response_is_delivered(self):
+    async def test_delivered_true_on_success(self):
         self.assertTrue(await self._run(nav_ok=True, nav_status=200))
 
-    async def test_5xx_error_response_is_delivered(self):
-        # 500 応答は *送達済み*（サーバに届き応答が返った）。navigate は False を返すが送達は成功。
+    async def test_delivered_true_even_on_error_response(self):
         self.assertTrue(await self._run(nav_ok=False, nav_status=500))
 
-    async def test_4xx_error_response_is_delivered(self):
-        self.assertTrue(await self._run(nav_ok=False, nav_status=404))
+    async def test_delivered_true_even_on_navigation_failure(self):
+        # payload 単位の goto 例外/応答なしでも url param は未送達扱いにしない（check 巻き添え防止）。
+        self.assertTrue(await self._run(nav_ok=False, nav_status=None))
 
-    async def test_no_response_is_not_delivered(self):
-        # transport 例外・応答なし（status None）でのみ未送達＝False。
-        self.assertFalse(await self._run(nav_ok=False, nav_status=None))
+    async def test_resets_stale_false_from_prior_form_probe(self):
+        # 直前 form probe が残した False を url probe に漏らさない。
+        self.assertTrue(await self._run(nav_ok=True, nav_status=200, prior=False))
 
 
 if __name__ == "__main__":
