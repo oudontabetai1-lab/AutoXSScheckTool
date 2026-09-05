@@ -3,7 +3,9 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from importlib import import_module
+import math
 import socket
+import threading
 from threading import Thread
 import time
 from typing import Iterator
@@ -16,14 +18,52 @@ FIXTURE_APPS: dict[str, str] = {
 }
 
 
+# factory が返らない/uvicorn が should_exit を無視すると、bound された cleanup join 後も daemon
+# fixture スレッドが生存放置される。case worker と同じく、これも run_suite ごとに無制限累積して
+# プロセスを枯渇させうる（Codex #133）。放置された fixture worker をプロセス横断で追跡・cap する。
+_fixture_lock = threading.Lock()
+_abandoned_fixtures: list[Thread] = []
+
+
+def _live_abandoned_fixture_count() -> int:
+    """死んだ worker を掃除し、生存中の放置 fixture worker 数を返す。"""
+    with _fixture_lock:
+        _abandoned_fixtures[:] = [t for t in _abandoned_fixtures if t.is_alive()]
+        return len(_abandoned_fixtures)
+
+
+def _register_abandoned_fixture(thread: Thread) -> None:
+    with _fixture_lock:
+        _abandoned_fixtures.append(thread)
+
+
+def _reset_abandoned_fixtures() -> None:
+    """テスト用: 放置 fixture worker トラッカーを空にする。"""
+    with _fixture_lock:
+        _abandoned_fixtures.clear()
+
+
 class UvicornFixtureLauncher(FixtureLauncher):
-    def __init__(self, startup_timeout: float = 5.0) -> None:
+    def __init__(
+        self, startup_timeout: float = 5.0, max_abandoned_fixtures: int = 4
+    ) -> None:
+        # NaN/inf だと deadline 比較が永久 False になり timeout が効かない（Codex #133）。
+        if not math.isfinite(startup_timeout) or startup_timeout <= 0:
+            raise ValueError("startup_timeout must be finite and positive")
+        if max_abandoned_fixtures < 1:
+            raise ValueError("max_abandoned_fixtures must be >= 1")
         self.startup_timeout = startup_timeout
+        self.max_abandoned_fixtures = max_abandoned_fixtures
 
     @contextmanager
     def launch(self, fixture_id: str) -> Iterator[str]:
         if fixture_id not in FIXTURE_APPS:
             raise ValueError(f"unknown fixture_id: {fixture_id}")
+        # 放置 fixture worker が上限なら起動を拒否（run_suite が fixture_unavailable にする）。
+        if _live_abandoned_fixture_count() >= self.max_abandoned_fixtures:
+            raise RuntimeError(
+                "too many abandoned fixture workers; a previous fixture did not stop"
+            )
 
         import uvicorn
 
@@ -79,3 +119,7 @@ class UvicornFixtureLauncher(FixtureLauncher):
                 if server is not None:
                     server.should_exit = True
                 thread.join(self.startup_timeout)
+                if thread.is_alive():
+                    # bound 内に止まらなかった＝放置 daemon worker。プロセス横断で追跡し累積を
+                    # 上限で bound する（次回以降の launch が上限超過なら拒否）。
+                    _register_abandoned_fixture(thread)
