@@ -59,6 +59,168 @@ class TransportErrorObservableTests(unittest.IsolatedAsyncioTestCase):
                 )
 
 
+class _SilentSwallowBrowser:
+    """実 fill_and_submit_form のように例外を内部で握りつぶし空 pair を返す（raise しない）。
+
+    送達失敗は last_probe_delivered=False で残す（_apply_ip がこれを見て transport_error を刻む）。
+    """
+    def __init__(self):
+        self.last_probe_delivered = True
+
+    async def fill_and_submit_form(self, *a, **k):
+        self.last_probe_delivered = False
+        return "", {}
+
+
+class _SwallowEngine:
+    def __init__(self):
+        self.browser = _SilentSwallowBrowser()
+        self.monitor = None
+        self.payload_gen = None
+        self.wave_errors: list = []
+        self.state_profile = "unrestricted"
+        self.attempt_ledger = None
+
+
+class _FormScanner:
+    """_apply_ip を通す最小 form scanner（BaseScanner 継承・_apply_payload は fill_and_submit_form）。"""
+    pass
+
+
+class SilentSwallowObservableTests(unittest.IsolatedAsyncioTestCase):
+    """fill_and_submit_form の **沈黙 swallow**（空 pair・例外なし）でも送達失敗を
+    transport_error として observability に残す（Codex #134 P1）。従来の
+    test_apply_payload_records_transport_error は browser が *raise* する経路のみをカバーし、
+    実 browser の内部 swallow は素通りしていた。
+    """
+
+    async def test_apply_ip_records_transport_error_on_silent_swallow(self):
+        from wscan.scanners.base import BaseScanner
+        from wscan.injection_point import InjectionPoint
+
+        class Scanner(BaseScanner):
+            CHECK_TYPE = "xss"
+            ALWAYS_STATE_CHANGING = False
+
+            async def scan_field(self, *a, **k):
+                return []
+
+            async def _apply_payload(self, url, form_index, field_name, payload, is_url_param):
+                return await self.browser.fill_and_submit_form(form_index, field_name, payload)
+
+        engine = _SwallowEngine()
+        scanner = Scanner(engine)
+        ip = InjectionPoint.for_form("http://x/", "q", form_index=0, method="GET")
+
+        source, pair = await scanner._apply_ip(ip, "payload")
+
+        # 制御フローは不変（空 pair をそのまま返す）。
+        self.assertEqual((source, pair), ("", {}))
+        # 送達失敗が transport_error として記録される。
+        self.assertTrue(
+            any(e.startswith("transport_error:xss:") for e in engine.wave_errors),
+            f"silent swallow not recorded: {engine.wave_errors}",
+        )
+
+    async def test_delivered_probe_records_no_transport_error(self):
+        """送達成功（last_probe_delivered=True）では偽の transport_error を刻まない（FP 非増加）。"""
+        from wscan.scanners.base import BaseScanner
+        from wscan.injection_point import InjectionPoint
+
+        class DeliveredBrowser:
+            def __init__(self):
+                self.last_probe_delivered = True
+
+            async def fill_and_submit_form(self, *a, **k):
+                self.last_probe_delivered = True
+                return "src", {}  # pair 未捕捉でも submit は成功（delivered=True）
+
+        class Scanner(BaseScanner):
+            CHECK_TYPE = "xss"
+            ALWAYS_STATE_CHANGING = False
+
+            async def scan_field(self, *a, **k):
+                return []
+
+            async def _apply_payload(self, url, form_index, field_name, payload, is_url_param):
+                return await self.browser.fill_and_submit_form(form_index, field_name, payload)
+
+        engine = _SwallowEngine()
+        engine.browser = DeliveredBrowser()
+        scanner = Scanner(engine)
+        ip = InjectionPoint.for_form("http://x/", "q", form_index=0, method="GET")
+
+        await scanner._apply_ip(ip, "payload")
+        self.assertEqual(engine.wave_errors, [])  # 偽記録なし
+
+
+class _NullNetwork:
+    def clear(self):
+        pass
+
+    def latest_for_url(self, *a, **k):
+        return None
+
+    def best_pair_for_page(self, *a, **k):
+        return None
+
+    def latest(self):
+        return None
+
+
+class _FakeUrlParamBrowser:
+    """実 BrowserManager.test_url_param を駆動する最小 fake（navigate をスタブ）。"""
+
+    def __init__(self, *, nav_ok: bool, nav_status):
+        self._nav_ok = nav_ok
+        self._nav_status = nav_status
+        self.last_navigation_status = None
+        self.last_probe_delivered = True
+        self.sleep_factor = 0.0
+        self.network = _NullNetwork()
+
+    def reset_dialog(self):
+        pass
+
+    async def navigate(self, *a, **k):
+        # 実 navigate と同契約: 応答があれば status を残し、例外/応答なしのみ None。
+        self.last_navigation_status = self._nav_status
+        return self._nav_ok
+
+    async def get_page_source(self):
+        return ""
+
+
+class UrlParamDeliveryFlagTests(unittest.IsolatedAsyncioTestCase):
+    """`test_url_param` の送達フラグ: HTTP エラー *応答* を「未送達」と誤判定しない（#134 P1・FP ガード）。
+
+    error-based SQLi 等は payload が 500/エラーページを誘発して検出するため、HTTP 4xx/5xx 応答を
+    未送達扱いにすると正常検査が transport_error に化け、degraded_checks が exercised から除外して
+    benchmark の TP/TN が壊れる（安全ツイン fixture で FP 増）。真の未送達（応答なし）でのみ False。
+    """
+
+    async def _run(self, *, nav_ok, nav_status):
+        from wscan.browser import BrowserManager
+
+        fake = _FakeUrlParamBrowser(nav_ok=nav_ok, nav_status=nav_status)
+        await BrowserManager.test_url_param(fake, "http://x/products", "category", "'")
+        return fake.last_probe_delivered
+
+    async def test_2xx_response_is_delivered(self):
+        self.assertTrue(await self._run(nav_ok=True, nav_status=200))
+
+    async def test_5xx_error_response_is_delivered(self):
+        # 500 応答は *送達済み*（サーバに届き応答が返った）。navigate は False を返すが送達は成功。
+        self.assertTrue(await self._run(nav_ok=False, nav_status=500))
+
+    async def test_4xx_error_response_is_delivered(self):
+        self.assertTrue(await self._run(nav_ok=False, nav_status=404))
+
+    async def test_no_response_is_not_delivered(self):
+        # transport 例外・応答なし（status None）でのみ未送達＝False。
+        self.assertFalse(await self._run(nav_ok=False, nav_status=None))
+
+
 if __name__ == "__main__":
     unittest.main()
 
