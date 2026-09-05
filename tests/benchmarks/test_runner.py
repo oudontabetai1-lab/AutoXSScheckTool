@@ -17,7 +17,7 @@ from wscan.benchmark_runner import HttpxCaseExecutor, run_suite, write_scorecard
 from wscan.scanner_contract import Carrier
 
 
-MANIFEST = Path(__file__).resolve().parents[2] / "benchmarks/manifests/realistic_site.yaml"
+MANIFEST = Path(__file__).resolve().parent / "data" / "realistic_site_reflection.yaml"
 METADATA = dict(run_id="test", source_sha="sha", manifest_digest="manifest",
                 registry_digest="registry", environment={"note": "単体テスト"})
 
@@ -197,9 +197,11 @@ def test_httpx_probe_with_mock_transport(suite, monkeypatch, carrier, reflection
     monkeypatch.setattr(httpx, "Client", lambda **kwargs: client(
         transport=httpx.MockTransport(handler), **kwargs,
     ))
+    # executor は manifest の宣言メソッドを尊重する（P2）。query=GET / form=POST を宣言する。
+    method = "GET" if carrier == Carrier.QUERY else "POST"
     case = suite.cases[0]
     case = replace(case, injection=replace(case.injection, carrier=carrier),
-                   request=replace(case.request, path="/search?keep=yes"))
+                   request=replace(case.request, path="/search?keep=yes", method=method))
     result = HttpxCaseExecutor()(case, "http://fixture.invalid")
     assert result.state == State.COMPLETED
     assert result.candidate_match == (reflection == "raw")
@@ -213,3 +215,23 @@ def test_http_error_is_not_safe(suite, monkeypatch):
     ))
     out = run_suite(suite, executor=HttpxCaseExecutor(), launcher=FakeLauncher(), **METADATA)
     assert all(c["state"] == "transport_error" for c in out["cases"])
+
+
+@pytest.mark.parametrize("carrier,method", [(Carrier.QUERY, "PUT"), (Carrier.FORM, "PATCH")])
+def test_httpx_honors_declared_method(suite, monkeypatch, carrier, method):
+    """executor は carrier 既定(GET/POST)でなく manifest の宣言メソッドで送る（Codex #133 P2）。"""
+    seen = {}
+
+    def handler(request):
+        seen["method"] = request.method
+        return httpx.Response(200, text="ok")
+
+    client = httpx.Client
+    monkeypatch.setattr(httpx, "Client", lambda **kwargs: client(
+        transport=httpx.MockTransport(handler), **kwargs,
+    ))
+    case = suite.cases[0]
+    case = replace(case, injection=replace(case.injection, carrier=carrier),
+                   request=replace(case.request, method=method))
+    HttpxCaseExecutor()(case, "http://fixture.invalid")
+    assert seen["method"] == method  # GET/POST 固定ではなく宣言メソッド

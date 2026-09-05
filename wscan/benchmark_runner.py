@@ -110,7 +110,13 @@ def write_scorecard(scorecard: dict[str, Any], out_dir: str | Path) -> tuple[Pat
 
 
 class HttpxCaseExecutor(CaseExecutor):
-    """query/form の生タグ反射だけを測る。期待値との比較は集計側で行う。"""
+    """**参照オラクル**（製品スキャナではない）。query/form の生タグ反射だけを測る。
+
+    fixture の健全性チェック（脆弱は反射・安全は非反射）と runner 配管の検証に使う参照実装。
+    製品の検出ロジック（XSSScanner/ScanEngine）を一切呼ばないので、**これで採点した scorecard は
+    製品スキャナの recall/回帰を測れない**（Codex #133 P1）。実スキャナを走らせて実 findings から
+    採点する scanner-backed executor は 0034-R2 で追加する。期待値との比較は集計側（build_scorecard）。
+    """
 
     def __init__(self, timeout: float = 5.0) -> None:
         self.timeout = timeout
@@ -128,13 +134,18 @@ class HttpxCaseExecutor(CaseExecutor):
         marker = re.sub(r"[^a-zA-Z0-9]", "", f"wscanbench{case.case_id}{uuid4().hex}")
         probe = f"{marker}<svg/onload=alert(1)>"
         url = base_url.rstrip("/") + "/" + case.request.path.lstrip("/")
+        # manifest の宣言メソッドを尊重する（verb 違いで別ハンドラを叩かないよう）。carrier は
+        # 注入位置（query=URL パラメータ / form=body）を決め、method は HTTP verb を決める。
+        method = (case.request.method or "GET").upper()
         with httpx.Client(timeout=self.timeout, trust_env=False) as client:
             if injection.carrier == Carrier.QUERY:
-                # path 内の既存 query は保ち、対象パラメータだけ差し替える。
-                url = httpx.URL(url).copy_merge_params({injection.parameter_id: probe})
-                response = client.get(url)
+                # path 内の既存 query は保ち、対象パラメータだけ差し替える。宣言メソッドで送る。
+                target = httpx.URL(url).copy_merge_params({injection.parameter_id: probe})
+                response = client.request(method, target)
             else:
-                response = client.post(url, data={injection.parameter_id: probe})
+                response = client.request(
+                    method, url, data={injection.parameter_id: probe}
+                )
             response.raise_for_status()
             matched = probe in response.text
         return CaseResult(case.case_id, CaseExecutionState.COMPLETED, matched, matched)

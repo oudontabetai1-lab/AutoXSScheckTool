@@ -141,6 +141,10 @@ gaps:
     reason: E2E benchmark ground truth 未整備（vulnerable/safe twin case が未作成）
     owner_task: "0034"
     deadline: "2026-12-31"
+  xss:
+    reason: E2E benchmark ground truth 未整備（vulnerable/safe twin case が未作成）
+    owner_task: "0034"
+    deadline: "2026-12-31"
   xxe:
     reason: E2E benchmark ground truth 未整備（vulnerable/safe twin case が未作成）
     owner_task: "0034"

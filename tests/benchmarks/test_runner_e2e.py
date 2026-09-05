@@ -1,4 +1,12 @@
-"""実ポートの fixture で manifest → 実行 → 保存を検証する opt-in E2E。"""
+"""実ポートの fixture で runner **配管**（manifest→起動→実行→保存）を検証する opt-in E2E。
+
+注意: ここで使う HttpxCaseExecutor は fixture の反射有無を測る**参照オラクル**であって、
+製品スキャナ（XSSScanner/ScanEngine）ではない。したがって本テストは runner の配管と
+fixture の健全性（脆弱は反射・安全は非反射）を確認するもので、**製品スキャナの recall を
+測るものではない**。実スキャナを走らせて findings から採点する scanner-backed executor は
+0034-R2（既存 E2E 移植）で追加する。manifest も出荷 canonical（benchmarks/manifests/）では
+なくテストローカル（tests/benchmarks/data/）に置き、registry 完全性の covered を実スキャナ
+未計測のまま偽らない。"""
 import hashlib
 import json
 import os
@@ -16,8 +24,9 @@ from wscan.scanners import SCANNERS
 pytestmark = pytest.mark.skipif(not os.getenv("WSCAN_E2E"), reason="opt-in E2E")
 
 
-def test_realistic_site_runner(tmp_path):
-    path = Path(__file__).resolve().parents[2] / "benchmarks/manifests/realistic_site.yaml"
+def test_realistic_site_runner_plumbing(tmp_path):
+    # テストローカル manifest（出荷 canonical ではない＝covered を偽らない）を参照オラクルで実行。
+    path = Path(__file__).resolve().parent / "data" / "realistic_site_reflection.yaml"
     suite = load_manifest_file(path, registry_keys=frozenset(SCANNERS))
     before = set(threading.enumerate())
     out = run_suite(
