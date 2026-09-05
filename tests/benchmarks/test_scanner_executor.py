@@ -301,11 +301,16 @@ def test_degraded_checks_excluded_from_exercised():
             "state_change_skipped:sqli"]  # state_change は劣化ではない
     degraded = _degraded_checks(wave)
     assert degraded == frozenset({"xss", "mass_assignment"})
-    rows = [{"check": "xss", "url": "http://h/s?q=1", "field_name": "q", "location": "form field", "status": "tested"}]
+    tested = [{"check": "xss", "url": "http://h/s?q=1", "field_name": "q", "location": "form field", "status": "tested"}]
     # 劣化 check なので tested でも exercised に入れない（probe 未送達かもしれない）。
-    assert _exercised_from_scan_matrix(rows, degraded_checks=degraded) == frozenset()
+    assert _exercised_from_scan_matrix(tested, degraded_checks=degraded) == frozenset()
     # 劣化していなければ入る。
-    assert _exercised_from_scan_matrix(rows, degraded_checks=frozenset())
+    assert _exercised_from_scan_matrix(tested, degraded_checks=frozenset())
+    # finding 行は送達の陽性証拠なので、同 check が劣化していても残す（Codex #134 P2）。
+    found = [{"check": "xss", "url": "http://h/s?q=1", "field_name": "q", "location": "form field", "status": "finding"}]
+    assert _exercised_from_scan_matrix(found, degraded_checks=degraded) == frozenset(
+        {("xss", "/s", "q", "form")}
+    )
 
 
 def test_canonical_xss_coverage_and_ground_truth(suite):

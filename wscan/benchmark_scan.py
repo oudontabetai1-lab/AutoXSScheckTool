@@ -43,13 +43,28 @@ def _degraded_checks(wave_errors) -> frozenset:
     return frozenset(degraded)
 
 
+def _row_exercised(row, degraded_checks) -> bool:
+    """1 行が exercised か。finding は送達の陽性証拠なので常に採る。tested は劣化 check なら除く。
+
+    - finding: 実際に finding を出した＝probe が送達され check が走った陽性証拠。劣化があっても採る
+      （別 field の transport error で成功検出まで消さない・Codex #134 P2）。
+    - tested: 空振り。probe が送達したか曖昧なので、劣化 check（transport 握りつぶし等）では除く。
+    - error/skip 等: 未計測なので採らない。
+    """
+    status = row.get("status")
+    if status == "finding":
+        return True
+    if status == "tested":
+        return str(row.get("check", "")) not in degraded_checks
+    return False
+
+
 def _exercised_from_scan_matrix(scan_matrix, degraded_checks=frozenset()) -> frozenset:
     """scan_matrix から (check, path, field, location) の exercised 集合を作る（純粋）。
 
-    tested/finding（成功して突いた）行だけ。error/skip は未計測なので除く。さらに
-    ``degraded_checks``（transport 握りつぶし等が観測された check）の行も除く：status="tested" でも
-    probe が送達していない可能性があり、空振りを FN/TN に化けさせないため（Codex #134 P1）。
-    location は正規化する。
+    finding/tested（成功して突いた）行を採り、error/skip は未計測なので除く。degraded_checks
+    （transport 握りつぶし等が観測された check）の曖昧な tested 行は除くが、finding 行は残す
+    （送達の陽性証拠・Codex #134 P1/P2）。location は正規化する。
     """
     return frozenset(
         (
@@ -59,8 +74,7 @@ def _exercised_from_scan_matrix(scan_matrix, degraded_checks=frozenset()) -> fro
             _normalize_location(row.get("location", "")),
         )
         for row in (scan_matrix or [])
-        if row.get("status") in _EXERCISED_STATUSES
-        and str(row.get("check", "")) not in degraded_checks
+        if _row_exercised(row, degraded_checks)
     )
 
 
