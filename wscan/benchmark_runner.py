@@ -191,6 +191,24 @@ def _case_exercised(
     )
 
 
+def _finding_check_matches(finding_check: str, case_check: str) -> bool:
+    """finding の check_type が case の check ファミリに属するか（Codex #134 P2）。
+
+    engine の ``_check_type_in_scope`` と同型: 完全一致・``"<check>_"`` 前置（graphql_*/jwt_*/
+    privesc_* 等のサブタイプ）・エイリアス表（cache_poisoning→cache_deception 等）で判定する。
+    サブタイプを exact 一致で捨てると exercised な vulnerable case が FN になる。エイリアス表は
+    engine の ``_CHECK_EXTRA_TYPES`` を lazy import して再利用し重複ドリフトを避ける（前置一致だけ
+    なら import しない）。
+    """
+    if finding_check == case_check or finding_check.startswith(case_check + "_"):
+        return True
+    try:
+        from wscan.engine import _CHECK_EXTRA_TYPES
+    except Exception:
+        return False
+    return finding_check in _CHECK_EXTRA_TYPES.get(case_check, ())
+
+
 def score_cases(
     suite: BenchmarkSuite, outcome: ScanOutcome, *, ran_checks: set[str],
 ) -> list[CaseResult]:
@@ -216,7 +234,7 @@ def score_cases(
             continue
         matches = [
             finding for finding in outcome.findings
-            if _attribute(finding, "check_type") == case.check
+            if _finding_check_matches(_attribute(finding, "check_type", ""), case.check)
             and urlparse(_attribute(finding, "url", "")).path == path
             and _attribute(finding, "field_name") == field
             # location は「宣言側 *と* finding 側の両方が populated のときだけ」照合して carrier を

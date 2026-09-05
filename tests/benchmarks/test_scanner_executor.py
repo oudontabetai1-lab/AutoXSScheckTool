@@ -157,6 +157,19 @@ def test_location_disambiguates_findings(suite):
     assert br.score_cases(suite, empty, ran_checks={"xss"})[0].candidate_match
 
 
+def test_subtype_and_alias_findings_match_check_family(suite):
+    """サブタイプ/エイリアスの finding も check ファミリに一致させ FN にしない（Codex #134 P2）。"""
+    # 完全一致（xss）は当然一致。<check>_ 前置（xss_stored）も一致する。
+    for ct in ("xss", "xss_stored"):
+        outcome = ScanOutcome(findings=[finding(check_type=ct)], exercised=exercised_of(suite))
+        assert br.score_cases(suite, outcome, ran_checks={"xss"})[0].candidate_match, ct
+    # 純粋 predicate: engine のエイリアス表を再利用（cache_poisoning←cache_deception）。
+    assert br._finding_check_matches("graphql_introspection", "graphql")
+    assert br._finding_check_matches("jwt_alg_none", "jwt")
+    assert br._finding_check_matches("cache_deception", "cache_poisoning")
+    assert not br._finding_check_matches("sqli", "xss")
+
+
 def assert_failure(out, error, state):
     assert out["run_error"] == error
     assert all(c["state"] == state for c in out["cases"])
