@@ -24,6 +24,12 @@ def test_rejects_non_finite_startup_timeout(bad):
         UvicornFixtureLauncher(startup_timeout=bad)
 
 
+@pytest.mark.parametrize("bad", [float("nan"), float("inf"), 0.0, -1.0])
+def test_rejects_non_finite_cleanup_grace(bad):
+    with pytest.raises(ValueError):
+        UvicornFixtureLauncher(cleanup_grace=bad)
+
+
 def test_rejects_non_positive_abandoned_cap():
     with pytest.raises(ValueError):
         UvicornFixtureLauncher(max_abandoned_fixtures=0)

@@ -71,14 +71,21 @@ def _reset_fixture_workers() -> None:
 
 class UvicornFixtureLauncher(FixtureLauncher):
     def __init__(
-        self, startup_timeout: float = 5.0, max_abandoned_fixtures: int = 4
+        self, startup_timeout: float = 5.0, max_abandoned_fixtures: int = 4,
+        cleanup_grace: float = 2.0,
     ) -> None:
         # NaN/inf だと deadline 比較が永久 False になり timeout が効かない（Codex #133）。
         if not math.isfinite(startup_timeout) or startup_timeout <= 0:
             raise ValueError("startup_timeout must be finite and positive")
+        if not math.isfinite(cleanup_grace) or cleanup_grace <= 0:
+            raise ValueError("cleanup_grace must be finite and positive")
         if max_abandoned_fixtures < 1:
             raise ValueError("max_abandoned_fixtures must be >= 1")
         self.startup_timeout = startup_timeout
+        # 起動成功後の graceful shutdown を待つ短い猶予。startup_timeout とは別軸にする：
+        # 起動が stuck して失敗したとき、cleanup で **もう一度** startup_timeout 待つと報告が
+        # 実質 2×startup_timeout 遅れる（Codex #133）。失敗時は待たず、成功時のみこの猶予で待つ。
+        self.cleanup_grace = cleanup_grace
         self.max_abandoned_fixtures = max_abandoned_fixtures
 
     @contextmanager
@@ -133,6 +140,7 @@ class UvicornFixtureLauncher(FixtureLauncher):
                 )
                 thread.start()
                 thread_started = True  # 以降 予約解放は serve thread が担う
+                startup_ok = False
                 try:
                     deadline = time.monotonic() + self.startup_timeout
                     while True:
@@ -147,16 +155,18 @@ class UvicornFixtureLauncher(FixtureLauncher):
                             # factory ハングを含む起動全般の timeout。呼び出し側で fixture_unavailable。
                             raise TimeoutError("fixture startup timed out")
                         time.sleep(0.01)
+                    startup_ok = True
                     yield f"http://127.0.0.1:{port}"
                 finally:
                     # cleanup の join は **bound** する。無制限 join すると起動 stuck 時に startup
                     # timeout 例外が run_suite へ届かず fixture_unavailable を報告できない（#133）。
-                    # 上限内に止まらなければ daemon を放置して抜ける（予約は serve の finally が
-                    # いつか解放、ハング中は保持され続けて cap を効かせる）。
+                    # 起動成功時のみ graceful shutdown を cleanup_grace で待ち、起動失敗（stuck）時は
+                    # 待たない（そこで startup_timeout をもう一度待つと報告が 2×遅れる・Codex #133）。
+                    # ハング中の worker は放置＝予約が残り cap を効かせる。
                     server = holder.get("server")
                     if server is not None:
                         server.should_exit = True
-                    thread.join(self.startup_timeout)
+                    thread.join(self.cleanup_grace if startup_ok else 0.0)
         finally:
             if not thread_started:
                 # serve を start する前に失敗した場合のみ、予約をここで解放（二重解放を防ぐ）。
