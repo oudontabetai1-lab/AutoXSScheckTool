@@ -382,6 +382,8 @@ GitHub Advanced Security / VS Code / Azure DevOps 等の CI ツールにネイ�
 
 通常層（確実性重視）では `verified=true` の Finding だけを確証 (confirmed) 件数として扱います。未確証 (hypothesis) も SARIF result から削除せず、`verification_state` を保持したまま `level: note` に下げるため、CI ゲートと人手レビューを分離できます。
 
+`run.properties.coverage` に検査カバレッジ補助情報を出します（0016）: `check_coverage`（registry 全数・選択された check・未選択 check・COMPLETE/PARTIAL/INCOMPLETE・設定の誤記）と、前提不足で実質検査できなかった check（`prerequisite_missing`）・state profile で送信 skip された check（`state_profile_skipped`）。SARIF 消費側（CI/ダッシュボード）が「results が 0＝安全ではなく、未実行や前提不足の検査がある」を機械的に判別できます。
+
 ### 使い方
 
 ```bash
