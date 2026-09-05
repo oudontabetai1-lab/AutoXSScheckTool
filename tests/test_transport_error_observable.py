@@ -168,6 +168,98 @@ class _NullNetwork:
         return None
 
 
+class _FakeSubmitBtn:
+    async def click(self):
+        pass
+
+
+class _FakeFormPage:
+    """実 fill_and_submit_form を駆動する fake page。evaluate 結果と post-submit 例外を制御。"""
+
+    def __init__(self, *, result, wait_raises=False):
+        self._result = result
+        self._wait_raises = wait_raises
+
+    async def evaluate(self, *a, **k):
+        # 1 回目=fill JS（result を返す）。submit 経路（btn 無し）では 2 回目に submit JS が
+        # 呼ばれるが、テストは submit_btn を返すので基本 1 回。
+        return self._result
+
+    async def query_selector(self, *a, **k):
+        return _FakeSubmitBtn()
+
+    async def wait_for_load_state(self, *a, **k):
+        if self._wait_raises:
+            raise RuntimeError("post-submit wait boom (slow/streaming)")
+
+
+class _FakeFormBrowser:
+    """実 BrowserManager.fill_and_submit_form を駆動する最小 fake。"""
+
+    def __init__(self, *, result, nav_status=200, wait_raises=False, prior_delivered=None):
+        self.page = _FakeFormPage(result=result, wait_raises=wait_raises)
+        self.network = _NullNetwork()
+        self.timeout = 5
+        self.sleep_factor = 0.0
+        self.auth_user = ""
+        self.auth_pass = ""
+        self.last_navigation_status = nav_status
+        # 直前 probe が残した値（stale が漏れないことの検証用）。
+        self.last_probe_delivered = True if prior_delivered is None else prior_delivered
+
+    def reset_dialog(self):
+        pass
+
+    async def get_page_source(self):
+        return "<html></html>"
+
+
+class FormDeliveryFlagTests(unittest.IsolatedAsyncioTestCase):
+    """fill_and_submit_form の送達フラグ（Codex #137 P1/P2）。
+
+    P1: フォーム不在は直前 navigate が応答を得ていれば speculative（True）、応答なし
+        （status None＝失敗ロード）なら未送達（False）。
+    P2: submit dispatch 後の wait/get_source 例外は送達済みを維持（True）。dispatch 前の
+        例外のみ未送達（False）。
+    """
+
+    async def _run(self, **kw):
+        from wscan.browser import BrowserManager
+
+        fake = _FakeFormBrowser(**kw)
+        await BrowserManager.fill_and_submit_form(fake, 0, "q", "payload")
+        return fake.last_probe_delivered
+
+    async def test_success_marks_delivered(self):
+        self.assertTrue(await self._run(result={"success": True, "action": "http://x/"}))
+
+    async def test_form_absent_after_loaded_page_is_speculative_delivered(self):
+        # ページは正常ロード（status 200）だが form 不在＝speculative probe＝送達成功扱い。
+        self.assertTrue(
+            await self._run(result={"success": False, "error": "form not found"}, nav_status=200)
+        )
+
+    async def test_form_absent_after_failed_load_is_undelivered(self):
+        # 直前 navigate が応答なし（status None＝失敗ロード）→ stale ページの form 不在＝未送達。
+        self.assertFalse(
+            await self._run(result={"success": False, "error": "form not found"}, nav_status=None)
+        )
+
+    async def test_post_dispatch_exception_keeps_delivered(self):
+        # submit 済みで wait_for_load_state が例外（slow/streaming）→ 送達済みを維持。
+        self.assertTrue(
+            await self._run(result={"success": True, "action": "http://x/"}, wait_raises=True)
+        )
+
+    async def test_form_absent_does_not_leak_prior_true(self):
+        # 失敗ロードの form 不在は、直前 probe が True でも False にする（stale を漏らさない）。
+        self.assertFalse(
+            await self._run(
+                result={"success": False}, nav_status=None, prior_delivered=True
+            )
+        )
+
+
 class _FakeUrlParamBrowser:
     """実 BrowserManager.test_url_param を駆動する最小 fake（navigate をスタブ）。"""
 

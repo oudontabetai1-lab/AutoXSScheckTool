@@ -1521,6 +1521,9 @@ class BrowserManager:
         """Fill a form field with payload and submit. Returns (page_source, network_pair)."""
         self.reset_dialog()
         self.network.clear()
+        # submit を dispatch できたか（＝probe 送達）。post-submit の wait/get_source 例外で
+        # 送達成功を覆さないための local（Codex #137 P2）。
+        dispatched = False
         try:
             result = await self.page.evaluate(
                 """
@@ -1622,12 +1625,14 @@ class BrowserManager:
 
             # Check whether the form was found before attempting submit
             if not result or not result.get("success"):
-                # フォーム不在は transport 失敗ではない。スキャナは各 param を form/url 両経路で
-                # speculative に probe するため、URL param エンドポイントを「form field」として試すと
-                # 日常的に form 不在になる（正常動作）。ここを未送達扱いにすると _degraded_checks が
-                # check 粒度で当該 check の tested を全除外し、無関係な url_param safe twin まで
-                # NOT_REACHED 化して benchmark を壊す。stale を残さないよう True を明示する。
-                self.last_probe_delivered = True
+                # フォーム不在。直前 navigate が応答を得ていれば（status あり）ページは正常ロード
+                # されており、URL param を form field として試した speculative probe＝送達成功扱い
+                # （True）。応答なし（status None＝transport 例外/失敗ロード）なら stale ページによる
+                # form 不在＝未送達（False）。scanner は navigate の戻り値を見ずに本メソッドを呼ぶため
+                # （xss.py 等）、ここで失敗ロードを取りこぼさない（Codex #137 P1）。speculative を
+                # False にしないのは、check 粒度の _degraded_checks が当該 check の tested を全除外し
+                # 無関係な url_param safe twin まで NOT_REACHED 化して benchmark を壊すため。
+                self.last_probe_delivered = self.last_navigation_status is not None
                 source = await self.get_page_source()
                 return source, {}
 
@@ -1642,6 +1647,9 @@ class BrowserManager:
                 await self.page.evaluate(
                     f"document.querySelectorAll('form')[{form_index}].submit()"
                 )
+            # submit を dispatch した＝probe 送達。以降の wait/get_source 例外で覆さない。
+            dispatched = True
+            self.last_probe_delivered = True
 
             await self.page.wait_for_load_state("domcontentloaded", timeout=self.timeout)
             _js_wait = 0.2 * self.sleep_factor
@@ -1653,11 +1661,13 @@ class BrowserManager:
             # アナリティクス等の別 URL ビーコンを掴まないよう、対象ページを最も
             # よく表すペアを選ぶ（同一オリジンの文書本体を優先）。
             pair = self.network.best_pair_for_page(action_url) or self.network.latest() or {}
-            self.last_probe_delivered = True  # 送信まで到達（pair 未捕捉でも submit は行った）
             return source, pair
         except Exception as e:
-            # 例外を握りつぶし空 pair を返すが、送達失敗を観測フラグに残す（scanner が拾う・0007 D1）。
-            self.last_probe_delivered = False
+            # 例外を握りつぶし空 pair を返す。送達失敗の観測フラグは dispatch 状態で決める
+            # （0007 D1・Codex #137 P2）: submit dispatch 前の例外（fill/評価失敗）＝未送達（False）、
+            # dispatch 後（wait_for_load_state/get_page_source が slow/streaming 応答で失敗）＝
+            # 送達済みを維持（True）。前 probe の値が漏れないよう local dispatched で判定する。
+            self.last_probe_delivered = dispatched
             source = await self.get_page_source()
             return source, {}
 
