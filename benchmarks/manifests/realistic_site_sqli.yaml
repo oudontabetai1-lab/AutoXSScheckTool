@@ -1,0 +1,29 @@
+schema_version: 1
+suite_id: realistic_site_sqli
+fixture_id: realistic_site
+runner_profile: scan_engine
+mode: normal-deterministic
+source_kind: first_party
+# error-based SQLi の vulnerable ＋ safe twin。realistic_site の /products・/catalog は URL param
+# （form 無し）なので carrier/location は query/url_param で宣言する（scanner の実検出に合わせる。
+# 実 injection_location は E2E で検証する）。EXPECTED_FINDINGS(/products category)・
+# SAFE_ENDPOINTS(/catalog sort=allow-list 検証済み) を正本にする。
+cases:
+  - case_id: realistic_site_sqli.products.category.vulnerable
+    expected: vulnerable
+    check: sqli
+    request: {method: GET, path: /products}
+    injection: {carrier: query, parameter_id: category, value_kind: string}
+    match: {path: /products, field: category, location: url_param}
+    twin_id: realistic_site_sqli.catalog.sort.safe
+    taxonomy: [error_based, unauthenticated]
+    gate: observed
+  - case_id: realistic_site_sqli.catalog.sort.safe
+    expected: safe
+    check: sqli
+    request: {method: GET, path: /catalog}
+    injection: {carrier: query, parameter_id: sort, value_kind: string}
+    match: {path: /catalog, field: sort, location: url_param}
+    twin_id: realistic_site_sqli.products.category.vulnerable
+    taxonomy: [error_based, unauthenticated]
+    gate: observed
