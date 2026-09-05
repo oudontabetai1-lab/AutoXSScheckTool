@@ -237,8 +237,12 @@ class HttpxCaseExecutor(CaseExecutor):
 
     def __call__(self, case: BenchmarkCase, base_url: str) -> CaseResult:
         injection = case.injection
+        # このオラクルは XSS の生タグ反射しか測れない。他 check（sqli 等）の query/form case に
+        # XSS probe を撃つと、その scanner の TP/FN を汚染する。check!=xss は UNSUPPORTED にする
+        # （黙って別 scanner の結果へ混ぜない・Codex #133 P2）。
         if (
-            injection is None
+            case.check != "xss"
+            or injection is None
             or injection.carrier not in {Carrier.QUERY, Carrier.FORM}
             or any(p.lower() in {"browser", "browser_required", "chromium", "playwright"}
                    for p in case.prerequisites)

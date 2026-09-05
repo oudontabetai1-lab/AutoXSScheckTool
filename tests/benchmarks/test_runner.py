@@ -295,6 +295,14 @@ def test_httpx_browser_prerequisite(suite, monkeypatch, prerequisite):
     assert HttpxCaseExecutor()(case, "http://fixture.invalid").state == State.UNSUPPORTED
 
 
+@pytest.mark.parametrize("check", ["sqli", "os", "ssti", "nosql"])
+def test_httpx_non_xss_case_is_unsupported(suite, monkeypatch, check):
+    """XSS 参照オラクルは他 check の query/form case に XSS probe を撃たない（Codex #133 P2）。"""
+    monkeypatch.setattr(httpx, "Client", lambda **kwargs: pytest.fail("non-xss case sent HTTP"))
+    case = replace(suite.cases[0], check=check)  # carrier=query のまま check だけ差し替え
+    assert HttpxCaseExecutor()(case, "http://fixture.invalid").state == State.UNSUPPORTED
+
+
 @pytest.mark.parametrize("carrier", [Carrier.QUERY, Carrier.FORM])
 @pytest.mark.parametrize("reflection", ["raw", "escaped", "absent"])
 def test_httpx_probe_with_mock_transport(suite, monkeypatch, carrier, reflection):
