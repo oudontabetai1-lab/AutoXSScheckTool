@@ -390,6 +390,65 @@ def build_scorecard(
     return _json_value(scorecard)
 
 
+# 「良い」象限＝期待どおり（vulnerable を検出 TP / safe を非検出 TN）、
+# 「悪い」象限＝取りこぼし FN / 誤検知 FP。baseline との遷移で回帰/改善を判定する。
+_GOOD_CLASSIFICATIONS = frozenset({Classification.TP.value, Classification.TN.value})
+_BAD_CLASSIFICATIONS = frozenset({Classification.FN.value, Classification.FP.value})
+
+
+def _classification_quality(value: Any) -> str | None:
+    """混同行列象限を good/bad/None（未完了・分類なし）へ畳む。"""
+    if value in _GOOD_CLASSIFICATIONS:
+        return "good"
+    if value in _BAD_CLASSIFICATIONS:
+        return "bad"
+    return None
+
+
+def compute_baseline_diff(
+    current: Mapping[str, Any],
+    baseline: Mapping[str, Any],
+    *,
+    tier: str = "candidate",
+) -> dict[str, list[str]]:
+    """current と baseline の scorecard を case 単位で比較し差分を返す（純粋・0034）。
+
+    - ``new``: baseline に無く current にある case_id（追加された case）。
+    - ``removed``: current に無く baseline にある case_id（消えた case）。
+    - ``regressed``: 期待どおり(good=TP/TN)だったのに悪化(bad=FN/FP)した case（＝回帰）。
+    - ``improved``: 悪化(bad)だったのが期待どおり(good)になった case。
+
+    ``tier`` は ``candidate``（攻撃時シグナル）/``confirmed``（隔離再現）のどちらの分類で
+    比較するか。未完了（分類 None）への/からの遷移は regressed/improved に数えない
+    （measurement の欠落は別軸の completeness で扱い、精度の回帰と混同しない）。
+    """
+    if tier not in {"candidate", "confirmed"}:
+        raise ValueError("tier must be 'candidate' or 'confirmed'")
+
+    def _index(scorecard: Mapping[str, Any]) -> dict[str, Any]:
+        cases = scorecard.get("cases", []) or []
+        return {c.get("case_id"): c for c in cases if isinstance(c, Mapping) and c.get("case_id")}
+
+    cur = _index(current)
+    base = _index(baseline)
+    new = sorted(set(cur) - set(base))
+    removed = sorted(set(base) - set(cur))
+    regressed: list[str] = []
+    improved: list[str] = []
+    for case_id in sorted(set(cur) & set(base)):
+        cur_q = _classification_quality(
+            (cur[case_id].get("classification") or {}).get(tier)
+        )
+        base_q = _classification_quality(
+            (base[case_id].get("classification") or {}).get(tier)
+        )
+        if base_q == "good" and cur_q == "bad":
+            regressed.append(case_id)
+        elif base_q == "bad" and cur_q == "good":
+            improved.append(case_id)
+    return {"new": new, "removed": removed, "regressed": regressed, "improved": improved}
+
+
 def _display(value: Any) -> str:
     return "null" if value is None else str(value)
 
