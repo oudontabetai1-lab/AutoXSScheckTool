@@ -186,6 +186,16 @@ def test_max_lingering_workers_must_be_positive(suite):
                   launcher=FakeLauncher(), max_lingering_workers=0, **METADATA)
 
 
+def test_inconsistent_worker_limit_is_rejected(suite):
+    """異なる max_lingering_workers の混在は拒否し、単一のプロセス横断 limit を強制（Codex #133）。"""
+    import pytest as _pytest
+    run_suite(suite, executor=good_executor(suite), launcher=FakeLauncher(),
+              max_lingering_workers=2, **METADATA)
+    with _pytest.raises(ValueError):
+        run_suite(suite, executor=good_executor(suite), launcher=FakeLauncher(),
+                  max_lingering_workers=5, **METADATA)
+
+
 def test_none_executor_result_is_rejected(suite):
     """executor が None を返したら TRANSPORT_ERROR で隠さず TypeError で弾く（Codex #133）。"""
     import pytest as _pytest

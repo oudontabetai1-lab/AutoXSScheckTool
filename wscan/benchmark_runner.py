@@ -36,13 +36,30 @@ _MISSING = object()  # box に結果が「入っていない」ことを falsey 
 # worker は解放されないので予約が残り、cap がプロセス全体で正しく効く。
 _lingering_lock = threading.Lock()
 _reserved_workers = 0
+_worker_limit: int | None = None  # プロセス横断の単一 limit（最初の run_suite が確立）
 
 
-def _try_reserve_worker(cap: int) -> bool:
-    """cap 未満なら予約(+1)して True。到達済みなら予約せず False（atomic な check-and-reserve）。"""
+def _establish_worker_limit(cap: int) -> None:
+    """プロセス横断の単一 limit を確立/検証する。異なる値の混在は拒否する（Codex #133）。
+
+    caller ごとに cap が違うと「自分の cap でしか判定しない」ため、cap1 の後 cap100 が
+    大量予約して bound を回避できる。プロセス全体で一つの limit を強制し、不整合は loud に拒否。
+    """
+    global _worker_limit
+    with _lingering_lock:
+        if _worker_limit is None:
+            _worker_limit = cap
+        elif cap != _worker_limit:
+            raise ValueError(
+                f"inconsistent max_lingering_workers: {cap} != process-wide {_worker_limit}"
+            )
+
+
+def _try_reserve_worker() -> bool:
+    """共有 limit 未満なら予約(+1)して True。到達済みなら False（atomic な check-and-reserve）。"""
     global _reserved_workers
     with _lingering_lock:
-        if _reserved_workers >= cap:
+        if _worker_limit is None or _reserved_workers >= _worker_limit:
             return False
         _reserved_workers += 1
         return True
@@ -60,10 +77,11 @@ def _reserved_worker_count() -> int:
 
 
 def _reset_lingering_workers() -> None:
-    """テスト用: 予約カウンタを 0 に戻す（放置 daemon スレッドは残るが記録を消す）。"""
-    global _reserved_workers
+    """テスト用: 予約カウンタと共有 limit を初期化する（放置 daemon スレッドは残る）。"""
+    global _reserved_workers, _worker_limit
     with _lingering_lock:
         _reserved_workers = 0
+        _worker_limit = None
 
 
 def _execute(executor: CaseExecutor, case: BenchmarkCase, base_url: str) -> CaseResult:
@@ -137,6 +155,8 @@ def run_suite(
         raise ValueError("per_case_timeout must be finite and positive")
     if max_lingering_workers < 1:
         raise ValueError("max_lingering_workers must be >= 1")
+    # プロセス横断の単一 limit を確立/検証（不整合な cap は fixture 起動前に loud に拒否）。
+    _establish_worker_limit(max_lingering_workers)
 
     def scorecard(results: list[CaseResult]) -> dict[str, Any]:
         return build_scorecard(
@@ -166,7 +186,7 @@ def run_suite(
         for idx, case in enumerate(suite.cases):
             # spawn 前に atomic にスロットを予約。取れなければ滞留 worker が上限＝これ以上
             # thread を積まず loud に中断（跨ぎ累積・並行呼び出しの両方をここで bound）。
-            if not _try_reserve_worker(max_lingering_workers):
+            if not _try_reserve_worker():
                 results.extend(
                     CaseResult(remaining.case_id, CaseExecutionState.NOT_REACHED)
                     for remaining in suite.cases[idx:]
