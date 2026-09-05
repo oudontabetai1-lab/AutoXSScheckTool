@@ -34,20 +34,20 @@ def workers():
     br._reset_lingering_workers()
 
 
-def _mp(match):
-    """MatchSpec でも dict でも (path, field) を取り出す。"""
+def _mpl(match):
+    """MatchSpec でも dict でも (path, field, location) を取り出す。"""
     if isinstance(match, dict):
-        return match.get("path"), match.get("field")
-    return match.path, match.field
+        return match.get("path"), match.get("field"), match.get("location", "")
+    return match.path, match.field, getattr(match, "location", "")
 
 
 def exercised_of(suite):
-    """suite の全 case（match あり）の (check, path, field) を「実行済み」とみなす集合。"""
+    """suite の全 case（match あり）の (check, path, field, location) を「実行済み」とみなす集合。"""
     out = set()
     for c in suite.cases:
         if c.match is not None:
-            p, f = _mp(c.match)
-            out.add((c.check, p, f))
+            p, f, loc = _mpl(c.match)
+            out.add((c.check, p, f, loc))
     return frozenset(out)
 
 
@@ -127,12 +127,21 @@ def test_unexercised_case_is_not_reached(suite):
     """宣言された注入点をスキャンが突いていない case は NOT_REACHED（TN/FN に混ぜない・Codex #134 P1）。"""
     # exercised に vulnerable だけ入れ、safe(/help query) は未実行にする。
     vuln = suite.cases[0]
-    exercised = frozenset({(vuln.check, vuln.match.path, vuln.match.field)})
+    exercised = frozenset({(vuln.check, vuln.match.path, vuln.match.field, vuln.match.location)})
     outcome = ScanOutcome(findings=[finding()], exercised=exercised)
     results = br.score_cases(suite, outcome, ran_checks={"xss"})
     assert results[0].state == State.COMPLETED  # vulnerable は実行済み
     assert results[1].state == State.NOT_REACHED  # safe は未実行→陰性にしない
     assert results[1].candidate_match is False and results[1].confirmed_match is False
+
+
+def test_other_carrier_exercised_is_not_reached(suite):
+    """同名 field でも別 carrier だけ突いた場合は NOT_REACHED（location を exercised に含める・#134 P2）。"""
+    vuln = suite.cases[0]  # location=form
+    # 実行台帳には url_param だけ（form は突いていない）。case は form なので未計測扱い。
+    exercised = frozenset({(vuln.check, vuln.match.path, vuln.match.field, "url_param")})
+    outcome = ScanOutcome(findings=[finding()], exercised=exercised)
+    assert br.score_cases(suite, outcome, ran_checks={"xss"})[0].state == State.NOT_REACHED
 
 
 def test_location_disambiguates_findings(suite):
@@ -231,6 +240,21 @@ def test_empty_suite(suite):
     assert out["run_error"] == "empty_suite"
     assert out["cases"] == []
     assert not launcher.launched and not runner.calls
+
+
+def test_exercised_from_scan_matrix_filters_status_and_normalizes_location():
+    """tested/finding だけ exercised に入れ error/skip を除く・location を正規化（Codex #134 P1/P2）。"""
+    from wscan.benchmark_scan import _exercised_from_scan_matrix
+    rows = [
+        {"check": "xss", "url": "http://h/search?q=1", "field_name": "q", "location": "form field", "status": "finding"},
+        {"check": "xss", "url": "http://h/help?query=1", "field_name": "query", "location": "URL param", "status": "tested"},
+        {"check": "xss", "url": "http://h/err", "field_name": "e", "location": "form field", "status": "error"},  # 除外
+        {"check": "xss", "url": "http://h/skip", "field_name": "s", "location": "form field", "status": "skipped"},  # 除外
+    ]
+    ex = _exercised_from_scan_matrix(rows)
+    assert ("xss", "/search", "q", "form") in ex          # form field → form 正規化
+    assert ("xss", "/help", "query", "url_param") in ex    # URL param → url_param 正規化
+    assert not any(e[1] in ("/err", "/skip") for e in ex)  # error/skip は未計測なので除外
 
 
 def test_canonical_xss_coverage_and_ground_truth(suite):

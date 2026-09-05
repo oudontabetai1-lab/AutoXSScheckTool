@@ -148,14 +148,16 @@ class Finding(Protocol):
 class ScanOutcome:
     """1 スキャンの結果。findings に加え「実際に攻撃した注入点」の集合を持つ（0034-R2）。
 
-    ``exercised`` は ``(check, path, field)`` の集合。ran_checks（要求した check）だけでは
-    「crawler が注入点に到達し実際に突いたか」が分からず、未実行の safe case を空マッチ＝TN と
-    誤計上して precision を水増しする（Codex #134 P1）。実行台帳から exercised を渡すことで、
-    突いていない case は NOT_REACHED（未計測）にできる。
+    ``exercised`` は ``(check, path, field, location)`` の集合。ran_checks（要求した check）だけ
+    では「crawler が注入点に到達し実際に突いたか」が分からず、未実行の safe case を空マッチ＝TN
+    と誤計上して precision を水増しする（Codex #134 P1）。実行台帳から exercised を渡すことで、
+    突いていない case は NOT_REACHED（未計測）にできる。error/skip 行は「成功して突いた」ではない
+    ので exercised に入れない。location も含め、同名の別 carrier を突いただけの case を exercised と
+    誤認しない（Codex #134 P2）。location の語彙は case.match.location と揃える（adapter が正規化）。
     """
 
     findings: list[Any]
-    exercised: frozenset[tuple[str, str, str]] = frozenset()
+    exercised: frozenset[tuple[str, str, str, str]] = frozenset()
 
 
 class ScanRunner(Protocol):
@@ -166,15 +168,27 @@ def _attribute(value: Any, name: str, default: Any = None) -> Any:
     return value.get(name, default) if isinstance(value, Mapping) else getattr(value, name, default)
 
 
-def _location_compatible(case_location: str, finding_location: str) -> bool:
-    """宣言側と finding 側の両方が location を持つときだけ一致を要求する。
+def _location_compatible(case_location: str, other_location: str) -> bool:
+    """宣言側と相手側（finding/実行台帳）の両方が location を持つときだけ一致を要求する。
 
     どちらかが空なら弁別できないので compatible とみなす（3 キー一致で採る）。両方 populated で
     値が違うときのみ不一致＝別 carrier の取り違えを防ぐ（Codex #134 P2）。
     """
-    if not case_location or not finding_location:
+    if not case_location or not other_location:
         return True
-    return case_location == finding_location
+    return case_location == other_location
+
+
+def _case_exercised(
+    exercised: frozenset[tuple[str, str, str, str]],
+    check: str, path: str, field: str, location: str,
+) -> bool:
+    """実行台帳に (check, path, field) が location 互換で存在するか（Codex #134 P2）。"""
+    return any(
+        entry[0] == check and entry[1] == path and entry[2] == field
+        and _location_compatible(location, entry[3])
+        for entry in exercised
+    )
 
 
 def score_cases(
@@ -195,8 +209,9 @@ def score_cases(
         path = _attribute(case.match, "path")
         field = _attribute(case.match, "field")
         location = _attribute(case.match, "location", "") or ""
-        if (case.check, path, field) not in exercised:
-            # 宣言された注入点をスキャンが突いていない＝未計測。空マッチを TN/FN にしない。
+        if not _case_exercised(exercised, case.check, path, field, location):
+            # 宣言された注入点をスキャンが（成功して）突いていない＝未計測。空マッチを TN/FN に
+            # しない。location も含め、同名の別 carrier を突いただけでは exercised にしない。
             results.append(CaseResult(case.case_id, CaseExecutionState.NOT_REACHED))
             continue
         matches = [
