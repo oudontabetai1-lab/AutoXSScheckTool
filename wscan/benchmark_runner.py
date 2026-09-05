@@ -115,7 +115,13 @@ def _run_case_with_timeout(
     thread = threading.Thread(
         target=target, name=f"benchmark-case-{case.case_id}", daemon=True
     )
-    thread.start()
+    try:
+        thread.start()
+    except BaseException:
+        # スレッド枯渇等で start に失敗したら target は走らないので、ここで予約を解放する
+        # （run_suite が予約済み。解放しないとリークする・fixture 側の thread_started と対称）。
+        _release_worker()
+        raise
     thread.join(timeout)
     if thread.is_alive():
         return CaseResult(case.case_id, CaseExecutionState.TIMEOUT)

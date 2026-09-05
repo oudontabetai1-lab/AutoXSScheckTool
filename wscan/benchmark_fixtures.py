@@ -94,11 +94,12 @@ class UvicornFixtureLauncher(FixtureLauncher):
                 "too many fixture workers; a previous fixture did not stop"
             )
 
-        import uvicorn
-
         spec = FIXTURE_APPS[fixture_id]
         thread_started = False
         try:
+            # import uvicorn も予約後・try 内で行う（import 失敗で予約をリークさせない）。
+            import uvicorn
+
             # bind した socket をそのまま渡し、空きポートの取り直し競合を避ける。
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
                 sock.bind(("127.0.0.1", 0))

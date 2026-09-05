@@ -203,6 +203,24 @@ def test_none_executor_result_is_rejected(suite):
         run_suite(suite, executor=lambda c, b: None, launcher=FakeLauncher(), **METADATA)
 
 
+def test_reservation_released_when_thread_start_fails(suite, monkeypatch):
+    """thread.start() が失敗しても予約はリークしない（先取り監査・fixture 側の対称）。"""
+    from wscan import benchmark_runner as br
+    real_thread = br.threading.Thread
+
+    def make_thread(*args, **kwargs):
+        t = real_thread(*args, **kwargs)
+        def _bad_start():
+            raise RuntimeError("cannot start new thread")
+        t.start = _bad_start
+        return t
+
+    monkeypatch.setattr(br.threading, "Thread", make_thread)
+    with pytest.raises(RuntimeError):
+        run_suite(suite, executor=good_executor(suite), launcher=FakeLauncher(), **METADATA)
+    assert br._reserved_worker_count() == 0  # start 失敗でも予約を解放している
+
+
 def test_timed_out_worker_is_daemon(suite):
     """ハングした executor の worker は daemon＝インタプリタ終了をブロックしない（Codex #133 P2）。"""
     release = Event()
