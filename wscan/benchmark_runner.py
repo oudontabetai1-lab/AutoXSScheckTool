@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from contextlib import AbstractContextManager, ExitStack
+from dataclasses import dataclass
 import json
 import math
 from pathlib import Path
@@ -139,31 +140,73 @@ class Finding(Protocol):
     check_type: str
     url: str
     field_name: str
+    injection_location: str
     verified: bool
 
 
+@dataclass(frozen=True)
+class ScanOutcome:
+    """1 スキャンの結果。findings に加え「実際に攻撃した注入点」の集合を持つ（0034-R2）。
+
+    ``exercised`` は ``(check, path, field)`` の集合。ran_checks（要求した check）だけでは
+    「crawler が注入点に到達し実際に突いたか」が分からず、未実行の safe case を空マッチ＝TN と
+    誤計上して precision を水増しする（Codex #134 P1）。実行台帳から exercised を渡すことで、
+    突いていない case は NOT_REACHED（未計測）にできる。
+    """
+
+    findings: list[Any]
+    exercised: frozenset[tuple[str, str, str]] = frozenset()
+
+
 class ScanRunner(Protocol):
-    def __call__(self, base_url: str, checks: list[str]) -> list[Finding | Mapping[str, Any]]: ...
+    def __call__(self, base_url: str, checks: list[str]) -> ScanOutcome: ...
 
 
 def _attribute(value: Any, name: str, default: Any = None) -> Any:
     return value.get(name, default) if isinstance(value, Mapping) else getattr(value, name, default)
 
 
+def _location_compatible(case_location: str, finding_location: str) -> bool:
+    """宣言側と finding 側の両方が location を持つときだけ一致を要求する。
+
+    どちらかが空なら弁別できないので compatible とみなす（3 キー一致で採る）。両方 populated で
+    値が違うときのみ不一致＝別 carrier の取り違えを防ぐ（Codex #134 P2）。
+    """
+    if not case_location or not finding_location:
+        return True
+    return case_location == finding_location
+
+
 def score_cases(
-    suite: BenchmarkSuite, findings: list[Finding | Mapping[str, Any]], *, ran_checks: set[str],
+    suite: BenchmarkSuite, outcome: ScanOutcome, *, ran_checks: set[str],
 ) -> list[CaseResult]:
-    """実 findings の候補/確証を照合する。期待値との比較は scorecard 側に委ねる。"""
+    """実 findings の候補/確証を照合する。期待値との比較は scorecard 側に委ねる。
+
+    注入点が実際に突かれていない（exercised に無い）case は NOT_REACHED にし、TN/FN へ
+    混ぜない（未実行を陰性に計上しない・Codex #134 P1）。location が宣言されている場合は
+    finding.injection_location とも一致を要求し、同名 query/form の取り違えを防ぐ（P2）。
+    """
+    exercised = outcome.exercised
     results = []
     for case in suite.cases:
         if case.check not in ran_checks or case.match is None:
             results.append(CaseResult(case.case_id, CaseExecutionState.UNSUPPORTED))
             continue
+        path = _attribute(case.match, "path")
+        field = _attribute(case.match, "field")
+        location = _attribute(case.match, "location", "") or ""
+        if (case.check, path, field) not in exercised:
+            # 宣言された注入点をスキャンが突いていない＝未計測。空マッチを TN/FN にしない。
+            results.append(CaseResult(case.case_id, CaseExecutionState.NOT_REACHED))
+            continue
         matches = [
-            finding for finding in findings
+            finding for finding in outcome.findings
             if _attribute(finding, "check_type") == case.check
-            and urlparse(_attribute(finding, "url", "")).path == _attribute(case.match, "path")
-            and _attribute(finding, "field_name") == _attribute(case.match, "field")
+            and urlparse(_attribute(finding, "url", "")).path == path
+            and _attribute(finding, "field_name") == field
+            # location は「宣言側 *と* finding 側の両方が populated のときだけ」照合して carrier を
+            # 弁別する。finding が location を持たない（空）ときは 3 キー一致で採る（Codex #134 P2）。
+            and _location_compatible(location, _attribute(finding, "injection_location", ""))
         ]
         results.append(CaseResult(
             case.case_id, CaseExecutionState.COMPLETED, bool(matches),
@@ -175,7 +218,7 @@ def score_cases(
 def run_scanned_suite(
     suite: BenchmarkSuite, *, launcher: FixtureLauncher, scan_runner: ScanRunner,
     run_id: str, source_sha: str, manifest_digest: str, registry_digest: str,
-    environment: Mapping[str, Any] | None = None, scan_timeout: float = 120.0,
+    environment: Mapping[str, Any] | None = None, scan_timeout: float = 900.0,
 ) -> dict[str, Any]:
     """suite ごとに一度スキャンする。失敗/期限切れ時の部分 findings は採用しない。
 
@@ -214,15 +257,15 @@ def run_scanned_suite(
         if not _try_reserve_worker():
             return failed(CaseExecutionState.NOT_REACHED, "scan_failed")
         try:
-            findings = _run_with_timeout(
+            outcome = _run_with_timeout(
                 lambda: scan_runner(base_url, list(ran_checks)),
                 name=f"benchmark-scan-{suite.suite_id}", timeout=scan_timeout,
             )
-            if not isinstance(findings, list):
-                raise TypeError("scan_runner must return a list of findings")
+            if not isinstance(outcome, ScanOutcome):
+                raise TypeError("scan_runner must return a ScanOutcome")
         except Exception:
             return failed(CaseExecutionState.NOT_REACHED, "scan_failed")
-        results = score_cases(suite, findings, ran_checks=set(ran_checks))
+        results = score_cases(suite, outcome, ran_checks=set(ran_checks))
     return scorecard(results)
 
 

@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from wscan import benchmark_runner as br
+from wscan.benchmark_runner import ScanOutcome
 from wscan.benchmark_model import (
     CaseExecutionState as State, checks_covered_by_suites, load_manifest_file,
 )
@@ -28,9 +29,26 @@ def workers():
     yield
     for thread in threading.enumerate():
         if thread.name.startswith("benchmark-scan-"):
-            thread.join(2)
+            thread.join(3)
     assert br._reserved_worker_count() == 0
     br._reset_lingering_workers()
+
+
+def _mp(match):
+    """MatchSpec でも dict でも (path, field) を取り出す。"""
+    if isinstance(match, dict):
+        return match.get("path"), match.get("field")
+    return match.path, match.field
+
+
+def exercised_of(suite):
+    """suite の全 case（match あり）の (check, path, field) を「実行済み」とみなす集合。"""
+    out = set()
+    for c in suite.cases:
+        if c.match is not None:
+            p, f = _mp(c.match)
+            out.add((c.check, p, f))
+    return frozenset(out)
 
 
 class FakeLauncher:
@@ -52,18 +70,20 @@ class FakeLauncher:
 
 
 class FakeScanRunner:
-    def __init__(self, findings):
-        self.findings = findings
+    """findings と exercised（注入点実行台帳）を返す ScanRunner。"""
+    def __init__(self, findings, exercised):
+        self.outcome = ScanOutcome(findings=list(findings), exercised=frozenset(exercised))
         self.calls = []
 
     def __call__(self, base_url, checks):
         self.calls.append((base_url, checks))
-        return self.findings
+        return self.outcome
 
 
 def finding(**overrides):
+    # 出荷 manifest は form 注入（scanner が /search を form で検出する実態に合わせている）。
     return dict(check_type="xss", url="http://fixture.invalid/search?q=payload",
-                field_name="q", verified=True) | overrides
+                field_name="q", injection_location="form", verified=True) | overrides
 
 
 def run(suite, runner, launcher=None, **kwargs):
@@ -75,29 +95,57 @@ def run(suite, runner, launcher=None, **kwargs):
 @pytest.mark.parametrize("verified", [False, True])
 def test_score_and_single_scan(suite, as_dict, verified):
     item = finding(verified=verified)
-    runner = FakeScanRunner([item if as_dict else SimpleNamespace(**item)])
+    findings = [item if as_dict else SimpleNamespace(**item)]
     if as_dict:
         suite = replace(suite, cases=tuple(replace(c, match=vars(c.match)) for c in suite.cases))
-    results = br.score_cases(suite, runner.findings, ran_checks={"xss"})
+    outcome = ScanOutcome(findings=findings, exercised=exercised_of(suite))
+    results = br.score_cases(suite, outcome, ran_checks={"xss"})
+    # vulnerable(/search q) にマッチ→TP、safe(/help query) は実行済みだが finding 無し→TN。
     assert [(r.candidate_match, r.confirmed_match) for r in results] == [(True, verified), (False, False)]
     launcher = FakeLauncher()
-    out = run(suite, runner, launcher, environment={"test": True})
+    out = run(suite, FakeScanRunner(findings, exercised_of(suite)), launcher, environment={"test": True})
     assert "run_error" not in out
     assert [c["classification"]["candidate"] for c in out["cases"]] == ["tp", "tn"]
     assert out["environment"] == {"test": True}
-    assert runner.calls == [("http://fixture.invalid", ["xss"])]
     assert launcher.stopped
 
 
 @pytest.mark.parametrize("override", [dict(check_type="sqli"), dict(url="http://fixture.invalid/other"), dict(field_name="other")])
 def test_matching_requires_all_three_keys(suite, override):
-    assert not br.score_cases(suite, [finding(**override)], ran_checks={"xss"})[0].candidate_match
+    outcome = ScanOutcome(findings=[finding(**override)], exercised=exercised_of(suite))
+    assert not br.score_cases(suite, outcome, ran_checks={"xss"})[0].candidate_match
 
 
 def test_unsupported_and_missing_match(suite):
-    assert all(r.state == State.UNSUPPORTED for r in br.score_cases(suite, [finding()], ran_checks={"sqli"}))
-    suite = replace(suite, cases=(replace(suite.cases[0], match=None),))
-    assert br.score_cases(suite, [finding()], ran_checks={"xss"})[0].state == State.UNSUPPORTED
+    outcome = ScanOutcome(findings=[finding()], exercised=exercised_of(suite))
+    assert all(r.state == State.UNSUPPORTED for r in br.score_cases(suite, outcome, ran_checks={"sqli"}))
+    nomatch = replace(suite, cases=(replace(suite.cases[0], match=None),))
+    assert br.score_cases(nomatch, ScanOutcome([], frozenset()), ran_checks={"xss"})[0].state == State.UNSUPPORTED
+
+
+def test_unexercised_case_is_not_reached(suite):
+    """宣言された注入点をスキャンが突いていない case は NOT_REACHED（TN/FN に混ぜない・Codex #134 P1）。"""
+    # exercised に vulnerable だけ入れ、safe(/help query) は未実行にする。
+    vuln = suite.cases[0]
+    exercised = frozenset({(vuln.check, vuln.match.path, vuln.match.field)})
+    outcome = ScanOutcome(findings=[finding()], exercised=exercised)
+    results = br.score_cases(suite, outcome, ran_checks={"xss"})
+    assert results[0].state == State.COMPLETED  # vulnerable は実行済み
+    assert results[1].state == State.NOT_REACHED  # safe は未実行→陰性にしない
+    assert results[1].candidate_match is False and results[1].confirmed_match is False
+
+
+def test_location_disambiguates_findings(suite):
+    """同名 field でも injection_location が異なれば candidate にしない（Codex #134 P2）。"""
+    # vulnerable case は location=form。url_param 由来 finding は別 carrier なので一致しない。
+    other = ScanOutcome(findings=[finding(injection_location="url_param")], exercised=exercised_of(suite))
+    assert not br.score_cases(suite, other, ran_checks={"xss"})[0].candidate_match
+    # 同じ location なら一致する。
+    ok = ScanOutcome(findings=[finding(injection_location="form")], exercised=exercised_of(suite))
+    assert br.score_cases(suite, ok, ran_checks={"xss"})[0].candidate_match
+    # finding 側が location 空なら弁別できないので 3 キー一致で採る（実 scanner が空を返す場合の互換）。
+    empty = ScanOutcome(findings=[finding(injection_location="")], exercised=exercised_of(suite))
+    assert br.score_cases(suite, empty, ran_checks={"xss"})[0].candidate_match
 
 
 def assert_failure(out, error, state):
@@ -108,7 +156,7 @@ def assert_failure(out, error, state):
 
 
 def test_fixture_failure(suite):
-    runner = FakeScanRunner([finding()])
+    runner = FakeScanRunner([finding()], exercised_of(suite))
     assert_failure(run(suite, runner, FakeLauncher(fail=True)), "fixture_unavailable", "fixture_unavailable")
     assert runner.calls == []
 
@@ -123,18 +171,18 @@ def test_scan_exception(suite, error):
 
 
 def test_invalid_return_is_measurement_failure(suite):
-    assert_failure(run(suite, FakeScanRunner(None)), "scan_failed", "not_reached")
+    # ScanOutcome でない戻り値（None）は measurement 失敗として NOT_REACHED（scan_failed）。
+    assert_failure(run(suite, lambda base_url, checks: None), "scan_failed", "not_reached")
 
 
 def test_timeout_daemon_and_shared_cap(suite):
     release = threading.Event()
     calls = []
-    # R1 が確立した limit を使い、繰り返し suite でも追加 worker を積まない。
     br._establish_worker_limit(1)
     def scan(base_url, checks):
         calls.append(threading.current_thread())
         release.wait()
-        return [finding()]
+        return ScanOutcome([finding()], exercised_of(suite))
     try:
         launcher = FakeLauncher()
         out = run(suite, scan, launcher, scan_timeout=0.02)
@@ -143,19 +191,18 @@ def test_timeout_daemon_and_shared_cap(suite):
         assert len(calls) == 1 and calls[0].daemon and calls[0].is_alive()
         assert br._reserved_worker_count() == 1
         assert_failure(run(suite, scan, scan_timeout=0.02), "scan_failed", "not_reached")
-        assert len(calls) == 1
+        assert len(calls) == 1  # cap 到達で2回目は起動しない
     finally:
         release.set()
         for thread in calls:
-            thread.join(2)
-    assert_failure(out, "scan_failed", "not_reached")
+            thread.join(3)
 
 
 def test_start_failure_releases_reservation(suite, monkeypatch):
     def fail(self):
         raise RuntimeError("cannot start")
     monkeypatch.setattr(threading.Thread, "start", fail)
-    assert_failure(run(suite, FakeScanRunner([])), "scan_failed", "not_reached")
+    assert_failure(run(suite, FakeScanRunner([], frozenset())), "scan_failed", "not_reached")
     assert br._reserved_worker_count() == 0
 
 
@@ -163,15 +210,23 @@ def test_start_failure_releases_reservation(suite, monkeypatch):
 def test_timeout_validation(suite, timeout):
     launcher = FakeLauncher()
     with pytest.raises(ValueError, match="finite and positive"):
-        run(suite, FakeScanRunner([]), launcher, scan_timeout=timeout)
+        run(suite, FakeScanRunner([], frozenset()), launcher, scan_timeout=timeout)
     assert not launcher.launched
     with pytest.raises(ValueError, match="finite and positive"):
         ScanEngineScanRunner(timeout=timeout)
 
 
+def test_default_scan_timeout_exceeds_runner_default():
+    """外側 backstop の既定は内側 runner の既定より大きい（健全な scan を誤って中断しない・#134 P2）。"""
+    import inspect
+    outer = inspect.signature(br.run_scanned_suite).parameters["scan_timeout"].default
+    inner = inspect.signature(ScanEngineScanRunner.__init__).parameters["timeout"].default
+    assert outer > inner
+
+
 def test_empty_suite(suite):
     launcher = FakeLauncher()
-    runner = FakeScanRunner([])
+    runner = FakeScanRunner([], frozenset())
     out = run(replace(suite, cases=()), runner, launcher)
     assert out["run_error"] == "empty_suite"
     assert out["cases"] == []

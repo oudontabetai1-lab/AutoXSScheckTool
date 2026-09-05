@@ -4,13 +4,17 @@ fixture_id: realistic_site
 runner_profile: scan_engine
 mode: normal-deterministic
 source_kind: first_party
+# 反射 XSS の vulnerable ＋ safe twin。realistic_site の /search・/help は検索 form（GET・field を
+# クエリへ載せる）で、製品スキャナはこれを form 注入として検出し injection_location=form を付ける。
+# よって carrier/location は form で宣言する（scanner の実検出に合わせる。EXPECTED_FINDINGS/
+# SAFE_ENDPOINTS の field 名は維持）。
 cases:
   - case_id: realistic_site.xss.search.q.vulnerable
     expected: vulnerable
     check: xss
     request: {method: GET, path: /search}
-    injection: {carrier: query, parameter_id: q, value_kind: string}
-    match: {path: /search, field: q, location: url_param}
+    injection: {carrier: form, parameter_id: q, value_kind: string}
+    match: {path: /search, field: q, location: form}
     twin_id: realistic_site.xss.help.query.safe
     taxonomy: [reflected, unauthenticated]
     gate: observed
@@ -18,8 +22,8 @@ cases:
     expected: safe
     check: xss
     request: {method: GET, path: /help}
-    injection: {carrier: query, parameter_id: query, value_kind: string}
-    match: {path: /help, field: query, location: url_param}
+    injection: {carrier: form, parameter_id: query, value_kind: string}
+    match: {path: /help, field: query, location: form}
     twin_id: realistic_site.xss.search.q.vulnerable
     taxonomy: [reflected, unauthenticated]
     gate: observed
