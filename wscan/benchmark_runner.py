@@ -237,15 +237,17 @@ class HttpxCaseExecutor(CaseExecutor):
 
     def __call__(self, case: BenchmarkCase, base_url: str) -> CaseResult:
         injection = case.injection
-        # このオラクルは XSS の生タグ反射しか測れない。他 check（sqli 等）の query/form case に
-        # XSS probe を撃つと、その scanner の TP/FN を汚染する。check!=xss は UNSUPPORTED にする
-        # （黙って別 scanner の結果へ混ぜない・Codex #133 P2）。
+        # このオラクルは「匿名の単発 HTTP で XSS の生タグ反射を見る」だけ。よって:
+        #  - check!=xss は他 scanner の結果を汚染するので UNSUPPORTED（別 check に XSS probe を撃たない）。
+        #  - carrier は query/form のみ。
+        #  - **前提を1つでも持つ case は UNSUPPORTED**。auth_session/multi_account/second_request/
+        #    oob_sink/api_spec 等はこのオラクルが一切セットアップしないので、満たされないまま反射だけで
+        #    採点すると TP/FN/FP/TN を汚染する。browser だけでなく全前提を弾く（Codex #133 P2）。
         if (
             case.check != "xss"
             or injection is None
             or injection.carrier not in {Carrier.QUERY, Carrier.FORM}
-            or any(p.lower() in {"browser", "browser_required", "chromium", "playwright"}
-                   for p in case.prerequisites)
+            or bool(case.prerequisites)
         ):
             return CaseResult(case.case_id, CaseExecutionState.UNSUPPORTED)
 

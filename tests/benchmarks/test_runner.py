@@ -26,6 +26,12 @@ def _clean_lingering_workers():
     """プロセス横断の滞留 worker トラッカーをテスト間で分離する。"""
     _reset_lingering_workers()
     yield
+    # 旧 worker が finally で _release_worker() を呼び終えるまで待ってから reset する。待たずに
+    # reset すると、release 済み worker の遅れた _release_worker() が次テストの予約を減らし、
+    # プロセス横断 cap テストを flaky にする（Codex #133）。テストは自身の finally で release 済み。
+    for t in list(threading.enumerate()):
+        if t.name.startswith("benchmark-case-"):
+            t.join(3.0)
     _reset_lingering_workers()
 
 
@@ -288,9 +294,13 @@ def test_httpx_unsupported_carrier(suite, monkeypatch, carrier):
     assert HttpxCaseExecutor()(case, "http://fixture.invalid").state == State.UNSUPPORTED
 
 
-@pytest.mark.parametrize("prerequisite", ["browser", "browser_required", "chromium", "playwright"])
-def test_httpx_browser_prerequisite(suite, monkeypatch, prerequisite):
-    monkeypatch.setattr(httpx, "Client", lambda **kwargs: pytest.fail("browser case sent HTTP"))
+@pytest.mark.parametrize("prerequisite", [
+    "browser", "browser_required", "chromium", "playwright",  # browser 系
+    "auth_session", "multi_account", "second_request", "oob_sink", "api_spec",  # 非 browser
+])
+def test_httpx_any_prerequisite_is_unsupported(suite, monkeypatch, prerequisite):
+    """オラクルは前提を一切セットアップしない。前提を持つ case は全て UNSUPPORTED（Codex #133 P2）。"""
+    monkeypatch.setattr(httpx, "Client", lambda **kwargs: pytest.fail("prereq case sent HTTP"))
     case = replace(suite.cases[0], prerequisites=(prerequisite,))
     assert HttpxCaseExecutor()(case, "http://fixture.invalid").state == State.UNSUPPORTED
 
