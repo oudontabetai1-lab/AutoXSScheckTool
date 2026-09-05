@@ -1,0 +1,215 @@
+"""実ネットや browser に依存せず runner の未完了会計を固定する。"""
+from contextlib import contextmanager
+from dataclasses import replace
+import html
+import json
+from pathlib import Path
+from threading import Event
+from urllib.parse import parse_qs
+
+import httpx
+import pytest
+
+from wscan.benchmark_model import (
+    CaseExecutionState as State, CaseResult, load_manifest_file, scorecard_to_markdown,
+)
+from wscan.benchmark_runner import HttpxCaseExecutor, run_suite, write_scorecard
+from wscan.scanner_contract import Carrier
+
+
+MANIFEST = Path(__file__).resolve().parents[2] / "benchmarks/manifests/realistic_site.yaml"
+METADATA = dict(run_id="test", source_sha="sha", manifest_digest="manifest",
+                registry_digest="registry", environment={"note": "単体テスト"})
+
+
+@pytest.fixture
+def suite():
+    return load_manifest_file(MANIFEST, registry_keys=frozenset({"xss"}))
+
+
+class FakeLauncher:
+    def __init__(self, fail=False):
+        self.fail = fail
+        self.launched = False
+        self.stopped = False
+
+    @contextmanager
+    def launch(self, fixture_id):
+        assert fixture_id == "realistic_site"
+        self.launched = True
+        if self.fail:
+            raise RuntimeError("fixture unavailable")
+        try:
+            yield "http://fixture.invalid"
+        finally:
+            self.stopped = True
+
+
+class FakeExecutor:
+    def __init__(self, results):
+        self.results = results
+        self.calls = []
+
+    def __call__(self, case, base_url):
+        assert base_url == "http://fixture.invalid"
+        self.calls.append(case.case_id)
+        return self.results[case.case_id]
+
+
+def good_executor(suite):
+    return FakeExecutor({
+        case.case_id: CaseResult(case.case_id, State.COMPLETED, i == 0, i == 0)
+        for i, case in enumerate(suite.cases)
+    })
+
+
+def test_normal_suite_and_write_scorecard(suite, tmp_path):
+    launcher = FakeLauncher()
+    executor = good_executor(suite)
+    out = run_suite(suite, executor=executor, launcher=launcher, **METADATA)
+    assert "run_error" not in out
+    # observed のみなので、実行完了でも required gate は未達成。
+    assert out["overall_status"] == "PARTIAL"
+    assert out["case_counts"] == {"planned": 2, "completed": 2, "incomplete": 0}
+    assert [c["classification"]["candidate"] for c in out["cases"]] == ["tp", "tn"]
+    assert out["metrics"]["candidate"]["fp"] == 0
+    assert out["environment"] == METADATA["environment"]
+    assert executor.calls == [c.case_id for c in suite.cases]
+    assert launcher.stopped
+
+    json_path, md_path = write_scorecard(out, tmp_path / "nested" / "run")
+    assert json_path.name == "scorecard.json"
+    assert md_path.name == "scorecard.md"
+    assert json.loads(json_path.read_text(encoding="utf-8")) == out
+    assert "単体テスト" in json_path.read_text(encoding="utf-8")
+    assert md_path.read_text(encoding="utf-8") == scorecard_to_markdown(out)
+    assert md_path.stat().st_size > 0
+
+
+def test_fixture_unavailable(suite):
+    executor = good_executor(suite)
+    out = run_suite(suite, executor=executor, launcher=FakeLauncher(fail=True), **METADATA)
+    assert out["run_error"] == "fixture_unavailable"
+    assert out["overall_status"] == "INCOMPLETE"
+    assert all(c["state"] == "fixture_unavailable" for c in out["cases"])
+    assert executor.calls == []
+    assert out["metrics"]["candidate"]["tn"] == 0
+
+
+def test_timeout_does_not_wait_or_block_next_case(suite):
+    release = Event()
+    finished = Event()
+    launcher = FakeLauncher()
+
+    def executor(case, base_url):
+        if case == suite.cases[0]:
+            try:
+                assert release.wait(5), "runner waited for timed-out executor"
+            finally:
+                finished.set()
+        return CaseResult(case.case_id, State.COMPLETED)
+
+    try:
+        out = run_suite(suite, executor=executor, launcher=launcher,
+                        per_case_timeout=0.05, **METADATA)
+        assert not finished.is_set()
+        assert [c["state"] for c in out["cases"]] == ["timeout", "completed"]
+        assert out["overall_status"] == "INCOMPLETE"
+        assert out["cases"][0]["classification"]["candidate"] is None
+        assert launcher.stopped
+    finally:
+        release.set()
+        assert finished.wait(2)
+    assert out["cases"][0]["state"] == "timeout"
+
+
+@pytest.mark.parametrize("exception", [RuntimeError, TimeoutError])
+def test_executor_exception(suite, exception):
+    def executor(case, base_url):
+        raise exception("I/O failed")
+
+    out = run_suite(suite, executor=executor, launcher=FakeLauncher(), **METADATA)
+    assert all(c["state"] == "transport_error" for c in out["cases"])
+    assert out["overall_status"] == "INCOMPLETE"
+
+
+def test_empty_suite(suite):
+    launcher = FakeLauncher()
+    executor = good_executor(suite)
+    out = run_suite(replace(suite, cases=()), executor=executor, launcher=launcher, **METADATA)
+    assert out["run_error"] == "empty_suite"
+    assert out["overall_status"] != "COMPLETE"
+    assert out["cases"] == []
+    assert not launcher.launched
+    assert executor.calls == []
+
+
+def test_case_id_mismatch_is_not_fixture_failure(suite):
+    launcher = FakeLauncher()
+    executor = FakeExecutor({c.case_id: CaseResult("wrong", State.COMPLETED) for c in suite.cases})
+    with pytest.raises(ValueError, match="case_id mismatch"):
+        run_suite(suite, executor=executor, launcher=launcher, **METADATA)
+    assert launcher.stopped
+
+
+def test_not_reached_is_not_a_negative(suite):
+    executor = FakeExecutor({c.case_id: CaseResult(c.case_id, State.NOT_REACHED) for c in suite.cases})
+    out = run_suite(suite, executor=executor, launcher=FakeLauncher(), **METADATA)
+    assert out["overall_status"] == "INCOMPLETE"
+    assert out["metrics"]["candidate"]["tn"] == 0
+    assert out["metrics"]["candidate"]["fn"] == 0
+
+
+@pytest.mark.parametrize("carrier", [None, *[c for c in Carrier if c not in {Carrier.QUERY, Carrier.FORM}]])
+def test_httpx_unsupported_carrier(suite, monkeypatch, carrier):
+    def no_client(*args, **kwargs):
+        pytest.fail("unsupported case must not create an HTTP client")
+
+    monkeypatch.setattr(httpx, "Client", no_client)
+    case = suite.cases[0]
+    case = replace(case, injection=replace(case.injection, carrier=carrier) if carrier else None)
+    assert HttpxCaseExecutor()(case, "http://fixture.invalid").state == State.UNSUPPORTED
+
+
+@pytest.mark.parametrize("prerequisite", ["browser", "browser_required", "chromium", "playwright"])
+def test_httpx_browser_prerequisite(suite, monkeypatch, prerequisite):
+    monkeypatch.setattr(httpx, "Client", lambda **kwargs: pytest.fail("browser case sent HTTP"))
+    case = replace(suite.cases[0], prerequisites=(prerequisite,))
+    assert HttpxCaseExecutor()(case, "http://fixture.invalid").state == State.UNSUPPORTED
+
+
+@pytest.mark.parametrize("carrier", [Carrier.QUERY, Carrier.FORM])
+@pytest.mark.parametrize("reflection", ["raw", "escaped", "absent"])
+def test_httpx_probe_with_mock_transport(suite, monkeypatch, carrier, reflection):
+    def handler(request):
+        if carrier == Carrier.QUERY:
+            assert request.method == "GET"
+            assert request.url.params["keep"] == "yes"
+            probe = request.url.params["q"]
+        else:
+            assert request.method == "POST"
+            probe = parse_qs(request.content.decode())["q"][0]
+        assert "<svg/onload=alert(1)>" in probe
+        body = probe if reflection == "raw" else html.escape(probe) if reflection == "escaped" else "ok"
+        return httpx.Response(200, text=body)
+
+    client = httpx.Client
+    monkeypatch.setattr(httpx, "Client", lambda **kwargs: client(
+        transport=httpx.MockTransport(handler), **kwargs,
+    ))
+    case = suite.cases[0]
+    case = replace(case, injection=replace(case.injection, carrier=carrier),
+                   request=replace(case.request, path="/search?keep=yes"))
+    result = HttpxCaseExecutor()(case, "http://fixture.invalid")
+    assert result.state == State.COMPLETED
+    assert result.candidate_match == (reflection == "raw")
+    assert result.confirmed_match == result.candidate_match
+
+
+def test_http_error_is_not_safe(suite, monkeypatch):
+    client = httpx.Client
+    monkeypatch.setattr(httpx, "Client", lambda **kwargs: client(
+        transport=httpx.MockTransport(lambda request: httpx.Response(404)), **kwargs,
+    ))
+    out = run_suite(suite, executor=HttpxCaseExecutor(), launcher=FakeLauncher(), **METADATA)
+    assert all(c["state"] == "transport_error" for c in out["cases"])
