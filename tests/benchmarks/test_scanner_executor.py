@@ -123,6 +123,30 @@ def test_unsupported_and_missing_match(suite):
     assert br.score_cases(nomatch, ScanOutcome([], frozenset()), ran_checks={"xss"})[0].state == State.UNSUPPORTED
 
 
+def test_non_field_carrier_is_unsupported(suite):
+    """R2 は field carrier（query/form）だけ忠実に採点。json/header 等は UNSUPPORTED（Codex #134 P2）。"""
+    from wscan.scanner_contract import Carrier
+    for carrier in (Carrier.JSON, Carrier.HEADER, Carrier.COOKIE):
+        case = replace(suite.cases[0], injection=replace(suite.cases[0].injection, carrier=carrier))
+        s = replace(suite, cases=(case,))
+        outcome = ScanOutcome(findings=[finding()], exercised=exercised_of(s))
+        assert br.score_cases(s, outcome, ran_checks={"xss"})[0].state == State.UNSUPPORTED
+
+
+def test_unprovisioned_prerequisite_is_unsupported(suite):
+    """前提を宣言した case は、スキャンがそれを用意したときだけ採点する（Codex #134 P2）。"""
+    case = replace(suite.cases[0], prerequisites=("auth_session",))
+    s = replace(suite, cases=(case,))
+    ex = exercised_of(s)
+    # 未充足（fulfilled 空）→ UNSUPPORTED。
+    unmet = ScanOutcome(findings=[finding()], exercised=ex)
+    assert br.score_cases(s, unmet, ran_checks={"xss"})[0].state == State.UNSUPPORTED
+    # 充足（auth_session を用意）→ 通常どおり採点（COMPLETED・TP）。
+    met = ScanOutcome(findings=[finding()], exercised=ex, fulfilled_prerequisites=frozenset({"auth_session"}))
+    r = br.score_cases(s, met, ran_checks={"xss"})[0]
+    assert r.state == State.COMPLETED and r.candidate_match
+
+
 def test_unexercised_case_is_not_reached(suite):
     """宣言された注入点をスキャンが突いていない case は NOT_REACHED（TN/FN に混ぜない・Codex #134 P1）。"""
     # exercised に vulnerable だけ入れ、safe(/help query) は未実行にする。

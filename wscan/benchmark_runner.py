@@ -158,6 +158,17 @@ class ScanOutcome:
 
     findings: list[Any]
     exercised: frozenset[tuple[str, str, str, str]] = frozenset()
+    # このスキャンが実際にプロビジョニングした前提の集合（例: 認証済みなら auth_session）。
+    # ScanEngineScanRunner は匿名スキャンなので空。前提を宣言した case のうち、ここに無いものは
+    # 契約未充足として UNSUPPORTED にし、満たされない環境で TP/FN/FP/TN を作らない（Codex #134 P2）。
+    fulfilled_prerequisites: frozenset[str] = frozenset()
+
+
+# このオラクル/adapter が忠実に採点できる carrier。json_body/page-level 等は scan_matrix の
+# field/location が report 用プレースホルダ（"(json-body)"/"(page)"）で finding の実 identity と
+# 一致せず、method 次元も台帳に無い。R2 はこれらを UNSUPPORTED にし、R3 で carrier 固有の実行
+# identity を導入する（Codex #134 P2）。
+_SCOREABLE_CARRIERS = frozenset({"query", "form"})
 
 
 class ScanRunner(Protocol):
@@ -219,9 +230,22 @@ def score_cases(
     finding.injection_location とも一致を要求し、同名 query/form の取り違えを防ぐ（P2）。
     """
     exercised = outcome.exercised
+    fulfilled = outcome.fulfilled_prerequisites
     results = []
     for case in suite.cases:
-        if case.check not in ran_checks or case.match is None:
+        carrier = getattr(_attribute(case, "injection", None), "carrier", None)
+        carrier_value = getattr(carrier, "value", carrier)
+        prereqs = tuple(_attribute(case, "prerequisites", ()) or ())
+        if (
+            case.check not in ran_checks
+            or case.match is None
+            # R2 は field carrier（query/form）だけ忠実に採点できる。json/page/header 等は
+            # scan_matrix の identity がプレースホルダで finding と一致せず誤採点になるため未対応。
+            or carrier_value not in _SCOREABLE_CARRIERS
+            # 前提を宣言した case は、スキャンがその前提を実際に用意した場合のみ採点する。
+            # 未充足の前提で反射だけ見て TP/FN/FP/TN を作らない（HttpxCaseExecutor と同思想）。
+            or any(p not in fulfilled for p in prereqs)
+        ):
             results.append(CaseResult(case.case_id, CaseExecutionState.UNSUPPORTED))
             continue
         path = _attribute(case.match, "path")
