@@ -8,6 +8,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 from os import PathLike
+from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
 from wscan.scanner_contract import Carrier, ValueKind
@@ -756,14 +757,25 @@ def compute_registry_completeness(
     redundant_gaps = sorted(covered & gap_checks)  # covered 済みなのに gap が残る
     unknown_gaps = sorted(gap_checks - registry_set)  # registry に無い check への gap
     missing_safe_twin = sorted(covered - safe_twins)  # vuln はあるが FP を測れない
-    status = OverallStatus.COMPLETE.value if not uncovered else OverallStatus.INCOMPLETE.value
+    acknowledged = gap_checks & registry_set
+    # gap は「明示 INCOMPLETE 状態」であって complete ではない（RegistryGap の定義・
+    # suite の overall_status も既知 gap を COMPLETE にしない）。よって:
+    #   INCOMPLETE … 未承認の未計測 check（uncovered）がある＝黙って漏れている
+    #   PARTIAL    … 全 check が covered か gap だが、gap（未計測）がまだ残る
+    #   COMPLETE   … 全 registry check が実測 covered で gap ゼロ
+    if uncovered:
+        status = OverallStatus.INCOMPLETE.value
+    elif acknowledged:
+        status = OverallStatus.PARTIAL.value
+    else:
+        status = OverallStatus.COMPLETE.value
 
     return {
         "registry_total": len(registry),
         "covered": sorted(covered),
         "covered_count": len(covered),
-        "acknowledged_gaps": sorted(gap_checks & registry_set),
-        "acknowledged_gap_count": len(gap_checks & registry_set),
+        "acknowledged_gaps": sorted(acknowledged),
+        "acknowledged_gap_count": len(acknowledged),
         "uncovered": uncovered,
         "uncovered_count": len(uncovered),
         "missing_safe_twin": missing_safe_twin,
@@ -812,3 +824,28 @@ def load_registry_gaps_file(path: str | PathLike[str]) -> dict[str, RegistryGap]
     except (OSError, yaml.YAMLError) as exc:
         raise ManifestError(f"could not load registry gaps file: {exc}") from exc
     return load_registry_gaps(data)
+
+
+def discover_benchmark_suites(
+    manifests_dir: str | PathLike[str],
+    *,
+    registry_keys: frozenset[str],
+) -> list[BenchmarkSuite]:
+    """canonical manifest ディレクトリ直下の ``*.yaml``/``*.yml`` を全て load する（I/O）。
+
+    完全性ゲートが「実際に存在する manifest」から covered を導くための入口。ディレクトリが
+    無い/空なら ``[]``（manifest 未整備＝covered 空）。壊れた manifest は握り潰さず
+    ``ManifestError`` を伝播する（黙って未計測にしない）。ファイル名昇順で決定的に読む。
+    """
+    directory = Path(manifests_dir)
+    if not directory.is_dir():
+        return []
+    suites: list[BenchmarkSuite] = []
+    seen: set[str] = set()
+    for path in sorted(directory.glob("*.y*ml")):
+        suite = load_manifest_file(path, registry_keys=registry_keys)
+        if suite.suite_id in seen:
+            raise ManifestError(f"duplicate suite_id across manifests: {suite.suite_id}")
+        seen.add(suite.suite_id)
+        suites.append(suite)
+    return suites
