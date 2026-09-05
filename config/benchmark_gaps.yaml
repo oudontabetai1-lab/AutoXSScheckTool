@@ -77,15 +77,7 @@ gaps:
     reason: E2E benchmark ground truth 未整備（vulnerable/safe twin case が未作成）
     owner_task: "0034"
     deadline: "2026-12-31"
-  open_redirect:
-    reason: E2E benchmark ground truth 未整備（vulnerable/safe twin case が未作成）
-    owner_task: "0034"
-    deadline: "2026-12-31"
   os:
-    reason: E2E benchmark ground truth 未整備（vulnerable/safe twin case が未作成）
-    owner_task: "0034"
-    deadline: "2026-12-31"
-  path_traversal:
     reason: E2E benchmark ground truth 未整備（vulnerable/safe twin case が未作成）
     owner_task: "0034"
     deadline: "2026-12-31"
@@ -122,10 +114,6 @@ gaps:
     owner_task: "0034"
     deadline: "2026-12-31"
   ssrf:
-    reason: E2E benchmark ground truth 未整備（vulnerable/safe twin case が未作成）
-    owner_task: "0034"
-    deadline: "2026-12-31"
-  ssti:
     reason: E2E benchmark ground truth 未整備（vulnerable/safe twin case が未作成）
     owner_task: "0034"
     deadline: "2026-12-31"

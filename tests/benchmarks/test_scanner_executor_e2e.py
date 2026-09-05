@@ -51,3 +51,17 @@ def test_realistic_site_sqli_scanner_scorecard():
     assert "run_error" not in out, out
     assert out["case_counts"] == {"planned": 2, "completed": 2, "incomplete": 0}
     assert [c["classification"]["candidate"] for c in out["cases"]] == ["tp", "tn"], out
+
+
+def test_realistic_site_injection_scanner_scorecard():
+    """ssti/path_traversal/open_redirect を実 scanner で採点（各 vuln=TP・safe twin=TN・0034-R3）。"""
+    _require_chromium()
+    out = _run_manifest(
+        "realistic_site_injection.yaml", {"ssti", "path_traversal", "open_redirect"}
+    )
+    assert "run_error" not in out, out
+    assert out["case_counts"] == {"planned": 6, "completed": 6, "incomplete": 0}
+    # manifest 順: 各 check の vulnerable→safe twin。
+    assert [c["classification"]["candidate"] for c in out["cases"]] == [
+        "tp", "tn", "tp", "tn", "tp", "tn",
+    ], out

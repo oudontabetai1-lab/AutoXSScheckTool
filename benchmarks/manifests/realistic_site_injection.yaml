@@ -1,0 +1,69 @@
+schema_version: 1
+suite_id: realistic_site_injection
+fixture_id: realistic_site
+runner_profile: scan_engine
+mode: normal-deterministic
+source_kind: first_party
+# realistic_site の URL param 系注入 scanner（form 無しの純 URL param）を実採点する。各 check の
+# vulnerable と safe twin を EXPECTED_FINDINGS/SAFE_ENDPOINTS から取る。carrier/location は
+# query/url_param（scanner の実検出に合わせる。実 injection_location は E2E で検証する）。
+cases:
+  # SSTI: /greeting?name= がテンプレートエンジンで描画（脆弱）／ /welcome?name= は HTML エスケープ（安全）。
+  - case_id: realistic_site_injection.ssti.greeting.name.vulnerable
+    expected: vulnerable
+    check: ssti
+    request: {method: GET, path: /greeting}
+    injection: {carrier: query, parameter_id: name, value_kind: string}
+    match: {path: /greeting, field: name, location: url_param}
+    twin_id: realistic_site_injection.ssti.welcome.name.safe
+    taxonomy: [server_side_template, unauthenticated]
+    gate: observed
+  - case_id: realistic_site_injection.ssti.welcome.name.safe
+    expected: safe
+    check: ssti
+    request: {method: GET, path: /welcome}
+    injection: {carrier: query, parameter_id: name, value_kind: string}
+    match: {path: /welcome, field: name, location: url_param}
+    twin_id: realistic_site_injection.ssti.greeting.name.vulnerable
+    taxonomy: [server_side_template, unauthenticated]
+    gate: observed
+  # Path traversal: /files/download?doc= が containment 無しで /etc/ 到達（脆弱）／ /files/manual?name=
+  # は allow-list（安全）。
+  - case_id: realistic_site_injection.path_traversal.download.doc.vulnerable
+    expected: vulnerable
+    check: path_traversal
+    request: {method: GET, path: /files/download}
+    injection: {carrier: query, parameter_id: doc, value_kind: string}
+    match: {path: /files/download, field: doc, location: url_param}
+    twin_id: realistic_site_injection.path_traversal.manual.name.safe
+    taxonomy: [path_traversal, unauthenticated]
+    gate: observed
+  - case_id: realistic_site_injection.path_traversal.manual.name.safe
+    expected: safe
+    check: path_traversal
+    request: {method: GET, path: /files/manual}
+    injection: {carrier: query, parameter_id: name, value_kind: string}
+    match: {path: /files/manual, field: name, location: url_param}
+    twin_id: realistic_site_injection.path_traversal.download.doc.vulnerable
+    taxonomy: [path_traversal, unauthenticated]
+    gate: observed
+  # Open redirect: /redirect?url= を 302 Location にそのまま（脆弱）／ /account/continue?next= は
+  # 同一サイト相対のみ許可（安全）。
+  - case_id: realistic_site_injection.open_redirect.redirect.url.vulnerable
+    expected: vulnerable
+    check: open_redirect
+    request: {method: GET, path: /redirect}
+    injection: {carrier: query, parameter_id: url, value_kind: string}
+    match: {path: /redirect, field: url, location: url_param}
+    twin_id: realistic_site_injection.open_redirect.continue.next.safe
+    taxonomy: [open_redirect, unauthenticated]
+    gate: observed
+  - case_id: realistic_site_injection.open_redirect.continue.next.safe
+    expected: safe
+    check: open_redirect
+    request: {method: GET, path: /account/continue}
+    injection: {carrier: query, parameter_id: next, value_kind: string}
+    match: {path: /account/continue, field: next, location: url_param}
+    twin_id: realistic_site_injection.open_redirect.redirect.url.vulnerable
+    taxonomy: [open_redirect, unauthenticated]
+    gate: observed
