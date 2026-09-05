@@ -8,6 +8,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 from os import PathLike
+from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
 from wscan.scanner_contract import Carrier, ValueKind
@@ -683,3 +684,174 @@ def load_manifest_file(
     except (OSError, yaml.YAMLError) as exc:
         raise ManifestError(f"could not load manifest file: {exc}") from exc
     return load_manifest(data, registry_keys=registry_keys)
+
+
+# ── registry 完全性ゲート（0034-B）───────────────────────────────────────────
+# 「registry の全 scanner を benchmark へ列挙し、未登録を gate failure/明示 INCOMPLETE
+# にする」ための純粋な会計。scanner を registry へ足しただけで benchmark から漏れる状態を
+# 回帰テストで検出する forcing function を提供する（受け入れ条件）。
+
+
+@dataclass(frozen=True)
+class RegistryGap:
+    """benchmark case をまだ持たない check を「明示 INCOMPLETE」として承認する記録。
+
+    無言の未計測（黙って FN/TN へ混ぜる）を禁じ、未着手を owner_task と deadline 付きで
+    可視化する（設計 §「gate failure または明示 INCOMPLETE」）。
+    """
+
+    check: str
+    reason: str
+    owner_task: str
+    deadline: str
+
+
+def checks_covered_by_suites(
+    suites: Iterable[BenchmarkSuite],
+) -> tuple[frozenset[str], frozenset[str]]:
+    """suite 群から (vulnerable case を持つ check, safe case を持つ check) を返す（純粋）。
+
+    「covered」＝少なくとも1つの vulnerable ground truth を持つこと。safe twin の有無は
+    別集合で返し、vulnerable はあるが safe が無い check（FP を測れない）を上位で報告できる。
+
+    ``gate == GateKind.GAP`` の case は実測ではなくプレースホルダ（``overall_status`` も
+    GAP suite を PARTIAL 扱い）なので covered/safe に数えない。これを数えると、その check を
+    ``benchmark_gaps.yaml`` から外したとき完全性が誤って COMPLETE になる（Codex P2）。
+    """
+    vulnerable: set[str] = set()
+    safe: set[str] = set()
+    for suite in suites:
+        for case in suite.cases:
+            if case.gate == GateKind.GAP:
+                continue  # プレースホルダ＝未計測。covered として数えない。
+            if case.expected == ExpectedOutcome.VULNERABLE:
+                vulnerable.add(case.check)
+            elif case.expected == ExpectedOutcome.SAFE:
+                safe.add(case.check)
+    return frozenset(vulnerable), frozenset(safe)
+
+
+def compute_registry_completeness(
+    registry_checks: Iterable[str],
+    covered_checks: Iterable[str],
+    *,
+    safe_twin_checks: Iterable[str] = (),
+    acknowledged_gaps: Mapping[str, RegistryGap] | None = None,
+) -> dict[str, Any]:
+    """registry の各 check が benchmark で採点可能かを会計する（純粋・0034-B）。
+
+    - ``registry_checks``: SCANNERS のキー全体。
+    - ``covered_checks``: vulnerable ground truth を持つ check（``checks_covered_by_suites``）。
+    - ``safe_twin_checks``: safe twin を持つ check。covered だが safe twin が無いものを報告する。
+    - ``acknowledged_gaps``: check -> RegistryGap。benchmark 未整備を明示承認した check。
+
+    ``completeness_status``:
+      - ``COMPLETE``   … 全 registry check が covered か acknowledged gap のいずれか。
+      - ``INCOMPLETE`` … covered でも gap でもない check（＝黙って未計測）が1つ以上ある。
+    ``uncovered`` がゲートの本体（新 scanner を足しただけで漏れるとここに出て test が落ちる）。
+    ``redundant_gaps``（covered なのに gap 登録が残る）と ``unknown_gaps``（registry に無い
+    check への gap＝削除漏れ）も出し、gaps ファイルの陳腐化を検出する。
+    """
+    registry = sorted({str(c) for c in registry_checks})
+    registry_set = set(registry)
+    covered = set(str(c) for c in covered_checks) & registry_set
+    safe_twins = set(str(c) for c in safe_twin_checks) & registry_set
+    gaps = dict(acknowledged_gaps or {})
+    gap_checks = set(gaps)
+
+    uncovered = sorted(registry_set - covered - gap_checks)
+    redundant_gaps = sorted(covered & gap_checks)  # covered 済みなのに gap が残る
+    unknown_gaps = sorted(gap_checks - registry_set)  # registry に無い check への gap
+    missing_safe_twin = sorted(covered - safe_twins)  # vuln はあるが FP を測れない
+    acknowledged = gap_checks & registry_set
+    # gap は「明示 INCOMPLETE 状態」であって complete ではない（RegistryGap の定義・
+    # suite の overall_status も既知 gap を COMPLETE にしない）。よって:
+    #   INCOMPLETE … 未承認の未計測 check（uncovered）がある＝黙って漏れている
+    #   PARTIAL    … 全 check が covered か gap だが、gap（未計測）がまだ残る
+    #   COMPLETE   … 全 registry check が実測 covered で gap ゼロ
+    if uncovered:
+        status = OverallStatus.INCOMPLETE.value
+    elif acknowledged:
+        status = OverallStatus.PARTIAL.value
+    else:
+        status = OverallStatus.COMPLETE.value
+
+    return {
+        "registry_total": len(registry),
+        "covered": sorted(covered),
+        "covered_count": len(covered),
+        "acknowledged_gaps": sorted(acknowledged),
+        "acknowledged_gap_count": len(acknowledged),
+        "uncovered": uncovered,
+        "uncovered_count": len(uncovered),
+        "missing_safe_twin": missing_safe_twin,
+        "redundant_gaps": redundant_gaps,
+        "unknown_gaps": unknown_gaps,
+        "completeness_status": status,
+    }
+
+
+_REGISTRY_GAP_KEYS = frozenset({"reason", "owner_task", "deadline"})
+
+
+def load_registry_gaps(data: Any) -> dict[str, RegistryGap]:
+    """benchmark gaps 設定（check -> {reason, owner_task, deadline}）を検証して読む（純粋）。
+
+    トップは ``{"gaps": {<check>: {...}}}``。各エントリは reason/owner_task/deadline を必須にし、
+    未着手を「誰が・いつまでに」まで含めて承認させる（黙殺の防止）。
+    """
+    root = _mapping(data, "registry_gaps")
+    _known_keys(root, frozenset({"gaps"}), "registry_gaps")
+    raw = root.get("gaps", {})
+    if raw is None:
+        raw = {}
+    mapping = _mapping(raw, "registry_gaps.gaps")
+    gaps: dict[str, RegistryGap] = {}
+    for check, entry in mapping.items():
+        label = f"registry_gaps.gaps.{check}"
+        fields = _mapping(entry, label)
+        _known_keys(fields, _REGISTRY_GAP_KEYS, label)
+        gaps[check] = RegistryGap(
+            check=check,
+            reason=_required_string(fields, "reason", label),
+            owner_task=_required_string(fields, "owner_task", label),
+            deadline=_required_string(fields, "deadline", label),
+        )
+    return gaps
+
+
+def load_registry_gaps_file(path: str | PathLike[str]) -> dict[str, RegistryGap]:
+    """gaps YAML を読むだけの薄い I/O wrapper。検証は ``load_registry_gaps`` に委譲する。"""
+    import yaml
+
+    try:
+        with open(path, encoding="utf-8") as stream:
+            data = yaml.safe_load(stream)
+    except (OSError, yaml.YAMLError) as exc:
+        raise ManifestError(f"could not load registry gaps file: {exc}") from exc
+    return load_registry_gaps(data)
+
+
+def discover_benchmark_suites(
+    manifests_dir: str | PathLike[str],
+    *,
+    registry_keys: frozenset[str],
+) -> list[BenchmarkSuite]:
+    """canonical manifest ディレクトリ直下の ``*.yaml``/``*.yml`` を全て load する（I/O）。
+
+    完全性ゲートが「実際に存在する manifest」から covered を導くための入口。ディレクトリが
+    無い/空なら ``[]``（manifest 未整備＝covered 空）。壊れた manifest は握り潰さず
+    ``ManifestError`` を伝播する（黙って未計測にしない）。ファイル名昇順で決定的に読む。
+    """
+    directory = Path(manifests_dir)
+    if not directory.is_dir():
+        return []
+    suites: list[BenchmarkSuite] = []
+    seen: set[str] = set()
+    for path in sorted(directory.glob("*.y*ml")):
+        suite = load_manifest_file(path, registry_keys=registry_keys)
+        if suite.suite_id in seen:
+            raise ManifestError(f"duplicate suite_id across manifests: {suite.suite_id}")
+        seen.add(suite.suite_id)
+        suites.append(suite)
+    return suites
