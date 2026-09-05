@@ -1,12 +1,12 @@
 """注入型 benchmark runner と反射 XSS 用の最小 HTTP executor（0034-R1）。"""
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor, TimeoutError
 from contextlib import AbstractContextManager, ExitStack
 import json
 import math
 from pathlib import Path
 import re
+import threading
 from typing import Any, Mapping, Protocol
 from uuid import uuid4
 
@@ -31,8 +31,35 @@ def _execute(executor: CaseExecutor, case: BenchmarkCase, base_url: str) -> Case
     try:
         return executor(case, base_url)
     except Exception:
-        # executor 自身の TimeoutError も、待機期限切れとは分けて扱う。
+        # executor 自身の I/O timeout 例外も、待機期限切れ(TIMEOUT)とは分けて扱う。
         return CaseResult(case.case_id, CaseExecutionState.TRANSPORT_ERROR)
+
+
+def _run_case_with_timeout(
+    executor: CaseExecutor, case: BenchmarkCase, base_url: str, timeout: float
+) -> CaseResult:
+    """case を **daemon スレッド**で実行し、timeout 秒待つ。
+
+    ThreadPoolExecutor は実行中の future を cancel できず、その非 daemon worker が残ると
+    インタプリタ終了時に Python がそれを join して**プロセスが永久ハング**する（Codex #133）。
+    そのため daemon スレッドを使い、期限切れ時はスレッドを放置する（daemon なので終了を
+    ブロックしない）。executor は自前の I/O timeout（cooperative cancellation）を持つ前提で、
+    このスレッド timeout はその backstop。遅れて返った結果は採用しない。
+    """
+    box: dict[str, CaseResult] = {}
+
+    def target() -> None:
+        box["result"] = _execute(executor, case, base_url)
+
+    thread = threading.Thread(
+        target=target, name=f"benchmark-case-{case.case_id}", daemon=True
+    )
+    thread.start()
+    thread.join(timeout)
+    if thread.is_alive():
+        return CaseResult(case.case_id, CaseExecutionState.TIMEOUT)
+    # 完了していれば target が必ず box を埋める。空なら想定外なので TRANSPORT_ERROR。
+    return box.get("result") or CaseResult(case.case_id, CaseExecutionState.TRANSPORT_ERROR)
 
 
 def run_suite(
@@ -80,22 +107,13 @@ def run_suite(
 
         results = []
         for case in suite.cases:
-            # case ごとに分離し、前の timeout が次の case を待たせない。
-            pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="benchmark-case")
-            try:
-                future = pool.submit(_execute, executor, case, base_url)
-                try:
-                    result = future.result(timeout=per_case_timeout)
-                except TimeoutError:
-                    result = CaseResult(case.case_id, CaseExecutionState.TIMEOUT)
-                if not isinstance(result, CaseResult):
-                    raise TypeError("executor must return CaseResult")
-                if result.case_id != case.case_id:
-                    raise ValueError(f"case_id mismatch: {result.case_id} != {case.case_id}")
-                results.append(result)
-            finally:
-                # context manager の shutdown(wait=True) では timeout 後も停止してしまう。
-                pool.shutdown(wait=False, cancel_futures=True)
+            # case ごとに分離し、前の timeout が次の case を待たせない（daemon スレッド）。
+            result = _run_case_with_timeout(executor, case, base_url, per_case_timeout)
+            if not isinstance(result, CaseResult):
+                raise TypeError("executor must return CaseResult")
+            if result.case_id != case.case_id:
+                raise ValueError(f"case_id mismatch: {result.case_id} != {case.case_id}")
+            results.append(result)
     return scorecard(results)
 
 

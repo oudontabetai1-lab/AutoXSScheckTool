@@ -4,6 +4,7 @@ from dataclasses import replace
 import html
 import json
 from pathlib import Path
+import threading
 from threading import Event
 from urllib.parse import parse_qs
 
@@ -121,6 +122,25 @@ def test_timeout_does_not_wait_or_block_next_case(suite):
         release.set()
         assert finished.wait(2)
     assert out["cases"][0]["state"] == "timeout"
+
+
+def test_timed_out_worker_is_daemon(suite):
+    """ハングした executor の worker は daemon＝インタプリタ終了をブロックしない（Codex #133 P2）。"""
+    release = Event()
+
+    def executor(case, base_url):
+        release.wait(5)  # 期限より長く待つ。テスト終了時に release で解放する。
+        return CaseResult(case.case_id, State.COMPLETED)
+
+    try:
+        out = run_suite(suite, executor=executor, launcher=FakeLauncher(),
+                        per_case_timeout=0.05, **METADATA)
+        assert out["cases"][0]["state"] == "timeout"
+        lingering = [t for t in threading.enumerate() if t.name.startswith("benchmark-case-")]
+        assert lingering, "期限切れ worker が残っているはず（daemon 性を検証する対象）"
+        assert all(t.daemon for t in lingering), "残存 worker は daemon でなければならない"
+    finally:
+        release.set()
 
 
 @pytest.mark.parametrize("exception", [RuntimeError, TimeoutError])
