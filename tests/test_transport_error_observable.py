@@ -258,7 +258,10 @@ class FormDeliveryFlagTests(unittest.IsolatedAsyncioTestCase):
         return fake.last_probe_delivered
 
     async def test_success_marks_delivered(self):
-        self.assertTrue(await self._run(result={"success": True, "action": "http://x/"}))
+        # submit を dispatch できたら送達成功（dispatch 点で確定）。
+        self.assertTrue(
+            await self._run(result={"success": True, "action": "http://x/"}, submit_sends=True)
+        )
 
     async def test_form_absent_after_loaded_page_is_speculative_delivered(self):
         # ページは正常ロード（status 200）だが form 不在＝speculative probe＝送達成功扱い。

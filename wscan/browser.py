@@ -273,6 +273,10 @@ class NetworkCapture:
         # Use (url, id(request_object)) as key to avoid collisions when the same URL
         # is requested multiple times concurrently (race condition fix).
         self._pending: dict[tuple, dict] = {}
+        # clear() 以降に *送信* された（on_request が発火した）リクエスト数。応答ではなく送信を
+        # 数えるので、clear() で捨てた in-flight リクエストの後着応答（unmatched で pairs に入る）で
+        # 水増しされず、応答が来ない中断リクエストも送信済みとして計上できる（Codex #137 P2）。
+        self._requests_since_clear = 0
         # Optional RequestLogger: persists every request/response pair to a
         # JSONL audit log. clear() wipes the in-memory list per page, so the
         # log is the only place a complete request history survives.
@@ -288,6 +292,7 @@ class NetworkCapture:
             "timestamp": time.time(),
             "_req_id": id(request),
         }
+        self._requests_since_clear += 1
 
     def on_response(self, response: Response):
         # Match by (url, id(response.request)) so concurrent requests to the same URL
@@ -422,16 +427,20 @@ class NetworkCapture:
     def clear(self):
         self.pairs.clear()
         self._pending.clear()
+        self._requests_since_clear = 0
 
     def request_count(self) -> int:
-        """clear() 以降に観測した HTTP リクエスト数（送信済み: `_pending` + 応答済み: `pairs`）。
+        """clear() 以降に *送信* されたリクエスト数（on_request 発火回数）。
 
-        on_request で `_pending` に入り、応答が来れば `pairs` へ移る。応答前に navigation が
-        中断されても `_pending` に残るため、両方を数えれば「送信済み」を取りこぼさない。
+        応答ではなく送信を数えるのが要点（Codex #137 P2）:
+        - clear() で捨てた in-flight リクエストの後着応答は on_request を発火させないので
+          水増ししない（`pairs` を数えると unmatched 応答で誤増加する）。
+        - 応答が来ない中断リクエスト（navigation interrupt）も on_request 済みなので計上できる。
+
         submit 直前と直後の差分を見ることで、fill script の validation XHR や背景 polling では
-        なく *submit 自体* が送ったリクエストを isolate できる（Codex #137 P2）。
+        なく *submit 自体* が送ったリクエストだけを送達証拠にできる。
         """
-        return len(self.pairs) + len(self._pending)
+        return self._requests_since_clear
 
     def status_summary(self) -> dict:
         """スキャン全体で捕捉した HTTP status を集計する。"""
@@ -1531,10 +1540,10 @@ class BrowserManager:
         """Fill a form field with payload and submit. Returns (page_source, network_pair)."""
         self.reset_dialog()
         self.network.clear()
-        # submit を dispatch できたか（＝probe 送達）。post-submit の wait/get_source 例外で
-        # 送達成功を覆さないための local（Codex #137 P2）。
+        # submit を dispatch したか。dispatch できれば送達成功、以降の wait/get_source 例外で
+        # 覆さない（Codex #137 P2）。
         dispatched = False
-        # submit 直前のリクエスト数。None＝submit まで到達せず（送達判定に使わない）。
+        # submit 直前の送信済みリクエスト数。None＝submit まで到達せず（送達判定に使わない）。
         net_before_submit = None
         try:
             result = await self.page.evaluate(
@@ -1653,8 +1662,8 @@ class BrowserManager:
                 f"form:nth-of-type({form_index + 1}) [type=submit], "
                 f"form:nth-of-type({form_index + 1}) button"
             )
-            # submit 直前のリクエスト数を記録し、送達判定は「submit 後に増えたか」の差分で見る。
-            # fill script の validation XHR や背景 polling を submit のリクエストと取り違えない
+            # submit 直前の送信済みリクエスト数を記録し、送達判定は「submit 後に増えたか」の差分で
+            # 見る。fill script の validation XHR や背景 polling を submit のリクエストと取り違えない
             # （Codex #137 P2）。
             net_before_submit = self.network.request_count()
             if submit_btn:
@@ -1679,12 +1688,12 @@ class BrowserManager:
             pair = self.network.best_pair_for_page(action_url) or self.network.latest() or {}
             return source, pair
         except Exception as e:
-            # 例外を握りつぶし空 pair を返す。送達判定は「submit がリクエストを送信したか」を正本に
-            # する（0007 D1・Codex #137 P2）。Playwright の click() は post-dispatch の navigation 待ちを
-            # 含むため、リクエスト送信後に slow/interrupted navigation で click() 自体が raise しうる。
-            # その場合 dispatched=True に到達しないが、submit 直前からのリクエスト増分で送達を検出する。
-            # 差分を見るのは fill script の validation XHR や背景 polling を submit と取り違えないため。
-            # net_before_submit is None＝submit 前の例外（未送信）＝未送達。
+            # 例外を握りつぶし空 pair を返す。送達判定（0007 D1・Codex #137 P2）: submit を dispatch
+            # 済みなら送達成功を維持。未 dispatch でも、Playwright の click() は post-dispatch の
+            # navigation 待ちを含むため、リクエスト送信後に slow/interrupted navigation で click() 自体が
+            # raise しうる。その場合 dispatched に到達しないが、submit 直前からのリクエスト増分
+            # （request_count は on_request 発火数＝送信数。clear() 後の in-flight 応答で水増しされない）で
+            # 送達を検出する。net_before_submit is None＝submit 到達前の例外（未送信）＝未送達。
             self.last_probe_delivered = dispatched or (
                 net_before_submit is not None
                 and self.network.request_count() > net_before_submit
