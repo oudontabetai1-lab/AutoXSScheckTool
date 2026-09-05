@@ -45,7 +45,11 @@ class UvicornFixtureLauncher(FixtureLauncher):
                 except BaseException as exc:
                     errors.append(exc)
 
-            thread = Thread(target=serve, name=f"benchmark-fixture-{fixture_id}")
+            # daemon 化: 起動が stuck した（should_exit で止まらない）場合でも、この worker が
+            # インタプリタ終了をブロックしないようにする（Codex #133）。
+            thread = Thread(
+                target=serve, name=f"benchmark-fixture-{fixture_id}", daemon=True
+            )
             thread.start()
             try:
                 deadline = time.monotonic() + self.startup_timeout
@@ -59,5 +63,9 @@ class UvicornFixtureLauncher(FixtureLauncher):
                     time.sleep(0.01)
                 yield f"http://127.0.0.1:{port}"
             finally:
+                # cleanup の join は **bound** する。起動が stuck して should_exit で止まらない
+                # ときに無制限 join すると startup timeout 例外が呼び出し側（run_suite）へ届かず
+                # fixture_unavailable を報告できなくなる（Codex #133）。上限内に止まらなければ
+                # daemon スレッドを放置して抜ける（終了はブロックしない）。
                 server.should_exit = True
-                thread.join()
+                thread.join(self.startup_timeout)

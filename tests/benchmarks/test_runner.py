@@ -16,7 +16,7 @@ from wscan.benchmark_model import (
 )
 from wscan.benchmark_runner import (
     HttpxCaseExecutor, run_suite, write_scorecard,
-    _reset_lingering_workers, _live_lingering_count,
+    _reset_lingering_workers, _reserved_worker_count,
 )
 from wscan.scanner_contract import Carrier
 
@@ -169,7 +169,7 @@ def test_lingering_worker_cap_is_process_wide(suite):
                          per_case_timeout=0.05, max_lingering_workers=2, **METADATA)
         assert [c["state"] for c in out1["cases"]] == ["timeout", "timeout"]
         assert "run_error" not in out1
-        assert _live_lingering_count() == 2
+        assert _reserved_worker_count() == 2
         # 2回目: 既に global 2 >= cap 2 なので最初の case を起動せず即中断（跨ぎ累積を bound）。
         out2 = run_suite(suite, executor=executor, launcher=FakeLauncher(),
                          per_case_timeout=0.05, max_lingering_workers=2, **METADATA)
@@ -184,6 +184,13 @@ def test_max_lingering_workers_must_be_positive(suite):
     with _pytest.raises(ValueError):
         run_suite(suite, executor=lambda c, b: CaseResult(c.case_id, State.COMPLETED),
                   launcher=FakeLauncher(), max_lingering_workers=0, **METADATA)
+
+
+def test_none_executor_result_is_rejected(suite):
+    """executor が None を返したら TRANSPORT_ERROR で隠さず TypeError で弾く（Codex #133）。"""
+    import pytest as _pytest
+    with _pytest.raises(TypeError):
+        run_suite(suite, executor=lambda c, b: None, launcher=FakeLauncher(), **METADATA)
 
 
 def test_timed_out_worker_is_daemon(suite):

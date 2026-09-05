@@ -27,29 +27,43 @@ class FixtureLauncher(Protocol):
     def launch(self, fixture_id: str) -> AbstractContextManager[str]: ...
 
 
-# 期限切れで放置された daemon worker を **プロセス横断**で追跡する。per-call の cap だけだと、
-# 長命プロセスが非協調的 executor で run_suite を繰り返すたびに cap 分ずつ跨いで累積しうる
-# （Codex #133）。全 run_suite が同じトラッカーを見て共有 bound を効かせる。
+_MISSING = object()  # box に結果が「入っていない」ことを falsey な値と区別するための番兵
+
+# spawn 済みでまだ完了していない worker 数を **プロセス横断**で数える予約カウンタ。per-call の
+# cap や「後から登録」方式だと、①長命プロセスが run_suite を繰り返すと cap 分ずつ跨いで累積
+# ②並行 run_suite が「確認」と「登録」の隙間で同時に spawn して cap を超過（TOCTOU）する
+# （Codex #133）。よって spawn 前に atomic に**予約**し、worker 完了時に解放する。ハングした
+# worker は解放されないので予約が残り、cap がプロセス全体で正しく効く。
 _lingering_lock = threading.Lock()
-_lingering_workers: list[threading.Thread] = []
+_reserved_workers = 0
 
 
-def _register_lingering(thread: threading.Thread) -> None:
+def _try_reserve_worker(cap: int) -> bool:
+    """cap 未満なら予約(+1)して True。到達済みなら予約せず False（atomic な check-and-reserve）。"""
+    global _reserved_workers
     with _lingering_lock:
-        _lingering_workers.append(thread)
+        if _reserved_workers >= cap:
+            return False
+        _reserved_workers += 1
+        return True
 
 
-def _live_lingering_count() -> int:
-    """死んだ worker を掃除し、生存中（＝まだハング中）の滞留 worker 数を返す。"""
+def _release_worker() -> None:
+    global _reserved_workers
     with _lingering_lock:
-        _lingering_workers[:] = [t for t in _lingering_workers if t.is_alive()]
-        return len(_lingering_workers)
+        _reserved_workers = max(0, _reserved_workers - 1)
+
+
+def _reserved_worker_count() -> int:
+    with _lingering_lock:
+        return _reserved_workers
 
 
 def _reset_lingering_workers() -> None:
-    """テスト用: プロセス横断トラッカーを空にする（daemon スレッドは放置されるが記録を消す）。"""
+    """テスト用: 予約カウンタを 0 に戻す（放置 daemon スレッドは残るが記録を消す）。"""
+    global _reserved_workers
     with _lingering_lock:
-        _lingering_workers.clear()
+        _reserved_workers = 0
 
 
 def _execute(executor: CaseExecutor, case: BenchmarkCase, base_url: str) -> CaseResult:
@@ -62,21 +76,23 @@ def _execute(executor: CaseExecutor, case: BenchmarkCase, base_url: str) -> Case
 
 def _run_case_with_timeout(
     executor: CaseExecutor, case: BenchmarkCase, base_url: str, timeout: float
-) -> tuple[CaseResult, threading.Thread]:
-    """case を **daemon スレッド**で実行し、timeout 秒待つ。(結果, thread) を返す。
+) -> CaseResult:
+    """case を **daemon スレッド**で実行し、timeout 秒待つ。予約の解放は worker 完了時に行う。
 
     ThreadPoolExecutor は実行中の future を cancel できず、その非 daemon worker が残ると
     インタプリタ終了時に Python がそれを join して**プロセスが永久ハング**する（Codex #133）。
     そのため daemon スレッドを使い、期限切れ時はスレッドを放置する（daemon なので終了を
-    ブロックしない）。ただし daemon 化は「終了を待たない」だけで worker を cancel/bound は
-    しないため、呼び出し側（run_suite）が滞留 worker 数を上限で bound する。executor は自前の
-    I/O timeout（cooperative cancellation）を持つ前提で、このスレッド timeout はその backstop。
-    遅れて返った結果は採用しない。
+    ブロックしない）。予約スロット（呼び出し側が spawn 前に取得）は worker が実際に完了した
+    ときだけ解放する（target の finally）。ハングした worker は解放されず予約が残る＝cap が
+    正しく効く。executor は自前 I/O timeout（cooperative）を持つ前提で、これはその backstop。
     """
-    box: dict[str, CaseResult] = {}
+    box: dict[str, Any] = {}
 
     def target() -> None:
-        box["result"] = _execute(executor, case, base_url)
+        try:
+            box["result"] = _execute(executor, case, base_url)
+        finally:
+            _release_worker()  # 完了時のみ予約解放。ハング時は解放されず予約が残る。
 
     thread = threading.Thread(
         target=target, name=f"benchmark-case-{case.case_id}", daemon=True
@@ -84,10 +100,13 @@ def _run_case_with_timeout(
     thread.start()
     thread.join(timeout)
     if thread.is_alive():
-        return CaseResult(case.case_id, CaseExecutionState.TIMEOUT), thread
-    # 完了していれば target が必ず box を埋める。空なら想定外なので TRANSPORT_ERROR。
-    result = box.get("result") or CaseResult(case.case_id, CaseExecutionState.TRANSPORT_ERROR)
-    return result, thread
+        return CaseResult(case.case_id, CaseExecutionState.TIMEOUT)
+    # 完了スレッドは box を必ず埋める。番兵で「未設定」と「falsey な戻り値(None 等)」を区別し、
+    # None を TRANSPORT_ERROR で隠蔽せず run_suite の isinstance 契約チェックへ渡す（Codex #133）。
+    result = box.get("result", _MISSING)
+    if result is _MISSING:
+        return CaseResult(case.case_id, CaseExecutionState.TRANSPORT_ERROR)
+    return result
 
 
 def run_suite(
@@ -145,9 +164,9 @@ def run_suite(
         results = []
         aborted = False
         for idx, case in enumerate(suite.cases):
-            # 生存中の期限切れ worker（プロセス横断）が上限に達したら、これ以上 thread を
-            # 積まず loud に中断。run_suite を跨いだ累積もここで bound される。
-            if _live_lingering_count() >= max_lingering_workers:
+            # spawn 前に atomic にスロットを予約。取れなければ滞留 worker が上限＝これ以上
+            # thread を積まず loud に中断（跨ぎ累積・並行呼び出しの両方をここで bound）。
+            if not _try_reserve_worker(max_lingering_workers):
                 results.extend(
                     CaseResult(remaining.case_id, CaseExecutionState.NOT_REACHED)
                     for remaining in suite.cases[idx:]
@@ -155,12 +174,8 @@ def run_suite(
                 aborted = True
                 break
             # case ごとに分離し、前の timeout が次の case を待たせない（daemon スレッド）。
-            result, thread = _run_case_with_timeout(
-                executor, case, base_url, per_case_timeout
-            )
-            if thread.is_alive():
-                # 期限切れで放置された worker はプロセス横断トラッカーへ登録する。
-                _register_lingering(thread)
+            # 予約は worker 完了時に target の finally で解放される（ハング時は残る）。
+            result = _run_case_with_timeout(executor, case, base_url, per_case_timeout)
             if not isinstance(result, CaseResult):
                 raise TypeError("executor must return CaseResult")
             if result.case_id != case.case_id:
