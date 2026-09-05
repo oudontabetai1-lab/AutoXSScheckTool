@@ -23,10 +23,33 @@ def _normalize_location(raw: str) -> str:
     return _LOCATION_NORMALIZE.get(str(raw or "").strip().lower(), str(raw or ""))
 
 
-def _exercised_from_scan_matrix(scan_matrix) -> frozenset:
+# probe が transport 層で握りつぶされた/template が実行不能だった check を示す観測ノート
+# （engine.wave_errors、0007 D1）。status="tested" でも実際には probe が送達していない場合がある
+# ため、劣化した check の行は exercised から除く（Codex #134 P1）。
+_DEGRADATION_PREFIXES = ("transport_error:", "unexecutable_template:")
+
+
+def _degraded_checks(wave_errors) -> frozenset:
+    """wave_errors から transport 劣化/実行不能が記録された check 名の集合を作る（純粋）。"""
+    degraded = set()
+    for note in (wave_errors or []):
+        if not isinstance(note, str):
+            continue
+        for prefix in _DEGRADATION_PREFIXES:
+            if note.startswith(prefix):
+                check = note[len(prefix):].split(":", 1)[0].strip()
+                if check:
+                    degraded.add(check)
+    return frozenset(degraded)
+
+
+def _exercised_from_scan_matrix(scan_matrix, degraded_checks=frozenset()) -> frozenset:
     """scan_matrix から (check, path, field, location) の exercised 集合を作る（純粋）。
 
-    tested/finding（成功して突いた）行だけ。error/skip は未計測なので除く。location は正規化する。
+    tested/finding（成功して突いた）行だけ。error/skip は未計測なので除く。さらに
+    ``degraded_checks``（transport 握りつぶし等が観測された check）の行も除く：status="tested" でも
+    probe が送達していない可能性があり、空振りを FN/TN に化けさせないため（Codex #134 P1）。
+    location は正規化する。
     """
     return frozenset(
         (
@@ -37,6 +60,7 @@ def _exercised_from_scan_matrix(scan_matrix) -> frozenset:
         )
         for row in (scan_matrix or [])
         if row.get("status") in _EXERCISED_STATUSES
+        and str(row.get("check", "")) not in degraded_checks
     )
 
 
@@ -62,8 +86,13 @@ class ScanEngineScanRunner(ScanRunner):
             )
             await asyncio.wait_for(engine.run(), timeout=self.timeout)
             # 実際に「成功して」攻撃した注入点の実行台帳（scan_matrix）から exercised を作る。
-            # crawler 未到達/errored/別 carrier だけの case を NOT_REACHED にし TN/FN に混ぜない（#134）。
-            exercised = _exercised_from_scan_matrix(getattr(engine, "scan_matrix", None))
+            # crawler 未到達/errored/別 carrier だけ/transport 劣化した case を NOT_REACHED にし
+            # TN/FN に混ぜない（#134）。ScanEngineScanRunner は前提を用意しない匿名スキャンなので
+            # fulfilled_prerequisites は空（前提付き case は score 側で UNSUPPORTED）。
+            degraded = _degraded_checks(getattr(engine, "wave_errors", None))
+            exercised = _exercised_from_scan_matrix(
+                getattr(engine, "scan_matrix", None), degraded_checks=degraded
+            )
             return ScanOutcome(findings=list(engine.all_findings), exercised=exercised)
 
         # worker が終了するまで出力先を保持し、例外/キャンセル時も後始末する。

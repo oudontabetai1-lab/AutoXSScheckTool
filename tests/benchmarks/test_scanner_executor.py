@@ -294,6 +294,20 @@ def test_exercised_from_scan_matrix_filters_status_and_normalizes_location():
     assert not any(e[1] in ("/err", "/skip") for e in ex)  # error/skip は未計測なので除外
 
 
+def test_degraded_checks_excluded_from_exercised():
+    """transport 握りつぶし等が観測された check の tested 行は exercised から除く（Codex #134 P1）。"""
+    from wscan.benchmark_scan import _exercised_from_scan_matrix, _degraded_checks
+    wave = ["transport_error:xss: NavigationError: boom", "unexecutable_template:mass_assignment",
+            "state_change_skipped:sqli"]  # state_change は劣化ではない
+    degraded = _degraded_checks(wave)
+    assert degraded == frozenset({"xss", "mass_assignment"})
+    rows = [{"check": "xss", "url": "http://h/s?q=1", "field_name": "q", "location": "form field", "status": "tested"}]
+    # 劣化 check なので tested でも exercised に入れない（probe 未送達かもしれない）。
+    assert _exercised_from_scan_matrix(rows, degraded_checks=degraded) == frozenset()
+    # 劣化していなければ入る。
+    assert _exercised_from_scan_matrix(rows, degraded_checks=frozenset())
+
+
 def test_canonical_xss_coverage_and_ground_truth(suite):
     from tests.fixtures.realistic_site import EXPECTED_FINDINGS, SAFE_ENDPOINTS
     assert checks_covered_by_suites([suite]) == ({"xss"}, {"xss"})
