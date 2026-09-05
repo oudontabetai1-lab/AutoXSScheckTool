@@ -2,12 +2,14 @@
 from __future__ import annotations
 
 from contextlib import AbstractContextManager, ExitStack
+from dataclasses import dataclass
 import json
 import math
 from pathlib import Path
 import re
 import threading
-from typing import Any, Mapping, Protocol
+from typing import Any, Callable, Mapping, Protocol
+from urllib.parse import urlparse
 from uuid import uuid4
 
 import httpx
@@ -92,45 +94,236 @@ def _execute(executor: CaseExecutor, case: BenchmarkCase, base_url: str) -> Case
         return CaseResult(case.case_id, CaseExecutionState.TRANSPORT_ERROR)
 
 
-def _run_case_with_timeout(
-    executor: CaseExecutor, case: BenchmarkCase, base_url: str, timeout: float
-) -> CaseResult:
-    """case を **daemon スレッド**で実行し、timeout 秒待つ。予約の解放は worker 完了時に行う。
-
-    ThreadPoolExecutor は実行中の future を cancel できず、その非 daemon worker が残ると
-    インタプリタ終了時に Python がそれを join して**プロセスが永久ハング**する（Codex #133）。
-    そのため daemon スレッドを使い、期限切れ時はスレッドを放置する（daemon なので終了を
-    ブロックしない）。予約スロット（呼び出し側が spawn 前に取得）は worker が実際に完了した
-    ときだけ解放する（target の finally）。ハングした worker は解放されず予約が残る＝cap が
-    正しく効く。executor は自前 I/O timeout（cooperative）を持つ前提で、これはその backstop。
-    """
+def _run_with_timeout(operation: Callable[[], Any], *, name: str, timeout: float) -> Any:
+    """予約済み worker を実行する共通 backstop。期限切れの予約は完了時まで保持する。"""
     box: dict[str, Any] = {}
 
     def target() -> None:
         try:
-            box["result"] = _execute(executor, case, base_url)
+            box["result"] = operation()
+        except BaseException as exc:
+            box["error"] = exc
         finally:
-            _release_worker()  # 完了時のみ予約解放。ハング時は解放されず予約が残る。
+            _release_worker()
 
-    thread = threading.Thread(
-        target=target, name=f"benchmark-case-{case.case_id}", daemon=True
-    )
     try:
+        thread = threading.Thread(target=target, name=name, daemon=True)
         thread.start()
     except BaseException:
-        # スレッド枯渇等で start に失敗したら target は走らないので、ここで予約を解放する
-        # （run_suite が予約済み。解放しないとリークする・fixture 側の thread_started と対称）。
+        # 構築/start 失敗では target が走らないため、呼び出し側で予約を解放する。
         _release_worker()
         raise
     thread.join(timeout)
     if thread.is_alive():
+        raise TimeoutError("benchmark worker timed out")
+    if "error" in box:
+        raise box["error"]
+    return box.get("result", _MISSING)
+
+
+def _run_case_with_timeout(
+    executor: CaseExecutor, case: BenchmarkCase, base_url: str, timeout: float
+) -> CaseResult:
+    try:
+        result = _run_with_timeout(
+            lambda: _execute(executor, case, base_url),
+            name=f"benchmark-case-{case.case_id}", timeout=timeout,
+        )
+    except TimeoutError:
         return CaseResult(case.case_id, CaseExecutionState.TIMEOUT)
-    # 完了スレッドは box を必ず埋める。番兵で「未設定」と「falsey な戻り値(None 等)」を区別し、
-    # None を TRANSPORT_ERROR で隠蔽せず run_suite の isinstance 契約チェックへ渡す（Codex #133）。
-    result = box.get("result", _MISSING)
     if result is _MISSING:
         return CaseResult(case.case_id, CaseExecutionState.TRANSPORT_ERROR)
     return result
+
+
+class Finding(Protocol):
+    check_type: str
+    url: str
+    field_name: str
+    injection_location: str
+    verified: bool
+
+
+@dataclass(frozen=True)
+class ScanOutcome:
+    """1 スキャンの結果。findings に加え「実際に攻撃した注入点」の集合を持つ（0034-R2）。
+
+    ``exercised`` は ``(check, path, field, location)`` の集合。ran_checks（要求した check）だけ
+    では「crawler が注入点に到達し実際に突いたか」が分からず、未実行の safe case を空マッチ＝TN
+    と誤計上して precision を水増しする（Codex #134 P1）。実行台帳から exercised を渡すことで、
+    突いていない case は NOT_REACHED（未計測）にできる。error/skip 行は「成功して突いた」ではない
+    ので exercised に入れない。location も含め、同名の別 carrier を突いただけの case を exercised と
+    誤認しない（Codex #134 P2）。location の語彙は case.match.location と揃える（adapter が正規化）。
+    """
+
+    findings: list[Any]
+    exercised: frozenset[tuple[str, str, str, str]] = frozenset()
+    # このスキャンが実際にプロビジョニングした前提の集合（例: 認証済みなら auth_session）。
+    # ScanEngineScanRunner は匿名スキャンなので空。前提を宣言した case のうち、ここに無いものは
+    # 契約未充足として UNSUPPORTED にし、満たされない環境で TP/FN/FP/TN を作らない（Codex #134 P2）。
+    fulfilled_prerequisites: frozenset[str] = frozenset()
+
+
+# このオラクル/adapter が忠実に採点できる carrier。json_body/page-level 等は scan_matrix の
+# field/location が report 用プレースホルダ（"(json-body)"/"(page)"）で finding の実 identity と
+# 一致せず、method 次元も台帳に無い。R2 はこれらを UNSUPPORTED にし、R3 で carrier 固有の実行
+# identity を導入する（Codex #134 P2）。
+_SCOREABLE_CARRIERS = frozenset({"query", "form"})
+
+
+class ScanRunner(Protocol):
+    def __call__(self, base_url: str, checks: list[str]) -> ScanOutcome: ...
+
+
+def _attribute(value: Any, name: str, default: Any = None) -> Any:
+    return value.get(name, default) if isinstance(value, Mapping) else getattr(value, name, default)
+
+
+def _location_compatible(case_location: str, other_location: str) -> bool:
+    """宣言側と相手側（finding/実行台帳）の両方が location を持つときだけ一致を要求する。
+
+    どちらかが空なら弁別できないので compatible とみなす（3 キー一致で採る）。両方 populated で
+    値が違うときのみ不一致＝別 carrier の取り違えを防ぐ（Codex #134 P2）。
+    """
+    if not case_location or not other_location:
+        return True
+    return case_location == other_location
+
+
+def _case_exercised(
+    exercised: frozenset[tuple[str, str, str, str]],
+    check: str, path: str, field: str, location: str,
+) -> bool:
+    """実行台帳に (check, path, field) が location 互換で存在するか（Codex #134 P2）。"""
+    return any(
+        entry[0] == check and entry[1] == path and entry[2] == field
+        and _location_compatible(location, entry[3])
+        for entry in exercised
+    )
+
+
+def _finding_check_matches(finding_check: str, case_check: str) -> bool:
+    """finding の check_type が case の check ファミリに属するか（Codex #134 P2）。
+
+    engine の ``_check_type_in_scope`` と同型: 完全一致・``"<check>_"`` 前置（graphql_*/jwt_*/
+    privesc_* 等のサブタイプ）・エイリアス表（cache_poisoning→cache_deception 等）で判定する。
+    サブタイプを exact 一致で捨てると exercised な vulnerable case が FN になる。エイリアス表は
+    engine の ``_CHECK_EXTRA_TYPES`` を lazy import して再利用し重複ドリフトを避ける（前置一致だけ
+    なら import しない）。
+    """
+    if finding_check == case_check or finding_check.startswith(case_check + "_"):
+        return True
+    try:
+        from wscan.engine import _CHECK_EXTRA_TYPES
+    except Exception:
+        return False
+    return finding_check in _CHECK_EXTRA_TYPES.get(case_check, ())
+
+
+def score_cases(
+    suite: BenchmarkSuite, outcome: ScanOutcome, *, ran_checks: set[str],
+) -> list[CaseResult]:
+    """実 findings の候補/確証を照合する。期待値との比較は scorecard 側に委ねる。
+
+    注入点が実際に突かれていない（exercised に無い）case は NOT_REACHED にし、TN/FN へ
+    混ぜない（未実行を陰性に計上しない・Codex #134 P1）。location が宣言されている場合は
+    finding.injection_location とも一致を要求し、同名 query/form の取り違えを防ぐ（P2）。
+    """
+    exercised = outcome.exercised
+    fulfilled = outcome.fulfilled_prerequisites
+    results = []
+    for case in suite.cases:
+        carrier = getattr(_attribute(case, "injection", None), "carrier", None)
+        carrier_value = getattr(carrier, "value", carrier)
+        prereqs = tuple(_attribute(case, "prerequisites", ()) or ())
+        if (
+            case.check not in ran_checks
+            or case.match is None
+            # R2 は field carrier（query/form）だけ忠実に採点できる。json/page/header 等は
+            # scan_matrix の identity がプレースホルダで finding と一致せず誤採点になるため未対応。
+            or carrier_value not in _SCOREABLE_CARRIERS
+            # 前提を宣言した case は、スキャンがその前提を実際に用意した場合のみ採点する。
+            # 未充足の前提で反射だけ見て TP/FN/FP/TN を作らない（HttpxCaseExecutor と同思想）。
+            or any(p not in fulfilled for p in prereqs)
+        ):
+            results.append(CaseResult(case.case_id, CaseExecutionState.UNSUPPORTED))
+            continue
+        path = _attribute(case.match, "path")
+        field = _attribute(case.match, "field")
+        location = _attribute(case.match, "location", "") or ""
+        if not _case_exercised(exercised, case.check, path, field, location):
+            # 宣言された注入点をスキャンが（成功して）突いていない＝未計測。空マッチを TN/FN に
+            # しない。location も含め、同名の別 carrier を突いただけでは exercised にしない。
+            results.append(CaseResult(case.case_id, CaseExecutionState.NOT_REACHED))
+            continue
+        matches = [
+            finding for finding in outcome.findings
+            if _finding_check_matches(_attribute(finding, "check_type", ""), case.check)
+            and urlparse(_attribute(finding, "url", "")).path == path
+            and _attribute(finding, "field_name") == field
+            # location は「宣言側 *と* finding 側の両方が populated のときだけ」照合して carrier を
+            # 弁別する。finding が location を持たない（空）ときは 3 キー一致で採る（Codex #134 P2）。
+            and _location_compatible(location, _attribute(finding, "injection_location", ""))
+        ]
+        results.append(CaseResult(
+            case.case_id, CaseExecutionState.COMPLETED, bool(matches),
+            any(bool(_attribute(finding, "verified", False)) for finding in matches),
+        ))
+    return results
+
+
+def run_scanned_suite(
+    suite: BenchmarkSuite, *, launcher: FixtureLauncher, scan_runner: ScanRunner,
+    run_id: str, source_sha: str, manifest_digest: str, registry_digest: str,
+    environment: Mapping[str, Any] | None = None, scan_timeout: float = 900.0,
+) -> dict[str, Any]:
+    """suite ごとに一度スキャンする。失敗/期限切れ時の部分 findings は採用しない。
+
+    強制停止できない worker は R1 と共有する予約枠に残る。実 runner 自身にも
+    cooperative timeout が必要で、この期限は待機を打ち切る backstop とする。
+    """
+    if not math.isfinite(scan_timeout) or scan_timeout <= 0:
+        raise ValueError("scan_timeout must be finite and positive")
+    # R1 が設定済みならその共有 limit を尊重し、未設定時のみ既定値を確立する。
+    global _worker_limit
+    with _lingering_lock:
+        if _worker_limit is None:
+            _worker_limit = 4
+
+    def scorecard(results: list[CaseResult], error: str | None = None) -> dict[str, Any]:
+        out = build_scorecard(
+            suite, results, run_id=run_id, source_sha=source_sha,
+            manifest_digest=manifest_digest, registry_digest=registry_digest,
+            environment=environment,
+        )
+        if error is not None:
+            out["run_error"] = error
+        return out
+
+    def failed(state: CaseExecutionState, error: str) -> dict[str, Any]:
+        return scorecard([CaseResult(case.case_id, state) for case in suite.cases], error)
+
+    if not suite.cases:
+        return scorecard([], "empty_suite")
+    ran_checks = sorted({case.check for case in suite.cases})
+    with ExitStack() as stack:
+        try:
+            base_url = stack.enter_context(launcher.launch(suite.fixture_id))
+        except Exception:
+            return failed(CaseExecutionState.FIXTURE_UNAVAILABLE, "fixture_unavailable")
+        if not _try_reserve_worker():
+            return failed(CaseExecutionState.NOT_REACHED, "scan_failed")
+        try:
+            outcome = _run_with_timeout(
+                lambda: scan_runner(base_url, list(ran_checks)),
+                name=f"benchmark-scan-{suite.suite_id}", timeout=scan_timeout,
+            )
+            if not isinstance(outcome, ScanOutcome):
+                raise TypeError("scan_runner must return a ScanOutcome")
+        except Exception:
+            return failed(CaseExecutionState.NOT_REACHED, "scan_failed")
+        results = score_cases(suite, outcome, ran_checks=set(ran_checks))
+    return scorecard(results)
 
 
 def run_suite(

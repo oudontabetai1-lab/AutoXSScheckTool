@@ -46,7 +46,14 @@ jobs:
           exit 1
 
       # blocking: recall ゲート（test_recall_gate_is_100_percent 他）を含む E2E を実走する。
+      # benchmark の scanner-backed 採点 E2E（0034-R2）と runner 配管 E2E（R1）も同じ WSCAN_E2E
+      # ゲートなので、ここに含めないと CI で一度も走らず wiring/採点の回帰が全 workflow を素通り
+      # してしまう（Codex #134）。実ブラウザが要る点は共通。
       - name: End-to-end recall gate (blocking)
         env:
           WSCAN_E2E: '1'
-        run: pytest -q tests/test_end_to_end_scan.py
+        run: >-
+          pytest -q
+          tests/test_end_to_end_scan.py
+          tests/benchmarks/test_scanner_executor_e2e.py
+          tests/benchmarks/test_runner_e2e.py
