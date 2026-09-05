@@ -37,14 +37,16 @@ def _execute(executor: CaseExecutor, case: BenchmarkCase, base_url: str) -> Case
 
 def _run_case_with_timeout(
     executor: CaseExecutor, case: BenchmarkCase, base_url: str, timeout: float
-) -> CaseResult:
-    """case を **daemon スレッド**で実行し、timeout 秒待つ。
+) -> tuple[CaseResult, threading.Thread]:
+    """case を **daemon スレッド**で実行し、timeout 秒待つ。(結果, thread) を返す。
 
     ThreadPoolExecutor は実行中の future を cancel できず、その非 daemon worker が残ると
     インタプリタ終了時に Python がそれを join して**プロセスが永久ハング**する（Codex #133）。
     そのため daemon スレッドを使い、期限切れ時はスレッドを放置する（daemon なので終了を
-    ブロックしない）。executor は自前の I/O timeout（cooperative cancellation）を持つ前提で、
-    このスレッド timeout はその backstop。遅れて返った結果は採用しない。
+    ブロックしない）。ただし daemon 化は「終了を待たない」だけで worker を cancel/bound は
+    しないため、呼び出し側（run_suite）が滞留 worker 数を上限で bound する。executor は自前の
+    I/O timeout（cooperative cancellation）を持つ前提で、このスレッド timeout はその backstop。
+    遅れて返った結果は採用しない。
     """
     box: dict[str, CaseResult] = {}
 
@@ -57,9 +59,10 @@ def _run_case_with_timeout(
     thread.start()
     thread.join(timeout)
     if thread.is_alive():
-        return CaseResult(case.case_id, CaseExecutionState.TIMEOUT)
+        return CaseResult(case.case_id, CaseExecutionState.TIMEOUT), thread
     # 完了していれば target が必ず box を埋める。空なら想定外なので TRANSPORT_ERROR。
-    return box.get("result") or CaseResult(case.case_id, CaseExecutionState.TRANSPORT_ERROR)
+    result = box.get("result") or CaseResult(case.case_id, CaseExecutionState.TRANSPORT_ERROR)
+    return result, thread
 
 
 def run_suite(
@@ -73,14 +76,23 @@ def run_suite(
     registry_digest: str,
     environment: Mapping[str, Any] | None = None,
     per_case_timeout: float = 30.0,
+    max_lingering_workers: int = 4,
 ) -> dict[str, Any]:
     """各 case の実行状態を集め、既存モデルに集計を委ねる。
 
     timeout は待機を打ち切る。実行中のスレッドは強制停止できないため、注入する
     executor 自身にも I/O timeout が必要。遅れて返った結果は採用しない。
+
+    daemon スレッドは「終了を待たない」だけで worker を止められないので、非協調的な
+    executor（自前 I/O timeout 無し）や per_case_timeout が executor の I/O timeout より
+    短い設定だと、期限切れ worker が累積してプロセスを枯渇させうる（Codex #133）。よって
+    生存中の worker が ``max_lingering_workers`` に達したら新規 case を起動せず、未処理を
+    NOT_REACHED として run_error=worker_exhaustion で loud に打ち切る（黙って積み続けない）。
     """
     if not math.isfinite(per_case_timeout) or per_case_timeout <= 0:
         raise ValueError("per_case_timeout must be finite and positive")
+    if max_lingering_workers < 1:
+        raise ValueError("max_lingering_workers must be >= 1")
 
     def scorecard(results: list[CaseResult]) -> dict[str, Any]:
         return build_scorecard(
@@ -106,15 +118,31 @@ def run_suite(
             return out
 
         results = []
-        for case in suite.cases:
+        workers: list[threading.Thread] = []
+        aborted = False
+        for idx, case in enumerate(suite.cases):
+            # 生存中の期限切れ worker が上限に達したら、これ以上 thread を積まず loud に中断。
+            if sum(1 for t in workers if t.is_alive()) >= max_lingering_workers:
+                results.extend(
+                    CaseResult(remaining.case_id, CaseExecutionState.NOT_REACHED)
+                    for remaining in suite.cases[idx:]
+                )
+                aborted = True
+                break
             # case ごとに分離し、前の timeout が次の case を待たせない（daemon スレッド）。
-            result = _run_case_with_timeout(executor, case, base_url, per_case_timeout)
+            result, thread = _run_case_with_timeout(
+                executor, case, base_url, per_case_timeout
+            )
+            workers.append(thread)
             if not isinstance(result, CaseResult):
                 raise TypeError("executor must return CaseResult")
             if result.case_id != case.case_id:
                 raise ValueError(f"case_id mismatch: {result.case_id} != {case.case_id}")
             results.append(result)
-    return scorecard(results)
+    out = scorecard(results)
+    if aborted:
+        out["run_error"] = "worker_exhaustion"
+    return out
 
 
 def write_scorecard(scorecard: dict[str, Any], out_dir: str | Path) -> tuple[Path, Path]:

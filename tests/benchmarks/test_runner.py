@@ -124,6 +124,33 @@ def test_timeout_does_not_wait_or_block_next_case(suite):
     assert out["cases"][0]["state"] == "timeout"
 
 
+def test_worker_exhaustion_aborts_loudly(suite):
+    """滞留 worker が上限に達したら新規 case を起動せず run_error=worker_exhaustion で中断（Codex #133）。"""
+    release = Event()
+
+    def executor(case, base_url):
+        release.wait(5)  # 常にハング（テスト終了時に release）
+        return CaseResult(case.case_id, State.COMPLETED)
+
+    try:
+        # cap=1: case[0] がハングして1つ滞留 → case[1] を起動せず中断。
+        out = run_suite(suite, executor=executor, launcher=FakeLauncher(),
+                        per_case_timeout=0.05, max_lingering_workers=1, **METADATA)
+        assert out["run_error"] == "worker_exhaustion"
+        states = [c["state"] for c in out["cases"]]
+        assert states == ["timeout", "not_reached"]  # 未処理は NOT_REACHED（陰性に混ぜない）
+        assert out["overall_status"] != "COMPLETE"
+    finally:
+        release.set()
+
+
+def test_max_lingering_workers_must_be_positive(suite):
+    import pytest as _pytest
+    with _pytest.raises(ValueError):
+        run_suite(suite, executor=lambda c, b: CaseResult(c.case_id, State.COMPLETED),
+                  launcher=FakeLauncher(), max_lingering_workers=0, **METADATA)
+
+
 def test_timed_out_worker_is_daemon(suite):
     """ハングした executor の worker は daemon＝インタプリタ終了をブロックしない（Codex #133 P2）。"""
     release = Event()
