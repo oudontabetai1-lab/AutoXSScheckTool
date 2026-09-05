@@ -199,6 +199,13 @@ def create_app() -> FastAPI:
               <li><a href="/dashboard/widget?tab=overview">ダッシュボード</a></li>
               <li><a href="/admin/login">管理サインイン</a></li>
             </ul>
+            <p>安全ツイン（正しく検証する版）:</p>
+            <ul>
+              <li><a href="/tools/dns-lookup?name=intranet.local">DNS ルックアップ (allow-list)</a></li>
+              <li><a href="/integrations/avatar-fetch?image_url=https://cdn.example.com/a.png">アバター取得 (SSRF 防御)</a></li>
+              <li><a href="/dashboard/profile?bio=hello">プロフィール (textContent)</a></li>
+              <li><a href="/portal/signin">ポータルサインイン (文字列扱い)</a></li>
+            </ul>
             """,
         )
 

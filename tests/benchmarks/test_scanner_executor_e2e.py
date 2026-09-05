@@ -53,6 +53,23 @@ def test_realistic_site_sqli_scanner_scorecard():
     assert [c["classification"]["candidate"] for c in out["cases"]] == ["tp", "tn"], out
 
 
+def test_realistic_intranet_injection_scanner_scorecard():
+    """realistic_intranet の HTTP 注入系 4 scanner（os/ssrf/nosql/dom_xss）を実採点する（0034-R3）。
+
+    各 check の vulnerable=TP・safe twin=TN を確認し、recall/precision 100% を固定する。
+    manifest 順（os→ssrf→nosql→dom_xss、各 vulnerable→safe）に tp/tn が並ぶ。
+    """
+    _require_chromium()
+    out = _run_manifest(
+        "realistic_intranet_injection.yaml", {"os", "ssrf", "nosql", "dom_xss"}
+    )
+    assert "run_error" not in out, out
+    assert out["case_counts"] == {"planned": 8, "completed": 8, "incomplete": 0}
+    assert [c["classification"]["candidate"] for c in out["cases"]] == [
+        "tp", "tn", "tp", "tn", "tp", "tn", "tp", "tn",
+    ], out
+
+
 def test_realistic_site_injection_scanner_scorecard():
     """ssti/path_traversal/open_redirect を実 scanner で採点（各 vuln=TP・safe twin=TN・0034-R3）。"""
     _require_chromium()
