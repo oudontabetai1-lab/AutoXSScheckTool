@@ -155,8 +155,9 @@ class SilentSwallowObservableTests(unittest.IsolatedAsyncioTestCase):
 
 
 class _NullNetwork:
-    def __init__(self, has_activity=False):
-        self._has_activity = has_activity
+    def __init__(self, base_count=0):
+        # base_count＝clear() 後に残る fill 由来 XHR/背景 polling のノイズ。
+        self.count = base_count
 
     def clear(self):
         pass
@@ -170,15 +171,20 @@ class _NullNetwork:
     def latest(self):
         return None
 
-    def has_request_activity(self):
-        return self._has_activity
+    def request_count(self):
+        return self.count
 
 
 class _FakeSubmitBtn:
-    def __init__(self, raises=False):
+    def __init__(self, network, *, sends=True, raises=False):
+        self._network = network
+        self._sends = sends
         self._raises = raises
 
     async def click(self):
+        if self._sends:
+            # submit がリクエストを送る＝network カウントが増える。
+            self._network.count += 1
         if self._raises:
             # click() が post-dispatch の navigation 待ちで raise する状況を模す。
             raise RuntimeError("navigation interrupted after request sent")
@@ -187,10 +193,13 @@ class _FakeSubmitBtn:
 class _FakeFormPage:
     """実 fill_and_submit_form を駆動する fake page。evaluate 結果と各種例外を制御。"""
 
-    def __init__(self, *, result, wait_raises=False, click_raises=False):
+    def __init__(self, *, network, result, wait_raises=False, click_raises=False,
+                 submit_sends=True):
+        self._network = network
         self._result = result
         self._wait_raises = wait_raises
         self._click_raises = click_raises
+        self._submit_sends = submit_sends
 
     async def evaluate(self, *a, **k):
         # 1 回目=fill JS（result を返す）。submit 経路（btn 無し）では 2 回目に submit JS が
@@ -198,7 +207,9 @@ class _FakeFormPage:
         return self._result
 
     async def query_selector(self, *a, **k):
-        return _FakeSubmitBtn(raises=self._click_raises)
+        return _FakeSubmitBtn(
+            self._network, sends=self._submit_sends, raises=self._click_raises
+        )
 
     async def wait_for_load_state(self, *a, **k):
         if self._wait_raises:
@@ -209,11 +220,12 @@ class _FakeFormBrowser:
     """実 BrowserManager.fill_and_submit_form を駆動する最小 fake。"""
 
     def __init__(self, *, result, nav_status=200, wait_raises=False, click_raises=False,
-                 net_activity=False, prior_delivered=None):
+                 submit_sends=True, net_base=0, prior_delivered=None):
+        self.network = _NullNetwork(base_count=net_base)
         self.page = _FakeFormPage(
-            result=result, wait_raises=wait_raises, click_raises=click_raises
+            network=self.network, result=result, wait_raises=wait_raises,
+            click_raises=click_raises, submit_sends=submit_sends,
         )
-        self.network = _NullNetwork(has_activity=net_activity)
         self.timeout = 5
         self.sleep_factor = 0.0
         self.auth_user = ""
@@ -267,21 +279,41 @@ class FormDeliveryFlagTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_click_raises_but_request_sent_is_delivered(self):
-        # click() が post-dispatch の navigation 待ちで raise しても、リクエスト送信済み
-        # （network activity あり）なら送達成功（Codex #137 P2 再指摘）。
+        # click() が post-dispatch の navigation 待ちで raise しても、submit がリクエストを
+        # 送っていれば（差分 +1）送達成功（Codex #137 P2）。
         self.assertTrue(
             await self._run(
                 result={"success": True, "action": "http://x/"},
-                click_raises=True, net_activity=True,
+                click_raises=True, submit_sends=True,
             )
         )
 
     async def test_click_raises_without_request_is_undelivered(self):
-        # click() が raise しリクエストも送られていない（network activity なし）＝未送達。
+        # click() が raise し submit がリクエストを送っていない（差分 0）＝未送達。
         self.assertFalse(
             await self._run(
                 result={"success": True, "action": "http://x/"},
-                click_raises=True, net_activity=False,
+                click_raises=True, submit_sends=False,
+            )
+        )
+
+    async def test_prior_noise_not_mistaken_for_submission(self):
+        # fill 由来 XHR/背景 polling が clear() 後に残っていても（net_base=3）、submit が
+        # リクエストを送らず raise した場合は差分 0＝未送達。ノイズを submit と取り違えない
+        # （Codex #137 P2 再々指摘）。
+        self.assertFalse(
+            await self._run(
+                result={"success": True, "action": "http://x/"},
+                click_raises=True, submit_sends=False, net_base=3,
+            )
+        )
+
+    async def test_submission_over_prior_noise_is_delivered(self):
+        # ノイズ（net_base=3）があっても submit が実際にリクエストを送れば差分 +1＝送達。
+        self.assertTrue(
+            await self._run(
+                result={"success": True, "action": "http://x/"},
+                click_raises=True, submit_sends=True, net_base=3,
             )
         )
 

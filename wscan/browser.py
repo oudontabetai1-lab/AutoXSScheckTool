@@ -423,15 +423,15 @@ class NetworkCapture:
         self.pairs.clear()
         self._pending.clear()
 
-    def has_request_activity(self) -> bool:
-        """clear() 以降に HTTP リクエストが送信されたか（送達の証拠）。
+    def request_count(self) -> int:
+        """clear() 以降に観測した HTTP リクエスト数（送信済み: `_pending` + 応答済み: `pairs`）。
 
-        on_request で `_pending` に入り、応答が来れば `pairs` へ移る。応答前に
-        navigation が中断されても `_pending` に残るため、両方を見れば「送信済み」を
-        取りこぼさない（Codex #137 P2: click() が post-dispatch の navigation 待ちで
-        raise しても、リクエスト自体は送信済み＝送達成功と判定できる）。
+        on_request で `_pending` に入り、応答が来れば `pairs` へ移る。応答前に navigation が
+        中断されても `_pending` に残るため、両方を数えれば「送信済み」を取りこぼさない。
+        submit 直前と直後の差分を見ることで、fill script の validation XHR や背景 polling では
+        なく *submit 自体* が送ったリクエストを isolate できる（Codex #137 P2）。
         """
-        return bool(self.pairs or self._pending)
+        return len(self.pairs) + len(self._pending)
 
     def status_summary(self) -> dict:
         """スキャン全体で捕捉した HTTP status を集計する。"""
@@ -1534,6 +1534,8 @@ class BrowserManager:
         # submit を dispatch できたか（＝probe 送達）。post-submit の wait/get_source 例外で
         # 送達成功を覆さないための local（Codex #137 P2）。
         dispatched = False
+        # submit 直前のリクエスト数。None＝submit まで到達せず（送達判定に使わない）。
+        net_before_submit = None
         try:
             result = await self.page.evaluate(
                 """
@@ -1651,6 +1653,10 @@ class BrowserManager:
                 f"form:nth-of-type({form_index + 1}) [type=submit], "
                 f"form:nth-of-type({form_index + 1}) button"
             )
+            # submit 直前のリクエスト数を記録し、送達判定は「submit 後に増えたか」の差分で見る。
+            # fill script の validation XHR や背景 polling を submit のリクエストと取り違えない
+            # （Codex #137 P2）。
+            net_before_submit = self.network.request_count()
             if submit_btn:
                 await submit_btn.click()
             else:
@@ -1673,13 +1679,16 @@ class BrowserManager:
             pair = self.network.best_pair_for_page(action_url) or self.network.latest() or {}
             return source, pair
         except Exception as e:
-            # 例外を握りつぶし空 pair を返す。送達判定は「リクエストが送信されたか」を正本にする
-            # （0007 D1・Codex #137 P2）。Playwright の click() は post-dispatch の navigation 待ちを
+            # 例外を握りつぶし空 pair を返す。送達判定は「submit がリクエストを送信したか」を正本に
+            # する（0007 D1・Codex #137 P2）。Playwright の click() は post-dispatch の navigation 待ちを
             # 含むため、リクエスト送信後に slow/interrupted navigation で click() 自体が raise しうる。
-            # その場合 dispatched=True に到達しないが、network capture にリクエストが残るので送達成功と
-            # 判定する。dispatch 前の例外（fill/評価失敗＝リクエスト未送信）のみ未送達（False）。
-            # network.clear() は本メソッド冒頭で呼ぶため、ここでの activity は当 probe の submit に由来。
-            self.last_probe_delivered = dispatched or self.network.has_request_activity()
+            # その場合 dispatched=True に到達しないが、submit 直前からのリクエスト増分で送達を検出する。
+            # 差分を見るのは fill script の validation XHR や背景 polling を submit と取り違えないため。
+            # net_before_submit is None＝submit 前の例外（未送信）＝未送達。
+            self.last_probe_delivered = dispatched or (
+                net_before_submit is not None
+                and self.network.request_count() > net_before_submit
+            )
             source = await self.get_page_source()
             return source, {}
 
