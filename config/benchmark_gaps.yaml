@@ -1,0 +1,151 @@
+# benchmark registry gaps（0034-B）
+# registry の各 scanner のうち、まだ E2E benchmark の ground truth case を持たないものを
+# 「明示 INCOMPLETE」として owner_task/deadline 付きで承認する記録。黙って未計測にしない。
+# benchmark manifest に vulnerable/safe twin case を足したら、その check を gaps から外す。
+# 新しい scanner を registry へ追加したら、ここへ gap を足すか benchmark case を作らない限り
+# registry 完全性テスト（tests/benchmarks/test_registry_completeness.py）が失敗する。
+gaps:
+  cache_poisoning:
+    reason: E2E benchmark ground truth 未整備（vulnerable/safe twin case が未作成）
+    owner_task: "0034"
+    deadline: "2026-12-31"
+  clickjacking:
+    reason: E2E benchmark ground truth 未整備（vulnerable/safe twin case が未作成）
+    owner_task: "0034"
+    deadline: "2026-12-31"
+  cms:
+    reason: E2E benchmark ground truth 未整備（vulnerable/safe twin case が未作成）
+    owner_task: "0034"
+    deadline: "2026-12-31"
+  cors:
+    reason: E2E benchmark ground truth 未整備（vulnerable/safe twin case が未作成）
+    owner_task: "0034"
+    deadline: "2026-12-31"
+  csrf:
+    reason: E2E benchmark ground truth 未整備（vulnerable/safe twin case が未作成）
+    owner_task: "0034"
+    deadline: "2026-12-31"
+  deserialization:
+    reason: E2E benchmark ground truth 未整備（vulnerable/safe twin case が未作成）
+    owner_task: "0034"
+    deadline: "2026-12-31"
+  dom_xss:
+    reason: E2E benchmark ground truth 未整備（vulnerable/safe twin case が未作成）
+    owner_task: "0034"
+    deadline: "2026-12-31"
+  file_upload:
+    reason: E2E benchmark ground truth 未整備（vulnerable/safe twin case が未作成）
+    owner_task: "0034"
+    deadline: "2026-12-31"
+  graphql:
+    reason: E2E benchmark ground truth 未整備（vulnerable/safe twin case が未作成）
+    owner_task: "0034"
+    deadline: "2026-12-31"
+  header_injection:
+    reason: E2E benchmark ground truth 未整備（vulnerable/safe twin case が未作成）
+    owner_task: "0034"
+    deadline: "2026-12-31"
+  host_header:
+    reason: E2E benchmark ground truth 未整備（vulnerable/safe twin case が未作成）
+    owner_task: "0034"
+    deadline: "2026-12-31"
+  info_disclosure:
+    reason: E2E benchmark ground truth 未整備（vulnerable/safe twin case が未作成）
+    owner_task: "0034"
+    deadline: "2026-12-31"
+  js_static:
+    reason: E2E benchmark ground truth 未整備（vulnerable/safe twin case が未作成）
+    owner_task: "0034"
+    deadline: "2026-12-31"
+  jwt:
+    reason: E2E benchmark ground truth 未整備（vulnerable/safe twin case が未作成）
+    owner_task: "0034"
+    deadline: "2026-12-31"
+  ldap:
+    reason: E2E benchmark ground truth 未整備（vulnerable/safe twin case が未作成）
+    owner_task: "0034"
+    deadline: "2026-12-31"
+  mail_header:
+    reason: E2E benchmark ground truth 未整備（vulnerable/safe twin case が未作成）
+    owner_task: "0034"
+    deadline: "2026-12-31"
+  mass_assignment:
+    reason: E2E benchmark ground truth 未整備（vulnerable/safe twin case が未作成）
+    owner_task: "0034"
+    deadline: "2026-12-31"
+  nosql:
+    reason: E2E benchmark ground truth 未整備（vulnerable/safe twin case が未作成）
+    owner_task: "0034"
+    deadline: "2026-12-31"
+  open_redirect:
+    reason: E2E benchmark ground truth 未整備（vulnerable/safe twin case が未作成）
+    owner_task: "0034"
+    deadline: "2026-12-31"
+  os:
+    reason: E2E benchmark ground truth 未整備（vulnerable/safe twin case が未作成）
+    owner_task: "0034"
+    deadline: "2026-12-31"
+  path_traversal:
+    reason: E2E benchmark ground truth 未整備（vulnerable/safe twin case が未作成）
+    owner_task: "0034"
+    deadline: "2026-12-31"
+  privesc:
+    reason: E2E benchmark ground truth 未整備（vulnerable/safe twin case が未作成）
+    owner_task: "0034"
+    deadline: "2026-12-31"
+  prototype_pollution:
+    reason: E2E benchmark ground truth 未整備（vulnerable/safe twin case が未作成）
+    owner_task: "0034"
+    deadline: "2026-12-31"
+  race_condition:
+    reason: E2E benchmark ground truth 未整備（vulnerable/safe twin case が未作成）
+    owner_task: "0034"
+    deadline: "2026-12-31"
+  request_smuggling:
+    reason: E2E benchmark ground truth 未整備（vulnerable/safe twin case が未作成）
+    owner_task: "0034"
+    deadline: "2026-12-31"
+  secret_leak:
+    reason: E2E benchmark ground truth 未整備（vulnerable/safe twin case が未作成）
+    owner_task: "0034"
+    deadline: "2026-12-31"
+  security_headers:
+    reason: E2E benchmark ground truth 未整備（vulnerable/safe twin case が未作成）
+    owner_task: "0034"
+    deadline: "2026-12-31"
+  session:
+    reason: E2E benchmark ground truth 未整備（vulnerable/safe twin case が未作成）
+    owner_task: "0034"
+    deadline: "2026-12-31"
+  sqli:
+    reason: E2E benchmark ground truth 未整備（vulnerable/safe twin case が未作成）
+    owner_task: "0034"
+    deadline: "2026-12-31"
+  sri:
+    reason: E2E benchmark ground truth 未整備（vulnerable/safe twin case が未作成）
+    owner_task: "0034"
+    deadline: "2026-12-31"
+  ssrf:
+    reason: E2E benchmark ground truth 未整備（vulnerable/safe twin case が未作成）
+    owner_task: "0034"
+    deadline: "2026-12-31"
+  ssti:
+    reason: E2E benchmark ground truth 未整備（vulnerable/safe twin case が未作成）
+    owner_task: "0034"
+    deadline: "2026-12-31"
+  stored_xss:
+    reason: E2E benchmark ground truth 未整備（vulnerable/safe twin case が未作成）
+    owner_task: "0034"
+    deadline: "2026-12-31"
+  websocket:
+    reason: E2E benchmark ground truth 未整備（vulnerable/safe twin case が未作成）
+    owner_task: "0034"
+    deadline: "2026-12-31"
+  xss:
+    reason: E2E benchmark ground truth 未整備（vulnerable/safe twin case が未作成）
+    owner_task: "0034"
+    deadline: "2026-12-31"
+  xxe:
+    reason: E2E benchmark ground truth 未整備（vulnerable/safe twin case が未作成）
+    owner_task: "0034"
+    deadline: "2026-12-31"

@@ -421,6 +421,12 @@ retry/失敗種別/エンドポイント処理を変えるときは同種の全 
 - `config/wscan.yaml` … 既定設定と機能フラグ（`ai_analysis` / `waf_detection` /
   `payload_learning` / 適応ペイロード / `sitemap_crawl` / `spa_crawl` 等）。`checks` 既定は `["sqli","xss","os"]`。
 - `config/default_payloads.yaml` … 手キュレーションのフォールバックペイロード。
+- `config/benchmark_gaps.yaml` … E2E benchmark（0034）の **registry 完全性ゲート**用。まだ
+  ground truth case を持たない scanner を owner_task/deadline 付きの「明示 gap」として承認する。
+  `benchmark_model.compute_registry_completeness` が SCANNERS と突き合わせ、covered でも gap でも
+  ない check（＝新 scanner を足しただけで benchmark から漏れた状態）を `uncovered` として
+  `tests/benchmarks/test_registry_completeness.py` で落とす。benchmark case を足したら該当 check を
+  gaps から外す（covered なら `redundant_gaps`、registry から消えたら `unknown_gaps` で検出）。
 - `config/community_payloads.yaml` … `python main.py import-payloads` が公開集
   (PayloadsAllTheThings。`payload_importer.SOURCES`)から生成。**スキャン実行時はネット非依存**
   （生成済みYAMLを読むだけ）。`engine.merge_community_payloads` が既定(curated)に未収録の
