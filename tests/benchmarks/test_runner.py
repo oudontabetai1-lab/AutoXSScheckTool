@@ -14,8 +14,19 @@ import pytest
 from wscan.benchmark_model import (
     CaseExecutionState as State, CaseResult, load_manifest_file, scorecard_to_markdown,
 )
-from wscan.benchmark_runner import HttpxCaseExecutor, run_suite, write_scorecard
+from wscan.benchmark_runner import (
+    HttpxCaseExecutor, run_suite, write_scorecard,
+    _reset_lingering_workers, _live_lingering_count,
+)
 from wscan.scanner_contract import Carrier
+
+
+@pytest.fixture(autouse=True)
+def _clean_lingering_workers():
+    """プロセス横断の滞留 worker トラッカーをテスト間で分離する。"""
+    _reset_lingering_workers()
+    yield
+    _reset_lingering_workers()
 
 
 MANIFEST = Path(__file__).resolve().parent / "data" / "realistic_site_reflection.yaml"
@@ -140,6 +151,30 @@ def test_worker_exhaustion_aborts_loudly(suite):
         states = [c["state"] for c in out["cases"]]
         assert states == ["timeout", "not_reached"]  # 未処理は NOT_REACHED（陰性に混ぜない）
         assert out["overall_status"] != "COMPLETE"
+    finally:
+        release.set()
+
+
+def test_lingering_worker_cap_is_process_wide(suite):
+    """滞留 worker の上限は run_suite を跨いで効く（per-call でなくプロセス横断・Codex #133）。"""
+    release = Event()
+
+    def executor(case, base_url):
+        release.wait(5)
+        return CaseResult(case.case_id, State.COMPLETED)
+
+    try:
+        # 1回目: cap=2・2 case とも timeout → プロセス横断で 2 滞留（この run では未中断）。
+        out1 = run_suite(suite, executor=executor, launcher=FakeLauncher(),
+                         per_case_timeout=0.05, max_lingering_workers=2, **METADATA)
+        assert [c["state"] for c in out1["cases"]] == ["timeout", "timeout"]
+        assert "run_error" not in out1
+        assert _live_lingering_count() == 2
+        # 2回目: 既に global 2 >= cap 2 なので最初の case を起動せず即中断（跨ぎ累積を bound）。
+        out2 = run_suite(suite, executor=executor, launcher=FakeLauncher(),
+                         per_case_timeout=0.05, max_lingering_workers=2, **METADATA)
+        assert out2["run_error"] == "worker_exhaustion"
+        assert all(c["state"] == "not_reached" for c in out2["cases"])
     finally:
         release.set()
 

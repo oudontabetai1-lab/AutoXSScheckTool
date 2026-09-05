@@ -27,6 +27,31 @@ class FixtureLauncher(Protocol):
     def launch(self, fixture_id: str) -> AbstractContextManager[str]: ...
 
 
+# 期限切れで放置された daemon worker を **プロセス横断**で追跡する。per-call の cap だけだと、
+# 長命プロセスが非協調的 executor で run_suite を繰り返すたびに cap 分ずつ跨いで累積しうる
+# （Codex #133）。全 run_suite が同じトラッカーを見て共有 bound を効かせる。
+_lingering_lock = threading.Lock()
+_lingering_workers: list[threading.Thread] = []
+
+
+def _register_lingering(thread: threading.Thread) -> None:
+    with _lingering_lock:
+        _lingering_workers.append(thread)
+
+
+def _live_lingering_count() -> int:
+    """死んだ worker を掃除し、生存中（＝まだハング中）の滞留 worker 数を返す。"""
+    with _lingering_lock:
+        _lingering_workers[:] = [t for t in _lingering_workers if t.is_alive()]
+        return len(_lingering_workers)
+
+
+def _reset_lingering_workers() -> None:
+    """テスト用: プロセス横断トラッカーを空にする（daemon スレッドは放置されるが記録を消す）。"""
+    with _lingering_lock:
+        _lingering_workers.clear()
+
+
 def _execute(executor: CaseExecutor, case: BenchmarkCase, base_url: str) -> CaseResult:
     try:
         return executor(case, base_url)
@@ -118,11 +143,11 @@ def run_suite(
             return out
 
         results = []
-        workers: list[threading.Thread] = []
         aborted = False
         for idx, case in enumerate(suite.cases):
-            # 生存中の期限切れ worker が上限に達したら、これ以上 thread を積まず loud に中断。
-            if sum(1 for t in workers if t.is_alive()) >= max_lingering_workers:
+            # 生存中の期限切れ worker（プロセス横断）が上限に達したら、これ以上 thread を
+            # 積まず loud に中断。run_suite を跨いだ累積もここで bound される。
+            if _live_lingering_count() >= max_lingering_workers:
                 results.extend(
                     CaseResult(remaining.case_id, CaseExecutionState.NOT_REACHED)
                     for remaining in suite.cases[idx:]
@@ -133,7 +158,9 @@ def run_suite(
             result, thread = _run_case_with_timeout(
                 executor, case, base_url, per_case_timeout
             )
-            workers.append(thread)
+            if thread.is_alive():
+                # 期限切れで放置された worker はプロセス横断トラッカーへ登録する。
+                _register_lingering(thread)
             if not isinstance(result, CaseResult):
                 raise TypeError("executor must return CaseResult")
             if result.case_id != case.case_id:
