@@ -713,11 +713,17 @@ def checks_covered_by_suites(
 
     「covered」＝少なくとも1つの vulnerable ground truth を持つこと。safe twin の有無は
     別集合で返し、vulnerable はあるが safe が無い check（FP を測れない）を上位で報告できる。
+
+    ``gate == GateKind.GAP`` の case は実測ではなくプレースホルダ（``overall_status`` も
+    GAP suite を PARTIAL 扱い）なので covered/safe に数えない。これを数えると、その check を
+    ``benchmark_gaps.yaml`` から外したとき完全性が誤って COMPLETE になる（Codex P2）。
     """
     vulnerable: set[str] = set()
     safe: set[str] = set()
     for suite in suites:
         for case in suite.cases:
+            if case.gate == GateKind.GAP:
+                continue  # プレースホルダ＝未計測。covered として数えない。
             if case.expected == ExpectedOutcome.VULNERABLE:
                 vulnerable.add(case.check)
             elif case.expected == ExpectedOutcome.SAFE:

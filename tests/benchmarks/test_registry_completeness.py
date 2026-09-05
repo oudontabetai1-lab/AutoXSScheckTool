@@ -103,6 +103,31 @@ def test_checks_covered_by_suites_splits_vulnerable_and_safe():
     assert safe == frozenset({"xss"})
 
 
+def test_checks_covered_by_suites_excludes_gap_gated_cases():
+    """gate=GAP のプレースホルダ case は covered/safe に数えない（Codex P2）。"""
+    from wscan.benchmark_model import GateKind, GapInfo
+
+    def _case(cid, expected, check, gate):
+        return BenchmarkCase(
+            case_id=cid, expected=expected, check=check,
+            request=RequestSpec(method="GET", path="/"), gate=gate,
+            gap=GapInfo("未整備", "0034", "d") if gate == GateKind.GAP else None,
+        )
+    suite = BenchmarkSuite(
+        schema_version=1, suite_id="s", fixture_id="f", runner_profile="browser",
+        mode="normal-deterministic", source_kind=SourceKind.FIRST_PARTY,
+        cases=(
+            _case("v", ExpectedOutcome.VULNERABLE, "xss", GateKind.OBSERVED),  # 実測
+            _case("s", ExpectedOutcome.SAFE, "xss", GateKind.OBSERVED),
+            _case("gv", ExpectedOutcome.VULNERABLE, "sqli", GateKind.GAP),  # プレースホルダ
+            _case("gs", ExpectedOutcome.SAFE, "sqli", GateKind.GAP),
+        ),
+    )
+    vuln, safe = checks_covered_by_suites([suite])
+    assert vuln == frozenset({"xss"})  # sqli は GAP のみ → covered にしない
+    assert safe == frozenset({"xss"})
+
+
 def test_load_registry_gaps_requires_owner_and_deadline():
     good = {"gaps": {"xss": {"reason": "r", "owner_task": "0034", "deadline": "2026-12-31"}}}
     parsed = load_registry_gaps(good)
