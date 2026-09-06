@@ -1,0 +1,18 @@
+schema_version: 1
+suite_id: realistic_healthcare_page_batch2
+fixture_id: realistic_healthcare
+runner_profile: scan_engine
+mode: normal-deterministic
+source_kind: first_party
+# page 観測系（passive）check: cors / host_header。injection を宣言せず match は canonical page
+# identity（field="(page)"/location="page-level"）。scorer は passive case を (check, path) で採点し、
+# exercised は scan_page の page-level 行を要求する。
+# 注: 同 fixture の session/secret_leak（脆弱 candidate FN）・jwt（NOT_REACHED）・info_disclosure
+# （safe twin が scanner の probe 対象外で NOT_REACHED）は E2E で scanner の recall/到達性課題が
+# 判明したため本ゲートには含めない（別途対応）。
+cases:
+  - {case_id: realistic_healthcare_page_batch2.cors.export.vulnerable, expected: vulnerable, check: cors, request: {method: GET, path: /api/v1/records/export}, match: {path: /api/v1/records/export, field: "(page)", location: page-level}, twin_id: realistic_healthcare_page_batch2.cors.export_safe.safe, taxonomy: [misconfiguration, unauthenticated], gate: observed}
+  - {case_id: realistic_healthcare_page_batch2.cors.export_safe.safe, expected: safe, check: cors, request: {method: GET, path: /api/v1/records/export-safe}, match: {path: /api/v1/records/export-safe, field: "(page)", location: page-level}, twin_id: realistic_healthcare_page_batch2.cors.export.vulnerable, taxonomy: [misconfiguration, unauthenticated], gate: observed}
+
+  - {case_id: realistic_healthcare_page_batch2.host_header.reset.vulnerable, expected: vulnerable, check: host_header, request: {method: GET, path: /account/reset}, match: {path: /account/reset, field: "(page)", location: page-level}, twin_id: realistic_healthcare_page_batch2.host_header.reset_safe.safe, taxonomy: [misconfiguration, unauthenticated], gate: observed}
+  - {case_id: realistic_healthcare_page_batch2.host_header.reset_safe.safe, expected: safe, check: host_header, request: {method: GET, path: /account/reset-safe}, match: {path: /account/reset-safe, field: "(page)", location: page-level}, twin_id: realistic_healthcare_page_batch2.host_header.reset.vulnerable, taxonomy: [misconfiguration, unauthenticated], gate: observed}
