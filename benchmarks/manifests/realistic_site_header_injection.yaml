@@ -1,0 +1,30 @@
+schema_version: 1
+suite_id: realistic_site_header_injection
+fixture_id: realistic_site
+runner_profile: scan_engine
+mode: normal-deterministic
+source_kind: first_party
+# header_injection（CRLF によるレスポンスヘッダ注入）の vulnerable + safe twin。realistic_site の
+# /locale?lang= は lang をヘッダへ反映して CRLF 注入が成立する。安全ツイン /locale-safe は lang を
+# allow-list 検証してからヘッダに使うため注入不成立。carrier/location は fixture の一次情報（GET
+# クエリ=url_param）で宣言し、実 injection_location は E2E で検証する。EXPECTED_FINDINGS(/locale
+# lang)・SAFE_ENDPOINTS(/locale-safe lang) を正本にする。
+cases:
+  - case_id: realistic_site_header_injection.locale.lang.vulnerable
+    expected: vulnerable
+    check: header_injection
+    request: {method: GET, path: /locale}
+    injection: {carrier: query, parameter_id: lang, value_kind: string}
+    match: {path: /locale, field: lang, location: url_param}
+    twin_id: realistic_site_header_injection.locale_safe.lang.safe
+    taxonomy: [crlf_injection, unauthenticated]
+    gate: observed
+  - case_id: realistic_site_header_injection.locale_safe.lang.safe
+    expected: safe
+    check: header_injection
+    request: {method: GET, path: /locale-safe}
+    injection: {carrier: query, parameter_id: lang, value_kind: string}
+    match: {path: /locale-safe, field: lang, location: url_param}
+    twin_id: realistic_site_header_injection.locale.lang.vulnerable
+    taxonomy: [crlf_injection, unauthenticated]
+    gate: observed

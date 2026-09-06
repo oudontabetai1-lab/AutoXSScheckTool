@@ -82,3 +82,15 @@ def test_realistic_site_injection_scanner_scorecard():
     assert [c["classification"]["candidate"] for c in out["cases"]] == [
         "tp", "tn", "tp", "tn", "tp", "tn",
     ], out
+
+
+def test_realistic_site_header_injection_scanner_scorecard():
+    """header_injection（CRLF レスポンスヘッダ注入）を実 scanner で採点（0034-R3）。
+
+    /locale?lang=（脆弱）=TP・/locale-safe?lang=（allow-list 検証の安全ツイン）=TN。
+    """
+    _require_chromium()
+    out = _run_manifest("realistic_site_header_injection.yaml", {"header_injection"})
+    assert "run_error" not in out, out
+    assert out["case_counts"] == {"planned": 2, "completed": 2, "incomplete": 0}
+    assert [c["classification"]["candidate"] for c in out["cases"]] == ["tp", "tn"], out

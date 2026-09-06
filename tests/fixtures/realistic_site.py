@@ -28,6 +28,7 @@ signal.
 from __future__ import annotations
 
 import html
+import re
 import sqlite3
 from urllib.parse import quote, unquote
 
@@ -104,6 +105,8 @@ SAFE_ENDPOINTS = [
      "note": "manual id allow-listed, traversal returns 'not found'"},
     {"path": "/account/continue", "field": "next",
      "note": "only same-site relative paths accepted as redirect target"},
+    {"path": "/locale-safe", "field": "lang",
+     "note": "lang allow-list 検証後のみ Content-Language ヘッダに使用、CRLF は fallback で弾く"},
 ]
 
 
@@ -131,6 +134,7 @@ _NAV = [
     ('/redirect?url=/products', 'Partner link'),
     ('/account/continue?next=/account/profile', 'Continue'),
     ('/locale?lang=en-US', 'Language'),
+    ('/locale-safe?lang=en-US', 'Language (safe)'),
     ('/login', 'Sign in'),
     ('/reviews', 'Reviews'),
     ('/account/profile', 'My account'),
@@ -561,6 +565,21 @@ def create_app() -> FastAPI:
             response.headers["X-WscanHdrInject"] = "1"
         if "wscan_session=injected" in decoded:
             response.headers["Set-Cookie"] = "wscan_session=injected; Path=/"
+        return response
+
+    # ── header_injection 安全ツイン：allow-list 検証してからヘッダに使う ────────
+    @app.get("/locale-safe", response_class=HTMLResponse)
+    async def locale_safe(lang: str = Query("en-US")):
+        # SAFE: 言語タグを厳格な allow-list（英字とハイフンのみ）で検証してから
+        # Content-Language ヘッダに使う。CRLF や未知値は使わず既定へフォールバックする
+        # ので、注入マーカー入りの値がヘッダブロックへ漏れない（header injection 不成立）。
+        safe_lang = lang if re.fullmatch(r"[A-Za-z]{1,8}(?:-[A-Za-z]{1,8})?", lang) else "en-US"
+        body = _layout(
+            "Language preference",
+            f"<p>Interface language set to {html.escape(lang)}.</p>",
+        )
+        response = HTMLResponse(body)
+        response.headers["Content-Language"] = safe_lang
         return response
 
     # ── Auth: SQLi auth bypass (INTENTIONAL) ──────────────────────────────
