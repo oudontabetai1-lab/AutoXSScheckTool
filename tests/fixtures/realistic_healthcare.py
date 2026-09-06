@@ -195,6 +195,7 @@ _NAV = [
     ('/pharmacy/refill?rx=RX-77', 'Pharmacy'),
     ('/records/import', 'Lab import'),
     ('/directory/lookup?user=jsmith', 'Staff directory'),
+    ('/directory/search?name=jsmith', 'Staff search (safe)'),
     ('/messages/preview?name=patient', 'Messages'),
     ('/documents/view?doc=guide.pdf', 'Documents'),
     ('/community/posts', 'Community'),

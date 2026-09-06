@@ -1,0 +1,30 @@
+schema_version: 1
+suite_id: realistic_healthcare_ldap
+fixture_id: realistic_healthcare
+runner_profile: scan_engine
+mode: normal-deterministic
+source_kind: first_party
+# LDAP 注入の vulnerable + safe twin。realistic_healthcare の /directory/lookup?user= は user を
+# uid フィルタへ生展開し、不正フィルタで LDAP parse エラーが露出する。安全ツイン /directory/search
+# は特殊文字を RFC4515 でエスケープしてからフィルタへ渡す。carrier/location は fixture の一次情報
+# （GET クエリ=url_param）で宣言し、実 injection_location は E2E で検証する。EXPECTED_FINDINGS
+# (/directory/lookup user, difficulty=medium)・SAFE_ENDPOINTS(/directory/search name) を正本にする。
+cases:
+  - case_id: realistic_healthcare_ldap.lookup.user.vulnerable
+    expected: vulnerable
+    check: ldap
+    request: {method: GET, path: /directory/lookup}
+    injection: {carrier: query, parameter_id: user, value_kind: string}
+    match: {path: /directory/lookup, field: user, location: url_param}
+    twin_id: realistic_healthcare_ldap.search.name.safe
+    taxonomy: [ldap_injection, unauthenticated]
+    gate: observed
+  - case_id: realistic_healthcare_ldap.search.name.safe
+    expected: safe
+    check: ldap
+    request: {method: GET, path: /directory/search}
+    injection: {carrier: query, parameter_id: name, value_kind: string}
+    match: {path: /directory/search, field: name, location: url_param}
+    twin_id: realistic_healthcare_ldap.lookup.user.vulnerable
+    taxonomy: [ldap_injection, unauthenticated]
+    gate: observed
