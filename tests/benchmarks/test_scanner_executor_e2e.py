@@ -120,3 +120,16 @@ def test_realistic_healthcare_security_headers_scanner_scorecard():
     assert "run_error" not in out, out
     assert out["case_counts"] == {"planned": 2, "completed": 2, "incomplete": 0}
     assert [c["classification"]["candidate"] for c in out["cases"]] == ["tp", "tn"], out
+
+
+def test_realistic_healthcare_js_static_scanner_scorecard():
+    """realistic_healthcare の js_static（first-party JS の source→sink＝passive）を実採点する（0034-R3）。
+
+    /portal/notice（location.search→innerHTML）=TP・/portal/notice-safe（安全ツイン）=TN。
+    passive(page観測系)採点の 2 つ目の check としての回帰でもある。
+    """
+    _require_chromium()
+    out = _run_manifest("realistic_healthcare_page_observation.yaml", {"js_static"})
+    assert "run_error" not in out, out
+    assert out["case_counts"] == {"planned": 2, "completed": 2, "incomplete": 0}
+    assert [c["classification"]["candidate"] for c in out["cases"]] == ["tp", "tn"], out

@@ -1,0 +1,31 @@
+schema_version: 1
+suite_id: realistic_healthcare_page_observation
+fixture_id: realistic_healthcare
+runner_profile: scan_engine
+mode: normal-deterministic
+source_kind: first_party
+# page 観測系（passive）check: js_static（first-party JS の source→sink 静的解析）。注入点を持たず
+# ページ/レスポンス自体を観測するため injection を宣言せず、match は canonical page identity
+# （field="(page)"/location="page-level"）で宣言する。scorer は passive case を (check, path) で
+# 採点し、exercised は scan_page の page-level 行を要求する（page-level スキャナが実走した genuine な
+# 証拠）。EXPECTED_FINDINGS / SAFE_ENDPOINTS（field=None）を正本にする。
+# 注: clickjacking（安全ツイン candidate FP）・sri（脆弱 candidate FN）は E2E で scanner 側の
+# precision/recall 課題が判明したため本ゲートには含めない（別途 scanner 修正が要る）。
+cases:
+  # ── js_static（first-party JS の source→sink: location.search→innerHTML）───
+  - case_id: realistic_healthcare_page_observation.js_static.notice.vulnerable
+    expected: vulnerable
+    check: js_static
+    request: {method: GET, path: /portal/notice}
+    match: {path: /portal/notice, field: "(page)", location: page-level}
+    twin_id: realistic_healthcare_page_observation.js_static.notice_safe.safe
+    taxonomy: [client_side, unauthenticated]
+    gate: observed
+  - case_id: realistic_healthcare_page_observation.js_static.notice_safe.safe
+    expected: safe
+    check: js_static
+    request: {method: GET, path: /portal/notice-safe}
+    match: {path: /portal/notice-safe, field: "(page)", location: page-level}
+    twin_id: realistic_healthcare_page_observation.js_static.notice.vulnerable
+    taxonomy: [client_side, unauthenticated]
+    gate: observed
