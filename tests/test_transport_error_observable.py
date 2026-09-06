@@ -385,6 +385,55 @@ class UrlParamDeliveryFlagTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(await self._run(nav_ok=True, nav_status=200, prior=False))
 
 
+class SecurityHeadersFetchEvidenceTests(unittest.IsolatedAsyncioTestCase):
+    """security_headers は「レスポンス証拠の欠如」で観測失敗を判定し、空ヘッダは監査する
+    （Codex #142 P1/P2）。空レスポンス→transport_error、valid だが空ヘッダ→監査（note なし）。
+    """
+
+    def _scanner(self):
+        engine = _FakeEngine()
+        engine.browser.network = None
+        scanner = SCANNERS["security_headers"](engine)
+        return engine, scanner
+
+    async def test_no_response_records_transport_error(self):
+        engine, scanner = self._scanner()
+
+        async def _empty(url):
+            return {}  # レスポンス証拠なし（fetch 失敗）
+
+        scanner._response_pair = _empty
+        out = await scanner.scan_page("http://x/legacy/status")
+        self.assertEqual(out, [])
+        self.assertTrue(
+            any(e.startswith("transport_error:security_headers:") for e in engine.wave_errors),
+            engine.wave_errors,
+        )
+
+    async def test_valid_empty_headers_is_audited_not_degraded(self):
+        engine, scanner = self._scanner()
+
+        async def _valid_empty(url):
+            # 正常なレスポンスだがセキュリティヘッダ皆無（＝最大級の脆弱ケース）。
+            return {"request": {"url": url}, "response": {"status": 200, "headers": {}}}
+
+        scanner._response_pair = _valid_empty
+        recorded = []
+
+        async def _rec(**kw):
+            recorded.append(kw)
+            return object()
+
+        scanner.record_finding = _rec
+        out = await scanner.scan_page("http://x/legacy/status")
+        # 空ヘッダは失敗扱いせず監査する＝欠落ヘッダの finding を出し、transport_error は刻まない。
+        self.assertTrue(recorded, "empty-header valid response should be audited")
+        self.assertFalse(
+            any(e.startswith("transport_error:security_headers:") for e in engine.wave_errors),
+            engine.wave_errors,
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
 

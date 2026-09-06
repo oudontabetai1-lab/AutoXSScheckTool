@@ -184,6 +184,22 @@ def test_passive_finding_field_location_ignored():
     assert vuln.candidate_match  # field/location 差異に関係なく TP
 
 
+def test_injection_omitted_without_page_identity_is_unsupported():
+    """injection を省いても canonical page identity（field="(page)"/location="page-level"）が
+    無ければ passive にせず UNSUPPORTED にする（偶発省略の field carrier を passive 化して
+    field/location 照合を bypass し TP/FP を汚さない・Codex #142 P2）。
+    """
+    suite = _passive_suite()
+    # canonical でない match（url_param の field 名）に差し替え、injection は None のまま。
+    bad = replace(suite, cases=(
+        replace(suite.cases[0], match=replace(suite.cases[0].match, field="q", location="url_param")),
+    ))
+    exercised = frozenset({("security_headers", "/legacy/status", "q", "url_param")})
+    outcome = ScanOutcome(findings=[_sh_finding(field_name="q", injection_location="url_param")], exercised=exercised)
+    r = br.score_cases(bad, outcome, ran_checks={"security_headers"})[0]
+    assert r.state == State.UNSUPPORTED  # passive にならず carrier ゲートで UNSUPPORTED
+
+
 def test_non_field_carrier_is_unsupported(suite):
     """R2 は field carrier（query/form）だけ忠実に採点。json/header 等は UNSUPPORTED（Codex #134 P2）。"""
     from wscan.scanner_contract import Carrier

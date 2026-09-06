@@ -170,6 +170,12 @@ class ScanOutcome:
 # identity を導入する（Codex #134 P2）。
 _SCOREABLE_CARRIERS = frozenset({"query", "form"})
 
+# passive/page 観測系 case の canonical identity。engine の _attack_one_page が page-level scan_page
+# 行に刻む field="(page)"/location="page-level" と一致させる。injection を宣言せず、かつこの identity
+# を持つ case だけを passive 採点する（偶発的に injection を省いた field carrier を passive 化しない）。
+_PAGE_FIELD = "(page)"
+_PAGE_LOCATION = "page-level"
+
 
 class ScanRunner(Protocol):
     def __call__(self, base_url: str, checks: list[str]) -> ScanOutcome: ...
@@ -236,13 +242,21 @@ def score_cases(
         carrier = getattr(_attribute(case, "injection", None), "carrier", None)
         carrier_value = getattr(carrier, "value", carrier)
         prereqs = tuple(_attribute(case, "prerequisites", ()) or ())
-        # injection を宣言しない case ＝ passive/page 観測系（security_headers・clickjacking・
-        # cors・sri・secret_leak・info_disclosure 等）。注入点を持たずページ/レスポンス自体を
-        # 観測するため、field/location（注入概念）で照合せず (check, path) で採点する。exercised は
-        # scan_page が記録する page-level 行（field="(page)"/location="page-level"）を要求するので、
-        # 「page-level スキャナが実際にそのページで走った」genuine な証拠に基づく（プレースホルダ
-        # 誤マッチではない＝#141 の XML carrier 偽陽性とは別物）。
-        is_passive = _attribute(case, "injection", None) is None
+        # passive/page 観測系（security_headers・clickjacking・cors・sri・secret_leak・
+        # info_disclosure 等）＝注入点を持たずページ/レスポンス自体を観測する check。field/location
+        # （注入概念）で照合せず (check, path) で採点する。exercised は scan_page が記録する page-level
+        # 行（field="(page)"/location="page-level"）を要求するので、「page-level スキャナが実際に
+        # そのページで走った」genuine な証拠に基づく（プレースホルダ誤マッチではない＝#141 の XML
+        # carrier 偽陽性とは別物）。passive 判定は injection 省略だけでなく **canonical な page identity**
+        # （match.field="(page)" かつ location="page-level"）も要求する。injection を偶発的に省いた
+        # field carrier case を passive 化して field/location 照合を bypass し TP/FP を汚さない（そうした
+        # case は field≠"(page)" で passive にならず carrier ゲートで UNSUPPORTED になる・Codex #142 P2）。
+        _m = _attribute(case, "match", None)
+        is_passive = (
+            _attribute(case, "injection", None) is None
+            and _attribute(_m, "field", None) == _PAGE_FIELD
+            and str(_attribute(_m, "location", "")).strip().lower() == _PAGE_LOCATION
+        )
         if (
             case.check not in ran_checks
             or case.match is None
