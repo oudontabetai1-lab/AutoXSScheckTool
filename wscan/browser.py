@@ -273,6 +273,10 @@ class NetworkCapture:
         # Use (url, id(request_object)) as key to avoid collisions when the same URL
         # is requested multiple times concurrently (race condition fix).
         self._pending: dict[tuple, dict] = {}
+        # clear() 以降に *送信* された（on_request が発火した）リクエスト数。応答ではなく送信を
+        # 数えるので、clear() で捨てた in-flight リクエストの後着応答（unmatched で pairs に入る）で
+        # 水増しされず、応答が来ない中断リクエストも送信済みとして計上できる（Codex #137 P2）。
+        self._requests_since_clear = 0
         # Optional RequestLogger: persists every request/response pair to a
         # JSONL audit log. clear() wipes the in-memory list per page, so the
         # log is the only place a complete request history survives.
@@ -288,6 +292,7 @@ class NetworkCapture:
             "timestamp": time.time(),
             "_req_id": id(request),
         }
+        self._requests_since_clear += 1
 
     def on_response(self, response: Response):
         # Match by (url, id(response.request)) so concurrent requests to the same URL
@@ -422,6 +427,20 @@ class NetworkCapture:
     def clear(self):
         self.pairs.clear()
         self._pending.clear()
+        self._requests_since_clear = 0
+
+    def request_count(self) -> int:
+        """clear() 以降に *送信* されたリクエスト数（on_request 発火回数）。
+
+        応答ではなく送信を数えるのが要点（Codex #137 P2）:
+        - clear() で捨てた in-flight リクエストの後着応答は on_request を発火させないので
+          水増ししない（`pairs` を数えると unmatched 応答で誤増加する）。
+        - 応答が来ない中断リクエスト（navigation interrupt）も on_request 済みなので計上できる。
+
+        submit 直前と直後の差分を見ることで、fill script の validation XHR や背景 polling では
+        なく *submit 自体* が送ったリクエストだけを送達証拠にできる。
+        """
+        return self._requests_since_clear
 
     def status_summary(self) -> dict:
         """スキャン全体で捕捉した HTTP status を集計する。"""
@@ -509,6 +528,10 @@ class BrowserManager:
         self.last_login_success: bool = False
         self.last_navigation_error: str = ""
         self.last_navigation_status: Optional[int] = None
+        # 直近の probe 送達が成功したか。fill_and_submit_form/test_url_param が毎回設定する。
+        # 送達失敗（form 送信の沈黙 swallow・navigate 失敗）を observability へ表面化させる観測用
+        # フラグで、判定には関与しない（scanner が _apply_ip 後に読んで transport_error を記録・0007 D1）。
+        self.last_probe_delivered: bool = True
 
     async def init(self):
         """Launch browser and create page."""
@@ -1517,6 +1540,11 @@ class BrowserManager:
         """Fill a form field with payload and submit. Returns (page_source, network_pair)."""
         self.reset_dialog()
         self.network.clear()
+        # submit を dispatch したか。dispatch できれば送達成功、以降の wait/get_source 例外で
+        # 覆さない（Codex #137 P2）。
+        dispatched = False
+        # submit 直前の送信済みリクエスト数。None＝submit まで到達せず（送達判定に使わない）。
+        net_before_submit = None
         try:
             result = await self.page.evaluate(
                 """
@@ -1618,6 +1646,14 @@ class BrowserManager:
 
             # Check whether the form was found before attempting submit
             if not result or not result.get("success"):
+                # フォーム不在。直前 navigate が応答を得ていれば（status あり）ページは正常ロード
+                # されており、URL param を form field として試した speculative probe＝送達成功扱い
+                # （True）。応答なし（status None＝transport 例外/失敗ロード）なら stale ページによる
+                # form 不在＝未送達（False）。scanner は navigate の戻り値を見ずに本メソッドを呼ぶため
+                # （xss.py 等）、ここで失敗ロードを取りこぼさない（Codex #137 P1）。speculative を
+                # False にしないのは、check 粒度の _degraded_checks が当該 check の tested を全除外し
+                # 無関係な url_param safe twin まで NOT_REACHED 化して benchmark を壊すため。
+                self.last_probe_delivered = self.last_navigation_status is not None
                 source = await self.get_page_source()
                 return source, {}
 
@@ -1626,12 +1662,19 @@ class BrowserManager:
                 f"form:nth-of-type({form_index + 1}) [type=submit], "
                 f"form:nth-of-type({form_index + 1}) button"
             )
+            # submit 直前の送信済みリクエスト数を記録し、送達判定は「submit 後に増えたか」の差分で
+            # 見る。fill script の validation XHR や背景 polling を submit のリクエストと取り違えない
+            # （Codex #137 P2）。
+            net_before_submit = self.network.request_count()
             if submit_btn:
                 await submit_btn.click()
             else:
                 await self.page.evaluate(
                     f"document.querySelectorAll('form')[{form_index}].submit()"
                 )
+            # submit を dispatch した＝probe 送達。以降の wait/get_source 例外で覆さない。
+            dispatched = True
+            self.last_probe_delivered = True
 
             await self.page.wait_for_load_state("domcontentloaded", timeout=self.timeout)
             _js_wait = 0.2 * self.sleep_factor
@@ -1645,6 +1688,16 @@ class BrowserManager:
             pair = self.network.best_pair_for_page(action_url) or self.network.latest() or {}
             return source, pair
         except Exception as e:
+            # 例外を握りつぶし空 pair を返す。送達判定（0007 D1・Codex #137 P2）: submit を dispatch
+            # 済みなら送達成功を維持。未 dispatch でも、Playwright の click() は post-dispatch の
+            # navigation 待ちを含むため、リクエスト送信後に slow/interrupted navigation で click() 自体が
+            # raise しうる。その場合 dispatched に到達しないが、submit 直前からのリクエスト増分
+            # （request_count は on_request 発火数＝送信数。clear() 後の in-flight 応答で水増しされない）で
+            # 送達を検出する。net_before_submit is None＝submit 到達前の例外（未送信）＝未送達。
+            self.last_probe_delivered = dispatched or (
+                net_before_submit is not None
+                and self.network.request_count() > net_before_submit
+            )
             source = await self.get_page_source()
             return source, {}
 
@@ -1785,6 +1838,14 @@ class BrowserManager:
         new_query = urlencode({k: v[0] for k, v in params.items()})
         test_url = urlunparse(parsed._replace(query=new_query))
 
+        # 送達フラグは form 経路（fill_and_submit_form）の *沈黙 swallow* 観測専用（#134 の対象）。
+        # URL param 経路はここで True にリセットするだけで navigate 結果から未送達を導かない。理由:
+        # ssti/open_redirect 等は payload 次第で goto が正常に例外/応答なしになる（不正 URL・非HTTP
+        # redirect 先など payload 単位の通常挙動）。これを未送達として transport_error に刻むと、
+        # check 粒度の _degraded_checks が当該 check の tested を全除外し、無関係な url_param safe twin
+        # まで NOT_REACHED 化して benchmark を壊す（実測で確認）。リセットで直前 form probe の False が
+        # url probe に漏れる stale も防ぐ。URL param の送達観測は payload 粒度が要る別課題。
+        self.last_probe_delivered = True
         await self.navigate(test_url)
         _nav_wait = 0.1 * self.sleep_factor
         if _nav_wait > 0:

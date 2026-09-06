@@ -749,6 +749,17 @@ class BaseScanner(ABC):
                 payload,
                 ip.legacy_is_url_param(),
             )
+            # form/url の沈黙 swallow を観測可能にする（0007 D1）。fill_and_submit_form は例外を
+            # 握りつぶし空 pair を返すが、空 pair だけでは「送達成功だが pair 未捕捉」と区別できない。
+            # browser の送達フラグ（transport 例外・応答なしのときだけ False。HTTP 4xx/5xx 応答は
+            # 送達済み＝True）を見て、実際に未送達だったときだけ transport_error を刻む（制御フロー
+            # 不変・偽記録なし）。
+            # これを刻まないと ScanEngine が status="tested" を記録し、未送達の空振りが偽 TN/FN に
+            # 化ける（Codex #134 P1）。json_body の脱落は _apply_json_payload が既に記録する。
+            if not getattr(getattr(self, "browser", None), "last_probe_delivered", True):
+                self._record_scan_note(
+                    f"transport_error:{self.CHECK_TYPE}:probe_not_delivered"
+                )
         # D5/G2: 波状層横断の試行台帳へ応答メタを記録する。判定には関与せず、観測の
         # 記録のみ（例外は絶対に scan を止めない＝加算的・安全側）。
         self._record_attempt(ip, payload, source, pair)
