@@ -203,6 +203,7 @@ _NAV = [
     ('/community/posts', 'Community'),
     ('/portal/insights', 'Insights'),
     ('/portal/notice', 'Notices'),
+    ('/portal/notice-safe', 'Notices (safe)'),
     ('/account/reset', 'Account'),
     ('/tools/nslookup?host=intranet.local', 'Tools'),
 ]
