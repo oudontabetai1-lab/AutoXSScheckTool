@@ -133,3 +133,16 @@ def test_realistic_healthcare_js_static_scanner_scorecard():
     assert "run_error" not in out, out
     assert out["case_counts"] == {"planned": 2, "completed": 2, "incomplete": 0}
     assert [c["classification"]["candidate"] for c in out["cases"]] == ["tp", "tn"], out
+
+
+def test_realistic_healthcare_page_batch2_scanner_scorecard():
+    """realistic_healthcare の cors / host_header（page 観測系＝passive）を実採点する（0034-R3）。
+
+    cors /api/v1/records/export=TP・export-safe=TN、host_header /account/reset=TP・reset-safe=TN。
+    manifest 順（cors vuln→safe, host_header vuln→safe）に並ぶ。
+    """
+    _require_chromium()
+    out = _run_manifest("realistic_healthcare_page_batch2.yaml", {"cors", "host_header"})
+    assert "run_error" not in out, out
+    assert out["case_counts"] == {"planned": 4, "completed": 4, "incomplete": 0}
+    assert [c["classification"]["candidate"] for c in out["cases"]] == ["tp", "tn", "tp", "tn"], out

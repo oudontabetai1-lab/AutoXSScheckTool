@@ -205,6 +205,9 @@ _NAV = [
     ('/portal/notice', 'Notices'),
     ('/portal/notice-safe', 'Notices (safe)'),
     ('/account/reset', 'Account'),
+    ('/account/reset-safe', 'Account reset (safe)'),
+    ('/api/v1/records/export', 'Records export'),
+    ('/api/v1/records/export-safe', 'Records export (safe)'),
     ('/tools/nslookup?host=intranet.local', 'Tools'),
 ]
 
