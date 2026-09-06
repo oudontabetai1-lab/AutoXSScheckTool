@@ -1,0 +1,30 @@
+schema_version: 1
+suite_id: realistic_healthcare_xxe
+fixture_id: realistic_healthcare
+runner_profile: scan_engine
+mode: normal-deterministic
+source_kind: first_party
+# XXE の vulnerable + safe twin。realistic_healthcare の POST /records/import は XML 本文の外部実体を
+# 展開する（XXE 成立）。安全ツイン /records/import-safe は DTD/外部実体を無効化して解析する。
+# carrier/location は fixture の一次情報（POST フォームの xml フィールド=form）で宣言し、実
+# injection_location は E2E で検証する。EXPECTED_FINDINGS(/records/import xml, difficulty=medium)・
+# SAFE_ENDPOINTS(/records/import-safe xml) を正本にする。
+cases:
+  - case_id: realistic_healthcare_xxe.import.xml.vulnerable
+    expected: vulnerable
+    check: xxe
+    request: {method: POST, path: /records/import}
+    injection: {carrier: form, parameter_id: xml, value_kind: string}
+    match: {path: /records/import, field: xml, location: form}
+    twin_id: realistic_healthcare_xxe.import_safe.xml.safe
+    taxonomy: [xxe, unauthenticated]
+    gate: observed
+  - case_id: realistic_healthcare_xxe.import_safe.xml.safe
+    expected: safe
+    check: xxe
+    request: {method: POST, path: /records/import-safe}
+    injection: {carrier: form, parameter_id: xml, value_kind: string}
+    match: {path: /records/import-safe, field: xml, location: form}
+    twin_id: realistic_healthcare_xxe.import.xml.vulnerable
+    taxonomy: [xxe, unauthenticated]
+    gate: observed

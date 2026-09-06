@@ -107,3 +107,16 @@ def test_realistic_healthcare_ldap_scanner_scorecard():
     assert "run_error" not in out, out
     assert out["case_counts"] == {"planned": 2, "completed": 2, "incomplete": 0}
     assert [c["classification"]["candidate"] for c in out["cases"]] == ["tp", "tn"], out
+
+
+def test_realistic_healthcare_xxe_scanner_scorecard():
+    """realistic_healthcare の XXE を実 scanner で採点する（0034-R3）。
+
+    POST /records/import（外部実体を展開）=TP・/records/import-safe（DTD/外部実体を
+    無効化した安全ツイン）=TN。
+    """
+    _require_chromium()
+    out = _run_manifest("realistic_healthcare_xxe.yaml", {"xxe"})
+    assert "run_error" not in out, out
+    assert out["case_counts"] == {"planned": 2, "completed": 2, "incomplete": 0}
+    assert [c["classification"]["candidate"] for c in out["cases"]] == ["tp", "tn"], out

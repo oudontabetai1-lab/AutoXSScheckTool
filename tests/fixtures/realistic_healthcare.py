@@ -194,6 +194,7 @@ _NAV = [
     ('/billing/invoice?ref=INV-1001', 'Billing'),
     ('/pharmacy/refill?rx=RX-77', 'Pharmacy'),
     ('/records/import', 'Lab import'),
+    ('/records/import-safe', 'Lab import (safe)'),
     ('/directory/lookup?user=jsmith', 'Staff directory'),
     ('/directory/search?name=jsmith', 'Staff search (safe)'),
     ('/messages/preview?name=patient', 'Messages'),
