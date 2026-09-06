@@ -236,12 +236,20 @@ def score_cases(
         carrier = getattr(_attribute(case, "injection", None), "carrier", None)
         carrier_value = getattr(carrier, "value", carrier)
         prereqs = tuple(_attribute(case, "prerequisites", ()) or ())
+        # injection を宣言しない case ＝ passive/page 観測系（security_headers・clickjacking・
+        # cors・sri・secret_leak・info_disclosure 等）。注入点を持たずページ/レスポンス自体を
+        # 観測するため、field/location（注入概念）で照合せず (check, path) で採点する。exercised は
+        # scan_page が記録する page-level 行（field="(page)"/location="page-level"）を要求するので、
+        # 「page-level スキャナが実際にそのページで走った」genuine な証拠に基づく（プレースホルダ
+        # 誤マッチではない＝#141 の XML carrier 偽陽性とは別物）。
+        is_passive = _attribute(case, "injection", None) is None
         if (
             case.check not in ran_checks
             or case.match is None
-            # R2 は field carrier（query/form）だけ忠実に採点できる。json/page/header 等は
-            # scan_matrix の identity がプレースホルダで finding と一致せず誤採点になるため未対応。
-            or carrier_value not in _SCOREABLE_CARRIERS
+            # 注入系は field carrier（query/form）だけ忠実採点。json/xml/header 等 *注入を宣言する*
+            # carrier は scan_matrix の実行 identity がプレースホルダで finding と一致せず未対応。
+            # passive（無注入）はこのゲートを免れ、下記の (check, path) 採点を使う。
+            or (not is_passive and carrier_value not in _SCOREABLE_CARRIERS)
             # 前提を宣言した case は、スキャンがその前提を実際に用意した場合のみ採点する。
             # 未充足の前提で反射だけ見て TP/FN/FP/TN を作らない（HttpxCaseExecutor と同思想）。
             or any(p not in fulfilled for p in prereqs)
@@ -252,18 +260,25 @@ def score_cases(
         field = _attribute(case.match, "field")
         location = _attribute(case.match, "location", "") or ""
         if not _case_exercised(exercised, case.check, path, field, location):
-            # 宣言された注入点をスキャンが（成功して）突いていない＝未計測。空マッチを TN/FN に
-            # しない。location も含め、同名の別 carrier を突いただけでは exercised にしない。
+            # 宣言された注入点/ページをスキャンが（成功して）突いていない＝未計測。空マッチを
+            # TN/FN にしない。location も含め、同名の別 carrier を突いただけでは exercised にしない。
             results.append(CaseResult(case.case_id, CaseExecutionState.NOT_REACHED))
             continue
         matches = [
             finding for finding in outcome.findings
             if _finding_check_matches(_attribute(finding, "check_type", ""), case.check)
             and urlparse(_attribute(finding, "url", "")).path == path
-            and _attribute(finding, "field_name") == field
-            # location は「宣言側 *と* finding 側の両方が populated のときだけ」照合して carrier を
-            # 弁別する。finding が location を持たない（空）ときは 3 キー一致で採る（Codex #134 P2）。
-            and _location_compatible(location, _attribute(finding, "injection_location", ""))
+            # passive は field/location（注入概念）を持たない header 固有 finding なので (check, path)
+            # のみで採る。注入系は field 一致 ＋ location 弁別で同名 query/form の取り違えを防ぐ。
+            and (
+                is_passive
+                or (
+                    _attribute(finding, "field_name") == field
+                    # location は「宣言側 *と* finding 側の両方が populated のときだけ」照合して carrier
+                    # を弁別する。finding が空のときは 3 キー一致で採る（Codex #134 P2）。
+                    and _location_compatible(location, _attribute(finding, "injection_location", ""))
+                )
+            )
         ]
         results.append(CaseResult(
             case.case_id, CaseExecutionState.COMPLETED, bool(matches),

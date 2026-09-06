@@ -107,3 +107,16 @@ def test_realistic_healthcare_ldap_scanner_scorecard():
     assert "run_error" not in out, out
     assert out["case_counts"] == {"planned": 2, "completed": 2, "incomplete": 0}
     assert [c["classification"]["candidate"] for c in out["cases"]] == ["tp", "tn"], out
+
+
+def test_realistic_healthcare_security_headers_scanner_scorecard():
+    """realistic_healthcare の security_headers（page 観測系＝passive）を実採点する（0034-R3）。
+
+    /legacy/status（セキュリティヘッダ欠落）=TP・/legacy/status-secure（全付与の安全ツイン）=TN。
+    注入点を持たない passive check を (check, path) で採点する scorer 拡張の回帰でもある。
+    """
+    _require_chromium()
+    out = _run_manifest("realistic_healthcare_security_headers.yaml", {"security_headers"})
+    assert "run_error" not in out, out
+    assert out["case_counts"] == {"planned": 2, "completed": 2, "incomplete": 0}
+    assert [c["classification"]["candidate"] for c in out["cases"]] == ["tp", "tn"], out

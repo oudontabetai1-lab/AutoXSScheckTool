@@ -81,10 +81,6 @@ gaps:
     reason: E2E benchmark ground truth 未整備（vulnerable/safe twin case が未作成）
     owner_task: "0034"
     deadline: "2026-12-31"
-  security_headers:
-    reason: E2E benchmark ground truth 未整備（vulnerable/safe twin case が未作成）
-    owner_task: "0034"
-    deadline: "2026-12-31"
   session:
     reason: E2E benchmark ground truth 未整備（vulnerable/safe twin case が未作成）
     owner_task: "0034"
