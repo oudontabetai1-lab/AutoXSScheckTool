@@ -374,6 +374,28 @@ def test_degraded_checks_excluded_from_exercised():
     )
 
 
+def test_degraded_passive_page_row_excluded():
+    """passive の page-level tested 行も、その check が劣化していれば exercised から除く（Codex #142 P2）。
+
+    security_headers の fetch 失敗（_response_pair の握りつぶし）は transport_error:security_headers
+    を刻む。degraded_checks がこれを拾い page-level tested 行を除外するので、失敗した受動観測は
+    passive case を NOT_REACHED にし、誤 TN/FN を作らない。
+    """
+    from wscan.benchmark_scan import _exercised_from_scan_matrix, _degraded_checks
+    degraded = _degraded_checks(["transport_error:security_headers:no_response"])
+    assert degraded == frozenset({"security_headers"})
+    page_tested = [{
+        "check": "security_headers", "url": "http://h/legacy/status",
+        "field_name": "(page)", "location": "page-level", "status": "tested",
+    }]
+    # 劣化 check の page-level tested は除外（観測が genuine に成立していない）。
+    assert _exercised_from_scan_matrix(page_tested, degraded_checks=degraded) == frozenset()
+    # 劣化していなければ page-level 行は exercised に入る。
+    assert _exercised_from_scan_matrix(page_tested, degraded_checks=frozenset()) == frozenset(
+        {("security_headers", "/legacy/status", "(page)", "page-level")}
+    )
+
+
 def test_canonical_xss_coverage_and_ground_truth(suite):
     from tests.fixtures.realistic_site import EXPECTED_FINDINGS, SAFE_ENDPOINTS
     assert checks_covered_by_suites([suite]) == ({"xss"}, {"xss"})
