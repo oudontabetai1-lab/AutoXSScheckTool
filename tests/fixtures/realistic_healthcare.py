@@ -190,6 +190,8 @@ SAFE_ENDPOINTS = [
 # logged in) や SQL ログイン失敗判定に一致する語を入れない（差分判定の攪乱回避）。
 _NAV = [
     ('/', 'Home'),
+    ('/legacy/status', 'Legacy status'),
+    ('/legacy/status-secure', 'Legacy status (secure)'),
     ('/portal/search?q=results', 'Search'),
     ('/billing/invoice?ref=INV-1001', 'Billing'),
     ('/pharmacy/refill?rx=RX-77', 'Pharmacy'),

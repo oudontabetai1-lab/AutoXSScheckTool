@@ -1,0 +1,28 @@
+schema_version: 1
+suite_id: realistic_healthcare_security_headers
+fixture_id: realistic_healthcare
+runner_profile: scan_engine
+mode: normal-deterministic
+source_kind: first_party
+# security_headers は page 観測系（passive）check の代表。注入点を持たずレスポンスヘッダ自体を
+# 観測するため injection を宣言せず、match は page-level 行（field="(page)"/location="page-level"）で
+# 宣言する。scorer は passive case を (check, path) で採点し、exercised は scan_page が記録する
+# page-level 行を要求する（＝page-level スキャナが実走した genuine な証拠）。EXPECTED_FINDINGS
+# (/legacy/status)・SAFE_ENDPOINTS(/legacy/status-secure) を正本にする。
+cases:
+  - case_id: realistic_healthcare_security_headers.legacy_status.vulnerable
+    expected: vulnerable
+    check: security_headers
+    request: {method: GET, path: /legacy/status}
+    match: {path: /legacy/status, field: "(page)", location: page-level}
+    twin_id: realistic_healthcare_security_headers.legacy_status_secure.safe
+    taxonomy: [misconfiguration, unauthenticated]
+    gate: observed
+  - case_id: realistic_healthcare_security_headers.legacy_status_secure.safe
+    expected: safe
+    check: security_headers
+    request: {method: GET, path: /legacy/status-secure}
+    match: {path: /legacy/status-secure, field: "(page)", location: page-level}
+    twin_id: realistic_healthcare_security_headers.legacy_status.vulnerable
+    taxonomy: [misconfiguration, unauthenticated]
+    gate: observed

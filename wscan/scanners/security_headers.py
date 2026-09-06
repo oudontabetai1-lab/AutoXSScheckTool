@@ -149,12 +149,17 @@ class SecurityHeadersScanner(BaseScanner):
             await self.monitor.emit_status(f"Security headers audit on {url}")
 
         pair = await self._response_pair(url)
-        headers = {
-            k.lower(): v
-            for k, v in pair.get("response", {}).get("headers", {}).items()
-        }
-        if not headers:
+        response = pair.get("response") or {}
+        # 観測失敗は「レスポンス証拠（status）の欠如」で判定する（_response_pair が fetch 例外を
+        # 握りつぶし fallback の network pair も無いと {} が返る）。空ヘッダ*ではなく*空レスポンスが
+        # 失敗のシグナル。失敗時は transport_error を刻み、degraded_checks が page-level tested 行を
+        # 除外して passive case を誤 TN/FN でなく NOT_REACHED にする（Codex #142 P2）。
+        if not response or response.get("status") is None:
+            self._record_scan_note(f"transport_error:{self.CHECK_TYPE}:no_response")
             return []
+        # レスポンスは受信済み。ヘッダが空でも監査する（セキュリティヘッダ皆無＝全欠落＝最大級の
+        # 脆弱ケースで、まさに本 scanner が報告すべき対象・Codex #142 P1）。
+        headers = {k.lower(): v for k, v in response.get("headers", {}).items()}
 
         findings = []
         for header, description, severity, recommendation in _HEADER_CHECKS:

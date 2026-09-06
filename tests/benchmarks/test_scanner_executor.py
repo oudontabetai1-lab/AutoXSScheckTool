@@ -123,6 +123,83 @@ def test_unsupported_and_missing_match(suite):
     assert br.score_cases(nomatch, ScanOutcome([], frozenset()), ran_checks={"xss"})[0].state == State.UNSUPPORTED
 
 
+_PASSIVE_MANIFEST = (
+    Path(__file__).resolve().parents[2]
+    / "benchmarks/manifests/realistic_healthcare_security_headers.yaml"
+)
+
+
+def _passive_suite():
+    return load_manifest_file(_PASSIVE_MANIFEST, registry_keys={"security_headers"})
+
+
+def _sh_finding(**overrides):
+    # page 観測系 finding は header 固有の field_name を持ち injection_location は空/固有。
+    return dict(
+        check_type="security_headers",
+        url="http://fixture.invalid/legacy/status",
+        field_name="(Header: content-security-policy)",
+        injection_location="", verified=True,
+    ) | overrides
+
+
+def test_passive_case_scored_by_check_and_path():
+    """injection を宣言しない passive case（security_headers）は (check, path) で採点する。
+
+    field/location（注入概念）が finding と一致しなくても、vulnerable=TP・safe twin=TN になる。
+    exercised は page-level 行（field="(page)"/location="page-level"）で表す。
+    """
+    suite = _passive_suite()
+    # 両 case が exercised（page-level スキャナが実走した証拠）。
+    exercised = frozenset({
+        ("security_headers", "/legacy/status", "(page)", "page-level"),
+        ("security_headers", "/legacy/status-secure", "(page)", "page-level"),
+    })
+    outcome = ScanOutcome(findings=[_sh_finding()], exercised=exercised)
+    results = br.score_cases(suite, outcome, ran_checks={"security_headers"})
+    # vulnerable(/legacy/status) に finding→TP、safe(/legacy/status-secure) は exercised だが finding 無し→TN。
+    assert [(r.state, r.candidate_match) for r in results] == [
+        (State.COMPLETED, True), (State.COMPLETED, False),
+    ]
+
+
+def test_passive_case_not_exercised_is_not_reached():
+    """passive case も page-level 行が exercised に無ければ NOT_REACHED（未計測を TN/FN にしない）。"""
+    suite = _passive_suite()
+    outcome = ScanOutcome(findings=[_sh_finding()], exercised=frozenset())
+    results = br.score_cases(suite, outcome, ran_checks={"security_headers"})
+    assert all(r.state == State.NOT_REACHED for r in results)
+
+
+def test_passive_finding_field_location_ignored():
+    """passive では finding の field_name/injection_location が何であっても (check, path) で採る。"""
+    suite = _passive_suite()
+    exercised = frozenset({("security_headers", "/legacy/status", "(page)", "page-level")})
+    # わざと異なる field_name / injection_location を持つ finding。
+    outcome = ScanOutcome(
+        findings=[_sh_finding(field_name="(Header: x-frame-options)", injection_location="url_param")],
+        exercised=exercised,
+    )
+    vuln = br.score_cases(suite, outcome, ran_checks={"security_headers"})[0]
+    assert vuln.candidate_match  # field/location 差異に関係なく TP
+
+
+def test_injection_omitted_without_page_identity_is_unsupported():
+    """injection を省いても canonical page identity（field="(page)"/location="page-level"）が
+    無ければ passive にせず UNSUPPORTED にする（偶発省略の field carrier を passive 化して
+    field/location 照合を bypass し TP/FP を汚さない・Codex #142 P2）。
+    """
+    suite = _passive_suite()
+    # canonical でない match（url_param の field 名）に差し替え、injection は None のまま。
+    bad = replace(suite, cases=(
+        replace(suite.cases[0], match=replace(suite.cases[0].match, field="q", location="url_param")),
+    ))
+    exercised = frozenset({("security_headers", "/legacy/status", "q", "url_param")})
+    outcome = ScanOutcome(findings=[_sh_finding(field_name="q", injection_location="url_param")], exercised=exercised)
+    r = br.score_cases(bad, outcome, ran_checks={"security_headers"})[0]
+    assert r.state == State.UNSUPPORTED  # passive にならず carrier ゲートで UNSUPPORTED
+
+
 def test_non_field_carrier_is_unsupported(suite):
     """R2 は field carrier（query/form）だけ忠実に採点。json/header 等は UNSUPPORTED（Codex #134 P2）。"""
     from wscan.scanner_contract import Carrier
@@ -310,6 +387,28 @@ def test_degraded_checks_excluded_from_exercised():
     found = [{"check": "xss", "url": "http://h/s?q=1", "field_name": "q", "location": "form field", "status": "finding"}]
     assert _exercised_from_scan_matrix(found, degraded_checks=degraded) == frozenset(
         {("xss", "/s", "q", "form")}
+    )
+
+
+def test_degraded_passive_page_row_excluded():
+    """passive の page-level tested 行も、その check が劣化していれば exercised から除く（Codex #142 P2）。
+
+    security_headers の fetch 失敗（_response_pair の握りつぶし）は transport_error:security_headers
+    を刻む。degraded_checks がこれを拾い page-level tested 行を除外するので、失敗した受動観測は
+    passive case を NOT_REACHED にし、誤 TN/FN を作らない。
+    """
+    from wscan.benchmark_scan import _exercised_from_scan_matrix, _degraded_checks
+    degraded = _degraded_checks(["transport_error:security_headers:no_response"])
+    assert degraded == frozenset({"security_headers"})
+    page_tested = [{
+        "check": "security_headers", "url": "http://h/legacy/status",
+        "field_name": "(page)", "location": "page-level", "status": "tested",
+    }]
+    # 劣化 check の page-level tested は除外（観測が genuine に成立していない）。
+    assert _exercised_from_scan_matrix(page_tested, degraded_checks=degraded) == frozenset()
+    # 劣化していなければ page-level 行は exercised に入る。
+    assert _exercised_from_scan_matrix(page_tested, degraded_checks=frozenset()) == frozenset(
+        {("security_headers", "/legacy/status", "(page)", "page-level")}
     )
 
 
