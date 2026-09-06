@@ -16,6 +16,7 @@ from wscan.benchmark_runner import FixtureLauncher
 FIXTURE_APPS: dict[str, str] = {
     "realistic_site": "tests.fixtures.realistic_site:create_app",
     "realistic_intranet": "tests.fixtures.realistic_intranet:create_app",
+    "realistic_healthcare": "tests.fixtures.realistic_healthcare:create_app",
 }
 
 

@@ -94,3 +94,16 @@ def test_realistic_site_header_injection_scanner_scorecard():
     assert "run_error" not in out, out
     assert out["case_counts"] == {"planned": 2, "completed": 2, "incomplete": 0}
     assert [c["classification"]["candidate"] for c in out["cases"]] == ["tp", "tn"], out
+
+
+def test_realistic_healthcare_ldap_scanner_scorecard():
+    """realistic_healthcare の LDAP 注入を実 scanner で採点する（0034-R3）。
+
+    /directory/lookup?user=（uid フィルタへ生展開）=TP・/directory/search?name=
+    （RFC4515 エスケープの安全ツイン）=TN。
+    """
+    _require_chromium()
+    out = _run_manifest("realistic_healthcare_ldap.yaml", {"ldap"})
+    assert "run_error" not in out, out
+    assert out["case_counts"] == {"planned": 2, "completed": 2, "incomplete": 0}
+    assert [c["classification"]["candidate"] for c in out["cases"]] == ["tp", "tn"], out
