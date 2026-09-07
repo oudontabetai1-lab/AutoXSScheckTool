@@ -1032,7 +1032,7 @@ body {
           </div>
           <div class="cfg-field">
             <label>クライアント証明書 (PEM)</label>
-            <input type="text" id="cfgTlsClientCert" placeholder="サーバ側の既存画像を使う場合だけ入力">
+            <input type="text" id="cfgTlsClientCert" placeholder="アップロードするか、サーバ側パスを入力">
             <input type="file" id="upTlsClientCert" accept=".crt,.pem,.cer" style="font-size:0.75rem">
             <span id="upTlsClientCertStatus" style="font-size:0.72rem;color:var(--text-muted)"></span>
           </div>
@@ -1203,7 +1203,7 @@ body {
             </div>
             <div class="cfg-field">
               <label>QR画像（選択すると読取・確認）</label>
-              <input type="text" id="cfgMfaTotpQr" placeholder="アップロードするか、サーバ側パスを入力">
+              <input type="text" id="cfgMfaTotpQr" placeholder="サーバ側の既存画像を使う場合だけ入力">
               <input type="file" id="upMfaTotpQr" accept=".png,.jpg,.jpeg,.webp,.bmp,.gif" style="font-size:0.75rem">
             </div>
             <div class="cfg-field">
@@ -2588,7 +2588,7 @@ function applyAuthHeaders(cfg) {
 let totpPreviewVersion = 0;
 let totpQrNeedsValidation = false;
 function validateTotpReadiness() {
-  if (!totpQrNeedsValidation || document.getElementById('cfgMfaType').value === 'email') return true;
+  if (!totpQrNeedsValidation || document.getElementById('cfgMfaType').value !== 'totp') return true;
   alert('QRの読取が完了していません。画像を選び直すか、URI / Base32 / サーバ側パスを入力してください。');
   return false;
 }
@@ -2610,6 +2610,7 @@ function wireTotpQrPreview() {
     if (!file) return;
     const version = ++totpPreviewVersion;
     totpQrNeedsValidation = true;
+    document.getElementById('cfgMfaType').value = 'totp';
     // 前の登録情報で実行されないよう、新しい画像を選んだ時点で入力元を切り替える。
     ['cfgMfaTotpUri','cfgMfaTotpSecret','cfgMfaTotpQr'].forEach(id => {
       document.getElementById(id).value = '';

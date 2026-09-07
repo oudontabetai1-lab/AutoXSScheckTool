@@ -49,7 +49,7 @@ def test_username(html, expected):
     ('<input name="otp" inputmode="numeric">', '[name="otp"]'),
     ('<input name="x1" id="mfa">', '[name="x1"]'),
     ('<input id="TOTP">', '[id="TOTP"]'),
-    ('<input inputmode="numeric">', 'input[inputmode="numeric"]'),
+    ('<input inputmode="numeric">', None),
     ('<input inputmode="numeric" maxlength="8">', 'input[inputmode="numeric"]'),
     ('<input pattern="[0-9]{6}" maxlength="6">', 'input[maxlength="6"]'),
     ('<input pattern="[0-9]{6}">', 'input[pattern]'),
@@ -153,3 +153,12 @@ def test_otp_hints_do_not_match_unrelated_substrings(name):
 @pytest.mark.parametrize("name", ["otpCode", "OTPCode", "verification_code", "mfa-code", "2fa_code"])
 def test_otp_hints_accept_delimited_and_camel_case_tokens(name):
     assert find_otp_field(f'<input name="{name}">') is not None
+
+
+@pytest.mark.parametrize("html, expected", [
+    ('<form><input name="quantity" inputmode="numeric"><button>Buy</button></form>', None),
+    ('<p>Verification code</p><input inputmode="numeric">', 'input[inputmode="numeric"]'),
+    ('<input inputmode="numeric" pattern="[0-9]{6}">', 'input[inputmode="numeric"]'),
+])
+def test_unconstrained_numeric_input_requires_mfa_context(html, expected):
+    assert find_otp_field(html) == expected

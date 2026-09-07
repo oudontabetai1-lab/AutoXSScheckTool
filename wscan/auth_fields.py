@@ -150,11 +150,11 @@ def find_username_field(html: str) -> Optional[str]:
                          if _type(a) in _TEXT_TYPES and _hinted(a, _USER_HINTS)])
 
 
-def _short_code(attrs: dict[str, str]) -> bool:
+def _short_code(attrs: dict[str, str], mfa_context: bool = False) -> bool:
     length = attrs.get("maxlength")
     if length is not None and not re.fullmatch(r"0*[1-8]", length):
         return False
-    if attrs.get("inputmode", "").lower() == "numeric":
+    if attrs.get("inputmode", "").lower() == "numeric" and (length is not None or mfa_context):
         return True
     # 任意の pattern は OTP の根拠にならない。短い数字列だけを許す既知の
     # 形式に限定し、ページ由来の正規表現そのものは実行しない。
@@ -179,9 +179,10 @@ def find_otp_field(html: str) -> Optional[str]:
     candidates = [a for a in text_inputs if _hinted(a, _OTP_HINTS)]
     if candidates:
         return _single(doc, candidates)
-    candidates = [a for a in text_inputs if _short_code(a)]
+    mfa_context = looks_like_mfa_page(html)
+    candidates = [a for a in text_inputs if _short_code(a, mfa_context)]
     if candidates:
         return _single(doc, candidates)
-    if looks_like_mfa_page(html):
+    if mfa_context:
         return _single(doc, [a for a in text_inputs if _type(a) != "number"])
     return None

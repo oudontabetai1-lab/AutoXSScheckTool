@@ -38,7 +38,7 @@ def serving(app):
         sock.close()
 
 
-@pytest.mark.parametrize("variant", ["obfuscated", "nameless", "override", "qr"])
+@pytest.mark.parametrize("variant", ["obfuscated", "nameless", "override", "qr", "positional_override"])
 def test_totp_login_with_real_browser(variant, monkeypatch, tmp_path):
     from tests.fixtures import totp_login_app as fixture
     if variant == "nameless":
@@ -59,10 +59,21 @@ def test_totp_login_with_real_browser(variant, monkeypatch, tmp_path):
     if variant == "override":
         monkeypatch.setattr(fixture, "TOTP_HTML", fixture.TOTP_HTML.replace(
             '<input name="x1"', '<input name="noise"><input id="custom" type="password" name="x1"'))
-    with serving(create_app()) as url:
+    if variant == "positional_override":
+        monkeypatch.setattr(fixture, "LOGIN_HTML", fixture.LOGIN_HTML.replace('<label>', '').replace('</label>', ''))
+        monkeypatch.setattr(fixture, "TOTP_HTML", fixture.TOTP_HTML.replace('<input name="x1"', '<input name="noise"><input name="x1"'))
+    app = create_app()
+    if variant == "positional_override":
+        @app.middleware("http")
+        async def slow_login(request, call_next):
+            if request.method == "POST" and request.url.path == "/login":
+                await asyncio.sleep(.5)
+            return await call_next(request)
+    with serving(app) as url:
         async def exercise():
             cfg = MFAConfig(type="totp", totp_secret=TOTP_SECRET,
-                            selector="#custom" if variant == "override" else "")
+                            selector=("#custom" if variant == "override" else
+                                      "input:nth-of-type(2)" if variant == "positional_override" else ""))
             if variant == "qr":
                 from tests.test_totp_qr import _write_qr
                 qr = tmp_path / "認証登録.png"
@@ -106,6 +117,10 @@ def test_mfa_selection_and_fail_closed_with_real_dom():
             assert await browser.page.locator('input').input_value() == ''
             await browser.page.set_content('<input name="otp" hidden><input name="otp">')
             assert await browser._editable_auth_selector('input[name="otp"]') == ''
+            await browser.page.set_content('<form><input name="quantity" inputmode="numeric"><button>Buy</button></form>')
+            assert await browser._handle_mfa_challenge() == "not_present"
+            assert await browser.page.locator('input').input_value() == ''
+
         finally:
             await browser.close()
     asyncio.run(exercise())

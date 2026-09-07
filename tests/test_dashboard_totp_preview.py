@@ -47,6 +47,12 @@ global.fetch = () => new Promise(r => { resolve = r; });
   assert.equal(nodes.cfgMfaTotpSecret.value, '');
   assert.equal(validateTotpReadiness(), false);
   assert(nodes.upMfaTotpQrStatus.textContent.includes('画像を確認してください'));
+  nodes.cfgMfaType.value = '';
+  nodes.cfgMfaType.handlers.input();
+  assert.equal(validateTotpReadiness(), true);
+  nodes.cfgMfaType.value = 'totp';
+  assert.equal(validateTotpReadiness(), false);
+
   const stale = nodes.upMfaTotpQr.handlers.change();
   nodes.cfgMfaTotpSecret.value = 'MANUAL_SECRET';
   nodes.cfgMfaTotpSecret.handlers.input();
