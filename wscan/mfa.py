@@ -25,6 +25,7 @@ import re
 import shlex
 import time
 from dataclasses import dataclass, field as dc_field
+from html.parser import HTMLParser
 from typing import Optional
 
 
@@ -66,12 +67,43 @@ def seconds_until_next_window(timestamp: float, period: int) -> float:
     return float(period - (timestamp % period))
 
 
+class _VisibleText(HTMLParser):
+    """明示的な非表示要素・属性・スクリプトを文脈に含めない。"""
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.stack = []
+        self.parts = []
+
+    def handle_starttag(self, tag, attrs):
+        values = dict(attrs)
+        style = re.sub(r"\s+", "", (values.get("style") or "").lower())
+        hidden = (any(blocked for _, blocked in self.stack)
+                  or tag in {"head", "script", "style", "template", "noscript"}
+                  or "hidden" in values or "inert" in values
+                  or (values.get("aria-hidden") or "").lower() == "true"
+                  or "display:none" in style or "visibility:hidden" in style)
+        if tag not in {"area", "base", "br", "col", "embed", "hr", "img", "input",
+                       "link", "meta", "param", "source", "track", "wbr"}:
+            self.stack.append((tag, hidden))
+
+    def handle_endtag(self, tag):
+        for index in range(len(self.stack) - 1, -1, -1):
+            if self.stack[index][0] == tag:
+                del self.stack[index:]
+                break
+
+    def handle_data(self, data):
+        if not any(blocked for _, blocked in self.stack):
+            self.parts.append(data)
+
+
 def looks_like_mfa_page(html: str) -> bool:
-    """ページ HTML が MFA（2FA）コード入力画面に見えるか判定する（純粋関数）。"""
-    if not html:
-        return False
-    low = html.lower()
-    return any(sig in low for sig in _MFA_SIGNALS)
+    """表示テキストの語単位で MFA 文脈を判定（CSS の可視性は実 DOM で補完）。"""
+    doc = _VisibleText()
+    doc.feed(html or "")
+    low = " ".join(" ".join(doc.parts).lower().split())
+    return any(re.search(r"(?<![a-z0-9_])" + re.escape(sig) + r"(?![a-z0-9_])", low)
+               if sig.isascii() else sig in low for sig in _MFA_SIGNALS)
 
 
 def mfa_field_present(html: str, field: str) -> bool:
@@ -309,6 +341,7 @@ def collect_tool_text(result) -> str:
 class MFAConfig:
     type: str = "none"               # "totp" | "email" | "none"
     field: str = "otp"               # ログインフォーム側のコード入力欄 name/id
+    selector: str = ""               # 明示した OTP 欄の完全 CSS selector（最優先）
     code_length: int = 6
     code_regex: str = ""
     extra_env: dict = dc_field(default_factory=dict)
@@ -435,9 +468,14 @@ class MFAConfig:
         if (ov.get("totp_secret") or ov.get("totp_qr")) and not ov.get("totp_uri"):
             _totp_uri = ""
 
+        _totp_qr = _s("WSCAN_MFA_TOTP_QR", "")
+        if ov.get("totp_secret") and not ov.get("totp_qr"):
+            _totp_qr = ""
+
         cfg = cls(
             type=mtype,
             field=_s("WSCAN_MFA_FIELD", "otp") or "otp",
+            selector=_s("WSCAN_MFA_SELECTOR", ""),
             code_length=int(_f("WSCAN_MFA_CODE_LENGTH", 6)),
             code_regex=_s("WSCAN_MFA_CODE_REGEX", ""),
             totp_command=_s("WSCAN_MFA_TOTP_COMMAND", "node") or "node",
@@ -448,7 +486,7 @@ class MFAConfig:
             or "account_label",
             totp_secret=_s("WSCAN_MFA_TOTP_SECRET", ""),
             totp_uri=_totp_uri,
-            totp_qr=_s("WSCAN_MFA_TOTP_QR", ""),
+            totp_qr=_totp_qr,
             totp_digits=_i("WSCAN_MFA_TOTP_DIGITS", 6),
             totp_period=_i("WSCAN_MFA_TOTP_PERIOD", 30),
             totp_algorithm=(_s("WSCAN_MFA_TOTP_ALGORITHM", "SHA1") or "SHA1").upper(),

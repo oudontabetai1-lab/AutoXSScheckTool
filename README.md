@@ -213,7 +213,7 @@ python3 main.py serve --host 127.0.0.1 --port 8765
 
 認証タブの TOTP は `otpauth://` URI、Base32 シークレット、QR 画像からサーバー内でローカル生成します。Bearer トークンまたは1行1件のカスタムヘッダは、通常ツール層（`scan`）の crawl と全 HTTP リクエストに加え、Agent モードと Hybrid Phase 1 の Agent 偵察にも適用されます。明示した `Authorization` ヘッダは Bearer 欄より優先されます。TOTP URI/シークレットと Bearer は設定 export やブラウザ保存へ含めません。任意コマンドを実行する `header_refresh_cmd` はサーバー配備時の RCE 面になるため、ダッシュボードには公開していません。
 
-サーバー配備時は、TLS 証明書/秘密鍵/PFX/CA、カスタムペイロード、手動巡回 JSON、TOTP QR をブラウザからアップロードできます。保存先は `output/uploads/`、上限は1ファイル 8MBです。拡張子は用途別に制限され、既存のサーバー側パス入力も後方互換で利用できます。出力ディレクトリと手動巡回の保存先はアップロード対象ではないため、リモート運用では空欄（自動）を推奨します。
+サーバー配備時は、TLS 証明書/秘密鍵/PFX/CA、カスタムペイロード、手動巡回 JSON をブラウザからアップロードできます。保存先は `output/uploads/`、上限は1ファイル 8MBです。拡張子は用途別に制限され、既存のサーバー側パス入力も後方互換で利用できます。出力ディレクトリと手動巡回の保存先はアップロード対象ではないため、リモート運用では空欄（自動）を推奨します。
 
 ### Agent タブ
 
@@ -305,7 +305,8 @@ python3 main.py scan URL [options]
 | `--login-pass-field NAME` | `password` | パスワード入力欄 |
 | `--login-success TEXT` | 空 | 成功確認用の URL/ページ内文字列 |
 | `--mfa-type totp\|email` | 未指定 | ネイティブ TOTP または外部 MCP で MFA コード取得 |
-| `--mfa-field NAME` | 空（実行時既定 `otp`） | MFA 入力欄の name/id |
+| `--mfa-field NAME` | 空（実行時既定 `otp`） | MFA 入力欄の name/id。見つからなければ自動検出 |
+| `--mfa-selector CSS` | 空 | OTP 欄の完全 CSS selector（最優先）。曖昧・非表示なら入力しない |
 | `--mfa-totp-uri URI` | 空 | `otpauth://totp/...` からネイティブ TOTP を生成 |
 | `--mfa-totp-secret BASE32` | 空 | 生 Base32 シークレットからネイティブ TOTP を生成 |
 | `--mfa-totp-qr FILE` | 空 | QR 画像からネイティブ TOTP を生成（opencv は任意依存） |
@@ -816,6 +817,12 @@ python3 main.py scan https://example.com \
 ```
 
 URI の代わりに `--mfa-totp-secret BASE32` または `--mfa-totp-qr code.png` も使えます。QR 読み取りだけは任意依存の opencv が必要です（`pip install opencv-python-headless`）。シークレットや URI は保存されないため、毎回 CLI または `WSCAN_MFA_TOTP_URI` / `WSCAN_MFA_TOTP_SECRET` / `WSCAN_MFA_TOTP_QR` で渡してください。
+
+ダッシュボードの「認証・Cookie」で QR 画像を選ぶと、TOTP 登録情報として検証し、発行者・アカウント・桁数・周期・アルゴリズムを表示します。成功時は Base32 シークレット（マスク表示）と生成条件を自動入力し、前の URI / QR パスを解除します。画像はこの読取機能では保存されず、シークレットは設定 export・ブラウザ保存・イベント履歴にも残りません。読取中や失敗後は、画像を選び直すか URI / Base32 / サーバ側パスを入力してからスキャンを開始してください。MFAを使わない場合は「無効」に切り替えられます。「読取済み」は登録情報が有効という意味で、対象システムへのログイン成功は実行時に確認します。
+
+ログイン欄の name/id が一致しない場合、autocomplete・入力型・フォーム内の配置から候補を自動検出します。実画面で一意・可視・編集可能な欄だけに入力します。OTP 欄を指定したい場合は「OTP入力欄の CSS selector」、CLI の `--mfa-selector 'input[name="x1"]'`、または `WSCAN_MFA_SELECTOR` を使えます。明示 selector が見つからない場合に別の欄へ迂回して入力することはありません。
+
+手動で選ぶには「手動巡回」で遠隔ブラウザを起動し、ログイン操作で OTP 画面へ進んで「OTP欄を指定」を押し、入力欄そのものをクリックします。選択した selector が認証設定へ反映されます。複数の欄に1桁ずつ分割された OTP、iframe 内の欄など、自動で一意に特定できない画面では手動ログインで Cookie を取得してください。
 
 従来の外部 MCP による TOTP 取得も引き続き利用できます。
 

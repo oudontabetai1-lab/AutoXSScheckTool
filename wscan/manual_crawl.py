@@ -519,6 +519,41 @@ class ManualCrawlSession:
         except Exception:
             pass
 
+    async def select_mfa_field(self, nx: float, ny: float) -> dict:
+        """遠隔画面で指定した入力欄の一意な CSS selector を返す（値は取得しない）。"""
+        if not self.running or not self._page or not self.streaming:
+            raise ValueError("遠隔ブラウザを起動してください")
+        x, y = scale_point(nx, ny, self.view_width, self.view_height)
+        selector = await self._page.evaluate(
+            """([x, y]) => {
+                const el = document.elementFromPoint(x, y);
+                if (!el || el.tagName !== 'INPUT' || el.disabled || el.readOnly ||
+                    !['text','tel','number','password'].includes(el.type)) return '';
+                const unique = s => document.querySelectorAll(s).length === 1;
+                if (el.id) {
+                    const s = '#' + CSS.escape(el.id);
+                    if (unique(s)) return s;
+                }
+                if (el.name) {
+                    const s = 'input[name="' + CSS.escape(el.name) + '"]';
+                    if (unique(s)) return s;
+                }
+                const parts = [];
+                for (let node = el; node && node.nodeType === 1; node = node.parentElement) {
+                    const tag = node.tagName.toLowerCase();
+                    const siblings = node.parentElement ?
+                        Array.from(node.parentElement.children).filter(n => n.tagName === node.tagName) : [node];
+                    parts.unshift(tag + ':nth-of-type(' + (siblings.indexOf(node) + 1) + ')');
+                    const s = parts.join(' > ');
+                    if (unique(s)) return s;
+                }
+                return '';
+            }""", [x, y],
+        )
+        if not selector:
+            raise ValueError("編集可能な OTP 入力欄そのものをクリックしてください")
+        return {"selector": selector}
+
     async def input_event(self, ev: dict) -> dict:
         """遠隔操作イベントを実ブラウザへ適用する。
 

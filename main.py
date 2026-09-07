@@ -132,6 +132,7 @@ def _load_config(path: Path = _CONFIG_PATH) -> dict:
     cfg["auth_pass"]               = str(a.get("auth_pass", "") or "")
     cfg["mfa_type"]                = str(a.get("mfa_type", "") or "")
     cfg["mfa_field"]               = str(a.get("mfa_field", "") or "")
+    cfg["mfa_selector"]            = str(a.get("mfa_selector", "") or "")
     cfg["mfa_email_account"]       = str(a.get("mfa_email_account", "") or "")
     cfg["mfa_email_address"]       = str(a.get("mfa_email_address", "") or "")
     cfg["mfa_email_imap_host"]     = str(a.get("mfa_email_imap_host", "") or "")
@@ -1095,6 +1096,10 @@ Examples:
     scan.add_argument(
         "--mfa-field", metavar="NAME", default=_CFG.get("mfa_field", ""),
         help="One-time-code input field name/id on the login form (default: otp).",
+    )
+    scan.add_argument(
+        "--mfa-selector", metavar="CSS", default=_CFG.get("mfa_selector", ""),
+        help="OTP 入力欄の完全 CSS selector。指定時は name/id・自動検出より優先。",
     )
     # uri/secret/qr は CLI の明示有無を保持し、後段(_effective_totp_sources)で config
     # 既定を解決する。config/env の URI をここへ焼き込むと、明示 secret/qr より URI が
@@ -2330,6 +2335,7 @@ async def run_scan(args):
             # --mfa-totp-* を明示した場合は config type を無視し TOTP 自動昇格に委ねる。
             mfa_type=_effective_mfa_type(args),
             mfa_field=getattr(args, "mfa_field", "") or "",
+            mfa_selector=getattr(args, "mfa_selector", "") or "",
             mfa_totp_secret=mfa_totp_secret,
             mfa_totp_uri=mfa_totp_uri,
             mfa_totp_qr=mfa_totp_qr,
@@ -2655,6 +2661,7 @@ async def run_serve(args):
         "login_success_indicator": _CFG.get("login_success_indicator", ""),
         "mfa_type": _CFG.get("mfa_type", ""),
         "mfa_field": _CFG.get("mfa_field", ""),
+        "mfa_selector": _CFG.get("mfa_selector", ""),
         "mfa_email_account": _CFG.get("mfa_email_account", ""),
         "mfa_email_address": _CFG.get("mfa_email_address", ""),
         "mfa_email_imap_host": _CFG.get("mfa_email_imap_host", ""),
@@ -2940,6 +2947,7 @@ async def run_serve(args):
                 # "" は env を上書きして無効化。キー欠落(None)時のみ env に委ねる。
                 mfa_type=cfg.get("mfa_type"),
                 mfa_field=cfg.get("mfa_field", "") or "",
+                mfa_selector=cfg.get("mfa_selector", "") or "",
                 mfa_email_account=cfg.get("mfa_email_account", "") or "",
                 mfa_email_imap={
                     "address": cfg.get("mfa_email_address", "") or "",
