@@ -500,6 +500,87 @@ class SecurityHeadersFetchEvidenceTests(unittest.IsolatedAsyncioTestCase):
         )
 
 
+class _CookieCtxBrowser:
+    """context.cookies(url) が同名・別 path Cookie を返す最小ブラウザ context（P2 回帰）。"""
+
+    def __init__(self, cookies):
+        self._cookies = cookies
+
+        class _Ctx:
+            async def cookies(_self, url):
+                return list(cookies)
+
+        self._context = _Ctx()
+
+
+class FollowableRedirectTests(unittest.IsolatedAsyncioTestCase):
+    """_get の redirect 追従判定（Codex #145 P1）。same-host のみ・http→https upgrade は許可。"""
+
+    def _cls(self):
+        return SCANNERS["clickjacking"]
+
+    def test_same_host_same_scheme_follows(self):
+        f = self._cls()._followable_redirect
+        self.assertTrue(f("http://h/a", "http://h/b"))
+
+    def test_default_port_equals_explicit(self):
+        # http://h → http://h:80 は同一（P2d：canonical redirect を cross-origin 誤判定しない）。
+        f = self._cls()._followable_redirect
+        self.assertTrue(f("http://h/a", "http://h:80/a"))
+        self.assertTrue(f("https://h/a", "https://h:443/a"))
+
+    def test_http_to_https_upgrade_follows(self):
+        # 攻撃対象が canonical HTTPS へ 301 する通常ケースを追従する（P1）。
+        f = self._cls()._followable_redirect
+        self.assertTrue(f("http://h/page", "https://h/page"))
+
+    def test_https_to_http_downgrade_blocked(self):
+        f = self._cls()._followable_redirect
+        self.assertFalse(f("https://h/page", "http://h/page"))
+
+    def test_different_host_blocked(self):
+        # 別ホストへは追従しない（認証情報の漏洩防止）。
+        f = self._cls()._followable_redirect
+        self.assertFalse(f("http://h/a", "http://evil/a"))
+        self.assertFalse(f("http://h/a", "https://evil/a"))
+
+    def test_different_port_same_scheme_blocked(self):
+        f = self._cls()._followable_redirect
+        self.assertFalse(f("http://h:8000/a", "http://h:9000/a"))
+
+
+class WorkerCookieHeaderTests(unittest.IsolatedAsyncioTestCase):
+    """_worker_cookie_header が同名・別 path Cookie を潰さず RFC6265 §5.4 順で返す（Codex #145 P2）。"""
+
+    def _scanner(self, cookies):
+        engine = _FakeEngine()
+        engine.browser = _CookieCtxBrowser(cookies)
+        return SCANNERS["clickjacking"](engine)
+
+    async def test_duplicate_name_paths_preserved_longest_first(self):
+        scanner = self._scanner([
+            {"name": "session", "value": "root", "path": "/"},
+            {"name": "session", "value": "admin", "path": "/admin"},
+        ])
+        header = await scanner._worker_cookie_header("http://h/admin/x")
+        # 両方保持し、より具体的な /admin（長い path）を先頭に。
+        self.assertEqual(header, "session=admin; session=root")
+
+    async def test_single_cookie(self):
+        scanner = self._scanner([{"name": "a", "value": "1", "path": "/"}])
+        self.assertEqual(await scanner._worker_cookie_header("http://h/"), "a=1")
+
+    async def test_no_cookies_is_none(self):
+        scanner = self._scanner([])
+        self.assertIsNone(await scanner._worker_cookie_header("http://h/"))
+
+    async def test_missing_context_is_none(self):
+        engine = _FakeEngine()
+        engine.browser = object()  # _context 属性なし
+        scanner = SCANNERS["clickjacking"](engine)
+        self.assertIsNone(await scanner._worker_cookie_header("http://h/"))
+
+
 if __name__ == "__main__":
     unittest.main()
 
