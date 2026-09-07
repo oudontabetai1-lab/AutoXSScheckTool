@@ -40,20 +40,7 @@ def _write_qr(path, text: str = _URI, fmt: str = ".png") -> None:
     path.write_bytes(buf.tobytes())
 
 
-def _skip_if_detector_flaky():
-    """この cv2 ビルドの QRCodeDetector が round-trip できないなら skip（環境差吸収）。"""
-    import tempfile
-    from pathlib import Path
-
-    with tempfile.TemporaryDirectory() as d:
-        p = Path(d) / "probe.png"
-        _write_qr(p)
-        if decode_qr_image(str(p)) != _URI:
-            pytest.skip("この cv2 ビルドの QRCodeDetector が round-trip 不可")
-
-
 def test_decode_qr_from_png(tmp_path):
-    _skip_if_detector_flaky()
     p = tmp_path / "totp.png"
     _write_qr(p)
     assert decode_qr_image(str(p)) == _URI
@@ -61,14 +48,12 @@ def test_decode_qr_from_png(tmp_path):
 
 def test_decode_qr_unicode_path(tmp_path):
     """非ASCII（日本語）パスでもデコードできる（imread のパス依存を回避した回帰）。"""
-    _skip_if_detector_flaky()
     p = tmp_path / "認証コード_テスト.png"
     _write_qr(p)
     assert decode_qr_image(str(p)) == _URI
 
 
 def test_decode_qr_path_with_space(tmp_path):
-    _skip_if_detector_flaky()
     p = tmp_path / "my totp qr.png"
     _write_qr(p)
     assert decode_qr_image(str(p)) == _URI
@@ -76,29 +61,27 @@ def test_decode_qr_path_with_space(tmp_path):
 
 def test_decode_qr_tilde_expansion(tmp_path, monkeypatch):
     """`~/...` の home 展開（is_file 前に expanduser する回帰）。"""
-    _skip_if_detector_flaky()
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("USERPROFILE", str(tmp_path))  # Windows 保険
     _write_qr(tmp_path / "t.png")
     assert decode_qr_image("~/t.png") == _URI
 
 
-def test_decode_qr_webp_fallback(tmp_path):
+def test_decode_qr_webp_fallback(tmp_path, monkeypatch):
     """cv2 が苦手な形式でも PIL フォールバックで読める（形式非依存化の回帰）。"""
     Image = pytest.importorskip("PIL.Image")
-    _skip_if_detector_flaky()
     arr = _qr_bgr(_URI)  # QRCodeEncoder はグレースケール(2D)を返す
     p = tmp_path / "totp.webp"
     try:
         Image.fromarray(arr).save(p, format="WEBP", lossless=True)
     except Exception:
         pytest.skip("PIL WEBP 書き出し不可")
+    monkeypatch.setattr(cv2, "imdecode", lambda *args: None)
     assert decode_qr_image(str(p)) == _URI
 
 
 def test_resolve_totp_secret_from_qr_end_to_end(tmp_path):
     """QR → resolve_totp_secret → generate_totp の一気通貫（実利用経路）。"""
-    _skip_if_detector_flaky()
     p = tmp_path / "totp.png"
     _write_qr(p)
     resolved = resolve_totp_secret(qr=str(p))

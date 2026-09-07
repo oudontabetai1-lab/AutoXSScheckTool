@@ -182,19 +182,30 @@ def decode_qr_image(path: str) -> Optional[str]:
         # ~ と環境変数を展開する（`~/totp.png` や `$HOME/...` を is_file 前に解決）。
         resolved = Path(os.path.expandvars(os.path.expanduser(raw)))
         if not resolved.is_file():
-            _log.warning("TOTP QR 画像が見つかりません: %s", raw)
+            _log.warning("TOTP QR 画像が見つかりません。指定したファイルを確認してください")
             return None
         try:
             data_bytes = resolved.read_bytes()
         except Exception:
-            _log.warning("TOTP QR 画像を読み込めません（権限/破損の可能性）: %s", resolved)
+            _log.warning("TOTP QR 画像を読み込めません（権限/破損の可能性）")
+            return None
+        # Pillow だけでは QR を検出できない。画像形式の診断より先に確認する。
+        try:
+            import cv2  # type: ignore
+
+            if not callable(getattr(cv2, "QRCodeDetector", None)):
+                raise ImportError("QRCodeDetector unavailable")
+        except Exception:
+            _log.warning(
+                "QR デコーダ（opencv-python）を利用できません。"
+                "`pip install opencv-python` するか --mfa-totp-uri/--mfa-totp-secret を指定してください"
+            )
             return None
         image = _load_image_bgr(data_bytes)
         if image is None:
             _log.warning(
-                "TOTP QR 画像をデコードできません（対応形式は PNG/JPG 等。WEBP/HEIC/SVG や"
-                "破損ファイルは不可）。--mfa-totp-uri か --mfa-totp-secret での指定を検討してください: %s",
-                resolved,
+                "TOTP QR 画像をデコードできません（破損または未対応形式の可能性）。"
+                "PNG/JPG に変換するか --mfa-totp-uri/--mfa-totp-secret での指定を検討してください",
             )
             return None
         text = _detect_qr_text(image)
@@ -202,8 +213,7 @@ def decode_qr_image(path: str) -> Optional[str]:
             return text
         _log.warning(
             "画像は読み込めましたが QR コードを検出できませんでした（画質/トリミングを確認、"
-            "または --mfa-totp-uri/--mfa-totp-secret を使用してください）: %s",
-            resolved,
+            "または --mfa-totp-uri/--mfa-totp-secret を使用してください）",
         )
         return None
     except Exception:

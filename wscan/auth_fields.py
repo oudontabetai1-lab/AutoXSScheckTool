@@ -136,10 +136,18 @@ def find_username_field(html: str) -> Optional[str]:
 
 
 def _short_code(attrs: dict[str, str]) -> bool:
-    if attrs.get("inputmode") != "numeric" and "pattern" not in attrs:
-        return False
     length = attrs.get("maxlength")
-    return length is None or bool(re.fullmatch(r"0*[1-8]", length))
+    if length is not None and not re.fullmatch(r"0*[1-8]", length):
+        return False
+    if attrs.get("inputmode", "").lower() == "numeric":
+        return True
+    # 任意の pattern は OTP の根拠にならない。短い数字列だけを許す既知の
+    # 形式に限定し、ページ由来の正規表現そのものは実行しない。
+    pattern = re.fullmatch(
+        r"\^?(?:\[0-9\]|\\d)\{([1-8])(?:,([1-8]))?\}\$?",
+        attrs.get("pattern", ""),
+    )
+    return bool(pattern and (pattern[2] is None or pattern[1] <= pattern[2]))
 
 
 def find_otp_field(html: str) -> Optional[str]:

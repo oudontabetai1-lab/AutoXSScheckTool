@@ -130,3 +130,16 @@ def test_fixture_login_totp_and_safe_twins(monkeypatch):
             assert find_otp_field(safe.text) is None
     with TestClient(create_app()) as other:
         assert other.get("/dashboard").status_code == 401
+
+
+@pytest.mark.parametrize("pattern", [
+    "[A-Za-z]+", "[A-Z]{6}", ".*", "", "[0-9]+", "[0-9]{9}",
+    "[0-9]{1,99}", "[0-9]{8,6}", "[0-9]{6}|[A-Z]+", "[0-9]{" + "9" * 5000 + "}",
+])
+def test_otp_rejects_unrelated_or_unbounded_patterns(pattern):
+    assert find_otp_field(f'<input pattern="{pattern}">') is None
+
+
+@pytest.mark.parametrize("pattern", [r"[0-9]{6}", r"\d{6}", r"^[0-9]{6}$", r"\d{4,8}"])
+def test_otp_accepts_bounded_numeric_patterns(pattern):
+    assert find_otp_field(f'<input pattern="{pattern}">') == "input[pattern]"
