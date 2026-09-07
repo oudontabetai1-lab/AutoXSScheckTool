@@ -1457,7 +1457,13 @@ class BaseScanner(ABC):
     def _origin(url: str):
         from urllib.parse import urlparse
         p = urlparse(url)
-        return (p.scheme, p.hostname, p.port)
+        scheme = (p.scheme or "").lower()
+        # 明示ポート省略（None）と既定ポート（80/443）を同一 origin と扱う。
+        # そうしないと http://h/ → http://h:80/ の same-origin redirect を cross-origin と
+        # 誤判定し、追従を止めた 3xx を document として監査してしまう（Codex #145 P2d）。
+        default_port = {"http": 80, "https": 443}.get(scheme)
+        port = p.port if p.port is not None else default_port
+        return (scheme, (p.hostname or "").lower(), port)
 
     async def _worker_cookies_for(self, url: str):
         """現在の worker ブラウザ context の Cookie を URL スコープで取り出す（Codex #145 P2）。
@@ -1507,8 +1513,14 @@ class BaseScanner(ABC):
                 # hop ごとに worker context の URL スコープ Cookie で入れ替える。
                 ck = await self._worker_cookies_for(u)
                 client.cookies = httpx.Cookies(ck or {})
+                # include_cookie=False: engine.cookies を生 Cookie ヘッダとして載せない。
+                # 載せると worker context の URL スコープ jar を上書きし、別スコープの Cookie を
+                # 別 origin/パスへ送りうる（Codex #145 P2c）。Cookie は上の client.cookies に一本化。
                 return await client.get(
-                    u, headers=self.auth_headers_for_url(u) if _has_auth else None
+                    u,
+                    headers=self.auth_headers_for_url(u, include_cookie=False)
+                    if _has_auth
+                    else None,
                 )
 
             current = url
@@ -1531,6 +1543,15 @@ class BaseScanner(ABC):
         """対象ページの request/response pair を返す。直接 GET 優先・失敗時のみ network fallback。"""
         try:
             response = await self._get(url)
+            # same-origin 追従後もなお 3xx（cross-origin redirect で追従を止めた・hop 上限到達）なら、
+            # それは document ではなく redirect レスポンス。その欠落ヘッダ（X-Frame-Options/CSP 等）を
+            # document の欠落と誤って監査すると FP になる。status を持たない pair を返し、観測系
+            # スキャナに「document 未取得（NOT_REACHED）」として扱わせる（Codex #145 P2d）。
+            if 300 <= response.status_code < 400:
+                return {
+                    "request": {"url": url, "method": "GET"},
+                    "response": {"url": str(response.url), "headers": {}, "body": ""},
+                }
             return {
                 "request": {"url": url, "method": "GET"},
                 "response": {
