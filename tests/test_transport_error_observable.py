@@ -501,13 +501,13 @@ class SecurityHeadersFetchEvidenceTests(unittest.IsolatedAsyncioTestCase):
 
 
 class _CookieCtxBrowser:
-    """context.cookies(url) が同名・別 path Cookie を返す最小ブラウザ context（P2 回帰）。"""
+    """context.cookies() が同名・別 path/secure Cookie を返す最小ブラウザ context（P2 回帰）。"""
 
     def __init__(self, cookies):
         self._cookies = cookies
 
         class _Ctx:
-            async def cookies(_self, url):
+            async def cookies(_self, *a, **k):
                 return list(cookies)
 
         self._context = _Ctx()
@@ -549,36 +549,60 @@ class FollowableRedirectTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(f("http://h:8000/a", "http://h:9000/a"))
 
 
-class WorkerCookieHeaderTests(unittest.IsolatedAsyncioTestCase):
-    """_worker_cookie_header が同名・別 path Cookie を潰さず RFC6265 §5.4 順で返す（Codex #145 P2）。"""
+class BuildCookieJarTests(unittest.IsolatedAsyncioTestCase):
+    """_build_cookie_jar_for が同名・別 path/secure/別ホスト Cookie を http.cookiejar で正しく扱う
+    （Codex #145 P2/round4）。jar が送る Cookie ヘッダで検証する。"""
 
     def _scanner(self, cookies):
         engine = _FakeEngine()
         engine.browser = _CookieCtxBrowser(cookies)
         return SCANNERS["clickjacking"](engine)
 
+    def _cookie_header(self, jar, url):
+        """jar が url へ送る Cookie ヘッダ文字列（http.cookiejar 経由）を得る。"""
+        import httpx
+        req = httpx.Request("GET", url)
+        jar.set_cookie_header(req)
+        return req.headers.get("cookie")
+
     async def test_duplicate_name_paths_preserved_longest_first(self):
         scanner = self._scanner([
-            {"name": "session", "value": "root", "path": "/"},
-            {"name": "session", "value": "admin", "path": "/admin"},
+            {"name": "session", "value": "root", "path": "/", "domain": "app.test"},
+            {"name": "session", "value": "admin", "path": "/admin", "domain": "app.test"},
         ])
-        header = await scanner._worker_cookie_header("http://h/admin/x")
-        # 両方保持し、より具体的な /admin（長い path）を先頭に。
+        jar = await scanner._build_cookie_jar_for("http://app.test/admin/x")
+        header = self._cookie_header(jar, "http://app.test/admin/x")
+        # 両方保持し、より具体的な /admin（長い path）を先頭に（RFC6265 §5.4）。
         self.assertEqual(header, "session=admin; session=root")
 
-    async def test_single_cookie(self):
-        scanner = self._scanner([{"name": "a", "value": "1", "path": "/"}])
-        self.assertEqual(await scanner._worker_cookie_header("http://h/"), "a=1")
+    async def test_secure_cookie_withheld_on_http_sent_on_https(self):
+        scanner = self._scanner([
+            {"name": "sid", "value": "s", "path": "/", "domain": "app.test", "secure": True},
+        ])
+        jar = await scanner._build_cookie_jar_for("http://app.test/")
+        # secure Cookie は http では出さず、https upgrade hop でのみ送る。
+        self.assertIsNone(self._cookie_header(jar, "http://app.test/"))
+        self.assertEqual(self._cookie_header(jar, "https://app.test/"), "sid=s")
 
-    async def test_no_cookies_is_none(self):
+    async def test_other_host_cookie_excluded(self):
+        scanner = self._scanner([
+            {"name": "a", "value": "1", "path": "/", "domain": "other.test"},
+            {"name": "b", "value": "2", "path": "/", "domain": "app.test"},
+        ])
+        jar = await scanner._build_cookie_jar_for("http://app.test/")
+        self.assertEqual(self._cookie_header(jar, "http://app.test/"), "b=2")
+
+    async def test_no_cookies_empty_jar(self):
         scanner = self._scanner([])
-        self.assertIsNone(await scanner._worker_cookie_header("http://h/"))
+        jar = await scanner._build_cookie_jar_for("http://app.test/")
+        self.assertIsNone(self._cookie_header(jar, "http://app.test/"))
 
-    async def test_missing_context_is_none(self):
+    async def test_missing_context_empty_jar(self):
         engine = _FakeEngine()
         engine.browser = object()  # _context 属性なし
         scanner = SCANNERS["clickjacking"](engine)
-        self.assertIsNone(await scanner._worker_cookie_header("http://h/"))
+        jar = await scanner._build_cookie_jar_for("http://app.test/")
+        self.assertIsNone(self._cookie_header(jar, "http://app.test/"))
 
 
 if __name__ == "__main__":

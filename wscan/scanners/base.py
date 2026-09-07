@@ -1480,37 +1480,63 @@ class BaseScanner(ABC):
             return s_port == d_port
         return s_scheme == "http" and d_scheme == "https"
 
-    async def _worker_cookie_header(self, url: str):
-        """worker ブラウザ context の URL スコープ Cookie を RFC6265 §5.4 順の Cookie ヘッダで返す。
+    async def _build_cookie_jar_for(self, url: str):
+        """worker ブラウザ context の Cookie を target host に絞った httpx Cookie jar として構築する。
 
         並行モードでは _attack_one_page が per-page cookie 同期を省くため、global な
-        engine.cookies スナップショットではなく worker context の実 Cookie jar を使う（Codex #145 P2c）。
-        Playwright の ``context.cookies(url)`` は URL 一致（domain+path）の Cookie のみ返す。
-        dict 内包で {name: value} に潰すと ``session`` が / と /admin に両方ある等の**同名・別 path**
-        Cookie を1つに落とし、誤ったセッション（root cookie）で検査して 401/別アカウント応答を
-        監査しうる（Codex #145 P2）。そのため path の長い順に並べ、同名 Cookie を両方保持した生
-        ヘッダ文字列を組む（engine._sync_cookies_for_url と同じ RFC6265 §5.4 の並び）。取得不能
-        （テスト用 fake browser 等）や一致なしのときは None（未認証扱い）。
+        engine.cookies スナップショットではなく worker context の実 Cookie を使う（Codex #145 P2c）。
+        生ヘッダ手組みではなく ``http.cookiejar`` に載せることで以下を全てネイティブに扱う:
+          - 同名・別 path Cookie（``session`` が / と /admin 等）の**両方保持＋RFC6265 §5.4 順**
+            （生ヘッダ手組みだと同名を潰しやすい・Codex #145 P2）。
+          - redirect 応答の ``Set-Cookie`` を **hop 間で蓄積**（httpx client が response から
+            client.cookies へ取り込み、次 hop で送る＝session rotation を追従・Codex #145 P2）。
+          - ``secure`` Cookie の **https 限定送出**（http hop では出さず、承認した http→https
+            upgrade hop でのみ送る）。
+        target host に一致する Cookie のみ載せる（host-only は完全一致、domain-cookie は suffix）。
+        取得不能（テスト用 fake browser 等）や host 不明なら空 jar（未認証扱い）。
         """
+        import http.cookiejar as _cj
+        from urllib.parse import urlparse
+
+        jar = httpx.Cookies()
         ctx = getattr(getattr(self, "browser", None), "_context", None)
         if ctx is None:
-            return None
+            return jar
+        host = (urlparse(url).hostname or "").lower()
+        if not host:
+            return jar
         try:
-            cks = await ctx.cookies(url)  # Playwright が URL に一致する Cookie だけ返す
+            cookies = await ctx.cookies()  # context の全 Cookie（属性込み）
         except Exception:
-            return None
-        if not cks:
-            return None
-        # path の長いものを先頭に（同名 Cookie は / より /admin を先に）。stable sort。
-        ordered = sorted(
-            cks, key=lambda c: len(str(c.get("path", "/") or "/")), reverse=True
-        )
-        parts = [
-            f"{c['name']}={c.get('value', '')}"
-            for c in ordered
-            if c.get("name")
-        ]
-        return "; ".join(parts) or None
+            return jar
+        for c in cookies or []:
+            name = c.get("name")
+            if not name:
+                continue
+            raw_dom = str(c.get("domain", "") or "")
+            is_domain_cookie = raw_dom.startswith(".")
+            dom_norm = raw_dom.lstrip(".").lower()
+            # target host に一致しない Cookie は載せない（別ホストの Cookie を送らない）。
+            if dom_norm and not (
+                host == dom_norm
+                or (is_domain_cookie and host.endswith("." + dom_norm))
+            ):
+                continue
+            try:
+                jar.jar.set_cookie(
+                    _cj.Cookie(
+                        version=0, name=name, value=str(c.get("value", "") or ""),
+                        port=None, port_specified=False,
+                        domain=raw_dom, domain_specified=bool(raw_dom),
+                        domain_initial_dot=is_domain_cookie,
+                        path=str(c.get("path", "/") or "/"), path_specified=True,
+                        secure=bool(c.get("secure")), expires=None, discard=True,
+                        comment=None, comment_url=None, rest={}, rfc2109=False,
+                    )
+                )
+            except Exception:
+                continue
+        return jar
 
     async def _get(self, url: str):
         """対象 URL の GET レスポンスを直接取得する（page 観測系スキャナ共有）。
@@ -1521,8 +1547,11 @@ class BaseScanner(ABC):
 
         redirect は httpx の自動追従を無効化し、**same-host のみ手動で追従**する（http→https の
         canonical upgrade は許可・別ホスト/ダウングレードは遮断）。別ホストへ追従すると初期 URL に
-        しかスコープされない認証ヘッダ/Cookie が別 origin へ漏れる（Codex #145 P1）。追従時は hop
-        ごとに Cookie/ヘッダを URL 再スコープし、canonical redirect の最終ドキュメントを観測する。
+        しかスコープされない認証ヘッダ/Cookie が別 origin へ漏れる（Codex #145 P1）。
+        認証ヘッダは in-scope の元 url から一度だけ算出して全 hop で再利用する。承認した
+        http→https upgrade は host_scope 外となり per-hop 再算出だと scoped auth を落とすため
+        （Codex #145 P1 round4）。Cookie は client.cookies（http.cookiejar）が host 一致分を
+        hop ごとに送り、各応答の Set-Cookie を蓄積する（session rotation を追従・P2 round4）。
         追従しきれずなお 3xx なら _response_pair 側で document 扱いしない（Codex #145 P2d）。
         """
         proxy = getattr(self.engine, "proxy", "") or None
@@ -1535,21 +1564,25 @@ class BaseScanner(ABC):
         # engine.httpx_client_kwargs が上書きしても、認証情報の漏洩防止のため必ず無効化する。
         kwargs["follow_redirects"] = False
         _has_auth = hasattr(self.engine, "auth_headers")
+        # 認証ヘッダは in-scope の元 url から算出し全 same-host hop で再利用（承認 upgrade でも
+        # scoped credential を落とさない）。include_cookie=False で global engine.cookies を
+        # 生 Cookie ヘッダとして載せない（Cookie は下の jar に一本化・Codex #145 P2c）。
+        base_auth = (
+            dict(self.auth_headers_for_url(url, include_cookie=False))
+            if _has_auth
+            else None
+        )
         async with httpx.AsyncClient(**kwargs) as client:
             from urllib.parse import urljoin
 
+            client.cookies = await self._build_cookie_jar_for(url)
+
             async def _fetch(u: str):
-                headers: dict = {}
-                if _has_auth:
-                    # include_cookie=False: global engine.cookies を生 Cookie ヘッダとして
-                    # 載せない（別スコープ Cookie を別 origin/path へ送りうる・Codex #145 P2c）。
-                    headers.update(self.auth_headers_for_url(u, include_cookie=False))
-                # Cookie は worker context の URL スコープ・重複保持ヘッダで一本化する（P2/P2c）。
-                # client jar は使わない（per-request cookies= deprecated かつ同名 Cookie を潰すため）。
-                ck = await self._worker_cookie_header(u)
-                if ck:
-                    headers["Cookie"] = ck
-                return await client.get(u, headers=headers or None)
+                # Cookie は client.cookies（http.cookiejar）が host/path/secure 一致で送り、
+                # 応答の Set-Cookie を蓄積する。auth は in-scope の base_auth を再利用。
+                return await client.get(
+                    u, headers=dict(base_auth) if base_auth else None
+                )
 
             current = url
             response = await _fetch(current)
