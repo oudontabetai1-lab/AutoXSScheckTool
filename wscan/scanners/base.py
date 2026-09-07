@@ -1453,20 +1453,43 @@ class BaseScanner(ABC):
             return latest_for_url(url, match_query=False) or {}
         return network.latest() or {}
 
+    @staticmethod
+    def _origin(url: str):
+        from urllib.parse import urlparse
+        p = urlparse(url)
+        return (p.scheme, p.hostname, p.port)
+
+    async def _worker_cookies_for(self, url: str):
+        """現在の worker ブラウザ context の Cookie を URL スコープで取り出す（Codex #145 P2）。
+
+        並行モードでは _attack_one_page が per-page cookie 同期を省くため、global な
+        engine.cookies スナップショットではなく worker context の実 Cookie jar を使う。取得できない
+        （テスト用 fake browser 等）ときは None（未認証扱い）。
+        """
+        ctx = getattr(getattr(self, "browser", None), "_context", None)
+        if ctx is None:
+            return None
+        try:
+            cks = await ctx.cookies(url)  # Playwright が URL に一致する Cookie だけ返す
+            return {c["name"]: c["value"] for c in cks} or None
+        except Exception:
+            return None
+
     async def _get(self, url: str):
         """対象 URL の GET レスポンスを直接取得する（page 観測系スキャナ共有）。
 
         ブラウザの network capture（current_page_pair）は latest() フォールバックで別リクエスト
         （asset/別ページ）の pair を返し、ヘッダ観測系（clickjacking/security_headers 等）が誤った
         ヘッダを見て FP/FN を出しうる。直接 httpx で取得することで対象ページの実ヘッダを確実に得る。
+
+        redirect は httpx の自動追従を無効化し、**same-origin のみ手動で追従**する。cross-origin
+        redirect を追従すると初期 URL にしかスコープされない認証ヘッダ/Cookie が別 origin へ漏れる
+        （Codex #145 P1）。追従時は hop ごとに Cookie/ヘッダを再スコープし、canonical な same-origin
+        redirect の最終ドキュメントを観測する（3xx をそのまま監査して document ヘッダ欠落を誤報告
+        しない・Codex #145 P2）。Cookie は worker context から URL スコープで取る。
         """
         proxy = getattr(self.engine, "proxy", "") or None
         timeout = getattr(self.engine, "timeout", 15)
-        # follow_redirects=False: redirect を自動追従しない。追従すると (1) auth_headers_for_url は
-        # 初期 URL にしかスコープされず、cross-origin redirect で custom 認証ヘッダ（X-API-Key 等。
-        # httpx が剥がすのは Authorization/Cookie のみ）が別 origin へ漏れる、(2) 認証 Cookie を raw
-        # Cookie ヘッダで渡すと httpx が redirect 構築時に落とし、最終応答が login/未認証ページになって
-        # 保護ページに誤 finding を出す（Codex #145 P1）。要求 URL の実応答（3xx 含む）を観測する。
         kwargs: dict = {"timeout": timeout, "follow_redirects": False}
         if hasattr(self.engine, "httpx_client_kwargs"):
             kwargs = self.engine.httpx_client_kwargs(**kwargs)
@@ -1474,10 +1497,33 @@ class BaseScanner(ABC):
             kwargs["proxy"] = proxy
         # engine.httpx_client_kwargs が上書きしても、認証情報の漏洩防止のため必ず無効化する。
         kwargs["follow_redirects"] = False
-        if hasattr(self.engine, "auth_headers"):
-            kwargs["headers"] = self.auth_headers_for_url(url)
+        _has_auth = hasattr(self.engine, "auth_headers")
+        origin = self._origin(url)
         async with httpx.AsyncClient(**kwargs) as client:
-            response = await client.get(url)
+            from urllib.parse import urljoin
+
+            async def _fetch(u: str):
+                # Cookie は client jar に設定する（per-request cookies= は httpx で deprecated）。
+                # hop ごとに worker context の URL スコープ Cookie で入れ替える。
+                ck = await self._worker_cookies_for(u)
+                client.cookies = httpx.Cookies(ck or {})
+                return await client.get(
+                    u, headers=self.auth_headers_for_url(u) if _has_auth else None
+                )
+
+            current = url
+            response = await _fetch(current)
+            hops = 0
+            while response.status_code in (301, 302, 303, 307, 308) and hops < 5:
+                loc = response.headers.get("location")
+                if not loc:
+                    break
+                target = urljoin(str(response.url), loc)
+                if self._origin(target) != origin:
+                    break  # cross-origin redirect は追従しない（認証情報の漏洩防止）
+                hops += 1
+                current = target
+                response = await _fetch(current)
             self._record_probe_status(response)
         return response
 
