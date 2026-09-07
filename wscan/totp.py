@@ -4,11 +4,15 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import logging
+import os
 import re
 import time
 from pathlib import Path
 from typing import Optional
 from urllib.parse import parse_qs, unquote, urlparse
+
+_log = logging.getLogger(__name__)
 
 
 _ALGORITHMS = {
@@ -83,18 +87,125 @@ def parse_otpauth_uri(uri: str) -> Optional[dict]:
         return None
 
 
-def decode_qr_image(path: str) -> Optional[str]:
-    """QR 画像を読み取り、埋め込まれた文字列を返す。失敗時は ``None``。"""
+def _silence_cv2() -> None:
+    """OpenCV の stderr へ出る WARN（``findDecoder`` 等）を抑制する（best-effort）。
+
+    cv2 はデコード不能を C++ 層から stderr に直接吐くため、Python の except では
+    握れず、利用者には脈絡のない WARN だけが見える。本ツールで cv2 を使うのは QR
+    デコードのみなので、ここでログレベルを下げても副作用は無い。API 差異は無視する。
+    """
     try:
-        if not path or not Path(path).is_file():
-            return None
         import cv2  # type: ignore
 
-        image = cv2.imread(path)
-        if image is None:
+        cv2.utils.logging.setLogLevel(cv2.utils.logging.LOG_LEVEL_SILENT)
+    except Exception:
+        pass
+
+
+def _load_image_bgr(data: bytes):
+    """画像バイト列を numpy BGR 配列へ復号する。読めなければ ``None``。
+
+    ``cv2.imread`` はファイルパス依存（非ASCII パスや一部ビルドで無言 ``None``）の
+    ため使わず、まず ``cv2.imdecode``（バイト経由＝パス非依存）で読む。cv2 が苦手な
+    形式（WEBP/BMP/TIFF 等）は PIL で開いて配列化して救済する。
+    """
+    if not data:
+        return None
+    try:
+        import cv2  # type: ignore
+        import numpy as np
+
+        arr = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)
+        if arr is not None:
+            return arr
+    except Exception:
+        pass
+    try:
+        import io
+
+        import numpy as np
+        from PIL import Image  # type: ignore
+
+        with Image.open(io.BytesIO(data)) as im:
+            arr = np.array(im.convert("RGB"))[:, :, ::-1].copy()  # RGB->BGR
+        return arr
+    except Exception:
+        return None
+
+
+def _detect_qr_text(image) -> Optional[str]:
+    """BGR 配列から QR 文字列を取り出す。小さい QR は拡大＋余白付与で再試行する。"""
+    try:
+        import cv2  # type: ignore
+    except Exception:
+        _log.warning(
+            "QR デコーダ（opencv-python）が見つかりません。"
+            "`pip install opencv-python` するか --mfa-totp-uri/--mfa-totp-secret を指定してください"
+        )
+        return None
+    detector = cv2.QRCodeDetector()
+    try:
+        data, _pts, _s = detector.detectAndDecode(image)
+        if isinstance(data, str) and data:
+            return data
+    except Exception:
+        pass
+    # 小さい/低解像度の QR は detectAndDecode が空を返すため、最近傍拡大＋quiet zone
+    # （白余白）を足して再検出する（スクリーンショットの小さな QR の救済）。
+    try:
+        h = int(image.shape[0]) if hasattr(image, "shape") and image.shape else 0
+        if h and h < 300:
+            scale = max(2, (300 // max(1, h)) + 1)
+            big = cv2.resize(image, None, fx=scale, fy=scale, interpolation=cv2.INTER_NEAREST)
+            big = cv2.copyMakeBorder(big, 20, 20, 20, 20, cv2.BORDER_CONSTANT, value=(255, 255, 255))
+            data, _pts, _s = detector.detectAndDecode(big)
+            if isinstance(data, str) and data:
+                return data
+    except Exception:
+        pass
+    return None
+
+
+def decode_qr_image(path: str) -> Optional[str]:
+    """QR 画像を読み取り、埋め込まれた文字列を返す。失敗時は ``None``。
+
+    ``cv2.imread`` のパス依存問題（非ASCII パス・未対応形式で無言 ``None`` を返し、
+    stderr に ``findDecoder`` WARN だけを残す）を避けるため、パス展開 → バイト読み →
+    ``imdecode``/PIL の順で堅牢に読み込み、失敗時は利用者が uri/secret へ切り替えられる
+    よう**具体的な診断**をログに残す（従来は無言で ``None`` を返すだけだった）。
+    """
+    try:
+        raw = str(path or "").strip()
+        if not raw:
             return None
-        data, _points, _straight = cv2.QRCodeDetector().detectAndDecode(image)
-        return data if isinstance(data, str) and data else None
+        _silence_cv2()
+        # ~ と環境変数を展開する（`~/totp.png` や `$HOME/...` を is_file 前に解決）。
+        resolved = Path(os.path.expandvars(os.path.expanduser(raw)))
+        if not resolved.is_file():
+            _log.warning("TOTP QR 画像が見つかりません: %s", raw)
+            return None
+        try:
+            data_bytes = resolved.read_bytes()
+        except Exception:
+            _log.warning("TOTP QR 画像を読み込めません（権限/破損の可能性）: %s", resolved)
+            return None
+        image = _load_image_bgr(data_bytes)
+        if image is None:
+            _log.warning(
+                "TOTP QR 画像をデコードできません（対応形式は PNG/JPG 等。WEBP/HEIC/SVG や"
+                "破損ファイルは不可）。--mfa-totp-uri か --mfa-totp-secret での指定を検討してください: %s",
+                resolved,
+            )
+            return None
+        text = _detect_qr_text(image)
+        if text:
+            return text
+        _log.warning(
+            "画像は読み込めましたが QR コードを検出できませんでした（画質/トリミングを確認、"
+            "または --mfa-totp-uri/--mfa-totp-secret を使用してください）: %s",
+            resolved,
+        )
+        return None
     except Exception:
         return None
 
