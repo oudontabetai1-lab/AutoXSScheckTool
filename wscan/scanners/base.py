@@ -1453,6 +1453,43 @@ class BaseScanner(ABC):
             return latest_for_url(url, match_query=False) or {}
         return network.latest() or {}
 
+    async def _get(self, url: str):
+        """対象 URL の GET レスポンスを直接取得する（page 観測系スキャナ共有）。
+
+        ブラウザの network capture（current_page_pair）は latest() フォールバックで別リクエスト
+        （asset/別ページ）の pair を返し、ヘッダ観測系（clickjacking/security_headers 等）が誤った
+        ヘッダを見て FP/FN を出しうる。直接 httpx で取得することで対象ページの実ヘッダを確実に得る。
+        """
+        proxy = getattr(self.engine, "proxy", "") or None
+        timeout = getattr(self.engine, "timeout", 15)
+        kwargs: dict = {"timeout": timeout, "follow_redirects": True}
+        if hasattr(self.engine, "httpx_client_kwargs"):
+            kwargs = self.engine.httpx_client_kwargs(**kwargs)
+        elif proxy:
+            kwargs["proxy"] = proxy
+        if hasattr(self.engine, "auth_headers"):
+            kwargs["headers"] = self.auth_headers_for_url(url)
+        async with httpx.AsyncClient(**kwargs) as client:
+            response = await client.get(url)
+            self._record_probe_status(response)
+        return response
+
+    async def _response_pair(self, url: str) -> dict:
+        """対象ページの request/response pair を返す。直接 GET 優先・失敗時のみ network fallback。"""
+        try:
+            response = await self._get(url)
+            return {
+                "request": {"url": url, "method": "GET"},
+                "response": {
+                    "url": str(response.url),
+                    "status": response.status_code,
+                    "headers": dict(response.headers),
+                    "body": response.text[:50000],
+                },
+            }
+        except Exception:
+            return self.current_page_pair(url)
+
     async def record_finding(
         self,
         url: str,

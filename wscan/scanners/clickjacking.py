@@ -101,11 +101,17 @@ class ClickjackingScanner(BaseScanner):
         if self.monitor:
             await self.monitor.emit_status(f"Clickjacking check on {url}")
 
-        pair = self.current_page_pair(url)
-        headers = {
-            k.lower(): v
-            for k, v in pair.get("response", {}).get("headers", {}).items()
-        }
+        # 対象ページのヘッダは直接 GET で確実に取得する。current_page_pair は latest() フォールバックで
+        # 別リクエスト（asset/別ページ）の pair を返し、XFO/CSP が欠落した誤ヘッダで安全ページを
+        # false positive にしうる（0034 passive benchmark で /portal/embed-safe が FP になった原因）。
+        pair = await self._response_pair(url)
+        response = pair.get("response") or {}
+        if not response or response.get("status") is None:
+            # レスポンス証拠なし（fetch 失敗）＝観測失敗。空ヘッダを「framing 保護なし」と誤判定
+            # しないよう transport_error を刻む（degraded_checks が passive case を NOT_REACHED に）。
+            self._record_scan_note(f"transport_error:{self.CHECK_TYPE}:no_response")
+            return []
+        headers = {k.lower(): v for k, v in response.get("headers", {}).items()}
 
         xfo = headers.get("x-frame-options", "").upper().strip()
         csp = headers.get("content-security-policy", "").lower()

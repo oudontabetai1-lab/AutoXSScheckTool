@@ -122,17 +122,23 @@ def test_realistic_healthcare_security_headers_scanner_scorecard():
     assert [c["classification"]["candidate"] for c in out["cases"]] == ["tp", "tn"], out
 
 
-def test_realistic_healthcare_js_static_scanner_scorecard():
-    """realistic_healthcare の js_static（first-party JS の source→sink＝passive）を実採点する（0034-R3）。
+def test_realistic_healthcare_page_observation_scanner_scorecard():
+    """realistic_healthcare の clickjacking / js_static（page 観測系＝passive）を実採点する（0034-R3）。
 
-    /portal/notice（location.search→innerHTML）=TP・/portal/notice-safe（安全ツイン）=TN。
-    passive(page観測系)採点の 2 つ目の check としての回帰でもある。
+    clickjacking /portal/embed=TP・/portal/embed-safe（XFO DENY + frame-ancestors 'none'）=TN、
+    js_static /portal/notice（location.search→innerHTML）=TP・/portal/notice-safe=TN。
+    clickjacking の安全ツイン TN は、ヘッダ取得を current_page_pair から直接 GET(_response_pair)へ
+    変えて FP を解消した回帰ガードでもある。manifest 順（clickjacking→js_static、各 vuln→safe）。
     """
     _require_chromium()
-    out = _run_manifest("realistic_healthcare_page_observation.yaml", {"js_static"})
+    out = _run_manifest(
+        "realistic_healthcare_page_observation.yaml", {"clickjacking", "js_static"}
+    )
     assert "run_error" not in out, out
-    assert out["case_counts"] == {"planned": 2, "completed": 2, "incomplete": 0}
-    assert [c["classification"]["candidate"] for c in out["cases"]] == ["tp", "tn"], out
+    assert out["case_counts"] == {"planned": 4, "completed": 4, "incomplete": 0}
+    assert [c["classification"]["candidate"] for c in out["cases"]] == [
+        "tp", "tn", "tp", "tn",
+    ], out
 
 
 def test_realistic_healthcare_page_batch2_scanner_scorecard():

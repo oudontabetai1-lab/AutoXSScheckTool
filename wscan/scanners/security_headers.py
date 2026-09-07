@@ -16,8 +16,6 @@ Evaluated headers:
 import re
 from typing import TYPE_CHECKING
 
-import httpx
-
 from wscan.scanner_contract import (
     CapabilityState, Carrier, CarrierCapability, CostClass, ExecutionKind,
     PayloadShape, Prerequisite, ScannerContract, StateChangeClass, TransportKind,
@@ -286,32 +284,4 @@ class SecurityHeadersScanner(BaseScanner):
 
         return None
 
-    async def _get(self, url: str):
-        proxy = getattr(self.engine, "proxy", "") or None
-        timeout = getattr(self.engine, "timeout", 15)
-        kwargs: dict = {"timeout": timeout, "follow_redirects": True}
-        if hasattr(self.engine, "httpx_client_kwargs"):
-            kwargs = self.engine.httpx_client_kwargs(**kwargs)
-        elif proxy:
-            kwargs["proxy"] = proxy
-        if hasattr(self.engine, "auth_headers"):
-            kwargs["headers"] = self.auth_headers_for_url(url)
-        async with httpx.AsyncClient(**kwargs) as client:
-            response = await client.get(url)
-            self._record_probe_status(response)
-        return response
-
-    async def _response_pair(self, url: str) -> dict:
-        try:
-            response = await self._get(url)
-            return {
-                "request": {"url": url, "method": "GET"},
-                "response": {
-                    "url": str(response.url),
-                    "status": response.status_code,
-                    "headers": dict(response.headers),
-                    "body": response.text[:50000],
-                },
-            }
-        except Exception:
-            return self.current_page_pair(url)
+    # _get / _response_pair は BaseScanner の共有ヘルパー（page 観測系スキャナで再利用）。

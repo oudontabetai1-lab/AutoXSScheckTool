@@ -204,6 +204,8 @@ _NAV = [
     ('/portal/insights', 'Insights'),
     ('/portal/notice', 'Notices'),
     ('/portal/notice-safe', 'Notices (safe)'),
+    ('/portal/embed', 'Embed'),
+    ('/portal/embed-safe', 'Embed (safe)'),
     ('/account/reset', 'Account'),
     ('/account/reset-safe', 'Account reset (safe)'),
     ('/api/v1/records/export', 'Records export'),

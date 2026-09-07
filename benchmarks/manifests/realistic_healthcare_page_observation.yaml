@@ -4,14 +4,31 @@ fixture_id: realistic_healthcare
 runner_profile: scan_engine
 mode: normal-deterministic
 source_kind: first_party
-# page 観測系（passive）check: js_static（first-party JS の source→sink 静的解析）。注入点を持たず
-# ページ/レスポンス自体を観測するため injection を宣言せず、match は canonical page identity
-# （field="(page)"/location="page-level"）で宣言する。scorer は passive case を (check, path) で
-# 採点し、exercised は scan_page の page-level 行を要求する（page-level スキャナが実走した genuine な
-# 証拠）。EXPECTED_FINDINGS / SAFE_ENDPOINTS（field=None）を正本にする。
-# 注: clickjacking（安全ツイン candidate FP）・sri（脆弱 candidate FN）は E2E で scanner 側の
-# precision/recall 課題が判明したため本ゲートには含めない（別途 scanner 修正が要る）。
+# page 観測系（passive）check: js_static（first-party JS の source→sink）・clickjacking（framing
+# 保護ヘッダ欠落）。注入点を持たずページ/レスポンス自体を観測するため injection を宣言せず、match は
+# canonical page identity（field="(page)"/location="page-level"）で宣言する。scorer は passive case を
+# (check, path) で採点し、exercised は scan_page の page-level 行を要求する（page-level スキャナが
+# 実走した genuine な証拠）。EXPECTED_FINDINGS / SAFE_ENDPOINTS（field=None）を正本にする。
+# 注: sri（脆弱 candidate FN）は E2E で scanner recall 課題が判明したため本ゲートには含めない。
 cases:
+  # ── clickjacking（X-Frame-Options / CSP frame-ancestors 欠落）──────────────
+  - case_id: realistic_healthcare_page_observation.clickjacking.embed.vulnerable
+    expected: vulnerable
+    check: clickjacking
+    request: {method: GET, path: /portal/embed}
+    match: {path: /portal/embed, field: "(page)", location: page-level}
+    twin_id: realistic_healthcare_page_observation.clickjacking.embed_safe.safe
+    taxonomy: [misconfiguration, unauthenticated]
+    gate: observed
+  - case_id: realistic_healthcare_page_observation.clickjacking.embed_safe.safe
+    expected: safe
+    check: clickjacking
+    request: {method: GET, path: /portal/embed-safe}
+    match: {path: /portal/embed-safe, field: "(page)", location: page-level}
+    twin_id: realistic_healthcare_page_observation.clickjacking.embed.vulnerable
+    taxonomy: [misconfiguration, unauthenticated]
+    gate: observed
+
   # ── js_static（first-party JS の source→sink: location.search→innerHTML）───
   - case_id: realistic_healthcare_page_observation.js_static.notice.vulnerable
     expected: vulnerable

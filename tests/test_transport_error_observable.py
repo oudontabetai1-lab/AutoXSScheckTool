@@ -385,6 +385,72 @@ class UrlParamDeliveryFlagTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(await self._run(nav_ok=True, nav_status=200, prior=False))
 
 
+class ClickjackingHeaderEvidenceTests(unittest.IsolatedAsyncioTestCase):
+    """clickjacking は対象ページの実ヘッダ（直接 GET）で framing 保護を判定する（0034 FP 修正）。
+
+    XFO: DENY または CSP frame-ancestors があれば安全（finding なし）。current_page_pair の
+    latest() フォールバックで別リクエストの誤ヘッダを掴んで安全ページを FP にしない。
+    """
+
+    def _scanner(self):
+        engine = _FakeEngine()
+        engine.browser.network = None
+        return engine, SCANNERS["clickjacking"](engine)
+
+    async def _run(self, resp_headers):
+        engine, scanner = self._scanner()
+
+        async def _pair(url):
+            return {"request": {"url": url}, "response": {"status": 200, "headers": resp_headers}}
+
+        scanner._response_pair = _pair
+        recorded = []
+
+        async def _rec(**kw):
+            recorded.append(kw)
+            return object()
+
+        scanner.record_finding = _rec
+        out = await scanner.scan_page("http://x/portal/embed")
+        return recorded, engine
+
+    async def test_xfo_deny_is_safe(self):
+        recorded, _ = await self._run({"X-Frame-Options": "DENY"})
+        self.assertFalse(recorded)  # 保護あり＝finding なし（FP を出さない）
+
+    async def test_csp_frame_ancestors_is_safe(self):
+        recorded, _ = await self._run(
+            {"Content-Security-Policy": "default-src 'self'; frame-ancestors 'none'"}
+        )
+        self.assertFalse(recorded)
+
+    async def test_full_secure_headers_is_safe(self):
+        # /portal/embed-safe 相当（XFO DENY と frame-ancestors 'none' 両方）＝安全。
+        recorded, _ = await self._run(
+            {"X-Frame-Options": "DENY",
+             "Content-Security-Policy": "default-src 'self'; frame-ancestors 'none'"}
+        )
+        self.assertFalse(recorded)
+
+    async def test_no_framing_protection_is_vulnerable(self):
+        recorded, _ = await self._run({"Content-Security-Policy": "default-src 'self'"})
+        self.assertTrue(recorded)  # framing 保護なし＝finding
+
+    async def test_no_response_records_transport_error(self):
+        engine, scanner = self._scanner()
+
+        async def _empty(url):
+            return {}
+
+        scanner._response_pair = _empty
+        out = await scanner.scan_page("http://x/portal/embed")
+        self.assertEqual(out, [])
+        self.assertTrue(
+            any(e.startswith("transport_error:clickjacking:") for e in engine.wave_errors),
+            engine.wave_errors,
+        )
+
+
 class SecurityHeadersFetchEvidenceTests(unittest.IsolatedAsyncioTestCase):
     """security_headers は「レスポンス証拠の欠如」で観測失敗を判定し、空ヘッダは監査する
     （Codex #142 P1/P2）。空レスポンス→transport_error、valid だが空ヘッダ→監査（note なし）。
