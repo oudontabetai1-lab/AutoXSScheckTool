@@ -1579,6 +1579,20 @@ class BaseScanner(ABC):
             if _has_auth
             else None
         )
+        # Chromium navigation と同じ document request ヘッダ（UA/Accept 系）を再現し、UA/Accept で
+        # 応答を出し分ける origin/CDN で bot/error 変種を掴んで FP/FN を出さないようにする
+        # （Codex #145 P2 round6）。auth ヘッダが優先（ユーザ指定 UA 等があればそちらを尊重）。
+        req_headers: dict = {}
+        _ua = getattr(getattr(self, "browser", None), "DEFAULT_USER_AGENT", "") or ""
+        if _ua:
+            req_headers["User-Agent"] = _ua
+            req_headers["Accept"] = (
+                "text/html,application/xhtml+xml,application/xml;q=0.9,"
+                "image/avif,image/webp,*/*;q=0.8"
+            )
+            req_headers["Accept-Language"] = "en-US,en;q=0.9"
+        if base_auth:
+            req_headers.update(base_auth)
         async with httpx.AsyncClient(**kwargs) as client:
             from urllib.parse import urljoin
 
@@ -1586,9 +1600,9 @@ class BaseScanner(ABC):
 
             async def _fetch(u: str):
                 # Cookie は client.cookies（http.cookiejar）が host/path/secure 一致で送り、
-                # 応答の Set-Cookie を蓄積する。auth は in-scope の base_auth を再利用。
+                # 応答の Set-Cookie を蓄積する。auth+browser ヘッダは in-scope の req_headers を再利用。
                 return await client.get(
-                    u, headers=dict(base_auth) if base_auth else None
+                    u, headers=dict(req_headers) if req_headers else None
                 )
 
             current = url
@@ -1606,6 +1620,27 @@ class BaseScanner(ABC):
                 response = await _fetch(current)
             self._record_probe_status(response)
         return response
+
+    @staticmethod
+    def _reject_redirect_pair(pair: dict, url: str) -> dict:
+        """captured pair が 3xx redirect なら document 扱いせず status なし pair を返す。
+
+        直接 GET が例外を投げ network fallback（current_page_pair）へ倒れたとき、captured pair が
+        3xx（別リクエストの redirect 等）だと観測系が「document のヘッダ欠落」と誤監査して FP を
+        出す。直接 GET 経路と同じ 3xx ガードを fallback にも適用する（Codex #145 P2 round6）。
+        """
+        resp = (pair or {}).get("response") or {}
+        status = resp.get("status")
+        try:
+            is_redirect = status is not None and 300 <= int(status) < 400
+        except (TypeError, ValueError):
+            is_redirect = False
+        if not is_redirect:
+            return pair
+        return {
+            "request": (pair or {}).get("request") or {"url": url, "method": "GET"},
+            "response": {"url": resp.get("url", url), "headers": {}, "body": ""},
+        }
 
     async def _response_pair(self, url: str) -> dict:
         """対象ページの request/response pair を返す。直接 GET 優先・失敗時のみ network fallback。"""
@@ -1630,7 +1665,8 @@ class BaseScanner(ABC):
                 },
             }
         except Exception:
-            return self.current_page_pair(url)
+            # fallback の captured pair にも同じ 3xx ガードを適用する（Codex #145 P2 round6）。
+            return self._reject_redirect_pair(self.current_page_pair(url), url)
 
     async def record_finding(
         self,

@@ -558,6 +558,37 @@ class FollowableRedirectTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(f("http://h:8000/a", "http://h:9000/a"))
 
 
+class RejectRedirectPairTests(unittest.TestCase):
+    """_response_pair の fallback（current_page_pair）が返す 3xx を document 扱いしない（P2 round6）。"""
+
+    def _cls(self):
+        return SCANNERS["clickjacking"]
+
+    def test_redirect_pair_status_stripped(self):
+        f = self._cls()._reject_redirect_pair
+        pair = {"request": {"url": "http://x/"},
+                "response": {"status": 302, "url": "http://x/", "headers": {"location": "/y"}}}
+        out = f(pair, "http://x/")
+        # status が消え headers も空＝観測系は NOT_REACHED 扱い。
+        self.assertNotIn("status", out["response"])
+        self.assertEqual(out["response"]["headers"], {})
+
+    def test_non_redirect_pair_unchanged(self):
+        f = self._cls()._reject_redirect_pair
+        pair = {"request": {"url": "http://x/"},
+                "response": {"status": 200, "url": "http://x/", "headers": {"x-frame-options": "DENY"}}}
+        self.assertIs(f(pair, "http://x/"), pair)
+
+    def test_missing_status_unchanged(self):
+        f = self._cls()._reject_redirect_pair
+        pair = {"response": {"headers": {}}}
+        self.assertIs(f(pair, "http://x/"), pair)
+
+    def test_empty_pair_unchanged(self):
+        f = self._cls()._reject_redirect_pair
+        self.assertEqual(f({}, "http://x/"), {})
+
+
 class BuildCookieJarTests(unittest.IsolatedAsyncioTestCase):
     """_build_cookie_jar_for が同名・別 path/secure/別ホスト Cookie を http.cookiejar で正しく扱う
     （Codex #145 P2/round4）。jar が送る Cookie ヘッダで検証する。"""
