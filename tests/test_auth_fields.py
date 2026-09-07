@@ -162,3 +162,13 @@ def test_otp_hints_accept_delimited_and_camel_case_tokens(name):
 ])
 def test_unconstrained_numeric_input_requires_mfa_context(html, expected):
     assert find_otp_field(html) == expected
+
+
+@pytest.mark.parametrize("prefix", [
+    '<style>.x{color:hotpink}</style>', '<script>const otp = true;</script>',
+    '<!-- verification code -->', '<div hidden>Verification code</div>',
+    '<div style="display:none">OTP</div>', '<p>hotpink footpath</p>',
+    '<div data-note="verification code"></div>',
+])
+def test_nonvisible_or_substring_context_does_not_select_search(prefix):
+    assert find_otp_field(prefix + '<form><input name="search"></form>') is None

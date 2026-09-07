@@ -64,7 +64,7 @@ def create_app() -> FastAPI:
     async def dashboard(request: Request):
         if not sessions.get(request.cookies.get("session", ""), False):
             return HTMLResponse("Authentication required", status_code=401)
-        return "<h1>Signed in</h1>"
+        return '<h1>Signed in</h1><form><input name="search"><input name="filter"></form>'
 
     @app.get("/safe/contact", response_class=HTMLResponse)
     async def contact():

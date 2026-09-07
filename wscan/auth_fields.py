@@ -165,7 +165,7 @@ def _short_code(attrs: dict[str, str], mfa_context: bool = False) -> bool:
     return bool(pattern and (pattern[2] is None or pattern[1] <= pattern[2]))
 
 
-def find_otp_field(html: str) -> Optional[str]:
+def find_otp_field(html: str, *, mfa_context: Optional[bool] = None) -> Optional[str]:
     """autocomplete、名前、短い数値欄、MFA の単一可視欄の順に OTP を探す。
 
     同順位の複数候補や一意に表せない欄は None。可視性は HTML 内の明示的な
@@ -179,7 +179,8 @@ def find_otp_field(html: str) -> Optional[str]:
     candidates = [a for a in text_inputs if _hinted(a, _OTP_HINTS)]
     if candidates:
         return _single(doc, candidates)
-    mfa_context = looks_like_mfa_page(html)
+    if mfa_context is None:
+        mfa_context = looks_like_mfa_page(html)
     candidates = [a for a in text_inputs if _short_code(a, mfa_context)]
     if candidates:
         return _single(doc, candidates)

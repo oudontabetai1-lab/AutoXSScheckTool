@@ -2158,6 +2158,15 @@ class BrowserManager:
         except Exception:
             return ""
 
+    async def _visible_mfa_context(self) -> bool:
+        from html import escape
+        from .mfa import looks_like_mfa_page
+        try:
+            text = await self.page.locator("body").inner_text(timeout=500)
+            return looks_like_mfa_page(escape(text))
+        except Exception:
+            return False
+
     async def _mfa_input_selector(self, body: str) -> str:
         from .auth_fields import find_otp_field, name_or_id_selector
         solver = getattr(self, "mfa_solver", None)
@@ -2168,7 +2177,8 @@ class BrowserManager:
             # 明示指定が不正・曖昧な場合、別の欄へ OTP を投入しない。
             return await self._editable_auth_selector(explicit)
         configured = await self._editable_auth_selector(name_or_id_selector(solver.field or "otp"))
-        return configured or await self._editable_auth_selector(find_otp_field(body) or "")
+        return configured or await self._editable_auth_selector(
+            find_otp_field(body, mfa_context=await self._visible_mfa_context()) or "")
 
     async def auto_login(
         self,
@@ -2265,6 +2275,8 @@ class BrowserManager:
             # 要求される場合、外部 MCP 経由でコードを取得して投入する。未設定・
             # 非該当時は何もしない（従来挙動を維持）。
             mfa_field = ""
+            mfa_status = "not_present"
+            self._submitted_mfa_input = None
             mfa_solver = getattr(self, "mfa_solver", None)
             if mfa_solver is not None and mfa_solver.enabled:
                 from . import mfa as _mfa
@@ -2290,9 +2302,19 @@ class BrowserManager:
                 post_url = self.page.url
                 post_body = await self.get_page_source()
                 # MFA 画面に留まっている間は成功と判定しない（/mfa への遷移を誤認しない）。
+                # 送信前の実要素を追跡し、遷移先の同じ selector を別のOTP欄と誤認しない。
+                same_challenge_input = False
+                if mfa_status == "solved":
+                    try:
+                        same_challenge_input = await self._submitted_mfa_input.evaluate(
+                            "el => el.isConnected && !!el.getClientRects().length")
+                    except Exception:
+                        pass  # ナビゲーションで破棄された要素はチャレンジの残存ではない。
+                else:
+                    same_challenge_input = bool(await self._mfa_input_selector(post_body)) if mfa_field else False
                 on_mfa = bool(mfa_field) and (
-                    bool(await self._mfa_input_selector(post_body))
-                    or _mfa.mfa_challenge_present(post_body, mfa_field)
+                    same_challenge_input
+                    or (await self._visible_mfa_context() or _mfa.mfa_field_present(post_body, mfa_field))
                 )
                 # 判定は純粋関数へ集約。URL の変化だけでなく「ログインフォームが
                 # 残っていないか」「失敗文言が無いか」「ログインページから離脱したか」
@@ -2344,7 +2366,7 @@ class BrowserManager:
                 ):
                     return "not_present"
                 used = await self._mfa_input_selector(body)
-                if used or _mfa.mfa_challenge_present(body, field):
+                if used or (await self._visible_mfa_context() or _mfa.mfa_field_present(body, field)):
                     detected = True
                     break
                 await asyncio.sleep(0.3)
@@ -2365,6 +2387,7 @@ class BrowserManager:
             if not await self._editable_auth_selector(used):
                 return "failed"
             await self.page.fill(used, code, timeout=3000)
+            self._submitted_mfa_input = await self.page.locator(used).element_handle()
 
             # 送信（同フォームの submit ボタン → 失敗時は Enter）。
             try:

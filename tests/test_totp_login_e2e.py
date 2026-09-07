@@ -117,6 +117,11 @@ def test_mfa_selection_and_fail_closed_with_real_dom():
             assert await browser.page.locator('input').input_value() == ''
             await browser.page.set_content('<input name="otp" hidden><input name="otp">')
             assert await browser._editable_auth_selector('input[name="otp"]') == ''
+            browser.mfa_solver.config.selector = ""
+            await browser.page.set_content('<style>.notice{display:none;color:hotpink}</style>'
+                                           '<p class="notice">Verification code</p><form><input name="search"></form>')
+            assert await browser._mfa_input_selector(await browser.get_page_source()) == ''
+            assert not await browser._visible_mfa_context()
             await browser.page.set_content('<form><input name="quantity" inputmode="numeric"><button>Buy</button></form>')
             assert await browser._handle_mfa_challenge() == "not_present"
             assert await browser.page.locator('input').input_value() == ''

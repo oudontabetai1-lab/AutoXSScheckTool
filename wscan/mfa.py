@@ -25,6 +25,7 @@ import re
 import shlex
 import time
 from dataclasses import dataclass, field as dc_field
+from html.parser import HTMLParser
 from typing import Optional
 
 
@@ -66,12 +67,43 @@ def seconds_until_next_window(timestamp: float, period: int) -> float:
     return float(period - (timestamp % period))
 
 
+class _VisibleText(HTMLParser):
+    """明示的な非表示要素・属性・スクリプトを文脈に含めない。"""
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.stack = []
+        self.parts = []
+
+    def handle_starttag(self, tag, attrs):
+        values = dict(attrs)
+        style = re.sub(r"\s+", "", (values.get("style") or "").lower())
+        hidden = (any(blocked for _, blocked in self.stack)
+                  or tag in {"head", "script", "style", "template", "noscript"}
+                  or "hidden" in values or "inert" in values
+                  or (values.get("aria-hidden") or "").lower() == "true"
+                  or "display:none" in style or "visibility:hidden" in style)
+        if tag not in {"area", "base", "br", "col", "embed", "hr", "img", "input",
+                       "link", "meta", "param", "source", "track", "wbr"}:
+            self.stack.append((tag, hidden))
+
+    def handle_endtag(self, tag):
+        for index in range(len(self.stack) - 1, -1, -1):
+            if self.stack[index][0] == tag:
+                del self.stack[index:]
+                break
+
+    def handle_data(self, data):
+        if not any(blocked for _, blocked in self.stack):
+            self.parts.append(data)
+
+
 def looks_like_mfa_page(html: str) -> bool:
-    """ページ HTML が MFA（2FA）コード入力画面に見えるか判定する（純粋関数）。"""
-    if not html:
-        return False
-    low = html.lower()
-    return any(sig in low for sig in _MFA_SIGNALS)
+    """表示テキストの語単位で MFA 文脈を判定（CSS の可視性は実 DOM で補完）。"""
+    doc = _VisibleText()
+    doc.feed(html or "")
+    low = " ".join(" ".join(doc.parts).lower().split())
+    return any(re.search(r"(?<![a-z0-9_])" + re.escape(sig) + r"(?![a-z0-9_])", low)
+               if sig.isascii() else sig in low for sig in _MFA_SIGNALS)
 
 
 def mfa_field_present(html: str, field: str) -> bool:
