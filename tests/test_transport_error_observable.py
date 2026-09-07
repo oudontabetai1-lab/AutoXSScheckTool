@@ -533,6 +533,15 @@ class FollowableRedirectTests(unittest.IsolatedAsyncioTestCase):
         # 攻撃対象が canonical HTTPS へ 301 する通常ケースを追従する（P1）。
         f = self._cls()._followable_redirect
         self.assertTrue(f("http://h/page", "https://h/page"))
+        # 既定ポート明示（80→443）も canonical upgrade として追従。
+        self.assertTrue(f("http://h:80/page", "https://h:443/page"))
+
+    def test_non_default_port_upgrade_blocked(self):
+        # http://h:8080 → https://h:8443 は別サービスの可能性があり追従しない（P1 round5）。
+        f = self._cls()._followable_redirect
+        self.assertFalse(f("http://h:8080/page", "https://h:8443/page"))
+        self.assertFalse(f("http://h:8080/page", "https://h/page"))
+        self.assertFalse(f("http://h/page", "https://h:8443/page"))
 
     def test_https_to_http_downgrade_blocked(self):
         f = self._cls()._followable_redirect

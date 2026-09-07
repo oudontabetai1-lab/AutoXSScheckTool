@@ -1461,9 +1461,10 @@ class BaseScanner(ABC):
         別 origin へ漏れる・Codex #145 P1）。同一ホストなら:
           - 同一スキーム: 既定ポート（80/443）と明示ポートを同一視して追従（P2d：http://h →
             http://h:80 の canonical redirect を cross-origin 誤判定しない）。
-          - スキーム差: http→https の upgrade のみ許可（攻撃対象が canonical HTTPS へ 301 する
-            通常ケース。Cookie/ヘッダは hop ごとに再スコープするので secure Cookie も正しく載る）。
-            https→http のダウングレードは追従しない。
+          - スキーム差: http→https の **canonical upgrade（既定ポート 80→443）のみ**許可（攻撃対象が
+            canonical HTTPS へ 301 する通常ケース）。非既定ポート（http://h:8080 → https://h:8443）は
+            同一ホストでも別サービスの可能性があり、scoped auth を別 origin へ晒しうるため追従しない
+            （Codex #145 P1 round5）。https→http のダウングレードも追従しない。
         """
         from urllib.parse import urlparse
         s, d = urlparse(src_url), urlparse(dst_url)
@@ -1473,12 +1474,18 @@ class BaseScanner(ABC):
             return False
         s_scheme = (s.scheme or "").lower()
         d_scheme = (d.scheme or "").lower()
+        default = {"http": 80, "https": 443}
         if s_scheme == d_scheme:
-            default = {"http": 80, "https": 443}
             s_port = s.port if s.port is not None else default.get(s_scheme)
             d_port = d.port if d.port is not None else default.get(d_scheme)
             return s_port == d_port
-        return s_scheme == "http" and d_scheme == "https"
+        if s_scheme == "http" and d_scheme == "https":
+            # 既定ポート同士（http:80 → https:443）の canonical upgrade のみ。非既定ポートの
+            # upgrade は別サービスへの credential 露出になりうるため承認しない。
+            s_port = s.port if s.port is not None else 80
+            d_port = d.port if d.port is not None else 443
+            return s_port == 80 and d_port == 443
+        return False
 
     async def _build_cookie_jar_for(self, url: str):
         """worker ブラウザ context の Cookie を target host に絞った httpx Cookie jar として構築する。
