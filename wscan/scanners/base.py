@@ -1462,11 +1462,18 @@ class BaseScanner(ABC):
         """
         proxy = getattr(self.engine, "proxy", "") or None
         timeout = getattr(self.engine, "timeout", 15)
-        kwargs: dict = {"timeout": timeout, "follow_redirects": True}
+        # follow_redirects=False: redirect を自動追従しない。追従すると (1) auth_headers_for_url は
+        # 初期 URL にしかスコープされず、cross-origin redirect で custom 認証ヘッダ（X-API-Key 等。
+        # httpx が剥がすのは Authorization/Cookie のみ）が別 origin へ漏れる、(2) 認証 Cookie を raw
+        # Cookie ヘッダで渡すと httpx が redirect 構築時に落とし、最終応答が login/未認証ページになって
+        # 保護ページに誤 finding を出す（Codex #145 P1）。要求 URL の実応答（3xx 含む）を観測する。
+        kwargs: dict = {"timeout": timeout, "follow_redirects": False}
         if hasattr(self.engine, "httpx_client_kwargs"):
             kwargs = self.engine.httpx_client_kwargs(**kwargs)
         elif proxy:
             kwargs["proxy"] = proxy
+        # engine.httpx_client_kwargs が上書きしても、認証情報の漏洩防止のため必ず無効化する。
+        kwargs["follow_redirects"] = False
         if hasattr(self.engine, "auth_headers"):
             kwargs["headers"] = self.auth_headers_for_url(url)
         async with httpx.AsyncClient(**kwargs) as client:
