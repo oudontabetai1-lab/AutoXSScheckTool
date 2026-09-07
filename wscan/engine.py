@@ -538,6 +538,7 @@ class ScanEngine:
         login_success_indicator: str = "",
         mfa_type: Optional[str] = None,
         mfa_field: str = "",
+        mfa_selector: str = "",
         mfa_totp_secret: str = "",
         mfa_totp_uri: str = "",
         mfa_totp_qr: str = "",
@@ -896,6 +897,8 @@ class ScanEngine:
         _mfa_overrides: dict = {}
         if mfa_type is not None:
             _mfa_overrides["type"] = mfa_type or "none"
+        if mfa_selector:
+            _mfa_overrides["selector"] = mfa_selector
         if mfa_field:
             _mfa_overrides["field"] = mfa_field
         if mfa_totp_secret:

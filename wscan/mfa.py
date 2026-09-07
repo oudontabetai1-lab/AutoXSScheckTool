@@ -309,6 +309,7 @@ def collect_tool_text(result) -> str:
 class MFAConfig:
     type: str = "none"               # "totp" | "email" | "none"
     field: str = "otp"               # ログインフォーム側のコード入力欄 name/id
+    selector: str = ""               # 明示した OTP 欄の完全 CSS selector（最優先）
     code_length: int = 6
     code_regex: str = ""
     extra_env: dict = dc_field(default_factory=dict)
@@ -435,9 +436,14 @@ class MFAConfig:
         if (ov.get("totp_secret") or ov.get("totp_qr")) and not ov.get("totp_uri"):
             _totp_uri = ""
 
+        _totp_qr = _s("WSCAN_MFA_TOTP_QR", "")
+        if ov.get("totp_secret") and not ov.get("totp_qr"):
+            _totp_qr = ""
+
         cfg = cls(
             type=mtype,
             field=_s("WSCAN_MFA_FIELD", "otp") or "otp",
+            selector=_s("WSCAN_MFA_SELECTOR", ""),
             code_length=int(_f("WSCAN_MFA_CODE_LENGTH", 6)),
             code_regex=_s("WSCAN_MFA_CODE_REGEX", ""),
             totp_command=_s("WSCAN_MFA_TOTP_COMMAND", "node") or "node",
@@ -448,7 +454,7 @@ class MFAConfig:
             or "account_label",
             totp_secret=_s("WSCAN_MFA_TOTP_SECRET", ""),
             totp_uri=_totp_uri,
-            totp_qr=_s("WSCAN_MFA_TOTP_QR", ""),
+            totp_qr=_totp_qr,
             totp_digits=_i("WSCAN_MFA_TOTP_DIGITS", 6),
             totp_period=_i("WSCAN_MFA_TOTP_PERIOD", 30),
             totp_algorithm=(_s("WSCAN_MFA_TOTP_ALGORITHM", "SHA1") or "SHA1").upper(),

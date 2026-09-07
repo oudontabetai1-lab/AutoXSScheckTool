@@ -1032,7 +1032,7 @@ body {
           </div>
           <div class="cfg-field">
             <label>クライアント証明書 (PEM)</label>
-            <input type="text" id="cfgTlsClientCert" placeholder="アップロードするか、サーバ側パスを入力">
+            <input type="text" id="cfgTlsClientCert" placeholder="サーバ側の既存画像を使う場合だけ入力">
             <input type="file" id="upTlsClientCert" accept=".crt,.pem,.cer" style="font-size:0.75rem">
             <span id="upTlsClientCertStatus" style="font-size:0.72rem;color:var(--text-muted)"></span>
           </div>
@@ -1166,8 +1166,13 @@ body {
             </select>
           </div>
           <div class="cfg-field">
-            <label>コード入力フィールド名</label>
+            <label>コード入力フィールド名（空欄なら自動検出）</label>
             <input type="text" id="cfgMfaField" placeholder="otp">
+          </div>
+          <div class="cfg-field" style="grid-column:1/-1">
+            <label for="cfgMfaSelector">OTP入力欄の CSS selector（任意・最優先）</label>
+            <input type="text" id="cfgMfaSelector" placeholder='例: #verify input[name="x1"]'>
+            <div style="font-size:0.72rem;color:var(--text-muted)">手動巡回の「OTP欄を指定」から画面上の入力欄を選べます。</div>
           </div>
           <div class="cfg-field" style="grid-column:1/-1">
             <label>MFA メールアドレス / アカウント名 (メール方式)</label>
@@ -1183,7 +1188,8 @@ body {
           </summary>
           <div style="font-size:0.72rem;color:var(--text-muted);margin:8px 0;line-height:1.6">
             Authenticator登録画面の「セットアップキー/URI」を貼るのが最も確実です。
-            QRはブラウザからアップロードするか<strong>サーバ側のファイルパス</strong>で指定します（opencvが必要）。
+            QR画像を選ぶと TOTP として確認し、Base32シークレットと生成条件を自動入力します（opencvが必要）。
+            サーバ側の既存ファイルはパスでも指定できます。
             digits/period/algorithm は otpauth URI 指定時はURIの値が優先されます。
           </div>
           <div class="cfg-field" style="grid-column:1/-1">
@@ -1196,10 +1202,9 @@ body {
               <input type="password" id="cfgMfaTotpSecret" placeholder="JBSWY3DPEHPK3PXP" autocomplete="off">
             </div>
             <div class="cfg-field">
-              <label>QR画像（アップロード / サーバ側パス）</label>
+              <label>QR画像（選択すると読取・確認）</label>
               <input type="text" id="cfgMfaTotpQr" placeholder="アップロードするか、サーバ側パスを入力">
               <input type="file" id="upMfaTotpQr" accept=".png,.jpg,.jpeg,.webp,.bmp,.gif" style="font-size:0.75rem">
-              <span id="upMfaTotpQrStatus" style="font-size:0.72rem;color:var(--text-muted)"></span>
             </div>
             <div class="cfg-field">
               <label>桁数</label>
@@ -1219,6 +1224,7 @@ body {
               </select>
             </div>
           </div>
+          <div id="upMfaTotpQrStatus" role="status" aria-live="polite" style="font-size:0.78rem;color:var(--text-muted);margin-top:8px"></div>
         </details>
         <details style="margin-top:10px">
           <summary style="cursor:pointer;font-size:0.8rem;color:var(--accent)">IMAP 認証情報を直接指定（サーバ側に未登録のアドレスを動的に使う）</summary>
@@ -1561,6 +1567,7 @@ https://example.com/search?q=test" style="width:100%;font-family:monospace;font-
           同様に記録され、「停止して保存」でシードJSONになります。
         </div>
         <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:8px">
+          <button type="button" id="selectMfaField" onclick="armMfaFieldSelection()">OTP欄を指定</button>
           <button onclick="startRemoteBrowser()" style="padding:7px 14px;background:var(--accent);color:#fff;border:none;border-radius:4px;cursor:pointer;font-size:0.82rem">遠隔ブラウザを起動</button>
           <input type="text" id="remoteNavUrl" placeholder="https://example.com/page へ移動" style="flex:1;min-width:200px">
           <button onclick="remoteNavigate()" style="padding:7px 12px;background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:4px;cursor:pointer;font-size:0.82rem">移動</button>
@@ -2487,6 +2494,7 @@ function applyMfaImap(cfg) {
 function mfaTotpFields() {
   const g = id => (document.getElementById(id)?.value || '').trim();
   return {
+    mfa_selector:       g('cfgMfaSelector'),
     mfa_totp_uri:       g('cfgMfaTotpUri'),
     mfa_totp_secret:    g('cfgMfaTotpSecret'),
     mfa_totp_qr:        g('cfgMfaTotpQr'),
@@ -2553,6 +2561,7 @@ function applyMfaTotp(cfg) {
     const el = document.getElementById(id);
     if (el != null && v != null) el.value = v;
   };
+  setVal('cfgMfaSelector', cfg.mfa_selector);
   setVal('cfgMfaTotpUri', cfg.mfa_totp_uri);
   setVal('cfgMfaTotpSecret', cfg.mfa_totp_secret);
   setVal('cfgMfaTotpQr', cfg.mfa_totp_qr);
@@ -2573,6 +2582,58 @@ function applyAuthHeaders(cfg) {
   } else if (typeof cfg.headers === 'string') {
     setVal('cfgHeaders', cfg.headers);
   }
+}
+
+// QR登録情報はこの画面内だけで保持し、ファイル保存やイベント履歴に残さない。
+let totpPreviewVersion = 0;
+let totpQrNeedsValidation = false;
+function validateTotpReadiness() {
+  if (!totpQrNeedsValidation || document.getElementById('cfgMfaType').value === 'email') return true;
+  alert('QRの読取が完了していません。画像を選び直すか、URI / Base32 / サーバ側パスを入力してください。');
+  return false;
+}
+function wireTotpQrPreview() {
+  const fileInput = document.getElementById('upMfaTotpQr');
+  const status = document.getElementById('upMfaTotpQrStatus');
+  if (!fileInput || !status) return;
+  ['cfgMfaTotpUri','cfgMfaTotpSecret','cfgMfaTotpQr',
+   'cfgMfaTotpDigits','cfgMfaTotpPeriod','cfgMfaTotpAlgorithm','cfgMfaType'].forEach(id => {
+    document.getElementById(id).addEventListener('input', () => {
+      ++totpPreviewVersion;
+      if (['cfgMfaTotpUri','cfgMfaTotpSecret','cfgMfaTotpQr'].includes(id) &&
+          document.getElementById(id).value.trim()) totpQrNeedsValidation = false;
+      status.textContent = '設定が変更されました。次のQR選択時に再確認します。';
+    });
+  });
+  fileInput.addEventListener('change', async () => {
+    const file = fileInput.files?.[0];
+    if (!file) return;
+    const version = ++totpPreviewVersion;
+    totpQrNeedsValidation = true;
+    // 前の登録情報で実行されないよう、新しい画像を選んだ時点で入力元を切り替える。
+    ['cfgMfaTotpUri','cfgMfaTotpSecret','cfgMfaTotpQr'].forEach(id => {
+      document.getElementById(id).value = '';
+    });
+    status.textContent = 'QRを読み取り、TOTP登録情報を確認中…';
+    try {
+      const fd = new FormData();
+      fd.append('file', file);
+      const response = await fetch('/api/v1/mfa/totp/preview', {method: 'POST', body: fd, cache: 'no-store'});
+      const data = await response.json();
+      if (version !== totpPreviewVersion) return;
+      if (!response.ok) throw new Error(data.error || 'QRを読み取れませんでした');
+      totpQrNeedsValidation = false;
+      document.getElementById('cfgMfaType').value = 'totp';
+      document.getElementById('cfgMfaTotpSecret').value = data.secret;
+      document.getElementById('cfgMfaTotpDigits').value = data.digits;
+      document.getElementById('cfgMfaTotpPeriod').value = data.period;
+      document.getElementById('cfgMfaTotpAlgorithm').value = data.algorithm;
+      const identity = [data.issuer, data.label].filter(Boolean).join(' / ');
+      status.textContent = `✓ TOTPとして読取済み${identity ? ' — ' + identity : ''}（${data.digits}桁・${data.period}秒・${data.algorithm}）。Base32欄に反映しました。ログインの成否は実行時に確認します。`;
+    } catch (error) {
+      if (version === totpPreviewVersion) status.textContent = '✗ ' + error.message;
+    }
+  });
 }
 
 async function uploadFile(file) {
@@ -2736,6 +2797,28 @@ function remoteNavigate() {
   _wsSend({action: 'manual_crawl_input', event: {type: 'navigate', url}});
 }
 
+let _selectingMfaField = false;
+function armMfaFieldSelection() {
+  if (document.getElementById('remoteScreenWrap').style.display !== 'block') {
+    alert('遠隔ブラウザを起動してから OTP 欄を指定してください。');
+    return;
+  }
+  _selectingMfaField = true;
+  document.getElementById('remoteHint').textContent = 'OTP入力欄をクリックして指定してください';
+}
+async function selectRemoteMfaField(point) {
+  try {
+    const response = await fetch('/api/v1/manual-crawl/mfa-selector', {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(point),
+    });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || '入力欄を指定できませんでした');
+    document.getElementById('cfgMfaSelector').value = result.selector;
+    document.getElementById('remoteHint').textContent = 'OTP欄を認証設定に反映しました: ' + result.selector;
+  } catch (error) {
+    document.getElementById('remoteHint').textContent = error.message;
+  }
+}
 let _remoteBound = false;
 function bindRemoteScreen() {
   if (_remoteBound) return;
@@ -2751,6 +2834,11 @@ function bindRemoteScreen() {
     e.preventDefault();
     img.focus();
     const p = norm(e);
+    if (_selectingMfaField) {
+      _selectingMfaField = false;
+      selectRemoteMfaField(p);
+      return;
+    }
     _wsSend({action: 'manual_crawl_input', event: {type: 'click', nx: p.nx, ny: p.ny}});
   });
   img.addEventListener('contextmenu', (e) => {
@@ -2831,6 +2919,7 @@ function openManualCrawlAfterScan() {
 }
 
 function submitScanConfig() {
+  if (!validateTotpReadiness()) return;
   const url = document.getElementById('cfgInputUrl').value.trim();
   if (!url || !url.startsWith('http')) {
     document.getElementById('cfgInputUrl').focus();
@@ -3133,7 +3222,7 @@ function initConfigOverlay() {
   wireUpload('upPayloadsFile', 'cfgPayloadsFile', 'upPayloadsFileStatus');
   wireUpload('upManualCrawlFile', 'cfgManualCrawlFile', 'upManualCrawlFileStatus');
   wireUpload('upCrawlReviewManualFile', 'crawlReviewManualFile', 'upCrawlReviewManualFileStatus');
-  wireUpload('upMfaTotpQr', 'cfgMfaTotpQr', 'upMfaTotpQrStatus');
+  wireTotpQrPreview();
   // Read current port from URL
   const port = location.port || '8765';
   const portEl = document.getElementById('cfgPortDisp');
@@ -4974,6 +5063,7 @@ function applyAutoConfig(cfg) {
 
 // ─── ハイブリッドスキャン送信 ────────────────────────────────────
 function submitHybridScan() {
+  if (!validateTotpReadiness()) return;
   if (!state.ws || state.ws.readyState !== WebSocket.OPEN) {
     alert('WebSocket が接続されていません。ページをリロードしてください。');
     return;

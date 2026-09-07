@@ -700,6 +700,7 @@ def test_engine_passes_native_totp_overrides():
         mfa_totp_digits=8,
         mfa_totp_period=45,
         mfa_totp_algorithm="SHA256",
+        mfa_selector="input[data-purpose=verify]",
     )
     assert engine._mfa_config.type == "totp"
     assert engine._mfa_config.totp_secret == "GEZDGNBVGY3TQOJQ"
@@ -707,3 +708,20 @@ def test_engine_passes_native_totp_overrides():
     assert engine._mfa_config.totp_period == 45
     assert engine._mfa_config.totp_algorithm == "SHA256"
     assert engine._mfa_solver is not None
+    assert engine._mfa_solver.config.selector == "input[data-purpose=verify]"
+
+
+def test_native_secret_override_clears_stale_environment_qr():
+    cfg = mfa.MFAConfig.from_env(
+        env={"WSCAN_MFA_TOTP_QR": "/old/account.png", "WSCAN_MFA_TOTP_URI": "old"},
+        overrides={"totp_secret": "JBSWY3DPEHPK3PXP", "selector": "#verify input"},
+    )
+    assert cfg.totp_qr == ""
+    assert cfg.totp_uri == ""
+    assert cfg.selector == "#verify input"
+    assert cfg.enabled
+
+
+def test_mfa_selector_environment():
+    cfg = mfa.MFAConfig.from_env(env={"WSCAN_MFA_SELECTOR": "input[data-role=otp]"})
+    assert cfg.selector == "input[data-role=otp]"

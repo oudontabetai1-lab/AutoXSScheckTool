@@ -110,3 +110,16 @@ def test_corrupt_file_returns_none_and_warns(tmp_path, caplog):
 def test_empty_path_returns_none():
     assert decode_qr_image("") is None
     assert decode_qr_image(None) is None  # type: ignore[arg-type]
+
+
+def test_actual_qr_preview_api(tmp_path):
+    from fastapi.testclient import TestClient
+    from wscan.monitor import MonitorServer
+    path = tmp_path / "登録.png"
+    _write_qr(path)
+    with TestClient(MonitorServer(port=0).app) as client:
+        response = client.post('/api/v1/mfa/totp/preview',
+                               files={'file': (path.name, path.read_bytes(), 'image/png')})
+    assert response.status_code == 200
+    assert response.json()['secret'] == 'JBSWY3DPEHPK3PXP'
+    assert response.json()['issuer'] == 'Test'

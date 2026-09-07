@@ -189,35 +189,75 @@ def decode_qr_image(path: str) -> Optional[str]:
         except Exception:
             _log.warning("TOTP QR 画像を読み込めません（権限/破損の可能性）")
             return None
-        # Pillow だけでは QR を検出できない。画像形式の診断より先に確認する。
         try:
-            import cv2  # type: ignore
-
-            if not callable(getattr(cv2, "QRCodeDetector", None)):
-                raise ImportError("QRCodeDetector unavailable")
-        except Exception:
-            _log.warning(
-                "QR デコーダ（opencv-python）を利用できません。"
-                "`pip install opencv-python` するか --mfa-totp-uri/--mfa-totp-secret を指定してください"
-            )
+            return decode_qr_bytes(data_bytes)
+        except ValueError as exc:
+            _log.warning("%s", exc)
             return None
-        image = _load_image_bgr(data_bytes)
-        if image is None:
-            _log.warning(
-                "TOTP QR 画像をデコードできません（破損または未対応形式の可能性）。"
-                "PNG/JPG に変換するか --mfa-totp-uri/--mfa-totp-secret での指定を検討してください",
-            )
-            return None
-        text = _detect_qr_text(image)
-        if text:
-            return text
-        _log.warning(
-            "画像は読み込めましたが QR コードを検出できませんでした（画質/トリミングを確認、"
-            "または --mfa-totp-uri/--mfa-totp-secret を使用してください）",
-        )
-        return None
     except Exception:
         return None
+
+
+def decode_qr_bytes(data: bytes) -> str:
+    """画像を保存せず QR を読む。失敗理由には画像内容やパスを含めない。"""
+    try:
+        import cv2  # type: ignore
+        if not callable(getattr(cv2, "QRCodeDetector", None)):
+            raise ImportError("QRCodeDetector unavailable")
+    except Exception:
+        raise ValueError(
+            "QR デコーダ（opencv-python）を利用できません。"
+            "`pip install opencv-python` するか --mfa-totp-uri/--mfa-totp-secret を指定してください"
+        ) from None
+    _silence_cv2()
+    image = _load_image_bgr(data)
+    if image is None:
+        raise ValueError(
+            "TOTP QR 画像をデコードできません（破損または未対応形式の可能性）。"
+            "PNG/JPG に変換するか --mfa-totp-uri/--mfa-totp-secret での指定を検討してください"
+        )
+    text = _detect_qr_text(image)
+    if not text:
+        raise ValueError(
+            "画像は読み込めましたが QR コードを検出できませんでした（画質/トリミングを確認、"
+            "または --mfa-totp-uri/--mfa-totp-secret を使用してください）"
+        )
+    return text
+
+
+def inspect_totp_payload(text: str) -> dict:
+    """QR の内容を厳密に検証し、画面確認用の TOTP 登録情報を返す（純粋関数）。"""
+    raw = str(text or "").strip()
+    result = {"secret": raw, "digits": 6, "period": 30, "algorithm": "SHA1",
+              "label": "", "issuer": ""}
+    if raw.lower().startswith("otpauth:"):
+        try:
+            uri = urlparse(raw)
+            if uri.scheme.lower() != "otpauth" or uri.netloc.lower() != "totp":
+                raise ValueError
+            query = parse_qs(uri.query, keep_blank_values=True)
+            if any(len(values) != 1 for values in query.values()):
+                raise ValueError
+            result.update(parse_otpauth_uri(raw) or {})
+            # 通常の互換パーサによる既定値への補正で、不正な登録を成功表示しない。
+            for key, minimum, maximum in (("digits", 6, 10), ("period", 1, 86400)):
+                if key in query:
+                    value = _bounded_int(query[key][0], minimum, maximum)
+                    if value is None:
+                        raise ValueError
+                    result[key] = value
+            algorithm = query.get("algorithm", ["SHA1"])[0].upper()
+            if algorithm not in _ALGORITHMS or not query.get("secret", [""])[0]:
+                raise ValueError
+            result["algorithm"] = algorithm
+        except Exception:
+            raise ValueError("QR は有効な TOTP 登録情報ではありません（方式・桁数・周期を確認してください）") from None
+    secret = normalize_base32(result["secret"])
+    if not secret or generate_totp(secret, digits=result["digits"], period=result["period"],
+                                    algorithm=result["algorithm"], timestamp=0) is None:
+        raise ValueError("QR に有効な Base32 シークレットがありません。Authenticator 登録用の QR を選んでください")
+    result["secret"] = secret.rstrip("=")
+    return result
 
 
 def generate_totp(

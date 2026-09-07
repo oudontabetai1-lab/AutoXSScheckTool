@@ -59,6 +59,13 @@ class _Inputs(HTMLParser):
                 break
 
 
+def name_or_id_selector(value: str) -> str:
+    """name/id を CSS 文字列として引用し、設定値を selector 構文にしない。"""
+    escaped = "".join(f"\\{ord(ch):x} " if ord(ch) < 32 or ch in '\\"' else ch
+                      for ch in str(value))
+    return f'input[name="{escaped}"],input[id="{escaped}"]'
+
+
 def _type(attrs: dict[str, str]) -> str:
     return attrs.get("type", "").lower()
 
@@ -103,6 +110,14 @@ def _preferred(doc: _Inputs, key: str, value: str) -> tuple[bool, Optional[str]]
 
 
 def _hinted(attrs: dict[str, str], hints: tuple[str, ...]) -> bool:
+    if hints == _OTP_HINTS:
+        # shipping/zipcode の部分一致を避け、snake-case・camelCase の語単位で判定。
+        for key in ("name", "id"):
+            value = re.sub(r"([A-Z])([A-Z][a-z])", r"\1_\2", attrs.get(key, ""))
+            value = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", value)
+            if set(re.split(r"[^a-z0-9]+", value.lower())) & set(hints):
+                return True
+        return False
     return any(hint in attrs.get(key, "").lower()
                for key in ("name", "id") for hint in hints)
 

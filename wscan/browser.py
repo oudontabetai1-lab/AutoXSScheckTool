@@ -2139,6 +2139,37 @@ class BrowserManager:
         if normalized:
             await self._context.add_cookies(normalized)
 
+    async def _editable_auth_selector(self, selector: str) -> str:
+        """実 DOM 上で一意・可視・編集可能な input だけを認証入力先にする。"""
+        if not selector:
+            return ""
+        try:
+            locator = self.page.locator(selector)
+            if await locator.count() != 1:
+                return ""
+            if not await locator.is_visible() or not await locator.is_editable(timeout=500):
+                return ""
+            if not await locator.evaluate(
+                "el => el.tagName === 'INPUT' && ['text','email','tel','number','password'].includes(el.type)",
+                timeout=500,
+            ):
+                return ""
+            return selector
+        except Exception:
+            return ""
+
+    async def _mfa_input_selector(self, body: str) -> str:
+        from .auth_fields import find_otp_field, name_or_id_selector
+        solver = getattr(self, "mfa_solver", None)
+        if solver is None:
+            return ""
+        explicit = getattr(solver.config, "selector", "")
+        if explicit:
+            # 明示指定が不正・曖昧な場合、別の欄へ OTP を投入しない。
+            return await self._editable_auth_selector(explicit)
+        configured = await self._editable_auth_selector(name_or_id_selector(solver.field or "otp"))
+        return configured or await self._editable_auth_selector(find_otp_field(body) or "")
+
     async def auto_login(
         self,
         login_url: str,
@@ -2162,34 +2193,24 @@ class BrowserManager:
             self.last_login_success = False
             await self.navigate(login_url)
 
-            # Use Playwright's native fill() where possible so JS framework
-            # handlers receive realistic input events; fall back to JS assignment
-            # for unusual fields.
-            async def _fill_field(selector: str, value: str) -> bool:
-                try:
-                    await self.page.fill(selector, value, timeout=5000)
-                    return True
-                except Exception:
-                    return bool(await self.page.evaluate(
-                        """([sel, val]) => {
-                            const el = document.querySelector(sel);
-                            if (!el) return false;
-                            el.focus();
-                            el.value = val;
-                            ['input','change','blur'].forEach(e =>
-                                el.dispatchEvent(new Event(e, {bubbles:true}))
-                            );
-                            return true;
-                        }""",
-                        [selector, value],
-                    ))
-
-            user_selector = f'[name="{user_field}"],[id="{user_field}"]'
-            pass_selector = f'[name="{pass_field}"],[id="{pass_field}"]'
-            if not await _fill_field(user_selector, self.auth_user):
+            from .auth_fields import find_password_field, find_username_field, name_or_id_selector
+            body = await self.get_page_source()
+            user_selector = await self._editable_auth_selector(name_or_id_selector(user_field))
+            pass_selector = await self._editable_auth_selector(name_or_id_selector(pass_field))
+            if not user_selector:
+                user_selector = await self._editable_auth_selector(find_username_field(body) or "")
+            if not pass_selector:
+                pass_selector = await self._editable_auth_selector(find_password_field(body) or "")
+            if not user_selector or not pass_selector:
                 return False
-            if not await _fill_field(pass_selector, self.auth_pass):
+            if not await self.page.locator(user_selector).evaluate(
+                "(el, selector) => { const pw = document.querySelector(selector); "
+                "return pw && el !== pw && el.form === pw.form && el.type !== 'password'; }",
+                pass_selector,
+            ):
                 return False
+            await self.page.fill(user_selector, self.auth_user, timeout=5000)
+            await self.page.fill(pass_selector, self.auth_pass, timeout=5000)
 
             # MFA（メール）の baseline をパスワード送信前に確保する。送信で OTP メールが
             # 飛ぶため、ここで「送信前から受信箱にある古いメール」を記録しておくと、
@@ -2234,7 +2255,7 @@ class BrowserManager:
                 }"""
                 try:
                     async with self.page.expect_navigation(wait_until="domcontentloaded", timeout=15000):
-                        await self.page.evaluate(submit_script, [user_field])
+                        await self.page.evaluate(submit_script, [user_selector])
                 except Exception:
                     # AJAX logins or same-document updates may not navigate. The
                     # polling loop below still evaluates the resulting body and URL.
@@ -2269,7 +2290,10 @@ class BrowserManager:
                 post_url = self.page.url
                 post_body = await self.get_page_source()
                 # MFA 画面に留まっている間は成功と判定しない（/mfa への遷移を誤認しない）。
-                on_mfa = bool(mfa_field) and _mfa.mfa_challenge_present(post_body, mfa_field)
+                on_mfa = bool(mfa_field) and (
+                    bool(await self._mfa_input_selector(post_body))
+                    or _mfa.mfa_challenge_present(post_body, mfa_field)
+                )
                 # 判定は純粋関数へ集約。URL の変化だけでなく「ログインフォームが
                 # 残っていないか」「失敗文言が無いか」「ログインページから離脱したか」
                 # を併せて評価し、/login?error= のような「移動はしたが失敗」を弾く。
@@ -2293,7 +2317,7 @@ class BrowserManager:
         """パスワード送信後に MFA コード入力画面が出たら自動で突破する。
 
         最大 10 秒 MFA 画面の出現を待ち（強いシグナル or 設定されたコード入力欄の
-        存在で検出）、出たら外部 MCP からコードを取得して入力欄へ投入・送信する。
+        存在で検出）、出たらネイティブ TOTP / 外部 MCP からコードを取得して送信する。
 
         戻り値:
         - ``"not_present"`` … MFA 画面は現れなかった／既にログイン済み（従来挙動）。
@@ -2319,7 +2343,8 @@ class BrowserManager:
                     success_indicator in self.page.url or success_indicator in body
                 ):
                     return "not_present"
-                if _mfa.mfa_challenge_present(body, field):
+                used = await self._mfa_input_selector(body)
+                if used or _mfa.mfa_challenge_present(body, field):
                     detected = True
                     break
                 await asyncio.sleep(0.3)
@@ -2330,28 +2355,16 @@ class BrowserManager:
 
         # 解決フェーズ: 検出後の失敗は "failed"（未認証のまま成功扱いにしない）。
         try:
+            used = await self._mfa_input_selector(await self.get_page_source())
+            if not used:
+                return "failed"
             code = await self.mfa_solver.solve()
             if not code:
                 return "failed"
-
-            # コード入力欄を埋める。設定欄 → 一般的な OTP 入力欄の順に試す。
-            candidates = [
-                f'[name="{field}"],[id="{field}"]',
-                'input[autocomplete="one-time-code"]',
-                'input[name*="otp" i],input[id*="otp" i]',
-                'input[name*="code" i],input[id*="code" i]',
-                'input[name*="token" i],input[id*="token" i]',
-            ]
-            used = ""
-            for sel in candidates:
-                try:
-                    await self.page.fill(sel, code, timeout=3000)
-                    used = sel
-                    break
-                except Exception:
-                    continue
-            if not used:
+            # solve() が待機した間の画面遷移・DOM 変化も再検証する。
+            if not await self._editable_auth_selector(used):
                 return "failed"
+            await self.page.fill(used, code, timeout=3000)
 
             # 送信（同フォームの submit ボタン → 失敗時は Enter）。
             try:

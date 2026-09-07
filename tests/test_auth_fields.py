@@ -143,3 +143,13 @@ def test_otp_rejects_unrelated_or_unbounded_patterns(pattern):
 @pytest.mark.parametrize("pattern", [r"[0-9]{6}", r"\d{6}", r"^[0-9]{6}$", r"\d{4,8}"])
 def test_otp_accepts_bounded_numeric_patterns(pattern):
     assert find_otp_field(f'<input pattern="{pattern}">') == "input[pattern]"
+
+
+@pytest.mark.parametrize("name", ["shipping_address", "zipcode", "shopping", "decoder", "accountTokenized"])
+def test_otp_hints_do_not_match_unrelated_substrings(name):
+    assert find_otp_field(f'<input name="{name}">') is None
+
+
+@pytest.mark.parametrize("name", ["otpCode", "OTPCode", "verification_code", "mfa-code", "2fa_code"])
+def test_otp_hints_accept_delimited_and_camel_case_tokens(name):
+    assert find_otp_field(f'<input name="{name}">') is not None
