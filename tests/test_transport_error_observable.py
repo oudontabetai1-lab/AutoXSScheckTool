@@ -726,6 +726,51 @@ class DirectGetAPIRequestContextTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(called.get("url"), "http://app.test/p")
         self.assertIs(called.get("browser"), engine.browser)
 
+    async def test_resyncs_engine_cookies_even_when_redirect_hop_raises(self):
+        """中間 redirect hop が cookie を rotation/削除した後に次 hop が例外を投げても、
+        engine.cookies を再同期する（finally 経路）。成功パスだけの同期では無効トークンが
+        残り CORS 等が未認証応答に走る（Codex #145 P2 round16）。"""
+
+        class _RaiseOnSecondGet:
+            def __init__(self):
+                self.calls = 0
+
+            async def get(self, url, headers=None, **kw):
+                self.calls += 1
+                if self.calls == 1:
+                    r = _FakeAPIResponse(302, {"location": "/landing"})
+                    r.url = url
+                    return r  # 承認された同一ホスト redirect（cookie を変異させ得る）
+                raise RuntimeError("hop timeout")  # 次 hop の取得が失敗
+
+        engine = _FakeEngine()
+        engine.browser = _APIBrowser(_RaiseOnSecondGet())
+        scanner = SCANNERS["clickjacking"](engine)
+        called = {}
+
+        async def _sync(browser, for_url=""):
+            called["url"] = for_url
+
+        engine._sync_cookies_from_browser = _sync
+        with self.assertRaises(RuntimeError):
+            await scanner._get("http://app.test/start")
+        # 例外が伝播しても、直列なので再同期は必ず実行される。
+        self.assertEqual(called.get("url"), "http://app.test/start")
+
+    async def test_no_cookie_resync_under_concurrency(self):
+        """並列(--concurrency>1)では共有 engine.cookies を書き換えないよう再同期をスキップ
+        （別 worker の検査中の競合防止・Codex #145 P1 round15）。"""
+        engine, scanner = self._scanner(_FakeAPIResponse(200))
+        engine.concurrency = 2
+        called = {"n": 0}
+
+        async def _sync(browser, for_url=""):
+            called["n"] += 1
+
+        engine._sync_cookies_from_browser = _sync
+        await scanner._get("http://app.test/p")
+        self.assertEqual(called["n"], 0)
+
     async def test_disposes_responses(self):
         """最終 response を dispose して body を解放する（Codex #145 round13）。"""
         resp = _FakeAPIResponse(200, {"X-Frame-Options": "DENY"})

@@ -1605,8 +1605,10 @@ class BaseScanner(ABC):
             pass
 
         current = url
-        response = await request_ctx.get(current, headers=_headers_for(current) or None, **get_kwargs)
+        response = None
         try:
+            # 最初の GET も try 内に入れ、cookie を変異させ得る送信は必ず finally の再同期に載せる。
+            response = await request_ctx.get(current, headers=_headers_for(current) or None, **get_kwargs)
             hops = 0
             while response.status in (301, 302, 303, 307, 308) and hops < 5:
                 loc = response.headers.get("location")
@@ -1624,19 +1626,6 @@ class BaseScanner(ABC):
                 response = await request_ctx.get(
                     current, headers=_headers_for(current) or None, **get_kwargs
                 )
-            # 監査 GET が Playwright context の Cookie を rotation させた可能性があるため、
-            # engine.cookies を browser context（source of truth）から再同期する。後続の httpx ベース
-            # 直接呼び出し（CORSScanner._get_with_origin 等が使う engine.cookies）が stale セッションを
-            # 送らないようにする（Codex #145 P1 round14）。engine の既存同期機構を使う（自作しない）。
-            # ただし engine.cookies は共有なので、並列(--concurrency>1)では別 worker の検査中に書き換える
-            # 競合になる。_attack_one_page の per-page cookie 同期と同じく **直列時のみ**行う
-            # （並列は既存の共有 cookie 前提・Codex #145 P1 round15）。
-            _sync = getattr(self.engine, "_sync_cookies_from_browser", None)
-            if callable(_sync) and (getattr(self.engine, "concurrency", 1) or 1) <= 1:
-                try:
-                    await _sync(browser, url)
-                except Exception:
-                    pass
             try:
                 text = await response.text()
             except Exception:
@@ -1650,9 +1639,25 @@ class BaseScanner(ABC):
             self._record_probe_status(direct)
             return direct
         finally:
+            # 監査 GET が Playwright context の Cookie を rotation/削除させた可能性があるため、
+            # engine.cookies を browser context（source of truth）から再同期する。後続の httpx ベース
+            # 直接呼び出し（CORSScanner._get_with_origin 等が使う engine.cookies）が stale セッションを
+            # 送らないようにする（Codex #145 P1 round14）。**成功・失敗どちらでも** finally で行うのが要点で、
+            # 中間 redirect hop が cookie を変異させた後に次 hop が例外（timeout 等）を投げると、成功パス
+            # だけの同期では engine.cookies に無効トークンが残り CORS 等が未認証応答に走る（Codex #145 P2 round16）。
+            # engine の既存同期機構を使う（自作しない）。ただし engine.cookies は共有なので、並列
+            # (--concurrency>1)では別 worker の検査中に書き換える競合になる。_attack_one_page の
+            # per-page cookie 同期と同じく **直列時のみ**行う（並列は既存の共有 cookie 前提・round15）。
+            _sync = getattr(self.engine, "_sync_cookies_from_browser", None)
+            if callable(_sync) and (getattr(self.engine, "concurrency", 1) or 1) <= 1:
+                try:
+                    await _sync(browser, url)
+                except Exception:
+                    pass
             # APIResponse は dispose するまで body を保持する。証拠を _DirectResponse へ複写後に
             # 最終 response を必ず解放し、多ページ/大 document でのメモリ蓄積を防ぐ（Codex #145 round13）。
-            await self._dispose_response(response)
+            if response is not None:
+                await self._dispose_response(response)
 
     def _redirect_target_in_scope(self, target: str) -> bool:
         """redirect 先が engine の明示 scope（配置済み attack/access target 由来の origin）か。"""
