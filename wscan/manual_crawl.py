@@ -433,10 +433,14 @@ class ManualCrawlSession:
         # target=_blank のリンククリックは同一タブ化して screencast 1 枚に収める（追従も容易）。
         # window.open は上書きしない: 偽の window を返すと w.closed/w.postMessage を使うアプリや
         # OAuth ポップアップが壊れる。真の popup として開かせ、context.on("page") 追従で拾う。
+        # target=_blank のリンクだけ同一タブ化する。名前付きターゲット（<a target="preview"> が
+        # 名前付き iframe/window を指す等）はアプリの意図した browsing context なので触らない。
         same_tab_script = """
               document.addEventListener('click', (e) => {
                 const link = e.target && e.target.closest ? e.target.closest('a[target]') : null;
-                if (link) link.setAttribute('target', '_self');
+                if (link && (link.getAttribute('target') || '').toLowerCase() === '_blank') {
+                  link.setAttribute('target', '_self');
+                }
               }, true);
         """ if stream else ""
         self._recorder_script = f"""
