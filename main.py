@@ -748,7 +748,13 @@ Examples:
 
     # ── scan subcommand ────────────────────────────────────────────
     scan = sub.add_parser("scan", help="Run a security scan")
-    scan.add_argument("url", help="Target URL (e.g. https://example.com)")
+    scan.add_argument(
+        "url", nargs="+",
+        help="対象 URL。複数指定すると 1 回のスキャン（＝同一ログインセッション）で "
+             "全 URL を攻撃スコープとして巡回する（例: scan https://a https://b）。"
+             "先頭がクロール起点、2 つ目以降は --target-url と同義。"
+             "ログインが別々のサイトを個別に並行スキャンするなら `batch` を使う。",
+    )
 
     scan.add_argument(
         "--payloads", "-p", metavar="FILE",
@@ -2063,11 +2069,37 @@ async def run_agent(args):
     return result
 
 
+def _collapse_multi_target(
+    url_arg: "str | list[str]", target_urls: list,
+) -> "tuple[str, list]":
+    """位置引数 url（nargs='+'）を (先頭=クロール起点, 残り＋既存 target_urls) へ畳み込む。
+
+    純粋関数。先頭 URL を単一の攻撃起点に、2 つ目以降を追加攻撃スコープの先頭へ前置する
+    （既存の --target-url 由来 target_urls はその後ろに温存）。空文字は除外。文字列を
+    そのまま渡された場合（後方互換）は (url, target_urls) をそのまま返す。
+    """
+    if not isinstance(url_arg, list):
+        return url_arg, list(target_urls or [])
+    urls = [u for u in url_arg if u]
+    primary = urls[0] if urls else ""
+    extra = urls[1:]
+    return primary, list(extra) + list(target_urls or [])
+
+
 async def run_scan(args):
     from rich.console import Console
     from rich.panel import Panel
 
     console = Console()
+
+    # 位置引数 url は nargs="+"（複数対象を 1 スキャンで指定可）。先頭をクロール
+    # 起点 args.url（以降のコードは文字列前提）に畳み込み、2 つ目以降は追加攻撃
+    # スコープ（--target-url と同じ target_urls）へ前置する。同一ログインセッション
+    # で全対象を巡回・攻撃する（別ログインのサイトを個別並行するなら batch）。
+    if isinstance(getattr(args, "url", None), list):
+        args.url, args.target_urls = _collapse_multi_target(
+            args.url, getattr(args, "target_urls", []) or []
+        )
 
     # ── Fast mode preset ──────────────────────────────────────────────
     # Apply defaults only for options the user did NOT explicitly set.
