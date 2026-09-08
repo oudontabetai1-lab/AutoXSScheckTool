@@ -545,7 +545,10 @@ class ManualCrawlSession:
 
         def on_navigate(frame) -> None:
             if frame == page.main_frame:
-                self._record_url(page.url, "navigate")
+                # 追従タブ/popup が別オリジン（SSO/決済等）へ遷移したとき、その URL（クエリ含む）を
+                # artifact に残さない。requestfinished と同じ same-origin 判定を記録前に適用（Codex #153 P2）。
+                if _same_origin(page.url, self.start_url):
+                    self._record_url(page.url, "navigate")
                 if page is self._page:
                     self._schedule_snapshot("navigate", page)
 
@@ -568,17 +571,25 @@ class ManualCrawlSession:
             try:
                 await self._bind_page(page)
                 self._page = page
-                self._record_url(page.url, source)
                 if self.streaming:
                     await self._stop_screencast(clear_callback=False)
                     await self._start_screencast(page)
             except Exception as exc:
                 self.last_error = f"page switch failed: {exc}"
+        # バインド/有効化直後に snapshot（初期ページと同様）。popup の初期 document が context の page
+        # コールバック前に commit 済みだと framenavigated を観測できず、URL のみ記録では forms を
+        # 取り逃す（Codex #153 P1）。snapshot は _lock を取得し same-origin のみ記録するため、
+        # cross-origin popup の URL/forms を artifact に残さない（P2 とも整合）。lock 外で呼ぶ（再入防止）。
+        try:
+            await self.snapshot(source, page=page)
+        except Exception:
+            pass
 
     async def _handle_page_closed(self, closed_page) -> None:
         """アクティブページ終了時に、残存ページのうち最新へフォールバックする。"""
         if not self.running:
             return
+        fallback = None
         async with self._lock:
             if closed_page is not self._page:
                 return
@@ -591,11 +602,16 @@ class ManualCrawlSession:
                 return
             try:
                 await self._bind_page(fallback)
-                self._record_url(fallback.url, "page_fallback")
                 if self.streaming:
                     await self._start_screencast(fallback)
             except Exception as exc:
                 self.last_error = f"page fallback failed: {exc}"
+        # フォールバック先も same-origin なら snapshot（forms 取りこぼし防止・Codex #153 P1）。lock 外。
+        if fallback is not None:
+            try:
+                await self.snapshot("page_fallback", page=fallback)
+            except Exception:
+                pass
 
     async def _start_screencast(self, page=None) -> None:
         """CDP スクリーンキャストを開始し、フレームを ``frame_callback`` へ流す。"""

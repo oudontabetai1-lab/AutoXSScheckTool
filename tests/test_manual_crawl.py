@@ -24,7 +24,7 @@ class _FakeKeyboard:
 
 
 class _FakePage:
-    def __init__(self, url="http://example.test/"):
+    def __init__(self, url="http://example.test/", forms=None):
         self.url = url
         self.main_frame = object()
         self.mouse = Mock()
@@ -35,6 +35,10 @@ class _FakePage:
         self.evaluated = []
         self.fill = AsyncMock()
         self.focus = AsyncMock()
+        self._forms = forms or []
+
+    async def eval_on_selector_all(self, selector, script):
+        return self._forms
 
     async def expose_function(self, name, callback):
         self.exposed.append((name, callback))
@@ -370,6 +374,41 @@ class ManualCrawlRemoteBrowserTests(unittest.IsolatedAsyncioTestCase):
             await session.fill_totp("#otp"),
             {"ok": False, "error": "TOTP が設定されていません"},
         )
+
+    async def test_activated_popup_is_snapshotted_for_forms(self):
+        # popup の初期 document が commit 済みでも、有効化直後の snapshot で forms を取得する
+        # （URL のみ記録では input surface を取り逃す・Codex #153 P1）。
+        forms = [{"index": 0, "action": "http://example.test/popup", "method": "post",
+                  "inputs": [{"name": "q", "type": "text"}]}]
+        old_page = _FakePage()
+        popup = _FakePage("http://example.test/popup", forms=forms)
+        session = self._session(old_page, _FakeContext([old_page, popup]))
+        session._cdp = _FakeCdp()
+
+        await session._activate_page(popup, "new_page")
+
+        self.assertIn("http://example.test/popup", session.forms_by_url)
+        self.assertEqual(session.forms_by_url["http://example.test/popup"], forms)
+
+    async def test_cross_origin_popup_url_not_recorded(self):
+        # 追従した cross-origin popup（SSO/決済等）の URL・forms は artifact に残さない
+        # （same-origin のみ記録・Codex #153 P2）。screencast 追従（切替）自体は行う。
+        old_page = _FakePage()
+        evil = _FakePage("https://sso.evil.test/authorize?token=secret123",
+                         forms=[{"index": 0, "inputs": [{"name": "pw"}]}])
+        context = _FakeContext([old_page, evil])
+        session = self._session(old_page, context)
+        session._cdp = _FakeCdp()
+
+        await session._activate_page(evil, "new_page")
+
+        # 追従（アクティブ切替）は行う。
+        self.assertIs(session._page, evil)
+        self.assertIs(context.cdp_targets[-1], evil)
+        # だが cross-origin の URL / forms / events は記録しない。
+        self.assertNotIn("https://sso.evil.test/authorize?token=secret123", session.urls)
+        self.assertNotIn("https://sso.evil.test/authorize?token=secret123", session.forms_by_url)
+        self.assertFalse(any("evil.test" in json.dumps(e) for e in session.events))
 
 
 if __name__ == "__main__":
