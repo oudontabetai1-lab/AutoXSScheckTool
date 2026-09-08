@@ -776,6 +776,21 @@ class DirectGetFetchMetadataAndCookieSyncTests(unittest.IsolatedAsyncioTestCase)
         self.assertEqual(h.get("sec-fetch-dest"), "document")
         self.assertEqual(h.get("user-agent"), "Mozilla/5.0 TestUA")
 
+    async def test_user_header_replaces_generated_case_insensitively(self):
+        """ユーザ指定ヘッダ（小文字 user-agent 等）が生成 UA を大小非依存で置換し重複しない
+        （Codex #145 round11）。"""
+        engine, _ctx, scanner = self._scanner()
+        # engine.auth_headers が小文字キーの user-agent を返すよう差し替える。
+        engine.auth_headers = lambda extra=None, include_cookie=True, url=None: {
+            "user-agent": "CustomUA", "accept-language": "ja"
+        }
+        await scanner._get("http://app.test/page")
+        h = engine.captured_headers
+        # httpx は重複ヘッダを "A, B" と結合する。単一の custom 値のみになっていること。
+        self.assertEqual(h.get("user-agent"), "CustomUA")
+        self.assertNotIn("Mozilla", h.get("user-agent", ""))
+        self.assertEqual(h.get("accept-language"), "ja")
+
     async def test_direct_get_never_writes_browser_cookies(self):
         """直接 GET は 2xx の Set-Cookie（rotation）でも browser context を書き換えない
         （round7 の sync-back を撤去＝httpOnly 剥がし等の退行を避ける・Codex #145 round8）。"""

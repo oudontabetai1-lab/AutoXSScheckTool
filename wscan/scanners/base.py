@@ -1630,6 +1630,14 @@ class BaseScanner(ABC):
             req_headers["Sec-Fetch-User"] = "?1"
             req_headers["Sec-Fetch-Dest"] = "document"
         if base_auth:
+            # base_auth（ユーザ指定ヘッダ）は生成ヘッダ（UA/Accept/Sec-Fetch）を **case-insensitive**
+            # に置換する。素の update だと `user-agent`（小文字指定）と `User-Agent`（生成）が両立し、
+            # httpx が重複/結合値として送って Chromium の単一値と食い違う（origin/WAF が変種を返し
+            # FP/FN）。browser 傍受経路も case-insensitive 置換のため挙動を揃える（Codex #145 round11）。
+            _base_lower = {k.lower() for k in base_auth}
+            req_headers = {
+                k: v for k, v in req_headers.items() if k.lower() not in _base_lower
+            }
             req_headers.update(base_auth)
         async with httpx.AsyncClient(**kwargs) as client:
             from urllib.parse import urljoin
