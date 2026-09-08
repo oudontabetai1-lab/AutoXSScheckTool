@@ -23,7 +23,7 @@ from wscan.scanner_contract import (
     ValueKind,
 )
 
-from .base import BaseScanner, Finding, PageDocumentUnavailable
+from .base import BaseScanner, Finding
 
 if TYPE_CHECKING:
     from wscan.engine import ScanEngine
@@ -210,21 +210,15 @@ class SRIScanner(BaseScanner):
         # 対象ページの HTML は直接 GET で確実に取得する。current_page_pair は latest() フォールバックで
         # 別リクエストの pair を返し body が欠落しうるため、外部 script/link を取りこぼして FN になる
         # （0034 benchmark で /portal/insights の外部 CDN script を検出できなかった原因）。
-        pair = await self._response_pair(url)
-        response = pair.get("response") or {}
-        # 観測失敗（transient で {} / 完全失敗）と NOT_REACHED（statusless）を区別する。header scanner と
-        # 同じ判定を使い、**live DOM へフォールバックしない**（attack フェーズの browser.page は別 URL の
-        # タブになり得て wrong-page FP/FN を招くため・Codex #147 P2）。
-        if not response or response.get("status") is None:
-            self._record_scan_note(f"transport_error:{self.CHECK_TYPE}:no_response")
-            if not response:
-                raise PageDocumentUnavailable(
-                    f"{self.CHECK_TYPE}: 対象 document を取得できませんでした: {url}"
-                )
-            return []
-        body = response.get("body", "") or ""
+        # content 観測系は _document_body で本文を得る（非 2xx 本文も保持、transient/完全失敗のみ
+        # PageDocumentUnavailable）。live DOM へはフォールバックしない（attack フェーズの browser.page は
+        # 別 URL のタブになり得て wrong-page FP/FN を招くため・Codex #147 P2）。取得は header 監査と
+        # per-URL raw キャッシュを共有し 1 ページ 1 replay を保つ。
+        body = await self._document_body(url)
         if not body:
             return []
+        # record_finding の証拠用の最小 pair（本文は body 変数で保持済み）。
+        pair = {"request": {"url": url, "method": "GET"}, "response": {"url": url}}
 
         findings: list[Finding] = []
         for hit in find_unprotected_externals(body, url):

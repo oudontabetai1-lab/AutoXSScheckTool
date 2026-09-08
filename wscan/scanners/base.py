@@ -1715,62 +1715,111 @@ class BaseScanner(ABC):
         走る page 観測系スキャナ群がこのキャッシュを共有する。cookie 再同期も 1 回に減る。
         （replay を完全に無くす＝ブラウザ navigation 応答の per-URL 保存は別タスク＝verify 側の共有も含む。）
         """
-        cache = getattr(self.engine, "_page_obs_pair_cache", None)
+        raw = await self._raw_document_cached(url)
+        if not raw:
+            return {}  # 完全な取得失敗（transient/total failure）→ scanner が PageDocumentUnavailable
+        status = raw.get("status")
+        # header 監査は「2xx の描画された document」だけを対象にする。直接 GET は replay であり、
+        # one-time link / nonce 消費 URL では 2 回目の GET が 3xx や 401/404/410 等を返し得る。その
+        # 非 2xx 応答の欠落ヘッダ（XFO/CSP 等）を監査すると FP になるため status を落として NOT_REACHED。
+        # transient（408/429/5xx）は {} で PageDocumentUnavailable→resume 再試行（round17/18/19）。
+        if status is None or not (200 <= int(status) < 300):
+            try:
+                if status is not None and int(status) in _TRANSIENT_REPLAY_STATUSES:
+                    return {}
+            except (TypeError, ValueError):
+                pass
+            return {
+                "request": {"url": url, "method": "GET"},
+                "response": {"url": raw.get("url", url), "headers": {}, "body": ""},
+            }
+        return {
+            "request": {"url": url, "method": "GET"},
+            "response": {
+                "url": raw.get("url", url),
+                "status": int(status),
+                "headers": raw.get("headers", {}),
+                "body": raw.get("body", ""),
+            },
+        }
+
+    async def _document_body(self, url: str) -> str:
+        """content 観測系スキャナ（sri/secret_leak）用に対象応答の**本文**を返す。
+
+        `_response_pair`（header 監査用）は非 2xx を本文空の statusless に潰すが、secret_leak は
+        401/403/404/500 等の error/auth 応答本文に漏れた秘密も走査する必要があり、sri も同様に本文を
+        要する。そこで恒久的な非 2xx でも**本文を保持**して返す（transport_error も刻まない・Codex #147 P2）。
+        transient（408/429/5xx）と完全な取得失敗だけを観測失敗として transport_error を刻み
+        `PageDocumentUnavailable` を送出する（checkpoint 未完了→resume 再試行）。取得は header 監査と
+        同じ per-URL raw キャッシュを共有し、1 ページ 1 replay を保つ（副作用 GET を増やさない）。
+        """
+        raw = await self._raw_document_cached(url)
+        if not raw:
+            self._record_scan_note(f"transport_error:{self.CHECK_TYPE}:no_response")
+            raise PageDocumentUnavailable(
+                f"{self.CHECK_TYPE}: 対象 document を取得できませんでした: {url}"
+            )
+        status = raw.get("status")
+        try:
+            if status is not None and int(status) in _TRANSIENT_REPLAY_STATUSES:
+                self._record_scan_note(f"transport_error:{self.CHECK_TYPE}:transient")
+                raise PageDocumentUnavailable(
+                    f"{self.CHECK_TYPE}: 一時的な取得失敗（{status}）: {url}"
+                )
+        except (TypeError, ValueError):
+            pass
+        return raw.get("body", "") or ""
+
+    async def _raw_document_cached(self, url: str) -> Optional[dict]:
+        """対象 URL の生取得結果 ``{"status","headers","body","url"}`` を per-URL キャッシュ付きで返す。
+
+        header 観測系（clickjacking/security_headers）と content 観測系（sri/secret_leak）が
+        **同一ページの取得を 1 回だけ共有**するためのチョークポイント（副作用 GET を read-only ヘッダ
+        検査で二重に叩かない・Codex #145 P2 round18）。ポリシー（2xx 限定/本文保持）は各呼び出し側が
+        被せる。完全な取得失敗は ``None``。（replay 完全廃止＝ブラウザ navigation 応答の保存は別タスク。）
+        """
+        cache = getattr(self.engine, "_page_obs_raw_cache", None)
         if cache is None:
             try:
                 cache = {}
-                self.engine._page_obs_pair_cache = cache
+                self.engine._page_obs_raw_cache = cache
             except Exception:
                 cache = None
         if cache is not None and url in cache:
             return cache[url]
-        pair = await self._compute_response_pair(url)
+        raw = await self._compute_raw_document(url)
         if cache is not None:
             # ページ数に比例した無制限成長を防ぐ簡易上限（並列 worker の in-flight を十分に覆う）。
             if len(cache) > 64:
                 cache.clear()
-            cache[url] = pair
-        return pair
+            cache[url] = raw
+        return raw
 
-    async def _compute_response_pair(self, url: str) -> dict:
-        """対象ページの request/response pair を計算する。直接 GET 優先・失敗時のみ network fallback。"""
+    async def _compute_raw_document(self, url: str) -> Optional[dict]:
+        """直接 GET を優先し、失敗時のみ network capture へ fallback して生の応答を正規化する。
+
+        戻り値は ``{"status": int|None, "headers": dict, "body": str, "url": str}``、完全な取得失敗は
+        ``None``。status/本文の解釈（2xx 限定・非2xx 本文保持・transient）は呼び出し側のポリシーに委ねる。
+        """
         try:
             response = await self._get(url)
-            # header 監査は「replay で確実に取得できたレンダリング document（2xx）」に限定する。
-            # 直接 GET は再取得(replay)であり、one-time link / nonce 消費 GET のような replay-sensitive
-            # URL では、ブラウザが本物の保護 document を描画済みでも 2 回目のこの GET は 3xx や
-            # 401/403/404/410 等を返し得る。その非 2xx 応答の欠落ヘッダ（X-Frame-Options/CSP 等）を
-            # document の欠落として監査すると、ブラウザが描画していない応答に対する FP になる。
-            # 3xx は round6/P2d で既対応、4xx/5xx へ一般化（round17）。ただし非 2xx を一律に
-            # status なし pair（＝[] 返しで tested 完了）にすると、408/429/5xx のような **transient**
-            # 失敗まで恒久的に「監査済み」扱いになり resume で再試行されない（Codex #145 P2 round18）。
-            # そこで transient は空 pair を返して scanner に PageDocumentUnavailable を投げさせ、
-            # engine の error 経路（checkpoint 未完了→resume 再試行）へ載せる。恒久的な非 2xx
-            # （3xx・401/403/404/410 等の「この document ではない」）は従来どおり status なし pair で
-            # NOT_REACHED（[] 返し）にする。
-            status = response.status_code
-            if not (200 <= status < 300):
-                if status in _TRANSIENT_REPLAY_STATUSES:
-                    return {}  # → scanner: not response → PageDocumentUnavailable → resume 再試行
-                return {
-                    "request": {"url": url, "method": "GET"},
-                    "response": {"url": str(response.url), "headers": {}, "body": ""},
-                }
             return {
-                "request": {"url": url, "method": "GET"},
-                "response": {
-                    "url": str(response.url),
-                    "status": response.status_code,
-                    "headers": dict(response.headers),
-                    "body": response.text[:50000],
-                },
+                "status": response.status_code,
+                "headers": dict(response.headers),
+                "body": (response.text or "")[:50000],
+                "url": str(getattr(response, "url", url) or url),
             }
         except Exception:
-            # fallback の captured pair にも direct-GET と同じ document status 方針を適用する
-            # （2xx のみ監査／transient は空→resume／その他非2xx は NOT_REACHED）。従来は 3xx しか
-            # 弾かず、capture が 401/429/5xx のとき error 応答を監査して欠落ヘッダ finding や
-            # checkpoint 完了を招き、round18 の transient retry も素通りしていた（Codex #145 P2 round19）。
-            return self._apply_capture_status_policy(self.current_page_pair(url), url)
+            pair = self.current_page_pair(url)
+            resp = (pair or {}).get("response") or {}
+            if not resp:
+                return None
+            return {
+                "status": resp.get("status"),
+                "headers": resp.get("headers", {}) or {},
+                "body": resp.get("body", "") or "",
+                "url": resp.get("url", url),
+            }
 
     @staticmethod
     def _apply_capture_status_policy(pair: dict, url: str) -> dict:

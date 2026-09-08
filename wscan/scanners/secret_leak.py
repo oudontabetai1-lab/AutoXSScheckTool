@@ -31,7 +31,7 @@ from wscan.scanner_contract import (
     ValueKind,
 )
 
-from .base import BaseScanner, Finding, PageDocumentUnavailable
+from .base import BaseScanner, Finding
 
 if TYPE_CHECKING:
     from wscan.engine import ScanEngine
@@ -315,21 +315,15 @@ class SecretLeakScanner(BaseScanner):
         # 対象リソースの本文は直接 GET で確実に取得する。current_page_pair は latest() フォールバックで
         # 別リクエストの pair を返し body が欠落しうるため、JS アセット等の本文を取りこぼして FN になる
         # （0034 benchmark で /static/vendor.js の埋め込み秘密を検出できなかった原因）。
-        pair = await self._response_pair(url)
-        response = pair.get("response") or {}
-        # 観測失敗（transient で {} / 完全失敗）と NOT_REACHED（statusless）を区別する。header scanner と
-        # 同じ判定を使い、**live DOM へフォールバックしない**（attack フェーズの browser.page は別 URL の
-        # タブになり得て wrong-page FP/FN を招くため・Codex #147 P2）。
-        if not response or response.get("status") is None:
-            self._record_scan_note(f"transport_error:{self.CHECK_TYPE}:no_response")
-            if not response:
-                raise PageDocumentUnavailable(
-                    f"{self.CHECK_TYPE}: 対象 document を取得できませんでした: {url}"
-                )
-            return []
-        body = response.get("body", "") or ""
+        # content 観測系は _document_body で本文を得る。secret_leak は 401/403/404/500 等の error/auth
+        # 応答本文に漏れた秘密も走査する必要があるため、恒久非 2xx でも**本文を保持**する（transport_error も
+        # 刻まない・Codex #147 P2）。transient/完全失敗のみ PageDocumentUnavailable（resume 再試行）。
+        # live DOM へはフォールバックしない（wrong-page FP/FN 防止）。header 監査と per-URL raw キャッシュ共有。
+        body = await self._document_body(url)
         if not body:
             return []
+        # record_finding の証拠用の最小 pair（本文は body 変数で保持済み）。
+        pair = {"request": {"url": url, "method": "GET"}, "response": {"url": url}}
 
         findings: list[Finding] = []
         for hit in scan_text_for_secrets(body):
