@@ -766,7 +766,9 @@ def create_app() -> FastAPI:
             '<p>血圧・体重の推移を可視化します。</p><canvas id="trend"></canvas>',
             extra_head=(
                 f'<script src="{_CHART_SRC}" crossorigin="anonymous" '
-                'integrity="sha384-ENjdO4Dr2bkBIFxQpeoTz1HIcje39Wm4jDKdf19U8gI4ddQ3GYNS7NTKfAdVQSZe">'
+                # chart.umd.min.js@4.4.1 の実 digest（openssl sha384→base64）。実ブラウザでも
+                # 読み込める機能する safe twin にする（旧値は別ライブラリの hash だった・Codex #147 P2）。
+                'integrity="sha384-9nhczxUqK87bcKHh20fSQcTGD4qq5GhayNYSYWqwBkINBhOfQLg/P5HG5lF1urn4">'
                 "</script>"
             ),
         )
