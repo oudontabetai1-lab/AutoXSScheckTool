@@ -264,6 +264,7 @@ from .attack_planner import AttackPlanner, FieldAttackPlan, PageAttackPlan
 from .adaptive_payload import AdaptivePayloadEngine
 from .browser import BrowserManager, bucketize_status_counts, canonical_host
 from .header_scope import allowed_header_origins, headers_allowed_for_url
+from .url_normalize import normalize_proxy_server
 from .tls_config import TLSConfig
 from .chain_scanner import ChainScanner, ChainFinding
 from .ctf_flag_finder import FlagFinder
@@ -779,7 +780,9 @@ class ScanEngine:
         self.interactive_crawl_review = interactive_crawl_review
         self.skip_registration = skip_registration
         self.open_report = open_report
-        self.proxy = proxy
+        # 空白のみ/scheme 欠落/不正値を正規化（BrowserManager と httpx で共有）。
+        # 不正値は Playwright launch 前に明示エラーへ倒す（"Invalid URL" 回避）。
+        self.proxy = proxy = normalize_proxy_server(proxy)
         self.tls_config = TLSConfig.from_values(
             client_cert=tls_client_cert,
             client_key=tls_client_key,

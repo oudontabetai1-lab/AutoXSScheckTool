@@ -20,6 +20,7 @@ from rich.console import Console
 
 from .header_scope import headers_allowed_for_url
 from .tls_config import TLSConfig
+from .url_normalize import normalize_proxy_server
 from .url_extraction import (
     is_plausible_route_candidate,
     truncated_regex_literal,
@@ -477,7 +478,9 @@ class BrowserManager:
         # MFA（2FA）ソルバ。設定時はログイン後のワンタイムコード入力を自動化。
         # None なら従来どおり MFA 段は何もしない。
         self.mfa_solver = mfa_solver
-        self.proxy = proxy  # e.g. "http://127.0.0.1:8080"
+        # 空白のみ/scheme 欠落/不正値を正規化（不正なら実行前に明示エラー）。
+        # そのまま launch に渡すと Playwright が "Invalid URL" で落ちるため。
+        self.proxy = normalize_proxy_server(proxy)  # e.g. "http://127.0.0.1:8080"
         self.sleep_factor = sleep_factor
         self.tls_config = tls_config or TLSConfig()
         self.target_url = target_url
