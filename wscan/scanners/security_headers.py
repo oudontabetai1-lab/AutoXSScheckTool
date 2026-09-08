@@ -16,15 +16,13 @@ Evaluated headers:
 import re
 from typing import TYPE_CHECKING
 
-import httpx
-
 from wscan.scanner_contract import (
     CapabilityState, Carrier, CarrierCapability, CostClass, ExecutionKind,
     PayloadShape, Prerequisite, ScannerContract, StateChangeClass, TransportKind,
     ValueKind,
 )
 
-from .base import BaseScanner, Finding
+from .base import BaseScanner, Finding, PageDocumentUnavailable
 
 if TYPE_CHECKING:
     from wscan.engine import ScanEngine
@@ -156,6 +154,11 @@ class SecurityHeadersScanner(BaseScanner):
         # 除外して passive case を誤 TN/FN でなく NOT_REACHED にする（Codex #142 P2）。
         if not response or response.get("status") is None:
             self._record_scan_note(f"transport_error:{self.CHECK_TYPE}:no_response")
+            if not response:
+                # 完全な取得失敗（_get 失敗＋capture 無し）は例外で engine に伝え、checkpoint 未完了に
+                # して resume 再試行を可能にする（[] だと tested/完了で恒久 skip・Codex #145 P2 round15）。
+                # 3xx 等の legitimate NOT_REACHED（response は非空・status のみ無し）はそのまま [] を返す。
+                raise PageDocumentUnavailable(f"{self.CHECK_TYPE}: 対象 document を取得できませんでした: {url}")
             return []
         # レスポンスは受信済み。ヘッダが空でも監査する（セキュリティヘッダ皆無＝全欠落＝最大級の
         # 脆弱ケースで、まさに本 scanner が報告すべき対象・Codex #142 P1）。
@@ -264,6 +267,15 @@ class SecurityHeadersScanner(BaseScanner):
         except Exception:
             return None
 
+        # verify の再取得(replay)も 2xx（描画された document）でなければ検証不能(None)とする。
+        # 未消費の 3xx（セッション失効で外部 IdP へ redirect・hop 上限超過等）や、replay-sensitive
+        # URL で 2 回目の GET が返す 401/404/410 等は、ブラウザが描画した document ではない。その
+        # 欠落ヘッダを「再現確認」と誤判定して既報 finding を誤って reproduced にしないよう倒す
+        # （初回スキャンは _response_pair の 2xx ガードで保護されるが verify は _get 直呼び。
+        # Codex #145 P2 round10 で 3xx、round17 で 4xx/5xx へ一般化して _response_pair と揃える）。
+        if not (200 <= response.status_code < 300):
+            return None
+
         headers = {k.lower(): v for k, v in response.headers.items()}
 
         if evidence_type == "security_header_missing":
@@ -286,32 +298,4 @@ class SecurityHeadersScanner(BaseScanner):
 
         return None
 
-    async def _get(self, url: str):
-        proxy = getattr(self.engine, "proxy", "") or None
-        timeout = getattr(self.engine, "timeout", 15)
-        kwargs: dict = {"timeout": timeout, "follow_redirects": True}
-        if hasattr(self.engine, "httpx_client_kwargs"):
-            kwargs = self.engine.httpx_client_kwargs(**kwargs)
-        elif proxy:
-            kwargs["proxy"] = proxy
-        if hasattr(self.engine, "auth_headers"):
-            kwargs["headers"] = self.auth_headers_for_url(url)
-        async with httpx.AsyncClient(**kwargs) as client:
-            response = await client.get(url)
-            self._record_probe_status(response)
-        return response
-
-    async def _response_pair(self, url: str) -> dict:
-        try:
-            response = await self._get(url)
-            return {
-                "request": {"url": url, "method": "GET"},
-                "response": {
-                    "url": str(response.url),
-                    "status": response.status_code,
-                    "headers": dict(response.headers),
-                    "body": response.text[:50000],
-                },
-            }
-        except Exception:
-            return self.current_page_pair(url)
+    # _get / _response_pair は BaseScanner の共有ヘルパー（page 観測系スキャナで再利用）。

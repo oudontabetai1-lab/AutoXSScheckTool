@@ -451,6 +451,13 @@ class NetworkCapture:
 class BrowserManager:
     """Manages Playwright browser and provides helper methods."""
 
+    # Chromium context の User-Agent。page 観測系スキャナの直接 GET（BaseScanner._get）も
+    # 同じ UA を送り、UA/Accept で document を出し分ける origin/CDN で bot 変種を掴まないようにする。
+    DEFAULT_USER_AGENT = (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    )
+
     def __init__(
         self,
         headless: bool = False,
@@ -570,7 +577,7 @@ class BrowserManager:
         self._browser = await self._playwright.chromium.launch(**launch_kwargs)
         ctx_kwargs: dict = {
             "viewport": {"width": 1280, "height": 800},
-            "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "user_agent": self.DEFAULT_USER_AGENT,
         }
         ctx_kwargs.update(self.tls_config.playwright_context_options(self.target_url))
         if self.proxy:
