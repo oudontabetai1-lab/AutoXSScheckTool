@@ -571,6 +571,22 @@ def injection_point_from_finding(finding: Finding) -> Optional[InjectionPoint]:
     raise ProvenanceError(f"未知の injection_location です: {location!r}")
 
 
+class _DirectResponse:
+    """``BaseScanner._get`` が返す httpx.Response 互換の最小レスポンス。
+
+    Playwright ``APIResponse`` を正規化し、観測系スキャナ/``_response_pair``/``verify_finding``
+    が使う ``status_code`` / ``headers``（小文字キー dict）/ ``text``（取得済み str）/ ``url`` を提供する。
+    """
+
+    __slots__ = ("status_code", "headers", "text", "url")
+
+    def __init__(self, status_code: int, headers: dict, text: str, url: str):
+        self.status_code = status_code
+        self.headers = headers
+        self.text = text
+        self.url = url
+
+
 class BaseScanner(ABC):
     """Base class for all vulnerability scanners."""
 
@@ -1492,128 +1508,49 @@ class BaseScanner(ABC):
             return s_port == 80 and d_port == 443
         return False
 
-    async def _build_cookie_jar_for(self, url: str):
-        """worker ブラウザ context の Cookie を target host に絞った httpx Cookie jar として構築する。
-
-        並行モードでは _attack_one_page が per-page cookie 同期を省くため、global な
-        engine.cookies スナップショットではなく worker context の実 Cookie を使う（Codex #145 P2c）。
-        生ヘッダ手組みではなく ``http.cookiejar`` に載せることで以下を全てネイティブに扱う:
-          - 同名・別 path Cookie（``session`` が / と /admin 等）の**両方保持＋RFC6265 §5.4 順**
-            （生ヘッダ手組みだと同名を潰しやすい・Codex #145 P2）。
-          - redirect 応答の ``Set-Cookie`` を **hop 間で蓄積**（httpx client が response から
-            client.cookies へ取り込み、次 hop で送る＝session rotation を追従・Codex #145 P2）。
-          - ``secure`` Cookie の **https 限定送出**（http hop では出さず、承認した http→https
-            upgrade hop でのみ送る）。
-        target host に一致する Cookie のみ載せる（host-only は完全一致、domain-cookie は suffix）。
-        取得不能（テスト用 fake browser 等）や host 不明なら空 jar（未認証扱い）。
-
-        context は **呼び出し時に** ``self.engine.browser`` から解決する（Codex #145 P2 round8）。
-        ``self.browser`` は __init__ 時に捕捉したメイン browser で、``--concurrency>1`` の worker
-        タスクでは別 context になる。worker-aware な ``engine.browser`` property を使わないと、
-        別 worker が担当する保護ページを**メイン context の別スコープ/失効セッション**で取得し、
-        未認証応答を監査してしまう。
-        """
-        import http.cookiejar as _cj
-        from urllib.parse import urlparse
-
-        jar = httpx.Cookies()
-        browser = getattr(self.engine, "browser", None) or getattr(self, "browser", None)
-        ctx = getattr(browser, "_context", None)
-        if ctx is None:
-            return jar
-        # IPv6 リテラルは urlparse で角括弧が外れる（[::1] → ::1）。Cookie domain 側は括弧を
-        # 残すことがあるため両辺の括弧を除いて比較する（Codex #145 round10）。
-        host = (urlparse(url).hostname or "").lower().strip("[]")
-        if not host:
-            return jar
-        is_ipv6_host = ":" in host
-        try:
-            cookies = await ctx.cookies()  # context の全 Cookie（属性込み）
-        except Exception:
-            return jar
-        for c in cookies or []:
-            name = c.get("name")
-            if not name:
-                continue
-            raw_dom = str(c.get("domain", "") or "")
-            is_domain_cookie = raw_dom.startswith(".")
-            dom_norm = raw_dom.lstrip(".").lower().strip("[]")
-            # target host に一致しない Cookie は載せない（別ホストの Cookie を送らない）。
-            if dom_norm and not (
-                host == dom_norm
-                or (is_domain_cookie and host.endswith("." + dom_norm))
-            ):
-                continue
-            store_dom = raw_dom
-            store_spec = bool(raw_dom)
-            if not is_domain_cookie and dom_norm:
-                if is_ipv6_host:
-                    # http.cookiejar は IPv6 リテラルの domain 照合に失敗する（どの形式でも
-                    # マッチしない）。この jar は target host の直接 GET 専用（cookie は事前に
-                    # host 一致で filter 済み・redirect も same-host のみ追従）なので、domain 制限
-                    # なし（domain_specified=False）で host-only Cookie を送る（Codex #145 round10）。
-                    store_dom = ""
-                    store_spec = False
-                elif "." not in dom_norm:
-                    # 単一ラベルホスト（localhost / app 等）対策（Codex #145 round9）: http.cookiejar
-                    # は request host にドットが無いと <host>.local へ正規化して照合するため、
-                    # host-only Cookie の domain も .local を付けないと直接 GET と一致しない。
-                    store_dom = dom_norm + ".local"
-            try:
-                jar.jar.set_cookie(
-                    _cj.Cookie(
-                        version=0, name=name, value=str(c.get("value", "") or ""),
-                        port=None, port_specified=False,
-                        domain=store_dom, domain_specified=store_spec,
-                        domain_initial_dot=is_domain_cookie,
-                        path=str(c.get("path", "/") or "/"), path_specified=True,
-                        secure=bool(c.get("secure")), expires=None, discard=True,
-                        comment=None, comment_url=None, rest={}, rfc2109=False,
-                    )
-                )
-            except Exception:
-                continue
-        return jar
-
     async def _get(self, url: str):
         """対象 URL の GET レスポンスを直接取得する（page 観測系スキャナ共有）。
 
         ブラウザの network capture（current_page_pair）は latest() フォールバックで別リクエスト
         （asset/別ページ）の pair を返し、ヘッダ観測系（clickjacking/security_headers 等）が誤った
-        ヘッダを見て FP/FN を出しうる。直接 httpx で取得することで対象ページの実ヘッダを確実に得る。
+        ヘッダを見て FP/FN を出しうる。対象を直接 GET することで実ヘッダ/本文を確実に得る。
 
-        redirect は httpx の自動追従を無効化し、**same-host のみ手動で追従**する（http→https の
-        canonical upgrade は許可・別ホスト/ダウングレードは遮断）。別ホストへ追従すると初期 URL に
-        しかスコープされない認証ヘッダ/Cookie が別 origin へ漏れる（Codex #145 P1）。
-        認証ヘッダは in-scope の元 url から一度だけ算出して全 hop で再利用する。承認した
-        http→https upgrade は host_scope 外となり per-hop 再算出だと scoped auth を落とすため
-        （Codex #145 P1 round4）。Cookie は client.cookies（http.cookiejar）が host 一致分を
-        hop ごとに送り、各応答の Set-Cookie を蓄積する（session rotation を追従・P2 round4）。
-        追従しきれずなお 3xx なら _response_pair 側で document 扱いしない（Codex #145 P2d）。
+        取得は **Playwright browser context の APIRequestContext（``context.request``）** で行う。
+        これは browser context と同じ Cookie jar を使い、リクエスト Cookie の送出と応答 ``Set-Cookie``
+        の反映（session rotation・削除・httpOnly/sameSite 保持）を native に処理する。そのため httpx
+        の別クライアントで Cookie を再現していた処理（jar 構築・scoping・単一ラベル/IPv6・書き戻し）が
+        一切不要になり、監査 GET が session を rotation させても browser と desync しない
+        （Codex #145 round12。従来の httpx 実装は round2〜11 で Cookie 忠実性の指摘が続いていた）。
+
+        redirect は ``max_redirects=0`` で自動追従を無効化し、**same-host のみ手動追従**する（別ホスト/
+        ダウングレードへ認証ヘッダを漏らさない）。認証ヘッダは in-scope の元 url から一度だけ算出して
+        全 hop で再利用し（承認 upgrade でも scoped auth を落とさない）、Chromium と同じ document
+        request ヘッダ（UA/Accept/Sec-Fetch）を付与する（UA/Accept/Fetch-Metadata で応答を出し分ける
+        origin/WAF の変種掴みを防ぐ）。追従しきれずなお 3xx なら _response_pair 側で document 扱いしない。
+
+        APIRequestContext が使えない（テストダブル等）ときは例外を投げ、_response_pair を network
+        fallback へ倒す。
         """
-        proxy = getattr(self.engine, "proxy", "") or None
-        timeout = getattr(self.engine, "timeout", 15)
-        kwargs: dict = {"timeout": timeout, "follow_redirects": False}
-        if hasattr(self.engine, "httpx_client_kwargs"):
-            kwargs = self.engine.httpx_client_kwargs(**kwargs)
-        elif proxy:
-            kwargs["proxy"] = proxy
-        # engine.httpx_client_kwargs が上書きしても、認証情報の漏洩防止のため必ず無効化する。
-        kwargs["follow_redirects"] = False
+        from urllib.parse import urljoin
+
+        browser = getattr(self.engine, "browser", None) or getattr(self, "browser", None)
+        ctx = getattr(browser, "_context", None)
+        request_ctx = getattr(ctx, "request", None)
+        if request_ctx is None or not hasattr(request_ctx, "get"):
+            raise RuntimeError("browser APIRequestContext unavailable")
+
         _has_auth = hasattr(self.engine, "auth_headers")
         # 認証ヘッダは in-scope の元 url から算出し全 same-host hop で再利用（承認 upgrade でも
-        # scoped credential を落とさない）。include_cookie=False で global engine.cookies を
-        # 生 Cookie ヘッダとして載せない（Cookie は下の jar に一本化・Codex #145 P2c）。
+        # scoped credential を落とさない）。include_cookie=False で global engine.cookies を生 Cookie
+        # ヘッダとして載せない（Cookie は APIRequestContext の共有 jar が native に扱う）。
         base_auth = (
             dict(self.auth_headers_for_url(url, include_cookie=False))
             if _has_auth
             else None
         )
-        # Chromium navigation と同じ document request ヘッダ（UA/Accept 系）を再現し、UA/Accept で
-        # 応答を出し分ける origin/CDN で bot/error 変種を掴んで FP/FN を出さないようにする
-        # （Codex #145 P2 round6）。auth ヘッダが優先（ユーザ指定 UA 等があればそちらを尊重）。
+        # Chromium navigation と同じ document request ヘッダ（UA/Accept/Fetch Metadata）を再現。
         req_headers: dict = {}
-        _ua = getattr(getattr(self, "browser", None), "DEFAULT_USER_AGENT", "") or ""
+        _ua = getattr(browser, "DEFAULT_USER_AGENT", "") or ""
         if _ua:
             req_headers["User-Agent"] = _ua
             req_headers["Accept"] = (
@@ -1621,57 +1558,48 @@ class BaseScanner(ABC):
                 "image/avif,image/webp,*/*;q=0.8"
             )
             req_headers["Accept-Language"] = "en-US,en;q=0.9"
-            # Fetch Metadata: top-level document navigation を表す値を付与し、Sec-Fetch-* で
-            # ナビゲーションと fetch を区別する origin/WAF が browser には document を返しつつ本 GET
-            # にだけ 401/403/interstitial を返す差分を防ぐ（Codex #145 P2 round7）。アドレスバー相当の
-            # ユーザー起点トップレベル遷移＝Site:none / Mode:navigate / User:?1 / Dest:document。
             req_headers["Sec-Fetch-Site"] = "none"
             req_headers["Sec-Fetch-Mode"] = "navigate"
             req_headers["Sec-Fetch-User"] = "?1"
             req_headers["Sec-Fetch-Dest"] = "document"
         if base_auth:
-            # base_auth（ユーザ指定ヘッダ）は生成ヘッダ（UA/Accept/Sec-Fetch）を **case-insensitive**
-            # に置換する。素の update だと `user-agent`（小文字指定）と `User-Agent`（生成）が両立し、
-            # httpx が重複/結合値として送って Chromium の単一値と食い違う（origin/WAF が変種を返し
-            # FP/FN）。browser 傍受経路も case-insensitive 置換のため挙動を揃える（Codex #145 round11）。
+            # base_auth（ユーザ指定ヘッダ）は生成ヘッダを **case-insensitive** に置換する
+            # （`user-agent` 小文字指定と `User-Agent` 生成の重複を防ぐ・Codex #145 round11）。
             _base_lower = {k.lower() for k in base_auth}
             req_headers = {
                 k: v for k, v in req_headers.items() if k.lower() not in _base_lower
             }
             req_headers.update(base_auth)
-        async with httpx.AsyncClient(**kwargs) as client:
-            from urllib.parse import urljoin
 
-            client.cookies = await self._build_cookie_jar_for(url)
-
-            async def _fetch(u: str):
-                # Cookie は client.cookies（http.cookiejar）が host/path/secure 一致で送り、
-                # 応答の Set-Cookie を蓄積する。auth+browser ヘッダは in-scope の req_headers を再利用。
-                return await client.get(
-                    u, headers=dict(req_headers) if req_headers else None
-                )
-
-            current = url
-            response = await _fetch(current)
-            hops = 0
-            while response.status_code in (301, 302, 303, 307, 308) and hops < 5:
-                loc = response.headers.get("location")
-                if not loc:
-                    break
-                target = urljoin(str(response.url), loc)
-                if not self._followable_redirect(current, target):
-                    break  # 別ホスト/ダウングレードは追従しない（認証情報の漏洩防止）
-                hops += 1
-                current = target
-                response = await _fetch(current)
-            self._record_probe_status(response)
-        # 直接 GET 応答の Set-Cookie（session rotation 等）は browser 側へ書き戻さない
-        # （read-only 監査は共有 Cookie store を変更しない）。httpx jar から browser cookie
-        # セマンティクス（httpOnly/sameSite/expiry/削除）を忠実再現するのは不可能に近く、
-        # 部分的な書き戻しは HttpOnly 認証 Cookie を script 可読にするなど**より重大な退行**を招く
-        # （Codex #145 round7 で追加した sync-back が round8 で httpOnly 剥がし等を指摘され撤去）。
-        # 監査 GET は worker の現 Cookie スナップショットで対象を取得するに留める（Codex #145 round8）。
-        return response
+        current = url
+        response = await request_ctx.get(
+            current, headers=req_headers or None, max_redirects=0
+        )
+        hops = 0
+        while response.status in (301, 302, 303, 307, 308) and hops < 5:
+            loc = response.headers.get("location")
+            if not loc:
+                break
+            target = urljoin(current, loc)
+            if not self._followable_redirect(current, target):
+                break  # 別ホスト/ダウングレードは追従しない（認証情報の漏洩防止）
+            hops += 1
+            current = target
+            response = await request_ctx.get(
+                current, headers=req_headers or None, max_redirects=0
+            )
+        try:
+            text = await response.text()
+        except Exception:
+            text = ""
+        direct = _DirectResponse(
+            status_code=int(response.status),
+            headers=dict(response.headers),  # Playwright は小文字キーの dict を返す
+            text=text[:50000],
+            url=str(getattr(response, "url", current) or current),
+        )
+        self._record_probe_status(direct)
+        return direct
 
     @staticmethod
     def _reject_redirect_pair(pair: dict, url: str) -> dict:

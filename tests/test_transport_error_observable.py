@@ -500,19 +500,6 @@ class SecurityHeadersFetchEvidenceTests(unittest.IsolatedAsyncioTestCase):
         )
 
 
-class _CookieCtxBrowser:
-    """context.cookies() が同名・別 path/secure Cookie を返す最小ブラウザ context（P2 回帰）。"""
-
-    def __init__(self, cookies):
-        self._cookies = cookies
-
-        class _Ctx:
-            async def cookies(_self, *a, **k):
-                return list(cookies)
-
-        self._context = _Ctx()
-
-
 class FollowableRedirectTests(unittest.IsolatedAsyncioTestCase):
     """_get の redirect 追従判定（Codex #145 P1）。same-host のみ・http→https upgrade は許可。"""
 
@@ -617,206 +604,128 @@ class CurrentPagePairWorkerAwareTests(unittest.TestCase):
         self.assertEqual(pair["response"]["url"], "worker")  # worker の capture を読む
 
 
-class BuildCookieJarTests(unittest.IsolatedAsyncioTestCase):
-    """_build_cookie_jar_for が同名・別 path/secure/別ホスト Cookie を http.cookiejar で正しく扱う
-    （Codex #145 P2/round4）。jar が送る Cookie ヘッダで検証する。"""
+class _FakeAPIResponse:
+    """Playwright APIResponse の最小ダブル（status/headers/text/url）。"""
 
-    def _scanner(self, cookies):
-        engine = _FakeEngine()
-        engine.browser = _CookieCtxBrowser(cookies)
-        return SCANNERS["clickjacking"](engine)
+    def __init__(self, status, headers=None, text="<html>"):
+        self.status = status
+        self.headers = {k.lower(): v for k, v in (headers or {}).items()}
+        self._text = text
+        self.url = ""
 
-    def _cookie_header(self, jar, url):
-        """jar が url へ送る Cookie ヘッダ文字列（http.cookiejar 経由）を得る。"""
-        import httpx
-        req = httpx.Request("GET", url)
-        jar.set_cookie_header(req)
-        return req.headers.get("cookie")
-
-    async def test_duplicate_name_paths_preserved_longest_first(self):
-        scanner = self._scanner([
-            {"name": "session", "value": "root", "path": "/", "domain": "app.test"},
-            {"name": "session", "value": "admin", "path": "/admin", "domain": "app.test"},
-        ])
-        jar = await scanner._build_cookie_jar_for("http://app.test/admin/x")
-        header = self._cookie_header(jar, "http://app.test/admin/x")
-        # 両方保持し、より具体的な /admin（長い path）を先頭に（RFC6265 §5.4）。
-        self.assertEqual(header, "session=admin; session=root")
-
-    async def test_secure_cookie_withheld_on_http_sent_on_https(self):
-        scanner = self._scanner([
-            {"name": "sid", "value": "s", "path": "/", "domain": "app.test", "secure": True},
-        ])
-        jar = await scanner._build_cookie_jar_for("http://app.test/")
-        # secure Cookie は http では出さず、https upgrade hop でのみ送る。
-        self.assertIsNone(self._cookie_header(jar, "http://app.test/"))
-        self.assertEqual(self._cookie_header(jar, "https://app.test/"), "sid=s")
-
-    async def test_other_host_cookie_excluded(self):
-        scanner = self._scanner([
-            {"name": "a", "value": "1", "path": "/", "domain": "other.test"},
-            {"name": "b", "value": "2", "path": "/", "domain": "app.test"},
-        ])
-        jar = await scanner._build_cookie_jar_for("http://app.test/")
-        self.assertEqual(self._cookie_header(jar, "http://app.test/"), "b=2")
-
-    async def test_no_cookies_empty_jar(self):
-        scanner = self._scanner([])
-        jar = await scanner._build_cookie_jar_for("http://app.test/")
-        self.assertIsNone(self._cookie_header(jar, "http://app.test/"))
-
-    async def test_single_label_host_cookie_preserved(self):
-        """localhost / app 等の単一ラベルホストでも host-only Cookie が送られる（Codex #145 round9）。
-        http.cookiejar は request host を <host>.local 正規化するため domain に .local を付ける。"""
-        for host in ("localhost", "app"):
-            scanner = self._scanner([
-                {"name": "sid", "value": "z", "path": "/", "domain": host},
-            ])
-            jar = await scanner._build_cookie_jar_for(f"http://{host}/")
-            self.assertEqual(
-                self._cookie_header(jar, f"http://{host}/"), "sid=z",
-                f"single-label host {host} cookie not sent",
-            )
-
-    async def test_ipv6_host_cookie_preserved(self):
-        """IPv6 リテラル([::1])でも host-only Cookie が送られる（Codex #145 round10）。
-        http.cookiejar は IPv6 の domain 照合に失敗するため domain 制限なしで載せる。"""
-        for dom in ("::1", "[::1]"):  # Playwright が括弧付き/無しどちらを返しても
-            scanner = self._scanner([
-                {"name": "sid", "value": "v6", "path": "/", "domain": dom},
-            ])
-            jar = await scanner._build_cookie_jar_for("http://[::1]/")
-            self.assertEqual(
-                self._cookie_header(jar, "http://[::1]/"), "sid=v6",
-                f"ipv6 cookie (domain={dom}) not sent",
-            )
-
-    async def test_ipv6_jar_does_not_leak_to_other_ipv6_target(self):
-        """IPv6 の domain-less Cookie は、この per-target jar でも別 IPv6 host の request では
-        送られない設計（jar は target 専用に構築される）ことの明示（回帰防止）。"""
-        scanner = self._scanner([
-            {"name": "sid", "value": "v6", "path": "/", "domain": "::1"},
-        ])
-        jar = await scanner._build_cookie_jar_for("http://[::1]/")
-        # 同一 jar を別 IPv6 host へ使うことは実コードでは無い（jar は target 毎に再構築）。
-        # domain-less のため技術的には送られるが、_get は same-host のみ追従するため到達しない。
-        self.assertEqual(self._cookie_header(jar, "http://[::1]/"), "sid=v6")
-
-    async def test_missing_context_empty_jar(self):
-        engine = _FakeEngine()
-        engine.browser = object()  # _context 属性なし
-        scanner = SCANNERS["clickjacking"](engine)
-        jar = await scanner._build_cookie_jar_for("http://app.test/")
-        self.assertIsNone(self._cookie_header(jar, "http://app.test/"))
+    async def text(self):
+        return self._text
 
 
-class _MockCtx:
-    """add_cookies / cookies を記録する最小 Playwright context ダブル。"""
+class _FakeRequestCtx:
+    """context.request の最小ダブル。get() の (url, headers) を記録し、順に応答を返す。"""
 
-    def __init__(self, seed=None):
-        self._seed = seed or []
-        self.added: list = []
+    def __init__(self, responses):
+        self._responses = responses if isinstance(responses, list) else [responses]
+        self.calls: list = []
+        self._i = 0
 
-    async def cookies(self, *a, **k):
-        return list(self._seed)
+    async def get(self, url, headers=None, max_redirects=None):
+        self.calls.append((url, dict(headers or {}), max_redirects))
+        r = self._responses[min(self._i, len(self._responses) - 1)]
+        self._i += 1
+        r.url = url
+        return r
 
-    async def add_cookies(self, cookies):
-        self.added.extend(cookies)
 
-
-class _DirectGetBrowser:
+class _APIBrowser:
     DEFAULT_USER_AGENT = "Mozilla/5.0 TestUA"
 
-    def __init__(self, ctx):
-        self._context = ctx
+    def __init__(self, request_ctx):
+        class _Ctx:
+            pass
+
+        self._context = _Ctx()
+        self._context.request = request_ctx
 
 
-class _DirectGetEngine:
-    """_get を MockTransport で駆動する最小 engine（リクエストヘッダ捕捉・Set-Cookie 制御）。"""
+class DirectGetAPIRequestContextTests(unittest.IsolatedAsyncioTestCase):
+    """_get は Playwright browser context の APIRequestContext（context.request）で取得する
+    （Codex #145 round12）。Cookie は Playwright が native 管理するため httpx jar 自作を撤去。"""
 
-    def __init__(self, ctx, *, response):
-        self.browser = _DirectGetBrowser(ctx)
-        self.monitor = None
-        self.payload_gen = None
-        self.wave_errors: list = []
-        self.proxy = ""
-        self.timeout = 5
-        self._response = response
-        self.captured_headers: dict = {}
+    def _scanner(self, responses, *, auth=None):
+        engine = _FakeEngine()
+        engine.browser = _APIBrowser(_FakeRequestCtx(responses))
+        if auth is not None:
+            engine.auth_headers = auth
+        scanner = SCANNERS["clickjacking"](engine)
+        return engine, scanner
 
-    def httpx_client_kwargs(self, **kw):
-        import httpx
+    async def test_returns_direct_response_from_api_context(self):
+        resp = _FakeAPIResponse(200, {"X-Frame-Options": "DENY"}, text="<html>ok</html>")
+        engine, scanner = self._scanner(resp)
+        out = await scanner._get("http://app.test/p")
+        self.assertEqual(out.status_code, 200)
+        self.assertEqual(out.headers.get("x-frame-options"), "DENY")
+        self.assertEqual(out.text, "<html>ok</html>")
 
-        def handler(request):
-            self.captured_headers = {k.lower(): v for k, v in request.headers.items()}
-            return self._response
-
-        kw["transport"] = httpx.MockTransport(handler)
-        return kw
-
-
-class DirectGetFetchMetadataAndCookieSyncTests(unittest.IsolatedAsyncioTestCase):
-    """_get の Fetch Metadata ヘッダ付与（P2 round7）と 2xx 回転 Cookie の書き戻し（P1 round7）。"""
-
-    def _scanner(self, *, seed=None, response=None):
-        import httpx
-
-        resp = response or httpx.Response(200, text="<html>")
-        ctx = _MockCtx(seed=seed)
-        engine = _DirectGetEngine(ctx, response=resp)
-        return engine, ctx, SCANNERS["clickjacking"](engine)
-
-    async def test_sends_fetch_metadata_headers(self):
-        engine, _ctx, scanner = self._scanner()
-        await scanner._get("http://app.test/page")
-        h = engine.captured_headers
+    async def test_sends_fetch_metadata_and_ua(self):
+        engine, scanner = self._scanner(_FakeAPIResponse(200))
+        await scanner._get("http://app.test/p")
+        _url, headers, max_redirects = engine.browser._context.request.calls[0]
+        h = {k.lower(): v for k, v in headers.items()}
         self.assertEqual(h.get("sec-fetch-site"), "none")
         self.assertEqual(h.get("sec-fetch-mode"), "navigate")
         self.assertEqual(h.get("sec-fetch-user"), "?1")
         self.assertEqual(h.get("sec-fetch-dest"), "document")
         self.assertEqual(h.get("user-agent"), "Mozilla/5.0 TestUA")
+        self.assertEqual(max_redirects, 0)  # 自動追従は無効
 
     async def test_user_header_replaces_generated_case_insensitively(self):
-        """ユーザ指定ヘッダ（小文字 user-agent 等）が生成 UA を大小非依存で置換し重複しない
-        （Codex #145 round11）。"""
-        engine, _ctx, scanner = self._scanner()
-        # engine.auth_headers が小文字キーの user-agent を返すよう差し替える。
-        engine.auth_headers = lambda extra=None, include_cookie=True, url=None: {
+        auth = lambda extra=None, include_cookie=True, url=None: {
             "user-agent": "CustomUA", "accept-language": "ja"
         }
-        await scanner._get("http://app.test/page")
-        h = engine.captured_headers
-        # httpx は重複ヘッダを "A, B" と結合する。単一の custom 値のみになっていること。
+        engine, scanner = self._scanner(_FakeAPIResponse(200), auth=auth)
+        await scanner._get("http://app.test/p")
+        _url, headers, _mr = engine.browser._context.request.calls[0]
+        h = {k.lower(): v for k, v in headers.items()}
         self.assertEqual(h.get("user-agent"), "CustomUA")
         self.assertNotIn("Mozilla", h.get("user-agent", ""))
+        # 生成 User-Agent（大文字）が重複して残っていないこと。
+        self.assertNotIn("User-Agent", headers)
         self.assertEqual(h.get("accept-language"), "ja")
 
-    async def test_direct_get_never_writes_browser_cookies(self):
-        """直接 GET は 2xx の Set-Cookie（rotation）でも browser context を書き換えない
-        （round7 の sync-back を撤去＝httpOnly 剥がし等の退行を避ける・Codex #145 round8）。"""
-        import httpx
-
-        resp = httpx.Response(200, headers={"set-cookie": "session=NEW; Path=/"}, text="<html>")
-        engine, ctx, scanner = self._scanner(response=resp)
-        await scanner._get("http://app.test/page")
-        self.assertEqual(ctx.added, [])  # 書き戻しゼロ
-
-    async def test_cookie_jar_uses_worker_aware_engine_browser(self):
-        """_build_cookie_jar_for は self.browser（__init__捕捉のメイン）ではなく
-        呼び出し時の self.engine.browser（worker-aware）から context を解決する（Codex #145 round8）。"""
+    async def test_missing_api_context_raises_for_fallback(self):
+        """APIRequestContext が無い（テストダブル等）なら例外→_response_pair が network fallback。"""
         engine = _FakeEngine()
-        # __init__ 時のメイン browser は Cookie 無し。scanner 構築後に engine.browser を
-        # worker の context（Cookie あり）へ差し替える＝worker-aware なら worker の Cookie を読む。
-        engine.browser = _CookieCtxBrowser([])
+        engine.browser = object()  # _context 無し
         scanner = SCANNERS["clickjacking"](engine)
-        engine.browser = _CookieCtxBrowser([
-            {"name": "sid", "value": "w", "path": "/", "domain": "app.test"},
-        ])
-        jar = await scanner._build_cookie_jar_for("http://app.test/")
-        import httpx
-        req = httpx.Request("GET", "http://app.test/")
-        jar.set_cookie_header(req)
-        self.assertEqual(req.headers.get("cookie"), "sid=w")
+        with self.assertRaises(Exception):
+            await scanner._get("http://app.test/p")
+
+    async def test_same_host_redirect_followed(self):
+        responses = [
+            _FakeAPIResponse(302, {"location": "/landing"}),
+            _FakeAPIResponse(200, {"X-Frame-Options": "DENY"}),
+        ]
+        engine, scanner = self._scanner(responses)
+        out = await scanner._get("http://app.test/start")
+        self.assertEqual(out.status_code, 200)
+        # 2 hop 目が same-host の /landing を叩いている。
+        self.assertEqual(engine.browser._context.request.calls[1][0], "http://app.test/landing")
+
+    async def test_cross_host_redirect_not_followed(self):
+        responses = [_FakeAPIResponse(302, {"location": "https://evil.test/x"})]
+        engine, scanner = self._scanner(responses)
+        out = await scanner._get("http://app.test/start")
+        # 別ホストは追従せず 3xx のまま返す（_response_pair が status を落として NOT_REACHED）。
+        self.assertEqual(out.status_code, 302)
+        self.assertEqual(len(engine.browser._context.request.calls), 1)
+
+    async def test_uses_worker_aware_engine_browser(self):
+        """__init__ 捕捉のメイン self.browser でなく呼び出し時の self.engine.browser を使う。"""
+        engine = _FakeEngine()
+        engine.browser = object()  # 構築時のメインは APIRequestContext 無し
+        scanner = SCANNERS["clickjacking"](engine)
+        # 構築後に worker の browser（APIRequestContext あり）へ差し替える。
+        engine.browser = _APIBrowser(_FakeRequestCtx(_FakeAPIResponse(200, {"X-Frame-Options": "DENY"})))
+        out = await scanner._get("http://app.test/p")
+        self.assertEqual(out.status_code, 200)  # worker の context で取得できる
 
 
 if __name__ == "__main__":
