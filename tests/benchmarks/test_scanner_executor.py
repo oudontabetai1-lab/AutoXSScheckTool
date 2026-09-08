@@ -201,13 +201,28 @@ def test_injection_omitted_without_page_identity_is_unsupported():
 
 
 def test_non_field_carrier_is_unsupported(suite):
-    """R2 は field carrier（query/form）だけ忠実に採点。json/header 等は UNSUPPORTED（Codex #134 P2）。"""
+    """field carrier（query/form/multipart）以外は UNSUPPORTED（Codex #134 P2）。"""
     from wscan.scanner_contract import Carrier
     for carrier in (Carrier.JSON, Carrier.HEADER, Carrier.COOKIE):
         case = replace(suite.cases[0], injection=replace(suite.cases[0].injection, carrier=carrier))
         s = replace(suite, cases=(case,))
         outcome = ScanOutcome(findings=[finding()], exercised=exercised_of(s))
         assert br.score_cases(s, outcome, ran_checks={"xss"})[0].state == State.UNSUPPORTED
+
+
+def test_multipart_carrier_is_scoreable(suite):
+    """multipart は form field の実行台帳を使って scanner-backed 採点できる。"""
+    from wscan.scanner_contract import Carrier
+
+    case = replace(
+        suite.cases[0],
+        injection=replace(suite.cases[0].injection, carrier=Carrier.MULTIPART),
+    )
+    s = replace(suite, cases=(case,))
+    outcome = ScanOutcome(findings=[finding(injection_location="")], exercised=exercised_of(s))
+    result = br.score_cases(s, outcome, ran_checks={"xss"})[0]
+    assert result.state == State.COMPLETED
+    assert result.candidate_match
 
 
 def test_unprovisioned_prerequisite_is_unsupported(suite):

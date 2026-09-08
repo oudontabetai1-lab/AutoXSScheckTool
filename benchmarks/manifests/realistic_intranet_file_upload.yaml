@@ -1,0 +1,27 @@
+schema_version: 1
+suite_id: realistic_intranet_file_upload
+fixture_id: realistic_intranet
+runner_profile: scan_engine
+mode: normal-deterministic
+source_kind: first_party
+# file_upload はブラウザで multipart form を発見し、HTTPX で危険ファイルを送る。
+# 現行 scan_matrix の form field identity に合わせ、match.location は form とする。
+cases:
+  - case_id: realistic_intranet_file_upload.document_upload.attachment.vulnerable
+    expected: vulnerable
+    check: file_upload
+    request: {method: POST, path: /documents/upload}
+    injection: {carrier: multipart, parameter_id: attachment, value_kind: binary}
+    match: {path: /documents/upload, field: attachment, location: form}
+    twin_id: realistic_intranet_file_upload.document_upload_safe.attachment.safe
+    taxonomy: [unrestricted_file_upload, unauthenticated]
+    gate: observed
+  - case_id: realistic_intranet_file_upload.document_upload_safe.attachment.safe
+    expected: safe
+    check: file_upload
+    request: {method: POST, path: /documents/upload-safe}
+    injection: {carrier: multipart, parameter_id: attachment, value_kind: binary}
+    match: {path: /documents/upload-safe, field: attachment, location: form}
+    twin_id: realistic_intranet_file_upload.document_upload.attachment.vulnerable
+    taxonomy: [unrestricted_file_upload, unauthenticated]
+    gate: observed

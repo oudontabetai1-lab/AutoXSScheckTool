@@ -164,11 +164,13 @@ class ScanOutcome:
     fulfilled_prerequisites: frozenset[str] = frozenset()
 
 
-# このオラクル/adapter が忠実に採点できる carrier。json_body/page-level 等は scan_matrix の
+# この scanner-backed adapter が忠実に採点できる carrier。multipart は通常 form と同じ
+# scan_matrix identity（field/location=form）を持つが、file_upload の契約と manifest では
+# multipart として宣言する。json_body 等は scan_matrix の
 # field/location が report 用プレースホルダ（"(json-body)"/"(page)"）で finding の実 identity と
 # 一致せず、method 次元も台帳に無い。R2 はこれらを UNSUPPORTED にし、R3 で carrier 固有の実行
 # identity を導入する（Codex #134 P2）。
-_SCOREABLE_CARRIERS = frozenset({"query", "form"})
+_SCOREABLE_CARRIERS = frozenset({"query", "form", "multipart"})
 
 # passive/page 観測系 case の canonical identity。engine の _attack_one_page が page-level scan_page
 # 行に刻む field="(page)"/location="page-level" と一致させる。injection を宣言せず、かつこの identity
@@ -260,7 +262,7 @@ def score_cases(
         if (
             case.check not in ran_checks
             or case.match is None
-            # 注入系は field carrier（query/form）だけ忠実採点。json/xml/header 等 *注入を宣言する*
+            # 注入系は field carrier（query/form/multipart）だけ忠実採点。json/xml/header 等 *注入を宣言する*
             # carrier は scan_matrix の実行 identity がプレースホルダで finding と一致せず未対応。
             # passive（無注入）はこのゲートを免れ、下記の (check, path) 採点を使う。
             or (not is_passive and carrier_value not in _SCOREABLE_CARRIERS)

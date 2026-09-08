@@ -146,3 +146,12 @@ def test_realistic_healthcare_page_batch2_scanner_scorecard():
     assert "run_error" not in out, out
     assert out["case_counts"] == {"planned": 4, "completed": 4, "incomplete": 0}
     assert [c["classification"]["candidate"] for c in out["cases"]] == ["tp", "tn", "tp", "tn"], out
+
+
+def test_realistic_intranet_file_upload_scanner_scorecard():
+    """multipart file_upload を脆弱=TP・allow-list 安全ツイン=TN で実採点する。"""
+    _require_chromium()
+    out = _run_manifest("realistic_intranet_file_upload.yaml", {"file_upload"})
+    assert "run_error" not in out, out
+    assert out["case_counts"] == {"planned": 2, "completed": 2, "incomplete": 0}
+    assert [c["classification"]["candidate"] for c in out["cases"]] == ["tp", "tn"], out
