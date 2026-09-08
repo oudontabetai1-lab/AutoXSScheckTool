@@ -645,6 +645,104 @@ class BuildCookieJarTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(self._cookie_header(jar, "http://app.test/"))
 
 
+class _MockCtx:
+    """add_cookies / cookies を記録する最小 Playwright context ダブル。"""
+
+    def __init__(self, seed=None):
+        self._seed = seed or []
+        self.added: list = []
+
+    async def cookies(self, *a, **k):
+        return list(self._seed)
+
+    async def add_cookies(self, cookies):
+        self.added.extend(cookies)
+
+
+class _DirectGetBrowser:
+    DEFAULT_USER_AGENT = "Mozilla/5.0 TestUA"
+
+    def __init__(self, ctx):
+        self._context = ctx
+
+
+class _DirectGetEngine:
+    """_get を MockTransport で駆動する最小 engine（リクエストヘッダ捕捉・Set-Cookie 制御）。"""
+
+    def __init__(self, ctx, *, response):
+        self.browser = _DirectGetBrowser(ctx)
+        self.monitor = None
+        self.payload_gen = None
+        self.wave_errors: list = []
+        self.proxy = ""
+        self.timeout = 5
+        self._response = response
+        self.captured_headers: dict = {}
+
+    def httpx_client_kwargs(self, **kw):
+        import httpx
+
+        def handler(request):
+            self.captured_headers = {k.lower(): v for k, v in request.headers.items()}
+            return self._response
+
+        kw["transport"] = httpx.MockTransport(handler)
+        return kw
+
+
+class DirectGetFetchMetadataAndCookieSyncTests(unittest.IsolatedAsyncioTestCase):
+    """_get の Fetch Metadata ヘッダ付与（P2 round7）と 2xx 回転 Cookie の書き戻し（P1 round7）。"""
+
+    def _scanner(self, *, seed=None, response=None):
+        import httpx
+
+        resp = response or httpx.Response(200, text="<html>")
+        ctx = _MockCtx(seed=seed)
+        engine = _DirectGetEngine(ctx, response=resp)
+        return engine, ctx, SCANNERS["clickjacking"](engine)
+
+    async def test_sends_fetch_metadata_headers(self):
+        engine, _ctx, scanner = self._scanner()
+        await scanner._get("http://app.test/page")
+        h = engine.captured_headers
+        self.assertEqual(h.get("sec-fetch-site"), "none")
+        self.assertEqual(h.get("sec-fetch-mode"), "navigate")
+        self.assertEqual(h.get("sec-fetch-user"), "?1")
+        self.assertEqual(h.get("sec-fetch-dest"), "document")
+        self.assertEqual(h.get("user-agent"), "Mozilla/5.0 TestUA")
+
+    async def test_rotated_cookie_synced_back_on_2xx(self):
+        import httpx
+
+        resp = httpx.Response(200, headers={"set-cookie": "session=NEW; Path=/"}, text="<html>")
+        engine, ctx, scanner = self._scanner(response=resp)
+        await scanner._get("http://app.test/page")
+        names = {c["name"]: c["value"] for c in ctx.added}
+        self.assertEqual(names.get("session"), "NEW")
+
+    async def test_no_sync_back_on_non_2xx(self):
+        """401（未認証応答）の Cookie は書き戻さない＝browser の正セッションを壊さない。"""
+        import httpx
+
+        resp = httpx.Response(401, headers={"set-cookie": "session=BAD; Path=/"}, text="login")
+        engine, ctx, scanner = self._scanner(response=resp)
+        await scanner._get("http://app.test/page")
+        self.assertEqual(ctx.added, [])
+
+    async def test_cross_host_cookie_not_synced(self):
+        """target host と異なる domain の Cookie は書き戻さない。"""
+        import httpx
+
+        resp = httpx.Response(
+            200,
+            headers={"set-cookie": "x=1; Path=/; Domain=other.test"},
+            text="<html>",
+        )
+        engine, ctx, scanner = self._scanner(response=resp)
+        await scanner._get("http://app.test/page")
+        self.assertFalse(any(c["name"] == "x" for c in ctx.added))
+
+
 if __name__ == "__main__":
     unittest.main()
 

@@ -1591,6 +1591,14 @@ class BaseScanner(ABC):
                 "image/avif,image/webp,*/*;q=0.8"
             )
             req_headers["Accept-Language"] = "en-US,en;q=0.9"
+            # Fetch Metadata: top-level document navigation を表す値を付与し、Sec-Fetch-* で
+            # ナビゲーションと fetch を区別する origin/WAF が browser には document を返しつつ本 GET
+            # にだけ 401/403/interstitial を返す差分を防ぐ（Codex #145 P2 round7）。アドレスバー相当の
+            # ユーザー起点トップレベル遷移＝Site:none / Mode:navigate / User:?1 / Dest:document。
+            req_headers["Sec-Fetch-Site"] = "none"
+            req_headers["Sec-Fetch-Mode"] = "navigate"
+            req_headers["Sec-Fetch-User"] = "?1"
+            req_headers["Sec-Fetch-Dest"] = "document"
         if base_auth:
             req_headers.update(base_auth)
         async with httpx.AsyncClient(**kwargs) as client:
@@ -1619,7 +1627,49 @@ class BaseScanner(ABC):
                 current = target
                 response = await _fetch(current)
             self._record_probe_status(response)
+            # 成功応答（2xx）で session が rotation（Set-Cookie）していたら、その新 Cookie は
+            # この一時 client の jar にしか入らない。放置すると browser 側が旧 token のまま後続
+            # scanner が 401/未認証応答を監査しうるため、worker context へ書き戻す（Codex #145 P1
+            # round7）。2xx に限定＝401/redirect-to-login の Cookie で browser の正セッションを
+            # 壊さない安全側。
+            if 200 <= response.status_code < 300:
+                await self._sync_cookies_to_browser(client, url)
         return response
+
+    async def _sync_cookies_to_browser(self, client, url: str) -> None:
+        """直接 GET で回転/追加された Cookie を worker ブラウザ context へ書き戻す（Codex #145 P1 round7）。
+
+        target host に一致する Cookie だけを ``add_cookies`` で反映する（別ホストの Cookie は
+        書き戻さない）。context 不在（テストダブル等）・API 差異・失敗は握りつぶす（監査は副作用を
+        持たない読み取りが本分なので、書き戻し失敗で従来挙動を壊さない）。
+        """
+        ctx = getattr(getattr(self, "browser", None), "_context", None)
+        if ctx is None:
+            return
+        from urllib.parse import urlparse
+
+        host = (urlparse(url).hostname or "").lower()
+        if not host:
+            return
+        to_add: list[dict] = []
+        try:
+            for c in client.cookies.jar:
+                dom = (getattr(c, "domain", "") or "").lstrip(".").lower()
+                if dom and not (host == dom or host.endswith("." + dom)):
+                    continue  # 別ホストの Cookie は書き戻さない
+                entry: dict = {
+                    "name": c.name,
+                    "value": c.value or "",
+                    "domain": c.domain or host,
+                    "path": getattr(c, "path", "/") or "/",
+                }
+                if getattr(c, "secure", False):
+                    entry["secure"] = True
+                to_add.append(entry)
+            if to_add:
+                await ctx.add_cookies(to_add)
+        except Exception:
+            pass
 
     @staticmethod
     def _reject_redirect_pair(pair: dict, url: str) -> dict:
