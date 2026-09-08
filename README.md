@@ -397,14 +397,21 @@ python3 main.py agent URL [options]
 | `--max-steps N` | `100` | 最大操作ステップ |
 | `--headless / --no-headless` | headless | 非表示/表示ブラウザ |
 | `--auth-user`, `--auth-pass`, `--login-url` | config / 空 | 事前ログイン |
+| `--totp-secret SECRET` | `WSCAN_TOTP_SECRET` / 空 | TOTP ログイン。secret は証跡やプロンプトへ平文保存しない |
+| `--storage-state FILE` | 空 | Playwright/browser-use の認証済み storage state を復元 |
 | `--bearer TOKEN` | `WSCAN_BEARER` / config / 空 | Agent ブラウザへ Bearer 認証を付与 |
 | `-H, --header "Name: Value"` | `[]` | Agent ブラウザへカスタムヘッダを追加。複数指定可 |
 | `--header-file FILE` | 空 | JSON/YAML/1行1ヘッダ形式 |
 | `-o, --output DIR` | `output/agent_<timestamp>/` | 出力先 |
+| `--resume` | 無効 | `--output DIR` の checkpoint から、同一条件・残予算で再開 |
 | `--port PORT` | `8765` | モニターポート |
 | `--no-monitor`, `--no-open-report` | 無効 | モニター/自動表示を無効化 |
 
 > 初期化や実行がハードエラー（LLM プロバイダ不在、`browser-use` 未導入など）で失敗した場合、Agent は「0 findings の正常完了」とは表示せず **FAILED を表示して終了コードを非0** にします（CI で失敗を検知できます）。設定ディレクトリ（`~/.config` 系）が書込み不可のときは起動前に案内を出します（`export XDG_CONFIG_HOME=/書込み可能な場所` で解消。案内は警告で、実行自体は継続し、実際に失敗すれば上記のとおり FAILED になります）。
+
+Agent は認証、全体探索、検査種別ごとの probe、独立再検証、敵対的レビューを別 episode として実行します。探索で発見した各ページ×各指定 check が work queue に残っている、再検証が未完了、レビューが coverage gap を示した、または step 予算を使い切った場合は `COMPLETE` ではなく `PARTIAL`（終了コード 2）です。`agent_state.json`、`agent_steps.jsonl`、`agent_manifest.json` に再開可能な状態と伏字済み証跡を保存します。
+
+通常スキャンと Agent のどちらも、出力先の `reproduction.json` と `reproduce.sh` に再現情報を出します。再現 JSON には前提条件、操作手順、期待挙動、陰性対照、検証状態を含みます。`<REDACTED>` は実行時に認可済みの値へ差し替えてください。
 
 ### `triage` — ペイロード非投入の高速評価
 

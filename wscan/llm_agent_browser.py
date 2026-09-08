@@ -22,7 +22,6 @@ from __future__ import annotations
 import asyncio
 import fnmatch
 import inspect
-import json
 import os
 import re
 import secrets
@@ -35,12 +34,19 @@ from rich.console import Console
 from rich.rule import Rule
 
 from .header_scope import (
-    _BLANK_URLS,
-    _url_origin,
+    _BLANK_URLS as _BLANK_URLS,  # re-export: tests/external callers
+    _url_origin as _url_origin,  # re-export: tests/external callers
     allowed_header_origins,
     effective_origin_url,
-    expand_scheme_variants,
+    expand_scheme_variants as expand_scheme_variants,  # re-export
     headers_allowed_for_url,
+)
+from .agent_harness import (
+    AgentHarness,
+    AgentPhase,
+    AgentRole,
+    AgentRunSpec,
+    WorkStatus,
 )
 
 if TYPE_CHECKING:
@@ -104,6 +110,27 @@ def _normalize_scope_urls(urls: list[str]) -> list[str]:
             seen.add(value)
             normalized.append(value)
     return normalized
+
+
+def build_agent_sensitive_data(
+    login_url: str,
+    auth_user: str = "",
+    auth_pass: str = "",
+    totp_secret: str = "",
+) -> dict[str, dict[str, str]]:
+    """browser-use 用の domain-scoped secret を構築する（値は永続化しない）。"""
+    host = urlparse(str(login_url or "")).hostname or ""
+    if not host:
+        return {}
+    values: dict[str, str] = {}
+    if auth_user:
+        values["WSCAN_AUTH_USER"] = auth_user
+    if auth_pass:
+        values["WSCAN_AUTH_PASS"] = auth_pass
+    # browser-use は *_bu_2fa_code を TOTP secret として扱い、実行時コードへ変換する。
+    if totp_secret:
+        values["WSCAN_bu_2fa_code"] = totp_secret
+    return {host: values} if values else {}
 
 
 def _url_matches_scope(url: str, scopes: list[str]) -> bool:
@@ -341,6 +368,7 @@ class AgentFinding:
     evidence: str
     source: str = "agent"
     agent_verified: bool = False
+    dynamic_verified: bool = False
 
     def to_dict(self) -> dict:
         return {
@@ -352,6 +380,7 @@ class AgentFinding:
             "evidence": self.evidence,
             "source": self.source,
             "agent_verified": self.agent_verified,
+            "dynamic_verified": self.dynamic_verified,
         }
 
 
@@ -366,6 +395,8 @@ class AgentScanResult:
     error: Optional[str] = None
     success: bool = False
     memory: AgentMemory = field(default_factory=AgentMemory)
+    harness_status: str = ""
+    coverage_gaps: list[str] = field(default_factory=list)
 
 
 # ── LLM ファクトリ ──────────────────────────────────────────────────────────
@@ -438,8 +469,8 @@ def _build_vuln_block_re(nonce: str) -> re.Pattern:
         r"URL:\s*(?P<url>[^\n]+)\n"
         r"Field:\s*(?P<field>[^\n]+)\n"
         r"Payload:\s*(?P<payload>[^\n]+)\n"
-        r"Evidence:\s*(?P<evidence>(?:.+\n?)+?)(?=\nWSCAN-NONCE:|$)",
-        re.IGNORECASE,
+        r"Evidence:\s*(?P<evidence>.*?)(?=\nWSCAN-NONCE:|\Z)",
+        re.IGNORECASE | re.DOTALL,
     )
 
 
@@ -544,6 +575,10 @@ class AgentBrowserScanner:
         exclude_urls: Optional[list[str]] = None,
         exclude_fields: Optional[list[str]] = None,
         extra_headers: Optional[dict] = None,
+        totp_secret: str = "",
+        storage_state: str = "",
+        harness_output_dir: str | Path | None = None,
+        resume: bool = False,
     ):
         # CDP / SecurityWatchdog が scheme 無し URL を拒否するため補完する。
         raw_target_url = str(target_url or "").strip()
@@ -585,6 +620,10 @@ class AgentBrowserScanner:
             str(value).strip() for value in (exclude_fields or []) if str(value).strip()
         ]
         self.extra_headers = dict(extra_headers or {})
+        self.totp_secret = str(totp_secret or "")
+        self.storage_state = str(storage_state or "")
+        self.harness_output_dir = Path(harness_output_dir) if harness_output_dir else None
+        self.resume = bool(resume)
         self._header_origins = allowed_header_origins(
             self.target_url,
             self.target_urls,
@@ -603,6 +642,9 @@ class AgentBrowserScanner:
         self._header_application_failed_warned = False
         self._header_clear_failed_warned = False
         self._step_count = 0
+        self._episode_offset = 0
+        self._active_episode_id = "legacy"
+        self._harness: AgentHarness | None = None
         self._memory = AgentMemory()
         self._session_nonce = secrets.token_urlsafe(16)
 
@@ -1017,6 +1059,45 @@ class AgentBrowserScanner:
                 )
             return result
 
+        if self.harness_output_dir:
+            resolved_model = str(
+                getattr(llm, "model", None)
+                or getattr(llm, "model_name", None)
+                or self.llm_model
+                or {"claude": "claude-sonnet-4-5-20250929", "openai": "gpt-4o-mini", "ollama": "llama3"}.get(self.llm_provider, "default")
+            )
+            spec = AgentRunSpec(
+                mode="recon" if self.recon_mode else "agent",
+                target_url=self.target_url,
+                target_urls=tuple(self.target_urls),
+                access_urls=tuple(self.access_urls),
+                exclude_urls=tuple(self.exclude_urls),
+                exclude_fields=tuple(self.exclude_fields),
+                checks=tuple(self.checks),
+                provider=self.llm_provider,
+                model=resolved_model,
+                max_steps=self.max_steps,
+            )
+            try:
+                self._harness = AgentHarness(
+                    self.harness_output_dir,
+                    spec,
+                    resume=self.resume,
+                    secret_values=(
+                        self.auth_user,
+                        self.auth_pass,
+                        self.totp_secret,
+                        *self.extra_headers.values(),
+                    ),
+                )
+            except ValueError as exc:
+                result.error = str(exc)
+                return result
+            if not self._harness.state.work_queue:
+                if self.login_url and (self.auth_user or self.storage_state):
+                    self._harness.enqueue(AgentRole.AUTHENTICATOR, self.login_url)
+                self._harness.enqueue(AgentRole.EXPLORER, self.target_url)
+
         task = self._build_recon_task() if self.recon_mode else self._build_task()
         browser = None
 
@@ -1062,7 +1143,7 @@ class AgentBrowserScanner:
             agent_kwargs = dict(
                 task=task,
                 llm=llm,
-                override_system_message=system_prompt,
+                extend_system_message=system_prompt,
                 max_failures=5,
                 use_vision=True,
                 use_thinking=True,
@@ -1071,8 +1152,15 @@ class AgentBrowserScanner:
                 initial_actions=initial_actions,   # 最初のページへ確実に遷移
                 register_new_step_callback=self._on_step,
             )
+            sensitive_data = build_agent_sensitive_data(
+                self.login_url, self.auth_user, self.auth_pass, self.totp_secret
+            )
+            if sensitive_data:
+                agent_kwargs["sensitive_data"] = sensitive_data
+            if self._harness:
+                agent_kwargs["register_should_stop_callback"] = self._harness_should_stop
 
-            if self.extra_headers:
+            if self.extra_headers or sensitive_data or self.storage_state:
                 # browser-use 0.12.6 の実 API:
                 # BrowserSession(browser_profile=...) → Agent(browser_session=...)。
                 # 注意: BrowserProfile.headers は「ブラウザ/CDP エンドポイントへの接続時
@@ -1087,19 +1175,34 @@ class AgentBrowserScanner:
                     browser_profile = BrowserProfile(
                         headless=self.headless,
                         disable_security=True,
+                        allowed_domains=sorted({
+                            parsed.hostname
+                            for parsed in (
+                                urlparse(url) for url in [*self.target_urls, *self.access_urls]
+                            )
+                            if parsed.hostname
+                        }),
+                        storage_state=self.storage_state or None,
                     )
                     browser = BrowserSession(browser_profile=browser_profile)
+                    agent_browser_arg = "browser_session"
                     agent = Agent(browser_session=browser, **agent_kwargs)
                 except Exception:
+                    if sensitive_data or self.storage_state:
+                        raise RuntimeError(
+                            "認証情報を domain scope で保護できる BrowserSession を初期化できませんでした"
+                        )
                     console.print(
                         "[yellow]追加HTTPヘッダをブラウザへ設定できなかったため、"
                         "従来構成で続行します。[/yellow]"
                     )
                     browser = _build_legacy_browser()
+                    agent_browser_arg = "browser"
                     agent = Agent(browser=browser, **agent_kwargs)
             else:
                 # ヘッダ未指定時は完全に従来どおりの構築経路を使う。
                 browser = _build_legacy_browser()
+                agent_browser_arg = "browser"
                 agent = Agent(browser=browser, **agent_kwargs)
 
             console.print("[dim]エージェント起動中...[/dim]")
@@ -1114,6 +1217,7 @@ class AgentBrowserScanner:
             if not self._request_scoped_headers:
                 await self._prepare_extra_headers_before_run(browser, start_url)
 
+            on_step_start = None
             if self.extra_headers and self._request_scoped_headers:
                 async def _enable_fetch_on_step(_agent):
                     # イベント購読が使えない版や CDP 再接続後も、ポップアップや
@@ -1121,36 +1225,174 @@ class AgentBrowserScanner:
                     await self._subscribe_fetch_for_new_targets(browser)
                     await self._enable_fetch_for_current_target(browser)
 
-                history = await agent.run(
-                    max_steps=self.max_steps,
-                    on_step_start=_enable_fetch_on_step,
-                )
+                on_step_start = _enable_fetch_on_step
             elif self.extra_headers and hasattr(browser, "set_extra_headers"):
                 async def _apply_headers_on_step(_agent):
                     await self._apply_extra_headers(browser)
 
-                history = await agent.run(
-                    max_steps=self.max_steps,
-                    on_step_start=_apply_headers_on_step,
-                )
-            else:
-                history = await agent.run(max_steps=self.max_steps)
+                on_step_start = _apply_headers_on_step
 
-            result.steps_taken = self._step_count
-            result.success = history.is_successful()
+            if self._harness:
+                histories = []
+                texts: list[str] = [
+                    item.summary for item in self._harness.state.work_queue
+                    if item.status == WorkStatus.COMPLETE and item.summary
+                ]
+                hypothesis_texts: list[str] = [
+                    item.summary for item in self._harness.state.work_queue
+                    if item.status == WorkStatus.COMPLETE
+                    and item.role in {AgentRole.EXPLORER, AgentRole.PROBE_SPECIALIST}
+                    and item.summary
+                ]
+                verifier_findings: list[AgentFinding] = []
+                while self._harness.remaining_steps > 0 and not self._harness.state.stop_reason:
+                    work = self._harness.next_work()
+                    if work is None:
+                        break
+                    self._active_episode_id = work.work_id
+                    self._episode_offset = self._harness.session_consumed_steps
+                    self._harness.set_phase(
+                        AgentPhase.AUTHENTICATING
+                        if work.role == AgentRole.AUTHENTICATOR
+                        else AgentPhase.RECONNING
+                        if work.role == AgentRole.EXPLORER
+                        else AgentPhase.EXECUTING
+                    )
+                    pending = sum(
+                        item.status in {WorkStatus.PLANNED, WorkStatus.INCONCLUSIVE}
+                        for item in self._harness.state.work_queue
+                    ) + 1
+                    episode_budget = min(
+                        self._harness.remaining_steps,
+                        max(3, self._harness.remaining_steps // pending),
+                    )
+                    episode_kwargs = dict(agent_kwargs)
+                    episode_kwargs["task"] = self._build_work_task(
+                        work,
+                        hypothesis_texts
+                        if work.role == AgentRole.VERIFIER
+                        else texts,
+                    )
+                    episode_nonce = self._session_nonce
+                    if work.role == AgentRole.VERIFIER:
+                        # Candidate text に含まれない challenge を使い、単純な引用を
+                        # fresh-context 再現と誤認しない。
+                        episode_nonce = secrets.token_urlsafe(16)
+                        episode_kwargs["extend_system_message"] = (
+                            _SECURITY_SYSTEM_PROMPT
+                            .replace("{SESSION_NONCE}", episode_nonce)
+                            .replace("{SECURITY_SCOPE}", self._build_security_scope_policy())
+                        )
+                    episode_kwargs["use_vision"] = work.role not in {
+                        AgentRole.AUTHENTICATOR,
+                        AgentRole.ADVERSARIAL_REVIEWER,
+                    }
+                    destination = self.login_url if work.role == AgentRole.AUTHENTICATOR else self.target_url
+                    episode_kwargs["initial_actions"] = [
+                        {"navigate": {"url": destination, "new_tab": False}}
+                    ]
+                    episode_agent = Agent(**{agent_browser_arg: browser}, **episode_kwargs)
+                    run_kwargs = {"max_steps": episode_budget}
+                    if on_step_start:
+                        run_kwargs["on_step_start"] = on_step_start
+                    history = await episode_agent.run(**run_kwargs)
+                    histories.append(history)
+                    final = history.final_result() or ""
+                    episode_text = "\n".join(
+                        str(item) for item in (history.extracted_content() or [])
+                    ) + "\n" + final
+                    texts.append(episode_text)
+                    if work.role in {AgentRole.EXPLORER, AgentRole.PROBE_SPECIALIST}:
+                        hypothesis_texts.append(episode_text)
+                    if work.role == AgentRole.VERIFIER:
+                        verifier_findings.extend(
+                            _parse_findings_from_text(episode_text, nonce=episode_nonce)
+                        )
+                    terminal = (
+                        WorkStatus.COMPLETE
+                        if history.is_successful() and self._work_completion_claimed(work, episode_text)
+                        else WorkStatus.INCONCLUSIVE
+                    )
+                    self._harness.finish_work(
+                        work.work_id, terminal, summary=episode_text
+                    )
+
+                    if work.role == AgentRole.EXPLORER:
+                        page_found_re = re.compile(r"PAGE_FOUND:\s*(https?://\S+)", re.IGNORECASE)
+                        discovered = [self.target_url]
+                        for match in page_found_re.finditer(episode_text):
+                            url = match.group(1).rstrip(".,;)")
+                            if self.is_security_probe_allowed(url) and url not in discovered:
+                                discovered.append(url)
+                        if not self.recon_mode:
+                            for url in discovered:
+                                for check in self.checks:
+                                    self._harness.enqueue(
+                                        AgentRole.PROBE_SPECIALIST, url, check_type=check
+                                    )
+                            self._harness.enqueue(AgentRole.VERIFIER, self.target_url)
+                            self._harness.enqueue(AgentRole.ADVERSARIAL_REVIEWER, self.target_url)
+                        self._memory.visited_urls = list(dict.fromkeys([
+                            *self._memory.visited_urls, *discovered
+                        ]))
+                all_text = "\n".join(hypothesis_texts)
+                result.findings = _parse_findings_from_text(all_text, nonce=self._session_nonce)
+                verified_keys = {
+                    (item.url, item.field_name, item.check_type)
+                    for item in verifier_findings
+                }
+                for finding in result.findings:
+                    # LLM verifier episode は動的な再現シグナルだが、決定論スキャナの
+                    # `agent_verified` へは昇格させない。
+                    finding.dynamic_verified = (
+                        finding.url, finding.field_name, finding.check_type
+                    ) in verified_keys
+                gaps = [
+                    f"{item.role.value}:{item.target}:{item.check_type or '-'}:{item.status.value}"
+                    for item in self._harness.state.work_queue
+                    if item.status != WorkStatus.COMPLETE
+                ]
+                self._harness.note_coverage(
+                    visited_urls=self._memory.visited_urls,
+                    tested_targets=[
+                        f"{item.target}:{item.check_type}"
+                        for item in self._harness.state.work_queue
+                        if item.role == AgentRole.PROBE_SPECIALIST and item.status == WorkStatus.COMPLETE
+                    ],
+                    coverage_gaps=gaps,
+                    hypotheses_count=len(result.findings),
+                )
+                result.success = bool(histories) and all(h.is_successful() for h in histories)
+                status = self._harness.finalize(
+                    success=result.success,
+                    coverage_complete=self._harness.coverage_complete,
+                )
+                result.harness_status = status.value
+                result.coverage_gaps = list(self._harness.state.coverage_gaps)
+                result.steps_taken = self._harness.state.consumed_steps
+                result.final_summary = (histories[-1].final_result() or "") if histories else ""
+                result.memory = self._memory
+            else:
+                run_kwargs = {"max_steps": self.max_steps}
+                if on_step_start:
+                    run_kwargs["on_step_start"] = on_step_start
+                history = await agent.run(**run_kwargs)
+
+                result.steps_taken = self._step_count
+                result.success = history.is_successful()
 
             # final_result() が構造化テキストを返す
-            final_text = history.final_result() or ""
-            result.final_summary = final_text
+                final_text = history.final_result() or ""
+                result.final_summary = final_text
 
             # 全ステップのテキストを結合してファインディングを解析
-            all_text = "\n".join(
-                str(item) for item in (history.extracted_content() or [])
-            )
-            all_text += "\n" + final_text
+                all_text = "\n".join(
+                    str(item) for item in (history.extracted_content() or [])
+                )
+                all_text += "\n" + final_text
 
             # recon_mode: PAGE_FOUND: <url> パターンを解析して memory に追加
-            if self.recon_mode:
+            if self.recon_mode and not self._harness:
                 page_found_re = re.compile(r"PAGE_FOUND:\s*(https?://\S+)", re.IGNORECASE)
                 for m in page_found_re.finditer(all_text):
                     u = m.group(1).rstrip(".,;)")
@@ -1158,10 +1400,16 @@ class AgentBrowserScanner:
                         self._memory.visited_urls.append(u)
                 result.memory = self._memory
 
-            result.findings = _parse_findings_from_text(all_text, nonce=self._session_nonce)
+            if not self._harness:
+                result.findings = _parse_findings_from_text(all_text, nonce=self._session_nonce)
 
             # エラーがあればログに記録 (None エントリを除外)
-            errors = [e for e in (history.errors() or []) if e is not None]
+            errors = [
+                error
+                for item in (histories if self._harness else [history])
+                for error in (item.errors() or [])
+                if error is not None
+            ]
             if errors:
                 console.print(
                     f"  [yellow]エージェントエラー {len(errors)} 件:[/yellow]"
@@ -1171,10 +1419,22 @@ class AgentBrowserScanner:
 
         except ImportError:
             result.error = "browser-use がインストールされていません。pip install browser-use を実行してください。"
+            if self._harness:
+                result.harness_status = self._harness.finalize(
+                    success=False, coverage_complete=False, error=result.error
+                ).value
         except asyncio.CancelledError:
+            if self._harness:
+                result.harness_status = self._harness.finalize(
+                    success=False, coverage_complete=False, cancelled=True
+                ).value
             raise
         except Exception as exc:
             result.error = str(exc)
+            if self._harness:
+                result.harness_status = self._harness.finalize(
+                    success=False, coverage_complete=False, error=result.error
+                ).value
             console.print(f"[red]エージェントスキャンエラー: {exc}[/red]")
         finally:
             if browser is not None:
@@ -1243,6 +1503,81 @@ class AgentBrowserScanner:
     # Helpers
     # ------------------------------------------------------------------
 
+    async def _harness_should_stop(self) -> bool:
+        return bool(self._harness and self._harness.should_stop)
+
+    @staticmethod
+    def _work_completion_claimed(work, text: str) -> bool:
+        marker = {
+            AgentRole.AUTHENTICATOR: "AUTH COMPLETE",
+            AgentRole.EXPLORER: "EXPLORATION COMPLETE",
+            AgentRole.PROBE_SPECIALIST: "PROBE COMPLETE",
+            AgentRole.VERIFIER: "VERIFICATION COMPLETE",
+            AgentRole.ADVERSARIAL_REVIEWER: "REVIEW COMPLETE",
+        }[work.role]
+        upper = str(text or "").upper()
+        if work.role == AgentRole.ADVERSARIAL_REVIEWER and "COVERAGE GAP" in upper:
+            return False
+        return marker in upper
+
+    def _build_work_task(self, work, prior_texts: list[str]) -> str:
+        """役割を分離した短い episode task を生成する。"""
+        if work.role == AgentRole.AUTHENTICATOR:
+            if self.storage_state and not (self.auth_user and self.auth_pass):
+                return (
+                    f"Open {self.login_url} using the restored browser storage state. "
+                    "Confirm that the authenticated landing page is accessible, output "
+                    "AUTH COMPLETE, and stop. Do not run security probes."
+                )
+            totp = " Enter WSCAN_bu_2fa_code when a one-time code is requested." if self.totp_secret else ""
+            return (
+                f"Authenticate at {self.login_url}. Enter WSCAN_AUTH_USER and "
+                f"WSCAN_AUTH_PASS only into the configured login form.{totp} "
+                "Confirm the authenticated landing page, then output AUTH COMPLETE and stop. "
+                "Do not run security probes."
+            )
+        if work.role == AgentRole.EXPLORER:
+            return self._build_recon_task() + (
+                "\nAct only as the Explorer. Enumerate navigation, forms, URL parameters, "
+                "and client-side routes. Do not claim coverage complete while any discovered "
+                "link or input remains unvisited. Output EXPLORATION COMPLETE only after the "
+                "reachable frontier is empty."
+            )
+        if work.role == AgentRole.PROBE_SPECIALIST:
+            return (
+                f"Act only as the {work.check_type} probe specialist for {work.target}. "
+                f"Navigate there and test every form field and URL parameter on that page for "
+                f"{work.check_type}. Use a normal-value negative control for every payload. "
+                "Report only directly observed hypotheses using the required nonce block. "
+                "Do not explore unrelated pages and do not test another vulnerability class. "
+                "Output PROBE COMPLETE only after every input on this page has a recorded result."
+            )
+        evidence = re.sub(
+            r"WSCAN-NONCE:[^\s]+", "WSCAN-CANDIDATE", "\n".join(prior_texts)[-12000:]
+        )
+        if work.role == AgentRole.VERIFIER:
+            return (
+                "Act as an independent verifier in the existing authenticated browser session. "
+                "Re-run each candidate below in a fresh page context and compare it with a normal "
+                "negative control. Emit the required nonce finding block only for candidates whose "
+                "observable behavior reproduces; omission means inconclusive or rejected.\n"
+                "Output VERIFICATION COMPLETE after every candidate has a result.\n" + evidence
+            )
+        ledger = ""
+        if self._harness:
+            ledger = "\n".join(
+                f"- {item.role.value} | {item.target} | {item.check_type or '-'} | {item.status.value}"
+                for item in self._harness.state.work_queue
+                if item.role != AgentRole.ADVERSARIAL_REVIEWER
+            )
+        return (
+            "Act as an adversarial reviewer. Do not submit payloads. Challenge false positives, "
+            "missing pages, missing input/check pairs, auth loss, and unsupported completion claims. "
+            "Return a concise list of coverage gaps, or state REVIEW COMPLETE only when the ledger "
+            "shows every discovered page and input was tested for every requested check.\n"
+            + "\nDeterministic work ledger:\n" + ledger + "\nEvidence excerpt:\n" + evidence
+        )
+
     def _build_task(self) -> str:
         # BUG-2 fix: Include concrete payloads per check type so the LLM
         # knows exactly what to test, not just vague "relevant payloads".
@@ -1286,9 +1621,10 @@ class AgentBrowserScanner:
             auth_section = (
                 f"\n## Step 0: Authentication\n"
                 f"Before testing, log in at: {self.login_url}\n"
-                f"Username: {self.auth_user}\n"
-                f"Password: {self.auth_pass}\n"
-                f"Confirm you are logged in, then proceed to test authenticated pages.\n"
+                "Username: WSCAN_AUTH_USER\n"
+                "Password: WSCAN_AUTH_PASS\n"
+                + ("TOTP code: WSCAN_bu_2fa_code\n" if self.totp_secret else "")
+                + "Confirm you are logged in, then proceed to test authenticated pages.\n"
             )
 
         # BUG-1 fix: format block uses newlines, matching _VULN_BLOCK_RE exactly.
@@ -1347,7 +1683,9 @@ class AgentBrowserScanner:
 
     def _is_configured_login_page(self, url: str) -> bool:
         """access-only でも認証入力だけ許可する configured login page か判定する。"""
-        if not self.login_url or not self.auth_user or not self.auth_pass:
+        if not self.login_url or not (
+            (self.auth_user and self.auth_pass) or self.totp_secret or self.storage_state
+        ):
             return False
         current = urlparse(str(url or "").rstrip("/"))
         login = urlparse(self.login_url.rstrip("/"))
@@ -1391,9 +1729,10 @@ class AgentBrowserScanner:
             auth_section = (
                 f"\n## Step 0: Authentication\n"
                 f"Log in at: {self.login_url}\n"
-                f"Username: {self.auth_user}\n"
-                f"Password: {self.auth_pass}\n"
-                f"Confirm login succeeded before proceeding.\n"
+                "Username: WSCAN_AUTH_USER\n"
+                "Password: WSCAN_AUTH_PASS\n"
+                + ("TOTP code: WSCAN_bu_2fa_code\n" if self.totp_secret else "")
+                + "Confirm login succeeded before proceeding.\n"
             )
 
         checks_section = "\n".join(
@@ -1429,7 +1768,7 @@ class AgentBrowserScanner:
 
     async def _on_step(self, state, output, step_num: int) -> None:
         """各ステップ実行時のコールバック。"""
-        self._step_count = step_num
+        self._step_count = self._episode_offset + step_num
 
         # browser-use の new-step callback は model action の実行前に呼ばれる。
         # 対象外/access-only/exclude 上では入力・JS・upload 等を action 列から除去し、
@@ -1442,7 +1781,13 @@ class AgentBrowserScanner:
             ) if getattr(output, "action", None) else []
             allow_mutation = self.is_security_probe_allowed(current_url)
             allowed_auth_values = (
-                (self.auth_user, self.auth_pass)
+                (
+                    self.auth_user,
+                    self.auth_pass,
+                    "WSCAN_AUTH_USER",
+                    "WSCAN_AUTH_PASS",
+                    "WSCAN_bu_2fa_code",
+                )
                 if not allow_mutation and self._is_configured_login_page(current_url)
                 else ()
             )
@@ -1469,6 +1814,22 @@ class AgentBrowserScanner:
         except Exception:
             # action 形式が想定外でも callback 自体で Agent を停止させない。
             pass
+
+        if self._harness:
+            try:
+                planned = (
+                    output.action if isinstance(output.action, list) else [output.action]
+                ) if getattr(output, "action", None) else []
+                self._harness.record_step(
+                    episode_id=self._active_episode_id,
+                    local_step=self._step_count,
+                    url=current_url,
+                    proposed_actions=planned,
+                    executed_actions=planned,
+                    blocked_count=locals().get("blocked_count", 0),
+                )
+            except Exception:
+                pass
 
         # ステップ内容を取得
         action_desc = ""

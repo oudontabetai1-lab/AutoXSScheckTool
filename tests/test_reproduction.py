@@ -35,6 +35,11 @@ class ReproductionPackageTests(unittest.TestCase):
 
         self.assertEqual(result["count"], 1)
         self.assertEqual(repro["findings"][0]["evidence_type"], "xss_dialog")
+        self.assertIn("negative_control", repro["findings"][0])
+        self.assertIn("preconditions", repro["findings"][0])
+        self.assertEqual(
+            repro["findings"][0]["verification"]["state"], "reproduced"
+        )
         self.assertIn("curl -i -sS -X GET", shell)
         self.assertIn("http://fixture.test/search", shell)
 
