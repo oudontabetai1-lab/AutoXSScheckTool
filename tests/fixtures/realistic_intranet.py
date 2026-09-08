@@ -22,7 +22,7 @@ import asyncio
 import html
 import re
 
-from fastapi import FastAPI, Form, Query
+from fastapi import FastAPI, File, Form, Query, UploadFile
 from fastapi.responses import HTMLResponse, PlainTextResponse
 
 
@@ -38,6 +38,8 @@ EXPECTED_FINDINGS = [
      "note": "MongoDB 演算子オブジェクトを渡すと Mongo エラーが露出（認証回避）"},
     {"check": "dom_xss", "path": "/dashboard/widget", "field": "tab",
      "note": "クエリ tab がクライアント側で innerHTML に書き込まれる"},
+    {"check": "file_upload", "path": "/documents/upload", "field": "attachment",
+     "note": "拡張子/MIMEを検証せず危険なスクリプトファイルを受理する"},
 ]
 
 # 検出されてはいけない入力。ここでの finding は誤検知。
@@ -50,6 +52,8 @@ SAFE_ENDPOINTS = [
      "note": "資格情報を常に文字列として扱い、演算子注入を受け付けない"},
     {"path": "/dashboard/profile", "field": "bio",
      "note": "自己紹介を textContent で描画（innerHTML を使わない）"},
+    {"path": "/documents/upload-safe", "field": "attachment",
+     "note": "単一拡張子・Content-Type・画像マジックバイトを allow-list 検証する"},
 ]
 
 
@@ -66,6 +70,8 @@ _NAV = [
     ('/dashboard/profile?bio=hello', 'Profile'),
     ('/admin/login', 'Admin sign in'),
     ('/portal/signin', 'Portal sign in'),
+    ('/documents/upload', 'Document upload'),
+    ('/documents/upload-safe', 'Safe document upload'),
 ]
 
 
@@ -198,6 +204,7 @@ def create_app() -> FastAPI:
               <li><a href="/integrations/webhook-test?url=https://hooks.example.com/health">Webhook 疎通テスト</a></li>
               <li><a href="/dashboard/widget?tab=overview">ダッシュボード</a></li>
               <li><a href="/admin/login">管理サインイン</a></li>
+              <li><a href="/documents/upload">添付ファイル登録</a></li>
             </ul>
             <p>安全ツイン（正しく検証する版）:</p>
             <ul>
@@ -205,6 +212,7 @@ def create_app() -> FastAPI:
               <li><a href="/integrations/avatar-fetch?image_url=https://cdn.example.com/a.png">アバター取得 (SSRF 防御)</a></li>
               <li><a href="/dashboard/profile?bio=hello">プロフィール (textContent)</a></li>
               <li><a href="/portal/signin">ポータルサインイン (文字列扱い)</a></li>
+              <li><a href="/documents/upload-safe">添付ファイル登録 (allow-list)</a></li>
             </ul>
             """,
         )
@@ -302,6 +310,56 @@ def create_app() -> FastAPI:
         if username == "alice" and password == "CorrectHorse9":
             return _layout("ポータル", "<p>ようこそ。</p>")
         return _layout("ポータルサインイン", "<p>資格情報が正しくありません。</p>")
+
+    # ── ファイルアップロード（意図的）：危険ファイルも無条件に受理 ────────
+    @app.get("/documents/upload", response_class=HTMLResponse)
+    async def document_upload_form():
+        return _layout(
+            "添付ファイル登録",
+            """
+            <form method="post" action="/documents/upload" enctype="multipart/form-data">
+              <label>Attachment <input name="attachment" type="file"></label>
+              <button>Send</button>
+            </form>
+            """,
+        )
+
+    @app.post("/documents/upload", response_class=PlainTextResponse, status_code=201)
+    async def document_upload(attachment: UploadFile = File(...)):
+        # VULNERABLE: filename / Content-Type / 本文を検証せず保存する想定。
+        # scanner の受理判定だけを返し、反射や実コマンド実行など別クラスのシグナルは出さない。
+        await attachment.read()
+        return "file received\n"
+
+    # ── ファイルアップロード安全ツイン：画像だけを厳格に許可 ────────────
+    @app.get("/documents/upload-safe", response_class=HTMLResponse)
+    async def document_upload_safe_form():
+        return _layout(
+            "添付ファイル登録（安全）",
+            """
+            <form method="post" action="/documents/upload-safe" enctype="multipart/form-data">
+              <label>Attachment <input name="attachment" type="file"></label>
+              <button>Send</button>
+            </form>
+            """,
+        )
+
+    @app.post("/documents/upload-safe", response_class=PlainTextResponse)
+    async def document_upload_safe(attachment: UploadFile = File(...)):
+        filename = attachment.filename or ""
+        content_type = (attachment.content_type or "").lower()
+        content = await attachment.read()
+        suffix = filename.rsplit(".", 1)[-1].lower() if filename.count(".") == 1 else ""
+        allowed_magic = {
+            "jpg": ("image/jpeg", (b"\xff\xd8\xff",)),
+            "jpeg": ("image/jpeg", (b"\xff\xd8\xff",)),
+            "png": ("image/png", (b"\x89PNG\r\n\x1a\n",)),
+        }
+        expected = allowed_magic.get(suffix)
+        # SAFE: 二重拡張子・偽装 MIME・画像でない本文をすべて拒否する。
+        if expected is None or content_type != expected[0] or not content.startswith(expected[1]):
+            return PlainTextResponse("rejected: unsupported file\n", status_code=415)
+        return "accepted image\n"
 
     # ── DOM-based XSS（意図的）：クライアント側で innerHTML に書き込む ───────
     @app.get("/dashboard/widget", response_class=HTMLResponse)
