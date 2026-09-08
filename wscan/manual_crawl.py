@@ -17,6 +17,8 @@ from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import urlparse
 
+from wscan.url_normalize import normalize_proxy_server
+
 
 @dataclass
 class ManualCrawlSeed:
@@ -346,7 +348,8 @@ class ManualCrawlSession:
         self.start_url = start_url
         self.output_path = output_path
         self.headless = headless
-        self.proxy = proxy
+        # 空白のみ/scheme 欠落/不正値を正規化（launch の "Invalid URL" 回避）。
+        self.proxy = proxy = normalize_proxy_server(proxy)
         self.started_at = time.time()
         self.stopped_at = 0.0
         self.running = True
