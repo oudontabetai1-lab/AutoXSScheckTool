@@ -2772,6 +2772,10 @@ async function startRemoteBrowser() {
     alert('開始URL を入力してください (Manual Crawl タブの「開始URL」または Basic タブの Target URL)。');
     return;
   }
+  // QR 読取が非同期検証中に起動すると、プレビュー handler が TOTP 欄を一旦クリアするため
+  // 空設定を session に snapshot してしまい、後から欄が埋まっても fill-totp が失敗する。
+  // 通常スキャン入口と同じく readiness を確認してから TOTP 設定を取得・送信する（Codex #151 P2）。
+  if (!validateTotpReadiness()) return;
   const outputPath = document.getElementById('manualCrawlOutput').value.trim() || 'flows/manual_crawl.json';
   const proxy = document.getElementById('cfgProxy').value.trim();
   const totp = {
