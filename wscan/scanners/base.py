@@ -1501,12 +1501,19 @@ class BaseScanner(ABC):
             upgrade hop でのみ送る）。
         target host に一致する Cookie のみ載せる（host-only は完全一致、domain-cookie は suffix）。
         取得不能（テスト用 fake browser 等）や host 不明なら空 jar（未認証扱い）。
+
+        context は **呼び出し時に** ``self.engine.browser`` から解決する（Codex #145 P2 round8）。
+        ``self.browser`` は __init__ 時に捕捉したメイン browser で、``--concurrency>1`` の worker
+        タスクでは別 context になる。worker-aware な ``engine.browser`` property を使わないと、
+        別 worker が担当する保護ページを**メイン context の別スコープ/失効セッション**で取得し、
+        未認証応答を監査してしまう。
         """
         import http.cookiejar as _cj
         from urllib.parse import urlparse
 
         jar = httpx.Cookies()
-        ctx = getattr(getattr(self, "browser", None), "_context", None)
+        browser = getattr(self.engine, "browser", None) or getattr(self, "browser", None)
+        ctx = getattr(browser, "_context", None)
         if ctx is None:
             return jar
         host = (urlparse(url).hostname or "").lower()
@@ -1627,49 +1634,13 @@ class BaseScanner(ABC):
                 current = target
                 response = await _fetch(current)
             self._record_probe_status(response)
-            # 成功応答（2xx）で session が rotation（Set-Cookie）していたら、その新 Cookie は
-            # この一時 client の jar にしか入らない。放置すると browser 側が旧 token のまま後続
-            # scanner が 401/未認証応答を監査しうるため、worker context へ書き戻す（Codex #145 P1
-            # round7）。2xx に限定＝401/redirect-to-login の Cookie で browser の正セッションを
-            # 壊さない安全側。
-            if 200 <= response.status_code < 300:
-                await self._sync_cookies_to_browser(client, url)
+        # 直接 GET 応答の Set-Cookie（session rotation 等）は browser 側へ書き戻さない
+        # （read-only 監査は共有 Cookie store を変更しない）。httpx jar から browser cookie
+        # セマンティクス（httpOnly/sameSite/expiry/削除）を忠実再現するのは不可能に近く、
+        # 部分的な書き戻しは HttpOnly 認証 Cookie を script 可読にするなど**より重大な退行**を招く
+        # （Codex #145 round7 で追加した sync-back が round8 で httpOnly 剥がし等を指摘され撤去）。
+        # 監査 GET は worker の現 Cookie スナップショットで対象を取得するに留める（Codex #145 round8）。
         return response
-
-    async def _sync_cookies_to_browser(self, client, url: str) -> None:
-        """直接 GET で回転/追加された Cookie を worker ブラウザ context へ書き戻す（Codex #145 P1 round7）。
-
-        target host に一致する Cookie だけを ``add_cookies`` で反映する（別ホストの Cookie は
-        書き戻さない）。context 不在（テストダブル等）・API 差異・失敗は握りつぶす（監査は副作用を
-        持たない読み取りが本分なので、書き戻し失敗で従来挙動を壊さない）。
-        """
-        ctx = getattr(getattr(self, "browser", None), "_context", None)
-        if ctx is None:
-            return
-        from urllib.parse import urlparse
-
-        host = (urlparse(url).hostname or "").lower()
-        if not host:
-            return
-        to_add: list[dict] = []
-        try:
-            for c in client.cookies.jar:
-                dom = (getattr(c, "domain", "") or "").lstrip(".").lower()
-                if dom and not (host == dom or host.endswith("." + dom)):
-                    continue  # 別ホストの Cookie は書き戻さない
-                entry: dict = {
-                    "name": c.name,
-                    "value": c.value or "",
-                    "domain": c.domain or host,
-                    "path": getattr(c, "path", "/") or "/",
-                }
-                if getattr(c, "secure", False):
-                    entry["secure"] = True
-                to_add.append(entry)
-            if to_add:
-                await ctx.add_cookies(to_add)
-        except Exception:
-            pass
 
     @staticmethod
     def _reject_redirect_pair(pair: dict, url: str) -> dict:

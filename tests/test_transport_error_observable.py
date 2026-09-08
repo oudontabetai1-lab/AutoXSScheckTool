@@ -711,36 +711,32 @@ class DirectGetFetchMetadataAndCookieSyncTests(unittest.IsolatedAsyncioTestCase)
         self.assertEqual(h.get("sec-fetch-dest"), "document")
         self.assertEqual(h.get("user-agent"), "Mozilla/5.0 TestUA")
 
-    async def test_rotated_cookie_synced_back_on_2xx(self):
+    async def test_direct_get_never_writes_browser_cookies(self):
+        """直接 GET は 2xx の Set-Cookie（rotation）でも browser context を書き換えない
+        （round7 の sync-back を撤去＝httpOnly 剥がし等の退行を避ける・Codex #145 round8）。"""
         import httpx
 
         resp = httpx.Response(200, headers={"set-cookie": "session=NEW; Path=/"}, text="<html>")
         engine, ctx, scanner = self._scanner(response=resp)
         await scanner._get("http://app.test/page")
-        names = {c["name"]: c["value"] for c in ctx.added}
-        self.assertEqual(names.get("session"), "NEW")
+        self.assertEqual(ctx.added, [])  # 書き戻しゼロ
 
-    async def test_no_sync_back_on_non_2xx(self):
-        """401（未認証応答）の Cookie は書き戻さない＝browser の正セッションを壊さない。"""
+    async def test_cookie_jar_uses_worker_aware_engine_browser(self):
+        """_build_cookie_jar_for は self.browser（__init__捕捉のメイン）ではなく
+        呼び出し時の self.engine.browser（worker-aware）から context を解決する（Codex #145 round8）。"""
+        engine = _FakeEngine()
+        # __init__ 時のメイン browser は Cookie 無し。scanner 構築後に engine.browser を
+        # worker の context（Cookie あり）へ差し替える＝worker-aware なら worker の Cookie を読む。
+        engine.browser = _CookieCtxBrowser([])
+        scanner = SCANNERS["clickjacking"](engine)
+        engine.browser = _CookieCtxBrowser([
+            {"name": "sid", "value": "w", "path": "/", "domain": "app.test"},
+        ])
+        jar = await scanner._build_cookie_jar_for("http://app.test/")
         import httpx
-
-        resp = httpx.Response(401, headers={"set-cookie": "session=BAD; Path=/"}, text="login")
-        engine, ctx, scanner = self._scanner(response=resp)
-        await scanner._get("http://app.test/page")
-        self.assertEqual(ctx.added, [])
-
-    async def test_cross_host_cookie_not_synced(self):
-        """target host と異なる domain の Cookie は書き戻さない。"""
-        import httpx
-
-        resp = httpx.Response(
-            200,
-            headers={"set-cookie": "x=1; Path=/; Domain=other.test"},
-            text="<html>",
-        )
-        engine, ctx, scanner = self._scanner(response=resp)
-        await scanner._get("http://app.test/page")
-        self.assertFalse(any(c["name"] == "x" for c in ctx.added))
+        req = httpx.Request("GET", "http://app.test/")
+        jar.set_cookie_header(req)
+        self.assertEqual(req.headers.get("cookie"), "sid=w")
 
 
 if __name__ == "__main__":
