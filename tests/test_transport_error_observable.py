@@ -599,6 +599,39 @@ class RejectRedirectPairTests(unittest.TestCase):
         self.assertEqual(f({}, "http://x/"), {})
 
 
+class CaptureStatusPolicyTests(unittest.TestCase):
+    """_apply_capture_status_policy は fallback の captured pair にも direct-GET と同じ
+    document status 方針を適用する（2xx=監査/transient=空/その他非2xx=NOT_REACHED・Codex #145 P2 round19）。"""
+
+    def _f(self):
+        return SCANNERS["clickjacking"]._apply_capture_status_policy
+
+    def test_2xx_capture_unchanged(self):
+        pair = {"request": {"url": "http://x/"},
+                "response": {"status": 200, "url": "http://x/", "headers": {"x-frame-options": "DENY"}}}
+        self.assertIs(self._f()(pair, "http://x/"), pair)
+
+    def test_permanent_non_2xx_capture_becomes_not_reached(self):
+        for status in (301, 401, 403, 404, 410):
+            with self.subTest(status=status):
+                pair = {"request": {"url": "http://x/"},
+                        "response": {"status": status, "url": "http://x/", "headers": {"a": "b"}}}
+                out = self._f()(pair, "http://x/")
+                self.assertNotIn("status", out["response"])
+                self.assertEqual(out["response"]["headers"], {})
+
+    def test_transient_capture_becomes_empty(self):
+        for status in (408, 429, 500, 502, 503, 504):
+            with self.subTest(status=status):
+                pair = {"request": {"url": "http://x/"},
+                        "response": {"status": status, "url": "http://x/", "headers": {}}}
+                self.assertEqual(self._f()(pair, "http://x/"), {})
+
+    def test_statusless_capture_unchanged(self):
+        pair = {"response": {"headers": {}}}
+        self.assertIs(self._f()(pair, "http://x/"), pair)
+
+
 class ResponsePairDocumentGuardTests(unittest.IsolatedAsyncioTestCase):
     """_response_pair は直接 GET(replay)が **2xx（描画された document）** のときだけ status/headers を
     載せる。恒久的な非 2xx（3xx・401/404/410 等の「この document ではない」）は status を落として

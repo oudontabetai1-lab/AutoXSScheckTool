@@ -1766,8 +1766,36 @@ class BaseScanner(ABC):
                 },
             }
         except Exception:
-            # fallback の captured pair にも同じ 3xx ガードを適用する（Codex #145 P2 round6）。
-            return self._reject_redirect_pair(self.current_page_pair(url), url)
+            # fallback の captured pair にも direct-GET と同じ document status 方針を適用する
+            # （2xx のみ監査／transient は空→resume／その他非2xx は NOT_REACHED）。従来は 3xx しか
+            # 弾かず、capture が 401/429/5xx のとき error 応答を監査して欠落ヘッダ finding や
+            # checkpoint 完了を招き、round18 の transient retry も素通りしていた（Codex #145 P2 round19）。
+            return self._apply_capture_status_policy(self.current_page_pair(url), url)
+
+    @staticmethod
+    def _apply_capture_status_policy(pair: dict, url: str) -> dict:
+        """captured pair の status に direct-GET と同じ document 判定を適用する（Codex #145 P2 round19）。
+
+        2xx=そのまま監査、transient(408/429/5xx)=空 ``{}``（→ scanner が PageDocumentUnavailable→
+        resume 再試行）、その他の非 2xx（3xx・恒久 4xx）=status なし pair（NOT_REACHED）、status 無し=
+        そのまま（既存の観測失敗判定に委ねる）。``_reject_redirect_pair`` の 3xx 限定ガードを一般化したもの。
+        """
+        resp = (pair or {}).get("response") or {}
+        status = resp.get("status")
+        if status is None:
+            return pair
+        try:
+            s = int(status)
+        except (TypeError, ValueError):
+            return pair
+        if 200 <= s < 300:
+            return pair
+        if s in _TRANSIENT_REPLAY_STATUSES:
+            return {}
+        return {
+            "request": (pair or {}).get("request") or {"url": url, "method": "GET"},
+            "response": {"url": resp.get("url", url), "headers": {}, "body": ""},
+        }
 
     async def record_finding(
         self,
