@@ -312,7 +312,10 @@ class SecretLeakScanner(BaseScanner):
         if self.monitor:
             await self.monitor.emit_status(f"Secret-leak check on {url}")
 
-        pair = self.current_page_pair(url)
+        # 対象リソースの本文は直接 GET で確実に取得する。current_page_pair は latest() フォールバックで
+        # 別リクエストの pair を返し body が欠落しうるため、JS アセット等の本文を取りこぼして FN になる
+        # （0034 benchmark で /static/vendor.js の埋め込み秘密を検出できなかった原因）。
+        pair = await self._response_pair(url)
         body = pair.get("response", {}).get("body", "") or ""
 
         # Fall back to live DOM if the captured response body is empty (e.g.

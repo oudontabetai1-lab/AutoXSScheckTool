@@ -207,7 +207,10 @@ class SRIScanner(BaseScanner):
         if self.monitor:
             await self.monitor.emit_status(f"SRI audit on {url}")
 
-        pair = self.current_page_pair(url)
+        # 対象ページの HTML は直接 GET で確実に取得する。current_page_pair は latest() フォールバックで
+        # 別リクエストの pair を返し body が欠落しうるため、外部 script/link を取りこぼして FN になる
+        # （0034 benchmark で /portal/insights の外部 CDN script を検出できなかった原因）。
+        pair = await self._response_pair(url)
         body = pair.get("response", {}).get("body", "") or ""
         if not body:
             try:
