@@ -249,14 +249,20 @@ python3 main.py scan --help
 ### `scan` — 通常スキャン
 
 ```bash
-python3 main.py scan URL [options]
+python3 main.py scan URL [URL ...] [options]
 ```
+
+`URL` は複数指定できる（`scan https://a https://b https://c`）。先頭がクロール起点、
+2 つ目以降は追加攻撃スコープ（`--target-url` と同義）となり、**1 回のスキャン＝同一
+ログインセッション**で全対象を巡回・攻撃する（ログインが共通のサブドメイン群などに便利）。
+ダッシュボードでは「検査対象URL（攻撃あり）」欄に 1 行 1 URL で列挙する。
+ログインが別々のサイトを個別（並列）にスキャンするなら [`batch`](#batch--複数ターゲット) を使う。
 
 基本・LLM:
 
 | オプション | 既定 | 内容 |
 | --- | --- | --- |
-| `URL` | 必須 | 検査対象 URL |
+| `URL` | 必須 | 検査対象 URL（複数指定可。先頭がクロール起点、以降は追加攻撃スコープ） |
 | `-p, --payloads FILE` | `output.payloads_file` / なし | カスタムペイロード YAML |
 | `--checks CHECK...` | `sqli xss os` | 実行するチェック。選択肢は「対応チェック種別」参照 |
 | `--all-checks` | 無効 | 登録済みの全 scanner を実行（`--checks` を上書き）。全検査カバレッジを一度に得る（0016） |
