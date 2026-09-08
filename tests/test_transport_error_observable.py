@@ -688,6 +688,21 @@ class DirectGetAPIRequestContextTests(unittest.IsolatedAsyncioTestCase):
         _url, _h, kw = engine.browser._context.request.calls[0]
         self.assertEqual(kw.get("timeout"), 5000.0)
 
+    async def test_resyncs_engine_cookies_after_get(self):
+        """監査 GET 後に engine._sync_cookies_from_browser で engine.cookies を再同期する
+        （httpx ベースの CORS 等が stale セッションを送らない・Codex #145 P1 round14）。"""
+        engine, scanner = self._scanner(_FakeAPIResponse(200))
+        called = {}
+
+        async def _sync(browser, for_url=""):
+            called["browser"] = browser
+            called["url"] = for_url
+
+        engine._sync_cookies_from_browser = _sync
+        await scanner._get("http://app.test/p")
+        self.assertEqual(called.get("url"), "http://app.test/p")
+        self.assertIs(called.get("browser"), engine.browser)
+
     async def test_disposes_responses(self):
         """最終 response を dispose して body を解放する（Codex #145 round13）。"""
         resp = _FakeAPIResponse(200, {"X-Frame-Options": "DENY"})

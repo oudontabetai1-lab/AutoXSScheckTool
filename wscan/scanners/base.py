@@ -1615,6 +1615,16 @@ class BaseScanner(ABC):
                 response = await request_ctx.get(
                     current, headers=_headers_for(current) or None, **get_kwargs
                 )
+            # 監査 GET が Playwright context の Cookie を rotation させた可能性があるため、
+            # engine.cookies を browser context（source of truth）から再同期する。後続の httpx ベース
+            # 直接呼び出し（CORSScanner._get_with_origin 等が使う engine.cookies）が stale セッションを
+            # 送らないようにする（Codex #145 P1 round14）。engine の既存同期機構を使う（自作しない）。
+            _sync = getattr(self.engine, "_sync_cookies_from_browser", None)
+            if callable(_sync):
+                try:
+                    await _sync(browser, url)
+                except Exception:
+                    pass
             try:
                 text = await response.text()
             except Exception:
