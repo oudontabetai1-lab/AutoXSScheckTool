@@ -1160,7 +1160,7 @@ class AgentBrowserScanner:
             if self._harness:
                 agent_kwargs["register_should_stop_callback"] = self._harness_should_stop
 
-            if self.extra_headers or sensitive_data or self.storage_state:
+            if self.extra_headers or sensitive_data or self.storage_state or self._harness:
                 # browser-use 0.12.6 の実 API:
                 # BrowserSession(browser_profile=...) → Agent(browser_session=...)。
                 # 注意: BrowserProfile.headers は「ブラウザ/CDP エンドポイントへの接続時
@@ -1186,7 +1186,9 @@ class AgentBrowserScanner:
                     )
                     browser = BrowserSession(browser_profile=browser_profile)
                     agent_browser_arg = "browser_session"
-                    agent = Agent(browser_session=browser, **agent_kwargs)
+                    agent = None if self._harness else Agent(
+                        browser_session=browser, **agent_kwargs
+                    )
                 except Exception:
                     if sensitive_data or self.storage_state:
                         raise RuntimeError(
@@ -1198,12 +1200,12 @@ class AgentBrowserScanner:
                     )
                     browser = _build_legacy_browser()
                     agent_browser_arg = "browser"
-                    agent = Agent(browser=browser, **agent_kwargs)
+                    agent = None if self._harness else Agent(browser=browser, **agent_kwargs)
             else:
                 # ヘッダ未指定時は完全に従来どおりの構築経路を使う。
                 browser = _build_legacy_browser()
                 agent_browser_arg = "browser"
-                agent = Agent(browser=browser, **agent_kwargs)
+                agent = None if self._harness else Agent(browser=browser, **agent_kwargs)
 
             console.print("[dim]エージェント起動中...[/dim]")
             if self.monitor:
