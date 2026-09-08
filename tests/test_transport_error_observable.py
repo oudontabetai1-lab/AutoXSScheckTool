@@ -601,8 +601,9 @@ class RejectRedirectPairTests(unittest.TestCase):
 
 class ResponsePairDocumentGuardTests(unittest.IsolatedAsyncioTestCase):
     """_response_pair は直接 GET(replay)が **2xx（描画された document）** のときだけ status/headers を
-    載せる。3xx/4xx/5xx replay（one-time link・nonce 消費で 401/404/410 等）は status を落として
-    NOT_REACHED 扱いにし、ブラウザが描画していない応答の欠落ヘッダを監査しない（Codex #145 P2 round17）。"""
+    載せる。恒久的な非 2xx（3xx・401/404/410 等の「この document ではない」）は status を落として
+    NOT_REACHED（[] 返し）。ただし transient（408/429/5xx）は空 pair を返して scanner に
+    PageDocumentUnavailable を投げさせ resume 再試行可能にする（Codex #145 P2 round17/18）。"""
 
     def _scanner(self, response):
         engine = _FakeEngine()
@@ -634,15 +635,43 @@ class ResponsePairDocumentGuardTests(unittest.IsolatedAsyncioTestCase):
         pair = await self._pair_for(410)
         self.assertNotIn("status", pair["response"])
 
-    async def test_5xx_replay_is_not_reached(self):
-        pair = await self._pair_for(503)
-        self.assertNotIn("status", pair["response"])
+    async def test_transient_5xx_returns_empty_pair(self):
+        # 503/429/408 は transient＝空 pair（→ scanner が PageDocumentUnavailable→resume 再試行）。
+        for status in (503, 502, 500, 429, 408, 504):
+            with self.subTest(status=status):
+                pair = await self._pair_for(status)
+                self.assertEqual(pair, {})
 
     async def test_clickjacking_does_not_flag_401_replay(self):
         # 401 replay の欠落 XFO/CSP を framing 保護なしと誤報しない（回帰）。
         engine, scanner = self._scanner(_FakeAPIResponse(401, {}))
         findings = await scanner.scan_page("http://app.test/one-time")
         self.assertEqual(findings, [])
+
+    async def test_clickjacking_raises_on_transient_replay(self):
+        # transient(503)は tested 完了にせず PageDocumentUnavailable で error 経路→resume 再試行。
+        engine, scanner = self._scanner(_FakeAPIResponse(503, {}))
+        with self.assertRaises(PageDocumentUnavailable):
+            await scanner.scan_page("http://app.test/flaky")
+
+    async def test_header_scanners_share_one_replay_per_url(self):
+        """clickjacking と security_headers が同一 engine・同一 URL で GET を 1 回だけ共有する
+        （副作用のある GET を read-only ヘッダ検査で二重に叩かない・Codex #145 P2 round18）。"""
+        engine = _FakeEngine()
+        ctx = _FakeRequestCtx(_FakeAPIResponse(200, {"X-Frame-Options": "DENY"}))
+        engine.browser = _APIBrowser(ctx)
+        cj = SCANNERS["clickjacking"](engine)
+        sh = SCANNERS["security_headers"](engine)
+        url = "http://app.test/logout"
+        pair_cj = await cj._response_pair(url)
+        pair_sh = await sh._response_pair(url)
+        # 2 スキャナが同一 URL を監査しても直接 GET は 1 回だけ（キャッシュ共有）。
+        self.assertEqual(len(ctx.calls), 1, ctx.calls)
+        self.assertEqual(pair_cj, pair_sh)
+        self.assertEqual(pair_cj["response"].get("status"), 200)
+        # 別 URL は別途 1 回 GET する。
+        await cj._response_pair("http://app.test/other")
+        self.assertEqual(len(ctx.calls), 2)
 
 
 class CurrentPagePairWorkerAwareTests(unittest.TestCase):

@@ -139,6 +139,10 @@ _IDEMPOTENCY_HEADER_NAMES = frozenset({
     "x-idempotency-token",
 })
 
+# page 観測系の直接 GET(replay) が返した際、「恒久的にこの document ではない」ではなく
+# 一時障害＝resume で再試行すべき status。408/429/5xx を transient として扱う（Codex #145 P2 round18）。
+_TRANSIENT_REPLAY_STATUSES = frozenset({408, 429, 500, 502, 503, 504})
+
 
 def refresh_idempotency_headers(headers: dict) -> dict:
     """replay 毎に idempotency キーの**値だけ**を新規 uuid へ置換する（純粋）。
@@ -1702,7 +1706,34 @@ class BaseScanner(ABC):
         }
 
     async def _response_pair(self, url: str) -> dict:
-        """対象ページの request/response pair を返す。直接 GET 優先・失敗時のみ network fallback。"""
+        """対象ページの request/response pair を返す（page 観測系スキャナ共有・per-URL replay 1 回）。
+
+        clickjacking / security_headers / sri / secret_leak は同一ページのヘッダを各自監査するため、
+        素朴には 1 ページに複数回 GET(replay) してしまう。副作用のある GET（logout/action リンク・
+        token 消費など 2xx を返すもの）を read-only のはずのヘッダ検査で二重に叩かないよう、engine 単位の
+        per-URL キャッシュで **1 ページ 1 replay** を共有する（Codex #145 P2 round18）。同一ページを続けて
+        走る page 観測系スキャナ群がこのキャッシュを共有する。cookie 再同期も 1 回に減る。
+        （replay を完全に無くす＝ブラウザ navigation 応答の per-URL 保存は別タスク＝verify 側の共有も含む。）
+        """
+        cache = getattr(self.engine, "_page_obs_pair_cache", None)
+        if cache is None:
+            try:
+                cache = {}
+                self.engine._page_obs_pair_cache = cache
+            except Exception:
+                cache = None
+        if cache is not None and url in cache:
+            return cache[url]
+        pair = await self._compute_response_pair(url)
+        if cache is not None:
+            # ページ数に比例した無制限成長を防ぐ簡易上限（並列 worker の in-flight を十分に覆う）。
+            if len(cache) > 64:
+                cache.clear()
+            cache[url] = pair
+        return pair
+
+    async def _compute_response_pair(self, url: str) -> dict:
+        """対象ページの request/response pair を計算する。直接 GET 優先・失敗時のみ network fallback。"""
         try:
             response = await self._get(url)
             # header 監査は「replay で確実に取得できたレンダリング document（2xx）」に限定する。
@@ -1710,11 +1741,17 @@ class BaseScanner(ABC):
             # URL では、ブラウザが本物の保護 document を描画済みでも 2 回目のこの GET は 3xx や
             # 401/403/404/410 等を返し得る。その非 2xx 応答の欠落ヘッダ（X-Frame-Options/CSP 等）を
             # document の欠落として監査すると、ブラウザが描画していない応答に対する FP になる。
-            # status を持たない pair を返し、観測系スキャナに「document 未取得（NOT_REACHED）」として
-            # 扱わせる（resume 対象）。3xx は round6/P2d で既対応、本修正で 4xx/5xx へ一般化（Codex #145 P2 round17）。
-            # 失敗時 fallback の captured pair（current_page_pair）はブラウザが実際に描画した応答＝
-            # 信頼できる document なので 3xx のみ弾く既存ガードのままにする（replay ではない）。
-            if not (200 <= response.status_code < 300):
+            # 3xx は round6/P2d で既対応、4xx/5xx へ一般化（round17）。ただし非 2xx を一律に
+            # status なし pair（＝[] 返しで tested 完了）にすると、408/429/5xx のような **transient**
+            # 失敗まで恒久的に「監査済み」扱いになり resume で再試行されない（Codex #145 P2 round18）。
+            # そこで transient は空 pair を返して scanner に PageDocumentUnavailable を投げさせ、
+            # engine の error 経路（checkpoint 未完了→resume 再試行）へ載せる。恒久的な非 2xx
+            # （3xx・401/403/404/410 等の「この document ではない」）は従来どおり status なし pair で
+            # NOT_REACHED（[] 返し）にする。
+            status = response.status_code
+            if not (200 <= status < 300):
+                if status in _TRANSIENT_REPLAY_STATUSES:
+                    return {}  # → scanner: not response → PageDocumentUnavailable → resume 再試行
                 return {
                     "request": {"url": url, "method": "GET"},
                     "response": {"url": str(response.url), "headers": {}, "body": ""},
