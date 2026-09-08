@@ -147,7 +147,12 @@ class EndToEndIntranetScanTests(unittest.TestCase):
         self.assertTrue(self.findings, "engine reported no findings at all")
 
     def test_every_planted_vulnerability_is_detected(self):
+        # この E2E は CHECKS で有効化した scanner のみ実行するため、EXPECTED_FINDINGS のうち
+        # 有効 check の項だけを recall 対象にする。未実行 check（例 file_upload）を偽 FN にしない
+        # （その scanner は 0034 benchmark E2E で権威的に採点される・Codex #148 P2）。
         for spec in EXPECTED_FINDINGS:
+            if spec["check"] not in CHECKS:
+                continue
             with self.subTest(check=spec["check"], path=spec["path"], field=spec["field"]):
                 matches = self._matching(spec["check"], spec["path"], spec["field"])
                 self.assertTrue(

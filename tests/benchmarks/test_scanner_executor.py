@@ -201,28 +201,26 @@ def test_injection_omitted_without_page_identity_is_unsupported():
 
 
 def test_non_field_carrier_is_unsupported(suite):
-    """field carrier（query/form/multipart）以外は UNSUPPORTED（Codex #134 P2）。"""
+    """field carrier（query/form）以外は UNSUPPORTED。xss は multipart 非対応なので multipart も
+    UNSUPPORTED（Codex #134 P2 / #148 P2）。"""
     from wscan.scanner_contract import Carrier
-    for carrier in (Carrier.JSON, Carrier.HEADER, Carrier.COOKIE):
+    # xss の CONTRACT は multipart=PLANNED（SUPPORTED でない）ため multipart も採点対象外。
+    for carrier in (Carrier.JSON, Carrier.HEADER, Carrier.COOKIE, Carrier.MULTIPART):
         case = replace(suite.cases[0], injection=replace(suite.cases[0].injection, carrier=carrier))
         s = replace(suite, cases=(case,))
         outcome = ScanOutcome(findings=[finding()], exercised=exercised_of(s))
         assert br.score_cases(s, outcome, ran_checks={"xss"})[0].state == State.UNSUPPORTED
 
 
-def test_multipart_carrier_is_scoreable(suite):
-    """multipart は form field の実行台帳を使って scanner-backed 採点できる。"""
-    from wscan.scanner_contract import Carrier
-
-    case = replace(
-        suite.cases[0],
-        injection=replace(suite.cases[0].injection, carrier=Carrier.MULTIPART),
-    )
-    s = replace(suite, cases=(case,))
-    outcome = ScanOutcome(findings=[finding(injection_location="")], exercised=exercised_of(s))
-    result = br.score_cases(s, outcome, ran_checks={"xss"})[0]
-    assert result.state == State.COMPLETED
-    assert result.candidate_match
+def test_multipart_scoreable_only_for_capable_check():
+    """multipart は scanner が CONTRACT で SUPPORTED を宣言する check（file_upload）でのみ採点対象。
+    非対応 scanner（xss=PLANNED）の multipart case を採点して unsupported coverage を TP/TN 化しない
+    （registry completeness 過大評価の防止・Codex #148 P2）。"""
+    assert br._carrier_scoreable_for_check("file_upload", "multipart") is True
+    assert br._carrier_scoreable_for_check("xss", "multipart") is False
+    # query/form は capability に関係なく常に採点可。
+    assert br._carrier_scoreable_for_check("xss", "query") is True
+    assert br._carrier_scoreable_for_check("file_upload", "form") is True
 
 
 def test_unprovisioned_prerequisite_is_unsupported(suite):

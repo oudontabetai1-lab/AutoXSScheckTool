@@ -164,13 +164,39 @@ class ScanOutcome:
     fulfilled_prerequisites: frozenset[str] = frozenset()
 
 
-# この scanner-backed adapter が忠実に採点できる carrier。multipart は通常 form と同じ
-# scan_matrix identity（field/location=form）を持つが、file_upload の契約と manifest では
-# multipart として宣言する。json_body 等は scan_matrix の
-# field/location が report 用プレースホルダ（"(json-body)"/"(page)"）で finding の実 identity と
-# 一致せず、method 次元も台帳に無い。R2 はこれらを UNSUPPORTED にし、R3 で carrier 固有の実行
-# identity を導入する（Codex #134 P2）。
-_SCOREABLE_CARRIERS = frozenset({"query", "form", "multipart"})
+# この scanner-backed adapter が忠実に採点できる carrier。query/form は field/location=form の
+# scan_matrix identity と一致する。json_body 等は scan_matrix の field/location が report 用
+# プレースホルダ（"(json-body)"/"(page)"）で finding の実 identity と一致せず、method 次元も台帳に
+# 無い。R2 はこれらを UNSUPPORTED にし、R3 で carrier 固有の実行 identity を導入する（Codex #134 P2）。
+_SCOREABLE_CARRIERS = frozenset({"query", "form"})
+
+
+def _multipart_scoreable_for_check(check: str) -> bool:
+    """multipart case をこの check の scanner で忠実採点してよいか。
+
+    multipart は form と同じ scan_matrix identity（field/location=form）を持つため form 台帳で
+    採点できるが、それは scanner が実際に multipart を実行できる場合のみ。CONTRACT で multipart を
+    SUPPORTED と宣言する check（file_upload 等）に限定し、multipart=PLANNED/UNSUPPORTED の scanner
+    （XSS 等）の multipart case を採点対象にして unsupported coverage を TP/TN 化しない
+    （registry completeness の過大評価を防ぐ・Codex #148 P2）。
+    """
+    try:
+        from wscan.scanner_contract import Carrier
+        from wscan.scanners import SCANNERS
+
+        contract = getattr(SCANNERS.get(check), "CONTRACT", None)
+        return contract is not None and Carrier.MULTIPART in contract.supported_carriers()
+    except Exception:
+        return False
+
+
+def _carrier_scoreable_for_check(check: str, carrier_value: str) -> bool:
+    """carrier がこの check で忠実採点できるか（query/form は常に可・multipart は capability 依存）。"""
+    if carrier_value in _SCOREABLE_CARRIERS:
+        return True
+    if carrier_value == "multipart":
+        return _multipart_scoreable_for_check(check)
+    return False
 
 # passive/page 観測系 case の canonical identity。engine の _attack_one_page が page-level scan_page
 # 行に刻む field="(page)"/location="page-level" と一致させる。injection を宣言せず、かつこの identity
@@ -262,10 +288,11 @@ def score_cases(
         if (
             case.check not in ran_checks
             or case.match is None
-            # 注入系は field carrier（query/form/multipart）だけ忠実採点。json/xml/header 等 *注入を宣言する*
-            # carrier は scan_matrix の実行 identity がプレースホルダで finding と一致せず未対応。
-            # passive（無注入）はこのゲートを免れ、下記の (check, path) 採点を使う。
-            or (not is_passive and carrier_value not in _SCOREABLE_CARRIERS)
+            # 注入系は field carrier（query/form、および multipart=SUPPORTED の scanner の multipart）
+            # だけ忠実採点。json/xml/header 等 *注入を宣言する* carrier は scan_matrix の実行 identity が
+            # プレースホルダで finding と一致せず未対応。passive（無注入）はこのゲートを免れ、下記の
+            # (check, path) 採点を使う。
+            or (not is_passive and not _carrier_scoreable_for_check(case.check, carrier_value))
             # 前提を宣言した case は、スキャンがその前提を実際に用意した場合のみ採点する。
             # 未充足の前提で反射だけ見て TP/FN/FP/TN を作らない（HttpxCaseExecutor と同思想）。
             or any(p not in fulfilled for p in prereqs)
