@@ -280,3 +280,34 @@ def test_empty_query_delimiter_is_preserved_and_idempotent():
     # 冪等。
     for u in ("http://h/p?", "http://h/p?nonce=1699999999", "http://h/p?nonce=1#/r"):
         assert n(n(u)) == n(u)
+
+
+def test_normalize_proxy_server_disables_blank_and_whitespace():
+    from wscan.url_normalize import normalize_proxy_server as p
+    # 空 / 空白のみは proxy 無効（"" を返す）。truthy な空白文字列が
+    # `if self.proxy:` を素通りして Playwright の Invalid URL を招く盲点を塞ぐ。
+    assert p("") == ""
+    assert p("   ") == ""
+    assert p("\t\n") == ""
+
+
+def test_normalize_proxy_server_trims_and_adds_scheme():
+    from wscan.url_normalize import normalize_proxy_server as p
+    # 前後空白の除去と scheme 補完（慣用の host:port 表記を許容）。
+    assert p("  http://127.0.0.1:8080  ") == "http://127.0.0.1:8080"
+    assert p("127.0.0.1:8080") == "http://127.0.0.1:8080"
+    assert p("localhost:3128") == "http://localhost:3128"
+    # 既に正しい値は不変（冪等）。
+    for v in ("http://127.0.0.1:8080", "socks5://10.0.0.1:1080"):
+        assert p(v) == v
+        assert p(p(v)) == p(v)
+
+
+def test_normalize_proxy_server_rejects_unparseable():
+    import pytest
+    from wscan.url_normalize import normalize_proxy_server as p
+    # host を解釈できない/内部に空白を含む値は実行前に ValueError で明示する
+    # （Playwright の不可解な "Invalid URL" ではなく actionable なメッセージへ倒す）。
+    for bad in ("://x", "not a url", "http://127.0.0.1: 8080"):
+        with pytest.raises(ValueError):
+            p(bad)

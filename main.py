@@ -132,6 +132,7 @@ def _load_config(path: Path = _CONFIG_PATH) -> dict:
     cfg["auth_pass"]               = str(a.get("auth_pass", "") or "")
     cfg["mfa_type"]                = str(a.get("mfa_type", "") or "")
     cfg["mfa_field"]               = str(a.get("mfa_field", "") or "")
+    cfg["mfa_selector"]            = str(a.get("mfa_selector", "") or "")
     cfg["mfa_email_account"]       = str(a.get("mfa_email_account", "") or "")
     cfg["mfa_email_address"]       = str(a.get("mfa_email_address", "") or "")
     cfg["mfa_email_imap_host"]     = str(a.get("mfa_email_imap_host", "") or "")
@@ -747,7 +748,13 @@ Examples:
 
     # ── scan subcommand ────────────────────────────────────────────
     scan = sub.add_parser("scan", help="Run a security scan")
-    scan.add_argument("url", help="Target URL (e.g. https://example.com)")
+    scan.add_argument(
+        "url", nargs="+",
+        help="対象 URL。複数指定すると 1 回のスキャン（＝同一ログインセッション）で "
+             "全 URL を攻撃スコープとして巡回する（例: scan https://a https://b）。"
+             "先頭がクロール起点、2 つ目以降は --target-url と同義。"
+             "ログインが別々のサイトを個別に並行スキャンするなら `batch` を使う。",
+    )
 
     scan.add_argument(
         "--payloads", "-p", metavar="FILE",
@@ -1095,6 +1102,10 @@ Examples:
     scan.add_argument(
         "--mfa-field", metavar="NAME", default=_CFG.get("mfa_field", ""),
         help="One-time-code input field name/id on the login form (default: otp).",
+    )
+    scan.add_argument(
+        "--mfa-selector", metavar="CSS", default=_CFG.get("mfa_selector", ""),
+        help="OTP 入力欄の完全 CSS selector。指定時は name/id・自動検出より優先。",
     )
     # uri/secret/qr は CLI の明示有無を保持し、後段(_effective_totp_sources)で config
     # 既定を解決する。config/env の URI をここへ焼き込むと、明示 secret/qr より URI が
@@ -2058,11 +2069,37 @@ async def run_agent(args):
     return result
 
 
+def _collapse_multi_target(
+    url_arg: "str | list[str]", target_urls: list,
+) -> "tuple[str, list]":
+    """位置引数 url（nargs='+'）を (先頭=クロール起点, 残り＋既存 target_urls) へ畳み込む。
+
+    純粋関数。先頭 URL を単一の攻撃起点に、2 つ目以降を追加攻撃スコープの先頭へ前置する
+    （既存の --target-url 由来 target_urls はその後ろに温存）。空文字は除外。文字列を
+    そのまま渡された場合（後方互換）は (url, target_urls) をそのまま返す。
+    """
+    if not isinstance(url_arg, list):
+        return url_arg, list(target_urls or [])
+    urls = [u for u in url_arg if u]
+    primary = urls[0] if urls else ""
+    extra = urls[1:]
+    return primary, list(extra) + list(target_urls or [])
+
+
 async def run_scan(args):
     from rich.console import Console
     from rich.panel import Panel
 
     console = Console()
+
+    # 位置引数 url は nargs="+"（複数対象を 1 スキャンで指定可）。先頭をクロール
+    # 起点 args.url（以降のコードは文字列前提）に畳み込み、2 つ目以降は追加攻撃
+    # スコープ（--target-url と同じ target_urls）へ前置する。同一ログインセッション
+    # で全対象を巡回・攻撃する（別ログインのサイトを個別並行するなら batch）。
+    if isinstance(getattr(args, "url", None), list):
+        args.url, args.target_urls = _collapse_multi_target(
+            args.url, getattr(args, "target_urls", []) or []
+        )
 
     # ── Fast mode preset ──────────────────────────────────────────────
     # Apply defaults only for options the user did NOT explicitly set.
@@ -2330,6 +2367,7 @@ async def run_scan(args):
             # --mfa-totp-* を明示した場合は config type を無視し TOTP 自動昇格に委ねる。
             mfa_type=_effective_mfa_type(args),
             mfa_field=getattr(args, "mfa_field", "") or "",
+            mfa_selector=getattr(args, "mfa_selector", "") or "",
             mfa_totp_secret=mfa_totp_secret,
             mfa_totp_uri=mfa_totp_uri,
             mfa_totp_qr=mfa_totp_qr,
@@ -2655,6 +2693,7 @@ async def run_serve(args):
         "login_success_indicator": _CFG.get("login_success_indicator", ""),
         "mfa_type": _CFG.get("mfa_type", ""),
         "mfa_field": _CFG.get("mfa_field", ""),
+        "mfa_selector": _CFG.get("mfa_selector", ""),
         "mfa_email_account": _CFG.get("mfa_email_account", ""),
         "mfa_email_address": _CFG.get("mfa_email_address", ""),
         "mfa_email_imap_host": _CFG.get("mfa_email_imap_host", ""),
@@ -2940,6 +2979,7 @@ async def run_serve(args):
                 # "" は env を上書きして無効化。キー欠落(None)時のみ env に委ねる。
                 mfa_type=cfg.get("mfa_type"),
                 mfa_field=cfg.get("mfa_field", "") or "",
+                mfa_selector=cfg.get("mfa_selector", "") or "",
                 mfa_email_account=cfg.get("mfa_email_account", "") or "",
                 mfa_email_imap={
                     "address": cfg.get("mfa_email_address", "") or "",

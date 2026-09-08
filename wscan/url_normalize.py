@@ -67,6 +67,43 @@ def _split_query_item(item: str) -> tuple[str, str]:
     return key, value
 
 
+def normalize_proxy_server(raw: str) -> str:
+    """proxy サーバ URL を Playwright/httpx が受理できる形へ正規化する（純粋）。
+
+    Playwright は ``proxy.server`` を内部で ``new URL()`` に通すため、host を取れない値や
+    内部に空白を含む値だと ``BrowserType.launch: Invalid URL`` で launch 全体が落ちる。
+    さらに呼び出し側の ``if self.proxy:`` ガードは空白のみ文字列（truthy）を素通りさせる。
+
+    - 前後空白を除く（空白のみ＝proxy 無効として "" を返す）。
+    - scheme が無ければ ``http://`` を補う（``127.0.0.1:8080`` 等の慣用表記を許容）。
+    - host が取れない/内部に空白等の不正文字がある値は ``ValueError`` を投げ、
+      Playwright の不可解な "Invalid URL" ではなく実行前に原因を明示する
+      （セキュリティ用途上、不正 proxy を黙って無効化して攻撃通信を迂回させない）。
+
+    戻り値は "" （proxy 無効）または正規化済み URL。
+    """
+    if not raw:
+        return ""
+    server = raw.strip()
+    if not server:
+        return ""
+    if "://" not in server:
+        # 127.0.0.1:8080 / localhost:3128 のような scheme 省略表記を許容。
+        server = "http://" + server
+    if any(char.isspace() for char in server):
+        raise ValueError(
+            f"proxy の値が不正です（空白を含み URL として解釈できません）: {raw!r}. "
+            "例: http://127.0.0.1:8080"
+        )
+    parsed = urlsplit(server)
+    if not parsed.scheme or not parsed.hostname:
+        raise ValueError(
+            f"proxy の値が不正です（host を解釈できません）: {raw!r}. "
+            "例: http://127.0.0.1:8080"
+        )
+    return server
+
+
 def strip_path_trailing_slash(url: str) -> str:
     """URL のパス成分の末尾スラッシュだけを除く（クエリ値/fragment は不変・純粋）。
 
