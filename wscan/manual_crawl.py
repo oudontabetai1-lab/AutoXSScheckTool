@@ -17,7 +17,12 @@ from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import urlparse
 
+from wscan.mfa import seconds_until_next_window
+from wscan.totp import generate_totp, resolve_totp_secret
 from wscan.url_normalize import normalize_proxy_server
+
+
+_TOTP_MIN_REMAINING_SECONDS = 3
 
 
 @dataclass
@@ -282,6 +287,12 @@ def scale_point(nx: float, ny: float, width: int, height: int) -> tuple[float, f
     return (_clamp01(nx) * width, _clamp01(ny) * height)
 
 
+def pick_active_page(pages: list[Any], closed_page: Any) -> Any | None:
+    """閉じたページを除く最後のページを、次のアクティブページとして返す。"""
+    remaining = [page for page in pages if page is not closed_page]
+    return remaining[-1] if remaining else None
+
+
 class ManualCrawlSession:
     """Stateful visible-browser recorder used by CLI and dashboard APIs."""
 
@@ -306,6 +317,20 @@ class ManualCrawlSession:
         self._page = None
         self._lock = asyncio.Lock()
         self._snapshot_tasks: set[asyncio.Task] = set()
+        self._page_tasks: set[asyncio.Task] = set()
+        self._bound_pages: list[Any] = []
+        self._fill_fn = ""
+        self._click_fn = ""
+        self._recorder_script = ""
+
+        # TOTP はメモリ上だけに保持し、status/save/log には含めない。
+        self.totp_uri = ""
+        self.totp_secret = ""
+        self.totp_qr = ""
+        self.totp_digits = 6
+        self.totp_period = 30
+        self.totp_algorithm = "SHA1"
+        self.last_mfa_selector = ""
 
         # 遠隔操作（スクリーンキャスト）用。
         self.streaming = False
@@ -323,6 +348,12 @@ class ManualCrawlSession:
         proxy: str = "",
         stream: bool = False,
         frame_callback=None,
+        totp_uri: str = "",
+        totp_secret: str = "",
+        totp_qr: str = "",
+        totp_digits: int = 6,
+        totp_period: int = 30,
+        totp_algorithm: str = "SHA1",
     ) -> dict:
         if self.running:
             raise RuntimeError("manual crawl session is already running")
@@ -336,6 +367,13 @@ class ManualCrawlSession:
             headless = True
         self.streaming = bool(stream)
         self._frame_callback = frame_callback if stream else None
+        self.totp_uri = str(totp_uri or "")
+        self.totp_secret = str(totp_secret or "")
+        self.totp_qr = str(totp_qr or "")
+        self.totp_digits = totp_digits
+        self.totp_period = totp_period
+        self.totp_algorithm = str(totp_algorithm or "SHA1").upper()
+        self.last_mfa_selector = ""
 
         try:
             from playwright.async_api import async_playwright
@@ -389,14 +427,23 @@ class ManualCrawlSession:
             raise
 
         token = secrets.token_hex(12)
-        fill_fn = f"__wscan_manual_fill_{token}__"
-        click_fn = f"__wscan_manual_click_{token}__"
-
-        await self._page.expose_function(fill_fn, self._record_fill)
-        await self._page.expose_function(click_fn, self._record_click)
-        await self._page.add_init_script(
-            f"""
+        self._fill_fn = f"__wscan_manual_fill_{token}__"
+        self._click_fn = f"__wscan_manual_click_{token}__"
+        guard = f"__wscan_manual_bound_{token}__"
+        # target=_blank のリンククリックは同一タブ化して screencast 1 枚に収める（追従も容易）。
+        # window.open は上書きしない: 偽の window を返すと w.closed/w.postMessage を使うアプリや
+        # OAuth ポップアップが壊れる。真の popup として開かせ、context.on("page") 追従で拾う。
+        same_tab_script = """
+              document.addEventListener('click', (e) => {
+                const link = e.target && e.target.closest ? e.target.closest('a[target]') : null;
+                if (link) link.setAttribute('target', '_self');
+              }, true);
+        """ if stream else ""
+        self._recorder_script = f"""
             (() => {{
+              if (window['{guard}']) return;
+              window['{guard}'] = true;
+              {same_tab_script}
               const cssPath = (el) => {{
                 if (!el || !el.tagName) return '';
                 if (el.id) return '#' + CSS.escape(el.id);
@@ -413,7 +460,7 @@ class ManualCrawlSession:
               document.addEventListener('change', (e) => {{
                 const el = e.target;
                 if (!el || !['INPUT','TEXTAREA','SELECT'].includes(el.tagName)) return;
-                window['{fill_fn}']({{
+                window['{self._fill_fn}']({{
                   selector: cssPath(el),
                   name: el.name || '',
                   type: el.type || el.tagName.toLowerCase(),
@@ -423,7 +470,7 @@ class ManualCrawlSession:
               document.addEventListener('click', (e) => {{
                 const el = e.target && e.target.closest ? e.target.closest('a,button,input[type=submit],input[type=button]') : null;
                 if (!el) return;
-                window['{click_fn}']({{
+                window['{self._click_fn}']({{
                   selector: cssPath(el),
                   text: (el.innerText || el.value || '').slice(0,120),
                   href: el.href || '',
@@ -432,32 +479,22 @@ class ManualCrawlSession:
               }}, true);
             }})();
             """
-        )
-
-        def on_navigate(frame) -> None:
-            if frame == self._page.main_frame:
-                self._schedule_snapshot("navigate")
-
-        def on_request_finished(request) -> None:
-            if request.resource_type in {"document", "xhr", "fetch"}:
-                url = request.url.split("#")[0]
-                if _same_origin(url, self.start_url):
-                    self._record_url(url, "request")
-
-        self._page.on("framenavigated", on_navigate)
-        self._page.on("requestfinished", on_request_finished)
+        await self._bind_page(self._page)
+        self._context.on("page", self._on_new_page)
 
         # goto は待たない: ナビゲーションが終わるまでブロックすると
         # 重いSPAや遅いサイトで API がタイムアウトしてしまうため、
         # バックグラウンドで実行する。ユーザは既に開いているブラウザ
         # 画面で操作できる。
+        initial_page = self._page
+
         async def _initial_goto() -> None:
             try:
-                await self._page.goto(start_url, wait_until="commit", timeout=15_000)
+                await initial_page.goto(start_url, wait_until="commit", timeout=15_000)
             except Exception as exc:
                 self.last_error = f"goto failed: {exc}"
             try:
-                await self.snapshot("start")
+                await self.snapshot("start", page=initial_page)
             except Exception:
                 pass
 
@@ -467,17 +504,107 @@ class ManualCrawlSession:
 
         if stream:
             try:
-                await self._start_screencast()
+                async with self._lock:
+                    # popup の page イベントが先に処理済みなら、その CDP を維持する。
+                    if self._cdp is None:
+                        await self._start_screencast(self._page)
             except Exception as exc:
                 self.last_error = f"screencast failed: {exc}"
 
         return self.status()
 
-    async def _start_screencast(self) -> None:
+    def _track_page_task(self, coroutine) -> None:
+        """Playwright の同期イベントからページ管理 coroutine を安全に起動する。"""
+        try:
+            task = asyncio.get_running_loop().create_task(coroutine)
+        except RuntimeError:
+            coroutine.close()
+            return
+        self._page_tasks.add(task)
+        task.add_done_callback(lambda t: self._page_tasks.discard(t))
+
+    def _on_new_page(self, page) -> None:
+        self._track_page_task(self._activate_page(page, "new_page"))
+
+    async def _bind_page(self, page) -> None:
+        """URL/操作記録と close 監視をページごとに一度だけ設定する。"""
+        if any(bound is page for bound in self._bound_pages):
+            return
+        await page.expose_function(self._fill_fn, self._record_fill)
+        await page.expose_function(self._click_fn, self._record_click)
+        await page.add_init_script(self._recorder_script)
+        # popup は初期 document の読込後に通知される場合があるため即時にも注入する。
+        try:
+            await page.evaluate(self._recorder_script)
+        except Exception:
+            pass
+
+        def on_navigate(frame) -> None:
+            if frame == page.main_frame:
+                self._record_url(page.url, "navigate")
+                if page is self._page:
+                    self._schedule_snapshot("navigate", page)
+
+        def on_request_finished(request) -> None:
+            if request.resource_type in {"document", "xhr", "fetch"}:
+                url = request.url.split("#")[0]
+                if _same_origin(url, self.start_url):
+                    self._record_url(url, "request")
+
+        page.on("framenavigated", on_navigate)
+        page.on("requestfinished", on_request_finished)
+        page.on("close", lambda *_: self._track_page_task(self._handle_page_closed(page)))
+        self._bound_pages.append(page)
+
+    async def _activate_page(self, page, source: str) -> None:
+        """新規ページを記録対象・入力対象・配信対象へ原子的に切り替える。"""
+        if not self.running:
+            return
+        async with self._lock:
+            try:
+                await self._bind_page(page)
+                self._page = page
+                self._record_url(page.url, source)
+                if self.streaming:
+                    await self._stop_screencast(clear_callback=False)
+                    await self._start_screencast(page)
+            except Exception as exc:
+                self.last_error = f"page switch failed: {exc}"
+
+    async def _handle_page_closed(self, closed_page) -> None:
+        """アクティブページ終了時に、残存ページのうち最新へフォールバックする。"""
+        if not self.running:
+            return
+        async with self._lock:
+            if closed_page is not self._page:
+                return
+            pages = list(self._context.pages) if self._context else []
+            fallback = pick_active_page(pages, closed_page)
+            self._page = fallback
+            if self.streaming:
+                await self._stop_screencast(clear_callback=False)
+            if fallback is None:
+                return
+            try:
+                await self._bind_page(fallback)
+                self._record_url(fallback.url, "page_fallback")
+                if self.streaming:
+                    await self._start_screencast(fallback)
+            except Exception as exc:
+                self.last_error = f"page fallback failed: {exc}"
+
+    async def _start_screencast(self, page=None) -> None:
         """CDP スクリーンキャストを開始し、フレームを ``frame_callback`` へ流す。"""
-        self._cdp = await self._context.new_cdp_session(self._page)
-        self._cdp.on("Page.screencastFrame", self._on_screencast_frame)
-        await self._cdp.send(
+        target = page or self._page
+        if self._context is None or target is None:
+            return
+        cdp = await self._context.new_cdp_session(target)
+        self._cdp = cdp
+        cdp.on(
+            "Page.screencastFrame",
+            lambda params: self._on_screencast_frame(params, cdp),
+        )
+        await cdp.send(
             "Page.startScreencast",
             {
                 "format": "jpeg",
@@ -488,26 +615,28 @@ class ManualCrawlSession:
             },
         )
 
-    def _on_screencast_frame(self, params: dict) -> None:
+    def _on_screencast_frame(self, params: dict, cdp=None) -> None:
         """CDP のフレームイベント（同期コールバック）→ 配信タスクを起こす。"""
         try:
             loop = asyncio.get_event_loop()
         except RuntimeError:
             return
-        t = loop.create_task(self._handle_frame(params))
+        t = loop.create_task(self._handle_frame(params, cdp or self._cdp))
         self._frame_tasks.add(t)
         t.add_done_callback(lambda x: self._frame_tasks.discard(x))
 
-    async def _handle_frame(self, params: dict) -> None:
+    async def _handle_frame(self, params: dict, cdp) -> None:
         # フレームを ack しないと次が届かない。ack 後にコールバックへ渡す。
         session_id = params.get("sessionId")
-        if self._cdp is not None and session_id is not None:
+        if cdp is not None and session_id is not None:
             try:
-                await self._cdp.send(
+                await cdp.send(
                     "Page.screencastFrameAck", {"sessionId": session_id}
                 )
             except Exception:
                 pass
+        if cdp is not self._cdp:
+            return
         cb = self._frame_callback
         if cb is None:
             return
@@ -523,12 +652,18 @@ class ManualCrawlSession:
             pass
 
     async def select_mfa_field(self, nx: float, ny: float) -> dict:
-        """遠隔画面で指定した入力欄の一意な CSS selector を返す（値は取得しない）。"""
+        """遠隔画面で OTP 欄を特定し、TOTP 設定済みなら現在コードを入力する。"""
         if not self.running or not self._page or not self.streaming:
             raise ValueError("遠隔ブラウザを起動してください")
         x, y = scale_point(nx, ny, self.view_width, self.view_height)
-        selector = await self._page.evaluate(
-            """([x, y]) => {
+        async with self._lock:
+            if not self.running or not self.streaming:
+                raise ValueError("遠隔ブラウザを起動してください")
+            page = self._page
+            if page is None:
+                raise ValueError("操作できるページがありません")
+            selector = await page.evaluate(
+                """([x, y]) => {
                 const el = document.elementFromPoint(x, y);
                 if (!el || el.tagName !== 'INPUT' || el.disabled || el.readOnly ||
                     !['text','tel','number','password'].includes(el.type)) return '';
@@ -551,11 +686,90 @@ class ManualCrawlSession:
                     if (unique(s)) return s;
                 }
                 return '';
-            }""", [x, y],
+                }""", [x, y],
+            )
+            if not selector:
+                raise ValueError("編集可能な OTP 入力欄そのものをクリックしてください")
+            self.last_mfa_selector = selector
+            result = {"selector": selector}
+            if self._has_totp_config():
+                filled = await self._fill_totp_locked(selector, page)
+                result.update(filled)
+            return result
+
+    def _has_totp_config(self) -> bool:
+        return bool(self.totp_uri or self.totp_secret or self.totp_qr)
+
+    async def _current_totp_code(self) -> str | None:
+        """設定を解決し、期限切れ直前なら次の TOTP 窓を待ってコードを生成する。"""
+        resolved = resolve_totp_secret(
+            uri=self.totp_uri,
+            secret=self.totp_secret,
+            qr=self.totp_qr,
+            digits=self.totp_digits,
+            period=self.totp_period,
+            algorithm=self.totp_algorithm,
         )
+        if not resolved:
+            return None
+        period = int(resolved["period"])
+        remaining = seconds_until_next_window(time.time(), period)
+        if remaining < _TOTP_MIN_REMAINING_SECONDS:
+            await asyncio.sleep(min(remaining + 0.2, float(period)))
+        return generate_totp(
+            resolved["secret"],
+            digits=resolved["digits"],
+            period=period,
+            algorithm=resolved["algorithm"],
+        )
+
+    async def _fill_totp_locked(self, selector: str, page) -> dict:
+        if not self._has_totp_config():
+            return {"ok": False, "error": "TOTP が設定されていません"}
+        try:
+            code = await self._current_totp_code()
+        except Exception:
+            code = None
+        if not code:
+            return {
+                "ok": False,
+                "error": "TOTP 設定を解決できません。URI・secret・QR と生成条件を確認してください",
+            }
+        try:
+            await page.fill(selector, code)
+        except Exception:
+            try:
+                await page.focus(selector)
+                await page.keyboard.press("Control+A")
+                await page.keyboard.type(code)
+            except Exception:
+                return {
+                    "ok": False,
+                    "error": "OTP 入力欄へ入力できません。selector と欄の表示・編集可否を確認してください",
+                }
+        self.last_mfa_selector = selector
+        self._record_fill({
+            "selector": selector,
+            "name": "",
+            "type": "totp",
+            "url": page.url,
+        })
+        return {"ok": True, "filled": True, "digits": len(code)}
+
+    async def fill_totp(self, selector: str) -> dict:
+        """現在の TOTP をアクティブページの指定欄へ入力する（コードは返さない）。"""
+        selector = str(selector or "").strip()
         if not selector:
-            raise ValueError("編集可能な OTP 入力欄そのものをクリックしてください")
-        return {"selector": selector}
+            return {"ok": False, "error": "OTP 入力欄の selector を指定してください"}
+        if not self.running or not self._page or not self.streaming:
+            return {"ok": False, "error": "遠隔ブラウザを起動してください"}
+        async with self._lock:
+            if not self.running or not self.streaming:
+                return {"ok": False, "error": "遠隔ブラウザを起動してください"}
+            page = self._page
+            if page is None:
+                return {"ok": False, "error": "操作できるページがありません"}
+            return await self._fill_totp_locked(selector, page)
 
     async def input_event(self, ev: dict) -> dict:
         """遠隔操作イベントを実ブラウザへ適用する。
@@ -569,29 +783,37 @@ class ManualCrawlSession:
         if norm is None:
             return {"ok": False, "error": "invalid input event"}
         try:
-            etype = norm["type"]
-            if etype == "click":
-                x, y = scale_point(norm["nx"], norm["ny"], self.view_width, self.view_height)
-                await self._page.mouse.click(x, y, button=norm["button"])
-            elif etype == "move":
-                x, y = scale_point(norm["nx"], norm["ny"], self.view_width, self.view_height)
-                await self._page.mouse.move(x, y)
-            elif etype == "scroll":
-                await self._page.mouse.wheel(0, norm["dy"])
-            elif etype == "text":
-                await self._page.keyboard.insert_text(norm["text"])
-            elif etype == "key":
-                await self._page.keyboard.press(norm["key"])
-            elif etype == "navigate":
-                # 同一オリジン内に限定（recorder と同じスコープ）。
-                if not _same_origin(norm["url"], self.start_url):
-                    return {"ok": False, "error": "out of scope"}
-                await self._page.goto(norm["url"], wait_until="commit", timeout=15_000)
+            async with self._lock:
+                if not self.running or not self.streaming:
+                    return {"ok": False, "error": "remote session not running"}
+                page = self._page
+                if page is None:
+                    return {"ok": False, "error": "remote page not available"}
+                etype = norm["type"]
+                if etype == "click":
+                    x, y = scale_point(
+                        norm["nx"], norm["ny"], self.view_width, self.view_height
+                    )
+                    await page.mouse.click(x, y, button=norm["button"])
+                elif etype == "move":
+                    x, y = scale_point(norm["nx"], norm["ny"], self.view_width, self.view_height)
+                    await page.mouse.move(x, y)
+                elif etype == "scroll":
+                    await page.mouse.wheel(0, norm["dy"])
+                elif etype == "text":
+                    await page.keyboard.insert_text(norm["text"])
+                elif etype == "key":
+                    await page.keyboard.press(norm["key"])
+                elif etype == "navigate":
+                    # 同一オリジン内に限定（recorder と同じスコープ）。
+                    if not _same_origin(norm["url"], self.start_url):
+                        return {"ok": False, "error": "out of scope"}
+                    await page.goto(norm["url"], wait_until="commit", timeout=15_000)
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
         return {"ok": True, "type": norm["type"]}
 
-    async def _stop_screencast(self) -> None:
+    async def _stop_screencast(self, *, clear_callback: bool = True) -> None:
         for t in list(self._frame_tasks):
             t.cancel()
         self._frame_tasks.clear()
@@ -605,7 +827,8 @@ class ManualCrawlSession:
             except Exception:
                 pass
         self._cdp = None
-        self._frame_callback = None
+        if clear_callback:
+            self._frame_callback = None
 
     async def _cleanup_browser(self) -> None:
         await self._stop_screencast()
@@ -613,6 +836,9 @@ class ManualCrawlSession:
         for task in list(self._snapshot_tasks):
             task.cancel()
         self._snapshot_tasks.clear()
+        for task in list(self._page_tasks):
+            task.cancel()
+        self._page_tasks.clear()
         try:
             if self._browser:
                 await self._browser.close()
@@ -627,6 +853,7 @@ class ManualCrawlSession:
         self._context = None
         self._page = None
         self._pw = None
+        self._bound_pages = []
 
     async def stop(self) -> dict:
         if not self.running:
@@ -642,7 +869,8 @@ class ManualCrawlSession:
                 except Exception:
                     pass
         finally:
-            await self._cleanup_browser()
+            async with self._lock:
+                await self._cleanup_browser()
 
         self.save()
         return self.status()
@@ -682,16 +910,19 @@ class ManualCrawlSession:
         output.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
         return output
 
-    async def snapshot(self, reason: str = "manual") -> None:
-        if not self._page:
+    async def snapshot(self, reason: str = "manual", page=None) -> None:
+        if not (page or self._page):
             return
         async with self._lock:
             try:
-                url = self._page.url.split("#")[0]
+                target = page or self._page
+                if target is None:
+                    return
+                url = target.url.split("#")[0]
                 if not _same_origin(url, self.start_url):
                     return
                 self._record_url(url, reason)
-                forms = await self._page.eval_on_selector_all(
+                forms = await target.eval_on_selector_all(
                     "form",
                     """forms => forms.map((f, index) => ({
                       index,
@@ -710,10 +941,10 @@ class ManualCrawlSession:
             except Exception as exc:
                 self.last_error = str(exc)
 
-    def _schedule_snapshot(self, reason: str) -> None:
+    def _schedule_snapshot(self, reason: str, page=None) -> None:
         async def _run() -> None:
             await asyncio.sleep(0.3)
-            await self.snapshot(reason)
+            await self.snapshot(reason, page=page)
 
         task = asyncio.create_task(_run())
         self._snapshot_tasks.add(task)

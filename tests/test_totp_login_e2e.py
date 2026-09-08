@@ -129,3 +129,47 @@ def test_mfa_selection_and_fail_closed_with_real_dom():
         finally:
             await browser.close()
     asyncio.run(exercise())
+
+
+def test_manual_crawl_remote_tab_switch_and_totp_fill(tmp_path):
+    """実 Chromium で popup 追従、TOTP 即時入力、close fallback を通す。"""
+    with serving(create_app()) as url:
+        async def exercise():
+            session = ManualCrawlSession()
+            try:
+                await session.start(
+                    start_url=url + "/login",
+                    output_path=str(tmp_path / "manual.json"),
+                    stream=True,
+                    frame_callback=lambda _frame: asyncio.sleep(0),
+                    totp_secret=TOTP_SECRET,
+                )
+                initial = session._page
+                popup = await session._context.new_page()
+                await popup.set_content('<input id="otp" type="text">')
+                for _ in range(100):
+                    if session._page is popup:
+                        break
+                    await asyncio.sleep(.02)
+                assert session._page is popup
+
+                box = await popup.locator("#otp").bounding_box()
+                result = await session.select_mfa_field(
+                    (box["x"] + 5) / session.view_width,
+                    (box["y"] + 5) / session.view_height,
+                )
+                code = await popup.locator("#otp").input_value()
+                assert result == {"selector": "#otp", "ok": True, "filled": True, "digits": 6}
+                assert len(code) == 6 and code.isdigit()
+                assert code not in str(result)
+
+                await popup.close()
+                for _ in range(100):
+                    if session._page is initial:
+                        break
+                    await asyncio.sleep(.02)
+                assert session._page is initial
+            finally:
+                await session.stop()
+
+        asyncio.run(exercise())

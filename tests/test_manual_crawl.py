@@ -2,15 +2,81 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import AsyncMock, Mock, patch
 
 from wscan.manual_crawl import (
+    ManualCrawlSession,
     build_seed_payload,
     coerce_input_event,
     load_manual_crawl_seed,
     parse_url_list,
+    pick_active_page,
     save_seed_payload,
     scale_point,
 )
+
+
+class _FakeKeyboard:
+    def __init__(self):
+        self.press = AsyncMock()
+        self.type = AsyncMock()
+        self.insert_text = AsyncMock()
+
+
+class _FakePage:
+    def __init__(self, url="http://example.test/"):
+        self.url = url
+        self.main_frame = object()
+        self.mouse = Mock()
+        self.keyboard = _FakeKeyboard()
+        self.handlers = {}
+        self.exposed = []
+        self.init_scripts = []
+        self.evaluated = []
+        self.fill = AsyncMock()
+        self.focus = AsyncMock()
+
+    async def expose_function(self, name, callback):
+        self.exposed.append((name, callback))
+
+    async def add_init_script(self, script):
+        self.init_scripts.append(script)
+
+    async def evaluate(self, script, arg=None):
+        self.evaluated.append((script, arg))
+        return "#otp"
+
+    def on(self, event, callback):
+        self.handlers[event] = callback
+
+
+class _FakeCdp:
+    def __init__(self):
+        self.handlers = {}
+        self.sent = []
+        self.detached = False
+
+    def on(self, event, callback):
+        self.handlers[event] = callback
+
+    async def send(self, method, params=None):
+        self.sent.append((method, params))
+
+    async def detach(self):
+        self.detached = True
+
+
+class _FakeContext:
+    def __init__(self, pages):
+        self.pages = pages
+        self.cdp_targets = []
+        self.cdps = []
+
+    async def new_cdp_session(self, page):
+        self.cdp_targets.append(page)
+        cdp = _FakeCdp()
+        self.cdps.append(cdp)
+        return cdp
 
 
 class ManualCrawlSeedTests(unittest.TestCase):
@@ -220,6 +286,90 @@ class RemoteInputTests(unittest.TestCase):
     def test_scale_point_maps_to_viewport(self):
         self.assertEqual(scale_point(0.5, 0.5, 1280, 800), (640.0, 400.0))
         self.assertEqual(scale_point(2.0, -1.0, 1280, 800), (1280.0, 0.0))
+
+
+class ActivePagePolicyTests(unittest.TestCase):
+    def test_pick_active_page_returns_latest_remaining_page(self):
+        first, middle, closed = object(), object(), object()
+        self.assertIs(pick_active_page([first, middle, closed], closed), middle)
+        self.assertIsNone(pick_active_page([closed], closed))
+
+
+class ManualCrawlRemoteBrowserTests(unittest.IsolatedAsyncioTestCase):
+    @staticmethod
+    def _session(page, context):
+        session = ManualCrawlSession()
+        session.running = True
+        session.streaming = True
+        session.start_url = "http://example.test/"
+        session._page = page
+        session._context = context
+        session._fill_fn = "__fill__"
+        session._click_fn = "__click__"
+        session._recorder_script = "window.__guard = true"
+        return session
+
+    async def test_new_page_becomes_active_and_rebinds_screencast(self):
+        old_page = _FakePage()
+        popup = _FakePage("http://example.test/popup")
+        context = _FakeContext([old_page, popup])
+        session = self._session(old_page, context)
+        old_cdp = _FakeCdp()
+        session._cdp = old_cdp
+
+        await session._activate_page(popup, "new_page")
+
+        self.assertIs(session._page, popup)
+        self.assertIs(context.cdp_targets[-1], popup)
+        self.assertIn(("Page.stopScreencast", None), old_cdp.sent)
+        self.assertTrue(old_cdp.detached)
+        self.assertIn("framenavigated", popup.handlers)
+        self.assertIn("requestfinished", popup.handlers)
+        self.assertIn("close", popup.handlers)
+        self.assertEqual(len(popup.init_scripts), 1)
+        self.assertEqual(len(popup.evaluated), 1)
+        self.assertIn("http://example.test/popup", session.urls)
+
+    async def test_active_page_close_falls_back_to_latest_remaining_page(self):
+        first = _FakePage("http://example.test/first")
+        latest = _FakePage("http://example.test/latest")
+        closed = _FakePage("http://example.test/closed")
+        context = _FakeContext([first, latest])
+        session = self._session(closed, context)
+        session._cdp = _FakeCdp()
+        session._bound_pages.extend([first, latest, closed])
+
+        await session._handle_page_closed(closed)
+
+        self.assertIs(session._page, latest)
+        self.assertIs(context.cdp_targets[-1], latest)
+
+    async def test_fill_totp_writes_known_code_without_returning_it(self):
+        page = _FakePage("http://example.test/mfa")
+        session = self._session(page, _FakeContext([page]))
+        session.totp_secret = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"
+        session.totp_digits = 8
+        session.totp_period = 30
+        session.totp_algorithm = "SHA1"
+
+        with patch("wscan.manual_crawl.time.time", return_value=59), patch(
+            "wscan.manual_crawl.asyncio.sleep", new=AsyncMock()
+        ):
+            result = await session.fill_totp("#otp")
+
+        page.fill.assert_awaited_once_with("#otp", "94287082")
+        self.assertEqual(result, {"ok": True, "filled": True, "digits": 8})
+        self.assertNotIn("94287082", json.dumps(result))
+        self.assertEqual(session.steps[-1]["selector"], "#otp")
+        self.assertNotIn("value", session.steps[-1])
+
+    async def test_fill_totp_reports_missing_configuration(self):
+        page = _FakePage("http://example.test/mfa")
+        session = self._session(page, _FakeContext([page]))
+        self.assertEqual(
+            await session.fill_totp("#otp"),
+            {"ok": False, "error": "TOTP が設定されていません"},
+        )
 
 
 if __name__ == "__main__":

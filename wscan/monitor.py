@@ -987,6 +987,15 @@ class MonitorServer:
                     proxy=proxy,
                     stream=stream,
                     frame_callback=self._emit_manual_crawl_frame if stream else None,
+                    # 秘匿値は ManualCrawlSession のメモリ上だけに渡し、status/event へは含めない。
+                    totp_uri=body.get("totp_uri") or body.get("mfa_totp_uri") or "",
+                    totp_secret=body.get("totp_secret") or body.get("mfa_totp_secret") or "",
+                    totp_qr=body.get("totp_qr") or body.get("mfa_totp_qr") or "",
+                    totp_digits=body.get("totp_digits", body.get("mfa_totp_digits", 6)),
+                    totp_period=body.get("totp_period", body.get("mfa_totp_period", 30)),
+                    totp_algorithm=body.get(
+                        "totp_algorithm", body.get("mfa_totp_algorithm", "SHA1")
+                    ),
                 )
                 await self.emit("manual_crawl_status", status)
                 return JSONResponse(status)
@@ -1012,6 +1021,30 @@ class MonitorServer:
                 return JSONResponse({"error": str(exc)}, status_code=400)
             except Exception:
                 return JSONResponse({"error": "入力欄を取得できませんでした。画面を確認してください"}, status_code=400)
+
+        @app.post("/api/v1/manual-crawl/fill-totp")
+        async def api_manual_crawl_fill_totp(request: Request):
+            """選択済み、または指定された OTP 欄へ現在の TOTP を再入力する。"""
+            if not self.manual_crawl_session:
+                return JSONResponse({"error": "遠隔ブラウザを起動してください"}, status_code=409)
+            try:
+                body = await request.json()
+                if not isinstance(body, dict):
+                    raise ValueError
+            except Exception:
+                return JSONResponse({"error": "JSON オブジェクトを指定してください"}, status_code=400)
+            selector = str(
+                body.get("selector") or self.manual_crawl_session.last_mfa_selector or ""
+            ).strip()
+            if not selector:
+                return JSONResponse(
+                    {"error": "先に OTP 欄を指定するか selector を送信してください"},
+                    status_code=400,
+                )
+            result = await self.manual_crawl_session.fill_totp(selector)
+            if not result.get("ok"):
+                return JSONResponse(result, status_code=400)
+            return JSONResponse(result)
 
         @app.post("/api/v1/manual-crawl/stop")
         async def api_manual_crawl_stop():

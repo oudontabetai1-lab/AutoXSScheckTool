@@ -1568,6 +1568,7 @@ https://example.com/search?q=test" style="width:100%;font-family:monospace;font-
         </div>
         <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:8px">
           <button type="button" id="selectMfaField" onclick="armMfaFieldSelection()">OTP欄を指定</button>
+          <button type="button" id="fillRemoteTotpBtn" onclick="fillRemoteTotp()">TOTPを再入力</button>
           <button onclick="startRemoteBrowser()" style="padding:7px 14px;background:var(--accent);color:#fff;border:none;border-radius:4px;cursor:pointer;font-size:0.82rem">遠隔ブラウザを起動</button>
           <input type="text" id="remoteNavUrl" placeholder="https://example.com/page へ移動" style="flex:1;min-width:200px">
           <button onclick="remoteNavigate()" style="padding:7px 12px;background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:4px;cursor:pointer;font-size:0.82rem">移動</button>
@@ -2773,12 +2774,20 @@ async function startRemoteBrowser() {
   }
   const outputPath = document.getElementById('manualCrawlOutput').value.trim() || 'flows/manual_crawl.json';
   const proxy = document.getElementById('cfgProxy').value.trim();
+  const totp = {
+    totp_uri: document.getElementById('cfgMfaTotpUri').value.trim(),
+    totp_secret: document.getElementById('cfgMfaTotpSecret').value.trim(),
+    totp_qr: document.getElementById('cfgMfaTotpQr').value.trim(),
+    totp_digits: document.getElementById('cfgMfaTotpDigits').value.trim() || 6,
+    totp_period: document.getElementById('cfgMfaTotpPeriod').value.trim() || 30,
+    totp_algorithm: document.getElementById('cfgMfaTotpAlgorithm').value || 'SHA1',
+  };
   document.getElementById('manualCrawlStatus').value = '遠隔ブラウザ起動中...';
   try {
     const res = await fetch('/api/v1/manual-crawl/start', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({url, output_path: outputPath, proxy, stream: true}),
+      body: JSON.stringify({url, output_path: outputPath, proxy, stream: true, ...totp}),
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || 'remote browser start failed');
@@ -2799,13 +2808,19 @@ function remoteNavigate() {
 }
 
 let _selectingMfaField = false;
+function hasRemoteTotpConfig() {
+  return ['cfgMfaTotpUri', 'cfgMfaTotpSecret', 'cfgMfaTotpQr']
+    .some(id => document.getElementById(id).value.trim());
+}
 function armMfaFieldSelection() {
   if (document.getElementById('remoteScreenWrap').style.display !== 'block') {
     alert('遠隔ブラウザを起動してから OTP 欄を指定してください。');
     return;
   }
   _selectingMfaField = true;
-  document.getElementById('remoteHint').textContent = 'OTP入力欄をクリックして指定してください';
+  document.getElementById('remoteHint').textContent = hasRemoteTotpConfig()
+    ? 'OTP入力欄をクリックしてください。指定後に現在のTOTPを自動入力します'
+    : 'OTP入力欄をクリックして指定してください';
 }
 async function selectRemoteMfaField(point) {
   try {
@@ -2815,7 +2830,29 @@ async function selectRemoteMfaField(point) {
     const result = await response.json();
     if (!response.ok) throw new Error(result.error || '入力欄を指定できませんでした');
     document.getElementById('cfgMfaSelector').value = result.selector;
-    document.getElementById('remoteHint').textContent = 'OTP欄を認証設定に反映しました: ' + result.selector;
+    if (result.filled) {
+      document.getElementById('remoteHint').textContent =
+        `OTP欄へ現在のTOTPを入力しました（${result.digits}桁）。期限切れ時は「TOTPを再入力」を押してください`;
+    } else if (result.error) {
+      document.getElementById('remoteHint').textContent =
+        'OTP欄は指定できましたが自動入力できませんでした: ' + result.error;
+    } else {
+      document.getElementById('remoteHint').textContent = 'OTP欄を認証設定に反映しました: ' + result.selector;
+    }
+  } catch (error) {
+    document.getElementById('remoteHint').textContent = error.message;
+  }
+}
+async function fillRemoteTotp() {
+  const selector = document.getElementById('cfgMfaSelector').value.trim();
+  try {
+    const response = await fetch('/api/v1/manual-crawl/fill-totp', {
+      method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({selector}),
+    });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || 'TOTPを入力できませんでした');
+    document.getElementById('remoteHint').textContent =
+      `現在のTOTPを再入力しました（${result.digits}桁）`;
   } catch (error) {
     document.getElementById('remoteHint').textContent = error.message;
   }
