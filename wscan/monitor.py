@@ -296,7 +296,7 @@ class MonitorServer:
         # Output directory name (timestamp) of the scan currently running, set by
         # the engine. Lets the portal map the live scan to its artifacts folder.
         self.current_scan_id: str = ""
-        # Crawl review (AeyeScan-style pause between crawl and plan)
+        # Crawl review (crawl と plan の間の一時停止レビュー)
         self.crawl_review_event: asyncio.Event = asyncio.Event()
         self.crawl_review_action: dict = {}
         # LLM config for auto-config HTTP endpoint (set by main.py after init)

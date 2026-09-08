@@ -2525,7 +2525,7 @@ class ScanEngine:
                 if self.monitor: await self.monitor.emit_phase("crawl")
                 crawled_pages = await self._phase_crawl()
 
-                # ── Phase 1b: Crawl Review (AeyeScan-style) ──────────────
+                # ── Phase 1b: Crawl Review (crawl→plan 間の一時停止レビュー) ──
                 if self.interactive_crawl_review and self.monitor:
                     crawled_pages = await self._phase_crawl_review(crawled_pages)
 
