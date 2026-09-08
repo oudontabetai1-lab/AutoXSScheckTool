@@ -1705,11 +1705,16 @@ class BaseScanner(ABC):
         """対象ページの request/response pair を返す。直接 GET 優先・失敗時のみ network fallback。"""
         try:
             response = await self._get(url)
-            # same-origin 追従後もなお 3xx（cross-origin redirect で追従を止めた・hop 上限到達）なら、
-            # それは document ではなく redirect レスポンス。その欠落ヘッダ（X-Frame-Options/CSP 等）を
-            # document の欠落と誤って監査すると FP になる。status を持たない pair を返し、観測系
-            # スキャナに「document 未取得（NOT_REACHED）」として扱わせる（Codex #145 P2d）。
-            if 300 <= response.status_code < 400:
+            # header 監査は「replay で確実に取得できたレンダリング document（2xx）」に限定する。
+            # 直接 GET は再取得(replay)であり、one-time link / nonce 消費 GET のような replay-sensitive
+            # URL では、ブラウザが本物の保護 document を描画済みでも 2 回目のこの GET は 3xx や
+            # 401/403/404/410 等を返し得る。その非 2xx 応答の欠落ヘッダ（X-Frame-Options/CSP 等）を
+            # document の欠落として監査すると、ブラウザが描画していない応答に対する FP になる。
+            # status を持たない pair を返し、観測系スキャナに「document 未取得（NOT_REACHED）」として
+            # 扱わせる（resume 対象）。3xx は round6/P2d で既対応、本修正で 4xx/5xx へ一般化（Codex #145 P2 round17）。
+            # 失敗時 fallback の captured pair（current_page_pair）はブラウザが実際に描画した応答＝
+            # 信頼できる document なので 3xx のみ弾く既存ガードのままにする（replay ではない）。
+            if not (200 <= response.status_code < 300):
                 return {
                     "request": {"url": url, "method": "GET"},
                     "response": {"url": str(response.url), "headers": {}, "body": ""},

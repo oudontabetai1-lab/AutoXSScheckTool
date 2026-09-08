@@ -599,6 +599,52 @@ class RejectRedirectPairTests(unittest.TestCase):
         self.assertEqual(f({}, "http://x/"), {})
 
 
+class ResponsePairDocumentGuardTests(unittest.IsolatedAsyncioTestCase):
+    """_response_pair は直接 GET(replay)が **2xx（描画された document）** のときだけ status/headers を
+    載せる。3xx/4xx/5xx replay（one-time link・nonce 消費で 401/404/410 等）は status を落として
+    NOT_REACHED 扱いにし、ブラウザが描画していない応答の欠落ヘッダを監査しない（Codex #145 P2 round17）。"""
+
+    def _scanner(self, response):
+        engine = _FakeEngine()
+        engine.browser = _APIBrowser(_FakeRequestCtx(response))
+        return engine, SCANNERS["clickjacking"](engine)
+
+    async def _pair_for(self, status, headers=None):
+        engine, scanner = self._scanner(
+            _FakeAPIResponse(status, headers or {"X-Frame-Options": "DENY"})
+        )
+        return await scanner._response_pair("http://app.test/doc")
+
+    async def test_2xx_is_audited(self):
+        pair = await self._pair_for(200)
+        self.assertEqual(pair["response"].get("status"), 200)
+        self.assertIn("x-frame-options", {k.lower() for k in pair["response"]["headers"]})
+
+    async def test_401_replay_is_not_reached(self):
+        pair = await self._pair_for(401)
+        self.assertNotIn("status", pair["response"])  # NOT_REACHED
+        self.assertEqual(pair["response"]["headers"], {})
+
+    async def test_404_replay_is_not_reached(self):
+        pair = await self._pair_for(404)
+        self.assertNotIn("status", pair["response"])
+        self.assertEqual(pair["response"]["headers"], {})
+
+    async def test_410_replay_is_not_reached(self):
+        pair = await self._pair_for(410)
+        self.assertNotIn("status", pair["response"])
+
+    async def test_5xx_replay_is_not_reached(self):
+        pair = await self._pair_for(503)
+        self.assertNotIn("status", pair["response"])
+
+    async def test_clickjacking_does_not_flag_401_replay(self):
+        # 401 replay の欠落 XFO/CSP を framing 保護なしと誤報しない（回帰）。
+        engine, scanner = self._scanner(_FakeAPIResponse(401, {}))
+        findings = await scanner.scan_page("http://app.test/one-time")
+        self.assertEqual(findings, [])
+
+
 class CurrentPagePairWorkerAwareTests(unittest.TestCase):
     """current_page_pair は __init__ 捕捉の self.browser でなく worker-aware な
     self.engine.browser の network から pair を読む（Codex #145 round9 の fallback 経路）。"""
