@@ -25,6 +25,8 @@ from pathlib import Path
 from typing import Optional
 from urllib.parse import urlparse, urljoin
 
+from wscan.url_normalize import normalize_proxy_server
+
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
@@ -392,7 +394,8 @@ class TriageEngine:
         self.target_url = url.rstrip("/")
         self.depth = depth
         self.headless = headless
-        self.proxy = proxy
+        # 空白のみ/scheme 欠落/不正値を正規化（launch の "Invalid URL" 回避）。
+        self.proxy = normalize_proxy_server(proxy)
         self.timeout = timeout
         self.llm_provider = llm_provider
         self.ollama_model = ollama_model

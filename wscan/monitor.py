@@ -588,6 +588,27 @@ class MonitorServer:
         async def health():
             return {"status": "ok", "clients": len(self.clients)}
 
+        @app.post("/api/v1/mfa/totp/preview")
+        async def api_totp_preview(file: UploadFile = File(...)):
+            """登録用 QR を保存・配信履歴へ記録せず、要求元だけに読取結果を返す。"""
+            from .totp import decode_qr_bytes, inspect_totp_payload
+            headers = {"Cache-Control": "no-store"}
+            try:
+                raw = await file.read(_UPLOAD_MAX_BYTES + 1)
+                if len(raw) > _UPLOAD_MAX_BYTES:
+                    return JSONResponse({"error": "ファイルが大きすぎます（最大8MB）"},
+                                        status_code=413, headers=headers)
+                decoded = await asyncio.to_thread(decode_qr_bytes, raw)
+                result = inspect_totp_payload(decoded)
+                return JSONResponse(result, headers=headers)
+            except ValueError as exc:
+                return JSONResponse({"error": str(exc)}, status_code=400, headers=headers)
+            except Exception:
+                return JSONResponse({"error": "QR の読取に失敗しました。PNG/JPG で再度選択してください"},
+                                    status_code=400, headers=headers)
+            finally:
+                await file.close()
+
         @app.post("/api/v1/upload")
         async def api_upload(request: Request, file: UploadFile = File(...)):
             """UIで選択した入力ファイルを認証済みサーバーへ保存する。"""
@@ -971,6 +992,26 @@ class MonitorServer:
                 return JSONResponse(status)
             except Exception as exc:
                 return JSONResponse({"error": str(exc)}, status_code=500)
+
+        @app.post("/api/v1/manual-crawl/mfa-selector")
+        async def api_manual_crawl_mfa_selector(request: Request):
+            if not self.manual_crawl_session:
+                return JSONResponse({"error": "遠隔ブラウザを起動してください"}, status_code=409)
+            try:
+                import math
+                point = await request.json()
+                nx, ny = float(point["nx"]), float(point["ny"])
+                if not all(math.isfinite(v) and 0 <= v <= 1 for v in (nx, ny)):
+                    raise ValueError
+            except Exception:
+                return JSONResponse({"error": "画面内の入力欄を指定してください"}, status_code=400)
+            try:
+                result = await self.manual_crawl_session.select_mfa_field(nx, ny)
+                return JSONResponse(result)
+            except ValueError as exc:
+                return JSONResponse({"error": str(exc)}, status_code=400)
+            except Exception:
+                return JSONResponse({"error": "入力欄を取得できませんでした。画面を確認してください"}, status_code=400)
 
         @app.post("/api/v1/manual-crawl/stop")
         async def api_manual_crawl_stop():

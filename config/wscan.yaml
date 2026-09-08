@@ -230,6 +230,7 @@ auth:
   # (WSCAN_MFA_*) で渡す。README 参照（コード/設定に埋め込まない）。
   mfa_type: ""
   mfa_field: ""
+  mfa_selector: ""  # OTP 欄の完全 CSS selector（任意・最優先）
 
 # ──────────────────────────────────────────────────────────
 # 各機能のOn/Off
