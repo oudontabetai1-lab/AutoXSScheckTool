@@ -589,6 +589,34 @@ class RejectRedirectPairTests(unittest.TestCase):
         self.assertEqual(f({}, "http://x/"), {})
 
 
+class CurrentPagePairWorkerAwareTests(unittest.TestCase):
+    """current_page_pair は __init__ 捕捉の self.browser でなく worker-aware な
+    self.engine.browser の network から pair を読む（Codex #145 round9 の fallback 経路）。"""
+
+    class _Net:
+        def __init__(self, pair):
+            self._pair = pair
+
+        def latest_for_url(self, url, match_query=False):
+            return self._pair
+
+        def latest(self):
+            return self._pair
+
+    class _Browser:
+        def __init__(self, pair):
+            self.network = CurrentPagePairWorkerAwareTests._Net(pair)
+
+    def test_reads_from_current_worker_browser(self):
+        engine = _FakeEngine()
+        engine.browser = self._Browser({"response": {"status": 200, "url": "m"}})
+        scanner = SCANNERS["clickjacking"](engine)
+        # 構築後に engine.browser を worker のもの（別 capture）へ差し替える。
+        engine.browser = self._Browser({"response": {"status": 200, "url": "worker"}})
+        pair = scanner.current_page_pair("http://x/")
+        self.assertEqual(pair["response"]["url"], "worker")  # worker の capture を読む
+
+
 class BuildCookieJarTests(unittest.IsolatedAsyncioTestCase):
     """_build_cookie_jar_for が同名・別 path/secure/別ホスト Cookie を http.cookiejar で正しく扱う
     （Codex #145 P2/round4）。jar が送る Cookie ヘッダで検証する。"""
@@ -636,6 +664,19 @@ class BuildCookieJarTests(unittest.IsolatedAsyncioTestCase):
         scanner = self._scanner([])
         jar = await scanner._build_cookie_jar_for("http://app.test/")
         self.assertIsNone(self._cookie_header(jar, "http://app.test/"))
+
+    async def test_single_label_host_cookie_preserved(self):
+        """localhost / app 等の単一ラベルホストでも host-only Cookie が送られる（Codex #145 round9）。
+        http.cookiejar は request host を <host>.local 正規化するため domain に .local を付ける。"""
+        for host in ("localhost", "app"):
+            scanner = self._scanner([
+                {"name": "sid", "value": "z", "path": "/", "domain": host},
+            ])
+            jar = await scanner._build_cookie_jar_for(f"http://{host}/")
+            self.assertEqual(
+                self._cookie_header(jar, f"http://{host}/"), "sid=z",
+                f"single-label host {host} cookie not sent",
+            )
 
     async def test_missing_context_empty_jar(self):
         engine = _FakeEngine()

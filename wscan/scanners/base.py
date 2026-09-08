@@ -1444,8 +1444,13 @@ class BaseScanner(ABC):
         have loaded scripts, stylesheets, or images.  Falling back to the latest
         network pair can make header/cookie findings describe an asset instead
         of the document URL.
+
+        ``--concurrency>1`` では各 worker が私的 ``NetworkCapture`` を持つため、__init__ 捕捉の
+        メイン ``self.browser`` ではなく **呼び出し時の worker-aware** ``self.engine.browser`` から
+        network を解決する（Codex #145 round9）。serial 時は engine.browser がメインを返すため挙動不変。
         """
-        network = getattr(self.browser, "network", None)
+        browser = getattr(self.engine, "browser", None) or getattr(self, "browser", None)
+        network = getattr(browser, "network", None)
         if not network:
             return {}
         latest_for_url = getattr(network, "latest_for_url", None)
@@ -1536,12 +1541,19 @@ class BaseScanner(ABC):
                 or (is_domain_cookie and host.endswith("." + dom_norm))
             ):
                 continue
+            # 単一ラベルホスト（localhost / app 等の intranet 名）対策（Codex #145 round9）:
+            # http.cookiejar は request host にドットが無いと <host>.local へ正規化して照合する。
+            # そのため host-only Cookie の domain も .local を付けないと直接 GET と一致せず、
+            # 未認証応答を監査してしまう。domain cookie（先頭ドット付き）は対象外。
+            store_dom = raw_dom
+            if not is_domain_cookie and dom_norm and "." not in dom_norm:
+                store_dom = dom_norm + ".local"
             try:
                 jar.jar.set_cookie(
                     _cj.Cookie(
                         version=0, name=name, value=str(c.get("value", "") or ""),
                         port=None, port_specified=False,
-                        domain=raw_dom, domain_specified=bool(raw_dom),
+                        domain=store_dom, domain_specified=bool(store_dom),
                         domain_initial_dot=is_domain_cookie,
                         path=str(c.get("path", "/") or "/"), path_specified=True,
                         secure=bool(c.get("secure")), expires=None, discard=True,
