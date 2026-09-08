@@ -1531,7 +1531,7 @@ class BaseScanner(ABC):
         APIRequestContext が使えない（テストダブル等）ときは例外を投げ、_response_pair を network
         fallback へ倒す。
         """
-        from urllib.parse import urljoin
+        from urllib.parse import urljoin, urlparse
 
         browser = getattr(self.engine, "browser", None) or getattr(self, "browser", None)
         ctx = getattr(browser, "_context", None)
@@ -1549,57 +1549,109 @@ class BaseScanner(ABC):
             else None
         )
         # Chromium navigation と同じ document request ヘッダ（UA/Accept/Fetch Metadata）を再現。
-        req_headers: dict = {}
+        browser_headers: dict = {}
         _ua = getattr(browser, "DEFAULT_USER_AGENT", "") or ""
         if _ua:
-            req_headers["User-Agent"] = _ua
-            req_headers["Accept"] = (
+            browser_headers["User-Agent"] = _ua
+            browser_headers["Accept"] = (
                 "text/html,application/xhtml+xml,application/xml;q=0.9,"
                 "image/avif,image/webp,*/*;q=0.8"
             )
-            req_headers["Accept-Language"] = "en-US,en;q=0.9"
-            req_headers["Sec-Fetch-Site"] = "none"
-            req_headers["Sec-Fetch-Mode"] = "navigate"
-            req_headers["Sec-Fetch-User"] = "?1"
-            req_headers["Sec-Fetch-Dest"] = "document"
-        if base_auth:
-            # base_auth（ユーザ指定ヘッダ）は生成ヘッダを **case-insensitive** に置換する
-            # （`user-agent` 小文字指定と `User-Agent` 生成の重複を防ぐ・Codex #145 round11）。
-            _base_lower = {k.lower() for k in base_auth}
-            req_headers = {
-                k: v for k, v in req_headers.items() if k.lower() not in _base_lower
-            }
-            req_headers.update(base_auth)
+            browser_headers["Accept-Language"] = "en-US,en;q=0.9"
+            browser_headers["Sec-Fetch-Site"] = "none"
+            browser_headers["Sec-Fetch-Mode"] = "navigate"
+            browser_headers["Sec-Fetch-User"] = "?1"
+            browser_headers["Sec-Fetch-Dest"] = "document"
+
+        origin_host = (urlparse(url).hostname or "").lower()
+
+        def _headers_for(hop_url: str) -> dict:
+            # 認証ヘッダは same-host hop（承認 upgrade 含む）では in-scope 元 url の scoped auth を
+            # 再利用（round4: upgrade 先が header-scope 外でも同一 host なら落とさない）。scope 承認の
+            # **別ホスト** hop（bare→www 双方 target 等）では、その host の scoped headers を再計算する
+            # （元 host のヘッダを別 host へ送らない・Codex #145 round13）。生成ヘッダは case-insensitive
+            # に auth で置換する（Codex #145 round11）。
+            headers = dict(browser_headers)
+            if not _has_auth:
+                return headers
+            hop_host = (urlparse(hop_url).hostname or "").lower()
+            auth = base_auth if hop_host == origin_host else dict(
+                self.auth_headers_for_url(hop_url, include_cookie=False)
+            )
+            if auth:
+                _bl = {k.lower() for k in auth}
+                headers = {k: v for k, v in headers.items() if k.lower() not in _bl}
+                headers.update(auth)
+            return headers
+
+        # --timeout（秒）を Playwright の ms へ渡す。未設定/0 は Playwright 既定に委ねる。
+        # 従来は set_default_timeout が page にしか効かず context.request は 30s 固定だった
+        # （低 timeout でも page 毎に 2 回 stall、30s 超では正当な遅延応答が失敗）（Codex #145 round13）。
+        get_kwargs: dict = {"max_redirects": 0}
+        try:
+            _t = float(getattr(self.engine, "timeout", 0) or 0)
+            if _t > 0:
+                get_kwargs["timeout"] = _t * 1000.0
+        except Exception:
+            pass
 
         current = url
-        response = await request_ctx.get(
-            current, headers=req_headers or None, max_redirects=0
-        )
-        hops = 0
-        while response.status in (301, 302, 303, 307, 308) and hops < 5:
-            loc = response.headers.get("location")
-            if not loc:
-                break
-            target = urljoin(current, loc)
-            if not self._followable_redirect(current, target):
-                break  # 別ホスト/ダウングレードは追従しない（認証情報の漏洩防止）
-            hops += 1
-            current = target
-            response = await request_ctx.get(
-                current, headers=req_headers or None, max_redirects=0
-            )
+        response = await request_ctx.get(current, headers=_headers_for(current) or None, **get_kwargs)
         try:
-            text = await response.text()
+            hops = 0
+            while response.status in (301, 302, 303, 307, 308) and hops < 5:
+                loc = response.headers.get("location")
+                if not loc:
+                    break
+                target = urljoin(current, loc)
+                if not (
+                    self._followable_redirect(current, target)
+                    or self._redirect_target_in_scope(target)
+                ):
+                    break  # same-host/承認 upgrade/明示 scope 以外は追従しない（認証情報の漏洩防止）
+                await self._dispose_response(response)  # 中間 response の body を解放
+                hops += 1
+                current = target
+                response = await request_ctx.get(
+                    current, headers=_headers_for(current) or None, **get_kwargs
+                )
+            try:
+                text = await response.text()
+            except Exception:
+                text = ""
+            direct = _DirectResponse(
+                status_code=int(response.status),
+                headers=dict(response.headers),  # Playwright は小文字キーの dict を返す
+                text=text[:50000],
+                url=str(getattr(response, "url", current) or current),
+            )
+            self._record_probe_status(direct)
+            return direct
+        finally:
+            # APIResponse は dispose するまで body を保持する。証拠を _DirectResponse へ複写後に
+            # 最終 response を必ず解放し、多ページ/大 document でのメモリ蓄積を防ぐ（Codex #145 round13）。
+            await self._dispose_response(response)
+
+    def _redirect_target_in_scope(self, target: str) -> bool:
+        """redirect 先が engine の明示 scope（配置済み attack/access target 由来の origin）か。"""
+        try:
+            origins = getattr(self.engine, "_header_scope_origins", None)
+            if not origins:
+                return False
+            from wscan.header_scope import headers_allowed_for_url
+            return headers_allowed_for_url(target, origins)
         except Exception:
-            text = ""
-        direct = _DirectResponse(
-            status_code=int(response.status),
-            headers=dict(response.headers),  # Playwright は小文字キーの dict を返す
-            text=text[:50000],
-            url=str(getattr(response, "url", current) or current),
-        )
-        self._record_probe_status(direct)
-        return direct
+            return False
+
+    @staticmethod
+    async def _dispose_response(response) -> None:
+        """APIResponse の body を解放する（メモリ蓄積防止・Codex #145 round13）。例外は無視。"""
+        try:
+            disp = getattr(response, "dispose", None)
+            if callable(disp):
+                await disp()
+        except Exception:
+            pass
 
     @staticmethod
     def _reject_redirect_pair(pair: dict, url: str) -> dict:

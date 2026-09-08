@@ -605,28 +605,32 @@ class CurrentPagePairWorkerAwareTests(unittest.TestCase):
 
 
 class _FakeAPIResponse:
-    """Playwright APIResponse の最小ダブル（status/headers/text/url）。"""
+    """Playwright APIResponse の最小ダブル（status/headers/text/url + dispose 記録）。"""
 
     def __init__(self, status, headers=None, text="<html>"):
         self.status = status
         self.headers = {k.lower(): v for k, v in (headers or {}).items()}
         self._text = text
         self.url = ""
+        self.disposed = 0
 
     async def text(self):
         return self._text
 
+    async def dispose(self):
+        self.disposed += 1
+
 
 class _FakeRequestCtx:
-    """context.request の最小ダブル。get() の (url, headers) を記録し、順に応答を返す。"""
+    """context.request の最小ダブル。get() の (url, headers, kwargs) を記録し、順に応答を返す。"""
 
     def __init__(self, responses):
         self._responses = responses if isinstance(responses, list) else [responses]
         self.calls: list = []
         self._i = 0
 
-    async def get(self, url, headers=None, max_redirects=None):
-        self.calls.append((url, dict(headers or {}), max_redirects))
+    async def get(self, url, headers=None, **kw):
+        self.calls.append((url, dict(headers or {}), kw))
         r = self._responses[min(self._i, len(self._responses) - 1)]
         self._i += 1
         r.url = url
@@ -667,14 +671,50 @@ class DirectGetAPIRequestContextTests(unittest.IsolatedAsyncioTestCase):
     async def test_sends_fetch_metadata_and_ua(self):
         engine, scanner = self._scanner(_FakeAPIResponse(200))
         await scanner._get("http://app.test/p")
-        _url, headers, max_redirects = engine.browser._context.request.calls[0]
+        _url, headers, kw = engine.browser._context.request.calls[0]
         h = {k.lower(): v for k, v in headers.items()}
         self.assertEqual(h.get("sec-fetch-site"), "none")
         self.assertEqual(h.get("sec-fetch-mode"), "navigate")
         self.assertEqual(h.get("sec-fetch-user"), "?1")
         self.assertEqual(h.get("sec-fetch-dest"), "document")
         self.assertEqual(h.get("user-agent"), "Mozilla/5.0 TestUA")
-        self.assertEqual(max_redirects, 0)  # 自動追従は無効
+        self.assertEqual(kw.get("max_redirects"), 0)  # 自動追従は無効
+
+    async def test_honors_configured_timeout_in_ms(self):
+        """engine.timeout（秒）を Playwright の ms として毎 hop 渡す（Codex #145 round13）。"""
+        engine, scanner = self._scanner(_FakeAPIResponse(200))
+        engine.timeout = 5  # 秒
+        await scanner._get("http://app.test/p")
+        _url, _h, kw = engine.browser._context.request.calls[0]
+        self.assertEqual(kw.get("timeout"), 5000.0)
+
+    async def test_disposes_responses(self):
+        """最終 response を dispose して body を解放する（Codex #145 round13）。"""
+        resp = _FakeAPIResponse(200, {"X-Frame-Options": "DENY"})
+        engine, scanner = self._scanner(resp)
+        await scanner._get("http://app.test/p")
+        self.assertGreaterEqual(resp.disposed, 1)
+
+    async def test_disposes_intermediate_redirect_responses(self):
+        r1 = _FakeAPIResponse(302, {"location": "/landing"})
+        r2 = _FakeAPIResponse(200, {"X-Frame-Options": "DENY"})
+        engine, scanner = self._scanner([r1, r2])
+        await scanner._get("http://app.test/start")
+        self.assertGreaterEqual(r1.disposed, 1)  # 中間 redirect も解放
+        self.assertGreaterEqual(r2.disposed, 1)
+
+    async def test_scope_approved_cross_host_redirect_followed(self):
+        """engine の明示 scope（_header_scope_origins）に含まれる別ホストへの redirect は追従し、
+        その host の scoped auth を再計算する（Codex #145 round13）。"""
+        r1 = _FakeAPIResponse(302, {"location": "https://www.app.test/"})
+        r2 = _FakeAPIResponse(200, {"X-Frame-Options": "DENY"})
+        engine, scanner = self._scanner([r1, r2])
+        engine._header_scope_origins = {"https://www.app.test", "http://app.test"}
+        out = await scanner._get("http://app.test/start")
+        self.assertEqual(out.status_code, 200)
+        self.assertEqual(
+            engine.browser._context.request.calls[1][0], "https://www.app.test/"
+        )
 
     async def test_user_header_replaces_generated_case_insensitively(self):
         auth = lambda extra=None, include_cookie=True, url=None: {
