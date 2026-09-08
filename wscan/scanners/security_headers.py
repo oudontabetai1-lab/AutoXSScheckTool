@@ -22,7 +22,7 @@ from wscan.scanner_contract import (
     ValueKind,
 )
 
-from .base import BaseScanner, Finding
+from .base import BaseScanner, Finding, PageDocumentUnavailable
 
 if TYPE_CHECKING:
     from wscan.engine import ScanEngine
@@ -154,6 +154,11 @@ class SecurityHeadersScanner(BaseScanner):
         # 除外して passive case を誤 TN/FN でなく NOT_REACHED にする（Codex #142 P2）。
         if not response or response.get("status") is None:
             self._record_scan_note(f"transport_error:{self.CHECK_TYPE}:no_response")
+            if not response:
+                # 完全な取得失敗（_get 失敗＋capture 無し）は例外で engine に伝え、checkpoint 未完了に
+                # して resume 再試行を可能にする（[] だと tested/完了で恒久 skip・Codex #145 P2 round15）。
+                # 3xx 等の legitimate NOT_REACHED（response は非空・status のみ無し）はそのまま [] を返す。
+                raise PageDocumentUnavailable(f"{self.CHECK_TYPE}: 対象 document を取得できませんでした: {url}")
             return []
         # レスポンスは受信済み。ヘッダが空でも監査する（セキュリティヘッダ皆無＝全欠落＝最大級の
         # 脆弱ケースで、まさに本 scanner が報告すべき対象・Codex #142 P1）。

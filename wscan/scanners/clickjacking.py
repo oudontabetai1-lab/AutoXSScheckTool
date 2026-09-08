@@ -16,7 +16,7 @@ from wscan.scanner_contract import (
     ValueKind,
 )
 
-from .base import BaseScanner, Finding
+from .base import BaseScanner, Finding, PageDocumentUnavailable
 
 if TYPE_CHECKING:
     from wscan.engine import ScanEngine
@@ -110,6 +110,11 @@ class ClickjackingScanner(BaseScanner):
             # レスポンス証拠なし（fetch 失敗）＝観測失敗。空ヘッダを「framing 保護なし」と誤判定
             # しないよう transport_error を刻む（degraded_checks が passive case を NOT_REACHED に）。
             self._record_scan_note(f"transport_error:{self.CHECK_TYPE}:no_response")
+            if not response:
+                # 完全な取得失敗（_get 失敗＋capture 無し）は例外で engine に伝え、checkpoint 未完了に
+                # して resume 再試行を可能にする（[] だと tested/完了で恒久 skip・Codex #145 P2 round15）。
+                # 3xx 等の legitimate NOT_REACHED（response は非空・status のみ無し）はそのまま [] を返す。
+                raise PageDocumentUnavailable(f"{self.CHECK_TYPE}: 対象 document を取得できませんでした: {url}")
             return []
         headers = {k.lower(): v for k, v in response.get("headers", {}).items()}
 

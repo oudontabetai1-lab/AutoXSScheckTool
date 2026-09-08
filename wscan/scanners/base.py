@@ -571,6 +571,15 @@ def injection_point_from_finding(finding: Finding) -> Optional[InjectionPoint]:
     raise ProvenanceError(f"未知の injection_location です: {location!r}")
 
 
+class PageDocumentUnavailable(RuntimeError):
+    """page 観測系スキャナが対象 document を取得できなかった（transport 失敗＋capture 無し）。
+
+    header 観測系（clickjacking/security_headers）はこれを送出し、engine の page-level except に
+    捕捉させて **checkpoint を完了扱いにしない**（[] を返すと tested/完了で恒久 skip となり resume が
+    再試行できない・Codex #145 P2 round15）。3xx 等の legitimate NOT_REACHED では送出しない。
+    """
+
+
 class _DirectResponse:
     """``BaseScanner._get`` が返す httpx.Response 互換の最小レスポンス。
 
@@ -1619,8 +1628,11 @@ class BaseScanner(ABC):
             # engine.cookies を browser context（source of truth）から再同期する。後続の httpx ベース
             # 直接呼び出し（CORSScanner._get_with_origin 等が使う engine.cookies）が stale セッションを
             # 送らないようにする（Codex #145 P1 round14）。engine の既存同期機構を使う（自作しない）。
+            # ただし engine.cookies は共有なので、並列(--concurrency>1)では別 worker の検査中に書き換える
+            # 競合になる。_attack_one_page の per-page cookie 同期と同じく **直列時のみ**行う
+            # （並列は既存の共有 cookie 前提・Codex #145 P1 round15）。
             _sync = getattr(self.engine, "_sync_cookies_from_browser", None)
-            if callable(_sync):
+            if callable(_sync) and (getattr(self.engine, "concurrency", 1) or 1) <= 1:
                 try:
                     await _sync(browser, url)
                 except Exception:

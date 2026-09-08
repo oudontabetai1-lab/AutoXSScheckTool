@@ -11,6 +11,7 @@ import unittest
 import pytest
 
 from wscan.scanners import SCANNERS
+from wscan.scanners.base import PageDocumentUnavailable
 
 
 class _BoomBrowser:
@@ -443,6 +444,26 @@ class ClickjackingHeaderEvidenceTests(unittest.IsolatedAsyncioTestCase):
             return {}
 
         scanner._response_pair = _empty
+        # 完全な取得失敗（response 証拠なし）は transport_error を刻んだ上で
+        # PageDocumentUnavailable を送出し、engine の error 経路（checkpoint 未完了→
+        # resume 再試行）へ載せる（Codex #145 P2 round15）。[] 返しだと tested 完了で恒久 skip。
+        with self.assertRaises(PageDocumentUnavailable):
+            await scanner.scan_page("http://x/portal/embed")
+        self.assertTrue(
+            any(e.startswith("transport_error:clickjacking:") for e in engine.wave_errors),
+            engine.wave_errors,
+        )
+
+    async def test_statusless_pair_returns_empty_without_raising(self):
+        # response は非空だが status 欠落（未消費の 3xx 等 legitimate NOT_REACHED）は
+        # transport_error を刻みつつ [] を返す（例外にしない）。完全失敗（raise）と
+        # 区別し続けることを固定する（Codex #145 P2 round15）。
+        engine, scanner = self._scanner()
+
+        async def _statusless(url):
+            return {"request": {"url": url}, "response": {"headers": {}}}
+
+        scanner._response_pair = _statusless
         out = await scanner.scan_page("http://x/portal/embed")
         self.assertEqual(out, [])
         self.assertTrue(
@@ -469,8 +490,10 @@ class SecurityHeadersFetchEvidenceTests(unittest.IsolatedAsyncioTestCase):
             return {}  # レスポンス証拠なし（fetch 失敗）
 
         scanner._response_pair = _empty
-        out = await scanner.scan_page("http://x/legacy/status")
-        self.assertEqual(out, [])
+        # 完全な取得失敗は transport_error を刻んだ上で PageDocumentUnavailable を送出する
+        # （Codex #145 P2 round15。[] 返しだと checkpoint tested 完了で resume 再試行されない）。
+        with self.assertRaises(PageDocumentUnavailable):
+            await scanner.scan_page("http://x/legacy/status")
         self.assertTrue(
             any(e.startswith("transport_error:security_headers:") for e in engine.wave_errors),
             engine.wave_errors,
