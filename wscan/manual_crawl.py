@@ -768,11 +768,15 @@ class ManualCrawlSession:
                     "error": "OTP 入力欄へ入力できません。selector と欄の表示・編集可否を確認してください",
                 }
         self.last_mfa_selector = selector
+        # cross-origin SSO ページで TOTP を入力した場合、page.url（OAuth の state/code/token を含む）を
+        # steps に残さない。save() は steps をスコープ無しで永続化するため、same-origin のときだけ URL を
+        # 記録する（urls/events と同じ privacy 方針・Codex #153 P2）。
+        step_url = page.url if _same_origin(page.url, self.start_url) else ""
         self._record_fill({
             "selector": selector,
             "name": "",
             "type": "totp",
-            "url": page.url,
+            "url": step_url,
         })
         return {"ok": True, "filled": True, "digits": len(code)}
 

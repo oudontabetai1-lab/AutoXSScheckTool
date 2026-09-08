@@ -367,6 +367,23 @@ class ManualCrawlRemoteBrowserTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(session.steps[-1]["selector"], "#otp")
         self.assertNotIn("value", session.steps[-1])
 
+    async def test_fill_totp_omits_cross_origin_url_from_steps(self):
+        # cross-origin SSO ページで TOTP を入力しても、page.url（OAuth の state/code/token 含む）を
+        # steps に残さない（save() がスコープ無しで永続化するため・Codex #153 P2）。
+        page = _FakePage("https://sso.evil.test/authorize?code=SECRET&state=xyz")
+        session = self._session(page, _FakeContext([page]))
+        session.totp_secret = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"
+        session.totp_digits = 8
+
+        with patch("wscan.manual_crawl.time.time", return_value=59), patch(
+            "wscan.manual_crawl.asyncio.sleep", new=AsyncMock()
+        ):
+            result = await session.fill_totp("#otp")
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(session.steps[-1]["url"], "")  # cross-origin URL は記録しない
+        self.assertFalse(any("evil.test" in json.dumps(s) for s in session.steps))
+
     async def test_fill_totp_reports_missing_configuration(self):
         page = _FakePage("http://example.test/mfa")
         session = self._session(page, _FakeContext([page]))
