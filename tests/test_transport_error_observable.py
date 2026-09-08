@@ -706,6 +706,29 @@ class ResponsePairDocumentGuardTests(unittest.IsolatedAsyncioTestCase):
         await cj._response_pair("http://app.test/other")
         self.assertEqual(len(ctx.calls), 2)
 
+    async def test_get_recovers_body_via_safe_decode_on_non_utf8(self):
+        # response.text() が非 UTF-8 で失敗しても body() バイト列を safe_decode して本文を保つ
+        # （SRI/secret_leak が非 UTF-8 バンドルを見逃す FN 防止・Codex #147 P2）。
+        leaked = "AKIA3SVBQ4XZ7KLMN2PQ"
+        raw = ('<script>var k="' + leaked + '";</script>').encode("utf-8") + b"\xff\xfe"
+        resp = _FakeAPIResponse(200, {"Content-Type": "text/html"}, text_raises=True, body_bytes=raw)
+        engine, scanner = self._scanner(resp)
+        out = await scanner._get("http://app.test/bundle.js")
+        self.assertIn(leaked, out.text)
+        # content scanner（secret_leak）が実際に検出できる。
+        engine2 = _FakeEngine()
+        engine2.browser = _APIBrowser(_FakeRequestCtx(
+            _FakeAPIResponse(200, {"Content-Type": "text/html"}, text_raises=True, body_bytes=raw)
+        ))
+        sl = SCANNERS["secret_leak"](engine2)
+
+        async def _rec(**kw):
+            return object()
+
+        sl.record_finding = _rec
+        findings = await sl.scan_page("http://app.test/bundle.js")
+        self.assertEqual(len(findings), 1)
+
     async def test_clickjacking_skips_non_html_content_type(self):
         # framing 保護は HTML document のみ対象。raw asset（.js 等・非 HTML content-type）は監査せず
         # []（XFO/CSP 欠落を「未保護」と誤報しない・Codex #147 P2）。
@@ -824,15 +847,22 @@ class CurrentPagePairWorkerAwareTests(unittest.TestCase):
 class _FakeAPIResponse:
     """Playwright APIResponse の最小ダブル（status/headers/text/url + dispose 記録）。"""
 
-    def __init__(self, status, headers=None, text="<html>"):
+    def __init__(self, status, headers=None, text="<html>", body_bytes=None, text_raises=False):
         self.status = status
         self.headers = {k.lower(): v for k, v in (headers or {}).items()}
         self._text = text
+        self._body = body_bytes
+        self._text_raises = text_raises
         self.url = ""
         self.disposed = 0
 
     async def text(self):
+        if self._text_raises:
+            raise UnicodeDecodeError("utf-8", b"", 0, 1, "invalid")
         return self._text
+
+    async def body(self):
+        return self._body if self._body is not None else self._text.encode("utf-8", "replace")
 
     async def dispose(self):
         self.disposed += 1

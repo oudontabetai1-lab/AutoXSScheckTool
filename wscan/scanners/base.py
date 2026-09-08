@@ -1633,7 +1633,15 @@ class BaseScanner(ABC):
             try:
                 text = await response.text()
             except Exception:
+                # 非 UTF-8 の HTML/JS 本文で response.text() が失敗しても本文を捨てない
+                # （SRI/secret_leak が非 UTF-8 バンドルの秘密/外部 script を見逃す FN になる）。
+                # network-capture 経路（browser.py）と同じく body() バイト列を safe_decode する（Codex #147 P2）。
                 text = ""
+                try:
+                    from wscan.textio import safe_decode
+                    text = safe_decode(await response.body(), limit=50000)
+                except Exception:
+                    text = ""
             direct = _DirectResponse(
                 status_code=int(response.status),
                 headers=dict(response.headers),  # Playwright は小文字キーの dict を返す
