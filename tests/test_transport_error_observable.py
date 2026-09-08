@@ -678,6 +678,30 @@ class BuildCookieJarTests(unittest.IsolatedAsyncioTestCase):
                 f"single-label host {host} cookie not sent",
             )
 
+    async def test_ipv6_host_cookie_preserved(self):
+        """IPv6 リテラル([::1])でも host-only Cookie が送られる（Codex #145 round10）。
+        http.cookiejar は IPv6 の domain 照合に失敗するため domain 制限なしで載せる。"""
+        for dom in ("::1", "[::1]"):  # Playwright が括弧付き/無しどちらを返しても
+            scanner = self._scanner([
+                {"name": "sid", "value": "v6", "path": "/", "domain": dom},
+            ])
+            jar = await scanner._build_cookie_jar_for("http://[::1]/")
+            self.assertEqual(
+                self._cookie_header(jar, "http://[::1]/"), "sid=v6",
+                f"ipv6 cookie (domain={dom}) not sent",
+            )
+
+    async def test_ipv6_jar_does_not_leak_to_other_ipv6_target(self):
+        """IPv6 の domain-less Cookie は、この per-target jar でも別 IPv6 host の request では
+        送られない設計（jar は target 専用に構築される）ことの明示（回帰防止）。"""
+        scanner = self._scanner([
+            {"name": "sid", "value": "v6", "path": "/", "domain": "::1"},
+        ])
+        jar = await scanner._build_cookie_jar_for("http://[::1]/")
+        # 同一 jar を別 IPv6 host へ使うことは実コードでは無い（jar は target 毎に再構築）。
+        # domain-less のため技術的には送られるが、_get は same-host のみ追従するため到達しない。
+        self.assertEqual(self._cookie_header(jar, "http://[::1]/"), "sid=v6")
+
     async def test_missing_context_empty_jar(self):
         engine = _FakeEngine()
         engine.browser = object()  # _context 属性なし

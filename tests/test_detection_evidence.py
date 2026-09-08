@@ -1811,6 +1811,31 @@ class DetectionEvidenceTests(unittest.TestCase):
 
         self.run_async(run())
 
+    def test_security_headers_verifier_rejects_unconsumed_redirect(self):
+        """verify 時に _get が未消費の 3xx を返したら（セッション失効→login redirect 等）、
+        欠落ヘッダを再現確認と誤判定せず検証不能(None)にする（Codex #145 P2 round10）。"""
+        async def run():
+            scanner = SecurityHeadersScanner(_DummyEngine())
+            scanner._get = AsyncMock(
+                return_value=httpx.Response(302, headers={"location": "https://idp.example/login"})
+            )
+            finding = Finding(
+                check_type="security_headers",
+                severity="medium",
+                url="http://fixture.test/",
+                field_name="(Header: strict-transport-security)",
+                payload="(no payload)",
+                evidence="HSTS missing",
+                evidence_type="security_header_missing",
+                evidence_details={"header": "strict-transport-security"},
+            )
+
+            result = await scanner.verify_finding(finding)
+
+            self.assertIsNone(result)  # 3xx は「再現した(True)」にしない
+
+        self.run_async(run())
+
     def test_security_headers_scan_uses_direct_response_headers_to_avoid_browser_header_gaps(self):
         async def run():
             scanner = SecurityHeadersScanner(_DummyEngine())

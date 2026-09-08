@@ -1521,9 +1521,12 @@ class BaseScanner(ABC):
         ctx = getattr(browser, "_context", None)
         if ctx is None:
             return jar
-        host = (urlparse(url).hostname or "").lower()
+        # IPv6 リテラルは urlparse で角括弧が外れる（[::1] → ::1）。Cookie domain 側は括弧を
+        # 残すことがあるため両辺の括弧を除いて比較する（Codex #145 round10）。
+        host = (urlparse(url).hostname or "").lower().strip("[]")
         if not host:
             return jar
+        is_ipv6_host = ":" in host
         try:
             cookies = await ctx.cookies()  # context の全 Cookie（属性込み）
         except Exception:
@@ -1534,26 +1537,34 @@ class BaseScanner(ABC):
                 continue
             raw_dom = str(c.get("domain", "") or "")
             is_domain_cookie = raw_dom.startswith(".")
-            dom_norm = raw_dom.lstrip(".").lower()
+            dom_norm = raw_dom.lstrip(".").lower().strip("[]")
             # target host に一致しない Cookie は載せない（別ホストの Cookie を送らない）。
             if dom_norm and not (
                 host == dom_norm
                 or (is_domain_cookie and host.endswith("." + dom_norm))
             ):
                 continue
-            # 単一ラベルホスト（localhost / app 等の intranet 名）対策（Codex #145 round9）:
-            # http.cookiejar は request host にドットが無いと <host>.local へ正規化して照合する。
-            # そのため host-only Cookie の domain も .local を付けないと直接 GET と一致せず、
-            # 未認証応答を監査してしまう。domain cookie（先頭ドット付き）は対象外。
             store_dom = raw_dom
-            if not is_domain_cookie and dom_norm and "." not in dom_norm:
-                store_dom = dom_norm + ".local"
+            store_spec = bool(raw_dom)
+            if not is_domain_cookie and dom_norm:
+                if is_ipv6_host:
+                    # http.cookiejar は IPv6 リテラルの domain 照合に失敗する（どの形式でも
+                    # マッチしない）。この jar は target host の直接 GET 専用（cookie は事前に
+                    # host 一致で filter 済み・redirect も same-host のみ追従）なので、domain 制限
+                    # なし（domain_specified=False）で host-only Cookie を送る（Codex #145 round10）。
+                    store_dom = ""
+                    store_spec = False
+                elif "." not in dom_norm:
+                    # 単一ラベルホスト（localhost / app 等）対策（Codex #145 round9）: http.cookiejar
+                    # は request host にドットが無いと <host>.local へ正規化して照合するため、
+                    # host-only Cookie の domain も .local を付けないと直接 GET と一致しない。
+                    store_dom = dom_norm + ".local"
             try:
                 jar.jar.set_cookie(
                     _cj.Cookie(
                         version=0, name=name, value=str(c.get("value", "") or ""),
                         port=None, port_specified=False,
-                        domain=store_dom, domain_specified=bool(store_dom),
+                        domain=store_dom, domain_specified=store_spec,
                         domain_initial_dot=is_domain_cookie,
                         path=str(c.get("path", "/") or "/"), path_specified=True,
                         secure=bool(c.get("secure")), expires=None, discard=True,

@@ -262,6 +262,13 @@ class SecurityHeadersScanner(BaseScanner):
         except Exception:
             return None
 
+        # 未消費の 3xx（セッション失効で外部 IdP へ redirect・hop 上限超過等）は描画された
+        # document ではない。その欠落ヘッダを「再現確認」と誤判定して既報 finding を誤って
+        # reproduced にしないよう、検証不能（None）として扱う（Codex #145 P2 round10。
+        # 初回スキャンは _response_pair の 3xx ガードで保護されるが verify は _get 直呼びのため素通りしていた）。
+        if 300 <= response.status_code < 400:
+            return None
+
         headers = {k.lower(): v for k, v in response.headers.items()}
 
         if evidence_type == "security_header_missing":
