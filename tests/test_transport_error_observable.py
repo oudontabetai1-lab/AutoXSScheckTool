@@ -706,6 +706,60 @@ class ResponsePairDocumentGuardTests(unittest.IsolatedAsyncioTestCase):
         await cj._response_pair("http://app.test/other")
         self.assertEqual(len(ctx.calls), 2)
 
+    async def test_clickjacking_skips_non_html_content_type(self):
+        # framing 保護は HTML document のみ対象。raw asset（.js 等・非 HTML content-type）は監査せず
+        # []（XFO/CSP 欠落を「未保護」と誤報しない・Codex #147 P2）。
+        engine, scanner = self._scanner(
+            _FakeAPIResponse(200, {"Content-Type": "text/plain; charset=utf-8"})
+        )
+        self.assertEqual(await scanner.scan_page("http://app.test/static/vendor.js"), [])
+
+    async def _audits(self, headers):
+        # record_finding をスタブし「guard を通過して監査（record_finding 到達）」を検証する
+        # （fake browser で record_finding 全体を回さずに済ませる）。
+        engine, scanner = self._scanner(_FakeAPIResponse(200, headers))
+        called = {"n": 0}
+
+        async def _rec(**kw):
+            called["n"] += 1
+            return object()
+
+        scanner.record_finding = _rec
+        out = await scanner.scan_page("http://app.test/page")
+        return called["n"], out
+
+    async def test_clickjacking_audits_html_without_protection(self):
+        # HTML document で framing 保護が無ければ従来どおり監査（content-type ガードの FN 非導入確認）。
+        n, out = await self._audits({"Content-Type": "text/html"})
+        self.assertEqual(n, 1)
+        self.assertEqual(len(out), 1)
+
+    async def test_clickjacking_audits_when_content_type_absent(self):
+        # content-type 欠落時は従来どおり監査（欠落で skip すると FN になるため）。
+        n, out = await self._audits({})
+        self.assertEqual(n, 1)
+        self.assertEqual(len(out), 1)
+
+    async def test_js_content_scanners_not_reached_on_statusless(self):
+        # sri/secret_leak は statusless（3xx 等）で [] を返し live DOM へフォールバックしない
+        # （attack フェーズの別 URL タブによる wrong-page FP/FN 防止・Codex #147 P2）。
+        for check in ("sri", "secret_leak"):
+            with self.subTest(check=check):
+                engine = _FakeEngine()
+                engine.browser = _APIBrowser(_FakeRequestCtx(_FakeAPIResponse(301, {})))
+                scanner = SCANNERS[check](engine)
+                self.assertEqual(await scanner.scan_page("http://app.test/x"), [])
+
+    async def test_js_content_scanners_raise_on_transient(self):
+        # transient(503)は PageDocumentUnavailable→resume（tested 完了にしない）。
+        for check in ("sri", "secret_leak"):
+            with self.subTest(check=check):
+                engine = _FakeEngine()
+                engine.browser = _APIBrowser(_FakeRequestCtx(_FakeAPIResponse(503, {})))
+                scanner = SCANNERS[check](engine)
+                with self.assertRaises(PageDocumentUnavailable):
+                    await scanner.scan_page("http://app.test/x")
+
 
 class CurrentPagePairWorkerAwareTests(unittest.TestCase):
     """current_page_pair は __init__ 捕捉の self.browser でなく worker-aware な

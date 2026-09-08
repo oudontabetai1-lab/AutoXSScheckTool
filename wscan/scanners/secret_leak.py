@@ -31,7 +31,7 @@ from wscan.scanner_contract import (
     ValueKind,
 )
 
-from .base import BaseScanner, Finding
+from .base import BaseScanner, Finding, PageDocumentUnavailable
 
 if TYPE_CHECKING:
     from wscan.engine import ScanEngine
@@ -316,16 +316,18 @@ class SecretLeakScanner(BaseScanner):
         # 別リクエストの pair を返し body が欠落しうるため、JS アセット等の本文を取りこぼして FN になる
         # （0034 benchmark で /static/vendor.js の埋め込み秘密を検出できなかった原因）。
         pair = await self._response_pair(url)
-        body = pair.get("response", {}).get("body", "") or ""
-
-        # Fall back to live DOM if the captured response body is empty (e.g.
-        # SPA where the served HTML is a shell and content is JS-rendered).
-        if not body:
-            try:
-                body = await self.browser.page.content()
-            except Exception:
-                body = ""
-
+        response = pair.get("response") or {}
+        # 観測失敗（transient で {} / 完全失敗）と NOT_REACHED（statusless）を区別する。header scanner と
+        # 同じ判定を使い、**live DOM へフォールバックしない**（attack フェーズの browser.page は別 URL の
+        # タブになり得て wrong-page FP/FN を招くため・Codex #147 P2）。
+        if not response or response.get("status") is None:
+            self._record_scan_note(f"transport_error:{self.CHECK_TYPE}:no_response")
+            if not response:
+                raise PageDocumentUnavailable(
+                    f"{self.CHECK_TYPE}: 対象 document を取得できませんでした: {url}"
+                )
+            return []
+        body = response.get("body", "") or ""
         if not body:
             return []
 
