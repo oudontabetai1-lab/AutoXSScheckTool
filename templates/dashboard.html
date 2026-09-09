@@ -2778,14 +2778,17 @@ async function startRemoteBrowser() {
   if (!validateTotpReadiness()) return;
   const outputPath = document.getElementById('manualCrawlOutput').value.trim() || 'flows/manual_crawl.json';
   const proxy = document.getElementById('cfgProxy').value.trim();
-  const totp = {
+  // MFA タイプが totp のときだけ TOTP 設定を送る。disabled/email 選択時に残存した TOTP 欄が
+  // _has_totp_config() を満たして意図せず自動入力されるのを防ぐ（Codex #153 P2）。
+  const mfaType = document.getElementById('cfgMfaType').value;
+  const totp = (mfaType === 'totp') ? {
     totp_uri: document.getElementById('cfgMfaTotpUri').value.trim(),
     totp_secret: document.getElementById('cfgMfaTotpSecret').value.trim(),
     totp_qr: document.getElementById('cfgMfaTotpQr').value.trim(),
     totp_digits: document.getElementById('cfgMfaTotpDigits').value.trim() || 6,
     totp_period: document.getElementById('cfgMfaTotpPeriod').value.trim() || 30,
     totp_algorithm: document.getElementById('cfgMfaTotpAlgorithm').value || 'SHA1',
-  };
+  } : {};
   document.getElementById('manualCrawlStatus').value = '遠隔ブラウザ起動中...';
   try {
     const res = await fetch('/api/v1/manual-crawl/start', {
