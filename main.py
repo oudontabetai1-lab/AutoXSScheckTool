@@ -774,6 +774,7 @@ Examples:
         "race_condition", "websocket", "secret_leak", "sri", "js_static",
         # 新クラス
         "prototype_pollution", "cache_poisoning", "mass_assignment",
+        "http_methods",
     ]
     _default_checks = _CFG.get("checks", ["sqli", "xss", "os"])
     scan.add_argument(

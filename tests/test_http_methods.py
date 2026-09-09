@@ -193,5 +193,15 @@ class ScannerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(out, [])  # raise せず []
 
 
+class CliChecksTests(unittest.TestCase):
+    def test_checks_http_methods_is_accepted(self):
+        import sys
+        import main as m
+        argv = ["prog", "scan", "http://x.test", "--checks", "http_methods", "--no-monitor"]
+        with mock.patch.object(sys, "argv", argv):
+            args = m.parse_args()
+        self.assertIn("http_methods", args.checks)
+
+
 if __name__ == "__main__":
     unittest.main()
