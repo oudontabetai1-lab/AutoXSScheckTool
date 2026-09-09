@@ -101,6 +101,77 @@ class OutdatedComponentScanner(BaseScanner):
         findings.extend(await self._scan_eol(url, pair, components, eol_base, timeout))
         # ② 外部 JS ライブラリ → OSV.dev で既知脆弱性照会
         findings.extend(await self._scan_osv(url, pair, body, osv_base, timeout))
+        # ③ NVD で CVE 照会（限定オプション・nvd_enabled 時のみ・参考集約）
+        if cfg.get("nvd_enabled"):
+            nvd_base = cfg.get("nvd_base_url") or component_intel.DEFAULT_NVD_BASE_URL
+            findings.extend(await self._scan_nvd(url, pair, components, nvd_base, timeout))
+        return findings
+
+    async def _scan_nvd(self, url, pair, components, base_url, timeout) -> list[Finding]:
+        import os
+        api_key = os.environ.get("WSCAN_NVD_API_KEY", "") or ""
+        cache = getattr(self.engine, "_nvd_cache", None)
+        if cache is None:
+            cache = {}
+            try:
+                self.engine._nvd_cache = cache
+            except Exception:
+                cache = None
+
+        findings: list[Finding] = []
+        seen: set[tuple[str, str]] = set()
+        for comp in components:
+            if not component_intel.nvd_product_cpe(comp.product):
+                continue  # CPE 対応製品のみ（保守側）
+            key = (comp.product, comp.version)
+            if key in seen:
+                continue
+            seen.add(key)
+            if cache is not None and key in cache:
+                info = cache[key]
+            else:
+                try:
+                    info = await component_intel.lookup_nvd(
+                        comp.product, comp.version, base_url=base_url,
+                        api_key=api_key, timeout=timeout,
+                    )
+                except Exception as exc:
+                    self._record_scan_note(f"transport_error:{self.CHECK_TYPE}:nvd:{type(exc).__name__}")
+                    continue
+                if cache is not None:
+                    cache[key] = info
+            if not info or not info.get("total"):
+                continue  # 照会不能・0 件は報告しない
+            ids = info.get("cve_ids") or []
+            sev = (info.get("max_severity") or "").lower()
+            id_disp = ", ".join(ids[:5])
+            evidence = (
+                f"参考: NVD に {comp.product} {comp.version} に該当し得る CVE が {info['total']} 件"
+                + (f"（最大深刻度 {info['max_severity']}）" if info.get("max_severity") else "")
+                + (f"・例: {id_disp}" if id_disp else "")
+                + "。CPE 一致は範囲が広く誤差を含むため、実際の影響は各 CVE を確認してください。"
+            )
+            findings.append(await self.record_finding(
+                url=url,
+                field_name=f"(CVE: {comp.product})",
+                payload="(no payload — NVD CPE lookup)",
+                evidence=evidence,
+                pair=pair,
+                severity="low",  # 参考情報（CPE ノイズを考慮して低め）
+                confidence="tentative",
+                evidence_type="known_cve_advisory",
+                evidence_details={
+                    "product": comp.product, "version": comp.version, "source": comp.source,
+                    "cve_count": info["total"], "cve_ids": ids,
+                    "max_severity": info.get("max_severity", ""),
+                    "reference": f"{base_url.rstrip('/')}/vuln/search",
+                },
+                reproduction_steps=[
+                    f"Detected {comp.product} {comp.version} ({comp.source}).",
+                    f"Query NVD by CPE ({component_intel.nvd_product_cpe(comp.product)}:{comp.version}).",
+                    "Review the matched CVEs to confirm which apply to this exact build.",
+                ],
+            ))
         return findings
 
     async def _scan_eol(self, url, pair, components, base_url, timeout) -> list[Finding]:

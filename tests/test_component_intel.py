@@ -105,6 +105,25 @@ class SummarizeOsvTests(unittest.TestCase):
         self.assertEqual(s["summary"], "XSS in jQuery")
 
 
+class NvdPureTests(unittest.TestCase):
+    def test_cpe_map(self):
+        self.assertEqual(ci.nvd_product_cpe("nginx"), "cpe:2.3:a:f5:nginx")
+        self.assertEqual(ci.nvd_product_cpe("httpd"), "cpe:2.3:a:apache:http_server")
+        self.assertIsNone(ci.nvd_product_cpe("wordpress"))  # NVD 対象外（保守側）
+
+    def test_summarize_nvd(self):
+        data = {"totalResults": 2, "vulnerabilities": [
+            {"cve": {"id": "CVE-2021-1", "metrics": {"cvssMetricV31": [
+                {"cvssData": {"baseSeverity": "HIGH"}}]}}},
+            {"cve": {"id": "CVE-2021-2", "metrics": {"cvssMetricV31": [
+                {"cvssData": {"baseSeverity": "CRITICAL"}}]}}},
+        ]}
+        s = ci.summarize_nvd(data)
+        self.assertEqual(s["total"], 2)
+        self.assertEqual(s["cve_ids"], ["CVE-2021-1", "CVE-2021-2"])
+        self.assertEqual(s["max_severity"], "CRITICAL")
+
+
 class _FakeResp:
     def __init__(self, status_code, payload):
         self.status_code = status_code
@@ -123,8 +142,9 @@ class _FakeClient:
         self.calls = []
         self.posts = []
 
-    async def get(self, url, timeout=None):
+    async def get(self, url, timeout=None, params=None, headers=None):
         self.calls.append(url)
+        self.last_get = {"params": params, "headers": headers}
         status, payload = self._mapping.get(url, (404, None))
         return _FakeResp(status, payload)
 
@@ -198,6 +218,28 @@ class NetworkLayerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await ci.lookup_osv("npm", "jquery", "3.99.0", client=ok), [])
         bad = _FakeClient(post_result=(500, None))
         self.assertIsNone(await ci.lookup_osv("npm", "jquery", "3.4.1", client=bad))
+
+    async def test_lookup_nvd_with_and_without_key(self):
+        url = "https://services.nvd.nist.gov/rest/json/cves/2.0"
+        payload = {"totalResults": 1, "vulnerabilities": [
+            {"cve": {"id": "CVE-2019-9511", "metrics": {"cvssMetricV31": [
+                {"cvssData": {"baseSeverity": "HIGH"}}]}}}]}
+        # API キーあり → apiKey ヘッダを送る。
+        c1 = _FakeClient({url: (200, payload)})
+        out = await ci.lookup_nvd("nginx", "1.18.0", api_key="KEY123", client=c1)
+        self.assertEqual(out["total"], 1)
+        self.assertEqual(c1.last_get["headers"], {"apiKey": "KEY123"})
+        self.assertEqual(c1.last_get["params"]["cpeName"], "cpe:2.3:a:f5:nginx:1.18.0:*:*:*:*:*:*:*")
+        # API キーなし → ヘッダ None でも動作。
+        c2 = _FakeClient({url: (200, payload)})
+        out2 = await ci.lookup_nvd("nginx", "1.18.0", client=c2)
+        self.assertEqual(out2["total"], 1)
+        self.assertIsNone(c2.last_get["headers"])
+
+    async def test_lookup_nvd_unmapped_product_skips(self):
+        c = _FakeClient({})
+        self.assertIsNone(await ci.lookup_nvd("wordpress", "6.1", client=c))
+        self.assertEqual(c.calls, [])
 
 
 class _FakeEngine:
@@ -321,6 +363,71 @@ class OutdatedComponentScannerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(out), 1)
         self.assertEqual(recorded[0]["evidence_details"]["source"], "cms")
         self.assertIn("CMS 検出", recorded[0]["evidence"])
+
+    async def test_nvd_advisory_when_enabled(self):
+        cfg = {"enabled": True, "eol_base_url": "https://endoflife.date",
+               "osv_base_url": "https://api.osv.dev", "nvd_enabled": True,
+               "nvd_base_url": "https://services.nvd.nist.gov", "timeout": 8}
+        engine = _FakeEngine(component_intel=cfg)
+        scanner = SCANNERS["outdated_components"](engine)
+
+        async def _pair(url):
+            return {"request": {"url": url},
+                    "response": {"status": 200, "headers": {"Server": "nginx/1.18.0"}, "body": ""}}
+
+        async def _eol(comp, **kw):
+            return None  # EOL は別経路（ここでは無し）
+
+        async def _nvd(product, version, **kw):
+            return {"total": 6, "cve_ids": ["CVE-2019-9511"], "max_severity": "HIGH"}
+
+        recorded = []
+
+        async def _rec(**kw):
+            recorded.append(kw)
+            return object()
+
+        scanner._response_pair = _pair
+        scanner.record_finding = _rec
+        import wscan.component_intel as _ci
+        oe, on = _ci.check_component_eol, _ci.lookup_nvd
+        _ci.check_component_eol, _ci.lookup_nvd = _eol, _nvd
+        try:
+            out = await scanner.scan_page("http://x/")
+        finally:
+            _ci.check_component_eol, _ci.lookup_nvd = oe, on
+        adv = [r for r in recorded if r["evidence_type"] == "known_cve_advisory"]
+        self.assertEqual(len(adv), 1)
+        self.assertEqual(adv[0]["severity"], "low")  # 参考情報
+        self.assertEqual(adv[0]["evidence_details"]["cve_count"], 6)
+
+    async def test_nvd_skipped_when_disabled(self):
+        # nvd_enabled=False（既定）なら NVD 照会しない。
+        engine, scanner = self._scanner(enabled=True)  # nvd_enabled 未設定
+
+        async def _pair(url):
+            return {"request": {"url": url},
+                    "response": {"status": 200, "headers": {"Server": "nginx/1.18.0"}, "body": ""}}
+
+        async def _eol(comp, **kw):
+            return None
+
+        called = {"nvd": 0}
+
+        async def _nvd(*a, **k):
+            called["nvd"] += 1
+            return {"total": 1, "cve_ids": [], "max_severity": ""}
+
+        scanner._response_pair = _pair
+        scanner.record_finding = lambda **kw: None
+        import wscan.component_intel as _ci
+        oe, on = _ci.check_component_eol, _ci.lookup_nvd
+        _ci.check_component_eol, _ci.lookup_nvd = _eol, _nvd
+        try:
+            await scanner.scan_page("http://x/")
+        finally:
+            _ci.check_component_eol, _ci.lookup_nvd = oe, on
+        self.assertEqual(called["nvd"], 0)
 
     async def test_supported_component_yields_no_finding(self):
         engine, scanner = self._scanner(enabled=True)

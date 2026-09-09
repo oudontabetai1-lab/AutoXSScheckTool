@@ -71,7 +71,12 @@ js_static prototype_pollution cache_poisoning mass_assignment
 `features.component_intel: true` かダッシュボードの「EOL コンポーネント検査」トグルで opt-in）。
 外部へ送るのは製品名/パッケージ名+バージョンのみで、対象 URL やヘッダ値全体は送信しません。API のベース URL・
 タイムアウトは `config/wscan.yaml` の `component_intel` ブロックで管理します（`eol_base_url` / `osv_base_url`。
-self-host 版へ差し替え可）。鍵が要る API（NVD 等）を足す場合は環境変数で渡す想定です。
+self-host 版へ差し替え可）。
+
+- **CVE 照会（NVD・限定オプション）**: `config/wscan.yaml` の `component_intel.nvd_enabled: true` で有効化すると、
+  少数の対応製品（nginx/apache/php/tomcat/openssl 等の保守的な CPE マップ）について [NVD](https://nvd.nist.gov)
+  の CVE を照会します。CPE 一致は範囲が広く誤差を含むため、**参考情報（低深刻度の集約）**として件数・最大深刻度・
+  代表 CVE を報告します。API キーは環境変数 `WSCAN_NVD_API_KEY` で渡すとレート制限が緩和されます（**無くても動作**）。
 
 Agent モードの CLI で選べる検査種別は `xss sqli ssti os path_traversal ssrf open_redirect csrf header_injection` です。
 

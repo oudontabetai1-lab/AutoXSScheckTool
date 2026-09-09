@@ -34,6 +34,22 @@ DEFAULT_EOL_BASE_URL = "https://endoflife.date"
 # 既定の OSV.dev base URL（JS ライブラリの既知脆弱性照会・鍵不要）。
 DEFAULT_OSV_BASE_URL = "https://api.osv.dev"
 
+# 既定の NVD base URL（CVE 照会・任意 API キーでレート緩和）。
+DEFAULT_NVD_BASE_URL = "https://services.nvd.nist.gov"
+
+# NVD 照会用の **保守的な** vendor:product CPE マップ（限定オプション）。CPE の当たり判定は
+# ノイズが多い（古い CVE も混じる）ため、対応付けが確実な少数の製品だけを対象にする。実測で
+# 件数が返る vendor を採用。ここに無い製品は NVD 照会しない（誤 CPE で誤検知しない）。
+_NVD_CPE_MAP: dict[str, str] = {
+    "nginx": "cpe:2.3:a:f5:nginx",
+    "php": "cpe:2.3:a:php:php",
+    "apache": "cpe:2.3:a:apache:http_server",
+    "httpd": "cpe:2.3:a:apache:http_server",
+    "tomcat": "cpe:2.3:a:apache:tomcat",
+    "openssl": "cpe:2.3:a:openssl:openssl",
+}
+_NVD_SEV_RANK = {"critical": 4, "high": 3, "medium": 2, "moderate": 2, "low": 1, "none": 0}
+
 # ネットワーク層の既定タイムアウト（秒）。
 DEFAULT_TIMEOUT = 8.0
 
@@ -375,3 +391,78 @@ async def lookup_osv(
         return None
     vulns = data.get("vulns")
     return vulns if isinstance(vulns, list) else []
+
+
+def nvd_product_cpe(product: str) -> Optional[str]:
+    """製品名を NVD の vendor:product CPE prefix へ写す（未対応は None・保守側）。"""
+    return _NVD_CPE_MAP.get(_norm_product(product))
+
+
+def summarize_nvd(data: dict) -> dict:
+    """NVD の /cves 応答から報告用サマリを作る（純粋）。
+
+    ``{"total": int, "cve_ids": [...上位], "max_severity": "CRITICAL|HIGH|..."}``。
+    深刻度は cvssMetricV31/V30/V2 の baseSeverity（V2 は baseScore→段階）から最大を採る。
+    """
+    total = int(data.get("totalResults", 0) or 0)
+    ids: list[str] = []
+    max_sev, max_rank = "", -1
+    for item in (data.get("vulnerabilities") or []):
+        cve = (item or {}).get("cve") or {}
+        cid = cve.get("id")
+        if cid:
+            ids.append(str(cid))
+        metrics = cve.get("metrics") or {}
+        sev = ""
+        for key in ("cvssMetricV31", "cvssMetricV30"):
+            arr = metrics.get(key) or []
+            if arr:
+                sev = str((arr[0].get("cvssData") or {}).get("baseSeverity", "") or "")
+                break
+        if not sev:
+            arr = metrics.get("cvssMetricV2") or []
+            if arr:
+                sev = str(arr[0].get("baseSeverity", "") or "")
+        r = _NVD_SEV_RANK.get(sev.lower(), -1)
+        if r > max_rank:
+            max_rank, max_sev = r, sev.upper()
+    return {"total": total, "cve_ids": ids, "max_severity": max_sev}
+
+
+async def lookup_nvd(
+    product: str,
+    version: str,
+    *,
+    base_url: str = DEFAULT_NVD_BASE_URL,
+    api_key: str = "",
+    timeout: float = DEFAULT_TIMEOUT,
+    results_per_page: int = 5,
+    client: "Optional[httpx.AsyncClient]" = None,
+) -> Optional[dict]:
+    """NVD の CVE API を CPE で照会し summarize_nvd の結果を返す（graceful・失敗時 None）。
+
+    限定オプション（保守的 CPE マップにある製品のみ）。API キーは任意で、あればヘッダ
+    ``apiKey`` を付けてレート制限を緩和する（無くても動作）。外部へ送るのは CPE（製品名+
+    バージョン）のみで target 情報は送らない。CVE なし（total=0）は ``{"total":0,...}`` を返す。
+    """
+    cpe_prefix = nvd_product_cpe(product)
+    if not cpe_prefix or not version or httpx is None:
+        return None
+    cpe_name = f"{cpe_prefix}:{version}:*:*:*:*:*:*:*"
+    url = f"{base_url.rstrip('/')}/rest/json/cves/2.0"
+    params = {"cpeName": cpe_name, "resultsPerPage": results_per_page}
+    headers = {"apiKey": api_key} if api_key else None
+    try:
+        if client is not None:
+            resp = await client.get(url, params=params, headers=headers, timeout=timeout)
+        else:
+            async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as c:
+                resp = await c.get(url, params=params, headers=headers)
+        if resp.status_code != 200:
+            return None
+        data = resp.json()
+    except Exception:
+        return None
+    if not isinstance(data, dict):
+        return None
+    return summarize_nvd(data)

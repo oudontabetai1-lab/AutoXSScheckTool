@@ -388,7 +388,8 @@ def _component_intel_config(path: Path | None = None) -> dict:
     """
     config_path = path or (CONFIG_DIR / "wscan.yaml")
     result = {"enabled": False, "eol_base_url": "https://endoflife.date",
-              "osv_base_url": "https://api.osv.dev", "timeout": 8.0}
+              "osv_base_url": "https://api.osv.dev", "nvd_enabled": False,
+              "nvd_base_url": "https://services.nvd.nist.gov", "timeout": 8.0}
     try:
         with open(config_path, encoding="utf-8") as f:
             raw = yaml.safe_load(f) or {}
@@ -398,6 +399,9 @@ def _component_intel_config(path: Path | None = None) -> dict:
             result["eol_base_url"] = str(block["eol_base_url"])
         if block.get("osv_base_url"):
             result["osv_base_url"] = str(block["osv_base_url"])
+        result["nvd_enabled"] = bool(block.get("nvd_enabled", False))
+        if block.get("nvd_base_url"):
+            result["nvd_base_url"] = str(block["nvd_base_url"])
         if block.get("timeout") is not None:
             result["timeout"] = float(block["timeout"])
     except Exception:
@@ -867,6 +871,8 @@ class ScanEngine:
             "enabled": _ci_enabled,
             "eol_base_url": _ci_cfg["eol_base_url"],
             "osv_base_url": _ci_cfg.get("osv_base_url", "https://api.osv.dev"),
+            "nvd_enabled": _ci_cfg.get("nvd_enabled", False),
+            "nvd_base_url": _ci_cfg.get("nvd_base_url", "https://services.nvd.nist.gov"),
             "timeout": _ci_cfg["timeout"],
         }
         if _ci_enabled and "outdated_components" not in self.checks:

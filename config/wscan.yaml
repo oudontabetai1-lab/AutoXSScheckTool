@@ -354,6 +354,10 @@ component_intel:
   eol_base_url: "https://endoflife.date"
   # 既知脆弱性 API（OSV.dev）。外部 JS ライブラリ（jsdelivr/cdnjs/unpkg 等）を照会する。
   osv_base_url: "https://api.osv.dev"
+  # CVE 照会（NVD）。限定オプション（既定 off）。CPE の当たり判定はノイズが多いため参考情報として
+  # 集約報告する。API キーは env WSCAN_NVD_API_KEY で渡すとレート制限が緩和される（無くても動作）。
+  nvd_enabled: false
+  nvd_base_url: "https://services.nvd.nist.gov"
   # 1 リクエストのタイムアウト秒。
   timeout: 8
 
