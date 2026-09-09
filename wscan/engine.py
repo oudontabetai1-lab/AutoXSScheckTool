@@ -387,7 +387,8 @@ def _component_intel_config(path: Path | None = None) -> dict:
     外部 API 情報（base URL・timeout）を設定で管理するためのチョークポイント。
     """
     config_path = path or (CONFIG_DIR / "wscan.yaml")
-    result = {"enabled": False, "eol_base_url": "https://endoflife.date", "timeout": 8.0}
+    result = {"enabled": False, "eol_base_url": "https://endoflife.date",
+              "osv_base_url": "https://api.osv.dev", "timeout": 8.0}
     try:
         with open(config_path, encoding="utf-8") as f:
             raw = yaml.safe_load(f) or {}
@@ -395,6 +396,8 @@ def _component_intel_config(path: Path | None = None) -> dict:
         block = raw.get("component_intel", {}) or {}
         if block.get("eol_base_url"):
             result["eol_base_url"] = str(block["eol_base_url"])
+        if block.get("osv_base_url"):
+            result["osv_base_url"] = str(block["osv_base_url"])
         if block.get("timeout") is not None:
             result["timeout"] = float(block["timeout"])
     except Exception:
@@ -863,6 +866,7 @@ class ScanEngine:
         self.component_intel: dict = {
             "enabled": _ci_enabled,
             "eol_base_url": _ci_cfg["eol_base_url"],
+            "osv_base_url": _ci_cfg.get("osv_base_url", "https://api.osv.dev"),
             "timeout": _ci_cfg["timeout"],
         }
         if _ci_enabled and "outdated_components" not in self.checks:

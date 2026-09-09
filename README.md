@@ -60,13 +60,18 @@ graphql jwt cms xxe ldap file_upload race_condition websocket secret_leak sri
 js_static prototype_pollution cache_poisoning mass_assignment
 ```
 
-**`outdated_components`（EOL コンポーネント検査・opt-in）**: `Server` / `X-Powered-By` /
-`X-AspNet-Version` / `X-Generator` バナーから製品名+バージョンを抽出し、無料の
-[endoflife.date](https://endoflife.date) API へ照会してサポート終了（EOL）版を検出します。
-**既定は無効**（有効時のみスキャン中に製品名を外部 API へ送信するため、`config/wscan.yaml` の
+**`outdated_components`（EOL・脆弱コンポーネント検査・opt-in）**: 2 種類の無料 API へ照会して
+既知の問題を持つコンポーネントを検出します。
+- **EOL 判定**: `Server` / `X-Powered-By` / `X-AspNet-Version` / `X-Generator` バナーから製品名+
+  バージョンを抽出し、[endoflife.date](https://endoflife.date) でサポート終了（EOL）版を検出。
+- **既知脆弱性（JS ライブラリ）**: ページが読み込む外部 JS ライブラリ（jsdelivr/cdnjs/unpkg 等の
+  `name@version`）を [OSV.dev](https://osv.dev) へ照会し、CVE/GHSA のある版を検出。
+
+**既定は無効**（有効時のみスキャン中に製品名/ライブラリ名を外部 API へ送信するため、`config/wscan.yaml` の
 `features.component_intel: true` かダッシュボードの「EOL コンポーネント検査」トグルで opt-in）。
-外部へ送るのは製品名のみで、対象 URL やヘッダ値全体は送信しません。API のベース URL・タイムアウトは
-`config/wscan.yaml` の `component_intel` ブロックで管理します（self-host 版の endoflife.date にも差し替え可）。
+外部へ送るのは製品名/パッケージ名+バージョンのみで、対象 URL やヘッダ値全体は送信しません。API のベース URL・
+タイムアウトは `config/wscan.yaml` の `component_intel` ブロックで管理します（`eol_base_url` / `osv_base_url`。
+self-host 版へ差し替え可）。鍵が要る API（NVD 等）を足す場合は環境変数で渡す想定です。
 
 Agent モードの CLI で選べる検査種別は `xss sqli ssti os path_traversal ssrf open_redirect csrf header_injection` です。
 

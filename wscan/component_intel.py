@@ -31,6 +31,9 @@ except Exception:  # pragma: no cover
 # 既定の endoflife.date base URL（設定で上書き可能）。
 DEFAULT_EOL_BASE_URL = "https://endoflife.date"
 
+# 既定の OSV.dev base URL（JS ライブラリの既知脆弱性照会・鍵不要）。
+DEFAULT_OSV_BASE_URL = "https://api.osv.dev"
+
 # ネットワーク層の既定タイムアウト（秒）。
 DEFAULT_TIMEOUT = 8.0
 
@@ -70,8 +73,100 @@ _PRODUCT_SLUGS: dict[str, str] = {
 _EXCLUDED_PRODUCTS = frozenset({"iis"})
 
 
+@dataclass(frozen=True)
+class Library:
+    """ページが読み込む外部 JS ライブラリ（name+version+ecosystem+URL）。"""
+
+    name: str
+    version: str
+    ecosystem: str    # OSV の ecosystem（例: "npm"）
+    url: str
+
+
 def _norm_product(name: str) -> str:
     return (name or "").strip().lower()
+
+
+# 主要 CDN の URL からライブラリ名+バージョンを抽出する（純粋・保守側）。いずれも npm パッケージ。
+#   jsdelivr: https://cdn.jsdelivr.net/npm/jquery@3.4.1/dist/jquery.min.js
+#   cdnjs/google: .../ajax/libs/jquery/3.4.1/jquery.min.js
+#   unpkg: https://unpkg.com/jquery@3.4.1/dist/jquery.min.js
+#   ファイル名埋め込み: .../jquery-3.4.1.min.js（推測度が高いので semver 形のみ）
+_LIB_URL_PATTERNS = (
+    re.compile(r"/npm/((?:@[\w.-]+/)?[\w.-]+)@(\d[\w.\-]*)"),
+    re.compile(r"/ajax/libs/([\w.-]+)/(\d[\w.\-]*)/"),
+    re.compile(r"unpkg\.com/((?:@[\w.-]+/)?[\w.-]+)@(\d[\w.\-]*)"),
+    re.compile(r"/([\w.-]+?)-(\d+\.\d+(?:\.\d+)?)(?:\.min)?\.js(?:$|[?#])"),
+)
+
+
+def _norm_version(v: str) -> str:
+    v = (v or "").strip()
+    return v[1:] if v[:1] in ("v", "V") and v[1:2].isdigit() else v
+
+
+def parse_js_libraries(html: str, base_url: str = "") -> list[Library]:
+    """HTML の外部 ``<script src>`` から (name, version, npm) を抽出する（純粋・ネットワーク非依存）。
+
+    主要 CDN（jsdelivr/cdnjs/unpkg/google）とファイル名埋め込みバージョンに限定して保守的に解析する
+    （誤検出を避ける＝確実性重視）。バージョンを取れないものは返さない。重複は (name, version) で排除。
+    ``base_url`` は相対 src の解決に使う。
+    """
+    from urllib.parse import urljoin  # 局所 import（純粋関数を軽く保つ）
+    from . import js_analysis
+
+    if not html:
+        return []
+    out: list[Library] = []
+    seen: set[tuple[str, str]] = set()
+    for src in js_analysis.extract_external_script_srcs(html):
+        absolute = urljoin(base_url, (src or "").strip())
+        for pat in _LIB_URL_PATTERNS:
+            m = pat.search(absolute)
+            if not m:
+                continue
+            name = m.group(1).strip().lower()
+            version = _norm_version(m.group(2))
+            if not name or not version or not version[0].isdigit():
+                continue
+            key = (name, version)
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(Library(name=name, version=version, ecosystem="npm", url=absolute))
+            break  # 1 src につき最初に一致したパターンだけ
+    return out
+
+
+def summarize_osv_vulns(vulns: list[dict]) -> dict:
+    """OSV の vulns から報告用サマリを作る（純粋）。
+
+    ``{"ids": [...], "cves": [...], "max_severity": "CRITICAL|HIGH|MODERATE|LOW|",
+       "summary": "先頭 vuln の要約"}``。severity は database_specific.severity を優先。
+    """
+    ids: list[str] = []
+    cves: list[str] = []
+    rank = {"critical": 4, "high": 3, "moderate": 2, "medium": 2, "low": 1}
+    max_sev, max_rank = "", -1
+    summary = ""
+    for v in vulns or []:
+        if not isinstance(v, dict):
+            continue
+        vid = v.get("id")
+        if vid:
+            ids.append(str(vid))
+        for a in v.get("aliases", []) or []:
+            if isinstance(a, str) and a.upper().startswith("CVE-"):
+                cves.append(a)
+        sev = str((v.get("database_specific") or {}).get("severity", "") or "").strip()
+        r = rank.get(sev.lower(), -1)
+        if r > max_rank:
+            max_rank, max_sev = r, sev.upper()
+        if not summary and v.get("summary"):
+            summary = str(v["summary"])
+    # 重複 CVE を排除しつつ順序保持
+    cves = list(dict.fromkeys(cves))
+    return {"ids": ids, "cves": cves, "max_severity": max_sev, "summary": summary}
 
 
 def parse_components_from_headers(headers: dict) -> list[Component]:
@@ -241,3 +336,38 @@ async def check_component_eol(
         "is_eol": bool(is_eol),
         "latest": cycle.get("latest", ""),
     }
+
+
+async def lookup_osv(
+    ecosystem: str,
+    name: str,
+    version: str,
+    *,
+    base_url: str = DEFAULT_OSV_BASE_URL,
+    timeout: float = DEFAULT_TIMEOUT,
+    client: "Optional[httpx.AsyncClient]" = None,
+) -> Optional[list[dict]]:
+    """OSV.dev へ (ecosystem, name, version) を照会し vulns 一覧を返す（graceful・失敗時 None）。
+
+    ``POST /v1/query`` に **パッケージ名+バージョン+ecosystem のみ**を送る（target 情報は送らない）。
+    脆弱性なしは ``[]``、照会不能/失敗は ``None``（区別して呼び出し側が扱えるように）。
+    """
+    if not (name and version and ecosystem) or httpx is None:
+        return None
+    url = f"{base_url.rstrip('/')}/v1/query"
+    body = {"version": version, "package": {"name": name, "ecosystem": ecosystem}}
+    try:
+        if client is not None:
+            resp = await client.post(url, json=body, timeout=timeout)
+        else:
+            async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as c:
+                resp = await c.post(url, json=body)
+        if resp.status_code != 200:
+            return None
+        data = resp.json()
+    except Exception:
+        return None
+    if not isinstance(data, dict):
+        return None
+    vulns = data.get("vulns")
+    return vulns if isinstance(vulns, list) else []

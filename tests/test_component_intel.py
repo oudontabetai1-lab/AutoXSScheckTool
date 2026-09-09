@@ -65,6 +65,46 @@ class SlugAndCycleTests(unittest.TestCase):
         self.assertIsNone(ci.evaluate_eol({"eol": "not-a-date"}, today))
 
 
+class ParseJsLibrariesTests(unittest.TestCase):
+    def test_cdn_patterns(self):
+        html = (
+            '<script src="https://cdn.jsdelivr.net/npm/jquery@3.4.1/dist/jquery.min.js"></script>'
+            '<script src="https://cdnjs.cloudflare.com/ajax/libs/lodash.js/4.17.10/lodash.min.js"></script>'
+            '<script src="https://unpkg.com/vue@2.6.10/dist/vue.js"></script>'
+            '<script src="/assets/angular-1.7.2.min.js"></script>'
+        )
+        libs = {(l.name, l.version) for l in ci.parse_js_libraries(html, "https://t.example/")}
+        self.assertIn(("jquery", "3.4.1"), libs)
+        self.assertIn(("lodash.js", "4.17.10"), libs)
+        self.assertIn(("vue", "2.6.10"), libs)
+        self.assertIn(("angular", "1.7.2"), libs)
+        self.assertTrue(all(l.ecosystem == "npm" for l in ci.parse_js_libraries(html, "https://t.example/")))
+
+    def test_no_version_and_dedup(self):
+        html = (
+            '<script src="https://example.com/app.js"></script>'  # version 無し→無視
+            '<script src="https://cdn.jsdelivr.net/npm/jquery@3.4.1/x.js"></script>'
+            '<script src="https://cdn.jsdelivr.net/npm/jquery@3.4.1/y.js"></script>'  # 重複
+        )
+        libs = ci.parse_js_libraries(html, "https://t.example/")
+        self.assertEqual([(l.name, l.version) for l in libs], [("jquery", "3.4.1")])
+
+
+class SummarizeOsvTests(unittest.TestCase):
+    def test_summary_extracts_ids_cves_and_max_severity(self):
+        vulns = [
+            {"id": "GHSA-a", "aliases": ["CVE-2020-11022"], "summary": "XSS in jQuery",
+             "database_specific": {"severity": "MODERATE"}},
+            {"id": "GHSA-b", "aliases": ["CVE-2020-11023", "CVE-2020-11022"],
+             "database_specific": {"severity": "HIGH"}},
+        ]
+        s = ci.summarize_osv_vulns(vulns)
+        self.assertEqual(s["ids"], ["GHSA-a", "GHSA-b"])
+        self.assertEqual(s["cves"], ["CVE-2020-11022", "CVE-2020-11023"])  # 重複排除
+        self.assertEqual(s["max_severity"], "HIGH")
+        self.assertEqual(s["summary"], "XSS in jQuery")
+
+
 class _FakeResp:
     def __init__(self, status_code, payload):
         self.status_code = status_code
@@ -75,15 +115,22 @@ class _FakeResp:
 
 
 class _FakeClient:
-    """httpx.AsyncClient の最小ダブル（get(url, timeout=) を記録し canned JSON を返す）。"""
+    """httpx.AsyncClient の最小ダブル（get/post を記録し canned JSON を返す）。"""
 
-    def __init__(self, mapping):
-        self._mapping = mapping
+    def __init__(self, mapping=None, post_result=None):
+        self._mapping = mapping or {}
+        self._post_result = post_result  # (status, payload)
         self.calls = []
+        self.posts = []
 
     async def get(self, url, timeout=None):
         self.calls.append(url)
         status, payload = self._mapping.get(url, (404, None))
+        return _FakeResp(status, payload)
+
+    async def post(self, url, json=None, timeout=None):
+        self.posts.append((url, json))
+        status, payload = self._post_result or (404, None)
         return _FakeResp(status, payload)
 
 
@@ -135,6 +182,23 @@ class NetworkLayerTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIsNone(out)  # raise せず None
 
+    async def test_lookup_osv_returns_vulns(self):
+        client = _FakeClient(post_result=(200, {"vulns": [
+            {"id": "GHSA-x", "aliases": ["CVE-2020-11022"],
+             "database_specific": {"severity": "MODERATE"}},
+        ]}))
+        vulns = await ci.lookup_osv("npm", "jquery", "3.4.1", client=client)
+        self.assertEqual(len(vulns), 1)
+        # 送信は package 名+version+ecosystem のみ（target 情報を含めない）。
+        self.assertEqual(client.posts[0][1],
+                         {"version": "3.4.1", "package": {"name": "jquery", "ecosystem": "npm"}})
+
+    async def test_lookup_osv_no_vulns_vs_failure(self):
+        ok = _FakeClient(post_result=(200, {"vulns": []}))
+        self.assertEqual(await ci.lookup_osv("npm", "jquery", "3.99.0", client=ok), [])
+        bad = _FakeClient(post_result=(500, None))
+        self.assertIsNone(await ci.lookup_osv("npm", "jquery", "3.4.1", client=bad))
+
 
 class _FakeEngine:
     def __init__(self, component_intel=None):
@@ -185,6 +249,39 @@ class OutdatedComponentScannerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(out), 1)
         self.assertEqual(recorded[0]["evidence_type"], "eol_component")
         self.assertEqual(recorded[0]["evidence_details"]["product"], "nginx")
+
+    async def test_reports_vulnerable_js_library(self):
+        engine, scanner = self._scanner(enabled=True)
+        html = '<script src="https://cdn.jsdelivr.net/npm/jquery@3.4.1/jquery.min.js"></script>'
+
+        async def _pair(url):
+            return {"request": {"url": url},
+                    "response": {"status": 200, "headers": {}, "body": html}}
+
+        async def _osv(ecosystem, name, version, **kw):
+            return [{"id": "GHSA-x", "aliases": ["CVE-2020-11022"],
+                     "summary": "XSS in jQuery", "database_specific": {"severity": "MODERATE"}}]
+
+        recorded = []
+
+        async def _rec(**kw):
+            recorded.append(kw)
+            return object()
+
+        scanner._response_pair = _pair
+        scanner.record_finding = _rec
+        import wscan.component_intel as _ci
+        orig = _ci.lookup_osv
+        _ci.lookup_osv = _osv
+        try:
+            out = await scanner.scan_page("http://x/")
+        finally:
+            _ci.lookup_osv = orig
+        self.assertEqual(len(out), 1)
+        self.assertEqual(recorded[0]["evidence_type"], "vulnerable_library")
+        self.assertEqual(recorded[0]["evidence_details"]["library"], "jquery")
+        self.assertIn("CVE-2020-11022", recorded[0]["evidence_details"]["cves"])
+        self.assertEqual(recorded[0]["severity"], "medium")  # MODERATE→medium
 
     async def test_supported_component_yields_no_finding(self):
         engine, scanner = self._scanner(enabled=True)

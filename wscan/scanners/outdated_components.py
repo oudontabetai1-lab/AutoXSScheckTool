@@ -82,16 +82,23 @@ class OutdatedComponentScanner(BaseScanner):
         pair = await self._response_pair(url)
         response = pair.get("response") or {}
         headers = {k.lower(): v for k, v in (response.get("headers") or {}).items()}
-        components = component_intel.parse_components_from_headers(headers)
-        if not components:
-            return []
+        body = response.get("body", "") or ""
 
-        base_url = cfg.get("eol_base_url") or component_intel.DEFAULT_EOL_BASE_URL
+        eol_base = cfg.get("eol_base_url") or component_intel.DEFAULT_EOL_BASE_URL
+        osv_base = cfg.get("osv_base_url") or component_intel.DEFAULT_OSV_BASE_URL
         timeout = float(cfg.get("timeout") or component_intel.DEFAULT_TIMEOUT)
 
         findings: list[Finding] = []
+        # ① 技術バナー → endoflife.date で EOL 判定
+        findings.extend(await self._scan_eol(url, pair, headers, eol_base, timeout))
+        # ② 外部 JS ライブラリ → OSV.dev で既知脆弱性照会
+        findings.extend(await self._scan_osv(url, pair, body, osv_base, timeout))
+        return findings
+
+    async def _scan_eol(self, url, pair, headers, base_url, timeout) -> list[Finding]:
+        findings: list[Finding] = []
         seen: set[tuple[str, str]] = set()
-        for comp in components:
+        for comp in component_intel.parse_components_from_headers(headers):
             key = (comp.product, comp.version)
             if key in seen:
                 continue
@@ -114,7 +121,7 @@ class OutdatedComponentScanner(BaseScanner):
                 + (f", 最新 {latest}" if latest else "")
                 + "）。EOL 版はセキュリティ更新が提供されず既知の脆弱性が残存します。"
             )
-            finding = await self.record_finding(
+            findings.append(await self.record_finding(
                 url=url,
                 field_name=f"(Component: {comp.product})",
                 payload="(no payload — banner/EOL lookup)",
@@ -124,12 +131,8 @@ class OutdatedComponentScanner(BaseScanner):
                 confidence="likely",
                 evidence_type="eol_component",
                 evidence_details={
-                    "product": comp.product,
-                    "version": comp.version,
-                    "source": comp.source,
-                    "cycle": result.get("cycle"),
-                    "eol": eol_val,
-                    "latest": latest,
+                    "product": comp.product, "version": comp.version, "source": comp.source,
+                    "cycle": result.get("cycle"), "eol": eol_val, "latest": latest,
                     "reference": f"{base_url.rstrip('/')}/{result.get('slug')}",
                 },
                 reproduction_steps=[
@@ -138,7 +141,76 @@ class OutdatedComponentScanner(BaseScanner):
                     f"Confirm via endoflife.date that {comp.product} {result.get('cycle')} is end-of-life.",
                     f"Upgrade to a supported release (latest: {latest or 'see endoflife.date'}).",
                 ],
-            )
-            findings.append(finding)
+            ))
+        return findings
 
+    async def _scan_osv(self, url, pair, body, base_url, timeout) -> list[Finding]:
+        libs = component_intel.parse_js_libraries(body, url)
+        if not libs:
+            return []
+        # 照会結果を engine 単位でキャッシュ（同一 (ecosystem,name,version) を複数ページで再照会しない）。
+        cache = getattr(self.engine, "_osv_cache", None)
+        if cache is None:
+            cache = {}
+            try:
+                self.engine._osv_cache = cache
+            except Exception:
+                cache = None
+
+        findings: list[Finding] = []
+        seen: set[tuple[str, str]] = set()
+        for lib in libs:
+            key = (lib.name, lib.version)
+            if key in seen:
+                continue
+            seen.add(key)
+            ck = (lib.ecosystem, lib.name, lib.version)
+            if cache is not None and ck in cache:
+                vulns = cache[ck]
+            else:
+                try:
+                    vulns = await component_intel.lookup_osv(
+                        lib.ecosystem, lib.name, lib.version, base_url=base_url, timeout=timeout,
+                    )
+                except Exception as exc:
+                    self._record_scan_note(f"transport_error:{self.CHECK_TYPE}:osv:{type(exc).__name__}")
+                    continue
+                if cache is not None:
+                    cache[ck] = vulns
+            if not vulns:
+                continue  # 脆弱性なし・照会不能(None)は報告しない
+            info = component_intel.summarize_osv_vulns(vulns)
+            ids = info["ids"] or []
+            cves = info["cves"] or []
+            sev = (info["max_severity"] or "").lower()
+            severity = {"critical": "critical", "high": "high", "moderate": "medium",
+                        "medium": "medium", "low": "low"}.get(sev, "medium")
+            id_disp = ", ".join((cves or ids)[:5])
+            evidence = (
+                f"外部 JS ライブラリ {lib.name} {lib.version} に既知の脆弱性があります"
+                f"（OSV: {len(ids)} 件{('・' + id_disp) if id_disp else ''}"
+                + (f"・{info['summary'][:80]}" if info.get("summary") else "")
+                + "）。修正版へ更新してください。"
+            )
+            findings.append(await self.record_finding(
+                url=url,
+                field_name=f"(Library: {lib.name})",
+                payload="(no payload — JS library / OSV lookup)",
+                evidence=evidence,
+                pair=pair,
+                severity=severity,
+                confidence="likely",
+                evidence_type="vulnerable_library",
+                evidence_details={
+                    "library": lib.name, "version": lib.version, "ecosystem": lib.ecosystem,
+                    "src": lib.url, "osv_ids": ids, "cves": cves,
+                    "max_severity": info["max_severity"],
+                },
+                reproduction_steps=[
+                    f"Load {url} and note the external script: {lib.url}",
+                    f"Identify {lib.name} version {lib.version}.",
+                    f"Check OSV.dev / GHSA: {id_disp or 'known advisories'} affect this version.",
+                    f"Upgrade {lib.name} to a patched release.",
+                ],
+            ))
         return findings
