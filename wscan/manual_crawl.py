@@ -33,9 +33,25 @@ class ManualCrawlSeed:
     steps: list[dict] = field(default_factory=list)
 
 
+def _origin_tuple(u: str):
+    """(scheme, host, 実効ポート) を返す。既定ポートを正規化し scheme を含める。"""
+    p = urlparse(u)
+    scheme = (p.scheme or "").lower()
+    host = (p.hostname or "").lower()
+    port = p.port or {"https": 443, "http": 80}.get(scheme)
+    return scheme, host, port
+
+
 def _same_origin(url: str, origin: str) -> bool:
+    """同一 origin か（scheme+host+実効ポートで判定）。
+
+    netloc だけの比較は (1) scheme を無視して http↔https を同一視し（cross-origin の SSO/決済
+    popup の URL を same-origin と誤判定して記録し得る）、(2) 明示ポートと既定ポート
+    （app.test と app.test:443）を別 origin 扱いして記録を取りこぼす。両方を正す（Codex #153）。
+    """
     try:
-        return urlparse(url).netloc == urlparse(origin).netloc
+        a, b = _origin_tuple(url), _origin_tuple(origin)
+        return bool(a[0] and a[1]) and a == b
     except Exception:
         return False
 
@@ -619,21 +635,30 @@ class ManualCrawlSession:
         if self._context is None or target is None:
             return
         cdp = await self._context.new_cdp_session(target)
-        self._cdp = cdp
         cdp.on(
             "Page.screencastFrame",
             lambda params: self._on_screencast_frame(params, cdp),
         )
-        await cdp.send(
-            "Page.startScreencast",
-            {
-                "format": "jpeg",
-                "quality": 55,
-                "maxWidth": self.view_width,
-                "maxHeight": self.view_height,
-                "everyNthFrame": 1,
-            },
-        )
+        try:
+            await cdp.send(
+                "Page.startScreencast",
+                {
+                    "format": "jpeg",
+                    "quality": 55,
+                    "maxWidth": self.view_width,
+                    "maxHeight": self.view_height,
+                    "everyNthFrame": 1,
+                },
+            )
+        except Exception:
+            # startScreencast 失敗時に死んだ CDP セッションを self._cdp に残さない
+            # （running/streaming=true なのに画面が届かない状態を防ぐ・Codex #153 P2）。
+            try:
+                await cdp.detach()
+            except Exception:
+                pass
+            raise
+        self._cdp = cdp  # 開始成功後にだけ確定する
 
     def _on_screencast_frame(self, params: dict, cdp=None) -> None:
         """CDP のフレームイベント（同期コールバック）→ 配信タスクを起こす。"""
@@ -768,15 +793,13 @@ class ManualCrawlSession:
                     "error": "OTP 入力欄へ入力できません。selector と欄の表示・編集可否を確認してください",
                 }
         self.last_mfa_selector = selector
-        # cross-origin SSO ページで TOTP を入力した場合、page.url（OAuth の state/code/token を含む）を
-        # steps に残さない。save() は steps をスコープ無しで永続化するため、same-origin のときだけ URL を
-        # 記録する（urls/events と同じ privacy 方針・Codex #153 P2）。
-        step_url = page.url if _same_origin(page.url, self.start_url) else ""
+        # cross-origin SSO ページの page.url（OAuth の state/code/token を含む）は steps に残さない。
+        # URL のスコープ判定は _record_fill（_safe_step_url）へ集約している（Codex #153）。
         self._record_fill({
             "selector": selector,
             "name": "",
             "type": "totp",
-            "url": step_url,
+            "url": page.url,
         })
         return {"ok": True, "filled": True, "digits": len(code)}
 
@@ -982,27 +1005,39 @@ class ManualCrawlSession:
             self.urls.append(url)
             self.events.append({"type": "url", "source": source, "url": url, "ts": time.time()})
 
+    def _safe_step_url(self, url: str) -> str:
+        """steps に保存してよい URL に整える。
+
+        cross-origin（SSO/決済 popup 等）の URL は state/code/token をクエリに含み得る。save() は
+        steps をスコープ無しで永続化するため、same-origin のときだけ URL を残し、それ以外は空にする
+        （urls/events/TOTP と同じ privacy 方針・Codex #153）。
+        """
+        url = url or ""
+        return url if _same_origin(url, self.start_url) else ""
+
     def _record_fill(self, data: dict) -> None:
         step = {
             "action": "fill",
             "selector": data.get("selector", ""),
             "name": data.get("name", ""),
             "type": data.get("type", ""),
-            "url": data.get("url", ""),
+            "url": self._safe_step_url(data.get("url", "")),
             "ts": time.time(),
         }
         self.steps.append(step)
 
     def _record_click(self, data: dict) -> None:
+        href = data.get("href", "")
+        same_origin_href = bool(href) and _same_origin(href, self.start_url)
         step = {
             "action": "click",
             "selector": data.get("selector", ""),
             "text": data.get("text", ""),
-            "href": data.get("href", ""),
-            "url": data.get("url", ""),
+            # cross-origin の href（OAuth callback 等）は残さない。
+            "href": href if same_origin_href else "",
+            "url": self._safe_step_url(data.get("url", "")),
             "ts": time.time(),
         }
         self.steps.append(step)
-        href = data.get("href", "")
-        if href and _same_origin(href, self.start_url):
+        if same_origin_href:
             self._record_url(href, "click")

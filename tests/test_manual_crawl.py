@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, Mock, patch
 
 from wscan.manual_crawl import (
     ManualCrawlSession,
+    _same_origin,
     build_seed_payload,
     coerce_input_event,
     load_manual_crawl_seed,
@@ -407,6 +408,52 @@ class ManualCrawlRemoteBrowserTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("http://example.test/popup", session.forms_by_url)
         self.assertEqual(session.forms_by_url["http://example.test/popup"], forms)
 
+    async def test_record_fill_omits_cross_origin_url(self):
+        # JS binding 由来の fill 記録も cross-origin URL を残さない（_record_fill 集約ゲート・Codex #153）。
+        page = _FakePage("http://example.test/login")
+        session = self._session(page, _FakeContext([page]))
+        session._record_fill({"selector": "#u", "name": "user", "type": "text",
+                              "url": "https://sso.evil.test/authorize?code=SECRET"})
+        self.assertEqual(session.steps[-1]["url"], "")
+        # same-origin はそのまま残す。
+        session._record_fill({"selector": "#p", "name": "pw", "type": "password",
+                              "url": "http://example.test/login?next=/home"})
+        self.assertEqual(session.steps[-1]["url"], "http://example.test/login?next=/home")
+
+    async def test_record_click_omits_cross_origin_href_and_url(self):
+        page = _FakePage("http://example.test/")
+        session = self._session(page, _FakeContext([page]))
+        session._record_click({"selector": "a", "text": "login",
+                               "href": "https://sso.evil.test/authorize?state=xyz",
+                               "url": "https://sso.evil.test/authorize?state=xyz"})
+        self.assertEqual(session.steps[-1]["href"], "")
+        self.assertEqual(session.steps[-1]["url"], "")
+        self.assertFalse(any("evil.test" in json.dumps(s) for s in session.steps))
+        self.assertNotIn("https://sso.evil.test/authorize?state=xyz", session.urls)
+
+    async def test_start_screencast_failure_does_not_leak_cdp(self):
+        # startScreencast 失敗時に死んだ CDP を self._cdp に残さず detach する（Codex #153 P2）。
+        class _FailCdp(_FakeCdp):
+            async def send(self, method, params=None):
+                self.sent.append((method, params))
+                if method == "Page.startScreencast":
+                    raise RuntimeError("screencast start failed")
+
+        class _FailContext(_FakeContext):
+            async def new_cdp_session(self, page):
+                self.cdp_targets.append(page)
+                cdp = _FailCdp()
+                self.cdps.append(cdp)
+                return cdp
+
+        page = _FakePage("http://example.test/")
+        session = self._session(page, _FailContext([page]))
+        session._cdp = None
+        with self.assertRaises(RuntimeError):
+            await session._start_screencast(page)
+        self.assertIsNone(session._cdp)  # 死んだ CDP を残さない
+        self.assertTrue(session._context.cdps[-1].detached)  # detach 済み
+
     async def test_cross_origin_popup_url_not_recorded(self):
         # 追従した cross-origin popup（SSO/決済等）の URL・forms は artifact に残さない
         # （same-origin のみ記録・Codex #153 P2）。screencast 追従（切替）自体は行う。
@@ -426,6 +473,30 @@ class ManualCrawlRemoteBrowserTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("https://sso.evil.test/authorize?token=secret123", session.urls)
         self.assertNotIn("https://sso.evil.test/authorize?token=secret123", session.forms_by_url)
         self.assertFalse(any("evil.test" in json.dumps(e) for e in session.events))
+
+
+class SameOriginTests(unittest.TestCase):
+    def test_scheme_must_match(self):
+        # http↔https を同一視しない（cross-origin popup を same-origin と誤判定しない・Codex #153）。
+        self.assertFalse(_same_origin("http://app.test/x", "https://app.test/y"))
+
+    def test_default_port_normalized(self):
+        # 明示既定ポートと省略を同一 origin 扱いにする（記録取りこぼし防止）。
+        self.assertTrue(_same_origin("https://app.test/x", "https://app.test:443/y"))
+        self.assertTrue(_same_origin("http://app.test:80/x", "http://app.test/y"))
+
+    def test_same_origin_true(self):
+        self.assertTrue(_same_origin("https://app.test/a?b=1", "https://app.test/c"))
+
+    def test_different_host(self):
+        self.assertFalse(_same_origin("https://app.test/x", "https://evil.test/x"))
+
+    def test_different_explicit_port(self):
+        self.assertFalse(_same_origin("https://app.test:8443/x", "https://app.test/y"))
+
+    def test_garbage_is_false(self):
+        self.assertFalse(_same_origin("", "https://app.test"))
+        self.assertFalse(_same_origin("not a url", "https://app.test"))
 
 
 if __name__ == "__main__":
