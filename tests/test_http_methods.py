@@ -27,6 +27,30 @@ class PureFunctionTests(unittest.TestCase):
         self.assertFalse(hm.trace_reflects(405, {}, "", "TOK"))
         self.assertFalse(hm.trace_reflects(200, {"Content-Type": "text/html"}, "<html>", "TOK"))
 
+    def test_trace_strength_token_is_confirmed(self):
+        self.assertEqual(hm.trace_reflection_strength(
+            200, {}, "...X-Xst-Probe: TOK...", "TOK"), "confirmed")
+
+    def test_trace_strength_message_http_without_token_is_likely(self):
+        # token 非反射（canned な message/http 応答）は confirmed にしない（FP 防止）。
+        self.assertEqual(hm.trace_reflection_strength(
+            200, {"Content-Type": "message/http"}, "TRACE / HTTP/1.1\n", "TOK"), "likely")
+
+    def test_trace_strength_none(self):
+        self.assertEqual(hm.trace_reflection_strength(405, {}, "", "TOK"), "")
+        self.assertEqual(hm.trace_reflection_strength(
+            200, {"Content-Type": "text/html"}, "<html>", "TOK"), "")
+
+    def test_redact_trace_body_masks_secrets(self):
+        body = ("TRACE / HTTP/1.1\r\nHost: app.test\r\n"
+                "Authorization: Bearer supersecrettoken\r\n"
+                "Cookie: session=abcdef123\r\nX-Xst-Probe: TOK\r\n")
+        out = hm.redact_trace_body(body)
+        self.assertNotIn("supersecrettoken", out)
+        self.assertNotIn("session=abcdef123", out)
+        self.assertIn("[REDACTED]", out)
+        self.assertIn("Host: app.test", out)  # 非秘匿ヘッダは残す（証跡）
+
 
 class _FakeResp:
     def __init__(self, status_code, headers=None, text=""):
@@ -111,6 +135,50 @@ class ScannerTests(unittest.IsolatedAsyncioTestCase):
         }
         rec = await self._run(responses)
         self.assertEqual(rec, [])
+
+    async def test_webdav_not_double_reported(self):
+        # OPTIONS(dav) と PROPFIND(207) が両方成立しても WebDAV Finding は 1 件だけ。
+        responses = {
+            "OPTIONS": _FakeResp(200, {"allow": "GET, PROPFIND", "dav": "1,2"}),
+            "TRACE": _FakeResp(405, {}, ""),
+            "PROPFIND": _FakeResp(207, {}, "<multistatus/>"),
+        }
+        rec = await self._run(responses)
+        webdav = [r for r in rec if r["evidence_type"] == "http_webdav_enabled"]
+        self.assertEqual(len(webdav), 1)
+        self.assertEqual(webdav[0]["severity"], "low")  # 告知≠悪用可能
+
+    async def test_xst_without_token_is_likely(self):
+        trace = _FakeResp(200, {"Content-Type": "message/http"}, "TRACE / HTTP/1.1\n")
+        # _echo を付けない＝token 非反射。
+        responses = {
+            "OPTIONS": _FakeResp(200, {"allow": "GET, POST"}),
+            "TRACE": trace,
+            "PROPFIND": _FakeResp(405, {}, ""),
+        }
+        rec = await self._run(responses)
+        xst = [r for r in rec if r["evidence_type"] == "http_trace_xst"]
+        self.assertEqual(len(xst), 1)
+        self.assertEqual(xst[0]["confidence"], "likely")
+
+    async def test_path_target_probed_in_addition_to_origin(self):
+        responses = {
+            "OPTIONS": _FakeResp(200, {"allow": "GET"}),
+            "TRACE": _FakeResp(405, {}, ""),
+            "PROPFIND": _FakeResp(404, {}, ""),
+        }
+        engine, scanner = self._scanner()
+
+        async def _rec(**kw):
+            return object()
+        scanner.record_finding = _rec
+        client = _FakeClient(responses)
+        with mock.patch.object(hm.httpx, "AsyncClient", return_value=client):
+            await scanner.scan_page("http://app.test/dav/files")
+        # origin ルートとページパスの両方を検査している。
+        urls = {u for _, u, _ in client.requested}
+        self.assertIn("http://app.test", urls)
+        self.assertIn("http://app.test/dav/files", urls)
 
     async def test_probe_failure_is_graceful(self):
         engine, scanner = self._scanner()
