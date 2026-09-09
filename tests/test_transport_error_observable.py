@@ -6,6 +6,7 @@
 落ちても「完全なスキャン」と誤表示してしまう（Codex #101 P1）。修正後は XSS と同様に
 ``transport_error:<check>`` を ``wave_errors`` へ記録する（挙動は不変）。
 """
+import asyncio
 import unittest
 
 import pytest
@@ -814,6 +815,73 @@ class ResponsePairDocumentGuardTests(unittest.IsolatedAsyncioTestCase):
                     [],
                     engine.wave_errors,
                 )
+
+    async def test_sri_ignores_non_2xx_error_page_body(self):
+        # 恒久非 2xx（404）の error テンプレート本文に integrity 無しの外部 script があっても、
+        # SRI は監査しない（ブラウザが描画した document ではない＝元 URL への FP 防止・Codex #147）。
+        html = '<html><head><script src="https://cdn.example.com/lib.js"></script></head></html>'
+        engine = _FakeEngine()
+        engine.browser = _APIBrowser(_FakeRequestCtx(_FakeAPIResponse(404, {}, text=html)))
+        scanner = SCANNERS["sri"](engine)
+
+        async def _rec(**kw):
+            return object()
+
+        scanner.record_finding = _rec
+        self.assertEqual(await scanner.scan_page("http://app.test/missing"), [])
+
+    async def test_sri_audits_2xx_document(self):
+        # 2xx の描画 document では従来どおり外部 script を監査（FN 非導入確認）。
+        html = '<html><head><script src="https://cdn.example.com/lib.js"></script></head></html>'
+        engine = _FakeEngine()
+        engine.browser = _APIBrowser(_FakeRequestCtx(_FakeAPIResponse(200, {}, text=html)))
+        scanner = SCANNERS["sri"](engine)
+        recorded = []
+
+        async def _rec(**kw):
+            recorded.append(kw)
+            return object()
+
+        scanner.record_finding = _rec
+        out = await scanner.scan_page("http://app.test/page")
+        self.assertEqual(len(out), 1)
+        self.assertEqual(recorded[0]["evidence_type"], "sri_missing")
+
+    async def test_secret_leak_still_scans_non_2xx_body_after_2xx_gate(self):
+        # allow_non_2xx=True の secret_leak は 404 本文の秘密を引き続き走査する（sri の 2xx 限定と両立）。
+        leaked = "AKIA3SVBQ4XZ7KLMN2PQ"
+        engine = _FakeEngine()
+        body = f'{{"error":"not found","debug_key":"{leaked}"}}'
+        engine.browser = _APIBrowser(_FakeRequestCtx(_FakeAPIResponse(404, {}, text=body)))
+        scanner = SCANNERS["secret_leak"](engine)
+
+        async def _rec(**kw):
+            return object()
+
+        scanner.record_finding = _rec
+        out = await scanner.scan_page("http://app.test/api")
+        self.assertEqual(len(out), 1)
+
+    async def test_raw_document_shared_in_flight_single_get(self):
+        # 並列に同一 URL を要求しても直接 GET(_compute)は 1 回だけ（in-flight 共有・Codex #147）。
+        engine = _FakeEngine()
+        engine.browser = _APIBrowser(_FakeRequestCtx(_FakeAPIResponse(200, {"X-Frame-Options": "DENY"})))
+        cj = SCANNERS["clickjacking"](engine)
+        sh = SCANNERS["security_headers"](engine)
+        calls = {"n": 0}
+
+        async def _slow_compute(u):
+            calls["n"] += 1
+            await asyncio.sleep(0.01)  # in-flight 中に他コルーチンへ制御を渡す
+            return {"status": 200, "headers": {"x-frame-options": "DENY"}, "body": "", "url": u}
+
+        cj._compute_raw_document = _slow_compute
+        sh._compute_raw_document = _slow_compute
+        url = "http://app.test/logout"
+        p1, p2 = await asyncio.gather(cj._response_pair(url), sh._response_pair(url))
+        self.assertEqual(calls["n"], 1)  # 二重 GET しない
+        self.assertEqual(p1, p2)
+        self.assertEqual(p1["response"].get("status"), 200)
 
 
 class CurrentPagePairWorkerAwareTests(unittest.TestCase):

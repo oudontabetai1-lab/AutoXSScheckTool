@@ -2,6 +2,7 @@
 Base Scanner Class
 Provides common utilities for all vulnerability scanners.
 """
+import asyncio
 import json
 import re
 import time
@@ -1641,7 +1642,12 @@ class BaseScanner(ABC):
                     from wscan.textio import safe_decode
                     text = safe_decode(await response.body(), limit=50000)
                 except Exception:
+                    # text() も body() も失敗＝本文を得られない。空本文を「本文なし」と黙って
+                    # 扱うと SRI/secret_leak が見逃す（FN）ので observability に記録する（Codex #147）。
                     text = ""
+                    self._record_scan_note(
+                        f"transport_error:{self.CHECK_TYPE}:body_decode_failed"
+                    )
             direct = _DirectResponse(
                 status_code=int(response.status),
                 headers=dict(response.headers),  # Playwright は小文字キーの dict を返す
@@ -1751,15 +1757,17 @@ class BaseScanner(ABC):
             },
         }
 
-    async def _document_body(self, url: str) -> str:
+    async def _document_body(self, url: str, *, allow_non_2xx: bool = True) -> str:
         """content 観測系スキャナ（sri/secret_leak）用に対象応答の**本文**を返す。
 
         `_response_pair`（header 監査用）は非 2xx を本文空の statusless に潰すが、secret_leak は
-        401/403/404/500 等の error/auth 応答本文に漏れた秘密も走査する必要があり、sri も同様に本文を
-        要する。そこで恒久的な非 2xx でも**本文を保持**して返す（transport_error も刻まない・Codex #147 P2）。
-        transient（408/429/5xx）と完全な取得失敗だけを観測失敗として transport_error を刻み
-        `PageDocumentUnavailable` を送出する（checkpoint 未完了→resume 再試行）。取得は header 監査と
-        同じ per-URL raw キャッシュを共有し、1 ページ 1 replay を保つ（副作用 GET を増やさない）。
+        401/403/404/500 等の error/auth 応答本文に漏れた秘密も走査する必要がある（`allow_non_2xx=True`）。
+        一方 **SRI は「ブラウザが実際に描画した document」= 2xx のみを監査すべき**で、恒久非 2xx の
+        error テンプレート本文（integrity 無しの外部 script を含み得る）を監査すると元 URL に対する
+        FP になる。そこで `allow_non_2xx=False` のときは恒久非 2xx を NOT_REACHED（本文 ""）にする
+        （Codex #147）。transient（408/429/5xx）と完全な取得失敗はどちらのモードでも観測失敗として
+        transport_error を刻み `PageDocumentUnavailable` を送出する（checkpoint 未完了→resume 再試行）。
+        取得は header 監査と同じ per-URL raw キャッシュを共有し 1 ページ 1 replay を保つ。
         """
         raw = await self._raw_document_cached(url)
         if not raw:
@@ -1776,6 +1784,13 @@ class BaseScanner(ABC):
                 )
         except (TypeError, ValueError):
             pass
+        if not allow_non_2xx:
+            # SRI 等: 2xx の描画 document のみ監査。恒久非 2xx / status 不明は NOT_REACHED（本文なし）。
+            try:
+                if status is None or not (200 <= int(status) < 300):
+                    return ""
+            except (TypeError, ValueError):
+                return ""
         return raw.get("body", "") or ""
 
     async def _raw_document_cached(self, url: str) -> Optional[dict]:
@@ -1793,14 +1808,30 @@ class BaseScanner(ABC):
                 self.engine._page_obs_raw_cache = cache
             except Exception:
                 cache = None
-        if cache is not None and url in cache:
-            return cache[url]
-        raw = await self._compute_raw_document(url)
-        if cache is not None:
-            # ページ数に比例した無制限成長を防ぐ簡易上限（並列 worker の in-flight を十分に覆う）。
-            if len(cache) > 64:
-                cache.clear()
-            cache[url] = raw
+        if cache is None:
+            return await self._compute_raw_document(url)
+        if url in cache:
+            entry = cache[url]
+            # in-flight（別コルーチンが取得中）なら同じ Future を待って GET を共有する
+            # （並列 page 観測系スキャナが同一 URL を二重 GET しない・Codex #147）。値なら即返す。
+            if isinstance(entry, asyncio.Future):
+                return await entry
+            return entry
+        # ページ数に比例した無制限成長を防ぐ簡易上限（並列 worker の in-flight を十分に覆う）。
+        if len(cache) > 64:
+            cache.clear()
+        fut: asyncio.Future = asyncio.get_event_loop().create_future()
+        cache[url] = fut  # in-flight マーカー（後続の同一 URL はこれを await）
+        try:
+            raw = await self._compute_raw_document(url)
+        except Exception as exc:
+            cache.pop(url, None)  # 失敗は毒キャッシュにしない
+            if not fut.done():
+                fut.set_exception(exc)
+            raise
+        cache[url] = raw  # Future を結果（dict/None）へ置換
+        if not fut.done():
+            fut.set_result(raw)
         return raw
 
     async def _compute_raw_document(self, url: str) -> Optional[dict]:
