@@ -380,6 +380,17 @@ def _community_payloads_enabled_by_config(path: Path | None = None) -> bool:
         return True
 
 
+def _tls_scan_enabled_by_config(path: Path | None = None) -> bool:
+    """config/wscan.yaml の features.tls_scan を読む（既定 off）。"""
+    config_path = path or (CONFIG_DIR / "wscan.yaml")
+    try:
+        with open(config_path, encoding="utf-8") as f:
+            raw = yaml.safe_load(f) or {}
+        return bool((raw.get("features", {}) or {}).get("tls_scan", False))
+    except Exception:
+        return False
+
+
 def _payload_evolution_enabled_by_config(path: Path | None = None) -> bool:
     """config/wscan.yaml の features.payload_evolution を読む。"""
     config_path = path or (CONFIG_DIR / "wscan.yaml")
@@ -554,6 +565,7 @@ class ScanEngine:
         enable_waf_detection: bool = True,
         enable_payload_learning: bool = True,
         enable_community_payloads: Optional[bool] = None,
+        enable_tls_scan: Optional[bool] = None,
         enable_payload_evolution: Optional[bool] = None,
         enable_payload_mutation: Optional[bool] = None,
         enable_adaptive_payloads: bool = True,
@@ -827,6 +839,15 @@ class ScanEngine:
         self.flows: list[ScanFlow] = ScanFlow.list_from_dicts(flows or [])
         if ctf_mode and "ssti" not in self.checks:
             self.checks.append("ssti")
+
+        # TLS 設定不備検査（opt-in）。features.tls_scan=true で tls_scan を checks に追加。
+        # 有効/無効は enable_tls_scan（ダッシュボード/CLI 上書き）優先、未指定なら config。
+        self.tls_scan_enabled: bool = (
+            _tls_scan_enabled_by_config() if enable_tls_scan is None
+            else bool(enable_tls_scan)
+        )
+        if self.tls_scan_enabled and "tls_scan" not in self.checks:
+            self.checks.append("tls_scan")
 
         # CTF flag finder
         self.flag_finder: Optional[FlagFinder] = FlagFinder(ctf_flag_pattern) if ctf_mode else None

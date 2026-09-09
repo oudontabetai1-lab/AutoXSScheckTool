@@ -1,0 +1,5 @@
+# TLS 設定不備検査（features.tls_scan）を使う場合の追加依存（OSS の sslyze）。
+# 本体スキャンには不要な optional 依存。導入すると features.tls_scan / --checks tls_scan が動作する。
+#   pip install -r requirements-tls.txt
+# 注意: sslyze は cryptography/nassl を要求し、環境の cryptography 版を変更する場合があります。
+sslyze>=6.0,<7.0
