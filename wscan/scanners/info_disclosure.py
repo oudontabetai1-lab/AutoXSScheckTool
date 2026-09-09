@@ -60,29 +60,17 @@ _SENSITIVE_PATHS = [
     "/trace.axd",
     "/server-status",
     "/server-info",
-    # 忘れ物 artifact（バージョン管理内部・秘密・バックアップ/ダンプ）。各パスは下の
-    # _CONTENT_PATTERNS または非 HTML fallback で「実際に配信された」ことを確認してから報告する
-    # （soft-404 での誤検知を避ける・0017）。
-    "/.git/config",
-    "/.git/HEAD",
-    "/.svn/entries",
+    # 忘れ物 artifact（バージョン管理内部・秘密・バックアップ）。各パスは下の
+    # _ARTIFACT_PATTERNS または（署名の無いもののみ）soft-404 ベースライン比較付きの
+    # 非 HTML fallback で「実際に配信された」ことを確認してから報告する（0017）。
+    # 既に上に含まれるパス（/.env・/.git/* 等）は重複登録しない。
     "/.hg/requires",
-    "/.env",
     "/.env.bak",
-    "/.env.local",
     "/.htpasswd",
     "/.npmrc",
     "/.aws/credentials",
     "/id_rsa",
-    "/.DS_Store",
-    "/config.php.bak",
-    "/wp-config.php.bak",
     "/web.config.bak",
-    "/backup.sql",
-    "/database.sql",
-    "/dump.sql",
-    "/backup.zip",
-    "/backup.tar.gz",
 ]
 
 # Patterns that confirm a sensitive file was actually served (not a 404 page)
@@ -97,7 +85,12 @@ _CONTENT_PATTERNS: dict[str, str] = {
     r"(?i)microsoft.*ole.*db.*provider.*error":                 "MSSQL OLE DB error",
     r"(?i)syntax error.*near.*line \d+":                        "SQL syntax error",
     r"(?i)(mysql|postgresql|sqlite|oracle)\s+error":            "Database error",
-    # 忘れ物 artifact の確定シグネチャ（0017）。
+}
+
+# 忘れ物 artifact（実際に配信されたファイル）の確定シグネチャ（0017）。これらは
+# _check_sensitive_files でのみ使う。_check_error_page（通常ページ HTML の監査）には
+# 混ぜない——SQL DDL やアーカイブ断片は正常ページにも現れ得て誤検知になるため。
+_ARTIFACT_PATTERNS: dict[str, str] = {
     r"ref:\s*refs/":                                            ".git/HEAD content",
     r"(?:dir\n\d+\n|svn://|\.svn/)":                            ".svn metadata",
     r"^revlogv1|^store\b":                                      ".hg metadata",
@@ -109,6 +102,13 @@ _CONTENT_PATTERNS: dict[str, str] = {
     r"(?i)(?:INSERT INTO|CREATE TABLE|DROP TABLE IF EXISTS)":   "SQL dump content",
     r"^PK\x03\x04":                                             "ZIP archive (possible backup)",
 }
+
+# 署名種別 → その本文に秘匿情報が含まれるため、レポートには本文を平文で保存しない
+# （マスクする）。0017。
+_SECRET_ARTIFACT_LABELS = frozenset({
+    ".htpasswd hashes", ".npmrc registry token", ".aws credentials",
+    "private key file",
+})
 
 # ディレクトリリスティング（autoindex）の確定シグネチャ。
 _DIR_LISTING_PATTERNS = (
@@ -125,11 +125,69 @@ _LISTING_DIRS = (
 )
 
 
+# 単独で autoindex を確定できる強いマーカー（サーバ生成に固有）。
+_DIR_LISTING_STRONG = (
+    re.compile(r'\[To Parent Directory\]', re.IGNORECASE),          # IIS
+    re.compile(r'<a href="\?C=N;O=D">Name</a>', re.IGNORECASE),     # Apache autoindex ソートリンク
+)
+# タイトル/見出しの "Index of /"（単独では弱い＝別途 補強証拠が要る）。
+_DIR_LISTING_TITLE = (
+    re.compile(r"<title>\s*Index of /", re.IGNORECASE),
+    re.compile(r"<h1>\s*Index of /", re.IGNORECASE),
+)
+# autoindex を補強する構造的証拠（親ディレクトリリンク・ファイル行）。
+_DIR_LISTING_CORROBORATION = (
+    re.compile(r'(?i)>\s*(?:Parent Directory|\.\.)\s*<'),           # 親ディレクトリ行
+    re.compile(r'(?i)<a href="[^"?][^"]*">[^<]+</a>\s*'
+               r'\d{1,2}-\w{3}-\d{4}'),                             # Apache のファイル行（名前+日付）
+)
+
+
 def detect_directory_listing(body: str) -> bool:
-    """レスポンス本文が autoindex（ディレクトリリスティング）かを判定する（純粋）。"""
+    """レスポンス本文が autoindex（ディレクトリリスティング）かを判定する（純粋）。
+
+    誤検知を抑えるため、(1) サーバ生成に固有の強いマーカー1つ、または
+    (2) "Index of /" タイトル/見出し＋親ディレクトリ/ファイル行の補強証拠、のいずれかを要求する。
+    タイトル文字列だけの一致では確定しない（"Index of / ..." を含む通常ページを拾わない）。
+    """
     if not body:
         return False
-    return any(p.search(body) for p in _DIR_LISTING_PATTERNS)
+    if any(p.search(body) for p in _DIR_LISTING_STRONG):
+        return True
+    if any(p.search(body) for p in _DIR_LISTING_TITLE):
+        return any(p.search(body) for p in _DIR_LISTING_CORROBORATION)
+    return False
+
+
+# soft-404（存在しないパスにも 200 を返すサーバ）判定のため、まず「まず存在しない」パスを
+# 引いて基準本文を得る。基準が 200 の非 HTML/一定本文なら、その origin では非 HTML fallback を
+# 信頼せず「署名一致のみ」で報告する（0017 のリーク物検査は soft-404 で誤検知しやすいため）。
+_SOFT404_PROBE = "/wscan-nonexistent-probe-8f3a1c9e2b.zzz"
+
+
+def _redact_sensitive(body: str, limit: int = 300) -> str:
+    """秘匿ファイル本文をレポート保存用にマスクする（純粋）。
+
+    key=value / key: value の値、および秘密鍵ブロックを伏字化し、先頭 ``limit`` 文字に切る。
+    レポートには「何が露出したか」の証跡は残しつつ、秘密の実値は残さない。
+    """
+    if not body:
+        return ""
+    text = body[:limit]
+    # 秘密鍵ブロックはヘッダだけ残して本体を伏字化。
+    text = re.sub(
+        r"(-----BEGIN (?:RSA |OPENSSH |EC |DSA )?PRIVATE KEY-----).*",
+        r"\1 [REDACTED]", text, flags=re.DOTALL,
+    )
+    # aws_secret_access_key=..., _authToken=..., password: ... 等の値を伏字化
+    # （行頭とは限らない: npmrc は `//registry...:_authToken=` の形を取る）。
+    text = re.sub(
+        r"(?i)([\w.\-]*(?:key|token|secret|password|passwd|pwd)[\w.\-]*\s*[:=]\s*)\S+",
+        r"\1[REDACTED]", text,
+    )
+    # htpasswd のハッシュ（user:$apr1$...）を伏字化。
+    text = re.sub(r"(:\$(?:apr1|2[aby]|6)\$)\S+", r"\1[REDACTED]", text)
+    return text
 
 # Headers that reveal technology stack
 _TECH_HEADERS = [
@@ -311,6 +369,18 @@ class InfoDisclosureScanner(BaseScanner):
             )
 
         async with httpx.AsyncClient(**kwargs) as client:
+            # soft-404 判定: まず存在しないパスを引く。200/206 が返る（＝存在しないのに
+            # 応答する）サーバでは、非 HTML fallback を信頼せず「署名一致のみ」で報告する。
+            soft404 = False
+            try:
+                probe = await client.get(urljoin(origin, _SOFT404_PROBE))
+                self._record_probe_status(probe)
+                soft404 = probe.status_code in (200, 206)
+            except Exception as exc:
+                self._record_scan_note(
+                    f"probe_error:{self.CHECK_TYPE}:soft404_baseline:{type(exc).__name__}"
+                )
+
             for path in _SENSITIVE_PATHS:
                 target = urljoin(origin, path)
                 try:
@@ -320,28 +390,36 @@ class InfoDisclosureScanner(BaseScanner):
                         continue
                     body = r.text[:4000]
 
-                    # Confirm by content pattern or small non-HTML response
+                    # 確定は「ファイル内容の署名一致」を最優先。エラー系署名と artifact 署名の両方を見る。
                     matched_label = None
-                    for pattern, label in _CONTENT_PATTERNS.items():
+                    for pattern, label in {**_CONTENT_PATTERNS, **_ARTIFACT_PATTERNS}.items():
                         if re.search(pattern, body, re.IGNORECASE | re.DOTALL):
                             matched_label = label
                             break
 
-                    # Fallback: if Content-Type is not HTML and body is non-empty
+                    # Fallback: Content-Type が非 HTML で本文が非空なら疑う。ただし soft-404 の
+                    # origin ではこの一般 fallback を使わない（署名の無い 200 は誤検知になるため）。
                     ct = r.headers.get("content-type", "")
-                    if matched_label is None and "html" not in ct and len(body.strip()) > 20:
+                    if (matched_label is None and not soft404
+                            and "html" not in ct and len(body.strip()) > 20):
                         matched_label = "non-HTML content (possible sensitive file)"
 
                     if matched_label is None:
                         continue
 
                     severity = "critical" if ".env" in path or ".git" in path else "high"
+                    # 秘匿情報を含むファイルはレポートに本文を平文で残さない（マスク）。
+                    stored_body = (
+                        _redact_sensitive(body)
+                        if matched_label in _SECRET_ARTIFACT_LABELS
+                        else body
+                    )
                     pair = {
                         "request": {"url": target},
                         "response": {
                             "status": r.status_code,
                             "headers": dict(r.headers),
-                            "body": body,
+                            "body": stored_body,
                         },
                     }
                     finding = await self.record_finding(
@@ -483,7 +561,7 @@ class InfoDisclosureScanner(BaseScanner):
         return response
 
     def _classify_sensitive_body(self, body: str, content_type: str) -> str | None:
-        for pattern, label in _CONTENT_PATTERNS.items():
+        for pattern, label in {**_CONTENT_PATTERNS, **_ARTIFACT_PATTERNS}.items():
             if re.search(pattern, body, re.IGNORECASE | re.DOTALL):
                 return label
         if "html" not in content_type and len((body or "").strip()) > 20:
