@@ -128,6 +128,7 @@ class AgentRunState:
     evidence_errors: list[str] = field(default_factory=list)
     checkpoint_generation: int = 0
     work_queue: list[AgentWorkItem] = field(default_factory=list)
+    hypotheses: list[dict] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         data = asdict(self)
@@ -359,7 +360,8 @@ class AgentHarness:
         for item in self.state.work_queue:
             if item.work_id == work_id:
                 item.status = status
-                item.summary = self._redact_runtime(redact_text(str(summary)))[:12000]
+                raw_summary = self._redact_runtime(str(summary))[:1000]
+                item.summary = redact_text(raw_summary)
                 self.checkpoint()
                 return
         raise KeyError(work_id)
@@ -444,6 +446,39 @@ class AgentHarness:
         if hypotheses_count is not None:
             self.state.hypotheses_count = max(0, int(hypotheses_count))
         self.checkpoint()
+
+    def note_hypotheses(self, hypotheses: Iterable[dict]) -> None:
+        """nonce 検証済み仮説を構造化して checkpoint に保持する。"""
+        existing = {
+            str(item.get("candidate_id", "")): item for item in self.state.hypotheses
+        }
+        for hypothesis in hypotheses:
+            safe = self._sanitize_value(dict(hypothesis))
+            candidate_id = str(safe.get("candidate_id", ""))
+            if candidate_id:
+                existing[candidate_id] = safe
+        self.state.hypotheses = list(existing.values())
+        self.state.hypotheses_count = len(self.state.hypotheses)
+        self.checkpoint()
+
+    def mark_dynamic_verification(self, candidate_id: str, reproduced: bool) -> None:
+        for item in self.state.hypotheses:
+            if item.get("candidate_id") == candidate_id:
+                item["dynamic_verified"] = bool(reproduced)
+                self.checkpoint()
+                return
+        raise KeyError(candidate_id)
+
+    def _sanitize_value(self, value):
+        if isinstance(value, dict):
+            return {str(key): self._sanitize_value(item) for key, item in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [self._sanitize_value(item) for item in value]
+        if isinstance(value, str):
+            # request_logger の一般 redaction regex に巨大な敵対文字列を直接渡さない。
+            text = self._redact_runtime(value)[:1000]
+            return redact_text(text)
+        return value
 
     def finalize(
         self,
@@ -547,6 +582,7 @@ class AgentHarness:
             "visited_url_count": len(self.state.visited_urls),
             "tested_target_count": len(self.state.tested_targets),
             "hypotheses_count": self.state.hypotheses_count,
+            "hypotheses": list(self.state.hypotheses),
             "coverage_complete": bool(coverage_complete),
             "coverage_gaps": list(self.state.coverage_gaps),
             "stop_reason": self.state.stop_reason,

@@ -170,3 +170,22 @@ def test_requeue_role_resets_completed_authentication(tmp_path):
     harness.finish_work(auth.work_id, WorkStatus.COMPLETE, summary="AUTH COMPLETE")
     assert harness.requeue_role(AgentRole.AUTHENTICATOR) == 1
     assert harness.next_work().work_id == auth.work_id
+
+
+def test_structured_hypotheses_survive_resume_without_session_nonce(tmp_path):
+    harness = AgentHarness(tmp_path, spec(max_steps=8))
+    hypothesis = {
+        "candidate_id": "candidate-1",
+        "check_type": "xss",
+        "severity": "high",
+        "url": "http://fixture.test/search",
+        "field_name": "q",
+        "payload": "<svg/onload=alert(1)>",
+        "evidence": "dialog observed",
+        "dynamic_verified": False,
+    }
+    harness.note_hypotheses([hypothesis])
+    resumed = AgentHarness(tmp_path, spec(max_steps=8), resume=True)
+    assert resumed.state.hypotheses == [hypothesis]
+    resumed.mark_dynamic_verification("candidate-1", True)
+    assert resumed.state.hypotheses[0]["dynamic_verified"] is True

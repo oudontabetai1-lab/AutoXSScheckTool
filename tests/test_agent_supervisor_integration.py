@@ -44,6 +44,16 @@ async def test_supervisor_runs_explore_probe_verify_and_adversarial_review(tmp_p
             budgets.append(_kwargs["max_steps"])
             task = self.kwargs["task"]
             if "Act only as the Explorer" in task:
+                await self.kwargs["register_new_step_callback"](
+                    types.SimpleNamespace(url="http://fixture.test/observed-only"),
+                    types.SimpleNamespace(action=[]),
+                    1,
+                )
+                await self.kwargs["register_new_step_callback"](
+                    types.SimpleNamespace(url="http://idp.test/login"),
+                    types.SimpleNamespace(action=[]),
+                    2,
+                )
                 return _History("PAGE_FOUND: http://fixture.test/search\nEXPLORATION COMPLETE")
             if "probe specialist" in task:
                 nonce = re.search(r"WSCAN-NONCE:([^\s]+)", self.kwargs["extend_system_message"]).group(1)
@@ -51,15 +61,22 @@ async def test_supervisor_runs_explore_probe_verify_and_adversarial_review(tmp_p
                     f"WSCAN-NONCE:{nonce}\nVULNERABILITY FOUND:\n"
                     "Type: xss\nSeverity: high\nURL: http://fixture.test/search\n"
                     "Field: q\nPayload: <svg/onload=alert(1)>\n"
-                    "Evidence: dialog observed\nPROBE COMPLETE"
+                    f"Evidence: {'A' * 13050}\n"
+                    f"WSCAN-NONCE:{nonce}\nVULNERABILITY FOUND:\n"
+                    "Type: xss\nSeverity: high\nURL: http://fixture.test/search\n"
+                    "Field: r\nPayload: <svg/onload=alert(2)>\n"
+                    "Evidence: second dialog observed\nPROBE COMPLETE"
                 )
             if "independent verifier" in task:
                 # Fresh episode repeats the same nonce-bound evidence.
                 nonce = re.search(r"WSCAN-NONCE:([^\s]+)", self.kwargs["extend_system_message"]).group(1)
-                block = task[task.find("WSCAN-CANDIDATE"):].replace(
-                    "WSCAN-CANDIDATE", f"WSCAN-NONCE:{nonce}", 1
+                field = "r" if '"field_name": "r"' in task else "q"
+                return _History(
+                    f"WSCAN-NONCE:{nonce}\nVULNERABILITY FOUND:\n"
+                    "Type: xss\nSeverity: high\nURL: http://fixture.test/search\n"
+                    f"Field: {field}\nPayload: <svg/onload=alert(1)>\n"
+                    "Evidence: dialog observed again\nVERIFICATION COMPLETE"
                 )
-                return _History(block + "\nVERIFICATION COMPLETE")
             return _History("REVIEW COMPLETE")
 
     class _Browser:
@@ -74,6 +91,7 @@ async def test_supervisor_runs_explore_probe_verify_and_adversarial_review(tmp_p
     module.Browser = _Browser
     scanner = AgentBrowserScanner(
         "http://fixture.test", checks=["xss"], max_steps=40,
+        access_urls=["http://idp.test"],
         harness_output_dir=tmp_path,
     )
     with patch("wscan.llm_agent_browser._build_llm", return_value=object()), patch(
@@ -84,12 +102,16 @@ async def test_supervisor_runs_explore_probe_verify_and_adversarial_review(tmp_p
     assert any("Act only as the Explorer" in task for task in tasks)
     assert budgets[0] <= 20  # 40-step run の半分以上を後続 role に予約する。
     assert any("probe specialist" in task for task in tasks)
+    assert any("fixture.test/observed-only" in task for task in tasks)
+    assert not any("probe specialist for http://idp.test" in task for task in tasks)
     assert any("independent verifier" in task for task in tasks)
+    assert sum("independent verifier" in task for task in tasks) == 2
     assert any("adversarial reviewer" in task for task in tasks)
     assert result.harness_status == "complete"
     assert result.coverage_gaps == []
-    assert result.findings and result.findings[0].dynamic_verified is True
-    assert result.findings[0].agent_verified is False
+    assert len(result.findings) == 2
+    assert all(finding.dynamic_verified for finding in result.findings)
+    assert all(finding.agent_verified is False for finding in result.findings)
 
 
 @pytest.mark.asyncio
