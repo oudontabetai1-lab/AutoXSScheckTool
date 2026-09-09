@@ -494,7 +494,8 @@ class AgentHarness:
             self.state.stop_reason = self.state.stop_reason or "cancelled"
         elif error:
             self.state.status = AgentRunStatus.FAILED
-            self.state.last_error = redact_text(str(error))[:1000]
+            safe_error = self._redact_runtime(str(error))[:1000]
+            self.state.last_error = redact_text(safe_error)
         elif self._evidence_failed or self.state.evidence_errors:
             self.state.status = AgentRunStatus.EVIDENCE_INCOMPLETE
         elif success and coverage_complete and not self.state.coverage_gaps and not self.state.stop_reason:

@@ -189,3 +189,14 @@ def test_structured_hypotheses_survive_resume_without_session_nonce(tmp_path):
     assert resumed.state.hypotheses == [hypothesis]
     resumed.mark_dynamic_verification("candidate-1", True)
     assert resumed.state.hypotheses[0]["dynamic_verified"] is True
+
+
+def test_finalize_redacts_runtime_secret_from_persisted_error(tmp_path):
+    harness = AgentHarness(tmp_path, spec(), secret_values=["error-secret"])
+    harness.finalize(
+        success=False, coverage_complete=False,
+        error="dependency rejected error-secret",
+    )
+    state = (tmp_path / "agent_state.json").read_text()
+    assert "error-secret" not in state
+    assert "<redacted>" in state

@@ -399,6 +399,7 @@ class AgentScanResult:
     memory: AgentMemory = field(default_factory=AgentMemory)
     harness_status: str = ""
     coverage_gaps: list[str] = field(default_factory=list)
+    preserve_existing_artifacts: bool = False
 
 
 # ── LLM ファクトリ ──────────────────────────────────────────────────────────
@@ -660,6 +661,9 @@ class AgentBrowserScanner:
         self._episode_offset = 0
         self._active_episode_id = "legacy"
         self._harness: AgentHarness | None = None
+        self._runtime_work_targets: dict[str, str] = {}
+        self._runtime_observed_urls: list[str] = []
+        self._runtime_hypotheses: dict[str, dict] = {}
         self._memory = AgentMemory()
         self._session_nonce = secrets.token_urlsafe(16)
 
@@ -1107,17 +1111,26 @@ class AgentBrowserScanner:
                 )
             except ValueError as exc:
                 result.error = str(exc)
+                result.preserve_existing_artifacts = bool(
+                    self.harness_output_dir
+                    and (self.harness_output_dir / "agent_state.json").exists()
+                )
                 return result
             if self.resume and not self.storage_state:
                 # BrowserSession は process を跨いで cookie を保持しない。storage state が
                 # 無い resume では、完了済みでも認証 episode を必ずやり直す。
                 self._harness.requeue_role(AgentRole.AUTHENTICATOR)
+            if self.resume:
+                # redacted checkpoint から executable URL を安全に再発見する。
+                self._harness.requeue_role(AgentRole.EXPLORER)
+                # verifier に元 URL を渡せるよう、probe も再実行して候補を復元する。
+                self._harness.requeue_role(AgentRole.PROBE_SPECIALIST)
             if not self._harness.state.work_queue:
                 if self.login_url and (
                     self.auth_user or self.auth_pass or self.totp_secret or self.storage_state
                 ):
-                    self._harness.enqueue(AgentRole.AUTHENTICATOR, self.login_url)
-                self._harness.enqueue(AgentRole.EXPLORER, self.target_url)
+                    self._enqueue_work(AgentRole.AUTHENTICATOR, self.login_url)
+                self._enqueue_work(AgentRole.EXPLORER, self.target_url)
 
         task = self._build_recon_task() if self.recon_mode else self._build_task()
         browser = None
@@ -1265,6 +1278,20 @@ class AgentBrowserScanner:
                     work = self._harness.next_work()
                     if work is None:
                         break
+                    if work.role == AgentRole.PROBE_SPECIALIST and not self._work_target(work):
+                        self._harness.finish_work(
+                            work.work_id,
+                            WorkStatus.BLOCKED,
+                            summary="executable URL was not rediscovered after resume",
+                        )
+                        continue
+                    if work.role == AgentRole.VERIFIER and not self._candidate_for_work(work):
+                        self._harness.finish_work(
+                            work.work_id,
+                            WorkStatus.BLOCKED,
+                            summary="executable candidate was not reproduced after resume",
+                        )
+                        continue
                     self._active_episode_id = work.work_id
                     self._episode_offset = self._harness.session_consumed_steps
                     self._harness.set_phase(
@@ -1321,10 +1348,11 @@ class AgentBrowserScanner:
                         for finding in episode_findings:
                             data = finding.to_dict()
                             data["candidate_id"] = _candidate_id(finding)
+                            self._runtime_hypotheses[data["candidate_id"]] = dict(data)
                             checkpoint_findings.append(data)
                         self._harness.note_hypotheses(checkpoint_findings)
                         for finding in episode_findings:
-                            self._harness.enqueue(
+                            self._enqueue_work(
                                 AgentRole.VERIFIER,
                                 _candidate_id(finding),
                                 check_type=finding.check_type,
@@ -1333,13 +1361,7 @@ class AgentBrowserScanner:
                         reproduced = _parse_findings_from_text(
                             episode_text, nonce=episode_nonce
                         )
-                        candidate = next(
-                            (
-                                item for item in self._harness.state.hypotheses
-                                if item.get("candidate_id") == work.target
-                            ),
-                            None,
-                        )
+                        candidate = self._candidate_for_work(work)
                         is_reproduced = bool(candidate) and any(
                             (finding.check_type, finding.url, finding.field_name)
                             == (
@@ -1364,7 +1386,11 @@ class AgentBrowserScanner:
                     if work.role == AgentRole.EXPLORER:
                         page_found_re = re.compile(r"PAGE_FOUND:\s*(https?://\S+)", re.IGNORECASE)
                         discovered = []
-                        for url in [self.target_url, *self._harness.state.visited_urls]:
+                        for url in [
+                            self.target_url,
+                            *self._runtime_observed_urls,
+                            *self._harness.state.visited_urls,
+                        ]:
                             if self.is_security_probe_allowed(url) and url not in discovered:
                                 discovered.append(url)
                         for match in page_found_re.finditer(episode_text):
@@ -1374,10 +1400,12 @@ class AgentBrowserScanner:
                         if not self.recon_mode:
                             for url in discovered:
                                 for check in self.checks:
-                                    self._harness.enqueue(
+                                    self._enqueue_work(
                                         AgentRole.PROBE_SPECIALIST, url, check_type=check
                                     )
-                            self._harness.enqueue(AgentRole.ADVERSARIAL_REVIEWER, self.target_url)
+                            self._enqueue_work(
+                                AgentRole.ADVERSARIAL_REVIEWER, self.target_url
+                            )
                         self._memory.visited_urls = list(dict.fromkeys([
                             *self._memory.visited_urls, *discovered
                         ]))
@@ -1541,6 +1569,28 @@ class AgentBrowserScanner:
     # Helpers
     # ------------------------------------------------------------------
 
+    def _enqueue_work(self, role: AgentRole, target: str, *, check_type: str = ""):
+        item = self._harness.enqueue(role, target, check_type=check_type)
+        self._runtime_work_targets[item.work_id] = str(target)
+        return item
+
+    def _work_target(self, work) -> str:
+        target = self._runtime_work_targets.get(work.work_id, work.target)
+        return "" if "<redacted>" in target else target
+
+    def _candidate_for_work(self, work) -> dict:
+        candidate = self._runtime_hypotheses.get(work.target)
+        if candidate:
+            return candidate
+        candidate = next(
+            (
+                item for item in (self._harness.state.hypotheses if self._harness else [])
+                if item.get("candidate_id") == work.target
+            ),
+            {},
+        )
+        return {} if "<redacted>" in str(candidate.get("url", "")) else candidate
+
     async def _harness_should_stop(self) -> bool:
         return bool(self._harness and self._harness.should_stop)
 
@@ -1564,7 +1614,10 @@ class AgentBrowserScanner:
             AgentRole.ADVERSARIAL_REVIEWER: "REVIEW COMPLETE",
         }[work.role]
         upper = str(text or "").upper()
-        if work.role == AgentRole.ADVERSARIAL_REVIEWER and "COVERAGE GAP" in upper:
+        has_reported_gap = any(
+            line.strip().startswith("COVERAGE GAP:") for line in upper.splitlines()
+        )
+        if work.role == AgentRole.ADVERSARIAL_REVIEWER and has_reported_gap:
             return False
         return marker in upper
 
@@ -1592,8 +1645,9 @@ class AgentBrowserScanner:
                 "reachable frontier is empty."
             )
         if work.role == AgentRole.PROBE_SPECIALIST:
+            target = self._work_target(work)
             return (
-                f"Act only as the {work.check_type} probe specialist for {work.target}. "
+                f"Act only as the {work.check_type} probe specialist for {target}. "
                 f"Navigate there and test every form field and URL parameter on that page for "
                 f"{work.check_type}. Use a normal-value negative control for every payload. "
                 "Report only directly observed hypotheses using the required nonce block. "
@@ -1601,13 +1655,7 @@ class AgentBrowserScanner:
                 "Output PROBE COMPLETE only after every input on this page has a recorded result."
             )
         if work.role == AgentRole.VERIFIER:
-            candidate = next(
-                (
-                    item for item in (self._harness.state.hypotheses if self._harness else [])
-                    if item.get("candidate_id") == work.target
-                ),
-                {},
-            )
+            candidate = self._candidate_for_work(work)
             candidate_json = json.dumps(
                 {
                     key: value for key, value in candidate.items()
@@ -1638,7 +1686,7 @@ class AgentBrowserScanner:
         return (
             "Act as an adversarial reviewer. Do not submit payloads. Challenge false positives, "
             "missing pages, missing input/check pairs, auth loss, and unsupported completion claims. "
-            "Return a concise list of coverage gaps, or state REVIEW COMPLETE only when the ledger "
+            "Return each actual gap as `COVERAGE GAP: <description>`, or state REVIEW COMPLETE only when the ledger "
             "shows every discovered page and input was tested for every requested check.\n"
             + "\nDeterministic work ledger:\n" + ledger + "\nEvidence excerpt:\n" + evidence
         )
@@ -1840,6 +1888,8 @@ class AgentBrowserScanner:
         # prompt 指示を外した場合にも payload 投入を実行時に止める。外部 IdP 等の
         # configured login page だけは認証情報の入力を許可する。
         current_url = str(getattr(state, "url", "") or "")
+        if current_url.startswith(("http://", "https://")) and current_url not in self._runtime_observed_urls:
+            self._runtime_observed_urls.append(current_url)
         planned_actions = []
         try:
             planned_actions = (

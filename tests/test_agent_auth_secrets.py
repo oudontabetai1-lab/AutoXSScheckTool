@@ -70,3 +70,28 @@ async def test_engine_redacts_reflected_login_secrets_from_artifacts(tmp_path):
     assert "user-secret" not in artifacts
     assert "password-secret" not in artifacts
     assert "<redacted>" in artifacts
+
+
+@pytest.mark.asyncio
+async def test_rejected_non_resume_invocation_preserves_existing_artifacts(tmp_path):
+    from wscan.agent_engine import AgentEngine
+
+    evidence = tmp_path / "evidence.json"
+    reproduction = tmp_path / "reproduction.json"
+    evidence.write_text("original evidence")
+    reproduction.write_text("original reproduction")
+    result = SimpleNamespace(
+        findings=[], steps_taken=0, success=False,
+        error="Agent output already contains harness state",
+        final_summary="", preserve_existing_artifacts=True,
+    )
+    with patch("wscan.llm_agent_browser.AgentBrowserScanner") as scanner:
+        scanner.return_value.run = AsyncMock(return_value=result)
+        engine = AgentEngine(
+            "https://app.example.test", output_dir=str(tmp_path), open_report=False
+        )
+        returned = await engine.run()
+
+    assert returned is result
+    assert evidence.read_text() == "original evidence"
+    assert reproduction.read_text() == "original reproduction"

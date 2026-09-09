@@ -73,6 +73,12 @@ def _convert_agent_findings(agent_findings: list) -> list:
                     getattr(af, "dynamic_verified", False)
                 )
             },
+            verification_note=(
+                "Independent Agent dynamic replay observed; "
+                "deterministic scanner verification is still pending."
+                if getattr(af, "dynamic_verified", False)
+                else ""
+            ),
             source="agent",
             agent_verified=getattr(af, "agent_verified", False),
         )
@@ -204,6 +210,14 @@ class AgentEngine:
         )
 
         result: AgentScanResult = await scanner.run()
+
+        if getattr(result, "preserve_existing_artifacts", False):
+            # `--resume` なしで既存 run directory を指定した拒否ケース。以前の
+            # evidence/reproduction を空の失敗結果で上書きしない。
+            console.print(
+                f"[bold red]Agent scan FAILED: {result.error}[/bold red]"
+            )
+            return result
 
         # AgentFindings → 共通 Finding 変換は Hybrid 偵察でも同じ経路を使う。
         findings = _convert_agent_findings(result.findings)

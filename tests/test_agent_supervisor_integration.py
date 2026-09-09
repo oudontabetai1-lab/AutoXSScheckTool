@@ -10,7 +10,7 @@ from unittest.mock import patch
 import pytest
 
 from wscan.llm_agent_browser import AgentBrowserScanner
-from wscan.agent_harness import AgentHarness, AgentRunSpec
+from wscan.agent_harness import AgentHarness, AgentRole, AgentRunSpec
 
 
 class _History:
@@ -137,3 +137,47 @@ async def test_pre_execution_callback_does_not_claim_action_was_executed(tmp_pat
     record = json.loads((tmp_path / "agent_steps.jsonl").read_text())
     assert record["proposed_actions"]
     assert record["executed_actions"] == []
+
+
+def test_runtime_keeps_executable_url_while_checkpoint_redacts_it(tmp_path):
+    scanner = AgentBrowserScanner("http://fixture.test")
+    scanner._harness = AgentHarness(
+        tmp_path,
+        AgentRunSpec(
+            mode="agent", target_url="http://fixture.test",
+            target_urls=("http://fixture.test",), access_urls=(),
+            exclude_urls=(), exclude_fields=(), checks=("xss",),
+            provider="ollama", model="exact", max_steps=5,
+        ),
+    )
+    raw = "http://fixture.test/private?token=executable-secret"
+    item = scanner._enqueue_work(AgentRole.PROBE_SPECIALIST, raw, check_type="xss")
+    assert scanner._work_target(item) == raw
+    checkpoint = (tmp_path / "agent_state.json").read_text()
+    assert "executable-secret" not in checkpoint
+    assert "<redacted>" in checkpoint
+
+
+def test_reviewer_accepts_explicit_negated_no_gap_conclusion():
+    work = types.SimpleNamespace(role=AgentRole.ADVERSARIAL_REVIEWER)
+    assert AgentBrowserScanner._work_completion_claimed(
+        work, "No coverage gaps found. REVIEW COMPLETE"
+    )
+    assert not AgentBrowserScanner._work_completion_claimed(
+        work, "COVERAGE GAP: /admin not tested\nREVIEW COMPLETE"
+    )
+
+
+def test_dynamic_agent_replay_does_not_impersonate_deterministic_verification():
+    from wscan.agent_engine import _convert_agent_findings
+    from wscan.llm_agent_browser import AgentFinding
+
+    finding = AgentFinding(
+        check_type="xss", severity="high", url="http://fixture.test/search",
+        field_name="q", payload="x", evidence="dialog", dynamic_verified=True,
+    )
+    converted = _convert_agent_findings([finding])[0]
+    assert converted.verification_state == "assumed"
+    assert converted.agent_verified is False
+    assert converted.evidence_details["agent_dynamic_reproduced"] is True
+    assert "deterministic scanner verification is still pending" in converted.verification_note
