@@ -283,6 +283,45 @@ class OutdatedComponentScannerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("CVE-2020-11022", recorded[0]["evidence_details"]["cves"])
         self.assertEqual(recorded[0]["severity"], "medium")  # MODERATE→medium
 
+    async def test_reports_eol_cms(self):
+        # クロールで検出した CMS（detected_cms）も EOL 照会対象にする。
+        engine, scanner = self._scanner(enabled=True)
+
+        class _Cms:
+            name = "drupal"
+            version = "7"
+            is_known = True
+
+        engine.detected_cms = _Cms()
+
+        async def _pair(url):
+            return {"request": {"url": url}, "response": {"status": 200, "headers": {}, "body": ""}}
+
+        async def _check(comp, **kw):
+            if comp.source == "cms":
+                return {"product": comp.product, "version": comp.version, "source": "cms",
+                        "slug": "drupal", "cycle": "7", "eol": True, "is_eol": True, "latest": "11"}
+            return None
+
+        recorded = []
+
+        async def _rec(**kw):
+            recorded.append(kw)
+            return object()
+
+        scanner._response_pair = _pair
+        scanner.record_finding = _rec
+        import wscan.component_intel as _ci
+        orig = _ci.check_component_eol
+        _ci.check_component_eol = _check
+        try:
+            out = await scanner.scan_page("http://x/")
+        finally:
+            _ci.check_component_eol = orig
+        self.assertEqual(len(out), 1)
+        self.assertEqual(recorded[0]["evidence_details"]["source"], "cms")
+        self.assertIn("CMS 検出", recorded[0]["evidence"])
+
     async def test_supported_component_yields_no_finding(self):
         engine, scanner = self._scanner(enabled=True)
 

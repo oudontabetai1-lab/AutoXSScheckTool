@@ -88,17 +88,25 @@ class OutdatedComponentScanner(BaseScanner):
         osv_base = cfg.get("osv_base_url") or component_intel.DEFAULT_OSV_BASE_URL
         timeout = float(cfg.get("timeout") or component_intel.DEFAULT_TIMEOUT)
 
+        # EOL 照会対象＝技術バナー（ヘッダ）＋クロール中に検出した CMS（あれば）。
+        components = list(component_intel.parse_components_from_headers(headers))
+        cms = getattr(self.engine, "detected_cms", None)
+        if cms is not None and getattr(cms, "is_known", False) and getattr(cms, "version", ""):
+            components.append(component_intel.Component(
+                product=cms.name, version=cms.version, source="cms",
+            ))
+
         findings: list[Finding] = []
-        # ① 技術バナー → endoflife.date で EOL 判定
-        findings.extend(await self._scan_eol(url, pair, headers, eol_base, timeout))
+        # ① 技術バナー/CMS → endoflife.date で EOL 判定
+        findings.extend(await self._scan_eol(url, pair, components, eol_base, timeout))
         # ② 外部 JS ライブラリ → OSV.dev で既知脆弱性照会
         findings.extend(await self._scan_osv(url, pair, body, osv_base, timeout))
         return findings
 
-    async def _scan_eol(self, url, pair, headers, base_url, timeout) -> list[Finding]:
+    async def _scan_eol(self, url, pair, components, base_url, timeout) -> list[Finding]:
         findings: list[Finding] = []
         seen: set[tuple[str, str]] = set()
-        for comp in component_intel.parse_components_from_headers(headers):
+        for comp in components:
             key = (comp.product, comp.version)
             if key in seen:
                 continue
@@ -115,8 +123,9 @@ class OutdatedComponentScanner(BaseScanner):
             eol_val = result.get("eol")
             latest = result.get("latest") or ""
             eol_desc = "サポート終了済み" if eol_val is True else f"{eol_val} にサポート終了"
+            origin = "CMS 検出" if comp.source == "cms" else f"{comp.source} ヘッダで開示"
             evidence = (
-                f"{comp.product} {comp.version}（{comp.source} ヘッダで開示）は "
+                f"{comp.product} {comp.version}（{origin}）は "
                 f"{eol_desc}（endoflife.date: cycle {result.get('cycle')}"
                 + (f", 最新 {latest}" if latest else "")
                 + "）。EOL 版はセキュリティ更新が提供されず既知の脆弱性が残存します。"
