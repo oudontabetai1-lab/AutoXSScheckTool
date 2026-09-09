@@ -161,3 +161,12 @@ def test_runtime_secret_values_are_removed_from_trace_and_checkpoint(tmp_path):
     artifacts = (tmp_path / "agent_steps.jsonl").read_text() + (tmp_path / "agent_state.json").read_text()
     assert "unlabeled-secret" not in artifacts
     assert "<redacted>" in artifacts
+
+
+def test_requeue_role_resets_completed_authentication(tmp_path):
+    harness = AgentHarness(tmp_path, spec())
+    auth = harness.enqueue(AgentRole.AUTHENTICATOR, "http://fixture.test/login")
+    harness.next_work()
+    harness.finish_work(auth.work_id, WorkStatus.COMPLETE, summary="AUTH COMPLETE")
+    assert harness.requeue_role(AgentRole.AUTHENTICATOR) == 1
+    assert harness.next_work().work_id == auth.work_id

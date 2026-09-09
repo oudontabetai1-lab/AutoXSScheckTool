@@ -1093,8 +1093,14 @@ class AgentBrowserScanner:
             except ValueError as exc:
                 result.error = str(exc)
                 return result
+            if self.resume and not self.storage_state:
+                # BrowserSession は process を跨いで cookie を保持しない。storage state が
+                # 無い resume では、完了済みでも認証 episode を必ずやり直す。
+                self._harness.requeue_role(AgentRole.AUTHENTICATOR)
             if not self._harness.state.work_queue:
-                if self.login_url and (self.auth_user or self.storage_state):
+                if self.login_url and (
+                    self.auth_user or self.auth_pass or self.totp_secret or self.storage_state
+                ):
                     self._harness.enqueue(AgentRole.AUTHENTICATOR, self.login_url)
                 self._harness.enqueue(AgentRole.EXPLORER, self.target_url)
 
@@ -1264,10 +1270,7 @@ class AgentBrowserScanner:
                         item.status in {WorkStatus.PLANNED, WorkStatus.INCONCLUSIVE}
                         for item in self._harness.state.work_queue
                     ) + 1
-                    episode_budget = min(
-                        self._harness.remaining_steps,
-                        max(3, self._harness.remaining_steps // pending),
-                    )
+                    episode_budget = self._episode_budget(work, pending)
                     episode_kwargs = dict(agent_kwargs)
                     episode_kwargs["task"] = self._build_work_task(
                         work,
@@ -1507,6 +1510,16 @@ class AgentBrowserScanner:
 
     async def _harness_should_stop(self) -> bool:
         return bool(self._harness and self._harness.should_stop)
+
+    def _episode_budget(self, work, pending: int) -> int:
+        """後続の probe/verify/review を飢餓にしない global budget 配分。"""
+        remaining = self._harness.remaining_steps if self._harness else self.max_steps
+        if work.role == AgentRole.AUTHENTICATOR:
+            return min(remaining, max(3, min(15, remaining // 5)))
+        if work.role == AgentRole.EXPLORER and not self.recon_mode:
+            # 未発見ページ数はまだ不明なので、最低半分を後から生成する work に予約する。
+            return min(remaining, max(3, min(25, remaining // 2)))
+        return min(remaining, max(1, remaining // max(1, pending)))
 
     @staticmethod
     def _work_completion_claimed(work, text: str) -> bool:
@@ -1777,6 +1790,7 @@ class AgentBrowserScanner:
         # prompt 指示を外した場合にも payload 投入を実行時に止める。外部 IdP 等の
         # configured login page だけは認証情報の入力を許可する。
         current_url = str(getattr(state, "url", "") or "")
+        planned_actions = []
         try:
             planned_actions = (
                 output.action if isinstance(output.action, list) else [output.action]
@@ -1819,15 +1833,14 @@ class AgentBrowserScanner:
 
         if self._harness:
             try:
-                planned = (
-                    output.action if isinstance(output.action, list) else [output.action]
-                ) if getattr(output, "action", None) else []
                 self._harness.record_step(
                     episode_id=self._active_episode_id,
                     local_step=self._step_count,
                     url=current_url,
-                    proposed_actions=planned,
-                    executed_actions=planned,
+                    proposed_actions=planned_actions,
+                    # callback は action 実行前。許可済み proposal としてのみ残し、
+                    # 実行済みであるとは主張しない。
+                    executed_actions=(),
                     blocked_count=locals().get("blocked_count", 0),
                 )
             except Exception:

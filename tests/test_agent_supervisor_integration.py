@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import re
+import json
 import sys
 import types
 from unittest.mock import patch
@@ -9,6 +10,7 @@ from unittest.mock import patch
 import pytest
 
 from wscan.llm_agent_browser import AgentBrowserScanner
+from wscan.agent_harness import AgentHarness, AgentRunSpec
 
 
 class _History:
@@ -31,6 +33,7 @@ class _History:
 @pytest.mark.asyncio
 async def test_supervisor_runs_explore_probe_verify_and_adversarial_review(tmp_path):
     tasks = []
+    budgets = []
 
     class _Agent:
         def __init__(self, **kwargs):
@@ -38,6 +41,7 @@ async def test_supervisor_runs_explore_probe_verify_and_adversarial_review(tmp_p
             tasks.append(kwargs["task"])
 
         async def run(self, **_kwargs):
+            budgets.append(_kwargs["max_steps"])
             task = self.kwargs["task"]
             if "Act only as the Explorer" in task:
                 return _History("PAGE_FOUND: http://fixture.test/search\nEXPLORATION COMPLETE")
@@ -78,6 +82,7 @@ async def test_supervisor_runs_explore_probe_verify_and_adversarial_review(tmp_p
         result = await scanner.run()
 
     assert any("Act only as the Explorer" in task for task in tasks)
+    assert budgets[0] <= 20  # 40-step run の半分以上を後続 role に予約する。
     assert any("probe specialist" in task for task in tasks)
     assert any("independent verifier" in task for task in tasks)
     assert any("adversarial reviewer" in task for task in tasks)
@@ -85,3 +90,28 @@ async def test_supervisor_runs_explore_probe_verify_and_adversarial_review(tmp_p
     assert result.coverage_gaps == []
     assert result.findings and result.findings[0].dynamic_verified is True
     assert result.findings[0].agent_verified is False
+
+
+@pytest.mark.asyncio
+async def test_pre_execution_callback_does_not_claim_action_was_executed(tmp_path):
+    class _Action:
+        def model_dump(self, **_kwargs):
+            return {"click": {"index": 1}}
+
+    scanner = AgentBrowserScanner("http://fixture.test")
+    scanner._harness = AgentHarness(
+        tmp_path,
+        AgentRunSpec(
+            mode="agent", target_url="http://fixture.test",
+            target_urls=("http://fixture.test",), access_urls=(),
+            exclude_urls=(), exclude_fields=(), checks=("xss",),
+            provider="ollama", model="exact", max_steps=5,
+        ),
+    )
+    scanner._active_episode_id = "episode"
+    output = types.SimpleNamespace(action=[_Action()])
+    await scanner._on_step(types.SimpleNamespace(url="http://fixture.test"), output, 1)
+
+    record = json.loads((tmp_path / "agent_steps.jsonl").read_text())
+    assert record["proposed_actions"]
+    assert record["executed_actions"] == []

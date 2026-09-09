@@ -627,6 +627,7 @@ async def _run_hybrid_recon_with_retries(
     now_fn=None,
     sleep_fn=None,
     max_retries=None,
+    on_retry=None,
 ):
     """時間帯中断された Hybrid 偵察を、次の許可枠で上限付き再実行する。
 
@@ -667,6 +668,8 @@ async def _run_hybrid_recon_with_retries(
             f"ハイブリッド Phase 1: 再試行 {retries}/{max_retries} を開始します。",
             "running",
         )
+        if on_retry:
+            on_retry()
         handoff, interrupted = await _run_with_time_window_monitor(
             operation,
             monitor,
@@ -2933,6 +2936,7 @@ async def run_serve(args):
                         monitor,
                         cfg.get("allowed_hours") or None,
                         cfg.get("forbidden_hours") or None,
+                        on_retry=lambda: setattr(recon_engine, "resume", True),
                     )
                 )
                 if not continue_to_phase2:

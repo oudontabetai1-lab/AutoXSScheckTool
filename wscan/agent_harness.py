@@ -334,6 +334,19 @@ class AgentHarness:
         self.checkpoint()
         return item
 
+    def requeue_role(self, role: AgentRole) -> int:
+        """新しい process/session でやり直す必要がある役割を planned に戻す。"""
+        count = 0
+        for item in self.state.work_queue:
+            if item.role == role and item.status != WorkStatus.PLANNED:
+                item.status = WorkStatus.PLANNED
+                item.attempts = 0
+                item.summary = ""
+                count += 1
+        if count:
+            self.checkpoint()
+        return count
+
     def finish_work(
         self,
         work_id: str,
