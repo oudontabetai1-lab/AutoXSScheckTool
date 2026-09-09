@@ -44,12 +44,26 @@ class PureFunctionTests(unittest.TestCase):
     def test_redact_trace_body_masks_secrets(self):
         body = ("TRACE / HTTP/1.1\r\nHost: app.test\r\n"
                 "Authorization: Bearer supersecrettoken\r\n"
-                "Cookie: session=abcdef123\r\nX-Xst-Probe: TOK\r\n")
+                "Cookie: session=abcdef123\r\n"
+                "X-Access-Token: aaa111\r\nX-Amz-Security-Token: bbb222\r\n"
+                "X-Csrf-Token: ccc333\r\n")
         out = hm.redact_trace_body(body)
-        self.assertNotIn("supersecrettoken", out)
-        self.assertNotIn("session=abcdef123", out)
+        for secret in ("supersecrettoken", "session=abcdef123", "aaa111", "bbb222", "ccc333"):
+            self.assertNotIn(secret, out)
         self.assertIn("[REDACTED]", out)
         self.assertIn("Host: app.test", out)  # 非秘匿ヘッダは残す（証跡）
+
+    def test_redact_trace_body_uses_runtime_registered_headers(self):
+        # engine が登録したカスタム認証ヘッダ（正規述語 is_sensitive_header 経由）も伏字化する。
+        from wscan import request_logger
+        request_logger.register_sensitive_headers(["X-Company-Auth"])
+        try:
+            body = "TRACE / HTTP/1.1\r\nX-Company-Auth: topsecretvalue\r\n"
+            out = hm.redact_trace_body(body)
+            self.assertNotIn("topsecretvalue", out)
+            self.assertIn("[REDACTED]", out)
+        finally:
+            request_logger.clear_sensitive_headers()
 
 
 class _FakeResp:

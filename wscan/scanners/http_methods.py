@@ -89,21 +89,29 @@ def trace_reflects(status: int, headers: dict, body: str, token: str) -> bool:
     return bool(trace_reflection_strength(status, headers, body, token))
 
 
-# TRACE 反射本文に含まれ得る秘匿ヘッダ（値をレポート保存前にマスクする）。
-_TRACE_SENSITIVE_HEADERS = re.compile(
-    r"(?im)^((?:authorization|proxy-authorization|cookie|set-cookie|x-api-key|"
-    r"x-auth-token|x-xst-probe)\s*:\s*).+$"
-)
+_TRACE_HEADER_LINE = re.compile(r"^([^\r\n:]+):(.*)$")
 
 
 def redact_trace_body(body: str, limit: int = 2000) -> str:
     """TRACE が反射した送信ヘッダのうち秘匿値をマスクする（純粋）。
 
     XST の証跡（どのヘッダが反射したか）は残しつつ、Authorization/Cookie 等の実値は残さない。
+    秘匿判定はハードコード列挙ではなく `request_logger.is_sensitive_header`（runtime 登録の
+    カスタム認証ヘッダも含む正規の述語）を使う（Codex #157 P1）。
     """
     if not body:
         return ""
-    return _TRACE_SENSITIVE_HEADERS.sub(r"\1[REDACTED]", body[:limit])
+    from wscan.request_logger import is_sensitive_header
+
+    out: list[str] = []
+    for line in body[:limit].splitlines(keepends=True):
+        m = _TRACE_HEADER_LINE.match(line.rstrip("\r\n"))
+        if m and is_sensitive_header(m.group(1).strip()):
+            nl = line[len(line.rstrip("\r\n")):]  # 改行（\r\n 等）を保持
+            out.append(f"{m.group(1)}: [REDACTED]{nl}")
+        else:
+            out.append(line)
+    return "".join(out)
 
 
 class HttpMethodsScanner(BaseScanner):
