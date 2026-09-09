@@ -75,6 +75,44 @@ class ExtractIssuesTests(unittest.TestCase):
         self.assertEqual(tls_scan.extract_tls_issues(object()), [])
 
 
+class ReachabilityTests(unittest.TestCase):
+    def _result(self, conn="COMPLETED", scan="COMPLETED", scan_result=None):
+        ns = types.SimpleNamespace(scan_result=scan_result)
+        if conn is not None:
+            ns.connectivity_status = _status(conn)
+        if scan is not None:
+            ns.scan_status = _status(scan)
+        return ns
+
+    def test_reachable_when_completed(self):
+        self.assertTrue(tls_scan.server_scan_reachable(self._result()))
+
+    def test_unreachable_on_connectivity_error(self):
+        self.assertFalse(tls_scan.server_scan_reachable(self._result(conn="ERROR")))
+
+    def test_unreachable_on_scan_error(self):
+        self.assertFalse(tls_scan.server_scan_reachable(
+            self._result(scan="ERROR_NO_CONNECTIVITY")))
+
+    def test_missing_attrs_default_reachable(self):
+        # 版差で属性が無くても過剰抑制しない（従来どおり到達扱い）。
+        self.assertTrue(tls_scan.server_scan_reachable(object()))
+
+    def test_completed_attempts_detection(self):
+        sr = types.SimpleNamespace(scan_result=types.SimpleNamespace(
+            ssl_2_0_cipher_suites=_cipher_attempt(False, status="ERROR"),
+            heartbleed=_bool_attempt("is_vulnerable_to_heartbleed", False, status="COMPLETED"),
+        ))
+        self.assertTrue(tls_scan.scan_has_completed_attempts(sr))
+
+    def test_no_completed_attempts(self):
+        sr = types.SimpleNamespace(scan_result=types.SimpleNamespace(
+            ssl_2_0_cipher_suites=_cipher_attempt(False, status="ERROR"),
+            robot=_robot_attempt(False, status="ERROR"),
+        ))
+        self.assertFalse(tls_scan.scan_has_completed_attempts(sr))
+
+
 class _FakeEngine:
     def __init__(self, enabled=True):
         self.browser = None
@@ -120,6 +158,38 @@ class ScannerTests(unittest.IsolatedAsyncioTestCase):
         with mock.patch.object(tls_scan, "sslyze_available", return_value=False):
             out = await scanner.scan_page("https://x.test/")
         self.assertEqual(out, [])
+
+    async def test_unreachable_records_note_not_silent(self):
+        engine = _FakeEngine(enabled=True)
+        scanner = SCANNERS["tls_scan"](engine)
+        with mock.patch.object(tls_scan, "sslyze_available", return_value=True), \
+             mock.patch.object(tls_scan, "run_sslyze_scan", return_value=object()), \
+             mock.patch.object(tls_scan, "server_scan_reachable", return_value=False):
+            out = await scanner.scan_page("https://x.test/")
+        self.assertEqual(out, [])
+        self.assertTrue(any("unreachable" in n for n in engine.wave_errors))
+
+    async def test_reachable_but_no_completed_attempts_records_incomplete(self):
+        engine = _FakeEngine(enabled=True)
+        scanner = SCANNERS["tls_scan"](engine)
+        with mock.patch.object(tls_scan, "sslyze_available", return_value=True), \
+             mock.patch.object(tls_scan, "run_sslyze_scan", return_value=object()), \
+             mock.patch.object(tls_scan, "server_scan_reachable", return_value=True), \
+             mock.patch.object(tls_scan, "extract_tls_issues", return_value=[]), \
+             mock.patch.object(tls_scan, "scan_has_completed_attempts", return_value=False):
+            out = await scanner.scan_page("https://x.test/")
+        self.assertEqual(out, [])
+        self.assertTrue(any("scan_incomplete" in n for n in engine.wave_errors))
+
+
+class CliChecksTests(unittest.TestCase):
+    def test_checks_tls_scan_is_accepted(self):
+        import sys
+        import main as m
+        argv = ["prog", "scan", "https://x.test", "--checks", "tls_scan", "--no-monitor"]
+        with mock.patch.object(sys, "argv", argv):
+            args = m.parse_args()
+        self.assertIn("tls_scan", args.checks)
 
 
 if __name__ == "__main__":

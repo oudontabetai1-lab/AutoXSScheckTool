@@ -30,6 +30,35 @@ def _completed(attempt: Any) -> bool:
         return False
 
 
+def server_scan_reachable(result: Any) -> bool:
+    """sslyze が対象サーバへ到達し handshake できたかを防御的に判定する（純粋）。
+
+    sslyze は接続不能でも ``ServerScanResult`` を返す（``connectivity_status=ERROR`` /
+    ``scan_status`` が未完）。この場合を「到達成功・issue 無し」と取り違えないための判定。
+    属性が無い版差では ``True``（従来どおり）にフォールバックし、過剰な抑制はしない。
+    """
+    conn = getattr(result, "connectivity_status", None)
+    if conn is not None and getattr(conn, "name", "") not in ("", "COMPLETED"):
+        return False
+    scan = getattr(result, "scan_status", None)
+    if scan is not None and getattr(scan, "name", "") not in ("", "COMPLETED"):
+        return False
+    return True
+
+
+def scan_has_completed_attempts(scan_result: Any) -> bool:
+    """検査対象コマンドのうち 1 つ以上が COMPLETED したかを返す（純粋）。
+
+    到達はしたが全コマンドが ERROR（部分 handshake 失敗等）のケースを「issue 無し」と
+    区別するために使う（黙った偽陰性の可視化）。
+    """
+    sr = getattr(scan_result, "scan_result", None) or scan_result
+    fields = [f for f, _, _ in _WEAK_PROTOCOLS] + [
+        "heartbleed", "openssl_ccs_injection", "robot",
+    ]
+    return any(_completed(getattr(sr, f, None)) for f in fields)
+
+
 def _protocol_accepted(attempt: Any) -> bool:
     """cipher-suites の attempt が「そのプロトコルで 1 つ以上受理」かを判定する。"""
     if not _completed(attempt):
@@ -113,10 +142,23 @@ def run_sslyze_scan(hostname: str, port: int = 443, timeout: float = 20.0) -> Op
             ScanCommand.OPENSSL_CCS_INJECTION,
             ScanCommand.ROBOT,
         }
-        request = ServerScanRequest(
-            server_location=ServerNetworkLocation(hostname=hostname, port=port),
-            scan_commands=commands,
-        )
+        # network_timeout を反映させる（版差で失敗したら既定設定へフォールバック）。
+        net_config = None
+        try:
+            from sslyze import ServerNetworkConfiguration
+            net_config = ServerNetworkConfiguration(
+                tls_server_name_indication=hostname,
+                network_timeout=max(1, int(timeout)),
+            )
+        except Exception:
+            net_config = None
+        request_kwargs = {
+            "server_location": ServerNetworkLocation(hostname=hostname, port=port),
+            "scan_commands": commands,
+        }
+        if net_config is not None:
+            request_kwargs["network_configuration"] = net_config
+        request = ServerScanRequest(**request_kwargs)
         scanner = Scanner()
         scanner.queue_scans([request])
         for result in scanner.get_results():

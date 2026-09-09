@@ -84,8 +84,15 @@ class TlsConfigScanner(BaseScanner):
         if result is None:
             self._record_scan_note(f"transport_error:{self.CHECK_TYPE}:no_result")
             return []
+        # sslyze は接続不能でも result を返す。到達失敗を「issue 無し」と取り違えない。
+        if not tls_scan.server_scan_reachable(result):
+            self._record_scan_note(f"transport_error:{self.CHECK_TYPE}:unreachable")
+            return []
 
         issues = tls_scan.extract_tls_issues(result)
+        # 到達はしたが全コマンドが未完（部分 handshake 失敗）なら、黙った偽陰性として記録する。
+        if not issues and not tls_scan.scan_has_completed_attempts(result):
+            self._record_scan_note(f"scan_incomplete:{self.CHECK_TYPE}:no_completed_attempts")
         findings: list[Finding] = []
         pair = {"request": {"url": origin, "method": "TLS"},
                 "response": {"url": origin, "headers": {}, "body": ""}}
