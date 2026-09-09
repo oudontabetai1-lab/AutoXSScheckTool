@@ -312,7 +312,7 @@ class AgentHarness:
         item = AgentWorkItem(
             work_id=work_id,
             role=role,
-            target=redact_url(str(target)),
+            target=self._redact_runtime(redact_url(str(target))),
             check_type=str(check_type),
         )
         self.state.work_queue.append(item)

@@ -172,6 +172,15 @@ def test_requeue_role_resets_completed_authentication(tmp_path):
     assert harness.next_work().work_id == auth.work_id
 
 
+def test_requeue_role_resets_completed_verifier_for_resume(tmp_path):
+    harness = AgentHarness(tmp_path, spec())
+    verifier = harness.enqueue(AgentRole.VERIFIER, "candidate-1", check_type="xss")
+    harness.next_work()
+    harness.finish_work(verifier.work_id, WorkStatus.COMPLETE)
+    assert harness.requeue_role(AgentRole.VERIFIER) == 1
+    assert harness.next_work().work_id == verifier.work_id
+
+
 def test_structured_hypotheses_survive_resume_without_session_nonce(tmp_path):
     harness = AgentHarness(tmp_path, spec(max_steps=8))
     hypothesis = {

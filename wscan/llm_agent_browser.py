@@ -1125,6 +1125,7 @@ class AgentBrowserScanner:
                 self._harness.requeue_role(AgentRole.EXPLORER)
                 # verifier に元 URL を渡せるよう、probe も再実行して候補を復元する。
                 self._harness.requeue_role(AgentRole.PROBE_SPECIALIST)
+                self._harness.requeue_role(AgentRole.VERIFIER)
             if not self._harness.state.work_queue:
                 if self.login_url and (
                     self.auth_user or self.auth_pass or self.totp_secret or self.storage_state
@@ -1376,7 +1377,7 @@ class AgentBrowserScanner:
                         )
                     terminal = (
                         WorkStatus.COMPLETE
-                        if history.is_successful() and self._work_completion_claimed(work, episode_text)
+                        if history.is_successful() and self._work_completion_claimed(work, final)
                         else WorkStatus.INCONCLUSIVE
                     )
                     self._harness.finish_work(
