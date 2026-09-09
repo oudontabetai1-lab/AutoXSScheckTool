@@ -154,6 +154,7 @@ def _load_config(path: Path = _CONFIG_PATH) -> dict:
     cfg["waf_detection"]           = bool(f.get("waf_detection",    True))
     cfg["payload_learning"]        = bool(f.get("payload_learning", True))
     cfg["community_payloads"]      = bool(f.get("community_payloads", True))
+    cfg["component_intel"]         = bool(f.get("component_intel",   False))
     cfg["sitemap_crawl"]           = bool(f.get("sitemap_crawl",    True))
     cfg["cvss_scores"]             = bool(f.get("cvss_scores",      True))
     cfg["skip_registration"]       = bool(f.get("skip_registration", True))
@@ -2724,6 +2725,7 @@ async def run_serve(args):
             "enable_waf_detection": _CFG.get("waf_detection", True),
             "enable_payload_learning": _CFG.get("payload_learning", True),
             "community_payloads": _CFG.get("community_payloads", True),
+            "component_intel": _CFG.get("component_intel", False),
             "enable_sitemap_crawl": _CFG.get("sitemap_crawl", True),
             "spa_crawl": _CFG.get("spa_crawl", False),
             "auto_spa_crawl": _CFG.get("auto_spa_crawl", True),
@@ -3014,6 +3016,7 @@ async def run_serve(args):
                 enable_waf_detection=bool(cfg.get("enable_waf_detection", True)),
                 enable_payload_learning=bool(cfg.get("enable_payload_learning", True)),
                 enable_community_payloads=bool(cfg.get("enable_community_payloads", True)),
+                enable_component_intel=bool(cfg.get("enable_component_intel", False)),
                 enable_sitemap_crawl=bool(cfg.get("enable_sitemap_crawl", True)),
                 enable_llm_web_browsing=bool(cfg.get("enable_llm_web_browsing", False)),
                 ctf_mode=bool(cfg.get("ctf_mode", False)),

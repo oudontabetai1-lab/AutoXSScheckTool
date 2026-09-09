@@ -41,6 +41,10 @@ gaps:
     reason: E2E benchmark ground truth 未整備（vulnerable/safe twin case が未作成）
     owner_task: "0034"
     deadline: "2026-12-31"
+  outdated_components:
+    reason: 判定を外部 API（endoflife.date）に依存する opt-in 検査で、決定論 E2E benchmark 未整備（safe twin 含む）
+    owner_task: "0023"
+    deadline: "2026-12-31"
   privesc:
     reason: E2E benchmark ground truth 未整備（vulnerable/safe twin case が未作成）
     owner_task: "0034"

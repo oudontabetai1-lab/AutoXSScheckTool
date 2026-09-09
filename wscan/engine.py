@@ -380,6 +380,28 @@ def _community_payloads_enabled_by_config(path: Path | None = None) -> bool:
         return True
 
 
+def _component_intel_config(path: Path | None = None) -> dict:
+    """config/wscan.yaml の features.component_intel と component_intel ブロックを読む。
+
+    ``{"enabled": bool, "eol_base_url": str, "timeout": float}`` を返す。既定 off。
+    外部 API 情報（base URL・timeout）を設定で管理するためのチョークポイント。
+    """
+    config_path = path or (CONFIG_DIR / "wscan.yaml")
+    result = {"enabled": False, "eol_base_url": "https://endoflife.date", "timeout": 8.0}
+    try:
+        with open(config_path, encoding="utf-8") as f:
+            raw = yaml.safe_load(f) or {}
+        result["enabled"] = bool((raw.get("features", {}) or {}).get("component_intel", False))
+        block = raw.get("component_intel", {}) or {}
+        if block.get("eol_base_url"):
+            result["eol_base_url"] = str(block["eol_base_url"])
+        if block.get("timeout") is not None:
+            result["timeout"] = float(block["timeout"])
+    except Exception:
+        pass
+    return result
+
+
 def _payload_evolution_enabled_by_config(path: Path | None = None) -> bool:
     """config/wscan.yaml の features.payload_evolution を読む。"""
     config_path = path or (CONFIG_DIR / "wscan.yaml")
@@ -554,6 +576,7 @@ class ScanEngine:
         enable_waf_detection: bool = True,
         enable_payload_learning: bool = True,
         enable_community_payloads: Optional[bool] = None,
+        enable_component_intel: Optional[bool] = None,
         enable_payload_evolution: Optional[bool] = None,
         enable_payload_mutation: Optional[bool] = None,
         enable_adaptive_payloads: bool = True,
@@ -827,6 +850,23 @@ class ScanEngine:
         self.flows: list[ScanFlow] = ScanFlow.list_from_dicts(flows or [])
         if ctf_mode and "ssti" not in self.checks:
             self.checks.append("ssti")
+
+        # EOL コンポーネント検査（opt-in）。有効時のみ endoflife.date への照会設定を
+        # self.component_intel に持ち、outdated_components を checks に追加する（既定 off＝スキャンの
+        # ネット非依存を維持）。有効/無効は enable_component_intel（ダッシュボード/CLI 上書き）優先、
+        # 未指定なら config/wscan.yaml の features.component_intel。base URL/timeout は常に config から。
+        _ci_cfg = _component_intel_config()
+        _ci_enabled = (
+            _ci_cfg["enabled"] if enable_component_intel is None
+            else bool(enable_component_intel)
+        )
+        self.component_intel: dict = {
+            "enabled": _ci_enabled,
+            "eol_base_url": _ci_cfg["eol_base_url"],
+            "timeout": _ci_cfg["timeout"],
+        }
+        if _ci_enabled and "outdated_components" not in self.checks:
+            self.checks.append("outdated_components")
 
         # CTF flag finder
         self.flag_finder: Optional[FlagFinder] = FlagFinder(ctf_flag_pattern) if ctf_mode else None

@@ -60,6 +60,14 @@ graphql jwt cms xxe ldap file_upload race_condition websocket secret_leak sri
 js_static prototype_pollution cache_poisoning mass_assignment
 ```
 
+**`outdated_components`（EOL コンポーネント検査・opt-in）**: `Server` / `X-Powered-By` /
+`X-AspNet-Version` / `X-Generator` バナーから製品名+バージョンを抽出し、無料の
+[endoflife.date](https://endoflife.date) API へ照会してサポート終了（EOL）版を検出します。
+**既定は無効**（有効時のみスキャン中に製品名を外部 API へ送信するため、`config/wscan.yaml` の
+`features.component_intel: true` かダッシュボードの「EOL コンポーネント検査」トグルで opt-in）。
+外部へ送るのは製品名のみで、対象 URL やヘッダ値全体は送信しません。API のベース URL・タイムアウトは
+`config/wscan.yaml` の `component_intel` ブロックで管理します（self-host 版の endoflife.date にも差し替え可）。
+
 Agent モードの CLI で選べる検査種別は `xss sqli ssti os path_traversal ssrf open_redirect csrf header_injection` です。
 
 ### IPA 準拠カバレッジ
