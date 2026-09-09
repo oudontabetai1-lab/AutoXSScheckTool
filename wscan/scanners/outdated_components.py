@@ -26,6 +26,15 @@ if TYPE_CHECKING:
     from wscan.engine import ScanEngine
 
 
+def _origin_of(url: str) -> str:
+    """URL の正規化 origin（engine._cms_origin と同じ表現）。壊れた入力は ""。"""
+    try:
+        from wscan.attack_planner import canonical_origin
+        return canonical_origin(url)
+    except Exception:
+        return ""
+
+
 _UNSUPPORTED = tuple(
     CarrierCapability(
         carrier=c, state=CapabilityState.UNSUPPORTED,
@@ -74,12 +83,17 @@ class OutdatedComponentScanner(BaseScanner):
             return []  # opt-in 無効時は何もしない（ネット非依存を維持）
         if url in self._checked_urls:
             return []
-        self._checked_urls.add(url)
 
         if self.monitor:
             await self.monitor.emit_status(f"Component EOL check on {url}")
 
         pair = await self._response_pair(url)
+        # 空 pair（408/429/5xx 等の transient）を「正常な空レスポンス」と取り違えない。
+        # 観測不能を記録し、checked にせず返す（この run 内で再試行余地を残す・黙った偽陰性を防ぐ）。
+        if not pair:
+            self._record_scan_note(f"transport_error:{self.CHECK_TYPE}:page_unavailable")
+            return []
+        self._checked_urls.add(url)
         response = pair.get("response") or {}
         headers = {k.lower(): v for k, v in (response.get("headers") or {}).items()}
         body = response.get("body", "") or ""
@@ -90,8 +104,12 @@ class OutdatedComponentScanner(BaseScanner):
 
         # EOL 照会対象＝技術バナー（ヘッダ）＋クロール中に検出した CMS（あれば）。
         components = list(component_intel.parse_components_from_headers(headers))
+        # CMS は検出元 origin と現在 URL の origin が一致するときだけ付与する
+        # （origin A で検出した CMS を origin B の URL に付けて誤検知/重複しない）。
         cms = getattr(self.engine, "detected_cms", None)
-        if cms is not None and getattr(cms, "is_known", False) and getattr(cms, "version", ""):
+        cms_origin = getattr(self.engine, "_cms_origin", "") or ""
+        if (cms is not None and getattr(cms, "is_known", False) and getattr(cms, "version", "")
+                and cms_origin and cms_origin == _origin_of(url)):
             components.append(component_intel.Component(
                 product=cms.name, version=cms.version, source="cms",
             ))
@@ -175,6 +193,15 @@ class OutdatedComponentScanner(BaseScanner):
         return findings
 
     async def _scan_eol(self, url, pair, components, base_url, timeout) -> list[Finding]:
+        # 同一 (product,version) を複数ページで再照会しないよう engine 単位でキャッシュ。
+        # 失敗（ComponentIntelUnavailable）はキャッシュせず（note のみ）、確定結果だけ載せる。
+        cache = getattr(self.engine, "_eol_cache", None)
+        if cache is None:
+            cache = {}
+            try:
+                self.engine._eol_cache = cache
+            except Exception:
+                cache = None
         findings: list[Finding] = []
         seen: set[tuple[str, str]] = set()
         for comp in components:
@@ -182,13 +209,18 @@ class OutdatedComponentScanner(BaseScanner):
             if key in seen:
                 continue
             seen.add(key)
-            try:
-                result = await component_intel.check_component_eol(
-                    comp, base_url=base_url, timeout=timeout,
-                )
-            except Exception as exc:  # 念のため（graceful）
-                self._record_scan_note(f"transport_error:{self.CHECK_TYPE}:{type(exc).__name__}")
-                continue
+            if cache is not None and key in cache:
+                result = cache[key]
+            else:
+                try:
+                    result = await component_intel.check_component_eol(
+                        comp, base_url=base_url, timeout=timeout,
+                    )
+                except Exception as exc:  # ComponentIntelUnavailable 含む（graceful・非キャッシュ）
+                    self._record_scan_note(f"transport_error:{self.CHECK_TYPE}:{type(exc).__name__}")
+                    continue
+                if cache is not None:
+                    cache[key] = result
             if not result or not result.get("is_eol"):
                 continue  # サポート中・判定不能は報告しない
             eol_val = result.get("eol")
@@ -266,11 +298,19 @@ class OutdatedComponentScanner(BaseScanner):
             severity = {"critical": "critical", "high": "high", "moderate": "medium",
                         "medium": "medium", "low": "low"}.get(sev, "medium")
             id_disp = ", ".join((cves or ids)[:5])
+            # CDN の構造化 URL 由来は likely、ファイル名推測（任意 origin の name-x.y.z.js）は
+            # 名称/版が内容と一致しない可能性があるため tentative に落とす（過検知抑制）。
+            is_guess = getattr(lib, "reliability", "cdn") == "filename"
+            confidence = "tentative" if is_guess else "likely"
+            guess_note = (
+                "（ファイル名からの推測のため、実際のライブラリ/版と異なる可能性があります）"
+                if is_guess else ""
+            )
             evidence = (
                 f"外部 JS ライブラリ {lib.name} {lib.version} に既知の脆弱性があります"
                 f"（OSV: {len(ids)} 件{('・' + id_disp) if id_disp else ''}"
                 + (f"・{info['summary'][:80]}" if info.get("summary") else "")
-                + "）。修正版へ更新してください。"
+                + "）。修正版へ更新してください。" + guess_note
             )
             findings.append(await self.record_finding(
                 url=url,
@@ -279,7 +319,7 @@ class OutdatedComponentScanner(BaseScanner):
                 evidence=evidence,
                 pair=pair,
                 severity=severity,
-                confidence="likely",
+                confidence=confidence,
                 evidence_type="vulnerable_library",
                 evidence_details={
                     "library": lib.name, "version": lib.version, "ecosystem": lib.ecosystem,

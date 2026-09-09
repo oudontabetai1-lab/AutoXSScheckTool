@@ -775,6 +775,8 @@ Examples:
         "race_condition", "websocket", "secret_leak", "sri", "js_static",
         # 新クラス
         "prototype_pollution", "cache_poisoning", "mass_assignment",
+        # opt-in（外部 API 照会が要る）検査。--checks で明示指定すると自動で有効化する。
+        "outdated_components",
     ]
     _default_checks = _CFG.get("checks", ["sqli", "xss", "os"])
     scan.add_argument(
@@ -2394,6 +2396,8 @@ async def run_scan(args):
             enable_community_payloads=getattr(args, "community_payloads", True),
             enable_adaptive_payloads=not getattr(args, "no_adaptive_payloads", False),
             enable_sitemap_crawl=not getattr(args, "no_sitemap_crawl", False),
+            # outdated_components は opt-in。--checks/--all-checks で明示されたら有効化（未指定は config）。
+            enable_component_intel=True if "outdated_components" in checks_list else None,
             enable_llm_web_browsing=getattr(args, "llm_web_browsing", False),
             concurrency=getattr(args, "concurrency", 1),
             flows=getattr(args, "flows", None) or [],

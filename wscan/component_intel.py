@@ -101,6 +101,9 @@ class Library:
     version: str
     ecosystem: str    # OSV の ecosystem（例: "npm"）
     url: str
+    # 抽出元の信頼度: "cdn"=構造化 CDN URL（name/version が明示）/ "filename"=ファイル名推測
+    # （任意 origin の name-x.y.z.js。内容と一致しない可能性があるため報告は tentative）。
+    reliability: str = "cdn"
 
 
 def _norm_product(name: str) -> str:
@@ -141,7 +144,7 @@ def parse_js_libraries(html: str, base_url: str = "") -> list[Library]:
     seen: set[tuple[str, str]] = set()
     for src in js_analysis.extract_external_script_srcs(html):
         absolute = urljoin(base_url, (src or "").strip())
-        for pat in _LIB_URL_PATTERNS:
+        for idx, pat in enumerate(_LIB_URL_PATTERNS):
             m = pat.search(absolute)
             if not m:
                 continue
@@ -153,9 +156,78 @@ def parse_js_libraries(html: str, base_url: str = "") -> list[Library]:
             if key in seen:
                 continue
             seen.add(key)
-            out.append(Library(name=name, version=version, ecosystem="npm", url=absolute))
+            # 最後のパターン（ファイル名 name-x.y.z.js）は任意 origin の推測なので信頼度低。
+            reliability = "filename" if idx == len(_LIB_URL_PATTERNS) - 1 else "cdn"
+            out.append(Library(name=name, version=version, ecosystem="npm",
+                               url=absolute, reliability=reliability))
             break  # 1 src につき最初に一致したパターンだけ
     return out
+
+
+def _cvss3_roundup(x: float) -> float:
+    """CVSS v3.1 仕様の Roundup（純粋）。"""
+    i = int(round(x * 100000))
+    if i % 10000 == 0:
+        return i / 100000.0
+    return (i // 10000 + 1) / 10.0
+
+
+def cvss3_base_severity(vector: str) -> str:
+    """CVSS v3.x ベクタ文字列からベース深刻度バンドを返す（純粋・"" は不明）。
+
+    OSV の top-level ``severity`` は CVSS ベクタ文字列で来ることが多く、数値スコアが無い。
+    仕様どおりベーススコアを計算しバンド（CRITICAL/HIGH/MEDIUM/LOW/NONE）へ写す。
+    未知/破損ベクタは ""（呼び出し側は他のシグナルへフォールバック）。
+    """
+    if not vector or "CVSS:3" not in vector:
+        return ""
+    m = {}
+    for part in vector.split("/")[1:]:
+        if ":" in part:
+            k, v = part.split(":", 1)
+            m[k] = v
+    try:
+        av = {"N": 0.85, "A": 0.62, "L": 0.55, "P": 0.2}[m["AV"]]
+        ac = {"L": 0.77, "H": 0.44}[m["AC"]]
+        ui = {"N": 0.85, "R": 0.62}[m["UI"]]
+        scope_c = m["S"] == "C"
+        pr_raw = m["PR"]
+        pr = ({"N": 0.85, "L": 0.68, "H": 0.5} if scope_c
+              else {"N": 0.85, "L": 0.62, "H": 0.27})[pr_raw]
+        imp = {"H": 0.56, "L": 0.22, "N": 0.0}
+        c, i, a = imp[m["C"]], imp[m["I"]], imp[m["A"]]
+    except (KeyError, TypeError):
+        return ""
+    iss = 1 - (1 - c) * (1 - i) * (1 - a)
+    impact = (7.52 * (iss - 0.029) - 3.25 * (iss - 0.02) ** 15) if scope_c else 6.42 * iss
+    if impact <= 0:
+        return "NONE"
+    expl = 8.22 * av * ac * pr * ui
+    base = _cvss3_roundup(min(1.08 * (impact + expl), 10) if scope_c
+                          else min(impact + expl, 10))
+    if base >= 9.0:
+        return "CRITICAL"
+    if base >= 7.0:
+        return "HIGH"
+    if base >= 4.0:
+        return "MEDIUM"
+    if base >= 0.1:
+        return "LOW"
+    return "NONE"
+
+
+def _osv_toplevel_severity(v: dict) -> str:
+    """OSV vuln の top-level ``severity``（CVSS ベクタ）からバンドを導く（純粋・"" は不明）。"""
+    best, best_rank = "", -1
+    rank = {"critical": 4, "high": 3, "moderate": 2, "medium": 2, "low": 1, "none": 0}
+    for s in (v.get("severity") or []):
+        if not isinstance(s, dict):
+            continue
+        band = cvss3_base_severity(str(s.get("score", "") or ""))
+        r = rank.get(band.lower(), -1)
+        if r > best_rank:
+            best_rank, best = r, band
+    return best
 
 
 def summarize_osv_vulns(vulns: list[dict]) -> dict:
@@ -179,6 +251,9 @@ def summarize_osv_vulns(vulns: list[dict]) -> dict:
             if isinstance(a, str) and a.upper().startswith("CVE-"):
                 cves.append(a)
         sev = str((v.get("database_specific") or {}).get("severity", "") or "").strip()
+        if not rank.get(sev.lower()):
+            # database_specific が無い/未知なら top-level CVSS ベクタから導く。
+            sev = _osv_toplevel_severity(v) or sev
         r = rank.get(sev.lower(), -1)
         if r > max_rank:
             max_rank, max_sev = r, sev.upper()
@@ -287,6 +362,24 @@ def evaluate_eol(cycle: dict, today: Optional[_dt.date] = None) -> Optional[bool
     return None
 
 
+class ComponentIntelUnavailable(Exception):
+    """外部 API への到達失敗（timeout/接続断/5xx/429/応答破損）を表す。
+
+    「一時的に照会できなかった（＝retry/observability 対象・キャッシュしない）」を
+    「照会できたがデータ無し（＝確定・None/[] を返しキャッシュ可）」と区別するために使う。
+    呼び出し側（scanner）はこれを捕捉して _record_scan_note し、結果をキャッシュしない。
+    """
+
+
+# 一時的（retry 相当）として扱う HTTP ステータス。これ以外の非 200（404 等）は「無データ」= None。
+_TRANSIENT_STATUS = frozenset({408, 425, 429, 500, 502, 503, 504})
+
+
+def _raise_if_transient(status: int, ctx: str) -> None:
+    if status in _TRANSIENT_STATUS:
+        raise ComponentIntelUnavailable(f"{ctx}: HTTP {status}")
+
+
 async def fetch_product_cycles(
     product_slug: str,
     *,
@@ -294,10 +387,11 @@ async def fetch_product_cycles(
     timeout: float = DEFAULT_TIMEOUT,
     client: "Optional[httpx.AsyncClient]" = None,
 ) -> Optional[list[dict]]:
-    """endoflife.date の ``/api/{product}.json`` を取得する（graceful・失敗時 None）。
+    """endoflife.date の ``/api/{product}.json`` を取得する。
 
-    外部へ送るのは product slug のみ。target 情報は一切送らない。``client`` を注入すると
-    テストで差し替え可能（未指定なら httpx で都度生成）。
+    到達失敗（timeout/接続断/5xx/429/JSON 破損）は ``ComponentIntelUnavailable`` を投げる
+    （黙って None にしない＝偽陰性の可視化・キャッシュ汚染防止）。404 等の「無データ」は None。
+    外部へ送るのは product slug のみ。``client`` を注入するとテストで差し替え可能。
     """
     slug = (product_slug or "").strip().strip("/")
     if not slug or httpx is None:
@@ -309,11 +403,17 @@ async def fetch_product_cycles(
         else:
             async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as c:
                 resp = await c.get(url)
-        if resp.status_code != 200:
-            return None
+    except ComponentIntelUnavailable:
+        raise
+    except Exception as exc:
+        raise ComponentIntelUnavailable(f"eol:{slug}:{type(exc).__name__}") from exc
+    _raise_if_transient(resp.status_code, f"eol:{slug}")
+    if resp.status_code != 200:
+        return None  # 404 等は「無データ」（確定）
+    try:
         data = resp.json()
-    except Exception:
-        return None
+    except Exception as exc:
+        raise ComponentIntelUnavailable(f"eol:{slug}:bad_json") from exc
     return data if isinstance(data, list) else None
 
 
@@ -382,11 +482,17 @@ async def lookup_osv(
         else:
             async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as c:
                 resp = await c.post(url, json=body)
-        if resp.status_code != 200:
-            return None
-        data = resp.json()
-    except Exception:
+    except ComponentIntelUnavailable:
+        raise
+    except Exception as exc:
+        raise ComponentIntelUnavailable(f"osv:{name}:{type(exc).__name__}") from exc
+    _raise_if_transient(resp.status_code, f"osv:{name}")
+    if resp.status_code != 200:
         return None
+    try:
+        data = resp.json()
+    except Exception as exc:
+        raise ComponentIntelUnavailable(f"osv:{name}:bad_json") from exc
     if not isinstance(data, dict):
         return None
     vulns = data.get("vulns")
@@ -456,13 +562,20 @@ async def lookup_nvd(
         if client is not None:
             resp = await client.get(url, params=params, headers=headers, timeout=timeout)
         else:
-            async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as c:
+            # apiKey ヘッダを別 origin のリダイレクト先へ渡さないよう follow_redirects=False。
+            async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as c:
                 resp = await c.get(url, params=params, headers=headers)
-        if resp.status_code != 200:
-            return None
-        data = resp.json()
-    except Exception:
+    except ComponentIntelUnavailable:
+        raise
+    except Exception as exc:
+        raise ComponentIntelUnavailable(f"nvd:{product}:{type(exc).__name__}") from exc
+    _raise_if_transient(resp.status_code, f"nvd:{product}")
+    if resp.status_code != 200:
         return None
+    try:
+        data = resp.json()
+    except Exception as exc:
+        raise ComponentIntelUnavailable(f"nvd:{product}:bad_json") from exc
     if not isinstance(data, dict):
         return None
     return summarize_nvd(data)

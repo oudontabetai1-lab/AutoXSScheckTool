@@ -216,8 +216,10 @@ class NetworkLayerTests(unittest.IsolatedAsyncioTestCase):
     async def test_lookup_osv_no_vulns_vs_failure(self):
         ok = _FakeClient(post_result=(200, {"vulns": []}))
         self.assertEqual(await ci.lookup_osv("npm", "jquery", "3.99.0", client=ok), [])
+        # 一時失敗（5xx）は例外を投げる（黙って None にせず observability/非キャッシュへ回す）。
         bad = _FakeClient(post_result=(500, None))
-        self.assertIsNone(await ci.lookup_osv("npm", "jquery", "3.4.1", client=bad))
+        with self.assertRaises(ci.ComponentIntelUnavailable):
+            await ci.lookup_osv("npm", "jquery", "3.4.1", client=bad)
 
     async def test_lookup_nvd_with_and_without_key(self):
         url = "https://services.nvd.nist.gov/rest/json/cves/2.0"
@@ -335,6 +337,9 @@ class OutdatedComponentScannerTests(unittest.IsolatedAsyncioTestCase):
             is_known = True
 
         engine.detected_cms = _Cms()
+        # CMS は検出元 origin と一致する URL でだけ付与される（cross-origin 誤検知防止）。
+        from wscan.scanners.outdated_components import _origin_of
+        engine._cms_origin = _origin_of("http://x/")
 
         async def _pair(url):
             return {"request": {"url": url}, "response": {"status": 200, "headers": {}, "body": ""}}
@@ -448,6 +453,123 @@ class OutdatedComponentScannerTests(unittest.IsolatedAsyncioTestCase):
         finally:
             _ci.check_component_eol = orig
         self.assertEqual(out, [])
+
+    async def test_cms_not_applied_cross_origin(self):
+        # 検出元 origin と異なる URL では CMS を EOL 照会対象にしない（cross-origin 誤検知防止）。
+        engine, scanner = self._scanner(enabled=True)
+
+        class _Cms:
+            name = "drupal"
+            version = "7"
+            is_known = True
+
+        engine.detected_cms = _Cms()
+        engine._cms_origin = "http://a.test"  # 検出は a.test
+
+        async def _pair(url):
+            return {"request": {"url": url}, "response": {"status": 200, "headers": {}, "body": ""}}
+
+        called = {"eol": 0}
+
+        async def _check(comp, **kw):
+            called["eol"] += 1
+            return None
+
+        scanner._response_pair = _pair
+        scanner.record_finding = lambda **kw: None
+        import wscan.component_intel as _ci
+        orig = _ci.check_component_eol
+        _ci.check_component_eol = _check
+        try:
+            out = await scanner.scan_page("http://b.test/page")  # 走査は b.test
+        finally:
+            _ci.check_component_eol = orig
+        self.assertEqual(out, [])
+        self.assertEqual(called["eol"], 0)  # CMS が付与されず照会も起きない
+
+    async def test_transient_pair_records_note_and_not_marked(self):
+        # 空 pair（transient）は note を残し checked にしない（黙った偽陰性防止・再試行余地）。
+        engine, scanner = self._scanner(enabled=True)
+
+        async def _pair(url):
+            return {}  # transient（408/429/5xx）
+
+        scanner._response_pair = _pair
+        out = await scanner.scan_page("http://x/")
+        self.assertEqual(out, [])
+        self.assertTrue(any("page_unavailable" in n for n in engine.wave_errors))
+        self.assertNotIn("http://x/", scanner._checked_urls)
+
+    async def test_filename_derived_library_is_tentative(self):
+        engine, scanner = self._scanner(enabled=True)
+        # 任意 origin のファイル名推測（CDN でない）。
+        html = '<script src="/assets/jquery-3.4.1.min.js"></script>'
+
+        async def _pair(url):
+            return {"request": {"url": url},
+                    "response": {"status": 200, "headers": {}, "body": html}}
+
+        async def _osv(ecosystem, name, version, **kw):
+            return [{"id": "GHSA-x", "aliases": ["CVE-2020-11022"],
+                     "database_specific": {"severity": "MODERATE"}}]
+
+        recorded = []
+
+        async def _rec(**kw):
+            recorded.append(kw)
+            return object()
+
+        scanner._response_pair = _pair
+        scanner.record_finding = _rec
+        import wscan.component_intel as _ci
+        orig = _ci.lookup_osv
+        _ci.lookup_osv = _osv
+        try:
+            out = await scanner.scan_page("http://x/")
+        finally:
+            _ci.lookup_osv = orig
+        self.assertEqual(len(out), 1)
+        self.assertEqual(recorded[0]["confidence"], "tentative")
+
+
+class CvssAndSeverityTests(unittest.TestCase):
+    def test_cvss3_known_vectors(self):
+        # CVSS 3.1 仕様例: 9.8 Critical。
+        self.assertEqual(ci.cvss3_base_severity(
+            "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"), "CRITICAL")
+        # 6.1 Medium（反射 XSS 典型・Scope Changed）。
+        self.assertEqual(ci.cvss3_base_severity(
+            "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:C/C:L/I:L/A:N"), "MEDIUM")
+        # None 影響。
+        self.assertEqual(ci.cvss3_base_severity(
+            "CVSS:3.1/AV:N/AC:H/PR:H/UI:R/S:U/C:N/I:N/A:N"), "NONE")
+
+    def test_cvss3_garbage(self):
+        self.assertEqual(ci.cvss3_base_severity(""), "")
+        self.assertEqual(ci.cvss3_base_severity("not-a-vector"), "")
+        self.assertEqual(ci.cvss3_base_severity("CVSS:3.1/AV:X"), "")
+
+    def test_osv_toplevel_severity_fallback(self):
+        # database_specific 無し・top-level CVSS ベクタから深刻度を導く。
+        vulns = [{"id": "CVE-x", "severity": [
+            {"type": "CVSS_V3", "score": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"}]}]
+        out = ci.summarize_osv_vulns(vulns)
+        self.assertEqual(out["max_severity"], "CRITICAL")
+
+    def test_osv_database_specific_takes_priority(self):
+        vulns = [{"id": "GHSA-y", "database_specific": {"severity": "LOW"}}]
+        self.assertEqual(ci.summarize_osv_vulns(vulns)["max_severity"], "LOW")
+
+
+class CliChecksTests(unittest.TestCase):
+    def test_checks_outdated_components_is_accepted(self):
+        import sys
+        from unittest import mock
+        import main as m
+        argv = ["p", "scan", "http://x.test", "--checks", "outdated_components", "--no-monitor"]
+        with mock.patch.object(sys, "argv", argv):
+            args = m.parse_args()
+        self.assertIn("outdated_components", args.checks)
 
 
 if __name__ == "__main__":
