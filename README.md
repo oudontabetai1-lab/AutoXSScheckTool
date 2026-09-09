@@ -82,6 +82,8 @@ Agent モードの CLI で選べる検査種別は `xss sqli ssti os path_traver
 
 このほか、権限昇格/IDOR、CORS、情報漏洩、Host ヘッダ、セキュリティヘッダ、NoSQL、デシリアライズ、リクエストスマグリング、SSRF、GraphQL、JWT、CMS、XXE、LDAP、ファイルアップロード、Race Condition、WebSocket、シークレット漏洩、SRI、Prototype Pollution、Cache Poisoning/Deception、Mass Assignment を検査できます。
 
+`info_disclosure` は、詳細エラー/技術バナーに加えて、**忘れ物 artifact**（`.git/config`・`.git/HEAD`・`.svn`・`.hg`・`.env`・`.htpasswd`・`.npmrc`・`.aws/credentials`・`id_rsa`・`.DS_Store`・`*.bak`・`*.sql`/`*.zip` 等のバックアップ/ダンプ）と、**ディレクトリリスティング**（autoindex）も検出します。誤検知を避けるため、各ファイルは内容シグネチャ（または非 HTML の実体）で「実際に配信された」ことを確認してから報告します。
+
 ## 2. 主要スクリーンショット
 
 ダッシュボードで検査条件を入力し、実行前にスコープ・認証・チェック種別を確認できます。

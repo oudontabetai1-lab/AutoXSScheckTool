@@ -60,6 +60,29 @@ _SENSITIVE_PATHS = [
     "/trace.axd",
     "/server-status",
     "/server-info",
+    # 忘れ物 artifact（バージョン管理内部・秘密・バックアップ/ダンプ）。各パスは下の
+    # _CONTENT_PATTERNS または非 HTML fallback で「実際に配信された」ことを確認してから報告する
+    # （soft-404 での誤検知を避ける・0017）。
+    "/.git/config",
+    "/.git/HEAD",
+    "/.svn/entries",
+    "/.hg/requires",
+    "/.env",
+    "/.env.bak",
+    "/.env.local",
+    "/.htpasswd",
+    "/.npmrc",
+    "/.aws/credentials",
+    "/id_rsa",
+    "/.DS_Store",
+    "/config.php.bak",
+    "/wp-config.php.bak",
+    "/web.config.bak",
+    "/backup.sql",
+    "/database.sql",
+    "/dump.sql",
+    "/backup.zip",
+    "/backup.tar.gz",
 ]
 
 # Patterns that confirm a sensitive file was actually served (not a 404 page)
@@ -74,7 +97,39 @@ _CONTENT_PATTERNS: dict[str, str] = {
     r"(?i)microsoft.*ole.*db.*provider.*error":                 "MSSQL OLE DB error",
     r"(?i)syntax error.*near.*line \d+":                        "SQL syntax error",
     r"(?i)(mysql|postgresql|sqlite|oracle)\s+error":            "Database error",
+    # 忘れ物 artifact の確定シグネチャ（0017）。
+    r"ref:\s*refs/":                                            ".git/HEAD content",
+    r"(?:dir\n\d+\n|svn://|\.svn/)":                            ".svn metadata",
+    r"^revlogv1|^store\b":                                      ".hg metadata",
+    r":\$(?:apr1|2[aby]|6)\$|:\{SHA\}":                         ".htpasswd hashes",
+    r"_authToken=|//registry\.":                                ".npmrc registry token",
+    r"aws_access_key_id\s*=|aws_secret_access_key\s*=":         ".aws credentials",
+    r"-----BEGIN (?:RSA |OPENSSH |EC |DSA )?PRIVATE KEY-----":  "private key file",
+    r"^Bud1":                                                   ".DS_Store metadata",
+    r"(?i)(?:INSERT INTO|CREATE TABLE|DROP TABLE IF EXISTS)":   "SQL dump content",
+    r"^PK\x03\x04":                                             "ZIP archive (possible backup)",
 }
+
+# ディレクトリリスティング（autoindex）の確定シグネチャ。
+_DIR_LISTING_PATTERNS = (
+    re.compile(r"<title>\s*Index of /", re.IGNORECASE),
+    re.compile(r"<h1>\s*Index of /", re.IGNORECASE),
+    re.compile(r'\[To Parent Directory\]', re.IGNORECASE),  # IIS
+    re.compile(r'<a href="\?C=N;O=D">Name</a>', re.IGNORECASE),  # Apache autoindex
+)
+
+# ディレクトリリスティングを試すよくある公開ディレクトリ。
+_LISTING_DIRS = (
+    "/", "/uploads/", "/files/", "/images/", "/assets/", "/backup/",
+    "/backups/", "/download/", "/downloads/", "/tmp/", "/static/", "/media/",
+)
+
+
+def detect_directory_listing(body: str) -> bool:
+    """レスポンス本文が autoindex（ディレクトリリスティング）かを判定する（純粋）。"""
+    if not body:
+        return False
+    return any(p.search(body) for p in _DIR_LISTING_PATTERNS)
 
 # Headers that reveal technology stack
 _TECH_HEADERS = [
@@ -171,8 +226,64 @@ class InfoDisclosureScanner(BaseScanner):
 
         findings = []
         findings += await self._check_sensitive_files(origin)
+        findings += await self._check_directory_listing(origin)
         findings += await self._check_tech_headers(url)
         findings += await self._check_error_page(url)
+        return findings
+
+    async def _check_directory_listing(self, origin: str) -> list[Finding]:
+        """よくある公開ディレクトリで autoindex（ディレクトリリスティング）が有効かを検出する（0017）。"""
+        findings: list[Finding] = []
+        proxy = getattr(self.engine, "proxy", "") or None
+        timeout = getattr(self.engine, "timeout", 15)
+        kwargs: dict = {"timeout": timeout, "follow_redirects": False}
+        if hasattr(self.engine, "httpx_client_kwargs"):
+            kwargs = self.engine.httpx_client_kwargs(**kwargs)
+        elif proxy:
+            kwargs["proxy"] = proxy
+        if hasattr(self.engine, "auth_headers"):
+            kwargs["headers"] = self.auth_headers_for_url(origin)
+
+        try:
+            async with httpx.AsyncClient(**kwargs) as client:
+                for path in _LISTING_DIRS:
+                    target = urljoin(origin, path)
+                    try:
+                        r = await client.get(target)
+                        self._record_probe_status(r)
+                    except Exception:
+                        self._record_scan_note(f"transport_error:{self.CHECK_TYPE}:dir_listing")
+                        continue
+                    if r.status_code not in (200, 206):
+                        continue
+                    if not detect_directory_listing(r.text[:4000]):
+                        continue
+                    pair = {
+                        "request": {"url": target},
+                        "response": {"status": r.status_code,
+                                     "headers": dict(r.headers), "body": r.text[:2000]},
+                    }
+                    findings.append(await self.record_finding(
+                        url=target,
+                        field_name="(directory listing)",
+                        payload="(GET request — no payload)",
+                        evidence=(
+                            f"Directory listing (autoindex) enabled: {path} → HTTP {r.status_code}. "
+                            "ファイル一覧が露出し、意図しないファイルの発見に悪用され得ます。"
+                        ),
+                        pair=pair,
+                        severity="medium",
+                        confidence="confirmed",
+                        evidence_type="info_directory_listing",
+                        evidence_details={"path": path},
+                        reproduction_steps=[
+                            f"Request {target}",
+                            "Confirm the response is an autoindex directory listing (\"Index of /\").",
+                            "Disable directory indexing (e.g. Apache: Options -Indexes).",
+                        ],
+                    ))
+        except Exception:
+            self._record_scan_note(f"transport_error:{self.CHECK_TYPE}:dir_listing_client")
         return findings
 
     # ------------------------------------------------------------------
