@@ -1329,16 +1329,18 @@ class DetectionEvidenceTests(unittest.TestCase):
     def test_info_disclosure_verifier_replays_sensitive_resource(self):
         async def run():
             scanner = InfoDisclosureScanner(_DummyEngine())
-            response = type(
-                "Resp",
-                (),
-                {
-                    "status_code": 200,
-                    "text": "APP_KEY=fixture\nDB_PASSWORD=secret\n",
-                    "headers": {"content-type": "text/plain"},
-                },
-            )()
-            scanner._get = AsyncMock(return_value=response)
+
+            def _mk(status, text, ctype):
+                return type("Resp", (), {"status_code": status, "text": text,
+                                         "headers": {"content-type": ctype}})()
+
+            # verify は検出時と同じ soft-404 判定を再適用する（存在しないパスを 1 度引く）。
+            # 正規のサーバは未知パスを 404 で返す → soft-404 でない → .env は confirmed。
+            async def _get(url, follow_redirects=False):
+                if "wscan-nonexistent" in url:
+                    return _mk(404, "<html>not found</html>", "text/html")
+                return _mk(200, "APP_KEY=fixture\nDB_PASSWORD=secret\n", "text/plain")
+            scanner._get = _get
             finding = Finding(
                 check_type="info_disclosure",
                 severity="critical",
@@ -1347,16 +1349,12 @@ class DetectionEvidenceTests(unittest.TestCase):
                 payload="(GET request — no payload)",
                 evidence="Sensitive resource accessible",
                 evidence_type="info_sensitive_resource",
-                evidence_details={"path": "/.env"},
+                evidence_details={"path": "/.env", "matched_label": ".env file content"},
             )
 
             result = await scanner.verify_finding(finding)
 
             self.assertTrue(result)
-            scanner._get.assert_awaited_once_with(
-                "http://fixture.test/.env",
-                follow_redirects=False,
-            )
 
         self.run_async(run())
 
