@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, Mock, patch
 
 from wscan.manual_crawl import (
     ManualCrawlSession,
+    _cookie_host_matches,
     _same_origin,
     build_seed_payload,
     coerce_input_event,
@@ -85,6 +86,32 @@ class _FakeContext:
 
 
 class ManualCrawlSeedTests(unittest.TestCase):
+    def test_load_honors_persisted_effective_origin_after_redirect(self):
+        # target が http だが保存は https（起動時リダイレクト後・同一ホスト）のとき、
+        # 厳密 origin 判定で scheme 差により seed を落とさない（保存 origin を優先・Codex #153）。
+        data = {
+            "start_url": "https://example.test/",
+            "seed_urls": ["https://example.test/", "https://example.test/app"],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "manual.json"
+            path.write_text(json.dumps(data), encoding="utf-8")
+            seed = load_manual_crawl_seed(str(path), "http://example.test/")
+        self.assertIn("https://example.test/app", seed.urls)
+
+    def test_load_does_not_promote_cross_host_saved_origin(self):
+        # 保存 start_url が別ホストでも、caller の same_origin_as（別ホスト）へは昇格しない。
+        data = {
+            "start_url": "https://sso.evil.test/",
+            "seed_urls": ["https://sso.evil.test/cb", "http://example.test/ok"],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "manual.json"
+            path.write_text(json.dumps(data), encoding="utf-8")
+            seed = load_manual_crawl_seed(str(path), "http://example.test/")
+        self.assertIn("http://example.test/ok", seed.urls)
+        self.assertNotIn("https://sso.evil.test/cb", seed.urls)
+
     def test_load_manual_crawl_seed_normalizes_same_origin_urls(self):
         data = {
             "seed_urls": [
@@ -458,17 +485,19 @@ class ManualCrawlRemoteBrowserTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(scheduled, [])
         self.assertFalse(any("evil.test" in u for u in session.urls))
 
-    async def test_stop_filters_cookies_to_target_origin(self):
-        # cross-origin SSO で認証しても、保存 cookie は target origin 限定（IdP cookie を漏らさない・Codex #153）。
-        session = self._session(_FakePage("http://example.test/"), None)
+    async def test_stop_filters_cookies_by_target_host_not_path(self):
+        # 保存 cookie は target ホスト一致で絞る（path に依らず保持・別ホスト IdP は除外・Codex #153）。
+        session = self._session(_FakePage("http://example.test/login"), None)
         session.running = True
-        session.start_url = "http://example.test/"
-        recorded = {}
+        session.start_url = "http://example.test/login"
 
         class _Ctx:
             async def cookies(self, urls=None):
-                recorded["urls"] = urls
-                return [{"name": "s", "value": "1"}]
+                # 認証で /app にスコープされた cookie と、別ホスト IdP の cookie が混在。
+                return [
+                    {"name": "app_session", "value": "1", "domain": "example.test", "path": "/app"},
+                    {"name": "idp", "value": "x", "domain": "sso.evil.test", "path": "/"},
+                ]
         session._context = _Ctx()
 
         async def _noop(*a, **k):
@@ -478,7 +507,9 @@ class ManualCrawlRemoteBrowserTests(unittest.IsolatedAsyncioTestCase):
         session.save = lambda: None
 
         await session.stop()
-        self.assertEqual(recorded["urls"], ["http://example.test/"])  # URL フィルタ付きで取得
+        names = {c["name"] for c in session.cookies}
+        self.assertIn("app_session", names)   # path=/app でも同一ホストなら保持
+        self.assertNotIn("idp", names)         # 別ホストは除外
 
     async def test_start_screencast_failure_does_not_leak_cdp(self):
         # startScreencast 失敗時に死んだ CDP を self._cdp に残さず detach する（Codex #153 P2）。
@@ -546,6 +577,16 @@ class SameOriginTests(unittest.TestCase):
     def test_garbage_is_false(self):
         self.assertFalse(_same_origin("", "https://app.test"))
         self.assertFalse(_same_origin("not a url", "https://app.test"))
+
+
+class CookieHostMatchTests(unittest.TestCase):
+    def test_exact_and_subdomain(self):
+        self.assertTrue(_cookie_host_matches("example.test", "example.test"))
+        self.assertTrue(_cookie_host_matches(".example.test", "app.example.test"))
+
+    def test_different_host(self):
+        self.assertFalse(_cookie_host_matches("sso.evil.test", "example.test"))
+        self.assertFalse(_cookie_host_matches("", "example.test"))
 
 
 if __name__ == "__main__":

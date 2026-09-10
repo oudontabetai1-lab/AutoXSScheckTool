@@ -56,6 +56,19 @@ def _same_origin(url: str, origin: str) -> bool:
         return False
 
 
+def _cookie_host_matches(cookie_domain: str, host: str) -> bool:
+    """cookie の domain が target host のものか（純粋）。
+
+    先頭ドットを除いて完全一致、または host がその domain のサブドメインなら True。
+    別サイト（IdP 等）の cookie を除外するために使う。空は False。
+    """
+    d = (cookie_domain or "").lower().lstrip(".")
+    h = (host or "").lower()
+    if not d or not h:
+        return False
+    return h == d or h.endswith("." + d)
+
+
 def _matches_scope(url: str, scopes: list[str]) -> bool:
     candidate = url.rstrip("/")
     parsed = urlparse(candidate)
@@ -122,8 +135,19 @@ def load_manual_crawl_seed(
         str(s) for s in (data.get("import_scopes") or [])
     ]
 
+    # 起動時リダイレクト（http→https 等・同一ホスト）後の実効 origin を保存してあるので、
+    # 同一ホストなら caller の same_origin_as より優先する。これをしないと、target が http の
+    # まま保存が https のとき、厳密 origin 判定で全 seed が scheme 差で落ちる（Codex #153）。
+    # 別ホストへは昇格しない（host 一致を条件にする）。
+    effective_origin = same_origin_as
+    saved_start = str(data.get("start_url") or "")
+    if saved_start.startswith(("http://", "https://")):
+        if not same_origin_as or (
+                _origin_tuple(saved_start)[1] == _origin_tuple(same_origin_as)[1]):
+            effective_origin = saved_start
+
     return ManualCrawlSeed(
-        urls=_unique_urls(raw_urls, same_origin_as, scopes),
+        urls=_unique_urls(raw_urls, effective_origin, scopes),
         cookies=data.get("cookies") or [],
         forms_by_url=data.get("forms_by_url") or {},
         steps=data.get("steps") or [],
@@ -511,12 +535,15 @@ class ManualCrawlSession:
         async def _initial_goto() -> None:
             try:
                 await initial_page.goto(start_url, wait_until="commit", timeout=15_000)
-                # 起動時の通常リダイレクト（http→https 等）後の実効 origin を記録基準にする。
-                # これをしないと start_url が旧 origin に固定され、以降の snapshot/forms/requests や
-                # 手入力 URL が軒並み out-of-scope 扱いになり artifact がほぼ空になる（Codex #153）。
-                # popup 等の後続は従来どおり厳密 origin 判定のまま。
+                # 起動時の**同一ホストの正規リダイレクト**（http→https 等のスキーム/ポート変更）だけを
+                # 記録基準に採用する。これをしないと start_url が旧 origin に固定され、以降の
+                # snapshot/forms/requests や手入力 URL が軒並み out-of-scope になり artifact が空になる。
+                # 一方、保護 URL が即座に cross-origin の IdP へリダイレクトするケースで IdP を記録
+                # origin に昇格させると、IdP の URL(OAuth パラメータ含む)や cookie を取り込んでしまう。
+                # そのため **ホストが変わるリダイレクトは採用しない**（Codex #153）。
                 landed = initial_page.url or ""
-                if landed.startswith(("http://", "https://")):
+                if (landed.startswith(("http://", "https://"))
+                        and _origin_tuple(landed)[1] == _origin_tuple(start_url)[1]):
                     self.start_url = landed
             except Exception as exc:
                 self.last_error = f"goto failed: {exc}"
@@ -922,13 +949,17 @@ class ManualCrawlSession:
             await self.snapshot("stop")
             if self._context:
                 try:
-                    # 保存 cookie は target origin 限定にする。cross-origin SSO popup で認証した場合、
-                    # URL フィルタ無しだと IdP のセッション cookie 等が manual-crawl JSON に書かれる
-                    # （URL/forms/events は同一 origin に絞っているのに cookie だけ漏れる・Codex #153）。
-                    if self.start_url:
-                        self.cookies = await self._context.cookies([self.start_url])
-                    else:
-                        self.cookies = await self._context.cookies()
+                    # 保存 cookie は target **ホスト**のものに限定する。cross-origin SSO popup で
+                    # 認証しても IdP の cookie を JSON に書かない。ただし URL フィルタ（cookies([url])）だと
+                    # 起動パス（/login）に送られる cookie しか返らず、認証後に path=/app 等へスコープされた
+                    # セッション cookie を取りこぼす。そこで全 cookie を取得し host ドメイン一致で絞る
+                    # （path に依らず同一ホストは保持・別ホストは除外・Codex #153）。
+                    all_cookies = await self._context.cookies()
+                    host = _origin_tuple(self.start_url)[1] if self.start_url else ""
+                    self.cookies = (
+                        [c for c in all_cookies if _cookie_host_matches(c.get("domain", ""), host)]
+                        if host else all_cookies
+                    )
                 except Exception:
                     pass
         finally:
