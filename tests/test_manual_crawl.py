@@ -408,8 +408,9 @@ class ManualCrawlRemoteBrowserTests(unittest.IsolatedAsyncioTestCase):
         ):
             result = await session.fill_totp("#otp")
 
-        self.assertTrue(result["ok"])
-        self.assertEqual(session.steps[-1]["url"], "")  # cross-origin URL は記録しない
+        self.assertTrue(result["ok"])  # 入力自体は成功
+        # cross-origin の TOTP 入力 step は丸ごと省略（selector 含め残さない）。
+        self.assertEqual(session.steps, [])
         self.assertFalse(any("evil.test" in json.dumps(s) for s in session.steps))
 
     async def test_fill_totp_reports_missing_configuration(self):
@@ -435,27 +436,28 @@ class ManualCrawlRemoteBrowserTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("http://example.test/popup", session.forms_by_url)
         self.assertEqual(session.forms_by_url["http://example.test/popup"], forms)
 
-    async def test_record_fill_omits_cross_origin_url(self):
-        # JS binding 由来の fill 記録も cross-origin URL を残さない（_record_fill 集約ゲート・Codex #153）。
+    async def test_record_fill_drops_cross_origin_step_entirely(self):
+        # cross-origin の fill step は URL だけでなく selector/name/type も含め丸ごと省略する
+        # （IdP のアカウント選択等が steps に残らない・Codex #153）。
         page = _FakePage("http://example.test/login")
         session = self._session(page, _FakeContext([page]))
-        session._record_fill({"selector": "#u", "name": "user", "type": "text",
+        session._record_fill({"selector": "#u", "name": "user@corp.example", "type": "text",
                               "url": "https://sso.evil.test/authorize?code=SECRET"})
-        self.assertEqual(session.steps[-1]["url"], "")
+        self.assertEqual(session.steps, [])  # step 自体が記録されない
         # same-origin はそのまま残す。
         session._record_fill({"selector": "#p", "name": "pw", "type": "password",
                               "url": "http://example.test/login?next=/home"})
         self.assertEqual(session.steps[-1]["url"], "http://example.test/login?next=/home")
 
-    async def test_record_click_omits_cross_origin_href_and_url(self):
+    async def test_record_click_drops_cross_origin_step_entirely(self):
         page = _FakePage("http://example.test/")
         session = self._session(page, _FakeContext([page]))
-        session._record_click({"selector": "a", "text": "login",
+        session._record_click({"selector": "button.account", "text": "user@corp.example",
                                "href": "https://sso.evil.test/authorize?state=xyz",
                                "url": "https://sso.evil.test/authorize?state=xyz"})
-        self.assertEqual(session.steps[-1]["href"], "")
-        self.assertEqual(session.steps[-1]["url"], "")
+        self.assertEqual(session.steps, [])  # selector/text も含め丸ごと残さない
         self.assertFalse(any("evil.test" in json.dumps(s) for s in session.steps))
+        self.assertFalse(any("corp.example" in json.dumps(s) for s in session.steps))
         self.assertNotIn("https://sso.evil.test/authorize?state=xyz", session.urls)
 
     async def test_background_tab_navigation_is_snapshotted(self):

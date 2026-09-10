@@ -1062,7 +1062,19 @@ class ManualCrawlSession:
         url = url or ""
         return url if _same_origin(url, self.start_url) else ""
 
+    def _step_out_of_scope(self, url: str) -> bool:
+        """操作 step の発生元 URL が cross-origin（記録 origin 外）か。
+
+        cross-origin なら selector/name/text 等も含め step を丸ごと省略する（IdP のアカウント選択
+        ボタンがユーザーのメール等を label に持つ場合に steps へ書き出さない・Codex #153）。
+        発生元 URL が http(s) で cross-origin のときのみ True（空/不明は in-scope 扱いで保持）。
+        """
+        url = url or ""
+        return url.startswith(("http://", "https://")) and not _same_origin(url, self.start_url)
+
     def _record_fill(self, data: dict) -> None:
+        if self._step_out_of_scope(data.get("url", "")):
+            return  # cross-origin の入力 step は一切残さない
         step = {
             "action": "fill",
             "selector": data.get("selector", ""),
@@ -1074,6 +1086,8 @@ class ManualCrawlSession:
         self.steps.append(step)
 
     def _record_click(self, data: dict) -> None:
+        if self._step_out_of_scope(data.get("url", "")):
+            return  # cross-origin のクリック step（IdP のアカウント選択等）は一切残さない
         href = data.get("href", "")
         same_origin_href = bool(href) and _same_origin(href, self.start_url)
         step = {
