@@ -153,24 +153,49 @@ def _is_secret_path(path: str) -> bool:
     return any(mk in p for mk in _SECRET_PATH_MARKERS)
 
 
+# catch-all 本文に紛れる「リクエスト毎に変わる動的フィールド」。比較前に除去して、
+# timestamp/nonce/trace-id/CSRF/UUID 等の差で「別物」と誤判定しないようにする（Codex #156）。
+_DYNAMIC_NOISE = re.compile(
+    r"(?i)"
+    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"   # UUID
+    r"|\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?"  # ISO 日時
+    r"|\b[0-9a-f]{16,}\b"                                             # 長い hex（nonce/trace/token）
+    r"|\b\d{10,}\b"                                                   # epoch 等の長い数字列
+    r"|(?:nonce|csrf|token|request[_-]?id|trace[_-]?id|timestamp)\s*[=:\"']+\s*[\w.\-+/=]+"
+)
+
+
 def _norm_catch_all(body: str, path: str) -> str:
-    """catch-all 比較用に本文を正規化する（純粋）。echo され得る path トークンを除去する。"""
+    """catch-all 比較用に本文を正規化する（純粋）。
+
+    echo され得る path トークンと、リクエスト毎に変わる動的フィールド（UUID/日時/nonce/トークン等）を
+    除去して、動的値の差だけで「別物」と判定しないようにする。
+    """
     b = (body or "")[:4000]
     for tok in (path or "").split("/"):
         if len(tok) > 2:
             b = b.replace(tok, "")
+    b = _DYNAMIC_NOISE.sub("", b)
     return b.strip()
 
 
 def _same_catch_all(body: str, path: str, baseline_body: str, baseline_path: str) -> bool:
     """候補本文が soft-404 baseline（catch-all）本文と実質同一かを判定する（純粋）。
 
-    両者から各自のリクエスト path の echo を除去して比較する。baseline 本文が空（＝取得失敗）なら
-    False（比較不能なので従来の署名/パス判定に委ねる）。
+    各自のリクエスト path の echo と動的フィールドを除去したうえで、完全一致または高い類似度
+    （difflib ratio>=0.9）なら同一 catch-all とみなす。散在する動的値が残っても取りこぼさない。
+    baseline 本文が空（＝取得失敗）なら False（従来の署名/パス判定に委ねる）。
     """
     if not baseline_body:
         return False
-    return _norm_catch_all(body, path) == _norm_catch_all(baseline_body, baseline_path)
+    a = _norm_catch_all(body, path)
+    b = _norm_catch_all(baseline_body, baseline_path)
+    if not a or not b:
+        return a == b
+    if a == b:
+        return True
+    import difflib
+    return difflib.SequenceMatcher(None, a, b).ratio() >= 0.9
 
 # ディレクトリリスティング（autoindex）の確定シグネチャ。
 _DIR_LISTING_PATTERNS = (
@@ -227,36 +252,8 @@ def detect_directory_listing(body: str) -> bool:
 _SOFT404_PROBE = "/wscan-nonexistent-probe-8f3a1c9e2b.zzz"
 
 
-def _redact_sensitive(body: str, limit: int = 300) -> str:
-    """秘匿ファイル本文をレポート保存用にマスクする（純粋）。
-
-    key=value / key: value の値、および秘密鍵ブロックを伏字化し、先頭 ``limit`` 文字に切る。
-    レポートには「何が露出したか」の証跡は残しつつ、秘密の実値は残さない。
-    """
-    if not body:
-        return ""
-    text = body[:limit]
-    # 秘密鍵ブロックはヘッダだけ残して本体を伏字化。
-    text = re.sub(
-        r"(-----BEGIN (?:RSA |OPENSSH |EC |DSA )?PRIVATE KEY-----).*",
-        r"\1 [REDACTED]", text, flags=re.DOTALL,
-    )
-    # 秘匿ファイル（.env/.aws/.npmrc 等）は中身全体が機密なので、変数名に依らず **全ての代入値**を
-    # 伏字化する。DATABASE_URL=postgres://user:password@host/db のように key/secret/token 等を名前に
-    # 含まない値も残さない（Codex #156）。行頭の `key=value` / `key: value` を対象にする。
-    text = re.sub(
-        r"(?m)^(\s*[\w.\-\[\]]+\s*[:=]\s*)\S.*$", r"\1[REDACTED]", text,
-    )
-    # 行頭でない代入（npmrc の `//registry...:_authToken=`）は秘匿語を含むものをマスク。
-    text = re.sub(
-        r"(?i)([\w.\-]*(?:key|token|secret|password|passwd|pwd|auth)[\w.\-]*\s*[:=]\s*)\S+",
-        r"\1[REDACTED]", text,
-    )
-    # htpasswd のハッシュを伏字化。$apr1$/bcrypt/$6$ 形に加え、検出器が受理する
-    # user:{SHA}base64 形（{SSHA} 含む）も同様にマスクする（Codex #156）。
-    text = re.sub(r"(:\$(?:apr1|2[aby]|6)\$)\S+", r"\1[REDACTED]", text)
-    text = re.sub(r"(:\{S?SHA\})\S+", r"\1[REDACTED]", text)
-    return text
+# （旧 _redact_sensitive は撤去。インライン・マスクは export 接頭辞・XML 属性・構造化形式で
+#  漏れが続いたため、秘匿ファイルは本文を保存せず署名安全な注記のみ残す方針へ変更・Codex #156）
 
 # Headers that reveal technology stack
 _TECH_HEADERS = [
@@ -492,12 +489,13 @@ class InfoDisclosureScanner(BaseScanner):
                         continue
 
                     severity = "critical" if ".env" in path or ".git" in path else "high"
-                    # 秘匿情報を含むファイルはレポートに本文を平文で残さない（マスク）。
-                    # ラベル判定に加えパスでも判断する（誤ラベル時の取りこぼしを防ぐ保険）。
+                    # 秘匿ファイル（.env/.aws/.npmrc/秘密鍵/…）は本文を**一切保存しない**。
+                    # インライン・マスクは export 接頭辞・XML 属性・構造化形式等で漏れが続くため、
+                    # 秘匿パス/ラベルでは本文を省略し、署名安全な注記だけ残す（Codex #156）。
+                    is_secret = (matched_label in _SECRET_ARTIFACT_LABELS or _is_secret_path(path))
                     stored_body = (
-                        _redact_sensitive(body)
-                        if (matched_label in _SECRET_ARTIFACT_LABELS or _is_secret_path(path))
-                        else body
+                        f"[{matched_label} を検出 — 秘匿のため本文はレポートに保存しません]"
+                        if is_secret else body
                     )
                     pair = {
                         "request": {"url": target},

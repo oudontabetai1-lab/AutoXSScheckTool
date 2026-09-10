@@ -97,26 +97,6 @@ class PatternSeparationTests(unittest.TestCase):
         self.assertEqual(matched, [])
 
 
-class RedactionTests(unittest.TestCase):
-    def test_private_key_redacted(self):
-        out = m._redact_sensitive(
-            "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAA...\n-----END...")
-        self.assertIn("BEGIN OPENSSH PRIVATE KEY", out)
-        self.assertIn("[REDACTED]", out)
-        self.assertNotIn("b3BlbnNzaC1r", out)
-
-    def test_aws_secret_redacted(self):
-        out = m._redact_sensitive(
-            "aws_access_key_id=AKIAIOSFODNN7EXAMPLE\n"
-            "aws_secret_access_key=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY\n")
-        self.assertNotIn("wJalrXUtnFEMI", out)
-        self.assertIn("[REDACTED]", out)
-
-    def test_npmrc_token_redacted(self):
-        out = m._redact_sensitive("//registry.npmjs.org/:_authToken=abc123secretvalue\n")
-        self.assertNotIn("abc123secretvalue", out)
-
-
 class DirListingTests(unittest.TestCase):
     def test_strong_marker_alone_confirms(self):
         self.assertTrue(m.detect_directory_listing(
@@ -191,36 +171,6 @@ class _FakeRespCT:
         self.headers = {"content-type": content_type}
 
 
-class RedactionShaTests(unittest.TestCase):
-    def test_sha_htpasswd_hash_redacted(self):
-        out = m._redact_sensitive("admin:{SHA}W6ph5Mm5Pz8GgiULbPgzG37mj9g=\n")
-        self.assertNotIn("W6ph5Mm5Pz8GgiULbPgzG37mj9g=", out)
-        self.assertIn("[REDACTED]", out)
-
-    def test_ssha_htpasswd_hash_redacted(self):
-        out = m._redact_sensitive("user:{SSHA}abcdEFGHsecretbase64==\n")
-        self.assertNotIn("abcdEFGHsecretbase64==", out)
-
-    def test_apr1_still_redacted(self):
-        out = m._redact_sensitive("admin:$apr1$abcd$ef.ghij/klmnop\n")
-        self.assertNotIn("ef.ghij/klmnop", out)
-
-    def test_all_assignment_values_redacted(self):
-        # 秘匿ファイルは変数名に依らず全代入値を伏字化（DATABASE_URL 等も残さない・Codex #156）。
-        body = ("APP_KEY=x\n"
-                "DATABASE_URL=postgres://user:password@host/db\n"
-                "MAILER=smtp://relay.internal:25\n")
-        out = m._redact_sensitive(body)
-        self.assertNotIn("postgres://user:password@host/db", out)
-        self.assertNotIn("smtp://relay.internal:25", out)
-        self.assertIn("[REDACTED]", out)
-
-    def test_npmrc_auth_redacted(self):
-        out = m._redact_sensitive("_auth=dXNlcjpwYXNzd29yZA==\n//registry.npmjs.org/:_authToken=abc123\n")
-        self.assertNotIn("dXNlcjpwYXNzd29yZA==", out)
-        self.assertNotIn("abc123", out)
-
-
 class CatchAllComparisonTests(unittest.TestCase):
     def test_same_catch_all_true_modulo_path(self):
         base = "<html>Unknown page /wscan-nonexistent-probe-8f3a1c9e2b.zzz not found. CREATE TABLE demo</html>"
@@ -234,6 +184,23 @@ class CatchAllComparisonTests(unittest.TestCase):
 
     def test_empty_baseline_false(self):
         self.assertFalse(m._same_catch_all("anything", "/x", "", m._SOFT404_PROBE))
+
+    def test_dynamic_fields_tolerated(self):
+        # catch-all が per-request な timestamp/nonce/trace-id/CSRF/UUID を含んでも同一判定する
+        # （動的値の差だけで別物にしない・Codex #156）。
+        base = ('<html>Not found /wscan-nonexistent-probe-8f3a1c9e2b.zzz '
+                'ts=2026-09-10T07:15:20Z nonce="a1b2c3d4e5f6a7b8" '
+                'trace_id=9f8e7d6c5b4a3021 req=12345678901 '
+                'id=550e8400-e29b-41d4-a716-446655440000. CREATE TABLE demo</html>')
+        cand = ('<html>Not found /.env ts=2026-09-10T09:41:02Z nonce="ffeeddccbbaa9988" '
+                'trace_id=1122334455667788 req=99887766554 '
+                'id=6ba7b810-9dad-11d1-80b4-00c04fd430c8. CREATE TABLE demo</html>')
+        self.assertTrue(m._same_catch_all(cand, "/.env", base, m._SOFT404_PROBE))
+
+    def test_high_similarity_is_catch_all(self):
+        base = "Error page. The requested resource was not found on this server. Please try again."
+        cand = "Error page. The requested resource was not found on this server. Please retry now."
+        self.assertTrue(m._same_catch_all(cand, "/.git/config", base, m._SOFT404_PROBE))
 
 
 class SensitiveVerifyTests(unittest.IsolatedAsyncioTestCase):
