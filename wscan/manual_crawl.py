@@ -565,7 +565,10 @@ class ManualCrawlSession:
                 # artifact に残さない。requestfinished と同じ same-origin 判定を記録前に適用（Codex #153 P2）。
                 if _same_origin(page.url, self.start_url):
                     self._record_url(page.url, "navigate")
-                if page is self._page:
+                    # 背景タブ（非アクティブ）でも same-origin なら form を snapshot する。active のみだと、
+                    # 別 popup がアクティブな間に背景タブが新フォームを読み、そのまま停止すると
+                    # forms_by_url に構造が残らず URL だけ保存される（Codex #153 P2）。
+                    # snapshot() 自身が same-origin を再確認するため cross-origin の form は捕捉しない。
                     self._schedule_snapshot("navigate", page)
 
         def on_request_finished(request) -> None:

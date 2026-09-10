@@ -431,6 +431,33 @@ class ManualCrawlRemoteBrowserTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(any("evil.test" in json.dumps(s) for s in session.steps))
         self.assertNotIn("https://sso.evil.test/authorize?state=xyz", session.urls)
 
+    async def test_background_tab_navigation_is_snapshotted(self):
+        # 背景タブ（非アクティブ）の same-origin ナビゲーションでも form を snapshot する
+        # （active のみだと背景タブの新フォームが forms_by_url に残らない・Codex #153 P2）。
+        active = _FakePage("http://example.test/active")
+        background = _FakePage("http://example.test/bg")
+        session = self._session(active, _FakeContext([active, background]))
+        scheduled = []
+        session._schedule_snapshot = lambda reason, page=None: scheduled.append(page)
+        await session._bind_page(background)   # 背景タブをバインド（active は別ページ）
+        on_nav = background.handlers["framenavigated"]
+        background.url = "http://example.test/bg/form"
+        on_nav(background.main_frame)
+        self.assertIn(background, scheduled)   # active でなくても snapshot がスケジュールされる
+        self.assertIn("http://example.test/bg/form", session.urls)
+
+    async def test_background_tab_cross_origin_not_snapshotted(self):
+        # 背景タブでも cross-origin なら URL も snapshot も残さない。
+        active = _FakePage("http://example.test/active")
+        evil = _FakePage("https://sso.evil.test/cb?token=x")
+        session = self._session(active, _FakeContext([active, evil]))
+        scheduled = []
+        session._schedule_snapshot = lambda reason, page=None: scheduled.append(page)
+        await session._bind_page(evil)
+        evil.handlers["framenavigated"](evil.main_frame)
+        self.assertEqual(scheduled, [])
+        self.assertFalse(any("evil.test" in u for u in session.urls))
+
     async def test_start_screencast_failure_does_not_leak_cdp(self):
         # startScreencast 失敗時に死んだ CDP を self._cdp に残さず detach する（Codex #153 P2）。
         class _FailCdp(_FakeCdp):
