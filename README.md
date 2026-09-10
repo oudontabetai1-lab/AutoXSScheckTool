@@ -50,7 +50,7 @@ WScan は、IPA「安全なウェブサイトの作り方」の脆弱性カテ�
 
 ### 対応チェック種別
 
-`wscan.scanners.SCANNERS` に登録されている 36 種類です。
+`wscan.scanners.SCANNERS` に登録されている 37 種類です。
 
 ```text
 sqli xss dom_xss os ssti path_traversal csrf header_injection mail_header
