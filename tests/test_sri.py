@@ -1,10 +1,63 @@
 """Unit tests for the SRIScanner.find_unprotected_externals helper."""
+import types
 import unittest
 
+from wscan.scanners import SCANNERS
+from wscan.scanners.base import PageDocumentUnavailable, _body_looks_like_html
 from wscan.scanners.sri import find_unprotected_externals
 
 
 PAGE = "https://app.example.com/dashboard"
+
+
+class DocumentBodyTransientHtmlTests(unittest.IsolatedAsyncioTestCase):
+    """_document_body(html_only=True, allow_non_2xx=False)＝SRI の取得経路（Codex #147）。"""
+
+    def _sri(self, raw):
+        engine = types.SimpleNamespace(browser=None, monitor=None, payload_gen=None,
+                                       wave_errors=[])
+        scanner = SCANNERS["sri"](engine)
+
+        async def _raw(url):
+            return raw
+        scanner._raw_document_cached = _raw
+        return scanner
+
+    async def test_transient_html_body_is_audited_not_retried(self):
+        # 5xx でもブラウザが描画する HTML（Content-Type: text/html）は監査対象として本文を返す。
+        html = '<html><body><script src="https://cdn.test/x.js"></script></body></html>'
+        scanner = self._sri({"status": 503, "url": PAGE,
+                             "headers": {"Content-Type": "text/html"}, "body": html})
+        out = await scanner._document_body(PAGE, allow_non_2xx=False, html_only=True)
+        self.assertEqual(out, html)
+
+    async def test_transient_non_html_body_still_retries(self):
+        # 5xx の JSON error 本文は SRI 監査対象でないので resume へ回す（retry 維持）。
+        scanner = self._sri({"status": 500, "url": PAGE,
+                             "headers": {"Content-Type": "application/json"},
+                             "body": '{"error":"boom"}'})
+        with self.assertRaises(PageDocumentUnavailable):
+            await scanner._document_body(PAGE, allow_non_2xx=False, html_only=True)
+
+    async def test_transient_empty_body_retries(self):
+        scanner = self._sri({"status": 502, "url": PAGE, "headers": {}, "body": ""})
+        with self.assertRaises(PageDocumentUnavailable):
+            await scanner._document_body(PAGE, allow_non_2xx=False, html_only=True)
+
+
+class BodyLooksLikeHtmlTests(unittest.TestCase):
+    def test_content_type_html(self):
+        self.assertTrue(_body_looks_like_html("", {"Content-Type": "text/html; charset=utf-8"},
+                                              is_2xx=False))
+
+    def test_explicit_non_html_false(self):
+        self.assertFalse(_body_looks_like_html("<html>", {"Content-Type": "application/json"},
+                                               is_2xx=True))
+
+    def test_missing_ctype_sniffs_on_non_2xx(self):
+        self.assertTrue(_body_looks_like_html("<!DOCTYPE html><html>", {}, is_2xx=False))
+        self.assertFalse(_body_looks_like_html("plain text", {}, is_2xx=False))
+        self.assertTrue(_body_looks_like_html("no tags", {}, is_2xx=True))
 
 
 class SRIDetectionTests(unittest.TestCase):

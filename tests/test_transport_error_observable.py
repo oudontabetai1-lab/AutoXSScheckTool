@@ -783,10 +783,28 @@ class ResponsePairDocumentGuardTests(unittest.IsolatedAsyncioTestCase):
                 with self.assertRaises(PageDocumentUnavailable):
                     await scanner.scan_page("http://app.test/x")
 
-    async def test_sri_raises_on_transient_even_with_body(self):
-        # SRI は 2xx の描画 document のみ監査。transient は本文があっても resume 対象。
+    async def test_sri_audits_transient_html_body(self):
+        # 5xx/429 でもブラウザは HTML を描画し integrity 無しの外部 script を読み込むため、
+        # 監査可能な HTML 本文があれば監査する（恒久失敗 endpoint を毎回 resume で再試行する
+        # だけで一度も監査しない問題を解消・Codex #147）。
+        html = ('<html><head><script src="https://cdn.jsdelivr.net/npm/jquery@3.6.0/x.js">'
+                '</script></head></html>')
         engine = _FakeEngine()
-        engine.browser = _APIBrowser(_FakeRequestCtx(_FakeAPIResponse(503, {}, text="<html>x</html>")))
+        engine.browser = _APIBrowser(_FakeRequestCtx(
+            _FakeAPIResponse(503, {"Content-Type": "text/html"}, text=html)))
+        scanner = SCANNERS["sri"](engine)
+
+        async def _rec(**kw):
+            return object()
+        scanner.record_finding = _rec
+        out = await scanner.scan_page("http://app.test/x")
+        self.assertEqual(len(out), 1)  # raise せず監査して finding 化
+
+    async def test_sri_raises_on_transient_non_html_body(self):
+        # transient の非 HTML（JSON API error 等）は SRI 監査対象でないので resume へ回す。
+        engine = _FakeEngine()
+        engine.browser = _APIBrowser(_FakeRequestCtx(
+            _FakeAPIResponse(503, {"Content-Type": "application/json"}, text='{"e":"x"}')))
         scanner = SCANNERS["sri"](engine)
         with self.assertRaises(PageDocumentUnavailable):
             await scanner.scan_page("http://app.test/x")

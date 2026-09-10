@@ -145,6 +145,26 @@ _IDEMPOTENCY_HEADER_NAMES = frozenset({
 _TRANSIENT_REPLAY_STATUSES = frozenset({408, 429, 500, 502, 503, 504})
 
 
+def _body_looks_like_html(body: str, headers, *, is_2xx: bool) -> bool:
+    """応答本文が「ブラウザが描画する HTML document」かを判定する（純粋・Codex #147）。
+
+    Content-Type に html を含めば HTML。Content-Type 欠落時は 2xx crawl document を HTML とみなし、
+    非 2xx では `<html`/`<!doctype html` の軽いスニッフィングに留める（error 応答の誤検知回避）。
+    明示的な非 HTML（json/js/画像等）は False。
+    """
+    ctype = ""
+    for k, v in (headers or {}).items():
+        if str(k).lower() == "content-type":
+            ctype = str(v).lower()
+            break
+    if "html" in ctype:
+        return True
+    if not ctype:
+        blob = (body or "")[:4000].lower()
+        return is_2xx or ("<html" in blob) or ("<!doctype html" in blob)
+    return False
+
+
 def refresh_idempotency_headers(headers: dict) -> dict:
     """replay 毎に idempotency キーの**値だけ**を新規 uuid へ置換する（純粋）。
 
@@ -1797,8 +1817,14 @@ class BaseScanner(ABC):
         try:
             if status is not None and int(status) in _TRANSIENT_REPLAY_STATUSES:
                 # transient でも、走査対象の本文があり content 監査（allow_non_2xx=True）なら走査する。
-                # 本文が無い（真に空）ときだけ resume へ回す。
                 if allow_non_2xx and body:
+                    return body
+                # SRI 等(html_only): ブラウザは 5xx/429 でも HTML を描画し integrity 無しの外部 script を
+                # 読み込むため、監査可能な HTML 本文があれば 2xx 同様に監査する。これを resume 用に
+                # 投げ続けると、恒久的に失敗する endpoint は毎回再試行されるだけで一度も監査されない
+                # （Codex #147）。body が無い/非 HTML のときだけ resume へ回す。
+                if html_only and body and _body_looks_like_html(
+                        body, raw.get("headers"), is_2xx=False):
                     return body
                 self._record_scan_note(f"transport_error:{self.CHECK_TYPE}:transient")
                 raise PageDocumentUnavailable(
@@ -1811,27 +1837,13 @@ class BaseScanner(ABC):
             # 2xx に限ると、ブラウザが描画し外部 script を読み込む custom 401/404 HTML を見逃す
             # （status だけでは本文が描画されないとは限らない・Codex #147）。HTML 以外（JSON API の
             # error・生 asset 等）は NOT_REACHED（本文なし）として誤検知を避ける。
-            ctype = ""
-            for k, v in (raw.get("headers") or {}).items():
-                if str(k).lower() == "content-type":
-                    ctype = str(v).lower()
-                    break
             is_2xx = False
             try:
                 is_2xx = status is not None and (200 <= int(status) < 300)
             except (TypeError, ValueError):
                 is_2xx = False
-            if "html" in ctype:
-                is_html = True
-            elif not ctype:
-                # Content-Type 欠落: 成功(2xx)の crawl document は HTML とみなす（<html> タグ省略や
-                # 長い前置きで先頭に現れない正規ページを取りこぼさない・Codex #147）。非2xx で header も
-                # 無い場合のみ軽いスニッフィングに留める（error 応答の誤検知を避ける）。
-                blob = body[:4000].lower()
-                is_html = is_2xx or ("<html" in blob) or ("<!doctype html" in blob)
-            else:
-                is_html = False  # 明示的に非 HTML（json/js/画像等）は監査しない
-            return body if is_html else ""
+            return body if _body_looks_like_html(
+                body, raw.get("headers"), is_2xx=is_2xx) else ""
         return body
 
     async def _raw_document_cached(self, url: str) -> Optional[dict]:
