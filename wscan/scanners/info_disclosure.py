@@ -98,17 +98,59 @@ _ARTIFACT_PATTERNS: dict[str, str] = {
     r"_authToken=|//registry\.":                                ".npmrc registry token",
     r"aws_access_key_id\s*=|aws_secret_access_key\s*=":         ".aws credentials",
     r"-----BEGIN (?:RSA |OPENSSH |EC |DSA )?PRIVATE KEY-----":  "private key file",
-    r"^Bud1":                                                   ".DS_Store metadata",
+    # 実 .DS_Store は先頭 4 バイト(00 00 00 01)＋"Bud1"。^Bud1 では復号本文に一致しない。
+    r"\x00\x00\x00\x01Bud1":                                    ".DS_Store metadata",
     r"(?i)(?:INSERT INTO|CREATE TABLE|DROP TABLE IF EXISTS)":   "SQL dump content",
     r"^PK\x03\x04":                                             "ZIP archive (possible backup)",
 }
 
 # 署名種別 → その本文に秘匿情報が含まれるため、レポートには本文を平文で保存しない
-# （マスクする）。0017。
+# （マスクする）。0017。.env も秘密（DB_PASSWORD 等）を含むため対象。
 _SECRET_ARTIFACT_LABELS = frozenset({
     ".htpasswd hashes", ".npmrc registry token", ".aws credentials",
-    "private key file",
+    "private key file", ".env file content",
 })
+
+# ラベル → そのシグネチャが適用可能なパス断片（小文字・部分一致のいずれか）。
+# 署名内容が一致しても、パスが不適合なら採用しない。これで (a) 別ファイル用の署名を
+# 誤ったラベルで選ばない（例: /.aws/credentials を「.env file content」にしない）、
+# (b) soft-404 の catch-all ページ（例 CREATE TABLE を含む SQL 解説）を全パスの
+# 「機密ファイル」に化けさせない、を同時に防ぐ（Codex #156 P1）。パス非依存の
+# エラー/漏えい署名（phpinfo・stack trace 等）はマップに載せず常に適用可とする。
+_LABEL_PATHS: dict[str, tuple[str, ...]] = {
+    ".env file content":            (".env",),
+    ".git config content":          ("/.git/",),
+    ".git/HEAD content":            ("/.git/",),
+    ".svn metadata":                ("/.svn/",),
+    ".hg metadata":                 ("/.hg/",),
+    ".htpasswd hashes":             (".htpasswd",),
+    ".npmrc registry token":        (".npmrc",),
+    ".aws credentials":             ("/.aws/",),
+    "private key file":             ("id_rsa", "id_dsa", "id_ecdsa", ".key", ".pem"),
+    ".DS_Store metadata":           (".ds_store",),
+    "SQL dump content":             (".sql",),
+    "ZIP archive (possible backup)": (".zip", ".tar.gz", ".tgz"),
+}
+
+# 本文に秘密を含みうるパス（ラベル判定に依らず本文をマスクする保険）。
+_SECRET_PATH_MARKERS = (
+    ".env", ".htpasswd", ".npmrc", "/.aws/", "id_rsa", "id_dsa", "id_ecdsa",
+    ".key", ".pem", "config.php.bak", "wp-config", "web.config",
+)
+
+
+def _label_applies(label: str, path: str) -> bool:
+    """ラベルが当該パスに適用可能か（マップ外のラベルは常に True＝パス非依存）。"""
+    markers = _LABEL_PATHS.get(label)
+    if not markers:
+        return True
+    p = (path or "").lower()
+    return any(mk in p for mk in markers)
+
+
+def _is_secret_path(path: str) -> bool:
+    p = (path or "").lower()
+    return any(mk in p for mk in _SECRET_PATH_MARKERS)
 
 # ディレクトリリスティング（autoindex）の確定シグネチャ。
 _DIR_LISTING_PATTERNS = (
@@ -391,8 +433,11 @@ class InfoDisclosureScanner(BaseScanner):
                     body = r.text[:4000]
 
                     # 確定は「ファイル内容の署名一致」を最優先。エラー系署名と artifact 署名の両方を見る。
+                    # ただし署名は当該パスに適用可能なものだけ採用する（誤ラベル選択・soft-404 catch-all を防ぐ）。
                     matched_label = None
                     for pattern, label in {**_CONTENT_PATTERNS, **_ARTIFACT_PATTERNS}.items():
+                        if not _label_applies(label, path):
+                            continue
                         if re.search(pattern, body, re.IGNORECASE | re.DOTALL):
                             matched_label = label
                             break
@@ -409,9 +454,10 @@ class InfoDisclosureScanner(BaseScanner):
 
                     severity = "critical" if ".env" in path or ".git" in path else "high"
                     # 秘匿情報を含むファイルはレポートに本文を平文で残さない（マスク）。
+                    # ラベル判定に加えパスでも判断する（誤ラベル時の取りこぼしを防ぐ保険）。
                     stored_body = (
                         _redact_sensitive(body)
-                        if matched_label in _SECRET_ARTIFACT_LABELS
+                        if (matched_label in _SECRET_ARTIFACT_LABELS or _is_secret_path(path))
                         else body
                     )
                     pair = {
@@ -542,6 +588,17 @@ class InfoDisclosureScanner(BaseScanner):
             except Exception:
                 return None
             return self._classify_error_body(r.text[:8000]) is not None
+
+        if finding.evidence_type == "info_directory_listing":
+            # GET し直して autoindex を再判定する（verify 分岐が無いと汎用 fallback が
+            # _apply_payload を呼んで失敗→assumed へ格下げされ confirmed 集計から漏れる・Codex #156）。
+            try:
+                r = await self._get(finding.url, follow_redirects=False)
+            except Exception:
+                return None
+            if r.status_code not in (200, 206):
+                return False
+            return detect_directory_listing(r.text[:4000])
 
         return None
 

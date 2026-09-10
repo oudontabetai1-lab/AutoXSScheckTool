@@ -1,8 +1,11 @@
 """0017: 忘れ物 artifact / ディレクトリリスティング検出の単体テスト（純粋・オフライン）。"""
 import re
+import types
 import unittest
+from unittest import mock
 
 from wscan.scanners import info_disclosure as m
+from wscan.scanners import SCANNERS
 
 
 class DirectoryListingTests(unittest.TestCase):
@@ -133,6 +136,84 @@ class DirListingTests(unittest.TestCase):
 
     def test_empty_body(self):
         self.assertFalse(m.detect_directory_listing(""))
+
+
+class LabelApplicabilityTests(unittest.TestCase):
+    def test_label_scoped_to_path(self):
+        # AWS creds は .env 署名にも一致し得るが、/.aws/ パスでは .env ラベルを採らない。
+        self.assertFalse(m._label_applies(".env file content", "/.aws/credentials"))
+        self.assertTrue(m._label_applies(".aws credentials", "/.aws/credentials"))
+
+    def test_catch_all_sql_signature_not_applied_to_git_path(self):
+        # soft-404 の catch-all（CREATE TABLE を含む解説ページ）が /.git/config を機密化しない。
+        self.assertFalse(m._label_applies("SQL dump content", "/.git/config"))
+        self.assertTrue(m._label_applies("SQL dump content", "/backup.sql"))
+
+    def test_path_agnostic_labels_always_apply(self):
+        self.assertTrue(m._label_applies("Database error", "/anything"))
+        self.assertTrue(m._label_applies("phpinfo() output", "/x/y"))
+
+    def test_secret_path(self):
+        self.assertTrue(m._is_secret_path("/.aws/credentials"))
+        self.assertTrue(m._is_secret_path("/.env.bak"))
+        self.assertFalse(m._is_secret_path("/index.html"))
+
+    def test_env_is_secret_label(self):
+        self.assertIn(".env file content", m._SECRET_ARTIFACT_LABELS)
+
+
+class DsStoreSignatureTests(unittest.TestCase):
+    def test_real_ds_store_header_matches(self):
+        # 実 .DS_Store は 00 00 00 01 "Bud1"。復号本文でこの完全ヘッダに一致する。
+        body = "\x00\x00\x00\x01Bud1\x00\x00\x00\x00some-metadata"
+        labels = [lab for pat, lab in m._ARTIFACT_PATTERNS.items()
+                  if re.search(pat, body, re.IGNORECASE | re.DOTALL)]
+        self.assertIn(".DS_Store metadata", labels)
+
+    def test_bare_bud1_word_does_not_falsely_match(self):
+        # 単なる "Bud1" 文字列（先頭バイト無し）は一致しない（正規ヘッダのみ）。
+        self.assertNotIn(".DS_Store metadata",
+                         [lab for pat, lab in m._ARTIFACT_PATTERNS.items()
+                          if re.search(pat, "Bud1 is a word", re.IGNORECASE)])
+
+
+class _FakeResp:
+    def __init__(self, status_code, text=""):
+        self.status_code = status_code
+        self.text = text
+        self.headers = {}
+
+
+class DirListingVerifyTests(unittest.IsolatedAsyncioTestCase):
+    def _scanner(self):
+        engine = types.SimpleNamespace(
+            browser=None, monitor=None, payload_gen=None, wave_errors=[],
+            proxy="", timeout=10)
+        return SCANNERS["info_disclosure"](engine)
+
+    async def test_directory_listing_reverified_true(self):
+        scanner = self._scanner()
+
+        async def _get(url, follow_redirects=False):
+            return _FakeResp(200, "<html><title>Index of /uploads</title>"
+                                  '<a href="../">Parent Directory</a>'
+                                  '<a href="a.txt">a.txt</a> 01-Jan-2020 12:00</html>')
+        scanner._get = _get
+        finding = types.SimpleNamespace(
+            evidence_type="info_directory_listing", url="http://x/uploads/",
+            evidence_details={})
+        self.assertTrue(await scanner.verify_finding(finding))
+
+    async def test_directory_listing_reverify_false_when_gone(self):
+        scanner = self._scanner()
+
+        async def _get(url, follow_redirects=False):
+            return _FakeResp(404, "not found")
+        scanner._get = _get
+        finding = types.SimpleNamespace(
+            evidence_type="info_directory_listing", url="http://x/uploads/",
+            evidence_details={})
+        self.assertFalse(await scanner.verify_finding(finding))
 
 
 if __name__ == "__main__":
