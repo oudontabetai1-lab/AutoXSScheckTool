@@ -773,21 +773,29 @@ class ResponsePairDocumentGuardTests(unittest.IsolatedAsyncioTestCase):
                 scanner = SCANNERS[check](engine)
                 self.assertEqual(await scanner.scan_page("http://app.test/x"), [])
 
-    async def test_js_content_scanners_raise_on_transient(self):
-        # transient(503)は PageDocumentUnavailable→resume（tested 完了にしない）。
+    async def test_transient_empty_body_raises_for_resume(self):
+        # 本文が無い transient(503) は走査対象が無いので PageDocumentUnavailable→resume（sri/secret_leak とも）。
         for check in ("sri", "secret_leak"):
             with self.subTest(check=check):
                 engine = _FakeEngine()
-                engine.browser = _APIBrowser(_FakeRequestCtx(_FakeAPIResponse(503, {})))
+                engine.browser = _APIBrowser(_FakeRequestCtx(_FakeAPIResponse(503, {}, text="")))
                 scanner = SCANNERS[check](engine)
                 with self.assertRaises(PageDocumentUnavailable):
                     await scanner.scan_page("http://app.test/x")
 
+    async def test_sri_raises_on_transient_even_with_body(self):
+        # SRI は 2xx の描画 document のみ監査。transient は本文があっても resume 対象。
+        engine = _FakeEngine()
+        engine.browser = _APIBrowser(_FakeRequestCtx(_FakeAPIResponse(503, {}, text="<html>x</html>")))
+        scanner = SCANNERS["sri"](engine)
+        with self.assertRaises(PageDocumentUnavailable):
+            await scanner.scan_page("http://app.test/x")
+
     async def test_secret_leak_scans_non_2xx_error_body(self):
-        # 401/403/404 等の error/auth 応答本文に漏れた秘密も走査する（本文保持・Codex #147 P2 Comment2）。
-        # 500 系は transient 扱い（別テスト）なのでここでは対象外。placeholder 語を含まない鍵を使う。
+        # 400/401/403/404（恒久）に加え 500（transient）の error 本文に漏れた秘密も走査する
+        # （500 スタックトレース等の漏えいを取りこぼさない・Codex #147 Comment）。
         leaked = "AKIA3SVBQ4XZ7KLMN2PQ"  # AWS Access Key ID 形式（AKIA+16、EXAMPLE 等を含まない）
-        for status in (400, 401, 403, 404):
+        for status in (400, 401, 403, 404, 500):
             with self.subTest(status=status):
                 engine = _FakeEngine()
                 body = f'{{"error":"unauthorized","debug_key":"{leaked}"}}'
@@ -800,6 +808,21 @@ class ResponsePairDocumentGuardTests(unittest.IsolatedAsyncioTestCase):
                 scanner.record_finding = _rec
                 out = await scanner.scan_page("http://app.test/api")
                 self.assertEqual(len(out), 1, f"status={status}: secret in error body not detected")
+
+    async def test_body_unavailable_raises_not_empty(self):
+        # text() も body() も失敗した場合、空本文と取り違えず PageDocumentUnavailable を投げる。
+        for check in ("sri", "secret_leak"):
+            with self.subTest(check=check):
+                engine = _FakeEngine()
+                resp = _FakeAPIResponse(200, {}, text_raises=True, body_bytes=None)
+                # body() も失敗させる。
+                async def _boom():
+                    raise RuntimeError("body failed")
+                resp.body = _boom
+                engine.browser = _APIBrowser(_FakeRequestCtx(resp))
+                scanner = SCANNERS[check](engine)
+                with self.assertRaises(PageDocumentUnavailable):
+                    await scanner.scan_page("http://app.test/x")
 
     async def test_permanent_non_2xx_does_not_record_transport_error(self):
         # 恒久非 2xx（404 等）は content scanner が本文走査するため transport_error を刻まない

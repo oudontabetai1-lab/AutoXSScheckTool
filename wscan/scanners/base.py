@@ -592,13 +592,17 @@ class _DirectResponse:
     が使う ``status_code`` / ``headers``（小文字キー dict）/ ``text``（取得済み str）/ ``url`` を提供する。
     """
 
-    __slots__ = ("status_code", "headers", "text", "url")
+    __slots__ = ("status_code", "headers", "text", "url", "body_unavailable")
 
-    def __init__(self, status_code: int, headers: dict, text: str, url: str):
+    def __init__(self, status_code: int, headers: dict, text: str, url: str,
+                 body_unavailable: bool = False):
         self.status_code = status_code
         self.headers = headers
         self.text = text
         self.url = url
+        # 本文の取得/復号が完全に失敗した（text() も body() も失敗）ことを示す。空本文の 200 を
+        # 「本文なし」と取り違えないための信号（content 観測系が PageDocumentUnavailable を投げる）。
+        self.body_unavailable = body_unavailable
 
 
 class BaseScanner(ABC):
@@ -1631,6 +1635,7 @@ class BaseScanner(ABC):
                 response = await request_ctx.get(
                     current, headers=_headers_for(current) or None, **get_kwargs
                 )
+            body_unavailable = False
             try:
                 text = await response.text()
             except Exception:
@@ -1642,9 +1647,11 @@ class BaseScanner(ABC):
                     from wscan.textio import safe_decode
                     text = safe_decode(await response.body(), limit=50000)
                 except Exception:
-                    # text() も body() も失敗＝本文を得られない。空本文を「本文なし」と黙って
-                    # 扱うと SRI/secret_leak が見逃す（FN）ので observability に記録する（Codex #147）。
+                    # text() も body() も失敗＝本文を得られない。空本文を「本文なし」と黙って扱うと
+                    # SRI/secret_leak が見逃す（FN）。observability に記録し、body_unavailable を立てて
+                    # content 観測系に PageDocumentUnavailable を投げさせる（Codex #147）。
                     text = ""
+                    body_unavailable = True
                     self._record_scan_note(
                         f"transport_error:{self.CHECK_TYPE}:body_decode_failed"
                     )
@@ -1653,6 +1660,7 @@ class BaseScanner(ABC):
                 headers=dict(response.headers),  # Playwright は小文字キーの dict を返す
                 text=text[:50000],
                 url=str(getattr(response, "url", current) or current),
+                body_unavailable=body_unavailable,
             )
             self._record_probe_status(direct)
             return direct
@@ -1764,10 +1772,12 @@ class BaseScanner(ABC):
         401/403/404/500 等の error/auth 応答本文に漏れた秘密も走査する必要がある（`allow_non_2xx=True`）。
         一方 **SRI は「ブラウザが実際に描画した document」= 2xx のみを監査すべき**で、恒久非 2xx の
         error テンプレート本文（integrity 無しの外部 script を含み得る）を監査すると元 URL に対する
-        FP になる。そこで `allow_non_2xx=False` のときは恒久非 2xx を NOT_REACHED（本文 ""）にする
-        （Codex #147）。transient（408/429/5xx）と完全な取得失敗はどちらのモードでも観測失敗として
-        transport_error を刻み `PageDocumentUnavailable` を送出する（checkpoint 未完了→resume 再試行）。
-        取得は header 監査と同じ per-URL raw キャッシュを共有し 1 ページ 1 replay を保つ。
+        FP になる。そこで `allow_non_2xx=False` のときは恒久非 2xx を NOT_REACHED（本文 ""）にする。
+        transient（408/429/5xx）は、**本文があり allow_non_2xx=True（secret_leak）なら本文を返して
+        走査する**（500 のスタックトレース等に漏れた秘密を取りこぼさない・Codex #147）。本文が空なら
+        走査対象が無いので `PageDocumentUnavailable` を送出して resume 再試行へ回す。本文の取得自体に
+        失敗した（body_unavailable）場合も空本文と取り違えず必ず送出する。取得は header 監査と同じ
+        per-URL raw キャッシュを共有し 1 ページ 1 replay を保つ。
         """
         raw = await self._raw_document_cached(url)
         if not raw:
@@ -1775,9 +1785,20 @@ class BaseScanner(ABC):
             raise PageDocumentUnavailable(
                 f"{self.CHECK_TYPE}: 対象 document を取得できませんでした: {url}"
             )
+        body = raw.get("body", "") or ""
+        # 本文の取得/復号が完全に失敗＝空本文と取り違えない（FN 防止）。必ず resume へ回す。
+        if raw.get("body_unavailable"):
+            self._record_scan_note(f"transport_error:{self.CHECK_TYPE}:body_unavailable")
+            raise PageDocumentUnavailable(
+                f"{self.CHECK_TYPE}: 本文を取得できませんでした: {url}"
+            )
         status = raw.get("status")
         try:
             if status is not None and int(status) in _TRANSIENT_REPLAY_STATUSES:
+                # transient でも、走査対象の本文があり content 監査（allow_non_2xx=True）なら走査する。
+                # 本文が無い（真に空）ときだけ resume へ回す。
+                if allow_non_2xx and body:
+                    return body
                 self._record_scan_note(f"transport_error:{self.CHECK_TYPE}:transient")
                 raise PageDocumentUnavailable(
                     f"{self.CHECK_TYPE}: 一時的な取得失敗（{status}）: {url}"
@@ -1791,7 +1812,7 @@ class BaseScanner(ABC):
                     return ""
             except (TypeError, ValueError):
                 return ""
-        return raw.get("body", "") or ""
+        return body
 
     async def _raw_document_cached(self, url: str) -> Optional[dict]:
         """対象 URL の生取得結果 ``{"status","headers","body","url"}`` を per-URL キャッシュ付きで返す。
@@ -1847,6 +1868,7 @@ class BaseScanner(ABC):
                 "headers": dict(response.headers),
                 "body": (response.text or "")[:50000],
                 "url": str(getattr(response, "url", url) or url),
+                "body_unavailable": bool(getattr(response, "body_unavailable", False)),
             }
         except Exception:
             pair = self.current_page_pair(url)
