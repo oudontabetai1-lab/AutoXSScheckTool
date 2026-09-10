@@ -224,7 +224,9 @@ _DIR_LISTING_TITLE = (
 )
 # autoindex を補強する構造的証拠（親ディレクトリリンク・ファイル行）。
 _DIR_LISTING_CORROBORATION = (
-    re.compile(r'(?i)>\s*(?:Parent Directory|\.\.)\s*<'),           # 親ディレクトリ行
+    # 親ディレクトリ行。nginx は `<a href="../">../</a>`＝リンクテキストが `../`（末尾スラッシュ付き）
+    # なので `..` 直後の任意スラッシュを許容する（Codex #156）。
+    re.compile(r'(?i)>\s*(?:Parent Directory|\.\./?)\s*<'),
     re.compile(r'(?i)<a href="[^"?][^"]*">[^<]+</a>\s*'
                r'\d{1,2}-\w{3}-\d{4}'),                             # Apache のファイル行（名前+日付）
 )
@@ -250,6 +252,10 @@ def detect_directory_listing(body: str) -> bool:
 # 引いて基準本文を得る。基準が 200 の非 HTML/一定本文なら、その origin では非 HTML fallback を
 # 信頼せず「署名一致のみ」で報告する（0017 のリーク物検査は soft-404 で誤検知しやすいため）。
 _SOFT404_PROBE = "/wscan-nonexistent-probe-8f3a1c9e2b.zzz"
+# ディレクトリ soft-404 baseline 用の probe path（末尾スラッシュ付きディレクトリ形）。
+# baseline リクエストと _same_catch_all の正規化で**同じ path** を使わないと、catch-all が
+# 要求 path を echo する際に baseline 側だけ echo が残り類似度が落ちて誤検知する（Codex #156）。
+_SOFT404_DIR_PROBE = "/wscan-nonexistent-probe-8f3a1c9e2b/"
 
 
 # （旧 _redact_sensitive は撤去。インライン・マスクは export 接頭辞・XML 属性・構造化形式で
@@ -375,7 +381,7 @@ class InfoDisclosureScanner(BaseScanner):
                 soft404_dir = False
                 baseline_dir_body = ""
                 try:
-                    probe = await client.get(urljoin(origin, _SOFT404_PROBE.rstrip('.zzz') + "/"))
+                    probe = await client.get(urljoin(origin, _SOFT404_DIR_PROBE))
                     self._record_probe_status(probe)
                     soft404_dir = probe.status_code in (200, 206)
                     if soft404_dir:
@@ -395,7 +401,7 @@ class InfoDisclosureScanner(BaseScanner):
                     body = r.text[:4000]
                     # 未知ディレクトリを同一 catch-all に書き換える origin では、その catch-all を
                     # 全 _LISTING_DIRS に対して確定報告しない（sensitive-resource と同じ baseline 比較・Codex #156）。
-                    if soft404_dir and _same_catch_all(body, path, baseline_dir_body, _SOFT404_PROBE):
+                    if soft404_dir and _same_catch_all(body, path, baseline_dir_body, _SOFT404_DIR_PROBE):
                         continue
                     if not detect_directory_listing(body):
                         continue
@@ -681,10 +687,10 @@ class InfoDisclosureScanner(BaseScanner):
             origin = f"{urlparse(finding.url).scheme}://{urlparse(finding.url).netloc}"
             path = urlparse(finding.url).path or "/"
             try:
-                probe = await self._get(urljoin(origin, _SOFT404_PROBE.rstrip('.zzz') + "/"),
+                probe = await self._get(urljoin(origin, _SOFT404_DIR_PROBE),
                                         follow_redirects=False)
                 if probe.status_code in (200, 206) and _same_catch_all(
-                        body, path, probe.text[:4000], _SOFT404_PROBE):
+                        body, path, probe.text[:4000], _SOFT404_DIR_PROBE):
                     return False
             except Exception:
                 pass

@@ -117,6 +117,14 @@ class DirListingTests(unittest.TestCase):
     def test_empty_body(self):
         self.assertFalse(m.detect_directory_listing(""))
 
+    def test_nginx_empty_autoindex_parent_link_only(self):
+        # nginx の空 autoindex は `<a href="../">../</a>` だけが補強行。`../`（末尾スラッシュ）を
+        # 親ディレクトリ行として受理する（Codex #156）。
+        self.assertTrue(m.detect_directory_listing(
+            '<html><head><title>Index of /uploads/</title></head><body>'
+            '<h1>Index of /uploads/</h1><hr><pre><a href="../">../</a>'
+            '</pre><hr></body></html>'))
+
 
 class LabelApplicabilityTests(unittest.TestCase):
     def test_label_scoped_to_path(self):
@@ -201,6 +209,16 @@ class CatchAllComparisonTests(unittest.TestCase):
         base = "Error page. The requested resource was not found on this server. Please try again."
         cand = "Error page. The requested resource was not found on this server. Please retry now."
         self.assertTrue(m._same_catch_all(cand, "/.git/config", base, m._SOFT404_PROBE))
+
+    def test_dir_catch_all_echoing_path_uses_matching_probe_path(self):
+        # 短い catch-all autoindex が要求 path を echo する場合、baseline 比較にも実 probe path
+        # （ディレクトリ形 _SOFT404_DIR_PROBE）を渡さないと baseline 側の echo が残り誤検知する。
+        base = "<html><h1>Index of /wscan-nonexistent-probe-8f3a1c9e2b/</h1></html>"
+        cand = "<html><h1>Index of /uploads/</h1></html>"
+        # 正しい probe path（ディレクトリ形）を渡せば同一 catch-all と判定できる。
+        self.assertTrue(m._same_catch_all(cand, "/uploads/", base, m._SOFT404_DIR_PROBE))
+        # 旧来の .zzz path では baseline の echo が残り類似度が落ちて取りこぼす（回帰ガード）。
+        self.assertFalse(m._same_catch_all(cand, "/uploads/", base, m._SOFT404_PROBE))
 
 
 class SensitiveVerifyTests(unittest.IsolatedAsyncioTestCase):
