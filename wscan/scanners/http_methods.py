@@ -160,7 +160,7 @@ class HttpMethodsScanner(BaseScanner):
         page_target = f"{origin}{parsed.path}" if parsed.path and parsed.path != "/" else origin
 
         findings: list[Finding] = []
-        client_failed = False
+        target_failed = False
         for target in (origin, page_target):
             if target in self._checked_targets:
                 continue
@@ -171,28 +171,38 @@ class HttpMethodsScanner(BaseScanner):
 
             if self.monitor:
                 await self.monitor.emit_status(f"HTTP methods check on {target}")
+            # この target で 1 つでも probe が応答を得たか。client 生成失敗でも request 時失敗
+            # (DNS/接続/TLS/proxy)でも「応答ゼロ＝未検査」なら後で観測失敗を伝播する。
+            probe_state = {"ok": False}
             try:
                 async with httpx.AsyncClient(**self._client_kwargs(target)) as client:
-                    findings += await self._check_options(client, target, origin)
-                    findings += await self._check_trace(client, target)
-                    findings += await self._check_webdav(client, target, origin)
+                    findings += await self._check_options(client, target, origin, probe_state)
+                    findings += await self._check_trace(client, target, probe_state)
+                    findings += await self._check_webdav(client, target, origin, probe_state)
             except Exception:
-                # client 生成/接続失敗＝probe が 1 つも走っていない。この target は未検査なので
-                # guard から外し、後で観測失敗を伝播できるようにする（checkpoint 完了→resume skip を防ぐ）。
                 self._record_scan_note(f"transport_error:{self.CHECK_TYPE}:client")
                 self._checked_targets.discard(target)
-                client_failed = True
-        # 何も検査できず（findings 皆無）client 失敗があったなら、engine に error として扱わせ
-        # resume で再試行させる（返り値 [] だと tested 完了扱いになり恒久 skip される・Codex #157）。
-        if client_failed and not findings:
+                target_failed = True
+                continue
+            if not probe_state["ok"]:
+                # client は生成できたが 3 probe すべて request 時に失敗＝この target は未検査。
+                self._record_scan_note(f"transport_error:{self.CHECK_TYPE}:no_response")
+                self._checked_targets.discard(target)
+                target_failed = True
+        # いずれかの target が完全に未検査（応答ゼロ）なら、他 target の finding の有無に関わらず
+        # observability 失敗を伝播する。engine に error 扱いさせ resume で再試行させる（返り値で
+        # 正常終了すると checkpoint 完了で恒久 skip される・Codex #157）。
+        if target_failed:
             raise PageDocumentUnavailable(
-                f"{self.CHECK_TYPE}: HTTP クライアントを生成できませんでした: {origin}"
+                f"{self.CHECK_TYPE}: 未検査のターゲットがあります（応答取得に失敗）: {origin}"
             )
         return findings
 
-    async def _check_options(self, client, target, origin) -> list[Finding]:
+    async def _check_options(self, client, target, origin, probe_state=None) -> list[Finding]:
         try:
             r = await client.request("OPTIONS", target)
+            if probe_state is not None:
+                probe_state["ok"] = True
             self._record_probe_status(r)
         except Exception:
             self._record_scan_note(f"transport_error:{self.CHECK_TYPE}:options")
@@ -246,10 +256,12 @@ class HttpMethodsScanner(BaseScanner):
             ))
         return findings
 
-    async def _check_trace(self, client, target) -> list[Finding]:
+    async def _check_trace(self, client, target, probe_state=None) -> list[Finding]:
         token = "XST-" + secrets.token_hex(8)
         try:
             r = await client.request("TRACE", target, headers={"X-Xst-Probe": token})
+            if probe_state is not None:
+                probe_state["ok"] = True
             self._record_probe_status(r)
         except Exception:
             self._record_scan_note(f"transport_error:{self.CHECK_TYPE}:trace")
@@ -283,13 +295,15 @@ class HttpMethodsScanner(BaseScanner):
             ],
         )]
 
-    async def _check_webdav(self, client, target, origin) -> list[Finding]:
+    async def _check_webdav(self, client, target, origin, probe_state=None) -> list[Finding]:
         # OPTIONS で既に WebDAV を報告済みなら二重報告しない（origin 単位）。
         if origin in self._webdav_reported:
             return []
         # OPTIONS で判定できなかった場合の補強。PROPFIND(Depth:0) は read-only。
         try:
             r = await client.request("PROPFIND", target, headers={"Depth": "0"})
+            if probe_state is not None:
+                probe_state["ok"] = True
             self._record_probe_status(r)
         except Exception:
             self._record_scan_note(f"transport_error:{self.CHECK_TYPE}:propfind")

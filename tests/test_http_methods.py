@@ -227,7 +227,9 @@ class ScannerTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(hm.PageDocumentUnavailable):
                 await scanner.scan_page("http://app.test/")
 
-    async def test_probe_failure_is_graceful(self):
+    async def test_all_requests_failing_raises_for_retry(self):
+        # DNS/接続/TLS 等で全 probe が request 時に失敗＝応答ゼロ（未検査）→ PageDocumentUnavailable を投げ
+        # engine に error(resume 再試行)扱いさせる（[] で tested 完了→恒久 skip させない・Codex #157）。
         engine, scanner = self._scanner()
 
         class _Boom:
@@ -236,8 +238,39 @@ class ScannerTests(unittest.IsolatedAsyncioTestCase):
             async def request(self, *a, **k): raise RuntimeError("boom")
 
         with mock.patch.object(hm.httpx, "AsyncClient", return_value=_Boom()):
-            out = await scanner.scan_page("http://app.test/")
-        self.assertEqual(out, [])  # raise せず []
+            with self.assertRaises(hm.PageDocumentUnavailable):
+                await scanner.scan_page("http://app.test/")
+        # 未検査ターゲットは guard から外れ、resume で再試行できる。
+        self.assertNotIn("http://app.test", scanner._checked_targets)
+
+    async def test_partial_target_failure_raises_even_with_findings(self):
+        # origin は応答して finding が出るが page path の client が失敗 → finding があっても raise し、
+        # 失敗ターゲットを resume 対象にする（Codex #157）。
+        engine, scanner = self._scanner()
+        recorded = []
+
+        async def _rec(**kw):
+            recorded.append(kw)
+            return object()
+        scanner.record_finding = _rec
+
+        ok = _FakeClient({
+            "OPTIONS": _FakeResp(200, {"allow": "GET, PUT, DELETE"}),
+            "TRACE": _FakeResp(405, {}, ""),
+            "PROPFIND": _FakeResp(405, {}, ""),
+        })
+
+        class _Boom:
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): return False
+            async def request(self, *a, **k): raise RuntimeError("boom")
+
+        clients = [ok, _Boom()]  # origin=ok, page path=boom
+        with mock.patch.object(hm.httpx, "AsyncClient", side_effect=lambda **k: clients.pop(0)):
+            with self.assertRaises(hm.PageDocumentUnavailable):
+                await scanner.scan_page("http://app.test/page")
+        # origin の danger finding は record 済み（raise で戻り値は失われるが resume で再発見される）。
+        self.assertTrue(any(r["evidence_type"] == "http_dangerous_methods" for r in recorded))
 
 
 class CliChecksTests(unittest.TestCase):
