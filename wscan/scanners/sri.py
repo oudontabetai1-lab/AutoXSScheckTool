@@ -214,9 +214,10 @@ class SRIScanner(BaseScanner):
         # PageDocumentUnavailable）。live DOM へはフォールバックしない（attack フェーズの browser.page は
         # 別 URL のタブになり得て wrong-page FP/FN を招くため・Codex #147 P2）。取得は header 監査と
         # per-URL raw キャッシュを共有し 1 ページ 1 replay を保つ。
-        # SRI は「ブラウザが描画した document」= 2xx のみ監査する（恒久非 2xx の error テンプレートを
-        # 監査すると integrity 無し外部 script の FP になる・Codex #147）。
-        body = await self._document_body(url, allow_non_2xx=False)
+        # SRI は「ブラウザが描画する HTML document」を監査する。status ではなく content-type で判定し、
+        # 外部 script を読み込む custom 401/404 HTML も対象にする（status だけでは本文が描画されない
+        # とは限らない・Codex #147）。HTML 以外（JSON API error・生 asset）は NOT_REACHED で誤検知回避。
+        body = await self._document_body(url, allow_non_2xx=False, html_only=True)
         if not body:
             return []
         # record_finding の証拠用の最小 pair（本文は body 変数で保持済み）。

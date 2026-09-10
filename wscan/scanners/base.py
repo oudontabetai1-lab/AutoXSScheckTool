@@ -1647,14 +1647,14 @@ class BaseScanner(ABC):
                     from wscan.textio import safe_decode
                     text = safe_decode(await response.body(), limit=50000)
                 except Exception:
-                    # text() も body() も失敗＝本文を得られない。空本文を「本文なし」と黙って扱うと
-                    # SRI/secret_leak が見逃す（FN）。observability に記録し、body_unavailable を立てて
-                    # content 観測系に PageDocumentUnavailable を投げさせる（Codex #147）。
+                    # text() も body() も失敗＝本文を得られない。body_unavailable を立てて content
+                    # 観測系（_document_body 呼び出し側）に PageDocumentUnavailable を投げさせる。
+                    # ここでは note を刻まない: この共有 GET は header 監査(clickjacking/security_headers)が
+                    # 先に呼ぶことがあり、本文失敗を header-only check の degradation として誤計上すると
+                    # _degraded_checks がその check の tested(TN)行まで NOT_REACHED 化する。note は本文を
+                    # 実際に要求する _document_body 側で content scanner 名義で刻む（Codex #147）。
                     text = ""
                     body_unavailable = True
-                    self._record_scan_note(
-                        f"transport_error:{self.CHECK_TYPE}:body_decode_failed"
-                    )
             direct = _DirectResponse(
                 status_code=int(response.status),
                 headers=dict(response.headers),  # Playwright は小文字キーの dict を返す
@@ -1765,7 +1765,8 @@ class BaseScanner(ABC):
             },
         }
 
-    async def _document_body(self, url: str, *, allow_non_2xx: bool = True) -> str:
+    async def _document_body(self, url: str, *, allow_non_2xx: bool = True,
+                             html_only: bool = False) -> str:
         """content 観測系スキャナ（sri/secret_leak）用に対象応答の**本文**を返す。
 
         `_response_pair`（header 監査用）は非 2xx を本文空の statusless に潰すが、secret_leak は
@@ -1805,13 +1806,18 @@ class BaseScanner(ABC):
                 )
         except (TypeError, ValueError):
             pass
-        if not allow_non_2xx:
-            # SRI 等: 2xx の描画 document のみ監査。恒久非 2xx / status 不明は NOT_REACHED（本文なし）。
-            try:
-                if status is None or not (200 <= int(status) < 300):
-                    return ""
-            except (TypeError, ValueError):
-                return ""
+        if html_only:
+            # SRI 等: ステータスではなく「ブラウザが描画する HTML document か」で判定する。
+            # 2xx に限ると、ブラウザが描画し外部 script を読み込む custom 401/404 HTML を見逃す
+            # （status だけでは本文が描画されないとは限らない・Codex #147）。HTML 以外（JSON API の
+            # error・生 asset 等）は NOT_REACHED（本文なし）として誤検知を避ける。
+            ctype = ""
+            for k, v in (raw.get("headers") or {}).items():
+                if str(k).lower() == "content-type":
+                    ctype = str(v).lower()
+                    break
+            is_html = ("html" in ctype) or (ctype == "" and "<html" in body[:2000].lower())
+            return body if is_html else ""
         return body
 
     async def _raw_document_cached(self, url: str) -> Optional[dict]:

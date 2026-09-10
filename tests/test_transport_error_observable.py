@@ -824,6 +824,29 @@ class ResponsePairDocumentGuardTests(unittest.IsolatedAsyncioTestCase):
                 with self.assertRaises(PageDocumentUnavailable):
                     await scanner.scan_page("http://app.test/x")
 
+    async def test_header_only_scanner_not_degraded_by_body_failure(self):
+        # 本文読取失敗(body_unavailable)でも、header 監査(clickjacking)はヘッダで完了できる。
+        # body 失敗を clickjacking 名義の transport_error にして degraded 扱いしない（Codex #147 4巡目）。
+        engine = _FakeEngine()
+        resp = _FakeAPIResponse(200, {"content-type": "text/html"}, text_raises=True, body_bytes=None)
+
+        async def _boom():
+            raise RuntimeError("body failed")
+        resp.body = _boom
+        engine.browser = _APIBrowser(_FakeRequestCtx(resp))
+        scanner = SCANNERS["clickjacking"](engine)
+
+        async def _rec(**kw):
+            return object()
+
+        scanner.record_finding = _rec
+        await scanner.scan_page("http://app.test/x")  # ヘッダで監査完了（例外なし）
+        self.assertEqual(
+            [e for e in engine.wave_errors if "body" in e],
+            [],
+            engine.wave_errors,
+        )
+
     async def test_permanent_non_2xx_does_not_record_transport_error(self):
         # 恒久非 2xx（404 等）は content scanner が本文走査するため transport_error を刻まない
         # （degraded_checks が無関係な safe case を NOT_REACHED 化しない・Codex #147 P2 Comment3）。
@@ -839,19 +862,39 @@ class ResponsePairDocumentGuardTests(unittest.IsolatedAsyncioTestCase):
                     engine.wave_errors,
                 )
 
-    async def test_sri_ignores_non_2xx_error_page_body(self):
-        # 恒久非 2xx（404）の error テンプレート本文に integrity 無しの外部 script があっても、
-        # SRI は監査しない（ブラウザが描画した document ではない＝元 URL への FP 防止・Codex #147）。
+    async def test_sri_audits_non_2xx_html_document(self):
+        # ブラウザが描画する custom 401/404 HTML（外部 script を読み込む）は SRI 監査対象
+        # （status だけでは本文が描画されないとは限らない・Codex #147 4巡目）。
         html = '<html><head><script src="https://cdn.example.com/lib.js"></script></head></html>'
+        for status in (401, 404):
+            with self.subTest(status=status):
+                engine = _FakeEngine()
+                engine.browser = _APIBrowser(_FakeRequestCtx(
+                    _FakeAPIResponse(status, {"content-type": "text/html"}, text=html)))
+                scanner = SCANNERS["sri"](engine)
+                recorded = []
+
+                async def _rec(**kw):
+                    recorded.append(kw)
+                    return object()
+
+                scanner.record_finding = _rec
+                out = await scanner.scan_page("http://app.test/missing")
+                self.assertEqual(len(out), 1)
+
+    async def test_sri_ignores_non_html_non_2xx(self):
+        # 非 HTML（JSON API error 等）の非 2xx は NOT_REACHED（誤検知回避）。
         engine = _FakeEngine()
-        engine.browser = _APIBrowser(_FakeRequestCtx(_FakeAPIResponse(404, {}, text=html)))
+        engine.browser = _APIBrowser(_FakeRequestCtx(
+            _FakeAPIResponse(404, {"content-type": "application/json"},
+                             text='{"error":"not found","cdn":"https://cdn.example.com/lib.js"}')))
         scanner = SCANNERS["sri"](engine)
 
         async def _rec(**kw):
             return object()
 
         scanner.record_finding = _rec
-        self.assertEqual(await scanner.scan_page("http://app.test/missing"), [])
+        self.assertEqual(await scanner.scan_page("http://app.test/api"), [])
 
     async def test_sri_audits_2xx_document(self):
         # 2xx の描画 document では従来どおり外部 script を監査（FN 非導入確認）。
