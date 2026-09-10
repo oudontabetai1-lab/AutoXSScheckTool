@@ -46,6 +46,13 @@ def server_scan_reachable(result: Any) -> bool:
     return True
 
 
+def _scan_fields() -> tuple[str, ...]:
+    """検査対象コマンド（scan_result のフィールド名）。``_WEAK_PROTOCOLS`` 定義後に呼ぶ。"""
+    return tuple(f for f, _, _ in _WEAK_PROTOCOLS) + (
+        "heartbleed", "openssl_ccs_injection", "robot",
+    )
+
+
 def scan_has_completed_attempts(scan_result: Any) -> bool:
     """検査対象コマンドのうち 1 つ以上が COMPLETED したかを返す（純粋）。
 
@@ -53,10 +60,23 @@ def scan_has_completed_attempts(scan_result: Any) -> bool:
     区別するために使う（黙った偽陰性の可視化）。
     """
     sr = getattr(scan_result, "scan_result", None) or scan_result
-    fields = [f for f, _, _ in _WEAK_PROTOCOLS] + [
-        "heartbleed", "openssl_ccs_injection", "robot",
-    ]
-    return any(_completed(getattr(sr, f, None)) for f in fields)
+    return any(_completed(getattr(sr, f, None)) for f in _scan_fields())
+
+
+def incomplete_commands(scan_result: Any) -> list[str]:
+    """要求したのに COMPLETED しなかったコマンド名の一覧を返す（純粋）。
+
+    一部コマンドだけ ERROR（例: TLS1.0 は成功だが Heartbleed/ROBOT が失敗）でも、
+    その失敗を黙って捨てて「issue 無しで検査成功」にしないためのシグナル（Codex #158）。
+    存在するフィールドのうち attempt が非 COMPLETED のものだけを返す（未取得は無視）。
+    """
+    sr = getattr(scan_result, "scan_result", None) or scan_result
+    out: list[str] = []
+    for f in _scan_fields():
+        attempt = getattr(sr, f, None)
+        if attempt is not None and not _completed(attempt):
+            out.append(f)
+    return out
 
 
 def _protocol_accepted(attempt: Any) -> bool:

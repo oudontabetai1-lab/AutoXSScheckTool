@@ -841,11 +841,14 @@ class ScanEngine:
             self.checks.append("ssti")
 
         # TLS 設定不備検査（opt-in）。features.tls_scan=true で tls_scan を checks に追加。
-        # 有効/無効は enable_tls_scan（ダッシュボード/CLI 上書き）優先、未指定なら config。
-        self.tls_scan_enabled: bool = (
-            _tls_scan_enabled_by_config() if enable_tls_scan is None
-            else bool(enable_tls_scan)
-        )
+        # 有効/無効は enable_tls_scan（ダッシュボード/CLI 上書き）優先。未指定なら、checks に
+        # tls_scan が明示されていれば有効化し、無ければ config に従う。これで CLI/ダッシュボード
+        # 経由でなく checks を直接渡す呼び出し（batch_runner 等）でも、明示指定した TLS 検査が
+        # 無効のまま黙って no-op にならない（Codex #158 P1）。
+        if enable_tls_scan is None:
+            self.tls_scan_enabled = ("tls_scan" in self.checks) or _tls_scan_enabled_by_config()
+        else:
+            self.tls_scan_enabled = bool(enable_tls_scan)
         if self.tls_scan_enabled and "tls_scan" not in self.checks:
             self.checks.append("tls_scan")
 

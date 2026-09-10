@@ -112,6 +112,24 @@ class ReachabilityTests(unittest.TestCase):
         ))
         self.assertFalse(tls_scan.scan_has_completed_attempts(sr))
 
+    def test_incomplete_commands_lists_failed(self):
+        # TLS1.0 は成功だが Heartbleed/ROBOT が ERROR → 失敗コマンドを列挙する（黙って捨てない）。
+        sr = types.SimpleNamespace(scan_result=types.SimpleNamespace(
+            tls_1_0_cipher_suites=_cipher_attempt(True, status="COMPLETED"),
+            heartbleed=_bool_attempt("is_vulnerable_to_heartbleed", False, status="ERROR"),
+            robot=_robot_attempt(False, status="ERROR"),
+        ))
+        inc = tls_scan.incomplete_commands(sr)
+        self.assertIn("heartbleed", inc)
+        self.assertIn("robot", inc)
+        self.assertNotIn("tls_1_0_cipher_suites", inc)
+
+    def test_incomplete_commands_none_when_all_completed(self):
+        sr = types.SimpleNamespace(scan_result=types.SimpleNamespace(
+            heartbleed=_bool_attempt("is_vulnerable_to_heartbleed", False, status="COMPLETED"),
+        ))
+        self.assertEqual(tls_scan.incomplete_commands(sr), [])
+
 
 class _FakeEngine:
     def __init__(self, enabled=True):
@@ -180,6 +198,74 @@ class ScannerTests(unittest.IsolatedAsyncioTestCase):
             out = await scanner.scan_page("https://x.test/")
         self.assertEqual(out, [])
         self.assertTrue(any("scan_incomplete" in n for n in engine.wave_errors))
+
+
+    async def test_cvss_matches_issue_severity(self):
+        # critical な Heartbleed が check_type 一律の 5.9 でなく severity 整合の CVSS を持つ。
+        engine = _FakeEngine(enabled=True)
+        scanner = SCANNERS["tls_scan"](engine)
+        recorded = []
+
+        async def _rec(**kw):
+            recorded.append(kw)
+            return object()
+
+        scanner.record_finding = _rec
+        with mock.patch.object(tls_scan, "sslyze_available", return_value=True), \
+             mock.patch.object(tls_scan, "run_sslyze_scan", return_value=object()), \
+             mock.patch.object(tls_scan, "server_scan_reachable", return_value=True), \
+             mock.patch.object(tls_scan, "extract_tls_issues", return_value=[
+                 {"kind": "heartbleed", "label": "Heartbleed", "severity": "critical", "detail": "d"},
+             ]):
+            await scanner.scan_page("https://x.test/")
+        self.assertEqual(recorded[0]["severity"], "critical")
+        self.assertGreaterEqual(recorded[0]["cvss_score"], 9.0)
+        self.assertIn("CVSS:3", recorded[0]["cvss_vector"])
+
+    async def test_partial_failure_recorded(self):
+        # issue が見つかっても、失敗コマンドがあれば記録する。
+        engine = _FakeEngine(enabled=True)
+        scanner = SCANNERS["tls_scan"](engine)
+        scanner.record_finding = lambda **kw: None
+        with mock.patch.object(tls_scan, "sslyze_available", return_value=True), \
+             mock.patch.object(tls_scan, "run_sslyze_scan", return_value=object()), \
+             mock.patch.object(tls_scan, "server_scan_reachable", return_value=True), \
+             mock.patch.object(tls_scan, "extract_tls_issues", return_value=[]), \
+             mock.patch.object(tls_scan, "scan_has_completed_attempts", return_value=True), \
+             mock.patch.object(tls_scan, "incomplete_commands", return_value=["robot", "heartbleed"]):
+            await scanner.scan_page("https://x.test/")
+        self.assertTrue(any("scan_incomplete" in n and "robot" in n for n in engine.wave_errors))
+
+
+class CvssOverrideTests(unittest.TestCase):
+    def test_finding_cvss_override(self):
+        from wscan.scanners.base import Finding
+        f = Finding(check_type="tls_scan", severity="critical", url="u", field_name="x",
+                    payload="p", evidence="e",
+                    cvss_score_override=9.1, cvss_vector_override="CVSS:3.1/AV:N/...")
+        self.assertEqual(f.cvss_score, 9.1)
+        self.assertEqual(f.cvss_vector, "CVSS:3.1/AV:N/...")
+
+    def test_finding_cvss_default_without_override(self):
+        from wscan.scanners.base import Finding
+        f = Finding(check_type="tls_scan", severity="medium", url="u", field_name="x",
+                    payload="p", evidence="e")
+        # override 無しなら check_type 既定（_CVSS_TABLE）。
+        self.assertGreater(f.cvss_score, 0)
+
+
+class EngineEnableTests(unittest.TestCase):
+    def test_explicit_tls_scan_check_enables_feature(self):
+        # checks に tls_scan を直接渡す呼び出し（batch_runner 等）でも有効化される。
+        from wscan.engine import ScanEngine
+        e = ScanEngine("https://x.test", checks=["tls_scan"], llm_provider="none", monitor=None)
+        self.assertTrue(e.tls_scan_enabled)
+        self.assertIn("tls_scan", e.checks)
+
+    def test_not_requested_stays_off(self):
+        from wscan.engine import ScanEngine
+        e = ScanEngine("https://x.test", checks=["xss"], llm_provider="none", monitor=None)
+        self.assertFalse(e.tls_scan_enabled)
 
 
 class CliChecksTests(unittest.TestCase):

@@ -20,6 +20,16 @@ if TYPE_CHECKING:
     from wscan.engine import ScanEngine
 
 
+# issue の severity に整合する代表 CVSS（score, vector）。同一 check_type でも issue ごとに
+# 深刻度が異なるため、check_type 一律の _CVSS_TABLE 値ではなくこちらを per-finding で渡す。
+_SEV_CVSS: dict[str, tuple[float, str]] = {
+    "critical": (9.1, "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:N"),
+    "high":     (7.4, "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:H/A:N"),
+    "medium":   (5.9, "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:N/A:N"),
+    "low":      (3.7, "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:L/I:N/A:N"),
+}
+
+
 _UNSUPPORTED = tuple(
     CarrierCapability(
         carrier=c, state=CapabilityState.UNSUPPORTED,
@@ -93,20 +103,33 @@ class TlsConfigScanner(BaseScanner):
         # 到達はしたが全コマンドが未完（部分 handshake 失敗）なら、黙った偽陰性として記録する。
         if not issues and not tls_scan.scan_has_completed_attempts(result):
             self._record_scan_note(f"scan_incomplete:{self.CHECK_TYPE}:no_completed_attempts")
+        # 一部コマンドだけ失敗（例: TLS1.0 は成功だが Heartbleed/ROBOT が ERROR）も、issue の有無に
+        # かかわらず記録する。失敗コマンドを黙って捨てて脆弱性を隠さない（Codex #158）。
+        incomplete = tls_scan.incomplete_commands(result)
+        if incomplete:
+            self._record_scan_note(
+                f"scan_incomplete:{self.CHECK_TYPE}:" + ",".join(incomplete)
+            )
         findings: list[Finding] = []
         pair = {"request": {"url": origin, "method": "TLS"},
                 "response": {"url": origin, "headers": {}, "body": ""}}
         for issue in issues:
+            severity = issue.get("severity", "medium")
+            cvss_score, cvss_vector = _SEV_CVSS.get(severity, _SEV_CVSS["medium"])
             findings.append(await self.record_finding(
                 url=origin,
                 field_name=f"(TLS: {issue['label']})",
                 payload="(no payload — TLS handshake probe)",
                 evidence=f"TLS 設定不備: {issue['label']} — {issue['detail']}",
                 pair=pair,
-                severity=issue.get("severity", "medium"),
+                severity=severity,
                 confidence="confirmed",
                 evidence_type=f"tls_{issue['kind']}",
                 evidence_details={"label": issue["label"], "kind": issue["kind"]},
+                # check_type 一律の CVSS ではなく、issue の severity に整合する CVSS を渡す
+                # （SSLv2/3=high, Heartbleed=critical 等を medium 5.9 で出さない・Codex #158）。
+                cvss_score=cvss_score,
+                cvss_vector=cvss_vector,
                 reproduction_steps=[
                     f"Run a TLS scan against {host}:{port} (e.g. sslyze).",
                     f"Confirm: {issue['detail']}",
