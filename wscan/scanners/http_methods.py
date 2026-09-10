@@ -98,17 +98,33 @@ def redact_trace_body(body: str, limit: int = 2000, sent_secret_values=()) -> st
     XST の証跡（どのヘッダが反射したか）は残しつつ、Authorization/Cookie 等の実値は残さない。
     2 段構え:
     (1) 行頭 `Header: value` 形は is_sensitive_header（runtime 登録のカスタム認証ヘッダも含む正規述語）で値を伏字化。
-    (2) ``sent_secret_values`` に送信した秘匿ヘッダの実値を渡すと、JSON/HTML 属性/エスケープ \r\n 等で
-        行頭に現れない直列化でも、その値を本文中どこでも literal 置換で伏字化する（Codex #157）。
+    (2) ``sent_secret_values`` に送信した秘匿ヘッダの実値を渡すと、行頭に現れない直列化でも本文中
+        どこでも伏字化する。実値そのものに加え、HTML 実体参照（&amp;/&quot; 等）・percent エンコード・
+        JSON 文字列エスケープ（クォートやバックスラッシュのエスケープ）といった一般的なエンコード変種も生成して置換する（Codex #157）。
     """
     if not body:
         return ""
+    import html as _html
+    import json as _json
+    from urllib.parse import quote as _quote
+
     from wscan.request_logger import is_sensitive_header
 
     text = body[:limit]
-    # (2) 送信した秘匿値を literal に伏字化（直列化形式に依らない）。長い値から先に置換。
-    for val in sorted({v for v in (sent_secret_values or []) if v and len(v) >= 4}, key=len, reverse=True):
-        text = text.replace(val, "[REDACTED]")
+    # (2) 送信した秘匿値を literal に伏字化（直列化形式に依らない）。反射器が安全に直列化した
+    # エンコード形（HTML 属性の &amp;/&quot;・percent エンコード・JSON のクォート/バックスラッシュ
+    # エスケープ）でも可逆な資格情報が残らないよう、各値の一般的なエンコード変種も生成して置換する
+    # （Codex #157）。長い値（＝より具体的な変種）から先に置換する。
+    variants: set[str] = set()
+    for val in (sent_secret_values or []):
+        if not val or len(val) < 4:
+            continue
+        variants.add(val)
+        variants.add(_html.escape(val))                  # & < > " ' → 実体参照
+        variants.add(_quote(val, safe=""))               # percent エンコード
+        variants.add(_json.dumps(val)[1:-1])             # JSON 文字列本体のエスケープ
+    for v in sorted({x for x in variants if x and len(x) >= 4}, key=len, reverse=True):
+        text = text.replace(v, "[REDACTED]")
     # (1) 行頭ヘッダ形の値を伏字化。
     out: list[str] = []
     for line in text.splitlines(keepends=True):
@@ -148,7 +164,7 @@ class HttpMethodsScanner(BaseScanner):
     ) -> list[Finding]:
         return []
 
-    def _client_kwargs(self, origin: str) -> dict:
+    def _client_kwargs(self, target: str, *, include_cookie: bool = True) -> dict:
         proxy = getattr(self.engine, "proxy", "") or None
         kwargs: dict = {"timeout": getattr(self.engine, "timeout", 15), "follow_redirects": False}
         if hasattr(self.engine, "httpx_client_kwargs"):
@@ -156,7 +172,11 @@ class HttpMethodsScanner(BaseScanner):
         elif proxy:
             kwargs["proxy"] = proxy
         if hasattr(self.engine, "auth_headers"):
-            kwargs["headers"] = self.auth_headers_for_url(origin)
+            # engine.auth_headers は Cookie 文字列を path 非依存で付けるため、ページ path に
+            # スコープされた Cookie（Path=/admin 等）を origin ルート(/)の probe へ送ると、ブラウザ
+            # なら省く資格情報を TRACE 反射等で漏らし得る。origin ルート probe では Cookie を外す
+            # （page_target probe はページ自身なので付与する・Codex #157）。
+            kwargs["headers"] = self.auth_headers_for_url(target, include_cookie=include_cookie)
         return kwargs
 
     async def scan_page(self, url: str) -> list[Finding]:
@@ -183,8 +203,13 @@ class HttpMethodsScanner(BaseScanner):
             # finding クラスのカバレッジが欠けるので target を未検査扱いにして resume へ回す
             # （全 probe 失敗だけを未検査とすると、OPTIONS だけ失敗したケースを取りこぼす・Codex #157）。
             probe_state = {"failed": False}
+            # Cookie はページ path にスコープされ得るため、ページ自身（page_target）の probe にのみ
+            # 付与し、bare origin ルートの probe では外す（path-scoped 資格情報の漏えい防止・Codex #157）。
+            include_cookie = target == page_target
             try:
-                async with httpx.AsyncClient(**self._client_kwargs(target)) as client:
+                async with httpx.AsyncClient(
+                    **self._client_kwargs(target, include_cookie=include_cookie)
+                ) as client:
                     findings += await self._check_options(client, target, origin, probe_state)
                     findings += await self._check_trace(client, target, probe_state)
                     findings += await self._check_webdav(client, target, origin, probe_state)

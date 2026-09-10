@@ -85,6 +85,24 @@ class PureFunctionTests(unittest.TestCase):
         out = hm.redact_trace_body(body, sent_secret_values=["abc"])
         self.assertIn("abc", out)
 
+    def test_redact_trace_body_masks_encoded_variants(self):
+        # 反射器が安全に直列化したエンコード形（HTML実体参照/percent/JSONエスケープ）でも伏字化する。
+        import html as _html
+        import json as _json
+        from urllib.parse import quote as _quote
+        secret = 'sid=a&b"c/d'
+        body = (
+            f'raw={secret}\n'
+            f'html_attr="{_html.escape(secret)}"\n'
+            f'percent={_quote(secret, safe="")}\n'
+            f'json={_json.dumps(secret)}\n'
+        )
+        out = hm.redact_trace_body(body, sent_secret_values=[secret])
+        # 生の断片（区切り記号を除いた本体）が一切残らない。
+        for frag in ("sid=a", "b%22c", "b&amp;", "a&b", "c/d", "c\\/d"):
+            self.assertNotIn(frag, out)
+        self.assertIn("[REDACTED]", out)
+
 
 class _FakeResp:
     def __init__(self, status_code, headers=None, text=""):
@@ -196,6 +214,23 @@ class ScannerTests(unittest.IsolatedAsyncioTestCase):
         xst = [r for r in rec if r["evidence_type"] == "http_trace_xst"]
         self.assertEqual(len(xst), 1)
         self.assertEqual(xst[0]["confidence"], "likely")
+
+    async def test_origin_probe_omits_page_path_cookie(self):
+        # origin ルート probe は path-scoped Cookie を送らない。page probe は送る（#157 P2）。
+        engine, scanner = self._scanner()
+        engine.cookies = "sid=secretvalue"
+
+        def _auth_headers(extra=None, *, include_cookie=True, url=""):
+            h = {}
+            if include_cookie and engine.cookies:
+                h["Cookie"] = engine.cookies
+            return h
+        engine.auth_headers = _auth_headers
+
+        kw_origin = scanner._client_kwargs("https://h.test", include_cookie=False)
+        self.assertNotIn("Cookie", kw_origin.get("headers", {}))
+        kw_page = scanner._client_kwargs("https://h.test/admin", include_cookie=True)
+        self.assertEqual(kw_page["headers"].get("Cookie"), "secretvalue" and engine.cookies)
 
     async def test_trace_body_redacts_sent_auth_header_value(self):
         # client.headers の秘匿値が本文（JSON 直列化など行頭に出ない形）でも伏字化される（#157 C2）。
