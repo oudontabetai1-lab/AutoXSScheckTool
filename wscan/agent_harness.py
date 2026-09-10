@@ -434,14 +434,18 @@ class AgentHarness:
     ) -> None:
         self.state.visited_urls = _unique([
             *self.state.visited_urls,
-            *(redact_url(str(url)) for url in visited_urls),
+            *(self._redact_runtime(redact_url(str(url))) for url in visited_urls),
         ])
         self.state.tested_targets = _unique([
             *self.state.tested_targets,
-            *(redact_text(str(item))[:1000] for item in tested_targets),
+            *(
+                redact_text(self._redact_runtime(str(item)))[:1000]
+                for item in tested_targets
+            ),
         ])
         self.state.coverage_gaps = _unique(
-            redact_text(str(item))[:1000] for item in coverage_gaps
+            redact_text(self._redact_runtime(str(item)))[:1000]
+            for item in coverage_gaps
         )
         if hypotheses_count is not None:
             self.state.hypotheses_count = max(0, int(hypotheses_count))

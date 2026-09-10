@@ -1121,11 +1121,7 @@ class AgentBrowserScanner:
                 # 無い resume では、完了済みでも認証 episode を必ずやり直す。
                 self._harness.requeue_role(AgentRole.AUTHENTICATOR)
             if self.resume:
-                # redacted checkpoint から executable URL を安全に再発見する。
-                self._harness.requeue_role(AgentRole.EXPLORER)
-                # verifier に元 URL を渡せるよう、probe も再実行して候補を復元する。
-                self._harness.requeue_role(AgentRole.PROBE_SPECIALIST)
-                self._harness.requeue_role(AgentRole.VERIFIER)
+                self._prepare_resume_work()
             if not self._harness.state.work_queue:
                 if self.login_url and (
                     self.auth_user or self.auth_pass or self.totp_secret or self.storage_state
@@ -1429,7 +1425,9 @@ class AgentBrowserScanner:
                     coverage_gaps=gaps,
                     hypotheses_count=len(result.findings),
                 )
-                result.success = bool(histories) and all(h.is_successful() for h in histories)
+                # 一時失敗の history は監査用に保持するが、再試行で同じ work が完了した
+                # 場合は最終 queue 状態を正とする。
+                result.success = self._harness.coverage_complete
                 status = self._harness.finalize(
                     success=result.success,
                     coverage_complete=self._harness.coverage_complete,
@@ -1499,6 +1497,19 @@ class AgentBrowserScanner:
         except Exception as exc:
             result.error = str(exc)
             if self._harness:
+                # probe 後の verifier/reviewer 例外でも、atomic checkpoint 済みの
+                # 仮説を evidence/reproduction package から失わない。
+                result.findings = [
+                    _finding_from_checkpoint(item)
+                    for item in self._harness.state.hypotheses
+                ]
+                result.coverage_gaps = [
+                    f"{item.role.value}:{item.target}:{item.check_type or '-'}:{item.status.value}"
+                    for item in self._harness.state.work_queue
+                    if item.status != WorkStatus.COMPLETE
+                ]
+                result.steps_taken = self._harness.state.consumed_steps
+                result.memory = self._memory
                 result.harness_status = self._harness.finalize(
                     success=False, coverage_complete=False, error=result.error
                 ).value
@@ -1591,6 +1602,51 @@ class AgentBrowserScanner:
             {},
         )
         return {} if "<redacted>" in str(candidate.get("url", "")) else candidate
+
+    def _prepare_resume_work(self) -> None:
+        """checkpoint で実行情報を失った未完了 work だけ再発見対象へ戻す。"""
+        if not self._harness:
+            return
+        unfinished = {
+            WorkStatus.PLANNED,
+            WorkStatus.RUNNING,
+            WorkStatus.INCONCLUSIVE,
+            WorkStatus.BLOCKED,
+            WorkStatus.FAILED,
+        }
+        needs_explorer = any(
+            item.role == AgentRole.PROBE_SPECIALIST
+            and item.status in unfinished
+            and not self._work_target(item)
+            for item in self._harness.state.work_queue
+        )
+        verifier_candidates = {
+            item.target
+            for item in self._harness.state.work_queue
+            if item.role == AgentRole.VERIFIER
+            and item.status in unfinished
+            and not self._candidate_for_work(item)
+        }
+        if verifier_candidates:
+            # 秘匿化された候補 URL/payload は probe の再実行でのみ復元する。
+            # 完了済み verifier は保持し、未完了候補だけ後で再検証する。
+            for item in list(self._harness.state.work_queue):
+                if item.role != AgentRole.PROBE_SPECIALIST:
+                    continue
+                related = any(
+                    hypothesis.get("candidate_id") in verifier_candidates
+                    and hypothesis.get("check_type") == item.check_type
+                    and hypothesis.get("url") == item.target
+                    for hypothesis in self._harness.state.hypotheses
+                )
+                if related:
+                    item.status = WorkStatus.PLANNED
+                    item.attempts = 0
+                    item.summary = ""
+                    needs_explorer = needs_explorer or not self._work_target(item)
+            self._harness.checkpoint()
+        if needs_explorer:
+            self._harness.requeue_role(AgentRole.EXPLORER)
 
     async def _harness_should_stop(self) -> bool:
         return bool(self._harness and self._harness.should_stop)

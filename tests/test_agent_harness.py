@@ -209,3 +209,15 @@ def test_finalize_redacts_runtime_secret_from_persisted_error(tmp_path):
     state = (tmp_path / "agent_state.json").read_text()
     assert "error-secret" not in state
     assert "<redacted>" in state
+
+
+def test_note_coverage_redacts_configured_secrets_everywhere(tmp_path):
+    harness = AgentHarness(tmp_path, spec(), secret_values=["coverage-secret"])
+    harness.note_coverage(
+        visited_urls=["http://fixture.test/private/coverage-secret"],
+        tested_targets=["field=coverage-secret"],
+        coverage_gaps=["retry coverage-secret"],
+    )
+    artifacts = (tmp_path / "agent_state.json").read_text()
+    assert "coverage-secret" not in artifacts
+    assert artifacts.count("<redacted>") == 3

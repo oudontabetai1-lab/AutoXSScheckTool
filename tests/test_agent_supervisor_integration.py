@@ -11,6 +11,7 @@ import pytest
 
 from wscan.llm_agent_browser import AgentBrowserScanner
 from wscan.agent_harness import AgentHarness, AgentRole, AgentRunSpec
+from wscan.agent_harness import WorkStatus
 
 
 class _History:
@@ -176,6 +177,181 @@ def test_page_extracted_completion_marker_is_not_a_final_claim():
     final = "I reached the step limit before finishing."
     assert "EXPLORATION COMPLETE" in extracted_page_text
     assert not AgentBrowserScanner._work_completion_claimed(work, final)
+
+
+def test_resume_preserves_completed_executable_work(tmp_path):
+    scanner = AgentBrowserScanner(
+        "http://fixture.test", checks=["xss"], max_steps=20,
+        harness_output_dir=tmp_path,
+    )
+    scanner._harness = AgentHarness(
+        tmp_path,
+        AgentRunSpec(
+            mode="agent", target_url="http://fixture.test",
+            target_urls=("http://fixture.test",), access_urls=(),
+            exclude_urls=(), exclude_fields=(), checks=("xss",),
+            provider="ollama", model="exact", max_steps=20,
+        ),
+    )
+    explorer = scanner._enqueue_work(AgentRole.EXPLORER, "http://fixture.test")
+    probe = scanner._enqueue_work(
+        AgentRole.PROBE_SPECIALIST, "http://fixture.test/search", check_type="xss"
+    )
+    for item in (explorer, probe):
+        scanner._harness.next_work()
+        scanner._harness.finish_work(item.work_id, WorkStatus.COMPLETE)
+
+    resumed = AgentBrowserScanner(
+        "http://fixture.test", checks=["xss"], max_steps=20,
+        harness_output_dir=tmp_path, resume=True,
+    )
+    resumed._harness = AgentHarness(
+        tmp_path, scanner._harness.spec, resume=True
+    )
+    resumed._prepare_resume_work()
+
+    assert all(
+        item.status == WorkStatus.COMPLETE
+        for item in resumed._harness.state.work_queue
+    )
+
+
+def test_resume_requeues_only_dependencies_for_redacted_pending_candidate(tmp_path):
+    run_spec = AgentRunSpec(
+        mode="agent", target_url="http://fixture.test",
+        target_urls=("http://fixture.test",), access_urls=(),
+        exclude_urls=(), exclude_fields=(), checks=("xss",),
+        provider="ollama", model="exact", max_steps=20,
+    )
+    harness = AgentHarness(tmp_path, run_spec, secret_values=["path-secret"])
+    explorer = harness.enqueue(AgentRole.EXPLORER, "http://fixture.test")
+    probe = harness.enqueue(
+        AgentRole.PROBE_SPECIALIST,
+        "http://fixture.test/path-secret",
+        check_type="xss",
+    )
+    for item in (explorer, probe):
+        harness.next_work()
+        harness.finish_work(item.work_id, WorkStatus.COMPLETE)
+    harness.note_hypotheses([{
+        "candidate_id": "candidate-1", "check_type": "xss",
+        "url": "http://fixture.test/path-secret", "field_name": "q",
+        "payload": "safe", "evidence": "observed",
+    }])
+    verifier = harness.enqueue(AgentRole.VERIFIER, "candidate-1", check_type="xss")
+
+    resumed = AgentBrowserScanner(
+        "http://fixture.test", checks=["xss"], max_steps=20,
+        totp_secret="path-secret", harness_output_dir=tmp_path, resume=True,
+    )
+    resumed._harness = AgentHarness(
+        tmp_path, run_spec, resume=True, secret_values=["path-secret"]
+    )
+    resumed._prepare_resume_work()
+    statuses = {item.work_id: item.status for item in resumed._harness.state.work_queue}
+
+    assert statuses[explorer.work_id] == WorkStatus.PLANNED
+    assert statuses[probe.work_id] == WorkStatus.PLANNED
+    assert statuses[verifier.work_id] == WorkStatus.PLANNED
+
+
+@pytest.mark.asyncio
+async def test_successful_retry_uses_final_work_state(tmp_path):
+    attempts = {"explorer": 0}
+
+    class _RetryHistory(_History):
+        def __init__(self, text, successful=True):
+            super().__init__(text)
+            self.successful = successful
+
+        def is_successful(self):
+            return self.successful
+
+    class _Agent:
+        def __init__(self, **kwargs):
+            self.task = kwargs["task"]
+
+        async def run(self, **_kwargs):
+            if "Act only as the Explorer" in self.task:
+                attempts["explorer"] += 1
+                if attempts["explorer"] == 1:
+                    return _RetryHistory("transient failure", successful=False)
+                return _RetryHistory("EXPLORATION COMPLETE")
+            if "probe specialist" in self.task:
+                return _RetryHistory("PROBE COMPLETE")
+            return _RetryHistory("No coverage gaps found. REVIEW COMPLETE")
+
+    class _Browser:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def stop(self):
+            pass
+
+    module = types.ModuleType("browser_use")
+    module.Agent = _Agent
+    module.Browser = _Browser
+    scanner = AgentBrowserScanner(
+        "http://fixture.test", checks=["xss"], max_steps=20,
+        harness_output_dir=tmp_path,
+    )
+    with patch("wscan.llm_agent_browser._build_llm", return_value=object()), patch(
+        "wscan.llm_agent_browser.check_agent_config_directory", return_value=(True, "")
+    ), patch.dict(sys.modules, {"browser_use": module}):
+        result = await scanner.run()
+
+    assert attempts["explorer"] == 2
+    assert result.success is True
+    assert result.harness_status == "complete"
+
+
+@pytest.mark.asyncio
+async def test_later_episode_failure_returns_checkpoint_findings(tmp_path):
+    class _Agent:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+        async def run(self, **_kwargs):
+            task = self.kwargs["task"]
+            if "Act only as the Explorer" in task:
+                return _History("EXPLORATION COMPLETE")
+            if "probe specialist" in task:
+                nonce = re.search(
+                    r"WSCAN-NONCE:([^\s]+)", self.kwargs["extend_system_message"]
+                ).group(1)
+                return _History(
+                    f"WSCAN-NONCE:{nonce}\nVULNERABILITY FOUND:\n"
+                    "Type: xss\nSeverity: high\nURL: http://fixture.test/search\n"
+                    "Field: q\nPayload: <svg/onload=alert(1)>\n"
+                    "Evidence: dialog observed\nPROBE COMPLETE"
+                )
+            if "independent verifier" in task:
+                raise RuntimeError("verifier crashed")
+            return _History("REVIEW COMPLETE")
+
+    class _Browser:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def stop(self):
+            pass
+
+    module = types.ModuleType("browser_use")
+    module.Agent = _Agent
+    module.Browser = _Browser
+    scanner = AgentBrowserScanner(
+        "http://fixture.test", checks=["xss"], max_steps=20,
+        harness_output_dir=tmp_path,
+    )
+    with patch("wscan.llm_agent_browser._build_llm", return_value=object()), patch(
+        "wscan.llm_agent_browser.check_agent_config_directory", return_value=(True, "")
+    ), patch.dict(sys.modules, {"browser_use": module}):
+        result = await scanner.run()
+
+    assert result.error == "verifier crashed"
+    assert len(result.findings) == 1
+    assert result.findings[0].field_name == "q"
+    assert result.harness_status == "failed"
 
 
 def test_dynamic_agent_replay_does_not_impersonate_deterministic_verification():
