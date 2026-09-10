@@ -511,6 +511,13 @@ class ManualCrawlSession:
         async def _initial_goto() -> None:
             try:
                 await initial_page.goto(start_url, wait_until="commit", timeout=15_000)
+                # 起動時の通常リダイレクト（http→https 等）後の実効 origin を記録基準にする。
+                # これをしないと start_url が旧 origin に固定され、以降の snapshot/forms/requests や
+                # 手入力 URL が軒並み out-of-scope 扱いになり artifact がほぼ空になる（Codex #153）。
+                # popup 等の後続は従来どおり厳密 origin 判定のまま。
+                landed = initial_page.url or ""
+                if landed.startswith(("http://", "https://")):
+                    self.start_url = landed
             except Exception as exc:
                 self.last_error = f"goto failed: {exc}"
             try:
@@ -915,7 +922,13 @@ class ManualCrawlSession:
             await self.snapshot("stop")
             if self._context:
                 try:
-                    self.cookies = await self._context.cookies()
+                    # 保存 cookie は target origin 限定にする。cross-origin SSO popup で認証した場合、
+                    # URL フィルタ無しだと IdP のセッション cookie 等が manual-crawl JSON に書かれる
+                    # （URL/forms/events は同一 origin に絞っているのに cookie だけ漏れる・Codex #153）。
+                    if self.start_url:
+                        self.cookies = await self._context.cookies([self.start_url])
+                    else:
+                        self.cookies = await self._context.cookies()
                 except Exception:
                     pass
         finally:

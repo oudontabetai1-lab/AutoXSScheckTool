@@ -458,6 +458,28 @@ class ManualCrawlRemoteBrowserTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(scheduled, [])
         self.assertFalse(any("evil.test" in u for u in session.urls))
 
+    async def test_stop_filters_cookies_to_target_origin(self):
+        # cross-origin SSO で認証しても、保存 cookie は target origin 限定（IdP cookie を漏らさない・Codex #153）。
+        session = self._session(_FakePage("http://example.test/"), None)
+        session.running = True
+        session.start_url = "http://example.test/"
+        recorded = {}
+
+        class _Ctx:
+            async def cookies(self, urls=None):
+                recorded["urls"] = urls
+                return [{"name": "s", "value": "1"}]
+        session._context = _Ctx()
+
+        async def _noop(*a, **k):
+            return None
+        session.snapshot = _noop
+        session._cleanup_browser = _noop
+        session.save = lambda: None
+
+        await session.stop()
+        self.assertEqual(recorded["urls"], ["http://example.test/"])  # URL フィルタ付きで取得
+
     async def test_start_screencast_failure_does_not_leak_cdp(self):
         # startScreencast 失敗時に死んだ CDP を self._cdp に残さず detach する（Codex #153 P2）。
         class _FailCdp(_FakeCdp):
