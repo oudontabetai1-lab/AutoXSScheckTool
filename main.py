@@ -3020,7 +3020,11 @@ async def run_serve(args):
                 enable_waf_detection=bool(cfg.get("enable_waf_detection", True)),
                 enable_payload_learning=bool(cfg.get("enable_payload_learning", True)),
                 enable_community_payloads=bool(cfg.get("enable_community_payloads", True)),
-                enable_tls_scan=bool(cfg.get("enable_tls_scan", False)),
+                # 明示指定が無ければ None を渡し、ScanEngine の checks 推論（checks に tls_scan が
+                # あれば有効）に委ねる。False 既定で上書きすると checks:["tls_scan"] が黙って no-op に
+                # なる（REST/WS/定期の serve リクエスト・Codex #158）。
+                enable_tls_scan=(None if cfg.get("enable_tls_scan") is None
+                                 else bool(cfg.get("enable_tls_scan"))),
                 enable_sitemap_crawl=bool(cfg.get("enable_sitemap_crawl", True)),
                 enable_llm_web_browsing=bool(cfg.get("enable_llm_web_browsing", False)),
                 ctf_mode=bool(cfg.get("ctf_mode", False)),

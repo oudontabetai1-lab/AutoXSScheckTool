@@ -222,6 +222,27 @@ class ScannerTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreaterEqual(recorded[0]["cvss_score"], 9.0)
         self.assertIn("CVSS:3", recorded[0]["cvss_vector"])
 
+    async def test_ipv6_origin_is_bracketed(self):
+        # IPv6 host は URL 上ブラケットが要る（https://::1:443 は不正）。
+        engine = _FakeEngine(enabled=True)
+        scanner = SCANNERS["tls_scan"](engine)
+        recorded = []
+
+        async def _rec(**kw):
+            recorded.append(kw)
+            return object()
+
+        scanner.record_finding = _rec
+        with mock.patch.object(tls_scan, "sslyze_available", return_value=True), \
+             mock.patch.object(tls_scan, "run_sslyze_scan", return_value=object()), \
+             mock.patch.object(tls_scan, "server_scan_reachable", return_value=True), \
+             mock.patch.object(tls_scan, "incomplete_commands", return_value=[]), \
+             mock.patch.object(tls_scan, "extract_tls_issues", return_value=[
+                 {"kind": "weak_protocol", "label": "TLS 1.0", "severity": "medium", "detail": "d"},
+             ]):
+            await scanner.scan_page("https://[::1]/")
+        self.assertEqual(recorded[0]["url"], "https://[::1]:443")
+
     async def test_partial_failure_recorded(self):
         # issue が見つかっても、失敗コマンドがあれば記録する。
         engine = _FakeEngine(enabled=True)
@@ -266,6 +287,17 @@ class EngineEnableTests(unittest.TestCase):
         from wscan.engine import ScanEngine
         e = ScanEngine("https://x.test", checks=["xss"], llm_provider="none", monitor=None)
         self.assertFalse(e.tls_scan_enabled)
+
+    def test_explicit_false_disables_even_with_check(self):
+        # serve が None を渡せば checks 推論が効く（明示 False 上書きで no-op にしない・Codex #158）。
+        from wscan.engine import ScanEngine
+        e = ScanEngine("https://x.test", checks=["tls_scan"], enable_tls_scan=None,
+                       llm_provider="none", monitor=None)
+        self.assertTrue(e.tls_scan_enabled)
+        # 明示 False は尊重（無効）。
+        e2 = ScanEngine("https://x.test", checks=["tls_scan"], enable_tls_scan=False,
+                        llm_provider="none", monitor=None)
+        self.assertFalse(e2.tls_scan_enabled)
 
 
 class CliChecksTests(unittest.TestCase):

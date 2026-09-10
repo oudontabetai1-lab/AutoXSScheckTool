@@ -73,7 +73,10 @@ class TlsConfigScanner(BaseScanner):
             return []  # TLS 検査は https のみ
         host = parsed.hostname or ""
         port = parsed.port or 443
-        origin = f"https://{host}:{port}"
+        # IPv6 は URL 上はブラケットが要る（sslyze へは素の host を渡す）。
+        # 例: host "::1" → origin "https://[::1]:443"（"https://::1:443" は不正）。
+        host_for_url = f"[{host}]" if ":" in host else host
+        origin = f"https://{host_for_url}:{port}"
         if not host or origin in self._checked_origins:
             return []
         self._checked_origins.add(origin)
