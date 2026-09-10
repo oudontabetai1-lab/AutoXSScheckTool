@@ -65,6 +65,26 @@ class PureFunctionTests(unittest.TestCase):
         finally:
             request_logger.clear_sensitive_headers()
 
+    def test_redact_trace_body_masks_serialized_secret_values(self):
+        # 行頭 `Header: value` に現れない直列化（JSON/HTML属性/エスケープ\r\n）でも、
+        # 送信した秘匿値を渡せば literal 置換で伏字化する（Codex #157 C2）。
+        secret = "Bearer supersecrettoken"
+        cookie = "session=abcdef123"
+        body = (
+            '{"headers":{"Authorization":"%s","Cookie":"%s"}}\n'
+            'TRACE / HTTP/1.1\\r\\nAuthorization: %s\\r\\n'
+        ) % (secret, cookie, secret)
+        out = hm.redact_trace_body(body, sent_secret_values=[secret, cookie])
+        self.assertNotIn("supersecrettoken", out)
+        self.assertNotIn("abcdef123", out)
+        self.assertIn("[REDACTED]", out)
+
+    def test_redact_trace_body_ignores_short_values(self):
+        # 短い値（len<4）は誤爆防止のため literal 置換しない。
+        body = "reflected abc here"
+        out = hm.redact_trace_body(body, sent_secret_values=["abc"])
+        self.assertIn("abc", out)
+
 
 class _FakeResp:
     def __init__(self, status_code, headers=None, text=""):
@@ -76,9 +96,11 @@ class _FakeResp:
 class _FakeClient:
     """httpx.AsyncClient の最小ダブル（request(method,url,headers=) を canned 応答へ）。"""
 
-    def __init__(self, responses):
+    def __init__(self, responses, headers=None):
         self._responses = responses  # {method: _FakeResp}
         self.requested = []
+        # 実送信ヘッダの相当物（_check_trace が秘匿値抽出に参照する）。
+        self.headers = headers or {}
 
     async def __aenter__(self):
         return self
@@ -174,6 +196,32 @@ class ScannerTests(unittest.IsolatedAsyncioTestCase):
         xst = [r for r in rec if r["evidence_type"] == "http_trace_xst"]
         self.assertEqual(len(xst), 1)
         self.assertEqual(xst[0]["confidence"], "likely")
+
+    async def test_trace_body_redacts_sent_auth_header_value(self):
+        # client.headers の秘匿値が本文（JSON 直列化など行頭に出ない形）でも伏字化される（#157 C2）。
+        secret = "Bearer supersecrettoken"
+        trace = _FakeResp(200, {"Content-Type": "message/http"},
+                          'TRACE / HTTP/1.1\n{"Authorization":"%s"}\n' % secret)
+        trace._echo = True
+        responses = {
+            "OPTIONS": _FakeResp(200, {"allow": "GET, POST"}),
+            "TRACE": trace,
+            "PROPFIND": _FakeResp(405, {}, ""),
+        }
+        engine, scanner = self._scanner()
+        recorded = []
+
+        async def _rec(**kw):
+            recorded.append(kw)
+            return object()
+
+        scanner.record_finding = _rec
+        client = _FakeClient(responses, headers={"Authorization": secret})
+        with mock.patch.object(hm.httpx, "AsyncClient", return_value=client):
+            await scanner.scan_page("http://app.test/")
+        xst = [r for r in recorded if r["evidence_type"] == "http_trace_xst"]
+        self.assertEqual(len(xst), 1)
+        self.assertNotIn("supersecrettoken", xst[0]["pair"]["response"]["body"])
 
     async def test_path_target_probed_in_addition_to_origin(self):
         responses = {

@@ -92,19 +92,26 @@ def trace_reflects(status: int, headers: dict, body: str, token: str) -> bool:
 _TRACE_HEADER_LINE = re.compile(r"^([^\r\n:]+):(.*)$")
 
 
-def redact_trace_body(body: str, limit: int = 2000) -> str:
+def redact_trace_body(body: str, limit: int = 2000, sent_secret_values=()) -> str:
     """TRACE が反射した送信ヘッダのうち秘匿値をマスクする（純粋）。
 
     XST の証跡（どのヘッダが反射したか）は残しつつ、Authorization/Cookie 等の実値は残さない。
-    秘匿判定はハードコード列挙ではなく `request_logger.is_sensitive_header`（runtime 登録の
-    カスタム認証ヘッダも含む正規の述語）を使う（Codex #157 P1）。
+    2 段構え:
+    (1) 行頭 `Header: value` 形は is_sensitive_header（runtime 登録のカスタム認証ヘッダも含む正規述語）で値を伏字化。
+    (2) ``sent_secret_values`` に送信した秘匿ヘッダの実値を渡すと、JSON/HTML 属性/エスケープ \r\n 等で
+        行頭に現れない直列化でも、その値を本文中どこでも literal 置換で伏字化する（Codex #157）。
     """
     if not body:
         return ""
     from wscan.request_logger import is_sensitive_header
 
+    text = body[:limit]
+    # (2) 送信した秘匿値を literal に伏字化（直列化形式に依らない）。長い値から先に置換。
+    for val in sorted({v for v in (sent_secret_values or []) if v and len(v) >= 4}, key=len, reverse=True):
+        text = text.replace(val, "[REDACTED]")
+    # (1) 行頭ヘッダ形の値を伏字化。
     out: list[str] = []
-    for line in body[:limit].splitlines(keepends=True):
+    for line in text.splitlines(keepends=True):
         m = _TRACE_HEADER_LINE.match(line.rstrip("\r\n"))
         if m and is_sensitive_header(m.group(1).strip()):
             nl = line[len(line.rstrip("\r\n")):]  # 改行（\r\n 等）を保持
@@ -273,9 +280,13 @@ class HttpMethodsScanner(BaseScanner):
         if not strength:
             return []
         # 反射本文には送信した Authorization/Cookie 等が含まれ得るのでマスクして保存する。
+        # 実際に送信したヘッダ（client.headers）から秘匿値を拾い、JSON/属性/エスケープ等で
+        # 行頭に現れない直列化でも literal 置換で伏字化する（Codex #157）。
+        from wscan.request_logger import is_sensitive_header
+        sent_secrets = [v for k, v in client.headers.items() if is_sensitive_header(k)]
         pair = {"request": {"url": target, "method": "TRACE"},
                 "response": {"status": r.status_code, "headers": dict(r.headers),
-                             "body": redact_trace_body(r.text)}}
+                             "body": redact_trace_body(r.text, sent_secret_values=sent_secrets)}}
         confirmed = strength == "confirmed"
         evidence = (
             "TRACE メソッドが有効で送信ヘッダを反射します（Cross-Site Tracing / XST）。"
@@ -312,6 +323,10 @@ class HttpMethodsScanner(BaseScanner):
             return []
         # 207 Multi-Status（WebDAV 応答）を強シグナルとする。
         if r.status_code != 207:
+            return []
+        # await 中に別パスの検査（--concurrency>1）が同 origin を報告済みにし得るので、
+        # 記録直前に再チェックして二重報告を防ぐ（入口ガードは await 前でレースする・Codex #157）。
+        if origin in self._webdav_reported:
             return []
         self._webdav_reported.add(origin)
         pair = {"request": {"url": target, "method": "PROPFIND"},
