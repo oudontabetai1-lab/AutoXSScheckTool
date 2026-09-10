@@ -184,6 +184,73 @@ class _FakeResp:
         self.headers = {}
 
 
+class RedactionShaTests(unittest.TestCase):
+    def test_sha_htpasswd_hash_redacted(self):
+        out = m._redact_sensitive("admin:{SHA}W6ph5Mm5Pz8GgiULbPgzG37mj9g=\n")
+        self.assertNotIn("W6ph5Mm5Pz8GgiULbPgzG37mj9g=", out)
+        self.assertIn("[REDACTED]", out)
+
+    def test_ssha_htpasswd_hash_redacted(self):
+        out = m._redact_sensitive("user:{SSHA}abcdEFGHsecretbase64==\n")
+        self.assertNotIn("abcdEFGHsecretbase64==", out)
+
+    def test_apr1_still_redacted(self):
+        out = m._redact_sensitive("admin:$apr1$abcd$ef.ghij/klmnop\n")
+        self.assertNotIn("ef.ghij/klmnop", out)
+
+
+class CatchAllComparisonTests(unittest.TestCase):
+    def test_same_catch_all_true_modulo_path(self):
+        base = "<html>Unknown page /wscan-nonexistent-probe-8f3a1c9e2b.zzz not found. CREATE TABLE demo</html>"
+        cand = "<html>Unknown page /backup.sql not found. CREATE TABLE demo</html>"
+        self.assertTrue(m._same_catch_all(cand, "/backup.sql", base, m._SOFT404_PROBE))
+
+    def test_different_body_not_catch_all(self):
+        base = "<html>404 not found</html>"
+        cand = "-- real dump\nCREATE TABLE users (id int);\nINSERT INTO users VALUES (1);"
+        self.assertFalse(m._same_catch_all(cand, "/backup.sql", base, m._SOFT404_PROBE))
+
+    def test_empty_baseline_false(self):
+        self.assertFalse(m._same_catch_all("anything", "/x", "", m._SOFT404_PROBE))
+
+
+class SensitiveVerifyTests(unittest.IsolatedAsyncioTestCase):
+    def _scanner(self):
+        engine = types.SimpleNamespace(
+            browser=None, monitor=None, payload_gen=None, wave_errors=[],
+            proxy="", timeout=10)
+        return SCANNERS["info_disclosure"](engine)
+
+    async def test_soft404_catch_all_fails_verification(self):
+        scanner = self._scanner()
+        catch_all = "Unknown path {p}. CREATE TABLE demo (id int);"
+
+        async def _get(url, follow_redirects=False):
+            from urllib.parse import urlparse
+            return _FakeResp(200, catch_all.format(p=urlparse(url).path))
+        scanner._get = _get
+        finding = types.SimpleNamespace(
+            evidence_type="info_sensitive_resource",
+            url="http://x/backup.sql",
+            evidence_details={"path": "/backup.sql", "matched_label": "SQL dump content"})
+        self.assertFalse(await scanner.verify_finding(finding))
+
+    async def test_genuine_artifact_still_verifies(self):
+        scanner = self._scanner()
+
+        async def _get(url, follow_redirects=False):
+            from urllib.parse import urlparse
+            if "wscan-nonexistent" in url:
+                return _FakeResp(404, "not found")  # サーバは正しく 404（soft-404 でない）
+            return _FakeResp(200, "-- dump\nCREATE TABLE users (id int);")
+        scanner._get = _get
+        finding = types.SimpleNamespace(
+            evidence_type="info_sensitive_resource",
+            url="http://x/backup.sql",
+            evidence_details={"path": "/backup.sql", "matched_label": "SQL dump content"})
+        self.assertTrue(await scanner.verify_finding(finding))
+
+
 class DirListingVerifyTests(unittest.IsolatedAsyncioTestCase):
     def _scanner(self):
         engine = types.SimpleNamespace(

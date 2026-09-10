@@ -152,6 +152,26 @@ def _is_secret_path(path: str) -> bool:
     p = (path or "").lower()
     return any(mk in p for mk in _SECRET_PATH_MARKERS)
 
+
+def _norm_catch_all(body: str, path: str) -> str:
+    """catch-all 比較用に本文を正規化する（純粋）。echo され得る path トークンを除去する。"""
+    b = (body or "")[:4000]
+    for tok in (path or "").split("/"):
+        if len(tok) > 2:
+            b = b.replace(tok, "")
+    return b.strip()
+
+
+def _same_catch_all(body: str, path: str, baseline_body: str, baseline_path: str) -> bool:
+    """候補本文が soft-404 baseline（catch-all）本文と実質同一かを判定する（純粋）。
+
+    両者から各自のリクエスト path の echo を除去して比較する。baseline 本文が空（＝取得失敗）なら
+    False（比較不能なので従来の署名/パス判定に委ねる）。
+    """
+    if not baseline_body:
+        return False
+    return _norm_catch_all(body, path) == _norm_catch_all(baseline_body, baseline_path)
+
 # ディレクトリリスティング（autoindex）の確定シグネチャ。
 _DIR_LISTING_PATTERNS = (
     re.compile(r"<title>\s*Index of /", re.IGNORECASE),
@@ -227,8 +247,10 @@ def _redact_sensitive(body: str, limit: int = 300) -> str:
         r"(?i)([\w.\-]*(?:key|token|secret|password|passwd|pwd)[\w.\-]*\s*[:=]\s*)\S+",
         r"\1[REDACTED]", text,
     )
-    # htpasswd のハッシュ（user:$apr1$...）を伏字化。
+    # htpasswd のハッシュを伏字化。$apr1$/bcrypt/$6$ 形に加え、検出器が受理する
+    # user:{SHA}base64 形（{SSHA} 含む）も同様にマスクする（Codex #156）。
     text = re.sub(r"(:\$(?:apr1|2[aby]|6)\$)\S+", r"\1[REDACTED]", text)
+    text = re.sub(r"(:\{S?SHA\})\S+", r"\1[REDACTED]", text)
     return text
 
 # Headers that reveal technology stack
@@ -413,11 +435,15 @@ class InfoDisclosureScanner(BaseScanner):
         async with httpx.AsyncClient(**kwargs) as client:
             # soft-404 判定: まず存在しないパスを引く。200/206 が返る（＝存在しないのに
             # 応答する）サーバでは、非 HTML fallback を信頼せず「署名一致のみ」で報告する。
+            # さらに baseline の本文も保持し、候補本文が catch-all と同一なら署名一致でも採らない。
             soft404 = False
+            baseline_body = ""
             try:
                 probe = await client.get(urljoin(origin, _SOFT404_PROBE))
                 self._record_probe_status(probe)
                 soft404 = probe.status_code in (200, 206)
+                if soft404:
+                    baseline_body = probe.text[:4000]
             except Exception as exc:
                 self._record_scan_note(
                     f"probe_error:{self.CHECK_TYPE}:soft404_baseline:{type(exc).__name__}"
@@ -431,6 +457,12 @@ class InfoDisclosureScanner(BaseScanner):
                     if r.status_code not in (200, 206):
                         continue
                     body = r.text[:4000]
+
+                    # soft-404 の origin では、候補本文が baseline（catch-all）本文と同一なら、
+                    # たとえ署名が一致しても「存在するファイル」ではなく catch-all なので報告しない
+                    # （全パスが同じ SQL 解説等を返すケースの誤検知防止・Codex #156）。
+                    if soft404 and _same_catch_all(body, path, baseline_body, _SOFT404_PROBE):
+                        continue
 
                     # 確定は「ファイル内容の署名一致」を最優先。エラー系署名と artifact 署名の両方を見る。
                     # ただし署名は当該パスに適用可能なものだけ採用する（誤ラベル選択・soft-404 catch-all を防ぐ）。
@@ -557,16 +589,37 @@ class InfoDisclosureScanner(BaseScanner):
 
     async def verify_finding(self, finding: Finding) -> bool | None:
         if finding.evidence_type == "info_sensitive_resource":
+            details = getattr(finding, "evidence_details", {}) or {}
+            path = details.get("path") or urlparse(finding.url).path
+            orig_label = details.get("matched_label", "")
             try:
                 r = await self._get(finding.url, follow_redirects=False)
             except Exception:
                 return None
             if r.status_code not in (200, 206):
                 return False
-            return self._classify_sensitive_body(
-                r.text[:4000],
-                r.headers.get("content-type", ""),
-            ) is not None
+            body = r.text[:4000]
+            # 検出時と同じ soft-404 / パス適用性ルールを再適用する。artifact が消えて URL が
+            # text/plain の soft-404 本文を返すようになった場合に、汎用 non-HTML ラベルや無関係な
+            # 署名で confirmed のまま残さない（Codex #156）。
+            origin = f"{urlparse(finding.url).scheme}://{urlparse(finding.url).netloc}"
+            soft404, baseline_body = False, ""
+            try:
+                probe = await self._get(urljoin(origin, _SOFT404_PROBE), follow_redirects=False)
+                soft404 = probe.status_code in (200, 206)
+                if soft404:
+                    baseline_body = probe.text[:4000]
+            except Exception:
+                pass
+            if soft404 and _same_catch_all(body, path, baseline_body, _SOFT404_PROBE):
+                return False
+            label = self._classify_sensitive_body(
+                body, r.headers.get("content-type", ""), path=path, soft404=soft404,
+            )
+            if label is None:
+                return False
+            # 元の matched_label が分かっていれば同一ラベルでの再一致を要求する。
+            return (not orig_label) or (label == orig_label)
 
         if finding.evidence_type == "info_tech_headers":
             try:
@@ -617,11 +670,16 @@ class InfoDisclosureScanner(BaseScanner):
             self._record_probe_status(response)
         return response
 
-    def _classify_sensitive_body(self, body: str, content_type: str) -> str | None:
+    def _classify_sensitive_body(self, body: str, content_type: str,
+                                 path: str | None = None, soft404: bool = False) -> str | None:
+        # path を渡した場合は検出時と同じパス適用性で署名を絞る。soft404 の origin では汎用
+        # non-HTML fallback を使わない（検出時と同じルール・Codex #156）。path=None/soft404=False は従来動作。
         for pattern, label in {**_CONTENT_PATTERNS, **_ARTIFACT_PATTERNS}.items():
+            if path is not None and not _label_applies(label, path):
+                continue
             if re.search(pattern, body, re.IGNORECASE | re.DOTALL):
                 return label
-        if "html" not in content_type and len((body or "").strip()) > 20:
+        if not soft404 and "html" not in content_type and len((body or "").strip()) > 20:
             return "non-HTML content (possible sensitive file)"
         return None
 
