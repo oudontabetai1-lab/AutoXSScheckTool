@@ -1816,7 +1816,21 @@ class BaseScanner(ABC):
                 if str(k).lower() == "content-type":
                     ctype = str(v).lower()
                     break
-            is_html = ("html" in ctype) or (ctype == "" and "<html" in body[:2000].lower())
+            is_2xx = False
+            try:
+                is_2xx = status is not None and (200 <= int(status) < 300)
+            except (TypeError, ValueError):
+                is_2xx = False
+            if "html" in ctype:
+                is_html = True
+            elif not ctype:
+                # Content-Type 欠落: 成功(2xx)の crawl document は HTML とみなす（<html> タグ省略や
+                # 長い前置きで先頭に現れない正規ページを取りこぼさない・Codex #147）。非2xx で header も
+                # 無い場合のみ軽いスニッフィングに留める（error 応答の誤検知を避ける）。
+                blob = body[:4000].lower()
+                is_html = is_2xx or ("<html" in blob) or ("<!doctype html" in blob)
+            else:
+                is_html = False  # 明示的に非 HTML（json/js/画像等）は監査しない
             return body if is_html else ""
         return body
 

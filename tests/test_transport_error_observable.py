@@ -882,6 +882,24 @@ class ResponsePairDocumentGuardTests(unittest.IsolatedAsyncioTestCase):
                 out = await scanner.scan_page("http://app.test/missing")
                 self.assertEqual(len(out), 1)
 
+    async def test_sri_audits_2xx_without_content_type_or_html_tag(self):
+        # Content-Type 欠落の 2xx document は <html> タグが無く（前置き先行でも）HTML とみなし監査する
+        # （省略/遅延した <html> で実在の未保護 script を取りこぼさない・Codex #147）。
+        body = ('\n\n<!-- long preamble ... -->\n'
+                '<script src="https://cdn.example.com/lib.js"></script>')
+        engine = _FakeEngine()
+        engine.browser = _APIBrowser(_FakeRequestCtx(_FakeAPIResponse(200, {}, text=body)))
+        scanner = SCANNERS["sri"](engine)
+        recorded = []
+
+        async def _rec(**kw):
+            recorded.append(kw)
+            return object()
+
+        scanner.record_finding = _rec
+        out = await scanner.scan_page("http://app.test/page")
+        self.assertEqual(len(out), 1)
+
     async def test_sri_ignores_non_html_non_2xx(self):
         # 非 HTML（JSON API error 等）の非 2xx は NOT_REACHED（誤検知回避）。
         engine = _FakeEngine()
