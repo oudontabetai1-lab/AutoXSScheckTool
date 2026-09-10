@@ -824,6 +824,25 @@ class ResponsePairDocumentGuardTests(unittest.IsolatedAsyncioTestCase):
                 with self.assertRaises(PageDocumentUnavailable):
                     await scanner.scan_page("http://app.test/x")
 
+    async def test_capture_fallback_missing_body_raises(self):
+        # direct GET 失敗→capture fallback で、captured response に body キーが無い（本文読取失敗）とき、
+        # 空本文と取り違えず body_unavailable を伝播して PageDocumentUnavailable を投げる（Codex #147）。
+        for check in ("sri", "secret_leak"):
+            with self.subTest(check=check):
+                engine = _FakeEngine()
+                scanner = SCANNERS[check](engine)
+
+                async def _boom_get(u):
+                    raise RuntimeError("direct GET failed")
+                # capture fallback: status/headers はあるが body キーが無い（読めなかった）。
+                scanner._get = _boom_get
+                scanner.current_page_pair = lambda u: {
+                    "request": {"url": u},
+                    "response": {"status": 200, "headers": {"content-type": "text/html"}, "url": u},
+                }
+                with self.assertRaises(PageDocumentUnavailable):
+                    await scanner.scan_page("http://app.test/x")
+
     async def test_header_only_scanner_not_degraded_by_body_failure(self):
         # 本文読取失敗(body_unavailable)でも、header 監査(clickjacking)はヘッダで完了できる。
         # body 失敗を clickjacking 名義の transport_error にして degraded 扱いしない（Codex #147 4巡目）。

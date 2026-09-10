@@ -1895,11 +1895,16 @@ class BaseScanner(ABC):
             resp = (pair or {}).get("response") or {}
             if not resp:
                 return None
+            # capture 側（NetworkCapture.enrich_response）は本文を読めなかったとき body キー自体を
+            # 欠落させる。これを空本文と取り違えず body_unavailable として伝播し、content 観測系に
+            # PageDocumentUnavailable を投げさせる（direct GET 失敗と同じ扱い・Codex #147）。
+            body_missing = "body" not in resp
             return {
                 "status": resp.get("status"),
                 "headers": resp.get("headers", {}) or {},
                 "body": resp.get("body", "") or "",
                 "url": resp.get("url", url),
+                "body_unavailable": body_missing,
             }
 
     @staticmethod
