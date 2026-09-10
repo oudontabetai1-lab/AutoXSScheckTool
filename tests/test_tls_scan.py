@@ -200,8 +200,9 @@ class ScannerTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(any("scan_incomplete" in n for n in engine.wave_errors))
 
 
-    async def test_cvss_matches_issue_severity(self):
-        # critical な Heartbleed が check_type 一律の 5.9 でなく severity 整合の CVSS を持つ。
+    async def test_cvss_mapped_by_kind_not_severity(self):
+        # Heartbleed は OOB read＝機密性のみ。severity バケツの critical(9.1, I:H) ではなく
+        # kind 整合の 7.5 / I:N を publish する（Codex #158）。
         engine = _FakeEngine(enabled=True)
         scanner = SCANNERS["tls_scan"](engine)
         recorded = []
@@ -218,9 +219,41 @@ class ScannerTests(unittest.IsolatedAsyncioTestCase):
                  {"kind": "heartbleed", "label": "Heartbleed", "severity": "critical", "detail": "d"},
              ]):
             await scanner.scan_page("https://x.test/")
-        self.assertEqual(recorded[0]["severity"], "critical")
-        self.assertGreaterEqual(recorded[0]["cvss_score"], 9.0)
-        self.assertIn("CVSS:3", recorded[0]["cvss_vector"])
+        self.assertEqual(recorded[0]["severity"], "critical")  # 表示 severity は維持
+        self.assertEqual(recorded[0]["cvss_score"], 7.5)
+        self.assertIn("C:H/I:N/A:N", recorded[0]["cvss_vector"])  # 完全性影響なし
+
+    async def test_proxy_configured_skips_with_note(self):
+        # proxy 設定時は別経路の直接接続を避け、明示的に skip を記録する（#158）。
+        engine = _FakeEngine(enabled=True)
+        engine.proxy = "http://127.0.0.1:8080"
+        scanner = SCANNERS["tls_scan"](engine)
+        with mock.patch.object(tls_scan, "sslyze_available", return_value=True), \
+             mock.patch.object(tls_scan, "run_sslyze_scan") as run:
+            out = await scanner.scan_page("https://x.test/")
+        self.assertEqual(out, [])
+        run.assert_not_called()
+        self.assertTrue(any("proxy_unsupported" in n for n in engine.wave_errors))
+
+    async def test_client_cert_configured_skips_with_note(self):
+        engine = _FakeEngine(enabled=True)
+        engine.tls_config = type("C", (), {"has_client_certificate": lambda self: True})()
+        scanner = SCANNERS["tls_scan"](engine)
+        with mock.patch.object(tls_scan, "sslyze_available", return_value=True), \
+             mock.patch.object(tls_scan, "run_sslyze_scan") as run:
+            out = await scanner.scan_page("https://x.test/")
+        self.assertEqual(out, [])
+        run.assert_not_called()
+        self.assertTrue(any("client_cert_unsupported" in n for n in engine.wave_errors))
+
+    def test_cvss_for_issue_per_kind(self):
+        # 各 kind が自己整合する (score, vector) を返す。
+        self.assertEqual(tls_scan.cvss_for_issue("heartbleed")[0], 7.5)
+        self.assertIn("I:N", tls_scan.cvss_for_issue("heartbleed")[1])
+        self.assertIn("I:H", tls_scan.cvss_for_issue("ccs_injection")[1])  # MITM 改ざん
+        self.assertEqual(tls_scan.cvss_for_issue("robot")[0], 5.9)
+        # 未知 kind は機密性のみの保守値（根拠無い I:H を出さない）。
+        self.assertIn("I:N", tls_scan.cvss_for_issue("unknown")[1])
 
     async def test_ipv6_origin_is_bracketed(self):
         # IPv6 host は URL 上ブラケットが要る（https://::1:443 は不正）。
@@ -298,6 +331,28 @@ class EngineEnableTests(unittest.TestCase):
         e2 = ScanEngine("https://x.test", checks=["tls_scan"], enable_tls_scan=False,
                         llm_provider="none", monitor=None)
         self.assertFalse(e2.tls_scan_enabled)
+
+
+class SeedScanTests(unittest.IsolatedAsyncioTestCase):
+    async def test_tls_seed_scan_probes_seed_origins_independent_of_crawl(self):
+        # crawl 結果に依存せず seed origin を検査し、http/重複は除く（Codex #158 P1）。
+        from wscan.engine import ScanEngine
+        engine = ScanEngine("https://weak.test/app", checks=["tls_scan"],
+                            enable_tls_scan=True, llm_provider="none", monitor=None)
+        engine.seed_urls = ["https://weak.test/other", "http://plain.test/", "https://b.test/"]
+        probed = []
+
+        async def _rec_scan_page(url):
+            probed.append(url)
+            return []
+
+        engine.scanners["tls_scan"].scan_page = _rec_scan_page
+        await engine._run_tls_seed_scans()
+        # https origin は dedup 後に検査、http は除外。
+        self.assertIn("https://weak.test", probed)
+        self.assertIn("https://b.test", probed)
+        self.assertNotIn("http://plain.test", probed)
+        self.assertEqual(len(probed), len(set(probed)))
 
 
 class CliChecksTests(unittest.TestCase):

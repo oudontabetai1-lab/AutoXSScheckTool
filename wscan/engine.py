@@ -1866,6 +1866,43 @@ class ScanEngine:
         except Exception as exc:
             self.wave_errors.append(f"checkpoint_save: {type(exc).__name__}: {exc}")
 
+    async def _run_tls_seed_scans(self) -> None:
+        """TLS 設定検査を crawl 結果に依存せず operator 指定の seed origin に対して実行する。
+
+        tls_scan は page-level のため、Playwright がナビゲートできたページでしか scan_page が
+        呼ばれない。弱いプロトコル（TLS1.0/1.1 のみ受理等）で Chromium がネゴシエートできない
+        origin は crawl 段階で seed ごと捨てられ、まさに検出したい弱プロトコル対象を取りこぼす
+        （Codex #158 P1）。ここで seed の https origin を直接検査する。scanner は origin 単位で
+        dedup するため crawl 済み origin は no-op。TLS は read-only なので状態変更を伴わない。
+        """
+        scanner = self.scanners.get("tls_scan")
+        if scanner is None:
+            return
+        seen: set[str] = set()
+        origins: list[str] = []
+        for u in [self.target_url, *self.target_urls, *self.seed_urls]:
+            if not u:
+                continue
+            p = urlparse(u)
+            if p.scheme != "https" or not p.netloc:
+                continue
+            origin = f"{p.scheme}://{p.netloc}"
+            if origin not in seen:
+                seen.add(origin)
+                origins.append(origin)
+        for origin in origins:
+            try:
+                await self.controller.checkpoint()
+            except (SkipField, SkipPage):
+                continue
+            try:
+                findings = await scanner.scan_page(origin)
+            except Exception as exc:
+                self.wave_errors.append(f"tls_seed_scan: {type(exc).__name__}: {exc}")
+                continue
+            for f in (findings or []):
+                self._record_finding(f, source="tls-seed")
+
     async def _run_api_template_checks(self) -> None:
         """API スペック由来の JSON 操作（``api_seed_requests``）を、クロール結果に
         依存せず検査する。
@@ -2592,6 +2629,9 @@ class ScanEngine:
                 try:
                     await self._run_api_template_checks()
                     await self._run_json_injection_checks()
+                    # crawl が到達できない弱プロトコル origin を取りこぼさないため、
+                    # seed origin に対して TLS 検査を直接走らせる（Codex #158 P1）。
+                    await self._run_tls_seed_scans()
                 except AbortScan:
                     scan_aborted = True
 

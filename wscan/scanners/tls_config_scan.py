@@ -20,16 +20,6 @@ if TYPE_CHECKING:
     from wscan.engine import ScanEngine
 
 
-# issue の severity に整合する代表 CVSS（score, vector）。同一 check_type でも issue ごとに
-# 深刻度が異なるため、check_type 一律の _CVSS_TABLE 値ではなくこちらを per-finding で渡す。
-_SEV_CVSS: dict[str, tuple[float, str]] = {
-    "critical": (9.1, "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:N"),
-    "high":     (7.4, "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:H/A:N"),
-    "medium":   (5.9, "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:N/A:N"),
-    "low":      (3.7, "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:L/I:N/A:N"),
-}
-
-
 _UNSUPPORTED = tuple(
     CarrierCapability(
         carrier=c, state=CapabilityState.UNSUPPORTED,
@@ -85,6 +75,20 @@ class TlsConfigScanner(BaseScanner):
             self._record_scan_note(f"transport_error:{self.CHECK_TYPE}:sslyze_unavailable")
             return []
 
+        # sslyze は host/port へ直接ハンドシェイクするのみで、operator 設定の proxy や
+        # クライアント証明書(mTLS)を経由しない。黙って別経路で接続すると監査 proxy を
+        # バイパスしたり mTLS 必須の対象を「到達不能」と誤報告するため、対応できない
+        # ネットワーク設定では検査せず明示的に skip を記録する（Codex #158）。
+        proxy = getattr(self.engine, "proxy", "") or ""
+        tls_config = getattr(self.engine, "tls_config", None)
+        needs_client_cert = bool(tls_config and tls_config.has_client_certificate())
+        if proxy:
+            self._record_scan_note(f"skipped:{self.CHECK_TYPE}:proxy_unsupported")
+            return []
+        if needs_client_cert:
+            self._record_scan_note(f"skipped:{self.CHECK_TYPE}:client_cert_unsupported")
+            return []
+
         if self.monitor:
             await self.monitor.emit_status(f"TLS config scan on {origin}")
 
@@ -118,7 +122,7 @@ class TlsConfigScanner(BaseScanner):
                 "response": {"url": origin, "headers": {}, "body": ""}}
         for issue in issues:
             severity = issue.get("severity", "medium")
-            cvss_score, cvss_vector = _SEV_CVSS.get(severity, _SEV_CVSS["medium"])
+            cvss_score, cvss_vector = tls_scan.cvss_for_issue(issue.get("kind", ""))
             findings.append(await self.record_finding(
                 url=origin,
                 field_name=f"(TLS: {issue['label']})",
@@ -129,8 +133,8 @@ class TlsConfigScanner(BaseScanner):
                 confidence="confirmed",
                 evidence_type=f"tls_{issue['kind']}",
                 evidence_details={"label": issue["label"], "kind": issue["kind"]},
-                # check_type 一律の CVSS ではなく、issue の severity に整合する CVSS を渡す
-                # （SSLv2/3=high, Heartbleed=critical 等を medium 5.9 で出さない・Codex #158）。
+                # check_type 一律でも severity バケツでもなく、脆弱性 kind ごとの CVSS を渡す
+                # （Heartbleed は機密性のみ＝I:N 等、根拠の無い impact を publish しない・Codex #158）。
                 cvss_score=cvss_score,
                 cvss_vector=cvss_vector,
                 reproduction_steps=[

@@ -98,6 +98,28 @@ _WEAK_PROTOCOLS = (
 )
 
 
+# issue kind → CVSS v3.1 (score, vector)。severity バケツ一律ではなく、検出した脆弱性ごとの
+# 実 impact を反映する（Codex #158）。score は対応 vector から計算される基本値で自己整合する。
+#   - Heartbleed: メモリ over-read による機密性喪失のみ（完全性/可用性は無傷）→ C:H/I:N/A:N, AC:L。
+#   - CCS Injection: MITM による鍵材料奪取で復号＋改ざん → C:H/I:H/A:N, AC:H。
+#   - ROBOT / 弱プロトコル受理: 記録トラフィックの復号/ダウングレード（機密性）→ C:H/I:N/A:N, AC:H。
+_KIND_CVSS: dict[str, tuple[float, str]] = {
+    "heartbleed":    (7.5, "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N"),
+    "ccs_injection": (7.4, "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:H/A:N"),
+    "robot":         (5.9, "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:N/A:N"),
+    "weak_protocol": (5.9, "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:N/A:N"),
+}
+
+
+def cvss_for_issue(kind: str) -> tuple[float, str]:
+    """TLS issue の kind に対応する CVSS v3.1 (score, vector) を返す（純粋）。
+
+    impact metric を脆弱性ごとに割り当てる（Heartbleed は機密性のみ＝I:N 等）。未知 kind は
+    機密性のみの保守値（5.9）へフォールバックし、根拠の無い I:H を出さない。
+    """
+    return _KIND_CVSS.get(kind, (5.9, "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:N/A:N"))
+
+
 def extract_tls_issues(scan_result: Any) -> list[dict]:
     """sslyze の結果から TLS の設定不備 issue 一覧を作る（防御的・純粋）。
 
