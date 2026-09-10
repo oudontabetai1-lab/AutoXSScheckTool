@@ -268,6 +268,8 @@ class DirListingVerifyTests(unittest.IsolatedAsyncioTestCase):
         scanner = self._scanner()
 
         async def _get(url, follow_redirects=False):
+            if "wscan-nonexistent" in url:
+                return _FakeResp(404, "not found")  # 正規サーバ: 未知ディレクトリは 404
             return _FakeResp(200, "<html><title>Index of /uploads</title>"
                                   '<a href="../">Parent Directory</a>'
                                   '<a href="a.txt">a.txt</a> 01-Jan-2020 12:00</html>')
@@ -282,6 +284,20 @@ class DirListingVerifyTests(unittest.IsolatedAsyncioTestCase):
 
         async def _get(url, follow_redirects=False):
             return _FakeResp(404, "not found")
+        scanner._get = _get
+        finding = types.SimpleNamespace(
+            evidence_type="info_directory_listing", url="http://x/uploads/",
+            evidence_details={})
+        self.assertFalse(await scanner.verify_finding(finding))
+
+    async def test_directory_listing_soft404_catch_all_fails_verify(self):
+        # 未知ディレクトリを同じ autoindex 風 catch-all に書き換える origin では、verify で False。
+        scanner = self._scanner()
+        catch_all = ("<html><title>Index of /</title><a href=\"../\">Parent Directory</a>"
+                     "<a href=\"x\">x</a> 01-Jan-2020 12:00</html>")
+
+        async def _get(url, follow_redirects=False):
+            return _FakeResp(200, catch_all)  # プローブも候補も同一 catch-all
         scanner._get = _get
         finding = types.SimpleNamespace(
             evidence_type="info_directory_listing", url="http://x/uploads/",

@@ -370,6 +370,18 @@ class InfoDisclosureScanner(BaseScanner):
 
         try:
             async with httpx.AsyncClient(**kwargs) as client:
+                # soft-404 baseline: 存在しないディレクトリを引き、catch-all（未知パスを同じ autoindex 風
+                # ページへ書き換える origin）を検出する。候補本文が baseline と実質同一なら報告しない。
+                soft404_dir = False
+                baseline_dir_body = ""
+                try:
+                    probe = await client.get(urljoin(origin, _SOFT404_PROBE.rstrip('.zzz') + "/"))
+                    self._record_probe_status(probe)
+                    soft404_dir = probe.status_code in (200, 206)
+                    if soft404_dir:
+                        baseline_dir_body = probe.text[:4000]
+                except Exception:
+                    self._record_scan_note(f"probe_error:{self.CHECK_TYPE}:dir_soft404")
                 for path in _LISTING_DIRS:
                     target = urljoin(origin, path)
                     try:
@@ -380,7 +392,12 @@ class InfoDisclosureScanner(BaseScanner):
                         continue
                     if r.status_code not in (200, 206):
                         continue
-                    if not detect_directory_listing(r.text[:4000]):
+                    body = r.text[:4000]
+                    # 未知ディレクトリを同一 catch-all に書き換える origin では、その catch-all を
+                    # 全 _LISTING_DIRS に対して確定報告しない（sensitive-resource と同じ baseline 比較・Codex #156）。
+                    if soft404_dir and _same_catch_all(body, path, baseline_dir_body, _SOFT404_PROBE):
+                        continue
+                    if not detect_directory_listing(body):
                         continue
                     pair = {
                         "request": {"url": target},
@@ -658,7 +675,20 @@ class InfoDisclosureScanner(BaseScanner):
                 return None
             if r.status_code not in (200, 206):
                 return False
-            return detect_directory_listing(r.text[:4000])
+            body = r.text[:4000]
+            # 検出時と同じ soft-404 baseline 比較を適用し、未知ディレクトリを同一 catch-all に
+            # 書き換える origin で catch-all を「リスティング」として確定したままにしない（Codex #156）。
+            origin = f"{urlparse(finding.url).scheme}://{urlparse(finding.url).netloc}"
+            path = urlparse(finding.url).path or "/"
+            try:
+                probe = await self._get(urljoin(origin, _SOFT404_PROBE.rstrip('.zzz') + "/"),
+                                        follow_redirects=False)
+                if probe.status_code in (200, 206) and _same_catch_all(
+                        body, path, probe.text[:4000], _SOFT404_PROBE):
+                    return False
+            except Exception:
+                pass
+            return detect_directory_listing(body)
 
         return None
 
