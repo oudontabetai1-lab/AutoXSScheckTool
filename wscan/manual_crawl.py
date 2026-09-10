@@ -947,6 +947,12 @@ class ManualCrawlSession:
         self.stopped_at = time.time()
         try:
             await self.snapshot("stop")
+            # 背景タブの遅延 snapshot（_schedule_snapshot の 0.3s 待ち）が stop 時点で未発火だと、
+            # この後の _cleanup_browser がそのタスクを cancel し、当該タブの forms が forms_by_url に
+            # 残らない。cleanup 前に bound page をすべて snapshot して取りこぼしを防ぐ（snapshot は
+            # same-origin 再確認＋URL 単位 dedup なので二重・cross-origin は無害・Codex #153）。
+            for bound in list(self._bound_pages):
+                await self.snapshot("stop_flush", page=bound)
             if self._context:
                 try:
                     # 保存 cookie は target **ホスト**のものに限定する。cross-origin SSO popup で

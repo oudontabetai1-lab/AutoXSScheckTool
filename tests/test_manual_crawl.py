@@ -513,6 +513,42 @@ class ManualCrawlRemoteBrowserTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("app_session", names)   # path=/app でも同一ホストなら保持
         self.assertNotIn("idp", names)         # 別ホストは除外
 
+    async def test_stop_flushes_bound_background_tab_forms(self):
+        # 背景タブの遅延 snapshot が未発火でも、stop() が cleanup 前に bound page を
+        # flush して forms を取りこぼさない（cleanup がタスクを cancel する前・Codex #153 P2）。
+        active = _FakePage("http://example.test/active")
+        bg_forms = [{"index": 0, "action": "http://example.test/bg", "method": "post",
+                     "inputs": [{"name": "q", "type": "text"}]}]
+        background = _FakePage("http://example.test/bg", forms=bg_forms)
+        session = self._session(active, _FakeContext([active, background]))
+        session._bound_pages = [active, background]
+
+        async def _noop(*a, **k):
+            return None
+        session._cleanup_browser = _noop
+        session.save = lambda: None
+
+        await session.stop()
+        # 背景タブの forms が flush で保存される。
+        self.assertIn("http://example.test/bg", session.forms_by_url)
+        self.assertEqual(session.forms_by_url["http://example.test/bg"], bg_forms)
+
+    async def test_stop_flush_skips_cross_origin_bound_page(self):
+        # flush でも cross-origin の bound page の forms は残さない（snapshot が same-origin 再確認）。
+        active = _FakePage("http://example.test/active")
+        evil = _FakePage("https://sso.evil.test/cb",
+                         forms=[{"index": 0, "inputs": [{"name": "pw"}]}])
+        session = self._session(active, _FakeContext([active, evil]))
+        session._bound_pages = [active, evil]
+
+        async def _noop(*a, **k):
+            return None
+        session._cleanup_browser = _noop
+        session.save = lambda: None
+
+        await session.stop()
+        self.assertNotIn("https://sso.evil.test/cb", session.forms_by_url)
+
     async def test_start_screencast_failure_does_not_leak_cdp(self):
         # startScreencast 失敗時に死んだ CDP を self._cdp に残さず detach する（Codex #153 P2）。
         class _FailCdp(_FakeCdp):
