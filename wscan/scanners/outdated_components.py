@@ -35,6 +35,17 @@ def _origin_of(url: str) -> str:
         return ""
 
 
+# severity に整合する代表 CVSS（score, vector）。OSV の深刻度は issue ごとに
+# critical〜low まで動くため、check_type 一律の _CVSS_TABLE 値ではなくこれを per-finding で渡す
+# （high/critical の脆弱ライブラリを medium 4.8 で出さない・Codex #155）。
+_SEV_CVSS: dict[str, tuple[float, str]] = {
+    "critical": (9.1, "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:N"),
+    "high":     (7.5, "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N"),
+    "medium":   (5.3, "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N"),
+    "low":      (3.7, "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:L/I:N/A:N"),
+}
+
+
 _UNSUPPORTED = tuple(
     CarrierCapability(
         carrier=c, state=CapabilityState.UNSUPPORTED,
@@ -78,10 +89,22 @@ class OutdatedComponentScanner(BaseScanner):
         return {}
 
     async def scan_page(self, url: str) -> list[Finding]:
+        # URL しか無い経路（body は _response_pair の 50KB 打ち切り本文）。
+        return await self._run(url)
+
+    async def scan_page_context(self, page) -> list[Finding]:
+        # CrawledPage 経由。full HTML と捕捉済み external_scripts（全件）を使い、
+        # 大きなページで末尾の script を取りこぼさない（Codex #155）。
+        full_html = getattr(page, "html", None)
+        scripts = getattr(page, "external_scripts", None) or {}
+        return await self._run(getattr(page, "url", ""), full_html=full_html,
+                               extra_script_urls=list(scripts.keys()))
+
+    async def _run(self, url: str, full_html=None, extra_script_urls=()) -> list[Finding]:
         cfg = self._config()
         if not cfg:
             return []  # opt-in 無効時は何もしない（ネット非依存を維持）
-        if url in self._checked_urls:
+        if not url or url in self._checked_urls:
             return []
 
         if self.monitor:
@@ -96,7 +119,8 @@ class OutdatedComponentScanner(BaseScanner):
         self._checked_urls.add(url)
         response = pair.get("response") or {}
         headers = {k.lower(): v for k, v in (response.get("headers") or {}).items()}
-        body = response.get("body", "") or ""
+        # JS ライブラリ抽出は full HTML を優先（50KB 打ち切り本文だと末尾 script を取りこぼす）。
+        body = full_html if full_html is not None else (response.get("body", "") or "")
 
         eol_base = cfg.get("eol_base_url") or component_intel.DEFAULT_EOL_BASE_URL
         osv_base = cfg.get("osv_base_url") or component_intel.DEFAULT_OSV_BASE_URL
@@ -117,8 +141,9 @@ class OutdatedComponentScanner(BaseScanner):
         findings: list[Finding] = []
         # ① 技術バナー/CMS → endoflife.date で EOL 判定
         findings.extend(await self._scan_eol(url, pair, components, eol_base, timeout))
-        # ② 外部 JS ライブラリ → OSV.dev で既知脆弱性照会
-        findings.extend(await self._scan_osv(url, pair, body, osv_base, timeout))
+        # ② 外部 JS ライブラリ → OSV.dev で既知脆弱性照会（full HTML＋捕捉済み script URL）
+        findings.extend(await self._scan_osv(url, pair, body, osv_base, timeout,
+                                             extra_script_urls=extra_script_urls))
         # ③ NVD で CVE 照会（限定オプション・nvd_enabled 時のみ・参考集約）
         if cfg.get("nvd_enabled"):
             nvd_base = cfg.get("nvd_base_url") or component_intel.DEFAULT_NVD_BASE_URL
@@ -171,13 +196,15 @@ class OutdatedComponentScanner(BaseScanner):
             )
             findings.append(await self.record_finding(
                 url=url,
-                field_name=f"(CVE: {comp.product})",
+                field_name=f"(CVE: {comp.product}@{comp.version})",
                 payload="(no payload — NVD CPE lookup)",
                 evidence=evidence,
                 pair=pair,
                 severity="low",  # 参考情報（CPE ノイズを考慮して低め）
                 confidence="tentative",
                 evidence_type="known_cve_advisory",
+                cvss_score=_SEV_CVSS["low"][0],
+                cvss_vector=_SEV_CVSS["low"][1],
                 evidence_details={
                     "product": comp.product, "version": comp.version, "source": comp.source,
                     "cve_count": info["total"], "cve_ids": ids,
@@ -235,13 +262,15 @@ class OutdatedComponentScanner(BaseScanner):
             )
             findings.append(await self.record_finding(
                 url=url,
-                field_name=f"(Component: {comp.product})",
+                field_name=f"(Component: {comp.product}@{comp.version})",
                 payload="(no payload — banner/EOL lookup)",
                 evidence=evidence,
                 pair=pair,
                 severity="medium",
                 confidence="likely",
                 evidence_type="eol_component",
+                cvss_score=_SEV_CVSS["medium"][0],
+                cvss_vector=_SEV_CVSS["medium"][1],
                 evidence_details={
                     "product": comp.product, "version": comp.version, "source": comp.source,
                     "cycle": result.get("cycle"), "eol": eol_val, "latest": latest,
@@ -256,8 +285,16 @@ class OutdatedComponentScanner(BaseScanner):
             ))
         return findings
 
-    async def _scan_osv(self, url, pair, body, base_url, timeout) -> list[Finding]:
-        libs = component_intel.parse_js_libraries(body, url)
+    async def _scan_osv(self, url, pair, body, base_url, timeout, extra_script_urls=()) -> list[Finding]:
+        # full HTML から抽出した lib に、クロールが捕捉した external_scripts URL 由来の lib を足す
+        # （HTML の 50KB 打ち切りや inline 記述漏れで取りこぼさない）。(name,version) で重複排除。
+        libs = list(component_intel.parse_js_libraries(body, url))
+        if extra_script_urls:
+            seen = {(lib.name, lib.version) for lib in libs}
+            for lib in component_intel.parse_js_libraries_from_urls(extra_script_urls):
+                if (lib.name, lib.version) not in seen:
+                    seen.add((lib.name, lib.version))
+                    libs.append(lib)
         if not libs:
             return []
         # 照会結果を engine 単位でキャッシュ（同一 (ecosystem,name,version) を複数ページで再照会しない）。
@@ -312,15 +349,20 @@ class OutdatedComponentScanner(BaseScanner):
                 + (f"・{info['summary'][:80]}" if info.get("summary") else "")
                 + "）。修正版へ更新してください。" + guess_note
             )
+            cvss_score, cvss_vector = _SEV_CVSS.get(severity, _SEV_CVSS["medium"])
             findings.append(await self.record_finding(
                 url=url,
-                field_name=f"(Library: {lib.name})",
+                # 同一ページが同一パッケージの複数版を読む場合、版を identity に含めないと
+                # record_finding の dedup(field_name+check+evidence_type+url)で 2 つ目が消える・Codex #155。
+                field_name=f"(Library: {lib.name}@{lib.version})",
                 payload="(no payload — JS library / OSV lookup)",
                 evidence=evidence,
                 pair=pair,
                 severity=severity,
                 confidence=confidence,
                 evidence_type="vulnerable_library",
+                cvss_score=cvss_score,
+                cvss_vector=cvss_vector,
                 evidence_details={
                     "library": lib.name, "version": lib.version, "ecosystem": lib.ecosystem,
                     "src": lib.url, "osv_ids": ids, "cves": cves,

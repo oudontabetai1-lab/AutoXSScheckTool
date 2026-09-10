@@ -4,6 +4,7 @@
 scanner は fake client / monkeypatch で外部 API を叩かずに検証する。
 """
 import datetime as dt
+import types
 import unittest
 
 from wscan import component_intel as ci
@@ -559,6 +560,73 @@ class CvssAndSeverityTests(unittest.TestCase):
     def test_osv_database_specific_takes_priority(self):
         vulns = [{"id": "GHSA-y", "database_specific": {"severity": "LOW"}}]
         self.assertEqual(ci.summarize_osv_vulns(vulns)["max_severity"], "LOW")
+
+
+class CdnReliabilityTests(unittest.TestCase):
+    def test_known_cdn_host_is_cdn(self):
+        libs = ci.parse_js_libraries_from_urls(
+            ["https://cdn.jsdelivr.net/npm/jquery@3.4.1/dist/jquery.min.js"])
+        self.assertEqual(len(libs), 1)
+        self.assertEqual(libs[0].reliability, "cdn")
+
+    def test_self_hosted_npm_layout_is_filename(self):
+        # 自己ホストが /npm/name@ver レイアウトを模しても cdn 扱いにしない（任意コードを含み得る）。
+        libs = ci.parse_js_libraries_from_urls(
+            ["https://app.test/npm/jquery@3.4.1/app.js"])
+        self.assertEqual(len(libs), 1)
+        self.assertEqual(libs[0].reliability, "filename")
+
+    def test_filename_pattern_is_filename(self):
+        libs = ci.parse_js_libraries_from_urls(["https://app.test/assets/jquery-3.4.1.min.js"])
+        self.assertEqual(libs[0].reliability, "filename")
+
+    def test_multiple_versions_all_kept(self):
+        libs = ci.parse_js_libraries_from_urls([
+            "https://cdn.jsdelivr.net/npm/jquery@3.4.1/jquery.min.js",
+            "https://cdn.jsdelivr.net/npm/jquery@3.6.0/jquery.min.js",
+        ])
+        versions = sorted(l.version for l in libs)
+        self.assertEqual(versions, ["3.4.1", "3.6.0"])
+
+
+class ScanPageContextTests(unittest.IsolatedAsyncioTestCase):
+    async def test_external_scripts_beyond_truncation_detected(self):
+        # 50KB 打ち切り本文には無いが external_scripts に捕捉された lib を検出する（Codex #155）。
+        cfg = {"enabled": True, "eol_base_url": "https://endoflife.date",
+               "osv_base_url": "https://api.osv.dev", "timeout": 8}
+        engine = _FakeEngine(component_intel=cfg)
+        scanner = SCANNERS["outdated_components"](engine)
+
+        async def _pair(url):
+            return {"request": {"url": url},
+                    "response": {"status": 200, "headers": {}, "body": "x" * 10}}
+
+        async def _osv(ecosystem, name, version, **kw):
+            return [{"id": "GHSA-x", "aliases": ["CVE-2020-11022"],
+                     "database_specific": {"severity": "MODERATE"}}]
+
+        recorded = []
+
+        async def _rec(**kw):
+            recorded.append(kw)
+            return object()
+
+        scanner._response_pair = _pair
+        scanner.record_finding = _rec
+        page = types.SimpleNamespace(
+            url="http://x/", html="<html>truncated body without the script</html>",
+            external_scripts={"https://cdn.jsdelivr.net/npm/jquery@3.4.1/jquery.min.js": "..."})
+        import wscan.component_intel as _ci
+        orig = _ci.lookup_osv
+        _ci.lookup_osv = _osv
+        try:
+            out = await scanner.scan_page_context(page)
+        finally:
+            _ci.lookup_osv = orig
+        self.assertEqual(len(out), 1)
+        self.assertEqual(recorded[0]["evidence_details"]["library"], "jquery")
+        self.assertIn("@3.4.1", recorded[0]["field_name"])  # 版を identity に含む
+        self.assertGreater(recorded[0]["cvss_score"], 0)  # severity 整合 CVSS
 
 
 class CliChecksTests(unittest.TestCase):

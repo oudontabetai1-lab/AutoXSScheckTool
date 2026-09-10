@@ -110,22 +110,83 @@ def _norm_product(name: str) -> str:
     return (name or "").strip().lower()
 
 
-# 主要 CDN の URL からライブラリ名+バージョンを抽出する（純粋・保守側）。いずれも npm パッケージ。
+# 構造化 CDN URL からライブラリ名+バージョンを抽出する（純粋・保守側）。いずれも npm パッケージ。
 #   jsdelivr: https://cdn.jsdelivr.net/npm/jquery@3.4.1/dist/jquery.min.js
 #   cdnjs/google: .../ajax/libs/jquery/3.4.1/jquery.min.js
 #   unpkg: https://unpkg.com/jquery@3.4.1/dist/jquery.min.js
-#   ファイル名埋め込み: .../jquery-3.4.1.min.js（推測度が高いので semver 形のみ）
 _LIB_URL_PATTERNS = (
     re.compile(r"/npm/((?:@[\w.-]+/)?[\w.-]+)@(\d[\w.\-]*)"),
     re.compile(r"/ajax/libs/([\w.-]+)/(\d[\w.\-]*)/"),
     re.compile(r"unpkg\.com/((?:@[\w.-]+/)?[\w.-]+)@(\d[\w.\-]*)"),
-    re.compile(r"/([\w.-]+?)-(\d+\.\d+(?:\.\d+)?)(?:\.min)?\.js(?:$|[?#])"),
 )
+# ファイル名埋め込み（.../jquery-3.4.1.min.js）。任意 origin でも一致するため推測（filename）扱い。
+_LIB_FILENAME_PATTERN = re.compile(r"/([\w.-]+?)-(\d+\.\d+(?:\.\d+)?)(?:\.min)?\.js(?:$|[?#])")
+
+# 構造化 URL パターンを「cdn（信頼度高）」と見なす既知 CDN ホスト。これ以外のホストで
+# /npm/ や /ajax/libs/ のレイアウトを模していても cdn 扱いにしない（自己ホストの
+# /npm/jquery@x/app.js 等を likely 脆弱性に誤格上げしない・Codex #155）。
+_KNOWN_CDN_HOSTS = frozenset({
+    "cdn.jsdelivr.net", "cdnjs.cloudflare.com", "ajax.googleapis.com",
+    "unpkg.com", "code.jquery.com", "stackpath.bootstrapcdn.com",
+    "maxcdn.bootstrapcdn.com", "cdn.skypack.dev", "esm.sh",
+})
+
+
+def _is_known_cdn_host(url: str) -> bool:
+    from urllib.parse import urlparse
+    host = (urlparse(url).hostname or "").lower()
+    return host in _KNOWN_CDN_HOSTS
 
 
 def _norm_version(v: str) -> str:
     v = (v or "").strip()
     return v[1:] if v[:1] in ("v", "V") and v[1:2].isdigit() else v
+
+
+def _library_from_url(absolute: str) -> "Optional[Library]":
+    """1 つの script URL から (name, version, reliability) を抽出する（純粋）。取れなければ None。"""
+    # まず構造化 CDN URL パターン。ただし信頼度「cdn」は既知 CDN ホストのときだけ。
+    for pat in _LIB_URL_PATTERNS:
+        m = pat.search(absolute)
+        if not m:
+            continue
+        name = m.group(1).strip().lower()
+        version = _norm_version(m.group(2))
+        if not name or not version or not version[0].isdigit():
+            continue
+        reliability = "cdn" if _is_known_cdn_host(absolute) else "filename"
+        return Library(name=name, version=version, ecosystem="npm",
+                       url=absolute, reliability=reliability)
+    # 構造化 URL に一致しなければ、ファイル名埋め込み（任意 origin の推測＝filename）を試す。
+    m = _LIB_FILENAME_PATTERN.search(absolute)
+    if m:
+        name = m.group(1).strip().lower()
+        version = _norm_version(m.group(2))
+        if name and version and version[0].isdigit():
+            return Library(name=name, version=version, ecosystem="npm",
+                           url=absolute, reliability="filename")
+    return None
+
+
+def parse_js_libraries_from_urls(urls) -> list[Library]:
+    """script URL の集合から (name, version, npm) を抽出する（純粋・ネットワーク非依存）。
+
+    クロールが捕捉した external_scripts のキー（絶対 URL・全件）を直接渡す用途。50KB 打ち切りの
+    HTML 本文に依存しないため、大きなページで末尾の script を取りこぼさない（Codex #155）。
+    重複は (name, version) で排除。
+    """
+    out: list[Library] = []
+    seen: set[tuple[str, str]] = set()
+    for u in (urls or []):
+        lib = _library_from_url(str(u or "").strip())
+        if lib is None:
+            continue
+        key = (lib.name, lib.version)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(lib)
+    return out
 
 
 def parse_js_libraries(html: str, base_url: str = "") -> list[Library]:
@@ -140,28 +201,10 @@ def parse_js_libraries(html: str, base_url: str = "") -> list[Library]:
 
     if not html:
         return []
-    out: list[Library] = []
-    seen: set[tuple[str, str]] = set()
-    for src in js_analysis.extract_external_script_srcs(html):
-        absolute = urljoin(base_url, (src or "").strip())
-        for idx, pat in enumerate(_LIB_URL_PATTERNS):
-            m = pat.search(absolute)
-            if not m:
-                continue
-            name = m.group(1).strip().lower()
-            version = _norm_version(m.group(2))
-            if not name or not version or not version[0].isdigit():
-                continue
-            key = (name, version)
-            if key in seen:
-                continue
-            seen.add(key)
-            # 最後のパターン（ファイル名 name-x.y.z.js）は任意 origin の推測なので信頼度低。
-            reliability = "filename" if idx == len(_LIB_URL_PATTERNS) - 1 else "cdn"
-            out.append(Library(name=name, version=version, ecosystem="npm",
-                               url=absolute, reliability=reliability))
-            break  # 1 src につき最初に一致したパターンだけ
-    return out
+    return parse_js_libraries_from_urls(
+        urljoin(base_url, (src or "").strip())
+        for src in js_analysis.extract_external_script_srcs(html)
+    )
 
 
 def _cvss3_roundup(x: float) -> float:
