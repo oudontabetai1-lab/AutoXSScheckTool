@@ -90,6 +90,18 @@ class ParseJsLibrariesTests(unittest.TestCase):
         libs = ci.parse_js_libraries(html, "https://t.example/")
         self.assertEqual([(l.name, l.version) for l in libs], [("jquery", "3.4.1")])
 
+    def test_version_in_query_not_matched(self):
+        # 版付きファイル名がクエリ/フラグメントにあるだけの URL を誤って当該ライブラリと判定しない。
+        # filename 照合は path のみに適用する（Codex #155）。
+        libs = ci.parse_js_libraries_from_urls([
+            "https://example.test/app.js?fallback=/jquery-3.4.1.js",
+            "https://example.test/bundle.js#/lodash-4.17.10.min.js",
+        ])
+        self.assertEqual(libs, [])
+        # path にあれば従来どおり検出する（回帰ガード）。
+        libs2 = ci.parse_js_libraries_from_urls(["https://example.test/vendor/jquery-3.4.1.js?v=1"])
+        self.assertEqual([(l.name, l.version) for l in libs2], [("jquery", "3.4.1")])
+
 
 class SummarizeOsvTests(unittest.TestCase):
     def test_summary_extracts_ids_cves_and_max_severity(self):
@@ -226,9 +238,12 @@ class NetworkLayerTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(ci.ComponentIntelUnavailable):
                 await ci.lookup_osv("npm", "jquery", "3.4.1",
                                     client=_FakeClient(post_result=(code, None)))
-        # 404 は「無データ」= None（確定・キャッシュ可）。
-        self.assertIsNone(await ci.lookup_osv("npm", "jquery", "3.4.1",
-                                              client=_FakeClient(post_result=(404, None))))
+        # OSV の /v1/query は固定エンドポイント。脆弱性なしは 200+空 vulns で返るため、
+        # 404/401/403 は「無データ」ではなく照会失敗（base URL 誤設定/権限）＝raise（Codex #155）。
+        for code in (404, 401, 403):
+            with self.assertRaises(ci.ComponentIntelUnavailable):
+                await ci.lookup_osv("npm", "jquery", "3.4.1",
+                                    client=_FakeClient(post_result=(code, None)))
 
     async def test_lookup_nvd_with_and_without_key(self):
         url = "https://services.nvd.nist.gov/rest/json/cves/2.0"
@@ -251,6 +266,14 @@ class NetworkLayerTests(unittest.IsolatedAsyncioTestCase):
         c = _FakeClient({})
         self.assertIsNone(await ci.lookup_nvd("wordpress", "6.1", client=c))
         self.assertEqual(c.calls, [])
+
+    async def test_lookup_nvd_non_200_raises(self):
+        # NVD の /cves も固定エンドポイント。CVE 無しは 200+totalResults:0。404/401/403 は
+        # 照会失敗＝raise（恒久 FN を防ぐ・Codex #155）。
+        url = "https://services.nvd.nist.gov/rest/json/cves/2.0"
+        for code in (404, 401, 403):
+            with self.assertRaises(ci.ComponentIntelUnavailable):
+                await ci.lookup_nvd("nginx", "1.18.0", client=_FakeClient({url: (code, None)}))
 
 
 class _FakeEngine:
@@ -335,6 +358,42 @@ class OutdatedComponentScannerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(recorded[0]["evidence_details"]["library"], "jquery")
         self.assertIn("CVE-2020-11022", recorded[0]["evidence_details"]["cves"])
         self.assertEqual(recorded[0]["severity"], "medium")  # MODERATE→medium
+
+    async def test_script_url_credentials_redacted(self):
+        # 署名/トークン付き script URL の資格情報は evidence_details/reproduction で伏字化する
+        # （Finding.to_dict の request URL 伏字化を迂回して artifact へ漏れない・Codex #155）。
+        engine, scanner = self._scanner(enabled=True)
+        src = "https://cdn.test/vendor/jquery-3.4.1.min.js?token=SECRETTOKENVALUE"
+        html = f'<script src="{src}"></script>'
+
+        async def _pair(url):
+            return {"request": {"url": url},
+                    "response": {"status": 200, "headers": {}, "body": html}}
+
+        async def _osv(ecosystem, name, version, **kw):
+            return [{"id": "GHSA-x", "aliases": ["CVE-2020-11022"],
+                     "database_specific": {"severity": "MODERATE"}}]
+
+        recorded = []
+
+        async def _rec(**kw):
+            recorded.append(kw)
+            return object()
+
+        scanner._response_pair = _pair
+        scanner.record_finding = _rec
+        import wscan.component_intel as _ci
+        orig = _ci.lookup_osv
+        _ci.lookup_osv = _osv
+        try:
+            await scanner.scan_page("http://x/")
+        finally:
+            _ci.lookup_osv = orig
+        self.assertEqual(len(recorded), 1)
+        self.assertNotIn("SECRETTOKENVALUE", recorded[0]["evidence_details"]["src"])
+        self.assertNotIn("SECRETTOKENVALUE", " ".join(recorded[0]["reproduction_steps"]))
+        # ライブラリ識別（path 由来）は維持。
+        self.assertEqual(recorded[0]["evidence_details"]["library"], "jquery")
 
     async def test_reports_eol_cms(self):
         # クロールで検出した CMS（detected_cms）も EOL 照会対象にする。

@@ -20,6 +20,7 @@ from wscan.scanner_contract import (
 )
 
 from .. import component_intel
+from ..request_logger import redact_url
 from .base import BaseScanner, Finding, PageDocumentUnavailable
 
 if TYPE_CHECKING:
@@ -408,11 +409,14 @@ class OutdatedComponentScanner(BaseScanner):
                 cvss_vector=cvss_vector,
                 evidence_details={
                     "library": lib.name, "version": lib.version, "ecosystem": lib.ecosystem,
-                    "src": lib.url, "osv_ids": ids, "cves": cves,
+                    # 署名/トークン付き script URL（?token=... 等）の資格情報を伏せる。これらは
+                    # checkpoint/レポートへそのまま直列化され、Finding.to_dict の request URL 伏字化を
+                    # 迂回して artifact 読者へ漏れるため、格納前に redact する（Codex #155）。
+                    "src": redact_url(lib.url), "osv_ids": ids, "cves": cves,
                     "max_severity": info["max_severity"],
                 },
                 reproduction_steps=[
-                    f"Load {url} and note the external script: {lib.url}",
+                    f"Load {url} and note the external script: {redact_url(lib.url)}",
                     f"Identify {lib.name} version {lib.version}.",
                     f"Check OSV.dev / GHSA: {id_disp or 'known advisories'} affect this version.",
                     f"Upgrade {lib.name} to a patched release.",

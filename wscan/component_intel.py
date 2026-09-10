@@ -151,7 +151,9 @@ def _library_from_url(absolute: str) -> "Optional[Library]":
         return Library(name=name, version=version, ecosystem="npm",
                        url=absolute, reliability=reliability)
     # 構造化 URL に一致しなければ、ファイル名埋め込み（任意 origin の推測＝filename）を試す。
-    m = _LIB_FILENAME_PATTERN.search(absolute)
+    # query/fragment ではなく path に対して照合する。`app.js?fallback=/jquery-3.4.1.js` のように
+    # クエリに版付きファイル名を持つ URL を誤ってそのライブラリと判定しない（Codex #155）。
+    m = _LIB_FILENAME_PATTERN.search(path)
     if m:
         name = m.group(1).strip().lower()
         version = _norm_version(m.group(2))
@@ -525,8 +527,11 @@ async def lookup_osv(
     except Exception as exc:
         raise ComponentIntelUnavailable(f"osv:{name}:{type(exc).__name__}") from exc
     _raise_if_transient(resp.status_code, f"osv:{name}")
+    # OSV の /v1/query は固定エンドポイント。脆弱性なしは 200＋空 vulns で返るため、401/403/404
+    # 等の非 200 は「advisory 無し」ではなく照会失敗（base URL 誤設定/権限）。None で返すと
+    # _scan_osv がキャッシュし checkpoint 完了＝恒久 FN になるので、失敗として投げる（Codex #155）。
     if resp.status_code != 200:
-        return None
+        raise ComponentIntelUnavailable(f"osv:{name}: HTTP {resp.status_code}")
     try:
         data = resp.json()
     except Exception as exc:
@@ -608,8 +613,11 @@ async def lookup_nvd(
     except Exception as exc:
         raise ComponentIntelUnavailable(f"nvd:{product}:{type(exc).__name__}") from exc
     _raise_if_transient(resp.status_code, f"nvd:{product}")
+    # NVD の /cves も固定エンドポイント。CVE 無しは 200＋totalResults:0 で返るため、401/403/404 等の
+    # 非 200 は「CVE 無し」ではなく照会失敗（base URL 誤設定/APIキー不正・throttle）。None ではなく
+    # 失敗として投げ、恒久 FN（checkpoint 完了）を防ぐ（Codex #155）。
     if resp.status_code != 200:
-        return None
+        raise ComponentIntelUnavailable(f"nvd:{product}: HTTP {resp.status_code}")
     try:
         data = resp.json()
     except Exception as exc:
