@@ -534,6 +534,41 @@ class OutdatedComponentScannerTests(unittest.IsolatedAsyncioTestCase):
             ci.lookup_osv = orig
         self.assertNotIn("http://x/", scanner._checked_urls)
 
+    async def test_transient_after_finding_does_not_record(self):
+        # EOL で finding が出た後に OSV が transient 失敗しても、record_finding は一切呼ばれない
+        # （dedup 汚染・webhook 発火・配信漏れを防ぐ＝resume でクリーンに再配信・Codex #155）。
+        from wscan.scanners.base import PageDocumentUnavailable
+        engine, scanner = self._scanner(enabled=True)
+        html = '<script src="https://cdn.jsdelivr.net/npm/jquery@3.4.1/jquery.min.js"></script>'
+
+        async def _pair(url):
+            return {"request": {"url": url},
+                    "response": {"status": 200, "headers": {"Server": "nginx/1.18.0"}, "body": html}}
+
+        async def _eol(comp, **kw):
+            return {"product": comp.product, "version": comp.version, "source": comp.source,
+                    "slug": "nginx", "cycle": "1.18", "eol": True, "is_eol": True, "latest": "1.27"}
+
+        async def _osv(*a, **k):
+            raise ci.ComponentIntelUnavailable("osv 503")
+
+        recorded = []
+
+        async def _rec(**kw):
+            recorded.append(kw)
+            return object()
+
+        scanner._response_pair = _pair
+        scanner.record_finding = _rec
+        oe, oo = ci.check_component_eol, ci.lookup_osv
+        ci.check_component_eol, ci.lookup_osv = _eol, _osv
+        try:
+            with self.assertRaises(PageDocumentUnavailable):
+                await scanner.scan_page("http://x/")
+        finally:
+            ci.check_component_eol, ci.lookup_osv = oe, oo
+        self.assertEqual(recorded, [])  # EOL finding も含め record されない（遅延記録）
+
     async def test_nvd_sample_max_label(self):
         # total > 取得件数 のとき「取得N件中の最大」と明示する（Codex #155）。
         cfg = {"enabled": True, "eol_base_url": "https://endoflife.date",

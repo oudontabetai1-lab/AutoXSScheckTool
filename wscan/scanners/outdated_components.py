@@ -142,31 +142,38 @@ class OutdatedComponentScanner(BaseScanner):
                 product=cms.name, version=cms.version, source="cms",
             ))
 
-        # 外部 API の一時失敗（ComponentIntelUnavailable）を検知したら、この run は照会未完なので
-        # page を再試行可能に残す（下で PageDocumentUnavailable を投げる・Codex #155）。
-        self._lookup_transient = False
-
-        findings: list[Finding] = []
+        # 外部照会は record_finding を**末尾まで遅延**する。各 _scan_* は finding の spec(kwargs)を
+        # 集め、transient 失敗は invocation ローカルな state に記録する（self に持たせると
+        # --concurrency>1 で別 page と混信する・Codex #155）。transient があれば record 前に raise
+        # するので、dedup 汚染も配信漏れも起きず、resume で安全に再試行できる（Codex #155）。
+        state = {"transient": False}
+        specs: list[dict] = []
         # ① 技術バナー/CMS → endoflife.date で EOL 判定
-        findings.extend(await self._scan_eol(url, pair, components, eol_base, timeout))
+        specs += await self._scan_eol(url, pair, components, eol_base, timeout, state)
         # ② 外部 JS ライブラリ → OSV.dev で既知脆弱性照会（full HTML＋捕捉済み script URL）
-        findings.extend(await self._scan_osv(url, pair, body, osv_base, timeout,
-                                             extra_script_urls=extra_script_urls))
+        specs += await self._scan_osv(url, pair, body, osv_base, timeout, state,
+                                      extra_script_urls=extra_script_urls)
         # ③ NVD で CVE 照会（限定オプション・nvd_enabled 時のみ・参考集約）
         if cfg.get("nvd_enabled"):
             nvd_base = cfg.get("nvd_base_url") or component_intel.DEFAULT_NVD_BASE_URL
-            findings.extend(await self._scan_nvd(url, pair, components, nvd_base, timeout))
+            specs += await self._scan_nvd(url, pair, components, nvd_base, timeout, state)
 
-        # いずれかの照会が一時失敗していたら、page を tested 完了にせず resume 対象にする
-        # （note+continue だけだと checkpoint が埋まり、資料未照会のまま skip される）。
-        if self._lookup_transient:
+        # いずれかの照会が一時失敗していたら、**まだ record していない**ので page を tested 完了に
+        # せず resume 対象にする（dedup 汚染・webhook 未発火・配信漏れを避ける）。
+        if state["transient"]:
             self._checked_urls.discard(url)
             raise PageDocumentUnavailable(
                 f"{self.CHECK_TYPE}: 外部照会が一時失敗しました（resume で再試行）: {url}"
             )
+        # 全照会が確定したので、ここで初めて record_finding する。
+        findings: list[Finding] = []
+        for spec in specs:
+            f = await self.record_finding(**spec)
+            if f is not None:
+                findings.append(f)
         return findings
 
-    async def _scan_nvd(self, url, pair, components, base_url, timeout) -> list[Finding]:
+    async def _scan_nvd(self, url, pair, components, base_url, timeout, state) -> list[dict]:
         import os
         api_key = os.environ.get("WSCAN_NVD_API_KEY", "") or ""
         cache = getattr(self.engine, "_nvd_cache", None)
@@ -177,7 +184,7 @@ class OutdatedComponentScanner(BaseScanner):
             except Exception:
                 cache = None
 
-        findings: list[Finding] = []
+        specs: list[dict] = []
         seen: set[tuple[str, str]] = set()
         for comp in components:
             if not component_intel.nvd_product_cpe(comp.product):
@@ -196,7 +203,7 @@ class OutdatedComponentScanner(BaseScanner):
                     )
                 except component_intel.ComponentIntelUnavailable as exc:
                     self._record_scan_note(f"transport_error:{self.CHECK_TYPE}:nvd:{type(exc).__name__}")
-                    self._lookup_transient = True
+                    state["transient"] = True
                     continue
                 except Exception as exc:
                     self._record_scan_note(f"transport_error:{self.CHECK_TYPE}:nvd:{type(exc).__name__}")
@@ -221,7 +228,7 @@ class OutdatedComponentScanner(BaseScanner):
                 + (f"・例: {id_disp}" if id_disp else "")
                 + "。CPE 一致は範囲が広く誤差を含むため、実際の影響は各 CVE を確認してください。"
             )
-            findings.append(await self.record_finding(
+            specs.append(dict(
                 url=url,
                 field_name=f"(CVE: {comp.product}@{comp.version})",
                 payload="(no payload — NVD CPE lookup)",
@@ -244,9 +251,9 @@ class OutdatedComponentScanner(BaseScanner):
                     "Review the matched CVEs to confirm which apply to this exact build.",
                 ],
             ))
-        return findings
+        return specs
 
-    async def _scan_eol(self, url, pair, components, base_url, timeout) -> list[Finding]:
+    async def _scan_eol(self, url, pair, components, base_url, timeout, state) -> list[dict]:
         # 同一 (product,version) を複数ページで再照会しないよう engine 単位でキャッシュ。
         # 失敗（ComponentIntelUnavailable）はキャッシュせず（note のみ）、確定結果だけ載せる。
         cache = getattr(self.engine, "_eol_cache", None)
@@ -256,7 +263,7 @@ class OutdatedComponentScanner(BaseScanner):
                 self.engine._eol_cache = cache
             except Exception:
                 cache = None
-        findings: list[Finding] = []
+        specs: list[dict] = []
         seen: set[tuple[str, str]] = set()
         for comp in components:
             key = (comp.product, comp.version)
@@ -273,7 +280,7 @@ class OutdatedComponentScanner(BaseScanner):
                 except component_intel.ComponentIntelUnavailable as exc:
                     # 一時失敗: page を再試行可能に残す（キャッシュしない）。
                     self._record_scan_note(f"transport_error:{self.CHECK_TYPE}:eol:{type(exc).__name__}")
-                    self._lookup_transient = True
+                    state["transient"] = True
                     continue
                 except Exception as exc:  # その他は graceful（非キャッシュ・継続）
                     self._record_scan_note(f"transport_error:{self.CHECK_TYPE}:{type(exc).__name__}")
@@ -292,7 +299,7 @@ class OutdatedComponentScanner(BaseScanner):
                 + (f", 最新 {latest}" if latest else "")
                 + "）。EOL 版はセキュリティ更新が提供されず既知の脆弱性が残存します。"
             )
-            findings.append(await self.record_finding(
+            specs.append(dict(
                 url=url,
                 field_name=f"(Component: {comp.product}@{comp.version})",
                 payload="(no payload — banner/EOL lookup)",
@@ -315,9 +322,9 @@ class OutdatedComponentScanner(BaseScanner):
                     f"Upgrade to a supported release (latest: {latest or 'see endoflife.date'}).",
                 ],
             ))
-        return findings
+        return specs
 
-    async def _scan_osv(self, url, pair, body, base_url, timeout, extra_script_urls=()) -> list[Finding]:
+    async def _scan_osv(self, url, pair, body, base_url, timeout, state, extra_script_urls=()) -> list[dict]:
         # full HTML から抽出した lib に、クロールが捕捉した external_scripts URL 由来の lib を足す
         # （HTML の 50KB 打ち切りや inline 記述漏れで取りこぼさない）。(name,version) で重複排除。
         libs = list(component_intel.parse_js_libraries(body, url))
@@ -338,7 +345,7 @@ class OutdatedComponentScanner(BaseScanner):
             except Exception:
                 cache = None
 
-        findings: list[Finding] = []
+        specs: list[dict] = []
         seen: set[tuple[str, str]] = set()
         for lib in libs:
             key = (lib.name, lib.version)
@@ -355,7 +362,7 @@ class OutdatedComponentScanner(BaseScanner):
                     )
                 except component_intel.ComponentIntelUnavailable as exc:
                     self._record_scan_note(f"transport_error:{self.CHECK_TYPE}:osv:{type(exc).__name__}")
-                    self._lookup_transient = True
+                    state["transient"] = True
                     continue
                 except Exception as exc:
                     self._record_scan_note(f"transport_error:{self.CHECK_TYPE}:osv:{type(exc).__name__}")
@@ -386,7 +393,7 @@ class OutdatedComponentScanner(BaseScanner):
                 + "）。修正版へ更新してください。" + guess_note
             )
             cvss_score, cvss_vector = _SEV_CVSS.get(severity, _SEV_CVSS["medium"])
-            findings.append(await self.record_finding(
+            specs.append(dict(
                 url=url,
                 # 同一ページが同一パッケージの複数版を読む場合、版を identity に含めないと
                 # record_finding の dedup(field_name+check+evidence_type+url)で 2 つ目が消える・Codex #155。
@@ -411,4 +418,4 @@ class OutdatedComponentScanner(BaseScanner):
                     f"Upgrade {lib.name} to a patched release.",
                 ],
             ))
-        return findings
+        return specs
