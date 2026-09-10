@@ -558,9 +558,8 @@ class ReportGenerator:
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>WScan Security Report — {self._escape(target)}</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%231a202c'/%3E%3Cpath d='M4 4h8v2H6v2h5v2H6v2h6v2H4z' fill='%2363b3ed'/%3E%3C/svg%3E">
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<!-- レポートは self-contained（オフライン/エアギャップ前提）。外部フォント(Google Fonts)は
+     読み込まず、font-family のシステムフォント fallback に委ねる（Codex #159）。 -->
 <style>
 /* WScan レポート — ダークなマット上のライトな印刷向け document（承認済みデザイン）。
    パレット: 紫アクセント / Inter + JetBrains Mono / 抑えめ severity。単一ライト紙面にコミット。 */
@@ -1889,8 +1888,7 @@ document.querySelectorAll('.plan-payloads-toggle').forEach(btn => {{
         return f"""<!DOCTYPE html>
 <html lang="ja"><head><meta charset="UTF-8">
 <title>Executive Report — {self._escape(target)}</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<!-- self-contained（オフライン前提）: 外部フォントは読み込まない（Codex #159）。 -->
 <style>
 body{{font-family:"Inter",system-ui,sans-serif;background:#161826;color:#292b31;margin:0;padding:26px 14px;-webkit-font-smoothing:antialiased}}
 .hdr{{max-width:1000px;margin:0 auto;background:#fff;border-radius:10px 10px 0 0;padding:38px 44px 22px;border-bottom:1px solid #e4e7f5;box-shadow:0 24px 60px rgba(0,0,0,.35);display:flex;flex-direction:column;gap:6px}}
@@ -2039,8 +2037,7 @@ ul li{{margin:4px 0;font-size:.9rem}} .footer{{text-align:center;color:#75798c;f
         return f"""<!DOCTYPE html>
 <html lang="ja"><head><meta charset="UTF-8">
 <title>Developer Report — {self._escape(target)}</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<!-- self-contained（オフライン前提）: 外部フォントは読み込まない（Codex #159）。 -->
 <style>
 body{{font-family:"Inter",system-ui,sans-serif;background:#161826;color:#292b31;margin:0;padding:26px 14px;-webkit-font-smoothing:antialiased}}
 .hdr{{max-width:960px;margin:0 auto;background:#fff;border-radius:10px 10px 0 0;padding:30px 40px 20px;border-bottom:1px solid #e4e7f5;box-shadow:0 24px 60px rgba(0,0,0,.35);display:flex;flex-direction:column;gap:6px}} .hdr h1{{font-size:1.5rem;font-weight:500;color:#292b31}}
