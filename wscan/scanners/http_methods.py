@@ -20,7 +20,7 @@ from wscan.scanner_contract import (
     ScannerContract, StateChangeClass,
 )
 
-from .base import BaseScanner, Finding
+from .base import BaseScanner, Finding, PageDocumentUnavailable
 
 if TYPE_CHECKING:
     from wscan.engine import ScanEngine
@@ -160,6 +160,7 @@ class HttpMethodsScanner(BaseScanner):
         page_target = f"{origin}{parsed.path}" if parsed.path and parsed.path != "/" else origin
 
         findings: list[Finding] = []
+        client_failed = False
         for target in (origin, page_target):
             if target in self._checked_targets:
                 continue
@@ -176,7 +177,17 @@ class HttpMethodsScanner(BaseScanner):
                     findings += await self._check_trace(client, target)
                     findings += await self._check_webdav(client, target, origin)
             except Exception:
+                # client 生成/接続失敗＝probe が 1 つも走っていない。この target は未検査なので
+                # guard から外し、後で観測失敗を伝播できるようにする（checkpoint 完了→resume skip を防ぐ）。
                 self._record_scan_note(f"transport_error:{self.CHECK_TYPE}:client")
+                self._checked_targets.discard(target)
+                client_failed = True
+        # 何も検査できず（findings 皆無）client 失敗があったなら、engine に error として扱わせ
+        # resume で再試行させる（返り値 [] だと tested 完了扱いになり恒久 skip される・Codex #157）。
+        if client_failed and not findings:
+            raise PageDocumentUnavailable(
+                f"{self.CHECK_TYPE}: HTTP クライアントを生成できませんでした: {origin}"
+            )
         return findings
 
     async def _check_options(self, client, target, origin) -> list[Finding]:
@@ -186,8 +197,10 @@ class HttpMethodsScanner(BaseScanner):
         except Exception:
             self._record_scan_note(f"transport_error:{self.CHECK_TYPE}:options")
             return []
+        # 危険メソッド/WebDAV の判定は Allow（そのエンドポイントが実際に受理するメソッド）だけに
+        # 基づく。Access-Control-Allow-Methods は cross-origin ポリシーの告知でありメソッド対応の
+        # 証明ではない（汎用 CORS ミドルウェアが PUT 等を返すと空 Allow で誤検知になる・Codex #157）。
         allowed = parse_allow_methods(r.headers.get("allow", ""))
-        allowed |= parse_allow_methods(r.headers.get("access-control-allow-methods", ""))
         dav = webdav_methods(allowed) or bool(r.headers.get("dav"))
         findings: list[Finding] = []
         danger = dangerous_methods(allowed)

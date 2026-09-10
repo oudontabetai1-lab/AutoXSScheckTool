@@ -194,6 +194,39 @@ class ScannerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("http://app.test", urls)
         self.assertIn("http://app.test/dav/files", urls)
 
+    async def test_cors_acam_does_not_produce_dangerous_finding(self):
+        # Access-Control-Allow-Methods（CORS ポリシー告知）だけでは危険メソッド/WebDAV を報告しない。
+        responses = {
+            "OPTIONS": _FakeResp(200, {"access-control-allow-methods": "PUT, DELETE, PROPFIND"}),
+            "TRACE": _FakeResp(405, {}, ""),
+            "PROPFIND": _FakeResp(405, {}, ""),
+        }
+        rec = await self._run(responses)
+        self.assertEqual(rec, [])
+
+    async def test_allow_header_still_detected(self):
+        responses = {
+            "OPTIONS": _FakeResp(200, {"allow": "GET, PUT, DELETE"}),
+            "TRACE": _FakeResp(405, {}, ""),
+            "PROPFIND": _FakeResp(405, {}, ""),
+        }
+        rec = await self._run(responses)
+        danger = [r for r in rec if r["evidence_type"] == "http_dangerous_methods"]
+        self.assertEqual(len(danger), 1)
+
+    async def test_client_creation_failure_raises_for_retry(self):
+        # client 生成/__aenter__ 失敗＝probe が 1 つも走らない → PageDocumentUnavailable を投げ
+        # engine に error 扱い（resume 再試行）させる（tested 完了で恒久 skip させない）。
+        engine, scanner = self._scanner()
+
+        class _BadEnter:
+            async def __aenter__(self): raise RuntimeError("tls handshake failed")
+            async def __aexit__(self, *a): return False
+
+        with mock.patch.object(hm.httpx, "AsyncClient", return_value=_BadEnter()):
+            with self.assertRaises(hm.PageDocumentUnavailable):
+                await scanner.scan_page("http://app.test/")
+
     async def test_probe_failure_is_graceful(self):
         engine, scanner = self._scanner()
 
