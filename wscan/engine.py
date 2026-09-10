@@ -1874,6 +1874,11 @@ class ScanEngine:
         origin は crawl 段階で seed ごと捨てられ、まさに検出したい弱プロトコル対象を取りこぼす
         （Codex #158 P1）。ここで seed の https origin を直接検査する。scanner は origin 単位で
         dedup するため crawl 済み origin は no-op。TLS は read-only なので状態変更を伴わない。
+
+        ただし TLS ハンドシェイクは能動的プローブなので、**攻撃スコープ内の URL から導いた origin
+        だけ**を対象にする。seed_urls は Hybrid の偵察で発見した探索専用 URL（外部リンク・
+        PAGE_FOUND 等）を含み得るため、_is_attack_target_url（＋除外）で濾して、operator が
+        テスト許可していないホストへ SSLyze を送らない（Codex #158 P1）。
         """
         scanner = self.scanners.get("tls_scan")
         if scanner is None:
@@ -1885,6 +1890,9 @@ class ScanEngine:
                 continue
             p = urlparse(u)
             if p.scheme != "https" or not p.netloc:
+                continue
+            # 攻撃スコープ外・明示除外の URL は能動 TLS プローブ対象にしない。
+            if self._is_url_excluded(u) or not self._is_attack_target_url(u):
                 continue
             origin = f"{p.scheme}://{p.netloc}"
             if origin not in seen:

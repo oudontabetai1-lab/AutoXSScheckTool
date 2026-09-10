@@ -334,12 +334,18 @@ class EngineEnableTests(unittest.TestCase):
 
 
 class SeedScanTests(unittest.IsolatedAsyncioTestCase):
-    async def test_tls_seed_scan_probes_seed_origins_independent_of_crawl(self):
-        # crawl 結果に依存せず seed origin を検査し、http/重複は除く（Codex #158 P1）。
+    async def test_tls_seed_scan_probes_only_attack_scope_origins(self):
+        # crawl 非依存で seed origin を検査するが、能動 TLS プローブは攻撃スコープ内に限定する。
+        # http/重複は除く。out-of-scope の偵察 seed（別ホスト）へは SSLyze を送らない（Codex #158 P1）。
         from wscan.engine import ScanEngine
-        engine = ScanEngine("https://weak.test/app", checks=["tls_scan"],
+        # origin レベルの攻撃スコープ（/ 終端）。weak.test 配下は全 path が in-scope。
+        engine = ScanEngine("https://weak.test/", checks=["tls_scan"],
                             enable_tls_scan=True, llm_provider="none", monitor=None)
-        engine.seed_urls = ["https://weak.test/other", "http://plain.test/", "https://b.test/"]
+        engine.seed_urls = [
+            "https://weak.test/other",   # in-scope（同一ホスト）
+            "http://plain.test/",        # http → 除外
+            "https://evil.test/cb",      # out-of-scope（偵察で発見した別ホスト）→ 送らない
+        ]
         probed = []
 
         async def _rec_scan_page(url):
@@ -348,11 +354,10 @@ class SeedScanTests(unittest.IsolatedAsyncioTestCase):
 
         engine.scanners["tls_scan"].scan_page = _rec_scan_page
         await engine._run_tls_seed_scans()
-        # https origin は dedup 後に検査、http は除外。
-        self.assertIn("https://weak.test", probed)
-        self.assertIn("https://b.test", probed)
-        self.assertNotIn("http://plain.test", probed)
-        self.assertEqual(len(probed), len(set(probed)))
+        self.assertIn("https://weak.test", probed)          # 攻撃スコープ内
+        self.assertNotIn("https://evil.test", probed)        # スコープ外は能動プローブしない
+        self.assertNotIn("http://plain.test", probed)        # http は対象外
+        self.assertEqual(len(probed), len(set(probed)))      # origin dedup
 
 
 class CliChecksTests(unittest.TestCase):
