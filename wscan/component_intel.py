@@ -110,32 +110,20 @@ def _norm_product(name: str) -> str:
     return (name or "").strip().lower()
 
 
-# 構造化 CDN URL からライブラリ名+バージョンを抽出する（純粋・保守側）。いずれも npm パッケージ。
+# 構造化 CDN レイアウト（PATH に対して照合）と、それを実際に使う CDN ホストの束縛。
 #   jsdelivr: https://cdn.jsdelivr.net/npm/jquery@3.4.1/dist/jquery.min.js
 #   cdnjs/google: .../ajax/libs/jquery/3.4.1/jquery.min.js
 #   unpkg: https://unpkg.com/jquery@3.4.1/dist/jquery.min.js
-_LIB_URL_PATTERNS = (
-    re.compile(r"/npm/((?:@[\w.-]+/)?[\w.-]+)@(\d[\w.\-]*)"),
-    re.compile(r"/ajax/libs/([\w.-]+)/(\d[\w.\-]*)/"),
-    re.compile(r"unpkg\.com/((?:@[\w.-]+/)?[\w.-]+)@(\d[\w.\-]*)"),
+# 各パターンは PATH の先頭（^）に固定し、クエリ文字列や無関係ホストで誤って cdn 認定しない
+# （例: cdn.jsdelivr.net/app.js?fallback=/npm/jquery@3.4.1 は path=/app.js で不一致・Codex #155）。
+_CDN_LAYOUTS = (
+    (re.compile(r"^/npm/((?:@[\w.-]+/)?[\w.-]+)@(\d[\w.\-]*)"), frozenset({"cdn.jsdelivr.net"})),
+    (re.compile(r"^/ajax/libs/([\w.-]+)/(\d[\w.\-]*)/"),
+     frozenset({"cdnjs.cloudflare.com", "ajax.googleapis.com"})),
+    (re.compile(r"^/((?:@[\w.-]+/)?[\w.-]+)@(\d[\w.\-]*)"), frozenset({"unpkg.com"})),
 )
 # ファイル名埋め込み（.../jquery-3.4.1.min.js）。任意 origin でも一致するため推測（filename）扱い。
 _LIB_FILENAME_PATTERN = re.compile(r"/([\w.-]+?)-(\d+\.\d+(?:\.\d+)?)(?:\.min)?\.js(?:$|[?#])")
-
-# 構造化 URL パターンを「cdn（信頼度高）」と見なす既知 CDN ホスト。これ以外のホストで
-# /npm/ や /ajax/libs/ のレイアウトを模していても cdn 扱いにしない（自己ホストの
-# /npm/jquery@x/app.js 等を likely 脆弱性に誤格上げしない・Codex #155）。
-_KNOWN_CDN_HOSTS = frozenset({
-    "cdn.jsdelivr.net", "cdnjs.cloudflare.com", "ajax.googleapis.com",
-    "unpkg.com", "code.jquery.com", "stackpath.bootstrapcdn.com",
-    "maxcdn.bootstrapcdn.com", "cdn.skypack.dev", "esm.sh",
-})
-
-
-def _is_known_cdn_host(url: str) -> bool:
-    from urllib.parse import urlparse
-    host = (urlparse(url).hostname or "").lower()
-    return host in _KNOWN_CDN_HOSTS
 
 
 def _norm_version(v: str) -> str:
@@ -145,16 +133,21 @@ def _norm_version(v: str) -> str:
 
 def _library_from_url(absolute: str) -> "Optional[Library]":
     """1 つの script URL から (name, version, reliability) を抽出する（純粋）。取れなければ None。"""
-    # まず構造化 CDN URL パターン。ただし信頼度「cdn」は既知 CDN ホストのときだけ。
-    for pat in _LIB_URL_PATTERNS:
-        m = pat.search(absolute)
+    from urllib.parse import urlparse
+    parsed = urlparse(absolute)
+    host = (parsed.hostname or "").lower()
+    path = parsed.path or ""
+    # 構造化 CDN レイアウトは PATH に対して照合し、そのレイアウトを使う CDN ホストのときだけ
+    # 信頼度 cdn。ホストが一致しない（自己ホスト等が同レイアウトを模す）場合は filename 扱い。
+    for pat, cdn_hosts in _CDN_LAYOUTS:
+        m = pat.search(path)
         if not m:
             continue
         name = m.group(1).strip().lower()
         version = _norm_version(m.group(2))
         if not name or not version or not version[0].isdigit():
             continue
-        reliability = "cdn" if _is_known_cdn_host(absolute) else "filename"
+        reliability = "cdn" if host in cdn_hosts else "filename"
         return Library(name=name, version=version, ecosystem="npm",
                        url=absolute, reliability=reliability)
     # 構造化 URL に一致しなければ、ファイル名埋め込み（任意 origin の推測＝filename）を試す。

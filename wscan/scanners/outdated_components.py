@@ -142,6 +142,10 @@ class OutdatedComponentScanner(BaseScanner):
                 product=cms.name, version=cms.version, source="cms",
             ))
 
+        # 外部 API の一時失敗（ComponentIntelUnavailable）を検知したら、この run は照会未完なので
+        # page を再試行可能に残す（下で PageDocumentUnavailable を投げる・Codex #155）。
+        self._lookup_transient = False
+
         findings: list[Finding] = []
         # ① 技術バナー/CMS → endoflife.date で EOL 判定
         findings.extend(await self._scan_eol(url, pair, components, eol_base, timeout))
@@ -152,6 +156,14 @@ class OutdatedComponentScanner(BaseScanner):
         if cfg.get("nvd_enabled"):
             nvd_base = cfg.get("nvd_base_url") or component_intel.DEFAULT_NVD_BASE_URL
             findings.extend(await self._scan_nvd(url, pair, components, nvd_base, timeout))
+
+        # いずれかの照会が一時失敗していたら、page を tested 完了にせず resume 対象にする
+        # （note+continue だけだと checkpoint が埋まり、資料未照会のまま skip される）。
+        if self._lookup_transient:
+            self._checked_urls.discard(url)
+            raise PageDocumentUnavailable(
+                f"{self.CHECK_TYPE}: 外部照会が一時失敗しました（resume で再試行）: {url}"
+            )
         return findings
 
     async def _scan_nvd(self, url, pair, components, base_url, timeout) -> list[Finding]:
@@ -182,6 +194,10 @@ class OutdatedComponentScanner(BaseScanner):
                         comp.product, comp.version, base_url=base_url,
                         api_key=api_key, timeout=timeout,
                     )
+                except component_intel.ComponentIntelUnavailable as exc:
+                    self._record_scan_note(f"transport_error:{self.CHECK_TYPE}:nvd:{type(exc).__name__}")
+                    self._lookup_transient = True
+                    continue
                 except Exception as exc:
                     self._record_scan_note(f"transport_error:{self.CHECK_TYPE}:nvd:{type(exc).__name__}")
                     continue
@@ -192,9 +208,16 @@ class OutdatedComponentScanner(BaseScanner):
             ids = info.get("cve_ids") or []
             sev = (info.get("max_severity") or "").lower()
             id_disp = ", ".join(ids[:5])
+            # max_severity は取得した先頭サンプル（resultsPerPage 件）での最大であり、total 全件の
+            # 真の最大とは限らない（後続ページに上位 severity があり得る）。その旨を明示する（Codex #155）。
+            sampled = info.get("total", 0) > len(ids)
+            sev_phrase = ""
+            if info.get("max_severity"):
+                sev_phrase = (f"（取得{len(ids)}件中の最大深刻度 {info['max_severity']}）" if sampled
+                              else f"（最大深刻度 {info['max_severity']}）")
             evidence = (
                 f"参考: NVD に {comp.product} {comp.version} に該当し得る CVE が {info['total']} 件"
-                + (f"（最大深刻度 {info['max_severity']}）" if info.get("max_severity") else "")
+                + sev_phrase
                 + (f"・例: {id_disp}" if id_disp else "")
                 + "。CPE 一致は範囲が広く誤差を含むため、実際の影響は各 CVE を確認してください。"
             )
@@ -247,7 +270,12 @@ class OutdatedComponentScanner(BaseScanner):
                     result = await component_intel.check_component_eol(
                         comp, base_url=base_url, timeout=timeout,
                     )
-                except Exception as exc:  # ComponentIntelUnavailable 含む（graceful・非キャッシュ）
+                except component_intel.ComponentIntelUnavailable as exc:
+                    # 一時失敗: page を再試行可能に残す（キャッシュしない）。
+                    self._record_scan_note(f"transport_error:{self.CHECK_TYPE}:eol:{type(exc).__name__}")
+                    self._lookup_transient = True
+                    continue
+                except Exception as exc:  # その他は graceful（非キャッシュ・継続）
                     self._record_scan_note(f"transport_error:{self.CHECK_TYPE}:{type(exc).__name__}")
                     continue
                 if cache is not None:
@@ -325,6 +353,10 @@ class OutdatedComponentScanner(BaseScanner):
                     vulns = await component_intel.lookup_osv(
                         lib.ecosystem, lib.name, lib.version, base_url=base_url, timeout=timeout,
                     )
+                except component_intel.ComponentIntelUnavailable as exc:
+                    self._record_scan_note(f"transport_error:{self.CHECK_TYPE}:osv:{type(exc).__name__}")
+                    self._lookup_transient = True
+                    continue
                 except Exception as exc:
                     self._record_scan_note(f"transport_error:{self.CHECK_TYPE}:osv:{type(exc).__name__}")
                     continue

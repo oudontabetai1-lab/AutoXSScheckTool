@@ -511,6 +511,65 @@ class OutdatedComponentScannerTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(any("page_unavailable" in n for n in engine.wave_errors))
         self.assertNotIn("http://x/", scanner._checked_urls)
 
+    async def test_transient_lookup_raises_for_resume(self):
+        # OSV が一時失敗(ComponentIntelUnavailable)したら page を tested 完了にせず resume 対象にする。
+        from wscan.scanners.base import PageDocumentUnavailable
+        engine, scanner = self._scanner(enabled=True)
+        html = '<script src="https://cdn.jsdelivr.net/npm/jquery@3.4.1/jquery.min.js"></script>'
+
+        async def _pair(url):
+            return {"request": {"url": url}, "response": {"status": 200, "headers": {}, "body": html}}
+
+        async def _osv(*a, **k):
+            raise ci.ComponentIntelUnavailable("osv 503")
+
+        scanner._response_pair = _pair
+        scanner.record_finding = lambda **kw: None
+        orig = ci.lookup_osv
+        ci.lookup_osv = _osv
+        try:
+            with self.assertRaises(PageDocumentUnavailable):
+                await scanner.scan_page("http://x/")
+        finally:
+            ci.lookup_osv = orig
+        self.assertNotIn("http://x/", scanner._checked_urls)
+
+    async def test_nvd_sample_max_label(self):
+        # total > 取得件数 のとき「取得N件中の最大」と明示する（Codex #155）。
+        cfg = {"enabled": True, "eol_base_url": "https://endoflife.date",
+               "osv_base_url": "https://api.osv.dev", "nvd_enabled": True,
+               "nvd_base_url": "https://services.nvd.nist.gov", "timeout": 8}
+        engine = _FakeEngine(component_intel=cfg)
+        scanner = SCANNERS["outdated_components"](engine)
+
+        async def _pair(url):
+            return {"request": {"url": url},
+                    "response": {"status": 200, "headers": {"Server": "nginx/1.18.0"}, "body": ""}}
+
+        async def _eol(*a, **k):
+            return None
+
+        async def _nvd(*a, **k):
+            return {"total": 20, "cve_ids": ["CVE-1", "CVE-2"], "max_severity": "HIGH"}
+
+        recorded = []
+
+        async def _rec(**kw):
+            recorded.append(kw)
+            return object()
+
+        scanner._response_pair = _pair
+        scanner.record_finding = _rec
+        oe, on = ci.check_component_eol, ci.lookup_nvd
+        ci.check_component_eol, ci.lookup_nvd = _eol, _nvd
+        try:
+            await scanner.scan_page("http://x/")
+        finally:
+            ci.check_component_eol, ci.lookup_nvd = oe, on
+        adv = [r for r in recorded if r["evidence_type"] == "known_cve_advisory"]
+        self.assertEqual(len(adv), 1)
+        self.assertIn("取得2件中の最大", adv[0]["evidence"])
+
     async def test_filename_derived_library_is_tentative(self):
         engine, scanner = self._scanner(enabled=True)
         # 任意 origin のファイル名推測（CDN でない）。
@@ -588,6 +647,19 @@ class CdnReliabilityTests(unittest.TestCase):
 
     def test_filename_pattern_is_filename(self):
         libs = ci.parse_js_libraries_from_urls(["https://app.test/assets/jquery-3.4.1.min.js"])
+        self.assertEqual(libs[0].reliability, "filename")
+
+    def test_layout_in_query_string_not_cdn(self):
+        # path でなく query に /npm/... があっても cdn 認定しない（Codex #155）。
+        libs = ci.parse_js_libraries_from_urls(
+            ["https://cdn.jsdelivr.net/app.js?fallback=/npm/jquery@3.4.1"])
+        self.assertEqual(libs, [])
+
+    def test_ajax_layout_on_wrong_cdn_is_filename(self):
+        # /ajax/libs レイアウトを、そのレイアウトを使わない別 CDN ホストで見ても cdn にしない。
+        libs = ci.parse_js_libraries_from_urls(
+            ["https://cdn.jsdelivr.net/ajax/libs/jquery/3.4.1/jquery.min.js"])
+        self.assertEqual(len(libs), 1)
         self.assertEqual(libs[0].reliability, "filename")
 
     def test_multiple_versions_all_kept(self):
