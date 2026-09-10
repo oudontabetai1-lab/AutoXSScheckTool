@@ -184,6 +184,13 @@ class _FakeResp:
         self.headers = {}
 
 
+class _FakeRespCT:
+    def __init__(self, status_code, text="", content_type=""):
+        self.status_code = status_code
+        self.text = text
+        self.headers = {"content-type": content_type}
+
+
 class RedactionShaTests(unittest.TestCase):
     def test_sha_htpasswd_hash_redacted(self):
         out = m._redact_sensitive("admin:{SHA}W6ph5Mm5Pz8GgiULbPgzG37mj9g=\n")
@@ -197,6 +204,21 @@ class RedactionShaTests(unittest.TestCase):
     def test_apr1_still_redacted(self):
         out = m._redact_sensitive("admin:$apr1$abcd$ef.ghij/klmnop\n")
         self.assertNotIn("ef.ghij/klmnop", out)
+
+    def test_all_assignment_values_redacted(self):
+        # 秘匿ファイルは変数名に依らず全代入値を伏字化（DATABASE_URL 等も残さない・Codex #156）。
+        body = ("APP_KEY=x\n"
+                "DATABASE_URL=postgres://user:password@host/db\n"
+                "MAILER=smtp://relay.internal:25\n")
+        out = m._redact_sensitive(body)
+        self.assertNotIn("postgres://user:password@host/db", out)
+        self.assertNotIn("smtp://relay.internal:25", out)
+        self.assertIn("[REDACTED]", out)
+
+    def test_npmrc_auth_redacted(self):
+        out = m._redact_sensitive("_auth=dXNlcjpwYXNzd29yZA==\n//registry.npmjs.org/:_authToken=abc123\n")
+        self.assertNotIn("dXNlcjpwYXNzd29yZA==", out)
+        self.assertNotIn("abc123", out)
 
 
 class CatchAllComparisonTests(unittest.TestCase):
@@ -234,6 +256,23 @@ class SensitiveVerifyTests(unittest.IsolatedAsyncioTestCase):
             url="http://x/backup.sql",
             evidence_details={"path": "/backup.sql", "matched_label": "SQL dump content"})
         self.assertFalse(await scanner.verify_finding(finding))
+
+    async def test_soft404_origin_real_nonhtml_artifact_verifies(self):
+        # SPA シェルを返す soft-404 origin でも、baseline と異なる実在の非HTML artifact
+        # (/web.config.bak 等・署名無し) は fallback で verify される（Codex #156）。
+        scanner = self._scanner()
+
+        async def _get(url, follow_redirects=False):
+            if "wscan-nonexistent" in url:
+                return _FakeRespCT(200, "<html>SPA shell</html>", "text/html")  # soft-404 catch-all
+            return _FakeRespCT(200, "secret-config-blob-not-the-shell-xyz", "application/octet-stream")
+        scanner._get = _get
+        finding = types.SimpleNamespace(
+            evidence_type="info_sensitive_resource",
+            url="http://x/web.config.bak",
+            evidence_details={"path": "/web.config.bak",
+                              "matched_label": "non-HTML content (possible sensitive file)"})
+        self.assertTrue(await scanner.verify_finding(finding))
 
     async def test_genuine_artifact_still_verifies(self):
         scanner = self._scanner()

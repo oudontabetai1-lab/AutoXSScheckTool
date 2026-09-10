@@ -241,10 +241,15 @@ def _redact_sensitive(body: str, limit: int = 300) -> str:
         r"(-----BEGIN (?:RSA |OPENSSH |EC |DSA )?PRIVATE KEY-----).*",
         r"\1 [REDACTED]", text, flags=re.DOTALL,
     )
-    # aws_secret_access_key=..., _authToken=..., password: ... 等の値を伏字化
-    # （行頭とは限らない: npmrc は `//registry...:_authToken=` の形を取る）。
+    # 秘匿ファイル（.env/.aws/.npmrc 等）は中身全体が機密なので、変数名に依らず **全ての代入値**を
+    # 伏字化する。DATABASE_URL=postgres://user:password@host/db のように key/secret/token 等を名前に
+    # 含まない値も残さない（Codex #156）。行頭の `key=value` / `key: value` を対象にする。
     text = re.sub(
-        r"(?i)([\w.\-]*(?:key|token|secret|password|passwd|pwd)[\w.\-]*\s*[:=]\s*)\S+",
+        r"(?m)^(\s*[\w.\-\[\]]+\s*[:=]\s*)\S.*$", r"\1[REDACTED]", text,
+    )
+    # 行頭でない代入（npmrc の `//registry...:_authToken=`）は秘匿語を含むものをマスク。
+    text = re.sub(
+        r"(?i)([\w.\-]*(?:key|token|secret|password|passwd|pwd|auth)[\w.\-]*\s*[:=]\s*)\S+",
         r"\1[REDACTED]", text,
     )
     # htpasswd のハッシュを伏字化。$apr1$/bcrypt/$6$ 形に加え、検出器が受理する
@@ -474,10 +479,12 @@ class InfoDisclosureScanner(BaseScanner):
                             matched_label = label
                             break
 
-                    # Fallback: Content-Type が非 HTML で本文が非空なら疑う。ただし soft-404 の
-                    # origin ではこの一般 fallback を使わない（署名の無い 200 は誤検知になるため）。
+                    # Fallback: Content-Type が非 HTML で本文が非空なら疑う。soft-404 の origin でも、
+                    # ここに到達した候補は上の _same_catch_all を通過済み（＝baseline と異なる本物の
+                    # 応答）なので fallback を使ってよい。これを無効化すると、SPA シェルを返す origin で
+                    # 実在の /openapi.json・actuator・web.config.bak 等（署名無し非HTML）を見逃す（Codex #156）。
                     ct = r.headers.get("content-type", "")
-                    if (matched_label is None and not soft404
+                    if (matched_label is None
                             and "html" not in ct and len(body.strip()) > 20):
                         matched_label = "non-HTML content (possible sensitive file)"
 
@@ -613,8 +620,10 @@ class InfoDisclosureScanner(BaseScanner):
                 pass
             if soft404 and _same_catch_all(body, path, baseline_body, _SOFT404_PROBE):
                 return False
+            # catch-all は上で除外済みなので、ここでは汎用 fallback を抑止しない（soft404=False）。
+            # これをしないと SPA シェル origin の実在 /openapi.json 等を verify で落としてしまう。
             label = self._classify_sensitive_body(
-                body, r.headers.get("content-type", ""), path=path, soft404=soft404,
+                body, r.headers.get("content-type", ""), path=path, soft404=False,
             )
             if label is None:
                 return False
