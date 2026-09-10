@@ -414,12 +414,14 @@ class ComponentIntelUnavailable(Exception):
     """
 
 
-# 一時的（retry 相当）として扱う HTTP ステータス。これ以外の非 200（404 等）は「無データ」= None。
-_TRANSIENT_STATUS = frozenset({408, 425, 429, 500, 502, 503, 504})
+# 一時的（retry 相当・照会不能）として扱う HTTP ステータス。408/425/429 と 5xx 全域
+# （501/507/520 等の proxy/CDN コードも含む）。これ以外の非 200（404 等）は「無データ」= None。
+_TRANSIENT_STATUS = frozenset({408, 425, 429})
 
 
 def _raise_if_transient(status: int, ctx: str) -> None:
-    if status in _TRANSIENT_STATUS:
+    # 5xx は一律 unavailable（選択列挙だと 501/507/520 等を無データ＝None キャッシュして黙った FN になる）。
+    if status in _TRANSIENT_STATUS or 500 <= status <= 599:
         raise ComponentIntelUnavailable(f"{ctx}: HTTP {status}")
 
 

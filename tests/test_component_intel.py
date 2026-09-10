@@ -221,6 +221,14 @@ class NetworkLayerTests(unittest.IsolatedAsyncioTestCase):
         bad = _FakeClient(post_result=(500, None))
         with self.assertRaises(ci.ComponentIntelUnavailable):
             await ci.lookup_osv("npm", "jquery", "3.4.1", client=bad)
+        # 5xx 全域を unavailable 扱い（501/507/520 等も enumerate 漏れで None キャッシュしない）。
+        for code in (501, 507, 520):
+            with self.assertRaises(ci.ComponentIntelUnavailable):
+                await ci.lookup_osv("npm", "jquery", "3.4.1",
+                                    client=_FakeClient(post_result=(code, None)))
+        # 404 は「無データ」= None（確定・キャッシュ可）。
+        self.assertIsNone(await ci.lookup_osv("npm", "jquery", "3.4.1",
+                                              client=_FakeClient(post_result=(404, None))))
 
     async def test_lookup_nvd_with_and_without_key(self):
         url = "https://services.nvd.nist.gov/rest/json/cves/2.0"
@@ -488,16 +496,18 @@ class OutdatedComponentScannerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(out, [])
         self.assertEqual(called["eol"], 0)  # CMS が付与されず照会も起きない
 
-    async def test_transient_pair_records_note_and_not_marked(self):
-        # 空 pair（transient）は note を残し checked にしない（黙った偽陰性防止・再試行余地）。
+    async def test_transient_pair_raises_for_resume(self):
+        # 空 pair（transient）は [] を返さず PageDocumentUnavailable を投げて resume 対象にする
+        # （[] だと page-level が tested 完了→恒久 skip・Codex #155）。checked にもしない。
+        from wscan.scanners.base import PageDocumentUnavailable
         engine, scanner = self._scanner(enabled=True)
 
         async def _pair(url):
             return {}  # transient（408/429/5xx）
 
         scanner._response_pair = _pair
-        out = await scanner.scan_page("http://x/")
-        self.assertEqual(out, [])
+        with self.assertRaises(PageDocumentUnavailable):
+            await scanner.scan_page("http://x/")
         self.assertTrue(any("page_unavailable" in n for n in engine.wave_errors))
         self.assertNotIn("http://x/", scanner._checked_urls)
 

@@ -20,7 +20,7 @@ from wscan.scanner_contract import (
 )
 
 from .. import component_intel
-from .base import BaseScanner, Finding
+from .base import BaseScanner, Finding, PageDocumentUnavailable
 
 if TYPE_CHECKING:
     from wscan.engine import ScanEngine
@@ -112,10 +112,14 @@ class OutdatedComponentScanner(BaseScanner):
 
         pair = await self._response_pair(url)
         # 空 pair（408/429/5xx 等の transient）を「正常な空レスポンス」と取り違えない。
-        # 観測不能を記録し、checked にせず返す（この run 内で再試行余地を残す・黙った偽陰性を防ぐ）。
+        # [] を返すと page-level ループが tested 完了として checkpoint を埋め、pair もキャッシュ済みで
+        # この run 内の再試行もできず resume でも skip される。他の document 観測系と同様に
+        # PageDocumentUnavailable を投げ、engine に error（resume 再試行）扱いさせる（Codex #155）。
         if not pair:
             self._record_scan_note(f"transport_error:{self.CHECK_TYPE}:page_unavailable")
-            return []
+            raise PageDocumentUnavailable(
+                f"{self.CHECK_TYPE}: 対象ページを取得できませんでした: {url}"
+            )
         self._checked_urls.add(url)
         response = pair.get("response") or {}
         headers = {k.lower(): v for k, v in (response.get("headers") or {}).items()}
