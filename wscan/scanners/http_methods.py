@@ -171,9 +171,11 @@ class HttpMethodsScanner(BaseScanner):
 
             if self.monitor:
                 await self.monitor.emit_status(f"HTTP methods check on {target}")
-            # この target で 1 つでも probe が応答を得たか。client 生成失敗でも request 時失敗
-            # (DNS/接続/TLS/proxy)でも「応答ゼロ＝未検査」なら後で観測失敗を伝播する。
-            probe_state = {"ok": False}
+            # 各 probe(OPTIONS/TRACE/PROPFIND)は独立した finding クラスを担う（OPTIONS だけが
+            # 危険 Allow メソッドの唯一の情報源等）。従って 1 つでも request 時失敗があれば、その
+            # finding クラスのカバレッジが欠けるので target を未検査扱いにして resume へ回す
+            # （全 probe 失敗だけを未検査とすると、OPTIONS だけ失敗したケースを取りこぼす・Codex #157）。
+            probe_state = {"failed": False}
             try:
                 async with httpx.AsyncClient(**self._client_kwargs(target)) as client:
                     findings += await self._check_options(client, target, origin, probe_state)
@@ -184,9 +186,9 @@ class HttpMethodsScanner(BaseScanner):
                 self._checked_targets.discard(target)
                 target_failed = True
                 continue
-            if not probe_state["ok"]:
-                # client は生成できたが 3 probe すべて request 時に失敗＝この target は未検査。
-                self._record_scan_note(f"transport_error:{self.CHECK_TYPE}:no_response")
+            if probe_state["failed"]:
+                # client は生成できたが いずれかの probe が request 時に失敗＝カバレッジ欠落。
+                self._record_scan_note(f"transport_error:{self.CHECK_TYPE}:probe_incomplete")
                 self._checked_targets.discard(target)
                 target_failed = True
         # いずれかの target が完全に未検査（応答ゼロ）なら、他 target の finding の有無に関わらず
@@ -201,10 +203,10 @@ class HttpMethodsScanner(BaseScanner):
     async def _check_options(self, client, target, origin, probe_state=None) -> list[Finding]:
         try:
             r = await client.request("OPTIONS", target)
-            if probe_state is not None:
-                probe_state["ok"] = True
             self._record_probe_status(r)
         except Exception:
+            if probe_state is not None:
+                probe_state["failed"] = True
             self._record_scan_note(f"transport_error:{self.CHECK_TYPE}:options")
             return []
         # 危険メソッド/WebDAV の判定は Allow（そのエンドポイントが実際に受理するメソッド）だけに
@@ -260,10 +262,10 @@ class HttpMethodsScanner(BaseScanner):
         token = "XST-" + secrets.token_hex(8)
         try:
             r = await client.request("TRACE", target, headers={"X-Xst-Probe": token})
-            if probe_state is not None:
-                probe_state["ok"] = True
             self._record_probe_status(r)
         except Exception:
+            if probe_state is not None:
+                probe_state["failed"] = True
             self._record_scan_note(f"transport_error:{self.CHECK_TYPE}:trace")
             return []
         strength = trace_reflection_strength(
@@ -302,10 +304,10 @@ class HttpMethodsScanner(BaseScanner):
         # OPTIONS で判定できなかった場合の補強。PROPFIND(Depth:0) は read-only。
         try:
             r = await client.request("PROPFIND", target, headers={"Depth": "0"})
-            if probe_state is not None:
-                probe_state["ok"] = True
             self._record_probe_status(r)
         except Exception:
+            if probe_state is not None:
+                probe_state["failed"] = True
             self._record_scan_note(f"transport_error:{self.CHECK_TYPE}:propfind")
             return []
         # 207 Multi-Status（WebDAV 応答）を強シグナルとする。

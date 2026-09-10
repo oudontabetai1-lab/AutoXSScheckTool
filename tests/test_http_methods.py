@@ -227,6 +227,25 @@ class ScannerTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(hm.PageDocumentUnavailable):
                 await scanner.scan_page("http://app.test/")
 
+    async def test_single_probe_failure_raises_for_retry(self):
+        # OPTIONS だけ transport 失敗（TRACE/PROPFIND は 405 応答）でも、OPTIONS 固有のカバレッジ
+        # （危険 Allow メソッド）が欠けるので未検査扱いにして resume へ回す（Codex #157）。
+        engine, scanner = self._scanner()
+
+        class _OptFail:
+            def __init__(self):
+                self._r = {"TRACE": _FakeResp(405, {}, ""), "PROPFIND": _FakeResp(405, {}, "")}
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): return False
+            async def request(self, method, url, headers=None):
+                if method == "OPTIONS":
+                    raise RuntimeError("dns failure")
+                return self._r[method]
+
+        with mock.patch.object(hm.httpx, "AsyncClient", return_value=_OptFail()):
+            with self.assertRaises(hm.PageDocumentUnavailable):
+                await scanner.scan_page("http://app.test/")
+
     async def test_all_requests_failing_raises_for_retry(self):
         # DNS/接続/TLS 等で全 probe が request 時に失敗＝応答ゼロ（未検査）→ PageDocumentUnavailable を投げ
         # engine に error(resume 再試行)扱いさせる（[] で tested 完了→恒久 skip させない・Codex #157）。
