@@ -151,8 +151,9 @@ class HttpMethodsScanner(BaseScanner):
 
     SEVERITY = "medium"
 
-    # origin だけでなくページのパスも検査するが、リクエスト増を抑えるため検査対象数を上限で抑える。
-    _MAX_TARGETS = 25
+    # origin だけでなくページのパスも検査するが、リクエスト増を抑えるため **origin 単位**で
+    # 検査対象数を上限で抑える（グローバル上限だと多パスの 1 origin が後続 origin の枠を奪う・Codex #157）。
+    _MAX_TARGETS_PER_ORIGIN = 25
 
     def __init__(self, engine: "ScanEngine"):
         super().__init__(engine)
@@ -164,7 +165,7 @@ class HttpMethodsScanner(BaseScanner):
     ) -> list[Finding]:
         return []
 
-    def _client_kwargs(self, target: str, *, include_cookie: bool = True) -> dict:
+    def _client_kwargs(self, target: str, *, cookie_override=None) -> dict:
         proxy = getattr(self.engine, "proxy", "") or None
         kwargs: dict = {"timeout": getattr(self.engine, "timeout", 15), "follow_redirects": False}
         if hasattr(self.engine, "httpx_client_kwargs"):
@@ -172,11 +173,14 @@ class HttpMethodsScanner(BaseScanner):
         elif proxy:
             kwargs["proxy"] = proxy
         if hasattr(self.engine, "auth_headers"):
-            # engine.auth_headers は Cookie 文字列を path 非依存で付けるため、ページ path に
-            # スコープされた Cookie（Path=/admin 等）を origin ルート(/)の probe へ送ると、ブラウザ
-            # なら省く資格情報を TRACE 反射等で漏らし得る。origin ルート probe では Cookie を外す
-            # （page_target probe はページ自身なので付与する・Codex #157）。
-            kwargs["headers"] = self.auth_headers_for_url(target, include_cookie=include_cookie)
+            # engine.auth_headers は Cookie 文字列を path 非依存で付ける（同期時のページ path で
+            # スコープされ Path=/ と Path=/admin の両方を含む）。origin と page で送るべき Cookie が
+            # 異なるため、cookie_override（URL 単位で再スコープした Cookie。engine.cookie_header_for_url
+            # 由来）があればそれで置換する。None のときは従来どおり Cookie を付与しない（Codex #157）。
+            headers = dict(self.auth_headers_for_url(target, include_cookie=False))
+            if cookie_override:
+                headers["Cookie"] = cookie_override
+            kwargs["headers"] = headers
         return kwargs
 
     async def scan_page(self, url: str) -> list[Finding]:
@@ -191,9 +195,18 @@ class HttpMethodsScanner(BaseScanner):
         for target in (origin, page_target):
             if target in self._checked_targets:
                 continue
-            if len(self._checked_targets) >= self._MAX_TARGETS:
-                self._record_scan_note(f"target_cap:{self.CHECK_TYPE}")
-                break
+            # 上限は **origin 単位**で数える。グローバル上限だと 1 origin の多数パスが枠を食い潰し、
+            # 後続 origin が 1 度も probe されないのに tested 完了扱いになり恒久的な偽カバレッジになる
+            # （Codex #157）。origin ルート probe は常に許可して各 origin の最低限の検査を確保する。
+            is_origin_probe = target == origin
+            if not is_origin_probe:
+                per_origin = sum(
+                    1 for t in self._checked_targets
+                    if t == origin or t.startswith(origin + "/")
+                )
+                if per_origin >= self._MAX_TARGETS_PER_ORIGIN:
+                    self._record_scan_note(f"target_cap:{self.CHECK_TYPE}")
+                    continue
             self._checked_targets.add(target)
 
             if self.monitor:
@@ -203,12 +216,15 @@ class HttpMethodsScanner(BaseScanner):
             # finding クラスのカバレッジが欠けるので target を未検査扱いにして resume へ回す
             # （全 probe 失敗だけを未検査とすると、OPTIONS だけ失敗したケースを取りこぼす・Codex #157）。
             probe_state = {"failed": False}
-            # Cookie はページ path にスコープされ得るため、ページ自身（page_target）の probe にのみ
-            # 付与し、bare origin ルートの probe では外す（path-scoped 資格情報の漏えい防止・Codex #157）。
-            include_cookie = target == page_target
+            # Cookie は URL 単位で再スコープして送る。origin ルート(/) には Path=/ の Cookie だけ、
+            # page(/admin) には Path=/ と Path=/admin の Cookie を送る（Path=/admin を / に漏らさず、
+            # かつ認証専用の root TRACE/WebDAV を匿名で見逃さない・Codex #157）。
+            cookie_override = None
+            if hasattr(self.engine, "cookie_header_for_url"):
+                cookie_override = await self.engine.cookie_header_for_url(target)
             try:
                 async with httpx.AsyncClient(
-                    **self._client_kwargs(target, include_cookie=include_cookie)
+                    **self._client_kwargs(target, cookie_override=cookie_override)
                 ) as client:
                     findings += await self._check_options(client, target, origin, probe_state)
                     findings += await self._check_trace(client, target, probe_state)

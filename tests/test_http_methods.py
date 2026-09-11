@@ -215,22 +215,77 @@ class ScannerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(xst), 1)
         self.assertEqual(xst[0]["confidence"], "likely")
 
-    async def test_origin_probe_omits_page_path_cookie(self):
-        # origin ルート probe は path-scoped Cookie を送らない。page probe は送る（#157 P2）。
+    async def test_client_kwargs_uses_scoped_cookie_override(self):
+        # _client_kwargs は cookie_override（URL 単位で再スコープした Cookie）で置換する。
+        # None のときは Cookie を付与しない（#157 P2）。
         engine, scanner = self._scanner()
-        engine.cookies = "sid=secretvalue"
 
         def _auth_headers(extra=None, *, include_cookie=True, url=""):
-            h = {}
-            if include_cookie and engine.cookies:
-                h["Cookie"] = engine.cookies
-            return h
+            return {"X-Custom": "1"}  # 非 Cookie ヘッダのみ
         engine.auth_headers = _auth_headers
 
-        kw_origin = scanner._client_kwargs("https://h.test", include_cookie=False)
-        self.assertNotIn("Cookie", kw_origin.get("headers", {}))
-        kw_page = scanner._client_kwargs("https://h.test/admin", include_cookie=True)
-        self.assertEqual(kw_page["headers"].get("Cookie"), "secretvalue" and engine.cookies)
+        kw_origin = scanner._client_kwargs("https://h.test", cookie_override="root=r")
+        self.assertEqual(kw_origin["headers"].get("Cookie"), "root=r")
+        kw_none = scanner._client_kwargs("https://h.test", cookie_override=None)
+        self.assertNotIn("Cookie", kw_none["headers"])
+        self.assertEqual(kw_none["headers"].get("X-Custom"), "1")  # 非 Cookie ヘッダは維持
+
+    async def test_origin_and_page_get_path_scoped_cookies(self):
+        # scan_page は各 target を engine.cookie_header_for_url で再スコープした Cookie で probe する。
+        # origin(/) は Path=/ の Cookie のみ、page(/admin) は両方（#157 P2）。
+        engine, scanner = self._scanner()
+        seen: dict[str, str] = {}
+
+        async def _cookie_for(url):
+            # /admin には root+admin、origin ルートには root のみ返す（path スコープ相当）。
+            return "root=r; adm=a" if url.endswith("/admin") else "root=r"
+        engine.cookie_header_for_url = _cookie_for
+
+        made: list[tuple[str, str]] = []
+        real_kwargs = scanner._client_kwargs
+
+        def _spy(target, *, cookie_override=None):
+            made.append((target, cookie_override or ""))
+            return real_kwargs(target, cookie_override=cookie_override)
+        scanner._client_kwargs = _spy
+
+        responses = {"OPTIONS": _FakeResp(200, {"allow": "GET"}),
+                     "TRACE": _FakeResp(405, {}, ""), "PROPFIND": _FakeResp(404, {}, "")}
+        client = _FakeClient(responses)
+        with mock.patch.object(hm.httpx, "AsyncClient", return_value=client):
+            await scanner.scan_page("http://app.test/admin")
+        by_target = dict(made)
+        self.assertEqual(by_target["http://app.test"], "root=r")           # origin: root のみ
+        self.assertEqual(by_target["http://app.test/admin"], "root=r; adm=a")  # page: 両方
+
+    async def test_probe_cap_is_per_origin(self):
+        # 上限は origin 単位。1 origin の多数パスが枠を食い潰しても、別 origin は必ず probe される（#157）。
+        engine, scanner = self._scanner()
+        scanner._MAX_TARGETS_PER_ORIGIN = 2
+        probed: list[str] = []
+
+        async def _opt(client, target, origin, probe_state=None):
+            probed.append(target)
+            return []
+
+        async def _empty(*a, **k):
+            return []
+        scanner._check_options = _opt
+        scanner._check_trace = _empty
+        scanner._check_webdav = _empty
+
+        responses = {"OPTIONS": _FakeResp(200, {"allow": "GET"}),
+                     "TRACE": _FakeResp(405, {}, ""), "PROPFIND": _FakeResp(404, {}, "")}
+        client = _FakeClient(responses)
+        with mock.patch.object(hm.httpx, "AsyncClient", return_value=client):
+            # origin A: origin + 3 paths（page probe は 2 で頭打ち、origin は常に許可）。
+            for p in ("/a", "/b", "/c"):
+                await scanner.scan_page(f"http://a.test{p}")
+            # origin B: 枯渇せず origin probe が走る。
+            await scanner.scan_page("http://b.test/x")
+        self.assertIn("http://a.test", probed)     # origin A ルート
+        self.assertIn("http://b.test", probed)     # 別 origin も必ず probe（グローバル枯渇しない）
+        self.assertIn("http://b.test/x", probed)
 
     async def test_trace_body_redacts_sent_auth_header_value(self):
         # client.headers の秘匿値が本文（JSON 直列化など行頭に出ない形）でも伏字化される（#157 C2）。

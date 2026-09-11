@@ -56,6 +56,28 @@ class CookiePathMatchTests(unittest.TestCase):
         self.assertEqual(result, "sid=admin; sid=root")
 
 
+class CookieHeaderForUrlTests(unittest.TestCase):
+    def _hdr(self, cookies, url):
+        browser = types.SimpleNamespace(page=types.SimpleNamespace(context=_Ctx(cookies)))
+        eng = types.SimpleNamespace(browser=browser)
+        return asyncio.run(ScanEngine.cookie_header_for_url(eng, url))
+
+    def test_origin_vs_page_path_scope(self):
+        # cookie_header_for_url は URL 単位で path スコープする（#157）。
+        cookies = [
+            {"name": "root", "value": "r", "domain": "example.com", "path": "/"},
+            {"name": "adm", "value": "a", "domain": "example.com", "path": "/admin"},
+        ]
+        # origin ルート(/): Path=/ の Cookie のみ（Path=/admin は送らない）。
+        self.assertEqual(self._hdr(cookies, "https://example.com"), "root=r")
+        # page(/admin): 両方送る（長い path が先）。
+        self.assertEqual(self._hdr(cookies, "https://example.com/admin"), "adm=a; root=r")
+
+    def test_no_browser_returns_empty(self):
+        eng = types.SimpleNamespace(browser=types.SimpleNamespace(page=None))
+        self.assertEqual(asyncio.run(ScanEngine.cookie_header_for_url(eng, "https://x.test")), "")
+
+
 class CookieDomainSyncTests(unittest.TestCase):
     def test_exact_and_parent_accepted_subdomain_rejected(self):
         cookies = [
