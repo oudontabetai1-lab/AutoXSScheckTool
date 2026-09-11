@@ -50,6 +50,7 @@ _CVSS_TABLE: dict[str, tuple[str, float]] = {
     "info_disclosure":   ("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N",  7.5),
     "host_header":       ("CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:L/I:L/A:N",  5.4),
     "security_headers":  ("CVSS:3.1/AV:N/AC:H/PR:N/UI:R/S:U/C:L/I:N/A:N",  3.1),
+    "tls_scan":          ("CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:N/A:N",  5.9),
     "nosql":             ("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:N",  9.1),
     "deserialization":   ("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H", 10.0),
     "request_smuggling": ("CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:C/C:H/I:H/A:N",  8.7),
@@ -373,6 +374,10 @@ class Finding:
     confidence: str = "tentative"   # "confirmed" | "likely" | "tentative"
     evidence_type: str = ""          # Structured signal, e.g. xss_dialog, sqli_error
     evidence_details: dict = field(default_factory=dict)
+    # check_type 由来の既定 CVSS を上書きする per-finding 値（同一 check_type でも issue ごとに
+    # 深刻度が変わる scanner 用。None/"" のときは _cvss_for(check_type) を使う）。
+    cvss_score_override: Optional[float] = None
+    cvss_vector_override: str = ""
     reproduction_steps: list[str] = field(default_factory=list)
     source: str = "scanner"          # "scanner" | "agent"
     agent_verified: bool = False      # Agent 発見を決定論スキャナでも再現できたか
@@ -447,6 +452,10 @@ class Finding:
             confidence=data.get("confidence", "tentative"),
             evidence_type=data.get("evidence_type", ""),
             evidence_details=dict(data.get("evidence_details", {}) or {}),
+            # 直列化された実効 CVSS を override として復元し、resume で issue 別 CVSS を保つ
+            # （欠落した旧 checkpoint は None/"" で check_type 既定へフォールバック）。
+            cvss_score_override=data.get("cvss_score"),
+            cvss_vector_override=data.get("cvss_vector", "") or "",
             reproduction_steps=list(data.get("reproduction_steps", []) or []),
             source=data.get("source", "scanner"),
             agent_verified=bool(data.get("agent_verified", False)),
@@ -467,11 +476,12 @@ class Finding:
 
     @property
     def cvss_vector(self) -> str:
-        return _cvss_for(self.check_type)[0]
+        return self.cvss_vector_override or _cvss_for(self.check_type)[0]
 
     @property
     def cvss_score(self) -> float:
-        return _cvss_for(self.check_type)[1]
+        return self.cvss_score_override if self.cvss_score_override is not None \
+            else _cvss_for(self.check_type)[1]
 
     def to_dict(self) -> dict:
         from wscan.compliance_map import get_refs
@@ -1813,6 +1823,8 @@ class BaseScanner(ABC):
         evidence_details: Optional[dict] = None,
         reproduction_steps: Optional[list[str]] = None,
         injection_point: Optional[InjectionPoint] = None,
+        cvss_score: Optional[float] = None,
+        cvss_vector: str = "",
     ) -> Finding:
         """Create and record a finding."""
         if screenshot_b64 is None:
@@ -1882,6 +1894,8 @@ class BaseScanner(ABC):
             confidence=confidence,
             evidence_type=evidence_type or self.CHECK_TYPE,
             evidence_details=evidence_details or {},
+            cvss_score_override=cvss_score,
+            cvss_vector_override=cvss_vector or "",
             reproduction_steps=reproduction_steps or self._default_reproduction_steps(
                 url, field_name, payload
             ),

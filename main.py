@@ -154,6 +154,7 @@ def _load_config(path: Path = _CONFIG_PATH) -> dict:
     cfg["waf_detection"]           = bool(f.get("waf_detection",    True))
     cfg["payload_learning"]        = bool(f.get("payload_learning", True))
     cfg["community_payloads"]      = bool(f.get("community_payloads", True))
+    cfg["tls_scan"]                = bool(f.get("tls_scan",         False))
     cfg["sitemap_crawl"]           = bool(f.get("sitemap_crawl",    True))
     cfg["cvss_scores"]             = bool(f.get("cvss_scores",      True))
     cfg["skip_registration"]       = bool(f.get("skip_registration", True))
@@ -774,6 +775,8 @@ Examples:
         "race_condition", "websocket", "secret_leak", "sri", "js_static",
         # 新クラス
         "prototype_pollution", "cache_poisoning", "mass_assignment",
+        # opt-in（外部OSS/依存が要る）検査。--checks で明示指定すると自動で有効化する。
+        "tls_scan",
     ]
     _default_checks = _CFG.get("checks", ["sqli", "xss", "os"])
     scan.add_argument(
@@ -2393,6 +2396,8 @@ async def run_scan(args):
             enable_community_payloads=getattr(args, "community_payloads", True),
             enable_adaptive_payloads=not getattr(args, "no_adaptive_payloads", False),
             enable_sitemap_crawl=not getattr(args, "no_sitemap_crawl", False),
+            # tls_scan は opt-in。--checks/--all-checks で明示されたら有効化（未指定なら config）。
+            enable_tls_scan=True if "tls_scan" in checks_list else None,
             enable_llm_web_browsing=getattr(args, "llm_web_browsing", False),
             concurrency=getattr(args, "concurrency", 1),
             flows=getattr(args, "flows", None) or [],
@@ -2724,6 +2729,7 @@ async def run_serve(args):
             "enable_waf_detection": _CFG.get("waf_detection", True),
             "enable_payload_learning": _CFG.get("payload_learning", True),
             "community_payloads": _CFG.get("community_payloads", True),
+            "tls_scan": _CFG.get("tls_scan", False),
             "enable_sitemap_crawl": _CFG.get("sitemap_crawl", True),
             "spa_crawl": _CFG.get("spa_crawl", False),
             "auto_spa_crawl": _CFG.get("auto_spa_crawl", True),
@@ -3014,6 +3020,11 @@ async def run_serve(args):
                 enable_waf_detection=bool(cfg.get("enable_waf_detection", True)),
                 enable_payload_learning=bool(cfg.get("enable_payload_learning", True)),
                 enable_community_payloads=bool(cfg.get("enable_community_payloads", True)),
+                # 明示指定が無ければ None を渡し、ScanEngine の checks 推論（checks に tls_scan が
+                # あれば有効）に委ねる。False 既定で上書きすると checks:["tls_scan"] が黙って no-op に
+                # なる（REST/WS/定期の serve リクエスト・Codex #158）。
+                enable_tls_scan=(None if cfg.get("enable_tls_scan") is None
+                                 else bool(cfg.get("enable_tls_scan"))),
                 enable_sitemap_crawl=bool(cfg.get("enable_sitemap_crawl", True)),
                 enable_llm_web_browsing=bool(cfg.get("enable_llm_web_browsing", False)),
                 ctf_mode=bool(cfg.get("ctf_mode", False)),
