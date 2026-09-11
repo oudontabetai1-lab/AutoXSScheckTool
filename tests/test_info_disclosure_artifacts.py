@@ -210,6 +210,13 @@ class CatchAllComparisonTests(unittest.TestCase):
         cand = "Error page. The requested resource was not found on this server. Please retry now."
         self.assertTrue(m._same_catch_all(cand, "/.git/config", base, m._SOFT404_PROBE))
 
+    def test_empty_normalized_bodies_not_catch_all(self):
+        # 動的フィールド除去で両方が空になる場合は catch-all 同一と判定しない。
+        # `TOKEN=<hex>` だけの実 /.env が `request_id=<hex>` だけの soft-404 に潰されない（Codex #156）。
+        baseline = "request_id=9f8e7d6c5b4a3021"        # 正規化で空
+        candidate = "TOKEN=0123456789abcdef0123"        # 正規化で空（だが実シークレット）
+        self.assertFalse(m._same_catch_all(candidate, "/.env", baseline, m._SOFT404_PROBE))
+
     def test_dir_catch_all_echoing_path_uses_matching_probe_path(self):
         # 短い catch-all autoindex が要求 path を echo する場合、baseline 比較にも実 probe path
         # （ディレクトリ形 _SOFT404_DIR_PROBE）を渡さないと baseline 側の echo が残り誤検知する。

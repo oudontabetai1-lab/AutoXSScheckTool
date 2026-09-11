@@ -190,8 +190,12 @@ def _same_catch_all(body: str, path: str, baseline_body: str, baseline_path: str
         return False
     a = _norm_catch_all(body, path)
     b = _norm_catch_all(baseline_body, baseline_path)
+    # どちらかが正規化後に空になった場合は catch-all 同一と判定しない。動的フィールド除去で
+    # 実体が消えた本文同士を「同一」とみなすと、`TOKEN=<hex>` だけの実 /.env が
+    # `request_id=<hex>` だけの soft-404 と一致して取りこぼされる（Codex #156）。空同士でも
+    # 共有する構造的内容が無い＝catch-all を確証できないので、署名/非HTML 判定に委ねる。
     if not a or not b:
-        return a == b
+        return False
     if a == b:
         return True
     import difflib
