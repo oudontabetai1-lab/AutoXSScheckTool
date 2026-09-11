@@ -50,14 +50,14 @@ WScan は、IPA「安全なウェブサイトの作り方」の脆弱性カテ�
 
 ### 対応チェック種別
 
-`wscan.scanners.SCANNERS` に登録されている 36 種類です。
+`wscan.scanners.SCANNERS` に登録されている 38 種類です。
 
 ```text
 sqli xss dom_xss os ssti path_traversal csrf header_injection mail_header
 open_redirect clickjacking session privesc stored_xss cors info_disclosure
 host_header security_headers nosql deserialization request_smuggling ssrf
 graphql jwt cms xxe ldap file_upload race_condition websocket secret_leak sri
-js_static prototype_pollution cache_poisoning mass_assignment
+js_static prototype_pollution cache_poisoning mass_assignment tls_scan
 ```
 
 **`outdated_components`（EOL・脆弱コンポーネント検査・opt-in）**: 2 種類の無料 API へ照会して
@@ -98,7 +98,7 @@ Agent モードの CLI で選べる検査種別は `xss sqli ssti os path_traver
 | 1.9 | クリックジャッキング | `clickjacking` | X-Frame-Options / CSP `frame-ancestors` |
 | 1.11 | オープンリダイレクト | `open_redirect` | リダイレクト先検証 |
 
-このほか、権限昇格/IDOR、CORS、情報漏洩、Host ヘッダ、セキュリティヘッダ、NoSQL、デシリアライズ、リクエストスマグリング、SSRF、GraphQL、JWT、CMS、XXE、LDAP、ファイルアップロード、Race Condition、WebSocket、シークレット漏洩、SRI、Prototype Pollution、Cache Poisoning/Deception、Mass Assignment を検査できます。
+このほか、権限昇格/IDOR、CORS、情報漏洩、Host ヘッダ、セキュリティヘッダ、NoSQL、デシリアライズ、リクエストスマグリング、SSRF、GraphQL、JWT、CMS、XXE、LDAP、ファイルアップロード、Race Condition、WebSocket、シークレット漏洩、SRI、Prototype Pollution、Cache Poisoning/Deception、Mass Assignment、TLS 設定不備を検査できます。
 
 ## 2. 主要スクリーンショット
 

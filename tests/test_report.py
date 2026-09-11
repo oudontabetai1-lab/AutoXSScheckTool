@@ -40,6 +40,22 @@ class ReportGeneratorTests(unittest.TestCase):
         self.assertIn("✅ 確証", html)
         self.assertIn("⚠ 要確認", html)
 
+    def test_report_is_self_contained_no_external_requests(self):
+        # レポートは self-contained（オフライン/エアギャップ前提）。外部フォント等の
+        # 第三者リクエストを発生させない（Codex #159）。
+        findings = [Finding(check_type="sqli", severity="high",
+                            url="http://fixture.test/x", field_name="q", payload="'",
+                            evidence="e", verification_state="reproduced")]
+        with tempfile.TemporaryDirectory() as tmp:
+            html = ReportGenerator(Path(tmp)).generate(
+                target="http://fixture.test", findings=findings,
+                visited_urls=["http://fixture.test/x"], checks=["sqli"],
+            ).read_text(encoding="utf-8")
+        for host in ("fonts.googleapis.com", "fonts.gstatic.com"):
+            self.assertNotIn(host, html)
+        # 残った外部 http(s) 参照はスキャン対象 URL（データ）だけであるべき。
+        self.assertNotIn('rel="stylesheet"', html)
+
     def test_verification_states_have_distinct_labels_and_badges(self):
         def finding(field_name, state, note=""):
             data = dict(

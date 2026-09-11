@@ -40,6 +40,7 @@ from .prototype_pollution import PrototypePollutionScanner
 from .cache_poisoning import CachePoisoningScanner
 from .mass_assignment import MassAssignmentScanner
 from .outdated_components import OutdatedComponentScanner
+from .tls_config_scan import TlsConfigScanner
 
 
 # check-type string → scanner class
@@ -85,6 +86,7 @@ SCANNERS: dict[str, type] = {
     "cache_poisoning":   CachePoisoningScanner,
     "mass_assignment":   MassAssignmentScanner,
     "outdated_components": OutdatedComponentScanner,
+    "tls_scan":          TlsConfigScanner,
 }
 
 
@@ -102,4 +104,5 @@ __all__ = [
     "WebSocketScanner", "SecretLeakScanner", "SRIScanner", "JsStaticScanner",
     "PrototypePollutionScanner", "CachePoisoningScanner", "MassAssignmentScanner",
     "OutdatedComponentScanner",
+    "TlsConfigScanner",
 ]

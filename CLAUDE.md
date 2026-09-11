@@ -418,6 +418,11 @@ retry/失敗種別/エンドポイント処理を変えるときは同種の全 
 
 ## 設定の場所
 
+- **設定の後方互換（不変条件）**: `config/wscan.yaml` にキー/ブロックを**足すときは必ず
+  `dict.get(key, default)` で読む**（直接インデックスしない）。セクションも `raw.get("section", {})` で
+  受ける。これにより新キーを知らない**古い/最小の config でも既定値で動く**（`main._load_config` と
+  各 `_*_by_config` ヘルパーがこの規約。回帰は `tests/test_config_backward_compat.py`）。過去の全バージョンを
+  網羅的に移行対応する必要は無いが、欠落キーの既定化・未知キーの無視・空/パース不能の安全処理は保つ。
 - `config/wscan.yaml` … 既定設定と機能フラグ（`ai_analysis` / `waf_detection` /
   `payload_learning` / 適応ペイロード / `sitemap_crawl` / `spa_crawl` 等）。`checks` 既定は `["sqli","xss","os"]`。
 - `config/default_payloads.yaml` … 手キュレーションのフォールバックペイロード。
