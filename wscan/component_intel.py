@@ -430,7 +430,8 @@ async def fetch_product_cycles(
     """endoflife.date の ``/api/{product}.json`` を取得する。
 
     到達失敗（timeout/接続断/5xx/429/JSON 破損）は ``ComponentIntelUnavailable`` を投げる
-    （黙って None にしない＝偽陰性の可視化・キャッシュ汚染防止）。404 等の「無データ」は None。
+    （黙って None にしない＝偽陰性の可視化・キャッシュ汚染防止）。**404 のみ**「無データ」＝None。
+    401/403 等（自己ホスト EOL の認証拒否・誤設定）は照会失敗として投げる（Codex #155）。
     外部へ送るのは product slug のみ。``client`` を注入するとテストで差し替え可能。
     """
     slug = (product_slug or "").strip().strip("/")
@@ -448,8 +449,12 @@ async def fetch_product_cycles(
     except Exception as exc:
         raise ComponentIntelUnavailable(f"eol:{slug}:{type(exc).__name__}") from exc
     _raise_if_transient(resp.status_code, f"eol:{slug}")
+    if resp.status_code == 404:
+        return None  # 404 のみ「無データ」（product 未登録・確定・キャッシュ可）
     if resp.status_code != 200:
-        return None  # 404 等は「無データ」（確定）
+        # 401/403 等（自己ホスト EOL の認証拒否・誤設定）は無データではなく照会失敗。None を
+        # _scan_eol がキャッシュし checkpoint 完了＝恒久 FN になるので投げる（OSV/NVD と同様・Codex #155）。
+        raise ComponentIntelUnavailable(f"eol:{slug}: HTTP {resp.status_code}")
     try:
         data = resp.json()
     except Exception as exc:

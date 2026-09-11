@@ -213,7 +213,19 @@ class NetworkLayerTests(unittest.IsolatedAsyncioTestCase):
         out = await ci.check_component_eol(
             ci.Component("php", "7.4.3", "server"), client=client,
         )
-        self.assertIsNone(out)  # raise せず None
+        self.assertIsNone(out)  # 404=無データ → raise せず None
+
+    async def test_eol_auth_error_raises_not_none(self):
+        # EOL は 404 のみ無データ。401/403 等（自己ホスト EOL の認証拒否）は照会失敗＝raise
+        # （None キャッシュ→checkpoint 完了で恒久 FN になるのを防ぐ・Codex #155）。
+        url = f"{ci.DEFAULT_EOL_BASE_URL.rstrip('/')}/api/php.json"
+        for code in (401, 403, 400):
+            with self.assertRaises(ci.ComponentIntelUnavailable):
+                await ci.fetch_product_cycles("php", client=_FakeClient({url: (code, None)}))
+        # 404 は従来どおり無データ＝None（raise しない）。
+        self.assertIsNone(
+            await ci.fetch_product_cycles("php", client=_FakeClient({url: (404, None)}))
+        )
 
     async def test_lookup_osv_returns_vulns(self):
         client = _FakeClient(post_result=(200, {"vulns": [
