@@ -4,29 +4,32 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>WScan — Live Monitor</title>
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%23161b22'/%3E%3Cpath d='M4 4h8v2H6v2h5v2H6v2h6v2H4z' fill='%23388bfd'/%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%23161826'/%3E%3Cpath d='M4 4h8v2H6v2h5v2H6v2h6v2H4z' fill='%239184d9'/%3E%3C/svg%3E">
 <style>
 /* ─── Reset & Base ─────────────────────────────────────────── */
 * { box-sizing: border-box; margin: 0; padding: 0; }
 :root {
-  --bg: #0d1117;
-  --surface: #161b22;
-  --surface2: #21262d;
-  --border: #30363d;
-  --text: #e6edf3;
-  --text-muted: #7d8590;
-  --accent: #388bfd;
-  --accent-glow: rgba(56,139,253,0.15);
-  --critical: #f85149;
-  --high: #d29922;
-  --medium: #388bfd;
-  --low: #3fb950;
-  --info: #a5d6ff;
-  --success: #3fb950;
-  --running: #f0883e;
+  --bg: #161826;
+  --surface: #1c1e2c;
+  --surface2: #232532;
+  --border: #3f424d;
+  --text: #e9e9ed;
+  --text-muted: #9397ab;
+  --accent: #9184d9;
+  --accent-glow: rgba(145,132,217,0.18);
+  --critical: #e2708f;
+  --high: #d99a63;
+  --medium: #9184d9;
+  --low: #8fb9c9;
+  --info: #b5abfc;
+  --success: #8fb9c9;
+  --running: #d99a63;
 }
 body {
-  font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+  font-family: 'Inter', system-ui, -apple-system, sans-serif;
   background: var(--bg);
   color: var(--text);
   height: 100vh;
@@ -1863,7 +1866,7 @@ https://example.com/search?q=test" style="width:100%;font-family:monospace;font-
           <button class="sm-mini-btn" onclick="smResetView()" title="リセット">⟲</button>
           <div class="sitemap-legend">
             <span class="sitemap-pill"><span class="sm-dot" style="background:#f0883e"></span>巡回中</span>
-            <span class="sitemap-pill"><span class="sm-dot" style="background:#388bfd"></span>完了</span>
+            <span class="sitemap-pill"><span class="sm-dot" style="background:#9184d9"></span>完了</span>
             <span class="sitemap-pill"><span class="sm-dot" style="background:#f85149"></span>検出</span>
           </div>
         </div>
@@ -3477,7 +3480,7 @@ async function loadDefaultConfigFromServer() {
 // powers both the config "攻撃シナリオ" tab and the post-crawl review screen.
 
 const SCN_ACTIONS = {
-  navigate: {ico:'🌐', label:'移動',     color:'#388bfd'},
+  navigate: {ico:'🌐', label:'移動',     color:'#9184d9'},
   fill:     {ico:'⌨️', label:'入力',     color:'#3fb950'},
   submit:   {ico:'📤', label:'送信',     color:'#d29922'},
   click:    {ico:'🖱️', label:'クリック', color:'#a371f7'},
@@ -5529,7 +5532,7 @@ function _smNodeColor(d) {
   switch (d.status) {
     case 'vuln':     return '#f85149';
     case 'scanning': return '#f0883e';
-    case 'done':     return '#388bfd';
+    case 'done':     return '#9184d9';
     default:         return '#3a3f4a';
   }
 }
