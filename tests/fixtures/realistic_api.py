@@ -436,6 +436,34 @@ def create_app() -> FastAPI:
     async def env_file_safe():
         return _text("Not found.", status_code=404)
 
+    # 0017: 忘れ物 artifact（.git/config）とディレクトリリスティング（autoindex）＋安全ツイン。
+    @app.get("/.git/config", response_class=PlainTextResponse)
+    async def git_config():
+        return _text(
+            "[core]\n\trepositoryformatversion = 0\n\tbare = false\n"
+            "[remote \"origin\"]\n\turl = https://git.internal.acme-cloud.test/app.git\n"
+        )
+
+    @app.get("/safe/.git/config", response_class=PlainTextResponse)
+    async def git_config_safe():
+        return _text("Not found.", status_code=404)
+
+    @app.get("/uploads/", response_class=HTMLResponse)
+    async def uploads_listing():
+        return (
+            "<html><head><title>Index of /uploads</title></head><body>"
+            "<h1>Index of /uploads</h1><pre>"
+            '<a href="?C=N;O=D">Name</a>\n'
+            '<a href="invoice-2021.pdf">invoice-2021.pdf</a>\n'
+            '<a href="backup.sql">backup.sql</a>\n'
+            "</pre></body></html>"
+        )
+
+    @app.get("/media/", response_class=HTMLResponse)
+    async def media_no_listing():
+        # 安全ツイン: autoindex を無効にした通常ページ（リスティングではない）。
+        return "<html><head><title>Media</title></head><body>No listing here.</body></html>"
+
     @app.get("/console/debug-error", response_class=HTMLResponse)
     async def debug_error():
         body = """
