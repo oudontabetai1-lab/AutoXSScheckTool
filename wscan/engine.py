@@ -412,6 +412,17 @@ def _community_payloads_enabled_by_config(path: Path | None = None) -> bool:
         return True
 
 
+def _tls_scan_enabled_by_config(path: Path | None = None) -> bool:
+    """config/wscan.yaml の features.tls_scan を読む（既定 off）。"""
+    config_path = path or (CONFIG_DIR / "wscan.yaml")
+    try:
+        with open(config_path, encoding="utf-8") as f:
+            raw = yaml.safe_load(f) or {}
+        return bool((raw.get("features", {}) or {}).get("tls_scan", False))
+    except Exception:
+        return False
+
+
 def _payload_evolution_enabled_by_config(path: Path | None = None) -> bool:
     """config/wscan.yaml の features.payload_evolution を読む。"""
     config_path = path or (CONFIG_DIR / "wscan.yaml")
@@ -586,6 +597,7 @@ class ScanEngine:
         enable_waf_detection: bool = True,
         enable_payload_learning: bool = True,
         enable_community_payloads: Optional[bool] = None,
+        enable_tls_scan: Optional[bool] = None,
         enable_payload_evolution: Optional[bool] = None,
         enable_payload_mutation: Optional[bool] = None,
         enable_adaptive_payloads: bool = True,
@@ -859,6 +871,18 @@ class ScanEngine:
         self.flows: list[ScanFlow] = ScanFlow.list_from_dicts(flows or [])
         if ctf_mode and "ssti" not in self.checks:
             self.checks.append("ssti")
+
+        # TLS 設定不備検査（opt-in）。features.tls_scan=true で tls_scan を checks に追加。
+        # 有効/無効は enable_tls_scan（ダッシュボード/CLI 上書き）優先。未指定なら、checks に
+        # tls_scan が明示されていれば有効化し、無ければ config に従う。これで CLI/ダッシュボード
+        # 経由でなく checks を直接渡す呼び出し（batch_runner 等）でも、明示指定した TLS 検査が
+        # 無効のまま黙って no-op にならない（Codex #158 P1）。
+        if enable_tls_scan is None:
+            self.tls_scan_enabled = ("tls_scan" in self.checks) or _tls_scan_enabled_by_config()
+        else:
+            self.tls_scan_enabled = bool(enable_tls_scan)
+        if self.tls_scan_enabled and "tls_scan" not in self.checks:
+            self.checks.append("tls_scan")
 
         # CTF flag finder
         self.flag_finder: Optional[FlagFinder] = FlagFinder(ctf_flag_pattern) if ctf_mode else None
@@ -1874,6 +1898,51 @@ class ScanEngine:
         except Exception as exc:
             self.wave_errors.append(f"checkpoint_save: {type(exc).__name__}: {exc}")
 
+    async def _run_tls_seed_scans(self) -> None:
+        """TLS 設定検査を crawl 結果に依存せず operator 指定の seed origin に対して実行する。
+
+        tls_scan は page-level のため、Playwright がナビゲートできたページでしか scan_page が
+        呼ばれない。弱いプロトコル（TLS1.0/1.1 のみ受理等）で Chromium がネゴシエートできない
+        origin は crawl 段階で seed ごと捨てられ、まさに検出したい弱プロトコル対象を取りこぼす
+        （Codex #158 P1）。ここで seed の https origin を直接検査する。scanner は origin 単位で
+        dedup するため crawl 済み origin は no-op。TLS は read-only なので状態変更を伴わない。
+
+        ただし TLS ハンドシェイクは能動的プローブなので、**攻撃スコープ内の URL から導いた origin
+        だけ**を対象にする。seed_urls は Hybrid の偵察で発見した探索専用 URL（外部リンク・
+        PAGE_FOUND 等）を含み得るため、_is_attack_target_url（＋除外）で濾して、operator が
+        テスト許可していないホストへ SSLyze を送らない（Codex #158 P1）。
+        """
+        scanner = self.scanners.get("tls_scan")
+        if scanner is None:
+            return
+        seen: set[str] = set()
+        origins: list[str] = []
+        for u in [self.target_url, *self.target_urls, *self.seed_urls]:
+            if not u:
+                continue
+            p = urlparse(u)
+            if p.scheme != "https" or not p.netloc:
+                continue
+            # 攻撃スコープ外・明示除外の URL は能動 TLS プローブ対象にしない。
+            if self._is_url_excluded(u) or not self._is_attack_target_url(u):
+                continue
+            origin = f"{p.scheme}://{p.netloc}"
+            if origin not in seen:
+                seen.add(origin)
+                origins.append(origin)
+        for origin in origins:
+            try:
+                await self.controller.checkpoint()
+            except (SkipField, SkipPage):
+                continue
+            try:
+                findings = await scanner.scan_page(origin)
+            except Exception as exc:
+                self.wave_errors.append(f"tls_seed_scan: {type(exc).__name__}: {exc}")
+                continue
+            for f in (findings or []):
+                self._record_finding(f, source="tls-seed")
+
     async def _run_api_template_checks(self) -> None:
         """API スペック由来の JSON 操作（``api_seed_requests``）を、クロール結果に
         依存せず検査する。
@@ -2582,6 +2651,9 @@ class ScanEngine:
                 try:
                     await self._run_api_template_checks()
                     await self._run_json_injection_checks()
+                    # crawl が到達できない弱プロトコル origin を取りこぼさないため、
+                    # seed origin に対して TLS 検査を直接走らせる（Codex #158 P1）。
+                    await self._run_tls_seed_scans()
                 except AbortScan:
                     scan_aborted = True
 

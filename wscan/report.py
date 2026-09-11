@@ -558,205 +558,241 @@ class ReportGenerator:
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>WScan Security Report — {self._escape(target)}</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%231a202c'/%3E%3Cpath d='M4 4h8v2H6v2h5v2H6v2h6v2H4z' fill='%2363b3ed'/%3E%3C/svg%3E">
+<!-- レポートは self-contained（オフライン/エアギャップ前提）。外部フォント(Google Fonts)は
+     読み込まず、font-family のシステムフォント fallback に委ねる（Codex #159）。 -->
 <style>
+/* WScan レポート — ダークなマット上のライトな印刷向け document（承認済みデザイン）。
+   パレット: 紫アクセント / Inter + JetBrains Mono / 抑えめ severity。単一ライト紙面にコミット。 */
+:root {{
+  --mat:#161826; --sheet:#ffffff; --ink:#292b31; --ink2:#3f424d; --muted:#595d6c; --faint:#75798c;
+  --accent:#5d5294; --accent2:#9184d9; --lav-bg:#f5f4ff; --lav-br:#d2cefd;
+  --panel:#f3f5fe; --rule:#e4e7f5; --rule2:#cfd3e5;
+  --s-crit:#a3234a; --s-high:#8f4d15; --s-med:#6f5c11; --s-low:#2b6076;
+  --dark-card:#232532; --dark-card2:#1c1e2c; --dark-ring:#3f424d; --dark-ink:#e9e9ed; --dark-muted:#9397ab;
+  --code-bg:#12141f; --code-fg:#cdd9e5;
+}}
 * {{ box-sizing: border-box; margin: 0; padding: 0; }}
-body {{ font-family: 'Segoe UI', system-ui, -apple-system, sans-serif; background: #f7f8fa; color: #1a202c; line-height: 1.6; }}
-.header {{ background: linear-gradient(135deg, #1a202c 0%, #2d3748 100%); color: white; padding: 40px; }}
-.header h1 {{ font-size: 2rem; font-weight: 700; margin-bottom: 8px; }}
-.header .subtitle {{ color: #a0aec0; font-size: 0.95rem; }}
-.header .target {{ color: #63b3ed; font-size: 1.1rem; margin-top: 12px; word-break: break-all; }}
-.container {{ max-width: 1200px; margin: 0 auto; padding: 32px 24px; }}
-.summary-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 16px; margin-bottom: 32px; }}
-.summary-card {{ background: white; border-radius: 12px; padding: 20px; text-align: center; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }}
-.summary-card .count {{ font-size: 2.5rem; font-weight: 800; }}
-.summary-card .label {{ font-size: 0.85rem; color: #718096; margin-top: 4px; text-transform: uppercase; letter-spacing: 0.05em; }}
-.critical-count {{ color: #e53e3e; }}
-.high-count {{ color: #dd6b20; }}
-.medium-count {{ color: #d69e2e; }}
-.low-count {{ color: #38a169; }}
-.total-count {{ color: #4299e1; }}
-.section {{ background: white; border-radius: 12px; padding: 24px; margin-bottom: 24px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }}
-.section h2 {{ font-size: 1.25rem; font-weight: 700; margin-bottom: 20px; padding-bottom: 12px; border-bottom: 2px solid #e2e8f0; }}
-.finding-card {{ border: 1px solid #e2e8f0; border-radius: 10px; margin-bottom: 20px; overflow: hidden; }}
-.finding-card-agent {{ border-color:#b794f4; box-shadow:0 0 0 2px rgba(107,70,193,.12); }}
-.finding-card-agent .finding-header {{ background:#faf5ff; }}
-.finding-header {{ padding: 16px 20px; background: #f8fafc; display: flex; flex-direction: column; gap: 8px; }}
-.finding-title {{ display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }}
-.badge {{ color: white; padding: 3px 10px; border-radius: 20px; font-size: 0.75rem; font-weight: 700; letter-spacing: 0.05em; }}
-.badge-chain {{ background:#744210; color:#fefcbf; padding:2px 8px; border-radius:10px; font-size:0.72rem; font-weight:700; }}
-.badge-multi {{ background:#1a365d; color:#bee3f8; padding:2px 8px; border-radius:10px; font-size:0.72rem; font-weight:700; }}
-.badge-ai {{ background:#44337a; color:#e9d8fd; padding:2px 8px; border-radius:10px; font-size:0.72rem; font-weight:700; }}
-.badge-agent {{ background:#6b46c1; color:#faf5ff; padding:2px 8px; border-radius:10px; font-size:0.72rem; font-weight:700; }}
-.badge-agent-verified {{ background:#276749; color:#f0fff4; padding:2px 8px; border-radius:10px; font-size:0.72rem; font-weight:700; }}
-.badge-confirmed {{ background:#276749; color:#f0fff4; padding:2px 8px; border-radius:10px; font-size:0.72rem; font-weight:700; }}
-.badge-unconfirmed {{ background:#d97706; color:#fff; padding:2px 8px; border-radius:10px; font-size:0.72rem; font-weight:700; cursor:help; }}
-.badge-assumed {{ background:#854d0e; color:#fef9c3; padding:2px 8px; border-radius:10px; font-size:0.72rem; font-weight:700; }}
-.badge-confidence {{ color:#fff; padding:2px 8px; border-radius:10px; font-size:0.72rem; font-weight:700; }}
-.badge-diff-new {{ background:#276749; color:#f0fff4; padding:2px 8px; border-radius:10px; font-size:0.72rem; font-weight:700; }}
-.badge-diff-persist {{ background:#2b6cb0; color:#ebf8ff; padding:2px 8px; border-radius:10px; font-size:0.72rem; font-weight:700; }}
-.cvss-badge {{ color:white; padding:2px 8px; border-radius:10px; font-size:0.72rem; font-weight:700; cursor:help; }}
-.filter-bar {{ display:flex; gap:12px; flex-wrap:wrap; margin-bottom:20px; align-items:center; }}
-.filter-bar label {{ font-size:0.85rem; color:#4a5568; font-weight:600; }}
-.filter-bar select, .filter-bar input {{ border:1px solid #e2e8f0; border-radius:6px; padding:6px 10px; font-size:0.85rem; background:white; }}
+body {{ font-family:"Inter",system-ui,-apple-system,sans-serif; background:var(--mat); color:var(--ink); line-height:1.6; -webkit-font-smoothing:antialiased; padding:26px 14px; }}
+code, pre, .mono {{ font-family:"JetBrains Mono","Cascadia Code","Consolas",monospace; }}
+a {{ color:var(--accent); }}
+
+/* 紙面 = header + container を連続した白シートに */
+.header {{ max-width:980px; margin:0 auto; background:var(--sheet); color:var(--ink);
+  border-radius:10px 10px 0 0; padding:40px 48px 24px; border-bottom:1px solid var(--rule);
+  display:flex; flex-direction:column; gap:7px; box-shadow:0 24px 60px rgba(0,0,0,.35); }}
+.header h1 {{ font-size:1.9rem; font-weight:500; letter-spacing:-.01em; color:var(--ink); line-height:1.15; }}
+.header .subtitle {{ order:-1; font-size:.7rem; letter-spacing:.16em; text-transform:uppercase; color:var(--accent); }}
+.header .target {{ font-family:"JetBrains Mono",monospace; font-size:.95rem; color:var(--ink2); word-break:break-all; }}
+.container {{ max-width:980px; margin:0 auto; background:var(--sheet); border-radius:0 0 10px 10px;
+  padding:28px 48px 40px; box-shadow:0 24px 60px rgba(0,0,0,.35); }}
+
+/* 概要 */
+.summary-grid {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:12px; margin-bottom:28px; }}
+.summary-card {{ background:var(--panel); border:1px solid var(--rule); border-radius:8px; padding:16px; text-align:center; }}
+.summary-card .count {{ font-size:2.1rem; font-weight:500; line-height:1; }}
+.summary-card .label {{ font-size:.72rem; color:var(--muted); margin-top:6px; text-transform:uppercase; letter-spacing:.05em; }}
+.critical-count {{ color:var(--s-crit); }}
+.high-count {{ color:var(--s-high); }}
+.medium-count {{ color:var(--s-med); }}
+.low-count {{ color:var(--s-low); }}
+.total-count {{ color:var(--accent); }}
+
+/* セクション（白シート内の区切り。カード乱用しない） */
+.section {{ background:transparent; border-radius:0; padding:0; margin-bottom:30px; box-shadow:none; }}
+.section h2 {{ font-size:1.15rem; font-weight:500; color:var(--ink); margin-bottom:16px; padding-bottom:10px; border-bottom:1px solid var(--rule); }}
+
+/* Finding カード */
+.finding-card {{ border:1px solid var(--rule); border-radius:8px; margin-bottom:18px; overflow:hidden; background:var(--sheet); }}
+.finding-card-agent {{ border-color:#eccfaf; }}
+.finding-card-agent .finding-header {{ background:#fdf6ee; }}
+.finding-header {{ padding:13px 16px; background:var(--panel); display:flex; flex-direction:column; gap:8px; border-bottom:1px solid var(--rule); }}
+.finding-title {{ display:flex; align-items:center; gap:9px; flex-wrap:wrap; }}
+.check-type {{ font-weight:500; font-size:1rem; font-family:"JetBrains Mono",monospace; color:var(--ink); }}
+.field-name {{ color:var(--muted); font-size:.88rem; }}
+.finding-url {{ font-size:.82rem; color:var(--ink2); word-break:break-all; font-family:"JetBrains Mono",monospace; }}
+.finding-body {{ padding:16px; display:flex; flex-direction:column; gap:14px; }}
+.finding-detail h4 {{ font-size:.72rem; text-transform:uppercase; letter-spacing:.09em; color:var(--accent); margin-bottom:6px; }}
+
+/* バッジ（抑えめ palette へ再トーン） */
+.badge {{ padding:3px 10px; border-radius:5px; font-size:.72rem; font-weight:600; letter-spacing:.03em; color:#fff; }}
+.badge-chain {{ background:#f7f1da; color:var(--s-med); padding:2px 8px; border-radius:5px; font-size:.7rem; font-weight:600; }}
+.badge-multi {{ background:#e7e5fe; color:var(--accent); padding:2px 8px; border-radius:5px; font-size:.7rem; font-weight:600; }}
+.badge-ai {{ background:#e7e5fe; color:var(--accent); padding:2px 8px; border-radius:5px; font-size:.7rem; font-weight:600; }}
+.badge-agent {{ background:#fbeee1; color:var(--s-high); padding:2px 8px; border-radius:5px; font-size:.7rem; font-weight:600; }}
+.badge-agent-verified {{ background:#e4e7f5; color:var(--ink2); padding:2px 8px; border-radius:5px; font-size:.7rem; font-weight:600; }}
+.badge-confirmed {{ background:#e4e7f5; color:var(--ink2); padding:2px 8px; border-radius:5px; font-size:.7rem; font-weight:600; }}
+.badge-unconfirmed {{ background:#f7f1da; color:var(--s-med); padding:2px 8px; border-radius:5px; font-size:.7rem; font-weight:600; cursor:help; }}
+.badge-assumed {{ background:#f7f1da; color:var(--s-med); padding:2px 8px; border-radius:5px; font-size:.7rem; font-weight:600; }}
+.badge-confidence {{ color:#fff; padding:2px 8px; border-radius:5px; font-size:.7rem; font-weight:600; }}
+.badge-diff-new {{ background:#e4e7f5; color:var(--s-low); padding:2px 8px; border-radius:5px; font-size:.7rem; font-weight:600; }}
+.badge-diff-persist {{ background:#e7e5fe; color:var(--accent); padding:2px 8px; border-radius:5px; font-size:.7rem; font-weight:600; }}
+.cvss-badge {{ color:#fff; padding:2px 8px; border-radius:5px; font-size:.7rem; font-weight:600; cursor:help; }}
+
+/* フィルタ */
+.filter-bar {{ display:flex; gap:12px; flex-wrap:wrap; margin-bottom:18px; align-items:center; }}
+.filter-bar label {{ font-size:.82rem; color:var(--muted); font-weight:600; }}
+.filter-bar select, .filter-bar input {{ border:1px solid var(--rule2); border-radius:6px; padding:6px 10px; font-size:.82rem; background:var(--sheet); color:var(--ink); }}
 .filter-bar input {{ min-width:200px; }}
-.check-type {{ font-weight: 700; font-size: 1rem; }}
-.field-name {{ color: #4a5568; font-size: 0.9rem; }}
-.finding-url {{ font-size: 0.85rem; color: #718096; word-break: break-all; }}
-.finding-body {{ padding: 20px; display: flex; flex-direction: column; gap: 16px; }}
-.finding-detail h4 {{ font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.08em; color: #718096; margin-bottom: 8px; }}
-.evidence-text {{ background: #fff8f0; border: 1px solid #fbd38d; border-radius: 6px; padding: 10px 14px; font-size: 0.9rem; color: #744210; }}
-.evidence-grid {{ display:grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap:10px; margin-top:8px; }}
-.evidence-cell {{ border:1px solid #e2e8f0; border-radius:8px; padding:10px; background:#f8fafc; }}
-.evidence-cell .k {{ font-size:.7rem; color:#718096; text-transform:uppercase; letter-spacing:.05em; margin-bottom:4px; }}
-.evidence-cell .v {{ font-size:.85rem; color:#1a202c; word-break:break-word; }}
-.repro-list {{ margin:8px 0 0 18px; color:#2d3748; font-size:.9rem; }}
-.payload-code {{ display: block; background: #1a202c; color: #68d391; padding: 10px 14px; border-radius: 6px; font-family: 'Cascadia Code', 'Consolas', monospace; font-size: 0.85rem; word-break: break-all; white-space: pre-wrap; }}
-.network-grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }}
-@media (max-width: 768px) {{ .network-grid {{ grid-template-columns: 1fr; }} }}
-.network-box h4 {{ font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.08em; color: #718096; margin-bottom: 8px; }}
-.network-content {{ background: #f7f8fa; border: 1px solid #e2e8f0; border-radius: 6px; padding: 10px 14px; font-family: monospace; font-size: 0.8rem; max-height: 200px; overflow-y: auto; white-space: pre-wrap; word-break: break-all; }}
-.screenshot-container h4 {{ font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.08em; color: #718096; margin-bottom: 8px; }}
-.evidence-screenshot {{ width: 100%; border: 1px solid #e2e8f0; border-radius: 6px; cursor: pointer; transition: transform 0.2s; }}
-.evidence-screenshot:hover {{ transform: scale(1.01); }}
-.no-findings {{ text-align: center; padding: 48px; color: #718096; }}
-.no-findings-icon {{ font-size: 4rem; color: #68d391; margin-bottom: 16px; }}
-.no-findings p {{ font-size: 1.1rem; margin-bottom: 8px; }}
-.no-findings .note {{ font-size: 0.85rem; color: #a0aec0; }}
-/* ── Dashboard-style URL panel ── */
-.url-panel-section {{ background:#0d1117; color:#cdd9e5; border:1px solid #1e293b; }}
-.url-panel-section h2 {{ color:#e6edf3; border-bottom-color:#1e293b; }}
-.url-panel-header {{ display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap; margin-bottom:14px; }}
+
+/* Evidence / network */
+.evidence-text {{ background:var(--lav-bg); border:1px solid var(--lav-br); border-radius:6px; padding:10px 14px; font-size:.88rem; color:var(--ink); }}
+.evidence-grid {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(170px,1fr)); gap:8px; margin-top:6px; }}
+.evidence-cell {{ border:1px solid var(--rule); border-radius:6px; padding:8px 10px; background:var(--panel); }}
+.evidence-cell .k {{ font-size:.66rem; color:var(--muted); text-transform:uppercase; letter-spacing:.06em; margin-bottom:3px; }}
+.evidence-cell .v {{ font-size:.82rem; color:var(--ink); word-break:break-word; font-family:"JetBrains Mono",monospace; }}
+.repro-list {{ margin:6px 0 0 18px; color:var(--ink2); font-size:.88rem; }}
+.payload-code {{ display:block; background:var(--code-bg); color:#b5abfc; padding:10px 14px; border-radius:6px; font-size:.82rem; word-break:break-all; white-space:pre-wrap; }}
+.network-grid {{ display:grid; grid-template-columns:1fr 1fr; gap:14px; }}
+@media (max-width:768px) {{ .network-grid {{ grid-template-columns:1fr; }} }}
+.network-box h4, .screenshot-container h4 {{ font-size:.72rem; text-transform:uppercase; letter-spacing:.09em; color:var(--muted); margin-bottom:6px; }}
+.network-content {{ background:var(--panel); border:1px solid var(--rule); border-radius:6px; padding:10px 12px; font-size:.78rem; max-height:220px; overflow:auto; white-space:pre-wrap; word-break:break-all; color:var(--ink); }}
+.evidence-screenshot {{ width:100%; border:1px solid var(--rule); border-radius:6px; cursor:pointer; transition:transform .2s; }}
+.evidence-screenshot:hover {{ transform:scale(1.01); }}
+.no-findings {{ text-align:center; padding:44px; color:var(--muted); }}
+.no-findings-icon {{ font-size:3.4rem; color:var(--s-low); margin-bottom:14px; }}
+.no-findings p {{ font-size:1.05rem; margin-bottom:8px; color:var(--ink); }}
+.no-findings .note {{ font-size:.82rem; color:var(--faint); }}
+
+/* ── ダーク URL パネル（意図的な濃色カード） ── */
+.url-panel-section {{ background:var(--dark-card); color:var(--dark-ink); border:1px solid var(--dark-ring); border-radius:8px; padding:16px 18px; }}
+.url-panel-section h2 {{ color:var(--dark-ink); border-bottom-color:var(--dark-ring); }}
+.url-panel-header {{ display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap; margin-bottom:12px; }}
 .url-panel-header h2 {{ margin:0; padding:0; border-bottom:none; }}
 .url-panel-summary {{ display:flex; gap:6px; flex-wrap:wrap; }}
 .url-panel-toolbar {{ display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin-bottom:10px; }}
-.url-filter-input {{ flex:1; min-width:220px; background:#161b22; border:1px solid #30363d; color:#cdd9e5; border-radius:6px; padding:6px 10px; font-size:.8rem; }}
-.url-filter-input:focus {{ outline:none; border-color:#388bfd; }}
+.url-filter-input {{ flex:1; min-width:220px; background:var(--dark-card2); border:1px solid var(--dark-ring); color:var(--dark-ink); border-radius:6px; padding:6px 10px; font-size:.8rem; }}
+.url-filter-input:focus {{ outline:none; border-color:var(--accent2); }}
 .url-filter-tabs {{ display:flex; gap:4px; }}
-.url-filter-tab {{ background:#161b22; border:1px solid #30363d; color:#8b949e; border-radius:999px; padding:4px 12px; font-size:.72rem; font-weight:700; cursor:pointer; }}
-.url-filter-tab:hover {{ color:#cdd9e5; border-color:#388bfd; }}
-.url-filter-tab.active {{ background:#1f6feb22; color:#79c0ff; border-color:#388bfd; }}
-.url-list {{ list-style:none; max-height:360px; overflow-y:auto; border:1px solid #1e293b; border-radius:8px; background:#0a0c0f; padding:4px 0; }}
-.url-item {{ display:flex; align-items:center; gap:10px; padding:6px 12px; font-family:'Cascadia Code','Consolas',monospace; font-size:.8rem; border-bottom:1px solid #1e293b; }}
+.url-filter-tab {{ background:var(--dark-card2); border:1px solid var(--dark-ring); color:var(--dark-muted); border-radius:999px; padding:4px 12px; font-size:.72rem; font-weight:600; cursor:pointer; }}
+.url-filter-tab:hover {{ color:var(--dark-ink); border-color:var(--accent2); }}
+.url-filter-tab.active {{ background:#2b2741; color:#d2cefd; border-color:var(--accent2); }}
+.url-list {{ list-style:none; max-height:360px; overflow-y:auto; border:1px solid var(--dark-ring); border-radius:8px; background:#0f111a; padding:4px 0; }}
+.url-item {{ display:flex; align-items:center; gap:10px; padding:6px 12px; font-family:"JetBrains Mono",monospace; font-size:.8rem; border-bottom:1px solid var(--dark-ring); }}
 .url-item:last-child {{ border-bottom:none; }}
-.url-item .url-text {{ flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:#8b949e; }}
-.url-item[data-status="vuln"] .url-text {{ color:#fca5a5; }}
-.url-badge {{ flex-shrink:0; padding:2px 9px; border-radius:999px; font-size:.68rem; font-weight:700; letter-spacing:.03em; }}
-.url-badge-done {{ background:#14532d; color:#86efac; }}
-.url-badge-vuln {{ background:#7f1d1d; color:#fca5a5; }}
+.url-item .url-text {{ flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--dark-muted); }}
+.url-item[data-status="vuln"] .url-text {{ color:#e2708f; }}
+.url-badge {{ flex-shrink:0; padding:2px 9px; border-radius:999px; font-size:.68rem; font-weight:600; letter-spacing:.03em; }}
+.url-badge-done {{ background:#2b2741; color:#b5abfc; }}
+.url-badge-vuln {{ background:#4a2530; color:#e2708f; }}
 .url-list::-webkit-scrollbar {{ width:8px; }}
-.url-list::-webkit-scrollbar-thumb {{ background:#30363d; border-radius:4px; }}
-.scan-meta {{ display: flex; gap: 24px; flex-wrap: wrap; }}
-.meta-item {{ display: flex; flex-direction: column; gap: 2px; }}
-.meta-label {{ font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.08em; color: #718096; }}
-.meta-value {{ font-weight: 600; }}
-.footer {{ text-align: center; color: #a0aec0; font-size: 0.8rem; padding: 32px; }}
-.lightbox {{ display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.85); z-index: 1000; justify-content: center; align-items: center; }}
-.lightbox.active {{ display: flex; }}
-.lightbox img {{ max-width: 95%; max-height: 95vh; border-radius: 8px; }}
-.lightbox-close {{ position: fixed; top: 20px; right: 20px; color: white; font-size: 2rem; cursor: pointer; background: rgba(0,0,0,0.5); width: 44px; height: 44px; border-radius: 50%; display: flex; align-items: center; justify-content: center; }}
-/* ── Attack Plan styles ── */
-.plan-section-meta {{ display:flex; gap:12px; flex-wrap:wrap; margin-bottom:20px; }}
-.plan-stat-card {{ background:#ebf8ff; border:1px solid #bee3f8; border-radius:8px; padding:12px 20px; text-align:center; min-width:100px; }}
-.plan-stat-card .ps-count {{ font-size:1.8rem; font-weight:800; }}
-.plan-stat-card .ps-label {{ font-size:0.75rem; color:#2b6cb0; text-transform:uppercase; letter-spacing:.05em; }}
-.ps-high {{ background:#fff5f5; border-color:#fed7d7; }} .ps-high .ps-count {{ color:#e53e3e; }}
-.ps-mid  {{ background:#fffaf0; border-color:#fbd38d; }} .ps-mid  .ps-count {{ color:#dd6b20; }}
-.ps-low  {{ background:#f0fff4; border-color:#9ae6b4; }} .ps-low  .ps-count {{ color:#276749; }}
-.plan-card {{ border:1px solid #bee3f8; border-radius:10px; margin-bottom:20px; overflow:hidden; }}
-.plan-card-header {{ background:#ebf8ff; padding:14px 20px; border-bottom:1px solid #bee3f8; display:flex; justify-content:space-between; align-items:start; cursor:pointer; user-select:none; }}
-.plan-card-header:hover {{ background:#dbeafe; }}
+.url-list::-webkit-scrollbar-thumb {{ background:var(--dark-ring); border-radius:4px; }}
+
+/* メタ / フッタ */
+.scan-meta {{ display:flex; gap:22px; flex-wrap:wrap; }}
+.meta-item {{ display:flex; flex-direction:column; gap:2px; }}
+.meta-label {{ font-size:.72rem; text-transform:uppercase; letter-spacing:.08em; color:var(--muted); }}
+.meta-value {{ font-weight:600; color:var(--ink); }}
+.footer {{ text-align:center; color:var(--faint); font-size:.78rem; padding:24px; }}
+
+/* lightbox */
+.lightbox {{ display:none; position:fixed; inset:0; background:rgba(0,0,0,.85); z-index:1000; justify-content:center; align-items:center; }}
+.lightbox.active {{ display:flex; }}
+.lightbox img {{ max-width:95%; max-height:95vh; border-radius:8px; }}
+.lightbox-close {{ position:fixed; top:20px; right:20px; color:#fff; font-size:2rem; cursor:pointer; background:rgba(0,0,0,.5); width:44px; height:44px; border-radius:50%; display:flex; align-items:center; justify-content:center; }}
+
+/* ── Attack Plan ── */
+.plan-section-meta {{ display:flex; gap:12px; flex-wrap:wrap; margin-bottom:18px; }}
+.plan-stat-card {{ background:var(--panel); border:1px solid var(--rule); border-radius:8px; padding:12px 20px; text-align:center; min-width:100px; }}
+.plan-stat-card .ps-count {{ font-size:1.7rem; font-weight:500; }}
+.plan-stat-card .ps-label {{ font-size:.72rem; color:var(--muted); text-transform:uppercase; letter-spacing:.05em; }}
+.ps-high {{ background:#fbeadf; border-color:#eccfaf; }} .ps-high .ps-count {{ color:var(--s-high); }}
+.ps-mid {{ background:#f7f1da; border-color:#e6dcb2; }} .ps-mid .ps-count {{ color:var(--s-med); }}
+.ps-low {{ background:#eef3fb; border-color:#cfdcec; }} .ps-low .ps-count {{ color:var(--s-low); }}
+.plan-card {{ border:1px solid var(--rule); border-radius:8px; margin-bottom:18px; overflow:hidden; }}
+.plan-card-header {{ background:var(--panel); padding:13px 18px; border-bottom:1px solid var(--rule); display:flex; justify-content:space-between; align-items:start; cursor:pointer; user-select:none; }}
+.plan-card-header:hover {{ background:#eaeefb; }}
 .plan-header-left {{ display:flex; flex-direction:column; gap:4px; }}
-.plan-url {{ font-family:monospace; font-size:.85rem; color:#2b6cb0; word-break:break-all; }}
-.plan-purpose {{ font-size:.9rem; color:#1a365d; font-weight:600; }}
-.plan-by {{ font-size:.75rem; color:#718096; }}
-.plan-by.llm {{ color:#6b46c1; font-weight:600; }}
-.plan-toggle {{ font-size:1.2rem; color:#4299e1; transition:transform .2s; padding-left:12px; }}
+.plan-url {{ font-family:"JetBrains Mono",monospace; font-size:.82rem; color:var(--accent); word-break:break-all; }}
+.plan-purpose {{ font-size:.88rem; color:var(--ink); font-weight:600; }}
+.plan-by {{ font-size:.72rem; color:var(--muted); }}
+.plan-by.llm {{ color:var(--accent); font-weight:600; }}
+.plan-toggle {{ font-size:1.1rem; color:var(--accent); transition:transform .2s; padding-left:12px; }}
 .plan-card.collapsed .plan-toggle {{ transform:rotate(-90deg); }}
 .plan-card.collapsed .plan-fields {{ display:none; }}
-.plan-fields {{ padding:16px 20px; display:flex; flex-direction:column; gap:10px; }}
-.plan-cols-header {{ display:grid; grid-template-columns:160px 56px 1fr 1.6fr; gap:12px; padding:0 0 6px; font-size:.72rem; font-weight:700; text-transform:uppercase; letter-spacing:.06em; color:#a0aec0; border-bottom:2px solid #e2e8f0; margin-bottom:6px; }}
-.plan-field-row {{ display:grid; grid-template-columns:160px 56px 1fr 1.6fr; gap:12px; align-items:start; font-size:.85rem; border-bottom:1px solid #f0f4f8; padding-bottom:10px; }}
+.plan-fields {{ padding:14px 18px; display:flex; flex-direction:column; gap:10px; }}
+.plan-cols-header {{ display:grid; grid-template-columns:160px 56px 1fr 1.6fr; gap:12px; padding:0 0 6px; font-size:.7rem; font-weight:600; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); border-bottom:1px solid var(--rule2); margin-bottom:6px; }}
+.plan-field-row {{ display:grid; grid-template-columns:160px 56px 1fr 1.6fr; gap:12px; align-items:start; font-size:.84rem; border-bottom:1px solid var(--rule); padding-bottom:10px; }}
 .plan-field-row:last-child {{ border-bottom:none; padding-bottom:0; }}
-.plan-field-name {{ font-family:monospace; font-weight:600; color:#2d3748; word-break:break-all; }}
-.plan-risk-badge {{ width:44px; height:44px; border-radius:50%; display:flex; align-items:center; justify-content:center; color:white; font-size:1.05rem; font-weight:800; flex-shrink:0; }}
+.plan-field-name {{ font-family:"JetBrains Mono",monospace; font-weight:600; color:var(--ink2); word-break:break-all; }}
+.plan-risk-badge {{ width:42px; height:42px; border-radius:50%; display:flex; align-items:center; justify-content:center; color:#fff; font-size:1rem; font-weight:600; flex-shrink:0; }}
 .plan-checks {{ display:flex; flex-wrap:wrap; gap:4px; align-content:start; }}
-.plan-check-badge {{ background:#e2e8f0; color:#4a5568; border-radius:4px; padding:2px 7px; font-size:.75rem; font-weight:600; }}
-.plan-check-badge.priority-0 {{ background:#fed7d7; color:#742a2a; }}
-.plan-check-badge.priority-1 {{ background:#feebc8; color:#7b341e; }}
+.plan-check-badge {{ background:var(--rule); color:var(--ink2); border-radius:4px; padding:2px 7px; font-size:.74rem; font-weight:600; }}
+.plan-check-badge.priority-0 {{ background:#f1d6dd; color:var(--s-crit); }}
+.plan-check-badge.priority-1 {{ background:#f7f1da; color:var(--s-med); }}
 .plan-rationale-col {{ display:flex; flex-direction:column; gap:6px; }}
-.plan-rationale {{ color:#718096; font-size:.82rem; font-style:italic; }}
-.cross-page-tag {{ display:inline-block; background:#e9d8fd; color:#553c9a; border-radius:4px; padding:1px 6px; font-size:.72rem; font-weight:700; font-style:normal; }}
-.plan-payloads-toggle {{ font-size:.75rem; color:#4299e1; cursor:pointer; text-decoration:underline; margin-top:4px; }}
-.plan-payload-list {{ display:none; margin-top:6px; background:#1a202c; border-radius:6px; padding:8px 12px; }}
+.plan-rationale {{ color:var(--muted); font-size:.82rem; font-style:italic; }}
+.cross-page-tag {{ display:inline-block; background:#e7e5fe; color:var(--accent); border-radius:4px; padding:1px 6px; font-size:.72rem; font-weight:600; font-style:normal; }}
+.plan-payloads-toggle {{ font-size:.75rem; color:var(--accent); cursor:pointer; text-decoration:underline; margin-top:4px; }}
+.plan-payload-list {{ display:none; margin-top:6px; background:var(--code-bg); border-radius:6px; padding:8px 12px; }}
 .plan-payload-list.open {{ display:block; }}
-.plan-payload-list code {{ display:block; color:#68d391; font-family:monospace; font-size:.78rem; padding:2px 0; word-break:break-all; }}
-.plan-payload-type {{ color:#a0aec0; font-size:.7rem; margin-bottom:4px; }}
-.no-plans {{ color:#a0aec0; font-size:.9rem; padding:16px 0; }}
+.plan-payload-list code {{ display:block; color:#b5abfc; font-size:.78rem; padding:2px 0; word-break:break-all; }}
+.plan-payload-type {{ color:var(--dark-muted); font-size:.7rem; margin-bottom:4px; }}
+.no-plans {{ color:var(--faint); font-size:.9rem; padding:16px 0; }}
 @media (max-width:768px) {{ .plan-cols-header,.plan-field-row {{ grid-template-columns:1fr 44px 1fr; }} .plan-rationale-col {{ display:none; }} }}
-/* ── Page Flow Diagram styles ── */
-.page-flow-wrapper {{ overflow-x: auto; max-width:100%; }}
+
+/* ── Page Flow ── */
+.page-flow-wrapper {{ overflow-x:auto; max-width:100%; }}
 .page-flow-svg {{ width:100%; max-width:100%; min-width:0; }}
 #site-map-graph svg {{ display:block; width:100% !important; max-width:100%; }}
-.page-node {{ cursor: pointer; }}
-.page-node rect {{ fill: #ebf8ff; stroke: #4299e1; stroke-width: 1.5; rx: 6; }}
-.page-node.root rect {{ fill: #fefcbf; stroke: #d69e2e; stroke-width: 2; }}
-.page-node text {{ font-size: 11px; fill: #1a365d; font-family: monospace; }}
-.page-edge {{ stroke: #a0aec0; stroke-width: 1.5; fill: none; marker-end: url(#arrow); }}
-.page-thumb {{ border: 1px solid #e2e8f0; border-radius: 4px; }}
-/* ── CTF Flags styles ── */
-.ctf-section {{ background: linear-gradient(135deg,#1a202c 0%,#2d3748 100%); border-radius:12px; padding:24px; margin-bottom:24px; box-shadow: 0 4px 12px rgba(0,0,0,0.3); }}
-.ctf-section h2 {{ color:#ffd700; font-size:1.3rem; font-weight:800; margin-bottom:16px; padding-bottom:10px; border-bottom:2px solid #4a5568; letter-spacing:.03em; }}
+.page-node {{ cursor:pointer; }}
+.page-node rect {{ fill:var(--panel); stroke:var(--accent2); stroke-width:1.5; rx:6; }}
+.page-node.root rect {{ fill:var(--lav-bg); stroke:var(--accent); stroke-width:2; }}
+.page-node text {{ font-size:11px; fill:var(--ink2); font-family:"JetBrains Mono",monospace; }}
+.page-edge {{ stroke:var(--accent); stroke-width:1.4; fill:none; marker-end:url(#arrow); }}
+.page-thumb {{ border:1px solid var(--rule); border-radius:4px; }}
+
+/* ── CTF Flags（濃色カード） ── */
+.ctf-section {{ background:var(--dark-card); border-radius:8px; padding:20px; margin-bottom:24px; box-shadow:0 0 0 1px var(--dark-ring); }}
+.ctf-section h2 {{ color:#d2cefd; font-size:1.2rem; font-weight:500; margin-bottom:14px; padding-bottom:10px; border-bottom:1px solid var(--dark-ring); letter-spacing:.02em; }}
 .ctf-flag-list {{ display:flex; flex-direction:column; gap:10px; }}
-.ctf-flag-item {{ background:#2d3748; border:1px solid #4a5568; border-radius:8px; padding:14px 18px; display:flex; flex-direction:column; gap:4px; }}
-.ctf-flag-value {{ font-family:'Cascadia Code','Consolas',monospace; font-size:1.05rem; font-weight:700; color:#ffd700; letter-spacing:.04em; word-break:break-all; }}
-.ctf-flag-source {{ font-size:.78rem; color:#a0aec0; }}
-.ctf-flag-copy {{ display:inline-block; margin-top:4px; font-size:.75rem; color:#68d391; cursor:pointer; text-decoration:underline; }}
-.ctf-no-flags {{ color:#a0aec0; font-style:italic; }}
-/* ── AI Analysis / Attack Chains (⑧ ⑨) ── */
-.ai-analysis-section {{ background: linear-gradient(135deg,#1a1a2e 0%,#16213e 100%);
-    border-radius:12px; padding:24px; margin-bottom:24px;
-    box-shadow: 0 4px 12px rgba(0,0,0,0.25); color:#e2e8f0; }}
-.ai-analysis-section h2 {{ color:#90cdf4; font-size:1.25rem; font-weight:800;
-    margin-bottom:16px; padding-bottom:10px; border-bottom:1px solid #2d3748; }}
-.ai-analysis-body {{ font-size:.9rem; line-height:1.8; white-space:pre-wrap;
-    word-break:break-word; color:#e2e8f0; }}
-.ai-fix-section {{ background:#f0fff4; border:1px solid #9ae6b4;
-    border-radius:8px; padding:14px 18px; }}
-.ai-fix-section h4 {{ color:#276749; font-size:.8rem; text-transform:uppercase;
-    letter-spacing:.08em; margin-bottom:8px; }}
-.ai-fix-body {{ font-size:.88rem; color:#1c4532; line-height:1.7; }}
+.ctf-flag-item {{ background:var(--dark-card2); border:1px solid var(--dark-ring); border-radius:8px; padding:13px 16px; display:flex; flex-direction:column; gap:4px; }}
+.ctf-flag-value {{ font-family:"JetBrains Mono",monospace; font-size:1rem; font-weight:500; color:#b5abfc; letter-spacing:.03em; word-break:break-all; }}
+.ctf-flag-source {{ font-size:.78rem; color:var(--dark-muted); }}
+.ctf-flag-copy {{ display:inline-block; margin-top:4px; font-size:.75rem; color:#8fb9c9; cursor:pointer; text-decoration:underline; }}
+.ctf-no-flags {{ color:var(--dark-muted); font-style:italic; }}
+
+/* ── AI Analysis / Chains（濃色カード） ── */
+.ai-analysis-section {{ background:var(--dark-card); border-radius:8px; padding:20px; margin-bottom:24px; box-shadow:0 0 0 1px var(--dark-ring); color:var(--dark-ink); }}
+.ai-analysis-section h2 {{ color:#9184d9; font-size:1.15rem; font-weight:500; margin-bottom:14px; padding-bottom:10px; border-bottom:1px solid var(--dark-ring); }}
+.ai-analysis-body {{ font-size:.88rem; line-height:1.8; white-space:pre-wrap; word-break:break-word; color:var(--dark-ink); }}
+.ai-fix-section {{ background:var(--lav-bg); border:1px solid var(--lav-br); border-radius:8px; padding:13px 16px; }}
+.ai-fix-section h4 {{ color:var(--accent); font-size:.78rem; text-transform:uppercase; letter-spacing:.08em; margin-bottom:8px; }}
+.ai-fix-body {{ font-size:.86rem; color:var(--ink); line-height:1.7; }}
+
+/* チェックリスト / 充足 */
 .table-scroll {{ max-width:100%; overflow-x:auto; }}
-.checklist-table {{ width:100%; border-collapse:collapse; font-size:.85rem; }}
-.checklist-table th {{ text-align:left; background:#f8fafc; color:#4a5568; padding:8px 10px; border-bottom:1px solid #e2e8f0; }}
-.checklist-table td {{ padding:8px 10px; border-bottom:1px solid #edf2f7; vertical-align:top; }}
-.status-pill {{ display:inline-block; padding:2px 8px; border-radius:999px; font-weight:700; font-size:.72rem; }}
-.status-tested {{ background:#ebf8ff; color:#2b6cb0; }}
-.status-finding {{ background:#fed7d7; color:#c53030; }}
-.status-error {{ background:#fff5f5; color:#9b2c2c; }}
-.status-skipped {{ background:#edf2f7; color:#4a5568; }}
+.checklist-table {{ width:100%; border-collapse:collapse; font-size:.84rem; }}
+.checklist-table th {{ text-align:left; background:var(--panel); color:var(--muted); padding:8px 10px; border-bottom:1px solid var(--rule2); font-weight:500; text-transform:uppercase; letter-spacing:.04em; font-size:.72rem; }}
+.checklist-table td {{ padding:8px 10px; border-bottom:1px solid var(--rule); vertical-align:top; }}
+.status-pill {{ display:inline-block; padding:2px 8px; border-radius:999px; font-weight:600; font-size:.7rem; }}
+.status-tested {{ background:#e7e5fe; color:var(--accent); }}
+.status-finding {{ background:#f1d6dd; color:var(--s-crit); }}
+.status-error {{ background:#f7ede0; color:var(--s-high); }}
+.status-skipped {{ background:var(--rule); color:var(--ink2); }}
+
+/* 修正サマリ */
 .remediation-grid {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(260px,1fr)); gap:14px; }}
-.remediation-card {{ border:1px solid #e2e8f0; border-radius:10px; padding:16px; background:#f8fafc; }}
-.remediation-card.p0 {{ border-color:#feb2b2; background:#fff5f5; }}
-.remediation-card.p1 {{ border-color:#fbd38d; background:#fffaf0; }}
-.remediation-card.p2 {{ border-color:#bee3f8; background:#ebf8ff; }}
-.remediation-card.p3 {{ border-color:#c6f6d5; background:#f0fff4; }}
+.remediation-card {{ border:1px solid var(--rule); border-radius:8px; padding:16px; background:var(--panel); }}
+.remediation-card.p0 {{ border-color:#e0b6c0; background:#fbeef1; }}
+.remediation-card.p1 {{ border-color:#e6dcb2; background:#faf6e8; }}
+.remediation-card.p2 {{ border-color:var(--lav-br); background:var(--lav-bg); }}
+.remediation-card.p3 {{ border-color:#cfdcec; background:#eef3fb; }}
 .remediation-head {{ display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-bottom:8px; }}
-.priority-pill {{ color:white; background:#4a5568; border-radius:999px; padding:2px 9px; font-size:.72rem; font-weight:800; }}
-.priority-pill.p0 {{ background:#c53030; }} .priority-pill.p1 {{ background:#dd6b20; }} .priority-pill.p2 {{ background:#2b6cb0; }} .priority-pill.p3 {{ background:#2f855a; }}
-.remediation-title {{ font-weight:800; color:#1a202c; }}
+.priority-pill {{ color:#fff; background:var(--ink2); border-radius:999px; padding:2px 9px; font-size:.7rem; font-weight:600; }}
+.priority-pill.p0 {{ background:var(--s-crit); }} .priority-pill.p1 {{ background:var(--s-high); }} .priority-pill.p2 {{ background:var(--accent); }} .priority-pill.p3 {{ background:var(--s-low); }}
+.remediation-title {{ font-weight:600; color:var(--ink); }}
 .remediation-meta {{ display:flex; flex-wrap:wrap; gap:6px; margin:8px 0; }}
-.remediation-meta span {{ background:white; border:1px solid #e2e8f0; border-radius:999px; padding:2px 8px; font-size:.72rem; color:#4a5568; }}
-.remediation-evidence {{ font-size:.82rem; color:#4a5568; margin-top:8px; }}
-.remediation-related {{ margin-top:8px; font-size:.78rem; color:#718096; }}
-.review-list {{ margin-top:18px; border-top:1px solid #e2e8f0; padding-top:14px; }}
-.review-item {{ padding:10px 12px; border:1px dashed #cbd5e0; border-radius:8px; margin-top:8px; background:#fff; font-size:.85rem; }}
+.remediation-meta span {{ background:var(--sheet); border:1px solid var(--rule); border-radius:999px; padding:2px 8px; font-size:.72rem; color:var(--ink2); }}
+.remediation-evidence {{ font-size:.82rem; color:var(--ink2); margin-top:8px; }}
+.remediation-related {{ margin-top:8px; font-size:.78rem; color:var(--muted); }}
+.review-list {{ margin-top:18px; border-top:1px solid var(--rule); padding-top:14px; }}
+.review-item {{ padding:10px 12px; border:1px dashed var(--rule2); border-radius:8px; margin-top:8px; background:var(--sheet); font-size:.84rem; }}
+
 @media (max-width:640px) {{
-  .header {{ padding:32px 24px; }}
-  .header h1 {{ font-size:2rem; }}
-  .container {{ padding:24px 12px; }}
-  .section {{ padding:24px 16px; }}
-  .stats-grid {{ grid-template-columns:repeat(2,minmax(0,1fr)); gap:14px; }}
-  .stat-card {{ padding:22px 12px; }}
+  .header {{ padding:30px 22px 20px; }}
+  .header h1 {{ font-size:1.6rem; }}
+  .container {{ padding:24px 18px 32px; }}
+  .summary-grid {{ grid-template-columns:repeat(2,minmax(0,1fr)); gap:10px; }}
   .remediation-grid {{ grid-template-columns:1fr; }}
   .evidence-grid {{ grid-template-columns:1fr; }}
   .network-grid {{ grid-template-columns:1fr; }}
@@ -1852,18 +1888,19 @@ document.querySelectorAll('.plan-payloads-toggle').forEach(btn => {{
         return f"""<!DOCTYPE html>
 <html lang="ja"><head><meta charset="UTF-8">
 <title>Executive Report — {self._escape(target)}</title>
+<!-- self-contained（オフライン前提）: 外部フォントは読み込まない（Codex #159）。 -->
 <style>
-body{{font-family:'Segoe UI',system-ui,sans-serif;background:#f7f8fa;color:#1a202c;margin:0}}
-.hdr{{background:linear-gradient(135deg,#1a202c,#2d3748);color:#fff;padding:40px}}
-.hdr h1{{font-size:1.8rem;font-weight:700}} .hdr .sub{{color:#a0aec0;font-size:.9rem;margin-top:6px}}
-.container{{max-width:1000px;margin:0 auto;padding:32px 24px}}
-.grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:16px;margin-bottom:24px}}
-.exec-card{{background:#fff;border-radius:12px;padding:20px;box-shadow:0 1px 3px rgba(0,0,0,.1)}}
-.exec-count{{font-size:2.5rem;font-weight:800}} .exec-label{{font-size:.8rem;color:#718096;text-transform:uppercase;letter-spacing:.05em}}
-.critical{{color:#e53e3e}} .high{{color:#dd6b20}} .medium{{color:#d69e2e}} .low{{color:#38a169}}
-.section{{background:#fff;border-radius:12px;padding:24px;margin-bottom:24px;box-shadow:0 1px 3px rgba(0,0,0,.1)}}
-.section h2{{font-size:1.1rem;font-weight:700;margin-bottom:16px;border-bottom:2px solid #e2e8f0;padding-bottom:8px}}
-ul li{{margin:4px 0;font-size:.9rem}} .footer{{text-align:center;color:#a0aec0;font-size:.75rem;padding:24px}}
+body{{font-family:"Inter",system-ui,sans-serif;background:#161826;color:#292b31;margin:0;padding:26px 14px;-webkit-font-smoothing:antialiased}}
+.hdr{{max-width:1000px;margin:0 auto;background:#fff;border-radius:10px 10px 0 0;padding:38px 44px 22px;border-bottom:1px solid #e4e7f5;box-shadow:0 24px 60px rgba(0,0,0,.35);display:flex;flex-direction:column;gap:6px}}
+.hdr h1{{font-size:1.7rem;font-weight:500;color:#292b31;line-height:1.15}} .hdr .sub{{order:-1;color:#5d5294;font-size:.7rem;letter-spacing:.16em;text-transform:uppercase}}
+.container{{max-width:1000px;margin:0 auto;background:#fff;border-radius:0 0 10px 10px;padding:28px 44px 38px;box-shadow:0 24px 60px rgba(0,0,0,.35)}}
+.grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:24px}}
+.exec-card{{background:#f3f5fe;border:1px solid #e4e7f5;border-radius:8px;padding:16px}}
+.exec-count{{font-size:2.1rem;font-weight:500}} .exec-label{{font-size:.72rem;color:#595d6c;text-transform:uppercase;letter-spacing:.05em}}
+.critical{{color:#a3234a}} .high{{color:#8f4d15}} .medium{{color:#6f5c11}} .low{{color:#2b6076}}
+.section{{background:transparent;border-radius:0;padding:0;margin-bottom:26px;box-shadow:none}}
+.section h2{{font-size:1.1rem;font-weight:500;margin-bottom:14px;border-bottom:1px solid #e4e7f5;padding-bottom:8px;color:#292b31}}
+ul li{{margin:4px 0;font-size:.9rem}} .footer{{text-align:center;color:#75798c;font-size:.75rem;padding:22px}}
 </style></head><body>
 <div class="hdr">
   <h1>Executive Security Report</h1>
@@ -2000,34 +2037,35 @@ ul li{{margin:4px 0;font-size:.9rem}} .footer{{text-align:center;color:#a0aec0;f
         return f"""<!DOCTYPE html>
 <html lang="ja"><head><meta charset="UTF-8">
 <title>Developer Report — {self._escape(target)}</title>
+<!-- self-contained（オフライン前提）: 外部フォントは読み込まない（Codex #159）。 -->
 <style>
-body{{font-family:'Segoe UI',system-ui,sans-serif;background:#f7f8fa;color:#1a202c;margin:0}}
-.hdr{{background:#1a202c;color:#fff;padding:32px}} .hdr h1{{font-size:1.6rem;font-weight:700}}
-.hdr .sub{{color:#a0aec0;font-size:.85rem;margin-top:4px}}
-.container{{max-width:960px;margin:0 auto;padding:24px}}
-.finding-item{{background:#fff;border-radius:8px;margin-bottom:12px;box-shadow:0 1px 2px rgba(0,0,0,.08);overflow:hidden}}
-.finding-item-agent{{box-shadow:0 0 0 2px rgba(107,70,193,.16)}}
-.finding-item-agent .fi-header{{background:#faf5ff}}
-.fi-header{{padding:12px 16px;display:flex;align-items:center;gap:10px;flex-wrap:wrap;background:#f8fafc}}
+body{{font-family:"Inter",system-ui,sans-serif;background:#161826;color:#292b31;margin:0;padding:26px 14px;-webkit-font-smoothing:antialiased}}
+.hdr{{max-width:960px;margin:0 auto;background:#fff;border-radius:10px 10px 0 0;padding:30px 40px 20px;border-bottom:1px solid #e4e7f5;box-shadow:0 24px 60px rgba(0,0,0,.35);display:flex;flex-direction:column;gap:6px}} .hdr h1{{font-size:1.5rem;font-weight:500;color:#292b31}}
+.hdr .sub{{order:-1;color:#5d5294;font-size:.7rem;letter-spacing:.16em;text-transform:uppercase}}
+.container{{max-width:960px;margin:0 auto;background:#fff;border-radius:0 0 10px 10px;padding:24px 40px 34px;box-shadow:0 24px 60px rgba(0,0,0,.35)}}
+.finding-item{{border:1px solid #e4e7f5;border-radius:8px;margin-bottom:12px;overflow:hidden;background:#fff}}
+.finding-item-agent{{border-color:#eccfaf}}
+.finding-item-agent .fi-header{{background:#fdf6ee}}
+.fi-header{{padding:11px 14px;display:flex;align-items:center;gap:9px;flex-wrap:wrap;background:#f3f5fe;border-bottom:1px solid #e4e7f5}}
 .fi-header label{{display:flex;align-items:center;gap:8px;cursor:pointer;flex:1}}
-.fi-body{{padding:12px 16px;display:none}}
+.fi-body{{padding:12px 14px;display:none}}
 .fi-check:checked ~ label + * + .fi-body, input:checked ~ .fi-body {{ display:block }}
 .finding-item:has(.fi-check:checked) .fi-body{{display:block}}
-.sev-tag{{color:#fff;padding:2px 8px;border-radius:12px;font-size:.72rem;font-weight:700}}
-.conf-tag{{font-size:.75rem;color:#718096;margin-left:auto}}
-.fi-url{{font-size:.82rem;color:#718096;font-family:monospace;word-break:break-all;margin-bottom:6px}}
-.fi-evidence{{background:#fff8f0;border:1px solid #fbd38d;border-radius:4px;padding:8px;font-size:.85rem;margin-bottom:6px}}
-.fi-payload{{display:block;background:#1a202c;color:#68d391;padding:8px;border-radius:4px;font-size:.8rem;word-break:break-all;margin-bottom:6px;white-space:pre-wrap}}
-.fix-box{{background:#f0fff4;border:1px solid #9ae6b4;border-radius:4px;padding:10px;font-size:.85rem;margin-top:6px}}
-.refs{{font-size:.75rem;color:#4a5568;margin-top:4px}}
-.new-badge{{background:#276749;color:#f0fff4;padding:2px 6px;border-radius:8px;font-size:.7rem;font-weight:700}}
-.fixed-badge{{background:#2b6cb0;color:#ebf8ff;padding:2px 6px;border-radius:8px;font-size:.7rem;font-weight:700}}
-.badge-agent{{background:#6b46c1;color:#faf5ff;padding:2px 8px;border-radius:10px;font-size:.72rem;font-weight:700}}
-.badge-agent-verified{{background:#276749;color:#f0fff4;padding:2px 8px;border-radius:10px;font-size:.72rem;font-weight:700}}
-.badge-confirmed{{background:#276749;color:#f0fff4;padding:2px 8px;border-radius:10px;font-size:.72rem;font-weight:700}}
-.badge-unconfirmed{{background:#d97706;color:#fff;padding:2px 8px;border-radius:10px;font-size:.72rem;font-weight:700}}
-.badge-assumed{{background:#854d0e;color:#fef9c3;padding:2px 8px;border-radius:10px;font-size:.72rem;font-weight:700}}
-.diff-bar{{background:#ebf8ff;border:1px solid #bee3f8;border-radius:8px;padding:10px 16px;margin-bottom:16px;font-size:.9rem}}
+.sev-tag{{color:#fff;padding:2px 8px;border-radius:5px;font-size:.72rem;font-weight:600}}
+.conf-tag{{font-size:.75rem;color:#595d6c;margin-left:auto;font-family:"JetBrains Mono",monospace}}
+.fi-url{{font-size:.82rem;color:#3f424d;font-family:"JetBrains Mono",monospace;word-break:break-all;margin-bottom:6px}}
+.fi-evidence{{background:#f5f4ff;border:1px solid #d2cefd;border-radius:5px;padding:8px 10px;font-size:.85rem;margin-bottom:6px;color:#292b31}}
+.fi-payload{{display:block;background:#12141f;color:#b5abfc;padding:8px 10px;border-radius:5px;font-size:.8rem;word-break:break-all;margin-bottom:6px;white-space:pre-wrap;font-family:"JetBrains Mono",monospace}}
+.fix-box{{background:#f5f4ff;border:1px solid #d2cefd;border-radius:5px;padding:10px;font-size:.85rem;margin-top:6px;color:#292b31}}
+.refs{{font-size:.75rem;color:#595d6c;margin-top:4px}}
+.new-badge{{background:#e4e7f5;color:#2b6076;padding:2px 6px;border-radius:5px;font-size:.7rem;font-weight:600}}
+.fixed-badge{{background:#e7e5fe;color:#5d5294;padding:2px 6px;border-radius:5px;font-size:.7rem;font-weight:600}}
+.badge-agent{{background:#fbeee1;color:#8f4d15;padding:2px 8px;border-radius:5px;font-size:.72rem;font-weight:600}}
+.badge-agent-verified{{background:#e4e7f5;color:#3f424d;padding:2px 8px;border-radius:5px;font-size:.72rem;font-weight:600}}
+.badge-confirmed{{background:#e4e7f5;color:#3f424d;padding:2px 8px;border-radius:5px;font-size:.72rem;font-weight:600}}
+.badge-unconfirmed{{background:#f7f1da;color:#6f5c11;padding:2px 8px;border-radius:5px;font-size:.72rem;font-weight:600}}
+.badge-assumed{{background:#f7f1da;color:#6f5c11;padding:2px 8px;border-radius:5px;font-size:.72rem;font-weight:600}}
+.diff-bar{{background:#f5f4ff;border:1px solid #d2cefd;border-radius:8px;padding:10px 16px;margin-bottom:16px;font-size:.9rem;color:#292b31}}
 .footer{{text-align:center;color:#a0aec0;font-size:.75rem;padding:20px}}
 </style></head><body>
 <div class="hdr">
