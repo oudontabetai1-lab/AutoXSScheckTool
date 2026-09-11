@@ -164,6 +164,15 @@ class SecurityHeadersScanner(BaseScanner):
         # 脆弱ケースで、まさに本 scanner が報告すべき対象・Codex #142 P1）。
         headers = {k.lower(): v for k, v in response.get("headers", {}).items()}
 
+        # CSP/HSTS/XFO 等の document セキュリティヘッダは **HTML document** に対して意味を持つ。
+        # crawl が nav アンカー等で拾った raw asset（.js/.css/.json/画像）を監査すると、これらを
+        # 持たない当然の非 document 応答を「未設定」と誤報する FP になる（clickjacking と同じガード・
+        # Codex #147 P2）。content-type が **明示的に非 HTML** のときだけ skip し、欠落時は従来どおり
+        # 監査して FN を作らない。
+        ctype = (headers.get("content-type", "") or "").lower()
+        if ctype and "html" not in ctype:
+            return []
+
         findings = []
         for header, description, severity, recommendation in _HEADER_CHECKS:
             if header not in headers:

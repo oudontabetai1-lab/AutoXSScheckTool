@@ -523,6 +523,28 @@ class SecurityHeadersFetchEvidenceTests(unittest.IsolatedAsyncioTestCase):
             engine.wave_errors,
         )
 
+    async def test_non_html_asset_is_skipped(self):
+        # 明示的な非 HTML（JS バンドル等）は document セキュリティヘッダ監査の対象外＝FP を出さない
+        # （clickjacking と同じガード・Codex #147）。
+        engine, scanner = self._scanner()
+
+        async def _js(url):
+            return {"request": {"url": url},
+                    "response": {"status": 200,
+                                 "headers": {"Content-Type": "application/javascript"}}}
+
+        scanner._response_pair = _js
+        recorded = []
+
+        async def _rec(**kw):
+            recorded.append(kw)
+            return object()
+
+        scanner.record_finding = _rec
+        out = await scanner.scan_page("http://x/static/vendor.js")
+        self.assertEqual(out, [])
+        self.assertFalse(recorded, "non-HTML asset must not produce missing-header findings")
+
 
 class FollowableRedirectTests(unittest.IsolatedAsyncioTestCase):
     """_get の redirect 追従判定（Codex #145 P1）。same-host のみ・http→https upgrade は許可。"""
