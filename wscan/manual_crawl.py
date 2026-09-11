@@ -31,6 +31,9 @@ class ManualCrawlSeed:
     cookies: list[dict] = field(default_factory=list)
     forms_by_url: dict[str, list[dict]] = field(default_factory=dict)
     steps: list[dict] = field(default_factory=list)
+    # 起動時リダイレクト（http→https 等・同一ホスト）後の実効 start origin。engine が
+    # scope（access/target）へ反映して、scheme 差で seed が全滅するのを防ぐ（Codex #153）。
+    effective_origin: str = ""
 
 
 def _origin_tuple(u: str):
@@ -151,6 +154,10 @@ def load_manual_crawl_seed(
         cookies=data.get("cookies") or [],
         forms_by_url=data.get("forms_by_url") or {},
         steps=data.get("steps") or [],
+        # caller と scheme だけ違う（同一ホスト）実効 origin を engine へ伝える。
+        effective_origin=(
+            effective_origin if effective_origin and effective_origin != same_origin_as else ""
+        ),
     )
 
 

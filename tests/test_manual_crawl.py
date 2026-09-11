@@ -98,6 +98,8 @@ class ManualCrawlSeedTests(unittest.TestCase):
             path.write_text(json.dumps(data), encoding="utf-8")
             seed = load_manual_crawl_seed(str(path), "http://example.test/")
         self.assertIn("https://example.test/app", seed.urls)
+        # 実効 origin（https・同一ホスト）を engine スコープ反映用に返す（Codex #153）。
+        self.assertEqual(seed.effective_origin, "https://example.test/")
 
     def test_load_does_not_promote_cross_host_saved_origin(self):
         # 保存 start_url が別ホストでも、caller の same_origin_as（別ホスト）へは昇格しない。
@@ -111,6 +113,33 @@ class ManualCrawlSeedTests(unittest.TestCase):
             seed = load_manual_crawl_seed(str(path), "http://example.test/")
         self.assertIn("http://example.test/ok", seed.urls)
         self.assertNotIn("https://sso.evil.test/cb", seed.urls)
+        # 別ホストの保存 origin は昇格しない＝effective_origin も空（engine スコープを広げない）。
+        self.assertEqual(seed.effective_origin, "")
+
+    def test_effective_origin_empty_when_no_redirect(self):
+        # target と scheme が同じ（リダイレクト無し）なら effective_origin は空。
+        data = {"start_url": "http://example.test/", "seed_urls": ["http://example.test/a"]}
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "manual.json"
+            path.write_text(json.dumps(data), encoding="utf-8")
+            seed = load_manual_crawl_seed(str(path), "http://example.test/")
+        self.assertEqual(seed.effective_origin, "")
+
+    def test_redirect_scope_to_add_pure(self):
+        # 同一ホスト・scheme 差なら追加 origin を返し、別ホスト/scheme 一致なら空（engine スコープ判定）。
+        from wscan.engine import _redirect_scope_to_add
+        self.assertEqual(
+            _redirect_scope_to_add("https://example.test/", "http://example.test/"),
+            "https://example.test")
+        # ポート付きも netloc を保持。
+        self.assertEqual(
+            _redirect_scope_to_add("https://example.test:8443/app", "http://example.test/"),
+            "https://example.test:8443")
+        # 別ホストは広げない。
+        self.assertEqual(_redirect_scope_to_add("https://evil.test/", "http://example.test/"), "")
+        # scheme 一致（リダイレクト無し）は空。
+        self.assertEqual(_redirect_scope_to_add("http://example.test/", "http://example.test/"), "")
+        self.assertEqual(_redirect_scope_to_add("", "http://example.test/"), "")
 
     def test_load_manual_crawl_seed_normalizes_same_origin_urls(self):
         data = {
