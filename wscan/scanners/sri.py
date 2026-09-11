@@ -207,15 +207,21 @@ class SRIScanner(BaseScanner):
         if self.monitor:
             await self.monitor.emit_status(f"SRI audit on {url}")
 
-        pair = self.current_page_pair(url)
-        body = pair.get("response", {}).get("body", "") or ""
-        if not body:
-            try:
-                body = await self.browser.page.content()
-            except Exception:
-                body = ""
+        # 対象ページの HTML は直接 GET で確実に取得する。current_page_pair は latest() フォールバックで
+        # 別リクエストの pair を返し body が欠落しうるため、外部 script/link を取りこぼして FN になる
+        # （0034 benchmark で /portal/insights の外部 CDN script を検出できなかった原因）。
+        # content 観測系は _document_body で本文を得る（非 2xx 本文も保持、transient/完全失敗のみ
+        # PageDocumentUnavailable）。live DOM へはフォールバックしない（attack フェーズの browser.page は
+        # 別 URL のタブになり得て wrong-page FP/FN を招くため・Codex #147 P2）。取得は header 監査と
+        # per-URL raw キャッシュを共有し 1 ページ 1 replay を保つ。
+        # SRI は「ブラウザが描画する HTML document」を監査する。status ではなく content-type で判定し、
+        # 外部 script を読み込む custom 401/404 HTML も対象にする（status だけでは本文が描画されない
+        # とは限らない・Codex #147）。HTML 以外（JSON API error・生 asset）は NOT_REACHED で誤検知回避。
+        body = await self._document_body(url, allow_non_2xx=False, html_only=True)
         if not body:
             return []
+        # record_finding の証拠用の最小 pair（本文は body 変数で保持済み）。
+        pair = {"request": {"url": url, "method": "GET"}, "response": {"url": url}}
 
         findings: list[Finding] = []
         for hit in find_unprotected_externals(body, url):

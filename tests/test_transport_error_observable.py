@@ -6,6 +6,7 @@
 落ちても「完全なスキャン」と誤表示してしまう（Codex #101 P1）。修正後は XSS と同様に
 ``transport_error:<check>`` を ``wave_errors`` へ記録する（挙動は不変）。
 """
+import asyncio
 import unittest
 
 import pytest
@@ -522,6 +523,28 @@ class SecurityHeadersFetchEvidenceTests(unittest.IsolatedAsyncioTestCase):
             engine.wave_errors,
         )
 
+    async def test_non_html_asset_is_skipped(self):
+        # 明示的な非 HTML（JS バンドル等）は document セキュリティヘッダ監査の対象外＝FP を出さない
+        # （clickjacking と同じガード・Codex #147）。
+        engine, scanner = self._scanner()
+
+        async def _js(url):
+            return {"request": {"url": url},
+                    "response": {"status": 200,
+                                 "headers": {"Content-Type": "application/javascript"}}}
+
+        scanner._response_pair = _js
+        recorded = []
+
+        async def _rec(**kw):
+            recorded.append(kw)
+            return object()
+
+        scanner.record_finding = _rec
+        out = await scanner.scan_page("http://x/static/vendor.js")
+        self.assertEqual(out, [])
+        self.assertFalse(recorded, "non-HTML asset must not produce missing-header findings")
+
 
 class FollowableRedirectTests(unittest.IsolatedAsyncioTestCase):
     """_get の redirect 追従判定（Codex #145 P1）。same-host のみ・http→https upgrade は許可。"""
@@ -706,6 +729,303 @@ class ResponsePairDocumentGuardTests(unittest.IsolatedAsyncioTestCase):
         await cj._response_pair("http://app.test/other")
         self.assertEqual(len(ctx.calls), 2)
 
+    async def test_get_recovers_body_via_safe_decode_on_non_utf8(self):
+        # response.text() が非 UTF-8 で失敗しても body() バイト列を safe_decode して本文を保つ
+        # （SRI/secret_leak が非 UTF-8 バンドルを見逃す FN 防止・Codex #147 P2）。
+        leaked = "AKIA3SVBQ4XZ7KLMN2PQ"
+        raw = ('<script>var k="' + leaked + '";</script>').encode("utf-8") + b"\xff\xfe"
+        resp = _FakeAPIResponse(200, {"Content-Type": "text/html"}, text_raises=True, body_bytes=raw)
+        engine, scanner = self._scanner(resp)
+        out = await scanner._get("http://app.test/bundle.js")
+        self.assertIn(leaked, out.text)
+        # content scanner（secret_leak）が実際に検出できる。
+        engine2 = _FakeEngine()
+        engine2.browser = _APIBrowser(_FakeRequestCtx(
+            _FakeAPIResponse(200, {"Content-Type": "text/html"}, text_raises=True, body_bytes=raw)
+        ))
+        sl = SCANNERS["secret_leak"](engine2)
+
+        async def _rec(**kw):
+            return object()
+
+        sl.record_finding = _rec
+        findings = await sl.scan_page("http://app.test/bundle.js")
+        self.assertEqual(len(findings), 1)
+
+    async def test_clickjacking_skips_non_html_content_type(self):
+        # framing 保護は HTML document のみ対象。raw asset（.js 等・非 HTML content-type）は監査せず
+        # []（XFO/CSP 欠落を「未保護」と誤報しない・Codex #147 P2）。
+        engine, scanner = self._scanner(
+            _FakeAPIResponse(200, {"Content-Type": "text/plain; charset=utf-8"})
+        )
+        self.assertEqual(await scanner.scan_page("http://app.test/static/vendor.js"), [])
+
+    async def _audits(self, headers):
+        # record_finding をスタブし「guard を通過して監査（record_finding 到達）」を検証する
+        # （fake browser で record_finding 全体を回さずに済ませる）。
+        engine, scanner = self._scanner(_FakeAPIResponse(200, headers))
+        called = {"n": 0}
+
+        async def _rec(**kw):
+            called["n"] += 1
+            return object()
+
+        scanner.record_finding = _rec
+        out = await scanner.scan_page("http://app.test/page")
+        return called["n"], out
+
+    async def test_clickjacking_audits_html_without_protection(self):
+        # HTML document で framing 保護が無ければ従来どおり監査（content-type ガードの FN 非導入確認）。
+        n, out = await self._audits({"Content-Type": "text/html"})
+        self.assertEqual(n, 1)
+        self.assertEqual(len(out), 1)
+
+    async def test_clickjacking_audits_when_content_type_absent(self):
+        # content-type 欠落時は従来どおり監査（欠落で skip すると FN になるため）。
+        n, out = await self._audits({})
+        self.assertEqual(n, 1)
+        self.assertEqual(len(out), 1)
+
+    async def test_js_content_scanners_no_body_returns_empty(self):
+        # 本文が無ければ [] を返し live DOM へフォールバックしない（wrong-page FP/FN 防止・Codex #147 P2）。
+        for check in ("sri", "secret_leak"):
+            with self.subTest(check=check):
+                engine = _FakeEngine()
+                engine.browser = _APIBrowser(_FakeRequestCtx(_FakeAPIResponse(200, {}, text="")))
+                scanner = SCANNERS[check](engine)
+                self.assertEqual(await scanner.scan_page("http://app.test/x"), [])
+
+    async def test_transient_empty_body_raises_for_resume(self):
+        # 本文が無い transient(503) は走査対象が無いので PageDocumentUnavailable→resume（sri/secret_leak とも）。
+        for check in ("sri", "secret_leak"):
+            with self.subTest(check=check):
+                engine = _FakeEngine()
+                engine.browser = _APIBrowser(_FakeRequestCtx(_FakeAPIResponse(503, {}, text="")))
+                scanner = SCANNERS[check](engine)
+                with self.assertRaises(PageDocumentUnavailable):
+                    await scanner.scan_page("http://app.test/x")
+
+    async def test_sri_audits_transient_html_body(self):
+        # 5xx/429 でもブラウザは HTML を描画し integrity 無しの外部 script を読み込むため、
+        # 監査可能な HTML 本文があれば監査する（恒久失敗 endpoint を毎回 resume で再試行する
+        # だけで一度も監査しない問題を解消・Codex #147）。
+        html = ('<html><head><script src="https://cdn.jsdelivr.net/npm/jquery@3.6.0/x.js">'
+                '</script></head></html>')
+        engine = _FakeEngine()
+        engine.browser = _APIBrowser(_FakeRequestCtx(
+            _FakeAPIResponse(503, {"Content-Type": "text/html"}, text=html)))
+        scanner = SCANNERS["sri"](engine)
+
+        async def _rec(**kw):
+            return object()
+        scanner.record_finding = _rec
+        out = await scanner.scan_page("http://app.test/x")
+        self.assertEqual(len(out), 1)  # raise せず監査して finding 化
+
+    async def test_sri_raises_on_transient_non_html_body(self):
+        # transient の非 HTML（JSON API error 等）は SRI 監査対象でないので resume へ回す。
+        engine = _FakeEngine()
+        engine.browser = _APIBrowser(_FakeRequestCtx(
+            _FakeAPIResponse(503, {"Content-Type": "application/json"}, text='{"e":"x"}')))
+        scanner = SCANNERS["sri"](engine)
+        with self.assertRaises(PageDocumentUnavailable):
+            await scanner.scan_page("http://app.test/x")
+
+    async def test_secret_leak_scans_non_2xx_error_body(self):
+        # 400/401/403/404（恒久）に加え 500（transient）の error 本文に漏れた秘密も走査する
+        # （500 スタックトレース等の漏えいを取りこぼさない・Codex #147 Comment）。
+        leaked = "AKIA3SVBQ4XZ7KLMN2PQ"  # AWS Access Key ID 形式（AKIA+16、EXAMPLE 等を含まない）
+        for status in (400, 401, 403, 404, 500):
+            with self.subTest(status=status):
+                engine = _FakeEngine()
+                body = f'{{"error":"unauthorized","debug_key":"{leaked}"}}'
+                engine.browser = _APIBrowser(_FakeRequestCtx(_FakeAPIResponse(status, {}, text=body)))
+                scanner = SCANNERS["secret_leak"](engine)
+
+                async def _rec(**kw):
+                    return object()
+
+                scanner.record_finding = _rec
+                out = await scanner.scan_page("http://app.test/api")
+                self.assertEqual(len(out), 1, f"status={status}: secret in error body not detected")
+
+    async def test_body_unavailable_raises_not_empty(self):
+        # text() も body() も失敗した場合、空本文と取り違えず PageDocumentUnavailable を投げる。
+        for check in ("sri", "secret_leak"):
+            with self.subTest(check=check):
+                engine = _FakeEngine()
+                resp = _FakeAPIResponse(200, {}, text_raises=True, body_bytes=None)
+                # body() も失敗させる。
+                async def _boom():
+                    raise RuntimeError("body failed")
+                resp.body = _boom
+                engine.browser = _APIBrowser(_FakeRequestCtx(resp))
+                scanner = SCANNERS[check](engine)
+                with self.assertRaises(PageDocumentUnavailable):
+                    await scanner.scan_page("http://app.test/x")
+
+    async def test_capture_fallback_missing_body_raises(self):
+        # direct GET 失敗→capture fallback で、captured response に body キーが無い（本文読取失敗）とき、
+        # 空本文と取り違えず body_unavailable を伝播して PageDocumentUnavailable を投げる（Codex #147）。
+        for check in ("sri", "secret_leak"):
+            with self.subTest(check=check):
+                engine = _FakeEngine()
+                scanner = SCANNERS[check](engine)
+
+                async def _boom_get(u):
+                    raise RuntimeError("direct GET failed")
+                # capture fallback: status/headers はあるが body キーが無い（読めなかった）。
+                scanner._get = _boom_get
+                scanner.current_page_pair = lambda u: {
+                    "request": {"url": u},
+                    "response": {"status": 200, "headers": {"content-type": "text/html"}, "url": u},
+                }
+                with self.assertRaises(PageDocumentUnavailable):
+                    await scanner.scan_page("http://app.test/x")
+
+    async def test_header_only_scanner_not_degraded_by_body_failure(self):
+        # 本文読取失敗(body_unavailable)でも、header 監査(clickjacking)はヘッダで完了できる。
+        # body 失敗を clickjacking 名義の transport_error にして degraded 扱いしない（Codex #147 4巡目）。
+        engine = _FakeEngine()
+        resp = _FakeAPIResponse(200, {"content-type": "text/html"}, text_raises=True, body_bytes=None)
+
+        async def _boom():
+            raise RuntimeError("body failed")
+        resp.body = _boom
+        engine.browser = _APIBrowser(_FakeRequestCtx(resp))
+        scanner = SCANNERS["clickjacking"](engine)
+
+        async def _rec(**kw):
+            return object()
+
+        scanner.record_finding = _rec
+        await scanner.scan_page("http://app.test/x")  # ヘッダで監査完了（例外なし）
+        self.assertEqual(
+            [e for e in engine.wave_errors if "body" in e],
+            [],
+            engine.wave_errors,
+        )
+
+    async def test_permanent_non_2xx_does_not_record_transport_error(self):
+        # 恒久非 2xx（404 等）は content scanner が本文走査するため transport_error を刻まない
+        # （degraded_checks が無関係な safe case を NOT_REACHED 化しない・Codex #147 P2 Comment3）。
+        for check in ("sri", "secret_leak"):
+            with self.subTest(check=check):
+                engine = _FakeEngine()
+                engine.browser = _APIBrowser(_FakeRequestCtx(_FakeAPIResponse(404, {}, text="<html>ok</html>")))
+                scanner = SCANNERS[check](engine)
+                await scanner.scan_page("http://app.test/missing")
+                self.assertEqual(
+                    [e for e in engine.wave_errors if e.startswith(f"transport_error:{check}")],
+                    [],
+                    engine.wave_errors,
+                )
+
+    async def test_sri_audits_non_2xx_html_document(self):
+        # ブラウザが描画する custom 401/404 HTML（外部 script を読み込む）は SRI 監査対象
+        # （status だけでは本文が描画されないとは限らない・Codex #147 4巡目）。
+        html = '<html><head><script src="https://cdn.example.com/lib.js"></script></head></html>'
+        for status in (401, 404):
+            with self.subTest(status=status):
+                engine = _FakeEngine()
+                engine.browser = _APIBrowser(_FakeRequestCtx(
+                    _FakeAPIResponse(status, {"content-type": "text/html"}, text=html)))
+                scanner = SCANNERS["sri"](engine)
+                recorded = []
+
+                async def _rec(**kw):
+                    recorded.append(kw)
+                    return object()
+
+                scanner.record_finding = _rec
+                out = await scanner.scan_page("http://app.test/missing")
+                self.assertEqual(len(out), 1)
+
+    async def test_sri_audits_2xx_without_content_type_or_html_tag(self):
+        # Content-Type 欠落の 2xx document は <html> タグが無く（前置き先行でも）HTML とみなし監査する
+        # （省略/遅延した <html> で実在の未保護 script を取りこぼさない・Codex #147）。
+        body = ('\n\n<!-- long preamble ... -->\n'
+                '<script src="https://cdn.example.com/lib.js"></script>')
+        engine = _FakeEngine()
+        engine.browser = _APIBrowser(_FakeRequestCtx(_FakeAPIResponse(200, {}, text=body)))
+        scanner = SCANNERS["sri"](engine)
+        recorded = []
+
+        async def _rec(**kw):
+            recorded.append(kw)
+            return object()
+
+        scanner.record_finding = _rec
+        out = await scanner.scan_page("http://app.test/page")
+        self.assertEqual(len(out), 1)
+
+    async def test_sri_ignores_non_html_non_2xx(self):
+        # 非 HTML（JSON API error 等）の非 2xx は NOT_REACHED（誤検知回避）。
+        engine = _FakeEngine()
+        engine.browser = _APIBrowser(_FakeRequestCtx(
+            _FakeAPIResponse(404, {"content-type": "application/json"},
+                             text='{"error":"not found","cdn":"https://cdn.example.com/lib.js"}')))
+        scanner = SCANNERS["sri"](engine)
+
+        async def _rec(**kw):
+            return object()
+
+        scanner.record_finding = _rec
+        self.assertEqual(await scanner.scan_page("http://app.test/api"), [])
+
+    async def test_sri_audits_2xx_document(self):
+        # 2xx の描画 document では従来どおり外部 script を監査（FN 非導入確認）。
+        html = '<html><head><script src="https://cdn.example.com/lib.js"></script></head></html>'
+        engine = _FakeEngine()
+        engine.browser = _APIBrowser(_FakeRequestCtx(_FakeAPIResponse(200, {}, text=html)))
+        scanner = SCANNERS["sri"](engine)
+        recorded = []
+
+        async def _rec(**kw):
+            recorded.append(kw)
+            return object()
+
+        scanner.record_finding = _rec
+        out = await scanner.scan_page("http://app.test/page")
+        self.assertEqual(len(out), 1)
+        self.assertEqual(recorded[0]["evidence_type"], "sri_missing")
+
+    async def test_secret_leak_still_scans_non_2xx_body_after_2xx_gate(self):
+        # allow_non_2xx=True の secret_leak は 404 本文の秘密を引き続き走査する（sri の 2xx 限定と両立）。
+        leaked = "AKIA3SVBQ4XZ7KLMN2PQ"
+        engine = _FakeEngine()
+        body = f'{{"error":"not found","debug_key":"{leaked}"}}'
+        engine.browser = _APIBrowser(_FakeRequestCtx(_FakeAPIResponse(404, {}, text=body)))
+        scanner = SCANNERS["secret_leak"](engine)
+
+        async def _rec(**kw):
+            return object()
+
+        scanner.record_finding = _rec
+        out = await scanner.scan_page("http://app.test/api")
+        self.assertEqual(len(out), 1)
+
+    async def test_raw_document_shared_in_flight_single_get(self):
+        # 並列に同一 URL を要求しても直接 GET(_compute)は 1 回だけ（in-flight 共有・Codex #147）。
+        engine = _FakeEngine()
+        engine.browser = _APIBrowser(_FakeRequestCtx(_FakeAPIResponse(200, {"X-Frame-Options": "DENY"})))
+        cj = SCANNERS["clickjacking"](engine)
+        sh = SCANNERS["security_headers"](engine)
+        calls = {"n": 0}
+
+        async def _slow_compute(u):
+            calls["n"] += 1
+            await asyncio.sleep(0.01)  # in-flight 中に他コルーチンへ制御を渡す
+            return {"status": 200, "headers": {"x-frame-options": "DENY"}, "body": "", "url": u}
+
+        cj._compute_raw_document = _slow_compute
+        sh._compute_raw_document = _slow_compute
+        url = "http://app.test/logout"
+        p1, p2 = await asyncio.gather(cj._response_pair(url), sh._response_pair(url))
+        self.assertEqual(calls["n"], 1)  # 二重 GET しない
+        self.assertEqual(p1, p2)
+        self.assertEqual(p1["response"].get("status"), 200)
+
 
 class CurrentPagePairWorkerAwareTests(unittest.TestCase):
     """current_page_pair は __init__ 捕捉の self.browser でなく worker-aware な
@@ -738,15 +1058,22 @@ class CurrentPagePairWorkerAwareTests(unittest.TestCase):
 class _FakeAPIResponse:
     """Playwright APIResponse の最小ダブル（status/headers/text/url + dispose 記録）。"""
 
-    def __init__(self, status, headers=None, text="<html>"):
+    def __init__(self, status, headers=None, text="<html>", body_bytes=None, text_raises=False):
         self.status = status
         self.headers = {k.lower(): v for k, v in (headers or {}).items()}
         self._text = text
+        self._body = body_bytes
+        self._text_raises = text_raises
         self.url = ""
         self.disposed = 0
 
     async def text(self):
+        if self._text_raises:
+            raise UnicodeDecodeError("utf-8", b"", 0, 1, "invalid")
         return self._text
+
+    async def body(self):
+        return self._body if self._body is not None else self._text.encode("utf-8", "replace")
 
     async def dispose(self):
         self.disposed += 1

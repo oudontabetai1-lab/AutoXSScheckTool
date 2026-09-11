@@ -118,6 +118,15 @@ class ClickjackingScanner(BaseScanner):
             return []
         headers = {k.lower(): v for k, v in response.get("headers", {}).items()}
 
+        # framing 保護（XFO/CSP frame-ancestors）は **HTML document** にのみ意味を持つ。
+        # crawl が拾った raw asset（.js/.css/.json/画像等）を clickjacking 監査すると、XFO/CSP を
+        # 持たない当然の非 document 応答を「未保護」と誤報する FP になる（Codex #147 P2。JS を
+        # nav アンカーやサブリソースで拾うと発生）。content-type が **明示的に非 HTML** のときだけ
+        # skip し、欠落時は従来どおり監査して FN を作らない。
+        ctype = (headers.get("content-type", "") or "").lower()
+        if ctype and "html" not in ctype:
+            return []
+
         xfo = headers.get("x-frame-options", "").upper().strip()
         csp = headers.get("content-security-policy", "").lower()
 

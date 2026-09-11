@@ -312,19 +312,18 @@ class SecretLeakScanner(BaseScanner):
         if self.monitor:
             await self.monitor.emit_status(f"Secret-leak check on {url}")
 
-        pair = self.current_page_pair(url)
-        body = pair.get("response", {}).get("body", "") or ""
-
-        # Fall back to live DOM if the captured response body is empty (e.g.
-        # SPA where the served HTML is a shell and content is JS-rendered).
-        if not body:
-            try:
-                body = await self.browser.page.content()
-            except Exception:
-                body = ""
-
+        # 対象リソースの本文は直接 GET で確実に取得する。current_page_pair は latest() フォールバックで
+        # 別リクエストの pair を返し body が欠落しうるため、JS アセット等の本文を取りこぼして FN になる
+        # （0034 benchmark で /static/vendor.js の埋め込み秘密を検出できなかった原因）。
+        # content 観測系は _document_body で本文を得る。secret_leak は 401/403/404/500 等の error/auth
+        # 応答本文に漏れた秘密も走査する必要があるため、恒久非 2xx でも**本文を保持**する（transport_error も
+        # 刻まない・Codex #147 P2）。transient/完全失敗のみ PageDocumentUnavailable（resume 再試行）。
+        # live DOM へはフォールバックしない（wrong-page FP/FN 防止）。header 監査と per-URL raw キャッシュ共有。
+        body = await self._document_body(url)
         if not body:
             return []
+        # record_finding の証拠用の最小 pair（本文は body 変数で保持済み）。
+        pair = {"request": {"url": url, "method": "GET"}, "response": {"url": url}}
 
         findings: list[Finding] = []
         for hit in scan_text_for_secrets(body):
