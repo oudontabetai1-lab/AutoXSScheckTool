@@ -254,6 +254,24 @@ def _cookie_path_matches(request_path: str, cookie_path: str) -> bool:
     # 境界が "/" であること（/admin が /administrator に誤マッチしないように）
     return cp.endswith("/") or req[len(cp):len(cp) + 1] == "/"
 
+
+def _redirect_scope_to_add(effective_origin: str, target_url: str) -> str:
+    """手動巡回の実効 origin が target と **scheme だけ違う同一ホスト**なら、access スコープへ
+    加えるべき origin（``scheme://netloc``）を返す（純粋・Codex #153）。該当しなければ ""。
+
+    別ホストや scheme 一致（リダイレクト無し）では "" を返し、スコープを不用意に広げない。
+    """
+    if not effective_origin:
+        return ""
+    from urllib.parse import urlparse as _up
+    ep, tp = _up(effective_origin), _up(target_url or "")
+    if (ep.hostname and tp.hostname
+            and ep.hostname.lower() == tp.hostname.lower()
+            and ep.scheme and ep.scheme != tp.scheme):
+        return f"{ep.scheme}://{ep.netloc}"
+    return ""
+
+
 import yaml
 from rich.console import Console
 from rich.rule import Rule
@@ -2990,6 +3008,15 @@ class ScanEngine:
                     f"  [dim cyan][Manual Crawl][/dim cyan] {len(manual_seed.urls)} URL, "
                     f"{len(manual_seed.cookies)} Cookie を読み込みました: {self.manual_crawl_path}"
                 )
+                # 起動時 http→https リダイレクト等で実効 origin が target と scheme だけ違う
+                # （同一ホスト）場合、その origin を access スコープへ加える。これをしないと
+                # load_manual_crawl_seed が https へ正規化した seed を _is_access_allowed_url
+                # （http 由来の scope）が全て弾き、手動巡回が丸ごと無効化される（Codex #153）。
+                _eff_scope = _redirect_scope_to_add(
+                    manual_seed.effective_origin, self.target_url
+                )
+                if _eff_scope and _eff_scope not in self.access_urls:
+                    self.access_urls.append(_eff_scope)
                 for _murl in manual_seed.urls:
                     if (
                         _murl not in self.visited_urls

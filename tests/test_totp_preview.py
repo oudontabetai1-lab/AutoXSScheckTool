@@ -83,6 +83,40 @@ def test_manual_selection_validates_coordinates_and_returns_selector():
     session.select_mfa_field.assert_awaited_once_with(.25, .5)
 
 
+def test_manual_fill_totp_uses_explicit_or_last_selector():
+    server = MonitorServer(port=0)
+    session = Mock()
+    session.last_mfa_selector = "#recent"
+    session.fill_totp = AsyncMock(return_value={"ok": True, "filled": True, "digits": 6})
+    server.manual_crawl_session = session
+    with TestClient(server.app) as client:
+        response = client.post("/api/v1/manual-crawl/fill-totp", json={})
+    assert response.json() == {"ok": True, "filled": True, "digits": 6}
+    session.fill_totp.assert_awaited_once_with("#recent")
+
+
+def test_manual_crawl_start_passes_totp_without_echoing_secret(monkeypatch):
+    created = Mock()
+    created.running = False
+    created.start = AsyncMock(return_value={"running": True, "streaming": True})
+    monkeypatch.setattr("wscan.manual_crawl.ManualCrawlSession", lambda: created)
+    server = MonitorServer(port=0)
+    server.emit = AsyncMock()
+    with TestClient(server.app) as client:
+        response = client.post("/api/v1/manual-crawl/start", json={
+            "url": "http://127.0.0.1/", "stream": True,
+            "totp_secret": SECRET, "totp_digits": 8, "totp_period": 45,
+            "totp_algorithm": "SHA256",
+        })
+    assert response.status_code == 200
+    assert SECRET not in response.text
+    kwargs = created.start.await_args.kwargs
+    assert kwargs["totp_secret"] == SECRET
+    assert kwargs["totp_digits"] == 8
+    assert kwargs["totp_period"] == 45
+    assert kwargs["totp_algorithm"] == "SHA256"
+
+
 def test_scan_cli_mfa_selector(monkeypatch):
     import main
     monkeypatch.setattr(sys, "argv", ["main.py", "scan", "http://127.0.0.1", "--mfa-selector", "#code"])
