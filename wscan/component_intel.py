@@ -459,7 +459,11 @@ async def fetch_product_cycles(
         data = resp.json()
     except Exception as exc:
         raise ComponentIntelUnavailable(f"eol:{slug}:bad_json") from exc
-    return data if isinstance(data, list) else None
+    # 200 だが cycle リストでない（誤設定の self-host EOL / proxy が JSON エラーを 200 で返す等）は
+    # 「無データ」ではなく照会失敗。None キャッシュで恒久 FN にせず、bad_json 同様に投げる（Codex #155）。
+    if not isinstance(data, list):
+        raise ComponentIntelUnavailable(f"eol:{slug}:not_a_list")
+    return data
 
 
 async def check_component_eol(

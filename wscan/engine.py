@@ -875,8 +875,12 @@ class ScanEngine:
         # ネット非依存を維持）。有効/無効は enable_component_intel（ダッシュボード/CLI 上書き）優先、
         # 未指定なら config/wscan.yaml の features.component_intel。base URL/timeout は常に config から。
         _ci_cfg = _component_intel_config()
+        # enable 未指定なら、checks に outdated_components が明示されていれば有効化し、無ければ config。
+        # これで CLI/ダッシュボード経由でなく checks を直接渡す BatchRunner 等でも、明示指定した
+        # 検査が config off のまま黙って no-op にならない（TLS 隣接ロジックと対称・Codex #155）。
         _ci_enabled = (
-            _ci_cfg["enabled"] if enable_component_intel is None
+            ("outdated_components" in self.checks or _ci_cfg["enabled"])
+            if enable_component_intel is None
             else bool(enable_component_intel)
         )
         self.component_intel: dict = {

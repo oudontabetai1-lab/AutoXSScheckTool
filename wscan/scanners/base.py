@@ -143,7 +143,9 @@ _IDEMPOTENCY_HEADER_NAMES = frozenset({
 
 # page 観測系の直接 GET(replay) が返した際、「恒久的にこの document ではない」ではなく
 # 一時障害＝resume で再試行すべき status。408/429/5xx を transient として扱う（Codex #145 P2 round18）。
-_TRANSIENT_REPLAY_STATUSES = frozenset({408, 429, 500, 502, 503, 504})
+# 408/429 と 5xx 全域を一時失敗として扱う（501/507/520 等を列挙漏れで「検査成功の空」に
+# しない＝resume で再試行させる・Codex #155）。
+_TRANSIENT_REPLAY_STATUSES = frozenset({408, 429} | set(range(500, 600)))
 
 
 def refresh_idempotency_headers(headers: dict) -> dict:

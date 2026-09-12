@@ -227,6 +227,12 @@ class NetworkLayerTests(unittest.IsolatedAsyncioTestCase):
             await ci.fetch_product_cycles("php", client=_FakeClient({url: (404, None)}))
         )
 
+    async def test_eol_non_list_200_raises(self):
+        # 200 だが cycle リストでない（誤設定/proxy の JSON エラー）は照会失敗＝raise（Codex #155）。
+        url = f"{ci.DEFAULT_EOL_BASE_URL.rstrip('/')}/api/php.json"
+        with self.assertRaises(ci.ComponentIntelUnavailable):
+            await ci.fetch_product_cycles("php", client=_FakeClient({url: (200, {"error": "nope"})}))
+
     async def test_lookup_osv_returns_vulns(self):
         client = _FakeClient(post_result=(200, {"vulns": [
             {"id": "GHSA-x", "aliases": ["CVE-2020-11022"],
@@ -815,6 +821,22 @@ class ScanPageContextTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(recorded[0]["evidence_details"]["library"], "jquery")
         self.assertIn("@3.4.1", recorded[0]["field_name"])  # 版を identity に含む
         self.assertGreater(recorded[0]["cvss_score"], 0)  # severity 整合 CVSS
+
+
+class EngineEnableTests(unittest.TestCase):
+    def test_explicit_check_enables_component_intel(self):
+        # checks に outdated_components を明示すると、enable 未指定でも有効化（config off でも no-op に
+        # しない・BatchRunner 直接構築でも効く・Codex #155）。
+        from wscan.engine import ScanEngine
+        e = ScanEngine("https://x.test", checks=["outdated_components"],
+                       llm_provider="none", monitor=None)
+        self.assertTrue(e.component_intel["enabled"])
+        self.assertIn("outdated_components", e.checks)
+
+    def test_not_requested_stays_off(self):
+        from wscan.engine import ScanEngine
+        e = ScanEngine("https://x.test", checks=["xss"], llm_provider="none", monitor=None)
+        self.assertFalse(e.component_intel["enabled"])
 
 
 class CliChecksTests(unittest.TestCase):
