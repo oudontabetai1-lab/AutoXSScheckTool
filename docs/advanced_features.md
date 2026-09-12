@@ -1,6 +1,6 @@
 # 高度診断支援機能 — 詳細調査レポート
 
-元々 `b1d1128` で実装された A〜J の 10 機能に加え、K〜P の 6 機能を追加実装。合計 16 機能。
+元々 `b1d1128` で実装された A〜J の 10 機能に加え、K〜Q の 7 機能を追加実装。合計 17 機能。
 
 ---
 
@@ -24,6 +24,7 @@
 | N | リクエストレート制御 | `wscan/engine.py`, `main.py` | 実装済み |
 | O | HAR ファイルインポート | `wscan/har_importer.py`, `wscan/engine.py` | 実装済み |
 | P | WebSocket インジェクション | `wscan/scanners/websocket.py` | 実装済み |
+| Q | TLS 設定検査（sslyze・opt-in） | `wscan/scanners/tls_config_scan.py`, `wscan/tls_scan.py` | 実装済み |
 
 ---
 
@@ -582,10 +583,10 @@ python3 -m pip install -r requirements-tls.txt
 
 ```bash
 # TLS 検査を有効化（--checks で明示すると自動で有効になる）
-python main.py scan --checks tls_scan https://target.example.com
+python main.py scan https://target.example.com --checks tls_scan
 
 # 他のチェックと組み合わせ
-python main.py scan --checks xss sqli tls_scan https://target.example.com
+python main.py scan https://target.example.com --checks xss sqli tls_scan
 ```
 
 ダッシュボードでは機能フラグ「TLS 設定不備検査」トグル、または config の `features.tls_scan` でも有効化できる。
