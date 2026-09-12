@@ -927,6 +927,11 @@ body { padding-left: 212px; }
 .ws-nav.active .m{background:var(--accent)}
 .ws-newscan{all:unset;cursor:pointer;text-align:center;margin:10px 12px 4px;padding:9px;border-radius:7px;font-size:12.5px;font-weight:600;color:#f3f1ff;background:linear-gradient(to bottom,#655a9e,#544a86);box-shadow:0 0 0 1px #6f64a8}
 .ws-newscan:hover{background:linear-gradient(to bottom,#6f64a8,#5d5294)}
+.ws-rail .ws-cur{padding:12px 12px 2px}
+.ws-rail .ws-eyebrow{display:flex;align-items:center;gap:7px;font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--text-muted);margin-bottom:5px}
+.ws-rail .pulse{width:6px;height:6px;border-radius:50%;background:var(--accent);animation:wsPulseRail 1.8s ease-in-out infinite}
+@keyframes wsPulseRail{0%,100%{opacity:1}50%{opacity:.35}}
+.ws-rail .ws-cur-status{font-size:12px;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .ws-rail .foot{margin-top:auto;padding:0 18px;display:flex;flex-direction:column;gap:8px;font-size:11.5px;color:var(--text-muted)}
 .ws-rail .foot .ln{height:1px;background:linear-gradient(to right,transparent,rgba(233,233,237,.14),transparent)}
 .ws-rail .dot{width:6px;height:6px;border-radius:50%;background:var(--low);display:inline-block;margin-right:7px}
@@ -940,6 +945,10 @@ body { padding-left: 212px; }
     <button class="ws-nav active"><span class="m"></span><span style="flex:1">ライブモニター</span></button>
     <button class="ws-newscan" onclick="document.getElementById('scanConfigOverlay').classList.add('active')">＋ 新規スキャン</button>
   </nav>
+  <div class="ws-cur">
+    <div class="ws-eyebrow"><span class="pulse"></span>現在のスキャン</div>
+    <div class="ws-cur-status" id="railStatus">待機中</div>
+  </div>
   <div class="foot">
     <div class="ln"></div>
     <div><span class="dot"></span>serve · 127.0.0.1</div>
@@ -1745,7 +1754,7 @@ https://example.com/search?q=test" style="width:100%;font-family:monospace;font-
 
 <!-- ─── Header ─────────────────────────────────────────────── -->
 <div class="header">
-  <div class="logo">WScan <span>Monitor</span></div>
+  <div style="font-size:1rem;font-weight:600;color:var(--text);white-space:nowrap">ライブモニター</div>
   <div class="status-bar">
     <div class="status-dot" id="statusDot"></div>
     <div class="status-text" id="statusText">Connecting...</div>
@@ -4486,6 +4495,7 @@ function togglePayloadExpand() {
 // ─── UI Helpers ─────────────────────────────────────────────────
 function setStatus(message, state) {
   document.getElementById('statusText').textContent = message;
+  var _rs=document.getElementById('railStatus'); if(_rs)_rs.textContent = message;
   const dot = document.getElementById('statusDot');
   dot.className = 'status-dot' + (state ? ' ' + state : '');
 }
