@@ -45,6 +45,9 @@ def test_agent_exit_code_flags_errors_and_unsuccessful_empty_runs():
         SimpleNamespace(error="", success=False, findings=[object()])
     ) == 0
     assert main._agent_exit_code(None) == 0
+    assert main._agent_exit_code(
+        SimpleNamespace(error="", success=False, findings=[object()], harness_status="partial")
+    ) == 2
 
 
 @pytest.mark.asyncio

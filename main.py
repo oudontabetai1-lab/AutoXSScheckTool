@@ -628,6 +628,7 @@ async def _run_hybrid_recon_with_retries(
     now_fn=None,
     sleep_fn=None,
     max_retries=None,
+    on_retry=None,
 ):
     """時間帯中断された Hybrid 偵察を、次の許可枠で上限付き再実行する。
 
@@ -668,6 +669,8 @@ async def _run_hybrid_recon_with_retries(
             f"ハイブリッド Phase 1: 再試行 {retries}/{max_retries} を開始します。",
             "running",
         )
+        if on_retry:
+            on_retry()
         handoff, interrupted = await _run_with_time_window_monitor(
             operation,
             monitor,
@@ -1524,6 +1527,15 @@ Examples:
         help="Login page URL (agent will log in before testing)",
     )
     agent.add_argument(
+        "--totp-secret", metavar="SECRET",
+        default=os.environ.get("WSCAN_TOTP_SECRET", ""),
+        help="TOTP secret for login (env WSCAN_TOTP_SECRET; never written to evidence)",
+    )
+    agent.add_argument(
+        "--storage-state", metavar="FILE", default="",
+        help="Playwright/browser-use storage-state JSON used for authenticated sessions",
+    )
+    agent.add_argument(
         "-H", "--header", metavar="HEADER", action="append", default=[],
         help=(
             "Agentブラウザの全リクエストへ追加するHTTPヘッダ。"
@@ -1550,6 +1562,10 @@ Examples:
         "--output", "-o", metavar="DIR",
         default=_CFG.get("output_dir") or None,
         help="Output directory for report and evidence (default: output/agent_<timestamp>)",
+    )
+    agent.add_argument(
+        "--resume", action="store_true", default=False,
+        help="Resume the exact Agent run in --output using its checkpoint and remaining budget",
     )
     agent.add_argument(
         "--port", type=int, default=_CFG.get("port", 8765),
@@ -1847,6 +1863,10 @@ def _agent_exit_code(result) -> int:
         return 0
     if getattr(result, "error", None):
         return 1
+    if getattr(result, "harness_status", "") in {
+        "partial", "evidence_incomplete", "cancelled"
+    }:
+        return 2
     if not getattr(result, "success", False) and not getattr(result, "findings", None):
         return 1
     return 0
@@ -1950,9 +1970,16 @@ async def run_agent(args):
     from rich.panel import Panel
     from wscan.monitor import MonitorServer
     from wscan.agent_engine import AgentEngine
+    from wscan.llm_agent_browser import AgentScanResult
     from wscan import llm_endpoint
 
     console = Console()
+
+    if getattr(args, "resume", False) and not (getattr(args, "output", "") or ""):
+        return AgentScanResult(
+            target_url=getattr(args, "url", ""),
+            error="--resume には元の Agent 出力先を --output DIR で指定してください。",
+        )
 
     # 外部 OpenAI 互換（tsuzumi2 等）のベース URL は AgentEngine 経由で明示的に渡す。
     # グローバル env は書き換えない（serve での operator 設定を壊さないため）。
@@ -2011,6 +2038,9 @@ async def run_agent(args):
             monitor=monitor,
             port=args.port,
             extra_headers=_agent_headers,
+            totp_secret=getattr(args, "totp_secret", "") or "",
+            storage_state=getattr(args, "storage_state", "") or "",
+            resume=getattr(args, "resume", False),
         )
         return await engine.run()
 
@@ -2050,12 +2080,15 @@ async def run_agent(args):
                 monitor=monitor,
                 port=args.port,
                 extra_headers=_agent_headers,
+                totp_secret=getattr(args, "totp_secret", "") or "",
+                storage_state=getattr(args, "storage_state", "") or "",
+                resume=getattr(args, "resume", False),
             )
             result = await engine.run()
             # early-return 条件は _agent_exit_code の非0条件と一致させる（D8）。
             # incomplete-empty（success=False かつ 0 findings）でも sleep(3600) に入れず
             # result をそのまま返し、非0 exit を確実に届ける。
-            if result.error or (not result.success and not result.findings):
+            if _agent_exit_code(result):
                 return result
             console.print("[dim]Dashboard is still running — press Ctrl+C to stop.[/dim]")
             await asyncio.sleep(3600)
@@ -2909,6 +2942,7 @@ async def run_serve(args):
                         monitor,
                         cfg.get("allowed_hours") or None,
                         cfg.get("forbidden_hours") or None,
+                        on_retry=lambda: setattr(recon_engine, "resume", True),
                     )
                 )
                 if not continue_to_phase2:

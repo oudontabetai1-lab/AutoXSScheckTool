@@ -54,6 +54,10 @@ def _finding_to_repro_item(finding: Finding, item_id: int) -> dict:
     if "headers" in response:
         response["headers"] = _redact_headers(response["headers"])
 
+    curl_command = _curl_from_request(finding.request or {})
+    steps = list(finding.reproduction_steps or [])
+    if not steps:
+        steps = _default_reproduction_steps(finding, request, bool(curl_command))
     return {
         "id": item_id,
         "check_type": finding.check_type,
@@ -70,11 +74,40 @@ def _finding_to_repro_item(finding: Finding, item_id: int) -> dict:
         "evidence": finding.evidence,
         "evidence_type": finding.evidence_type,
         "evidence_details": finding.evidence_details,
-        "reproduction_steps": finding.reproduction_steps,
+        "preconditions": {
+            "authorization_required": any(
+                _is_sensitive_header(name) for name in (request.get("headers") or {})
+            ),
+            "note": "Use an authorized test account and replace all redacted values at runtime.",
+        },
+        "reproduction_steps": steps,
+        "negative_control": (
+            f"Repeat the same request for {finding.field_name or 'the same input'} with a benign value "
+            "and confirm the vulnerable behavior is absent."
+        ),
+        "expected_observation": finding.evidence or finding.evidence_type,
+        "verification": {
+            "state": getattr(finding, "verification_state", ""),
+            "note": getattr(finding, "verification_note", ""),
+        },
         "request": request,
         "response": response,
-        "curl_command": _curl_from_request(finding.request or {}),
+        "curl_command": curl_command,
     }
+
+
+def _default_reproduction_steps(finding: Finding, request: dict, has_curl: bool) -> list[str]:
+    """Agent/通常スキャンで共通利用できる最小の再現手順を補完する。"""
+    steps = [f"Open the authorized target: {finding.url}"]
+    if finding.field_name:
+        steps.append(f"Set input {finding.field_name} to the recorded payload.")
+    if has_curl:
+        steps.append("Run the generated curl template after replacing redacted credentials.")
+    else:
+        steps.append("Submit the same form or browser action recorded by the scan.")
+    steps.append("Observe the expected vulnerable behavior and capture the response evidence.")
+    steps.append("Run the documented benign negative control and compare the result.")
+    return steps
 
 
 def _curl_from_request(request: dict) -> str:

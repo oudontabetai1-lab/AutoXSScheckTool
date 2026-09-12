@@ -12,6 +12,7 @@ Usage (CLI-level — see main.py `agent` subcommand):
 from __future__ import annotations
 
 import datetime
+import re
 import webbrowser
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -31,6 +32,31 @@ def _scope_list(values) -> list[str]:
     if isinstance(values, str):
         values = values.replace(",", "\n").splitlines()
     return [str(value).strip() for value in (values or []) if str(value).strip()]
+
+
+def _redact_exact_secrets(value: str, secrets) -> str:
+    """Agent/target が秘密値を反射しても成果物へ残さない。"""
+    text = str(value or "")
+    values = sorted({str(item) for item in secrets if str(item)}, key=len, reverse=True)
+    if not values:
+        return text
+    # 一度だけ置換し、短い秘密値が置換マーカー自身を再置換しないようにする。
+    pattern = "|".join(re.escape(item) for item in values)
+    return "<redacted>".join(
+        re.sub(pattern, "<redacted>", part)
+        for part in text.split("<redacted>")
+    )
+
+
+def _redact_artifact_values(value, secrets):
+    """JSON のキー・構文を保ったまま、文字列値だけを再帰的に伏せる。"""
+    if isinstance(value, dict):
+        return {key: _redact_artifact_values(item, secrets) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_redact_artifact_values(item, secrets) for item in value]
+    if isinstance(value, str):
+        return _redact_exact_secrets(value, secrets)
+    return value
 
 
 @dataclass
@@ -60,6 +86,17 @@ def _convert_agent_findings(agent_findings: list) -> list:
             field_name=af.field_name,
             payload=af.payload,
             evidence=af.evidence,
+            evidence_details={
+                "agent_dynamic_reproduced": bool(
+                    getattr(af, "dynamic_verified", False)
+                )
+            },
+            verification_note=(
+                "Independent Agent dynamic replay observed; "
+                "deterministic scanner verification is still pending."
+                if getattr(af, "dynamic_verified", False)
+                else ""
+            ),
             source="agent",
             agent_verified=getattr(af, "agent_verified", False),
         )
@@ -116,6 +153,9 @@ class AgentEngine:
         exclude_urls: Optional[list[str]] = None,
         exclude_fields: Optional[list[str]] = None,
         extra_headers: Optional[dict] = None,
+        totp_secret: str = "",
+        storage_state: str = "",
+        resume: bool = False,
     ):
         self.url = url.rstrip("/")
         self.llm_provider = llm_provider
@@ -136,6 +176,9 @@ class AgentEngine:
         self.exclude_urls = _scope_list(exclude_urls)
         self.exclude_fields = _scope_list(exclude_fields)
         self.extra_headers = dict(extra_headers or {})
+        self.totp_secret = str(totp_secret or "")
+        self.storage_state = str(storage_state or "")
+        self.resume = bool(resume)
 
         ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         self.output_dir = Path(output_dir) if output_dir else OUTPUT_BASE / f"agent_{ts}"
@@ -178,39 +221,71 @@ class AgentEngine:
             exclude_urls=self.exclude_urls,
             exclude_fields=self.exclude_fields,
             extra_headers=self.extra_headers,
+            totp_secret=self.totp_secret,
+            storage_state=self.storage_state,
+            harness_output_dir=self.output_dir,
+            resume=self.resume,
         )
 
         result: AgentScanResult = await scanner.run()
 
+        if getattr(result, "preserve_existing_artifacts", False):
+            # `--resume` なしで既存 run directory を指定した拒否ケース。以前の
+            # evidence/reproduction を空の失敗結果で上書きしない。
+            console.print(
+                f"[bold red]Agent scan FAILED: {result.error}[/bold red]"
+            )
+            return result
+
         # AgentFindings → 共通 Finding 変換は Hybrid 偵察でも同じ経路を使う。
         findings = _convert_agent_findings(result.findings)
+        artifact_secrets = [
+            self.auth_user,
+            self.auth_pass,
+            self.totp_secret,
+            *self.extra_headers.values(),
+        ]
+        safe_summary = _redact_exact_secrets(result.final_summary, artifact_secrets)
+        for finding in findings:
+            finding.url = _redact_exact_secrets(finding.url, artifact_secrets)
+            finding.field_name = _redact_exact_secrets(
+                finding.field_name, artifact_secrets
+            )
+            finding.payload = _redact_exact_secrets(finding.payload, artifact_secrets)
+            finding.evidence = _redact_exact_secrets(finding.evidence, artifact_secrets)
 
         # Save evidence JSON
         evidence_path = self.output_dir / "evidence.json"
         import json
+        evidence_data = _redact_artifact_values(
+            {
+                "target": self.url,
+                "llm_provider": self.llm_provider,
+                "llm_model": self.llm_model,
+                "checks": self.checks,
+                "steps_taken": result.steps_taken,
+                "success": result.success,
+                "error": result.error,
+                "final_summary": safe_summary,
+                "harness_status": getattr(result, "harness_status", ""),
+                "coverage_gaps": getattr(result, "coverage_gaps", []),
+                "findings": [f.to_dict() for f in findings],
+            },
+            artifact_secrets,
+        )
         evidence_path.write_text(
-            json.dumps(
-                {
-                    "target": self.url,
-                    "llm_provider": self.llm_provider,
-                    "llm_model": self.llm_model,
-                    "checks": self.checks,
-                    "steps_taken": result.steps_taken,
-                    "success": result.success,
-                    "error": result.error,
-                    "final_summary": result.final_summary,
-                    "findings": [f.to_dict() for f in findings],
-                },
-                ensure_ascii=False,
-                indent=2,
-            ),
-            encoding="utf-8",
+            json.dumps(evidence_data, ensure_ascii=False, indent=2), encoding="utf-8"
         )
 
         # Save final agent summary as markdown
-        if result.final_summary:
+        if safe_summary:
             summary_path = self.output_dir / "agent_summary.md"
-            summary_path.write_text(result.final_summary, encoding="utf-8")
+            summary_path.write_text(safe_summary, encoding="utf-8")
+
+        # 通常スキャンと同じ再現成果物を Agent 仮説にも生成する。assumed/reproduced は
+        # verification_state で明確に区別され、秘密値は exporter 側で伏せる。
+        from wscan.reproduction import write_reproduction_package
+        write_reproduction_package(findings, self.output_dir)
 
         # 初期化・実行のハードエラー、または history 上の非成功で 0 findings を「正常完了」に
         # 見せない。evidence は残すが、成功レポートと完了イベントは生成しない（D8）。findings が
@@ -237,8 +312,11 @@ class AgentEngine:
             checks=self.checks,
         )
 
+        complete = getattr(result, "harness_status", "") in ("", "complete") and result.success
+        status_label = "complete" if complete else "partial"
+        status_style = "green" if complete else "yellow"
         console.print(
-            f"\n[bold green]Agent scan complete![/bold green]  "
+            f"\n[bold {status_style}]Agent scan {status_label}![/bold {status_style}]  "
             f"[cyan]{len(findings)}[/cyan] finding(s)  "
             f"Report: [cyan]{report_path}[/cyan]"
         )
@@ -248,7 +326,8 @@ class AgentEngine:
 
         if self.monitor:
             await self.monitor.emit_status(
-                f"Agent scan complete — {len(findings)} finding(s)", "done"
+                f"Agent scan {status_label} — {len(findings)} finding(s)",
+                "done" if complete else "error",
             )
             # Push findings to dashboard
             for f in findings:
@@ -303,6 +382,10 @@ class AgentEngine:
             exclude_urls=self.exclude_urls,
             exclude_fields=self.exclude_fields,
             extra_headers=self.extra_headers,
+            totp_secret=self.totp_secret,
+            storage_state=self.storage_state,
+            harness_output_dir=self.output_dir,
+            resume=self.resume,
         )
 
         result = await scanner.run()
