@@ -35,6 +35,7 @@ class _History:
 async def test_supervisor_runs_explore_probe_verify_and_adversarial_review(tmp_path):
     tasks = []
     budgets = []
+    late_observed = False
 
     class _Agent:
         def __init__(self, **kwargs):
@@ -42,6 +43,7 @@ async def test_supervisor_runs_explore_probe_verify_and_adversarial_review(tmp_p
             tasks.append(kwargs["task"])
 
         async def run(self, **_kwargs):
+            nonlocal late_observed
             budgets.append(_kwargs["max_steps"])
             task = self.kwargs["task"]
             if "Act only as the Explorer" in task:
@@ -57,6 +59,13 @@ async def test_supervisor_runs_explore_probe_verify_and_adversarial_review(tmp_p
                 )
                 return _History("PAGE_FOUND: http://fixture.test/search\nEXPLORATION COMPLETE")
             if "probe specialist" in task:
+                if not late_observed:
+                    late_observed = True
+                    await self.kwargs["register_new_step_callback"](
+                        types.SimpleNamespace(url="http://fixture.test/late"),
+                        types.SimpleNamespace(action=[]),
+                        1,
+                    )
                 nonce = re.search(r"WSCAN-NONCE:([^\s]+)", self.kwargs["extend_system_message"]).group(1)
                 return _History(
                     f"WSCAN-NONCE:{nonce}\nVULNERABILITY FOUND:\n"
@@ -104,6 +113,7 @@ async def test_supervisor_runs_explore_probe_verify_and_adversarial_review(tmp_p
     assert budgets[0] <= 20  # 40-step run の半分以上を後続 role に予約する。
     assert any("probe specialist" in task for task in tasks)
     assert any("fixture.test/observed-only" in task for task in tasks)
+    assert any("probe specialist for http://fixture.test/late" in task for task in tasks)
     assert not any("probe specialist for http://idp.test" in task for task in tasks)
     assert any("independent verifier" in task for task in tasks)
     assert sum("independent verifier" in task for task in tasks) == 2

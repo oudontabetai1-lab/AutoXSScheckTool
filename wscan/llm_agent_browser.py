@@ -1096,6 +1096,7 @@ class AgentBrowserScanner:
                 provider=self.llm_provider,
                 model=resolved_model,
                 max_steps=self.max_steps,
+                auth_context_hash=self._auth_context_hash(),
             )
             try:
                 self._harness = AgentHarness(
@@ -1406,6 +1407,9 @@ class AgentBrowserScanner:
                         self._memory.visited_urls = list(dict.fromkeys([
                             *self._memory.visited_urls, *discovered
                         ]))
+                    # probe/verify 中の redirect・form submit・SPA 遷移も新しい
+                    # in-scope page として強制検査対象へ昇格する。
+                    self._enqueue_observed_probe_work()
                 result.findings = [
                     _finding_from_checkpoint(item)
                     for item in self._harness.state.hypotheses
@@ -1647,6 +1651,45 @@ class AgentBrowserScanner:
             self._harness.checkpoint()
         if needs_explorer:
             self._harness.requeue_role(AgentRole.EXPLORER)
+
+    def _auth_context_hash(self) -> str:
+        """秘密値を永続化せず resume の認証同一性を固定する。"""
+        storage_digest = ""
+        if self.storage_state:
+            try:
+                storage_digest = hashlib.sha256(
+                    Path(self.storage_state).read_bytes()
+                ).hexdigest()
+            except OSError:
+                storage_digest = f"unreadable:{self.storage_state}"
+        payload = json.dumps(
+            {
+                "login_url": self.login_url,
+                "auth_user": self.auth_user,
+                "auth_pass": self.auth_pass,
+                "totp_secret": self.totp_secret,
+                "headers": sorted(self.extra_headers.items()),
+                "storage_state": storage_digest,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return hashlib.sha256(
+            ("wscan-agent-auth-context-v1\0" + payload).encode("utf-8")
+        ).hexdigest()
+
+    def _enqueue_observed_probe_work(self) -> None:
+        """どの episode で見つかった URL も対象なら全 check の queue へ入れる。"""
+        if not self._harness or self.recon_mode:
+            return
+        for url in self._runtime_observed_urls:
+            if not self.is_security_probe_allowed(url):
+                continue
+            if url not in self._memory.visited_urls:
+                self._memory.visited_urls.append(url)
+            for check in self.checks:
+                self._enqueue_work(AgentRole.PROBE_SPECIALIST, url, check_type=check)
 
     async def _harness_should_stop(self) -> bool:
         return bool(self._harness and self._harness.should_stop)

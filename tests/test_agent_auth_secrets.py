@@ -1,4 +1,6 @@
 """Agent login secret の prompt 非混入と domain scope 契約。"""
+import json
+
 from wscan.llm_agent_browser import AgentBrowserScanner, build_agent_sensitive_data
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -49,6 +51,32 @@ def test_storage_state_auth_task_does_not_request_missing_placeholders():
     assert "AUTH COMPLETE" in task
 
 
+def test_resume_auth_fingerprint_covers_credentials_headers_and_storage(tmp_path):
+    storage = tmp_path / "storage.json"
+    storage.write_text('{"cookies":[]}', encoding="utf-8")
+    base = dict(
+        target_url="https://app.example.test",
+        login_url="https://app.example.test/login",
+        auth_user="account-a",
+        auth_pass="password-a",
+        totp_secret="totp-a",
+        extra_headers={"Authorization": "Bearer a"},
+        storage_state=str(storage),
+    )
+    original = AgentBrowserScanner(**base)._auth_context_hash()
+    assert len(original) == 64
+    for change in (
+        {"auth_user": "account-b"},
+        {"auth_pass": "password-b"},
+        {"totp_secret": "totp-b"},
+        {"extra_headers": {"Authorization": "Bearer b"}},
+        {"login_url": "https://app.example.test/other-login"},
+    ):
+        assert AgentBrowserScanner(**(base | change))._auth_context_hash() != original
+    storage.write_text('{"cookies":[{"name":"session","value":"b"}]}', encoding="utf-8")
+    assert AgentBrowserScanner(**base)._auth_context_hash() != original
+
+
 @pytest.mark.asyncio
 async def test_engine_redacts_reflected_login_secrets_from_artifacts(tmp_path):
     from wscan.agent_engine import AgentEngine
@@ -70,6 +98,30 @@ async def test_engine_redacts_reflected_login_secrets_from_artifacts(tmp_path):
     assert "user-secret" not in artifacts
     assert "password-secret" not in artifacts
     assert "<redacted>" in artifacts
+
+
+@pytest.mark.asyncio
+async def test_engine_redacts_values_without_corrupting_evidence_json(tmp_path):
+    from wscan.agent_engine import AgentEngine
+
+    result = SimpleNamespace(
+        findings=[], steps_taken=1, success=False, error="",
+        final_summary='a says "hello"', harness_status="partial",
+        coverage_gaps=['a " gap'],
+    )
+    with patch("wscan.llm_agent_browser.AgentBrowserScanner") as scanner:
+        scanner.return_value.run = AsyncMock(return_value=result)
+        engine = AgentEngine(
+            "https://app.example.test/a", auth_user="a", auth_pass='"',
+            output_dir=str(tmp_path), open_report=False,
+        )
+        await engine.run()
+
+    evidence = json.loads((tmp_path / "evidence.json").read_text())
+    assert set(evidence) >= {"target", "final_summary", "coverage_gaps", "findings"}
+    assert evidence["final_summary"] == (
+        "<redacted> s<redacted>ys <redacted>hello<redacted>"
+    )
 
 
 @pytest.mark.asyncio

@@ -95,6 +95,7 @@ class AgentRunSpec:
     provider: str
     model: str
     max_steps: int
+    auth_context_hash: str = ""
 
     def __post_init__(self) -> None:
         if self.max_steps < 1:
@@ -513,8 +514,12 @@ class AgentHarness:
                     self.state.stop_reason = "coverage_incomplete"
                 else:
                     self.state.stop_reason = "agent_incomplete"
-        self.checkpoint()
-        self._write_manifest(coverage_complete=coverage_complete)
+        checkpoint_ok = self.checkpoint()
+        if not checkpoint_ok:
+            self.state.status = AgentRunStatus.EVIDENCE_INCOMPLETE
+        manifest_ok = self._write_manifest(coverage_complete=coverage_complete)
+        if not manifest_ok:
+            self.state.status = AgentRunStatus.EVIDENCE_INCOMPLETE
         return self.state.status
 
     def checkpoint(self) -> bool:
@@ -573,7 +578,7 @@ class AgentHarness:
         if error not in self.state.evidence_errors:
             self.state.evidence_errors.append(error)
 
-    def _write_manifest(self, *, coverage_complete: bool) -> None:
+    def _write_manifest(self, *, coverage_complete: bool) -> bool:
         payload = {
             "schema_version": SCHEMA_VERSION,
             "run_id": self.state.run_id,
@@ -596,4 +601,4 @@ class AgentHarness:
             "trace": TRACE_FILENAME,
             "checkpoint": STATE_FILENAME,
         }
-        self._atomic_write_json(self.manifest_path, payload)
+        return self._atomic_write_json(self.manifest_path, payload)

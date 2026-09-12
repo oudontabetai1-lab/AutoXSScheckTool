@@ -16,7 +16,7 @@ from wscan.agent_harness import (
 )
 
 
-def spec(*, model="exact-model", max_steps=5):
+def spec(*, model="exact-model", max_steps=5, auth_context_hash=""):
     return AgentRunSpec(
         mode="agent",
         target_url="http://fixture.test",
@@ -28,6 +28,7 @@ def spec(*, model="exact-model", max_steps=5):
         provider="ollama",
         model=model,
         max_steps=max_steps,
+        auth_context_hash=auth_context_hash,
     )
 
 
@@ -98,6 +99,17 @@ def test_resume_preserves_global_budget_and_rejects_spec_drift(tmp_path):
 
     with pytest.raises(ValueError, match="spec mismatch"):
         AgentHarness(tmp_path, spec(model="different", max_steps=5), resume=True)
+
+
+def test_resume_rejects_changed_authentication_context(tmp_path):
+    original = spec(max_steps=5, auth_context_hash="account-a")
+    AgentHarness(tmp_path, original)
+    with pytest.raises(ValueError, match="spec mismatch"):
+        AgentHarness(
+            tmp_path,
+            spec(max_steps=5, auth_context_hash="account-b"),
+            resume=True,
+        )
 
 
 def test_complete_requires_explicit_coverage_contract(tmp_path):
@@ -221,3 +233,20 @@ def test_note_coverage_redacts_configured_secrets_everywhere(tmp_path):
     artifacts = (tmp_path / "agent_state.json").read_text()
     assert "coverage-secret" not in artifacts
     assert artifacts.count("<redacted>") == 3
+
+
+@pytest.mark.parametrize("failed_name", ["agent_state.json", "agent_manifest.json"])
+def test_finalize_reports_incomplete_when_final_artifact_write_fails(
+    tmp_path, monkeypatch, failed_name
+):
+    harness = AgentHarness(tmp_path, spec())
+    original_write = harness._atomic_write_json
+
+    def fail_selected(path, data):
+        if path.name == failed_name:
+            return False
+        return original_write(path, data)
+
+    monkeypatch.setattr(harness, "_atomic_write_json", fail_selected)
+    status = harness.finalize(success=True, coverage_complete=True)
+    assert status == AgentRunStatus.EVIDENCE_INCOMPLETE

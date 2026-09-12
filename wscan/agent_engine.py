@@ -12,6 +12,7 @@ Usage (CLI-level — see main.py `agent` subcommand):
 from __future__ import annotations
 
 import datetime
+import re
 import webbrowser
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -36,9 +37,26 @@ def _scope_list(values) -> list[str]:
 def _redact_exact_secrets(value: str, secrets) -> str:
     """Agent/target が秘密値を反射しても成果物へ残さない。"""
     text = str(value or "")
-    for secret in sorted({str(item) for item in secrets if str(item)}, key=len, reverse=True):
-        text = text.replace(secret, "<redacted>")
-    return text
+    values = sorted({str(item) for item in secrets if str(item)}, key=len, reverse=True)
+    if not values:
+        return text
+    # 一度だけ置換し、短い秘密値が置換マーカー自身を再置換しないようにする。
+    pattern = "|".join(re.escape(item) for item in values)
+    return "<redacted>".join(
+        re.sub(pattern, "<redacted>", part)
+        for part in text.split("<redacted>")
+    )
+
+
+def _redact_artifact_values(value, secrets):
+    """JSON のキー・構文を保ったまま、文字列値だけを再帰的に伏せる。"""
+    if isinstance(value, dict):
+        return {key: _redact_artifact_values(item, secrets) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_redact_artifact_values(item, secrets) for item in value]
+    if isinstance(value, str):
+        return _redact_exact_secrets(value, secrets)
+    return value
 
 
 @dataclass
@@ -229,31 +247,34 @@ class AgentEngine:
         ]
         safe_summary = _redact_exact_secrets(result.final_summary, artifact_secrets)
         for finding in findings:
+            finding.url = _redact_exact_secrets(finding.url, artifact_secrets)
+            finding.field_name = _redact_exact_secrets(
+                finding.field_name, artifact_secrets
+            )
             finding.payload = _redact_exact_secrets(finding.payload, artifact_secrets)
             finding.evidence = _redact_exact_secrets(finding.evidence, artifact_secrets)
 
         # Save evidence JSON
         evidence_path = self.output_dir / "evidence.json"
         import json
-        evidence_json = json.dumps(
-                {
-                    "target": self.url,
-                    "llm_provider": self.llm_provider,
-                    "llm_model": self.llm_model,
-                    "checks": self.checks,
-                    "steps_taken": result.steps_taken,
-                    "success": result.success,
-                    "error": result.error,
-                    "final_summary": safe_summary,
-                    "harness_status": getattr(result, "harness_status", ""),
-                    "coverage_gaps": getattr(result, "coverage_gaps", []),
-                    "findings": [f.to_dict() for f in findings],
-                },
-                ensure_ascii=False,
-                indent=2,
-            )
+        evidence_data = _redact_artifact_values(
+            {
+                "target": self.url,
+                "llm_provider": self.llm_provider,
+                "llm_model": self.llm_model,
+                "checks": self.checks,
+                "steps_taken": result.steps_taken,
+                "success": result.success,
+                "error": result.error,
+                "final_summary": safe_summary,
+                "harness_status": getattr(result, "harness_status", ""),
+                "coverage_gaps": getattr(result, "coverage_gaps", []),
+                "findings": [f.to_dict() for f in findings],
+            },
+            artifact_secrets,
+        )
         evidence_path.write_text(
-            _redact_exact_secrets(evidence_json, artifact_secrets), encoding="utf-8"
+            json.dumps(evidence_data, ensure_ascii=False, indent=2), encoding="utf-8"
         )
 
         # Save final agent summary as markdown
