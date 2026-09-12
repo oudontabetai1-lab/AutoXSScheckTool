@@ -23,7 +23,7 @@
   --accent-glow: rgba(145,132,217,0.18);
   --critical: #e2708f;
   --high: #d99a63;
-  --medium: #9184d9;
+  --medium: #c7b96a;
   --low: #8fb9c9;
   --info: #b5abfc;
   --success: #8fb9c9;
@@ -155,11 +155,11 @@ body {
 @keyframes fadeIn { from { opacity:0; transform:translateX(-4px); } to { opacity:1; transform:none; } }
 .event-item .time { color: var(--text-muted); font-size: 0.7rem; margin-right: 6px; font-family: monospace; }
 .event-status { border-left-color: var(--accent); background: var(--accent-glow); }
-.event-finding { border-left-color: var(--critical); background: rgba(248,81,73,0.1); }
+.event-finding { border-left-color: var(--critical); background: rgba(226,112,143,0.1); }
 .event-payload { border-left-color: var(--border); background: var(--surface2); }
-.event-page { border-left-color: var(--low); background: rgba(63,185,80,0.08); }
+.event-page { border-left-color: var(--low); background: rgba(143,185,201,0.08); }
 .event-request { border-left-color: var(--border); background: var(--surface); }
-.event-screenshot { border-left-color: var(--high); background: rgba(210,153,34,0.1); }
+.event-screenshot { border-left-color: var(--high); background: rgba(217,154,99,0.1); }
 
 .event-finding .ev-type { color: var(--critical); font-weight: 700; }
 .event-status .ev-type { color: var(--accent); font-weight: 600; }
@@ -273,7 +273,7 @@ body {
 .crawl-review-bar {
   display:none; flex-shrink:0; align-items:center; gap:10px; flex-wrap:wrap;
   padding:8px 12px; z-index:4;
-  background:linear-gradient(90deg, rgba(56,139,253,.20), rgba(56,139,253,.05));
+  background:linear-gradient(90deg, rgba(145,132,217,.20), rgba(145,132,217,.05));
   border-bottom:1px solid var(--accent);
 }
 .crawl-review-bar.active { display:flex; }
@@ -285,7 +285,7 @@ body {
 .crb-btn { border-radius:6px; padding:6px 14px; font-size:.8rem; font-weight:700; cursor:pointer;
   border:1px solid var(--border); background:var(--surface2); color:var(--text); }
 .crb-btn:hover { border-color:var(--accent); }
-.crb-btn.detail { background:rgba(56,139,253,.15); color:var(--accent); border-color:var(--accent); }
+.crb-btn.detail { background:rgba(145,132,217,.15); color:var(--accent); border-color:var(--accent); }
 .crb-btn.start { background:var(--accent); color:#fff; border:none; }
 .crb-btn.cancel { background:var(--surface2); color:var(--text-muted); }
 .sm-tooltip {
@@ -340,7 +340,7 @@ body {
 .sm-trow { display:flex; align-items:center; gap:6px; padding:4px 6px; border-radius:6px;
   cursor:pointer; white-space:nowrap; font-size:.76rem; }
 .sm-trow:hover { background:var(--surface2); }
-.sm-trow.sel { background:rgba(56,139,253,.18); outline:1px solid var(--accent); }
+.sm-trow.sel { background:rgba(145,132,217,.18); outline:1px solid var(--accent); }
 .sm-tcaret { width:12px; color:var(--text-muted); flex-shrink:0; text-align:center; }
 .sm-tcount { margin-left:auto; color:var(--text-muted); font-size:.68rem; }
 .sm-detail { flex:1; overflow:auto; background:rgba(13,17,23,.7);
@@ -350,7 +350,7 @@ body {
   overflow:hidden; background:#0e1420; max-width:560px; }
 .sm-shot img { display:block; width:100%; }
 .sm-marker { position:absolute; border:2px solid var(--critical); border-radius:4px;
-  box-shadow:0 0 0 3px rgba(248,81,73,.25); }
+  box-shadow:0 0 0 3px rgba(226,112,143,.25); }
 .sm-marker::after { content:"クリック"; position:absolute; top:-16px; left:0;
   background:var(--critical); color:#fff; font-size:.6rem; padding:0 5px; border-radius:3px; white-space:nowrap; }
 /* スクショ範囲外で押した要素: 点線＋「画面外」ラベルで、端に寄せて必ず見えるようにする */
@@ -436,10 +436,10 @@ body {
   padding: 2px 8px; border-radius: 10px;
   text-transform: uppercase; letter-spacing: 0.06em;
 }
-.sev-critical { background: rgba(248,81,73,0.2); color: var(--critical); }
-.sev-high { background: rgba(210,153,34,0.2); color: var(--high); }
-.sev-medium { background: rgba(56,139,253,0.2); color: var(--medium); }
-.sev-low { background: rgba(63,185,80,0.2); color: var(--low); }
+.sev-critical { background: rgba(226,112,143,.18); color: var(--critical); }
+.sev-high { background: rgba(217,154,99,.18); color: var(--high); }
+.sev-medium { background: rgba(199,185,106,.18); color: var(--medium); }
+.sev-low { background: rgba(143,185,201,.18); color: var(--low); }
 .fc-type { font-size: 0.7rem; font-weight: 700; color: var(--text); }
 .fc-field { font-size: 0.75rem; color: var(--text-muted); }
 .fc-evidence { font-size: 0.75rem; color: var(--text); margin-bottom: 4px; line-height: 1.4; }
@@ -451,12 +451,12 @@ body {
 .fc-meta-label { font-size:.62rem; color:var(--text-muted); text-transform:uppercase; letter-spacing:.06em; margin-bottom:2px; }
 .fc-meta-value { font-size:.72rem; color:var(--text); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .fc-confidence { font-size:.65rem; font-weight:800; padding:2px 8px; border-radius:10px; text-transform:uppercase; letter-spacing:.05em; border:1px solid transparent; }
-.fc-confidence-confirmed { color:#86efac; background:rgba(63,185,80,.16); border-color:rgba(63,185,80,.35); }
-.fc-confidence-likely { color:#facc15; background:rgba(210,153,34,.15); border-color:rgba(210,153,34,.35); }
-.fc-confidence-tentative { color:#b5abfc; background:rgba(56,139,253,.12); border-color:rgba(56,139,253,.3); }
-.fc-verified { font-size:.65rem; color:#86efac; background:rgba(63,185,80,.12); border:1px solid rgba(63,185,80,.25); padding:2px 8px; border-radius:10px; }
-.fc-assumed { font-size:.65rem; color:#facc15; background:rgba(210,153,34,.12); border:1px solid rgba(210,153,34,.35); padding:2px 8px; border-radius:10px; }
-.fc-unverified { font-size:.65rem; color:#fca5a5; background:rgba(248,81,73,.12); border:1px solid rgba(248,81,73,.35); padding:2px 8px; border-radius:10px; }
+.fc-confidence-confirmed { color:#86efac; background:rgba(143,185,201,.16); border-color:rgba(143,185,201,.35); }
+.fc-confidence-likely { color:#facc15; background:rgba(217,154,99,.15); border-color:rgba(217,154,99,.35); }
+.fc-confidence-tentative { color:#b5abfc; background:rgba(145,132,217,.12); border-color:rgba(145,132,217,.3); }
+.fc-verified { font-size:.65rem; color:#86efac; background:rgba(143,185,201,.12); border:1px solid rgba(143,185,201,.25); padding:2px 8px; border-radius:10px; }
+.fc-assumed { font-size:.65rem; color:#facc15; background:rgba(217,154,99,.12); border:1px solid rgba(217,154,99,.35); padding:2px 8px; border-radius:10px; }
+.fc-unverified { font-size:.65rem; color:#fca5a5; background:rgba(226,112,143,.12); border:1px solid rgba(226,112,143,.35); padding:2px 8px; border-radius:10px; }
 .fc-details { margin-top:8px; border-top:1px solid var(--border); padding-top:8px; }
 .fc-details summary { cursor:pointer; color:var(--accent); font-size:.72rem; font-weight:700; }
 .fc-detail-list { margin-top:6px; display:flex; flex-direction:column; gap:3px; font-family:monospace; font-size:.68rem; color:var(--text-muted); }
@@ -538,7 +538,7 @@ body {
   margin-left: 4px;
   display: none;
 }
-.ib-pause-state.visible { display: inline-block; background: rgba(210,153,34,0.2); color: var(--high); font-weight: 700; }
+.ib-pause-state.visible { display: inline-block; background: rgba(217,154,99,.18); color: var(--high); font-weight: 700; }
 
 /* ─── Plan Review Modal ──────────────────────────────────────── */
 .plan-modal-overlay {
@@ -605,7 +605,7 @@ body {
 }
 .pm-page-header {
   padding: 10px 14px;
-  background: rgba(56,139,253,0.08);
+  background: rgba(145,132,217,0.08);
   border-bottom: 1px solid var(--border);
   font-size: 0.8rem;
 }
@@ -804,11 +804,11 @@ body {
   background: linear-gradient(135deg, var(--accent), #5fa8ff);
   color: #fff; border: none; border-radius: 8px;
   cursor: pointer; transition: transform 0.15s, box-shadow 0.15s, opacity 0.15s;
-  box-shadow: 0 2px 8px rgba(56,139,253,0.35);
+  box-shadow: 0 2px 8px rgba(145,132,217,0.35);
 }
 .cfg-start-btn:hover {
   transform: translateY(-1px);
-  box-shadow: 0 4px 14px rgba(56,139,253,0.45);
+  box-shadow: 0 4px 14px rgba(145,132,217,0.45);
 }
 .cfg-start-btn:active { transform: translateY(0); }
 .cfg-hint { font-size: 0.75rem; color: var(--text-muted); }
@@ -1811,7 +1811,7 @@ https://example.com/search?q=test" style="width:100%;font-family:monospace;font-
   <button class="ib-btn skip-p" onclick="sendIntervention('skip_page')" title="現在のページをスキップ">⏩ ページスキップ</button>
   <button class="ib-btn abort" onclick="confirmAbort()" title="スキャンを中断（部分レポートを保存）">⏹ 中断</button>
   <span class="ib-pause-state" id="ibPauseState">⏸ 一時停止中</span>
-  <button class="ib-btn" onclick="toggleManualPayload()" title="手動ペイロード実行パネルを開く" style="margin-left:auto;background:rgba(56,139,253,0.15);color:var(--accent);border-color:var(--accent)">🎯 手動実行</button>
+  <button class="ib-btn" onclick="toggleManualPayload()" title="手動ペイロード実行パネルを開く" style="margin-left:auto;background:rgba(145,132,217,0.15);color:var(--accent);border-color:var(--accent)">🎯 手動実行</button>
 </div>
 
 <!-- ─── Scan Config Info Bar ────────────────────────────────── -->
@@ -2110,7 +2110,7 @@ https://example.com/search?q=test" style="width:100%;font-family:monospace;font-
       <button class="pm-btn" onclick="sendCrawlReview('cancel')"
         style="background:var(--surface2);color:var(--text);border:1px solid var(--border)">⏹ 検査を中止</button>
       <button class="pm-btn" onclick="sendCrawlReview('recrawl')"
-        style="background:rgba(56,139,253,0.15);color:var(--accent);border:1px solid var(--accent)">🔁 再巡回</button>
+        style="background:rgba(145,132,217,0.15);color:var(--accent);border:1px solid var(--accent)">🔁 再巡回</button>
       <button class="pm-btn confirm" onclick="sendCrawlReview('continue')">▶ この内容で検査続行</button>
     </div>
   </div>
@@ -4598,7 +4598,7 @@ function addFinding(data) {
   let ssHtml = '';
   if (data.screenshot_b64) {
     const border = data.dialog_confirmed
-      ? 'border:2px solid var(--critical);box-shadow:0 0 8px rgba(248,81,73,0.4);'
+      ? 'border:2px solid var(--critical);box-shadow:0 0 8px rgba(226,112,143,0.4);'
       : '';
     const dataSrc = `data:image/jpeg;base64,${data.screenshot_b64}`;
     ssHtml = `
@@ -4916,7 +4916,7 @@ function renderCrawlReviewList() {
     const params = p.params || 0;
     const depth = p.depth ?? '';
     const badge = (forms || params)
-      ? `<span style="background:rgba(248,81,73,.15);color:#ff7b72;padding:1px 6px;border-radius:8px;font-size:.7rem;font-weight:700">攻撃面 ${forms}F/${params}P</span>`
+      ? `<span style="background:rgba(226,112,143,.15);color:#ff7b72;padding:1px 6px;border-radius:8px;font-size:.7rem;font-weight:700">攻撃面 ${forms}F/${params}P</span>`
       : `<span style="background:var(--surface2);color:var(--text-muted);padding:1px 6px;border-radius:8px;font-size:.7rem">静的</span>`;
     return `
       <div style="display:flex;gap:10px;align-items:center;padding:6px 10px;border-bottom:1px solid var(--border);font-size:.8rem">
@@ -5415,7 +5415,7 @@ function _smRenderShots(model) {
       g.appendChild(_smEl('rect', {
         x: 6 + (CW - 12) * nr.x, y: 6 + IMGH * nr.y,
         width: Math.max(8, (CW - 12) * nr.w), height: Math.max(7, IMGH * nr.h),
-        rx: 3, fill: 'rgba(248,81,73,.18)', stroke: '#e2708f', 'stroke-width': 1.5
+        rx: 3, fill: 'rgba(226,112,143,.18)', stroke: '#e2708f', 'stroke-width': 1.5
       }));
     });
     const title = _smEl('text', { x: 8, y: CH - 11, 'font-size': '10.5px', fill: '#e9e9ed' });
