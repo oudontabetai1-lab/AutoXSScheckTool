@@ -51,6 +51,7 @@ _CVSS_TABLE: dict[str, tuple[str, float]] = {
     "info_disclosure":   ("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N",  7.5),
     "host_header":       ("CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:L/I:L/A:N",  5.4),
     "security_headers":  ("CVSS:3.1/AV:N/AC:H/PR:N/UI:R/S:U/C:L/I:N/A:N",  3.1),
+    "outdated_components": ("CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:L/I:L/A:L",  4.8),
     "tls_scan":          ("CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:N/A:N",  5.9),
     "nosql":             ("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:N",  9.1),
     "deserialization":   ("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H", 10.0),
@@ -143,7 +144,9 @@ _IDEMPOTENCY_HEADER_NAMES = frozenset({
 
 # page 観測系の直接 GET(replay) が返した際、「恒久的にこの document ではない」ではなく
 # 一時障害＝resume で再試行すべき status。408/429/5xx を transient として扱う（Codex #145 P2 round18）。
-_TRANSIENT_REPLAY_STATUSES = frozenset({408, 429, 500, 502, 503, 504})
+# 408/429 と 5xx 全域を一時失敗として扱う（501/507/520 等を列挙漏れで「検査成功の空」に
+# しない＝resume で再試行させる・Codex #155）。
+_TRANSIENT_REPLAY_STATUSES = frozenset({408, 429} | set(range(500, 600)))
 
 
 def _body_looks_like_html(body: str, headers, *, is_2xx: bool) -> bool:

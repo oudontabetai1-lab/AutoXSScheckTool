@@ -1390,6 +1390,7 @@ body {
           <div class="cfg-toggle on" id="tog-enable_waf_detection" onclick="toggleCfg('enable_waf_detection')">WAF自動検出</div>
           <div class="cfg-toggle on" id="tog-enable_payload_learning" onclick="toggleCfg('enable_payload_learning')">ペイロード学習</div>
           <div class="cfg-toggle on" id="tog-community_payloads" onclick="toggleCfg('community_payloads')">community ペイロード</div>
+          <div class="cfg-toggle off" id="tog-component_intel" onclick="toggleCfg('component_intel')">EOL コンポーネント検査 (endoflife.date・外部API)</div>
           <div class="cfg-toggle off" id="tog-tls_scan" onclick="toggleCfg('tls_scan')">TLS 設定不備検査 (sslyze・要 requirements-tls)</div>
           <div class="cfg-toggle on" id="tog-enable_sitemap_crawl" onclick="toggleCfg('enable_sitemap_crawl')">サイトマップ/robots.txtクロール</div>
           <div class="cfg-toggle off" id="tog-spa_crawl" onclick="toggleCfg('spa_crawl')">SPA クロール (React/Vue/Angular)</div>
@@ -2266,6 +2267,7 @@ const cfgToggles = {
   enable_waf_detection: true,
   enable_payload_learning: true,
   community_payloads: true,
+  component_intel: false,
   tls_scan: false,
   enable_sitemap_crawl: true,
   enable_llm_web_browsing: false,
@@ -2954,6 +2956,7 @@ function submitScanConfig() {
     enable_waf_detection:  cfgToggles.enable_waf_detection,
     enable_payload_learning: cfgToggles.enable_payload_learning,
     enable_community_payloads: cfgToggles.community_payloads,
+    enable_component_intel: cfgToggles.component_intel,
     enable_tls_scan: cfgToggles.tls_scan,
     enable_sitemap_crawl:  cfgToggles.enable_sitemap_crawl,
     state_profile: document.getElementById('cfgStateProfile').value,
@@ -5118,6 +5121,7 @@ function submitHybridScan() {
     access_urls:  (document.getElementById('cfgAccessUrls')?.value || '').split('\n').map(s=>s.trim()).filter(Boolean),
     fast_mode:    cfgToggles.fast_mode,
     enable_community_payloads: cfgToggles.community_payloads,
+    enable_component_intel: cfgToggles.component_intel,
     enable_tls_scan: cfgToggles.tls_scan,
     max_payloads: parseInt(document.getElementById('cfgMaxPayloads')?.value) || 0,
   };
