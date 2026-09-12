@@ -254,6 +254,43 @@ def _cookie_path_matches(request_path: str, cookie_path: str) -> bool:
     # 境界が "/" であること（/admin が /administrator に誤マッチしないように）
     return cp.endswith("/") or req[len(cp):len(cp) + 1] == "/"
 
+
+def _scoped_cookie_header(cookies: list, url: str) -> str:
+    """ブラウザ jar の cookie 群から、``url`` のホスト/パスへ送られる Cookie ヘッダを作る（純粋・RFC6265）。
+
+    domain（host-only は完全一致のみ・domain-scoped は suffix 可）と path（``_cookie_path_matches``）で
+    絞り、Path の長い順（§5.4）に並べる。空なら ""。同一ホストでも origin ルート(/) と page(/admin)で
+    送るべき Cookie が変わる（Path=/admin は / に送らない）ため、URL 単位でスコープした文字列を返す。
+    """
+    from urllib.parse import urlparse as _up
+    parsed = _up(url or "")
+    target_host = (parsed.hostname or "").lower()
+    req_path = parsed.path or "/"
+    is_https = (parsed.scheme or "").lower() == "https"
+    matched: list[tuple[str, str]] = []
+    for c in (cookies or []):
+        name = c.get("name")
+        if not name:
+            continue
+        # Secure Cookie は HTTPS 宛以外に送らない（ブラウザの Secure 強制と同じ）。手組み Cookie を
+        # 平文 HTTP へ送ると TRACE 反射等で秘匿値が漏れる（Codex #157）。
+        if c.get("secure") and not is_https:
+            continue
+        raw_dom = str(c.get("domain", ""))
+        is_domain_cookie = raw_dom.startswith(".")
+        dom = raw_dom.lstrip(".").lower()
+        if dom and target_host and not (
+            target_host == dom
+            or (is_domain_cookie and target_host.endswith("." + dom))
+        ):
+            continue
+        cpath = str(c.get("path", "/") or "/")
+        if not _cookie_path_matches(req_path, cpath):
+            continue
+        matched.append((cpath, f"{name}={c.get('value', '')}"))
+    matched.sort(key=lambda pv: len(pv[0]), reverse=True)
+    return "; ".join(pv[1] for pv in matched)
+
 import yaml
 from rich.console import Console
 from rich.rule import Rule
@@ -2322,7 +2359,6 @@ class ScanEngine:
         ホストを渡さないと host-only Cookie が落ちて API 検査が未認証になる。
         """
         try:
-            from urllib.parse import urlparse as _up
             page = getattr(browser, "page", None)
             if page is None:
                 return
@@ -2335,43 +2371,26 @@ class ScanEngine:
             # できないため上の except/None 経路では据え置く（無闇に消さない）。
             self.cookies = ""
             return
-        _parsed = _up(for_url or self.target_url)
-        target_host = (_parsed.hostname or "").lower()
-        req_path = _parsed.path or "/"
-        # (path, "name=value") を集めてから RFC 6265 §5.4 の並びへ整える。
-        matched: list[tuple[str, str]] = []
-        for c in cookies:
-            name = c.get("name")
-            if not name:
-                continue
-            raw_dom = str(c.get("domain", ""))
-            # 先頭ドットの有無で host-only か domain-scoped かを判別する
-            # （Playwright: ドメイン Cookie は ".example.com"、host-only は "example.com"）。
-            is_domain_cookie = raw_dom.startswith(".")
-            dom = raw_dom.lstrip(".").lower()
-            # ブラウザの送出規則に合わせて採用する:
-            #  - 完全一致は常に可
-            #  - サブドメインへの suffix 一致は **domain-scoped Cookie のときだけ** 可
-            #    （host-only な example.com の Cookie を api.example.com へ送らない）。
-            if dom and target_host and not (
-                target_host == dom
-                or (is_domain_cookie and target_host.endswith("." + dom))
-            ):
-                continue
-            cpath = str(c.get("path", "/") or "/")
-            # path スコープも照合（Path=/admin の Cookie を /api へ送らない）。
-            if not _cookie_path_matches(req_path, cpath):
-                continue
-            matched.append((cpath, f"{name}={c.get('value', '')}"))
-        # RFC 6265 §5.4: path の長いものを先に送る（同名 Cookie が / と /admin に
-        # ある場合、より具体的な /admin を先頭に）。最初の値を使うフレームワークで
-        # 誤ったセッション（root cookie）で検査するのを防ぐ。stable sort なので同じ
-        # path 長は元の順序（概ね生成順）を保つ。
-        matched.sort(key=lambda pv: len(pv[0]), reverse=True)
-        # マッチ集合で**常に置換**する（空でも）。per-URL 同期では、前の URL で
-        # 別ホスト用に設定した self.cookies が残ると、当該ホストに無関係な Cookie を
+        # domain/path スコープした Cookie ヘッダで**常に置換**する（空でも）。per-URL 同期では、
+        # 前の URL で別ホスト用に設定した self.cookies が残ると、当該ホストに無関係な Cookie を
         # 送って別セッションで検査してしまう。一致が無ければクリアして未認証で送る。
-        self.cookies = "; ".join(pv[1] for pv in matched)
+        self.cookies = _scoped_cookie_header(cookies, for_url or self.target_url)
+
+    async def cookie_header_for_url(self, url: str) -> str:
+        """``url`` のホスト/パスへ送られる Cookie ヘッダをブラウザ jar から作る（path/domain スコープ済み）。
+
+        ``self.cookies`` は同期時の for_url（=ページ path）でスコープされ Path=/ と Path=/admin の
+        両方を含むため、origin ルート(/) の probe へそのまま送ると Path=/admin の Cookie を漏らす。
+        本メソッドは URL 単位で再スコープした文字列を返し、origin と page で送り分けられるようにする
+        （http_methods 等が使用・Codex #157）。ブラウザ未接続・jar 空・例外時は ""。"""
+        try:
+            page = getattr(self.browser, "page", None)
+            if page is None:
+                return ""
+            cookies = await page.context.cookies()
+        except Exception:
+            return ""
+        return _scoped_cookie_header(cookies, url)
 
     async def _maybe_relogin_for_page(self, url: str) -> None:
         """攻撃対象ページの状態を見てセッション失効なら再ログインする。

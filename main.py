@@ -775,6 +775,7 @@ Examples:
         "race_condition", "websocket", "secret_leak", "sri", "js_static",
         # 新クラス
         "prototype_pollution", "cache_poisoning", "mass_assignment",
+        "http_methods",
         # opt-in（外部OSS/依存が要る）検査。--checks で明示指定すると自動で有効化する。
         "tls_scan",
     ]

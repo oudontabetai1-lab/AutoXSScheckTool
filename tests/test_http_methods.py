@@ -1,0 +1,455 @@
+"""0018: HTTP メソッド設定不備（危険メソッド告知 / XST / WebDAV）の単体テスト。
+
+純粋判定関数はオフライン検証。スキャナは httpx.AsyncClient を fake へ差し替えて
+実ネットワークなしで scan_page の分岐を検証する。
+"""
+import unittest
+from unittest import mock
+
+from wscan.scanners import SCANNERS
+from wscan.scanners import http_methods as hm
+
+
+class PureFunctionTests(unittest.TestCase):
+    def test_parse_allow(self):
+        self.assertEqual(hm.parse_allow_methods("GET, POST , put"), {"GET", "POST", "PUT"})
+        self.assertEqual(hm.parse_allow_methods(""), set())
+
+    def test_dangerous_and_webdav(self):
+        allowed = {"GET", "POST", "PUT", "DELETE", "PROPFIND", "MKCOL"}
+        self.assertEqual(hm.dangerous_methods(allowed), {"PUT", "DELETE"})
+        self.assertEqual(hm.webdav_methods(allowed), {"PROPFIND", "MKCOL"})
+
+    def test_trace_reflects(self):
+        self.assertTrue(hm.trace_reflects(200, {"Content-Type": "message/http"},
+                                          "TRACE / HTTP/1.1\nX-Xst-Probe: TOK", "TOK"))
+        self.assertTrue(hm.trace_reflects(200, {}, "...X-Xst-Probe: TOK...", "TOK"))
+        self.assertFalse(hm.trace_reflects(405, {}, "", "TOK"))
+        self.assertFalse(hm.trace_reflects(200, {"Content-Type": "text/html"}, "<html>", "TOK"))
+
+    def test_trace_strength_token_is_confirmed(self):
+        self.assertEqual(hm.trace_reflection_strength(
+            200, {}, "...X-Xst-Probe: TOK...", "TOK"), "confirmed")
+
+    def test_trace_strength_message_http_without_token_is_likely(self):
+        # token 非反射（canned な message/http 応答）は confirmed にしない（FP 防止）。
+        self.assertEqual(hm.trace_reflection_strength(
+            200, {"Content-Type": "message/http"}, "TRACE / HTTP/1.1\n", "TOK"), "likely")
+
+    def test_trace_strength_none(self):
+        self.assertEqual(hm.trace_reflection_strength(405, {}, "", "TOK"), "")
+        self.assertEqual(hm.trace_reflection_strength(
+            200, {"Content-Type": "text/html"}, "<html>", "TOK"), "")
+
+    def test_redact_trace_body_masks_secrets(self):
+        body = ("TRACE / HTTP/1.1\r\nHost: app.test\r\n"
+                "Authorization: Bearer supersecrettoken\r\n"
+                "Cookie: session=abcdef123\r\n"
+                "X-Access-Token: aaa111\r\nX-Amz-Security-Token: bbb222\r\n"
+                "X-Csrf-Token: ccc333\r\n")
+        out = hm.redact_trace_body(body)
+        for secret in ("supersecrettoken", "session=abcdef123", "aaa111", "bbb222", "ccc333"):
+            self.assertNotIn(secret, out)
+        self.assertIn("[REDACTED]", out)
+        self.assertIn("Host: app.test", out)  # 非秘匿ヘッダは残す（証跡）
+
+    def test_redact_trace_body_uses_runtime_registered_headers(self):
+        # engine が登録したカスタム認証ヘッダ（正規述語 is_sensitive_header 経由）も伏字化する。
+        from wscan import request_logger
+        request_logger.register_sensitive_headers(["X-Company-Auth"])
+        try:
+            body = "TRACE / HTTP/1.1\r\nX-Company-Auth: topsecretvalue\r\n"
+            out = hm.redact_trace_body(body)
+            self.assertNotIn("topsecretvalue", out)
+            self.assertIn("[REDACTED]", out)
+        finally:
+            request_logger.clear_sensitive_headers()
+
+    def test_redact_trace_body_masks_serialized_secret_values(self):
+        # 行頭 `Header: value` に現れない直列化（JSON/HTML属性/エスケープ\r\n）でも、
+        # 送信した秘匿値を渡せば literal 置換で伏字化する（Codex #157 C2）。
+        secret = "Bearer supersecrettoken"
+        cookie = "session=abcdef123"
+        body = (
+            '{"headers":{"Authorization":"%s","Cookie":"%s"}}\n'
+            'TRACE / HTTP/1.1\\r\\nAuthorization: %s\\r\\n'
+        ) % (secret, cookie, secret)
+        out = hm.redact_trace_body(body, sent_secret_values=[secret, cookie])
+        self.assertNotIn("supersecrettoken", out)
+        self.assertNotIn("abcdef123", out)
+        self.assertIn("[REDACTED]", out)
+
+    def test_redact_trace_body_ignores_short_values(self):
+        # 短い値（len<4）は誤爆防止のため literal 置換しない。
+        body = "reflected abc here"
+        out = hm.redact_trace_body(body, sent_secret_values=["abc"])
+        self.assertIn("abc", out)
+
+    def test_redact_trace_body_masks_encoded_variants(self):
+        # 反射器が安全に直列化したエンコード形（HTML実体参照/percent/JSONエスケープ）でも伏字化する。
+        import html as _html
+        import json as _json
+        from urllib.parse import quote as _quote
+        secret = 'sid=a&b"c/d'
+        body = (
+            f'raw={secret}\n'
+            f'html_attr="{_html.escape(secret)}"\n'
+            f'percent={_quote(secret, safe="")}\n'
+            f'json={_json.dumps(secret)}\n'
+        )
+        out = hm.redact_trace_body(body, sent_secret_values=[secret])
+        # 生の断片（区切り記号を除いた本体）が一切残らない。
+        for frag in ("sid=a", "b%22c", "b&amp;", "a&b", "c/d", "c\\/d"):
+            self.assertNotIn(frag, out)
+        self.assertIn("[REDACTED]", out)
+
+
+class _FakeResp:
+    def __init__(self, status_code, headers=None, text=""):
+        self.status_code = status_code
+        self.headers = headers or {}
+        self.text = text
+
+
+class _FakeClient:
+    """httpx.AsyncClient の最小ダブル（request(method,url,headers=) を canned 応答へ）。"""
+
+    def __init__(self, responses, headers=None):
+        self._responses = responses  # {method: _FakeResp}
+        self.requested = []
+        # 実送信ヘッダの相当物（_check_trace が秘匿値抽出に参照する）。
+        self.headers = headers or {}
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *a):
+        return False
+
+    async def request(self, method, url, headers=None):
+        self.requested.append((method, url, headers or {}))
+        resp = self._responses.get(method)
+        if resp is None:
+            raise RuntimeError("method not mocked")
+        # TRACE の token 反射をシミュレート（probe token を本文へ差し込む）。
+        if method == "TRACE" and getattr(resp, "_echo", False):
+            tok = (headers or {}).get("X-Xst-Probe", "")
+            resp = _FakeResp(resp.status_code, resp.headers, resp.text + tok)
+        return resp
+
+
+class _FakeEngine:
+    def __init__(self):
+        self.browser = None
+        self.monitor = None
+        self.payload_gen = None
+        self.wave_errors = []
+        self.proxy = ""
+        self.timeout = 10
+
+
+class ScannerTests(unittest.IsolatedAsyncioTestCase):
+    def _scanner(self):
+        engine = _FakeEngine()
+        return engine, SCANNERS["http_methods"](engine)
+
+    async def _run(self, responses):
+        engine, scanner = self._scanner()
+        recorded = []
+
+        async def _rec(**kw):
+            recorded.append(kw)
+            return object()
+
+        scanner.record_finding = _rec
+        client = _FakeClient(responses)
+        with mock.patch.object(hm.httpx, "AsyncClient", return_value=client):
+            await scanner.scan_page("http://app.test/")
+        return recorded
+
+    async def test_dangerous_webdav_and_xst(self):
+        trace = _FakeResp(200, {"Content-Type": "message/http"}, "TRACE / HTTP/1.1\n")
+        trace._echo = True
+        responses = {
+            "OPTIONS": _FakeResp(200, {"allow": "GET, POST, PUT, DELETE, PROPFIND", "dav": "1,2"}),
+            "TRACE": trace,
+            "PROPFIND": _FakeResp(207, {}, "<multistatus/>"),
+        }
+        rec = await self._run(responses)
+        types = {r["evidence_type"] for r in rec}
+        self.assertIn("http_dangerous_methods", types)
+        self.assertIn("http_webdav_enabled", types)
+        self.assertIn("http_trace_xst", types)
+
+    async def test_safe_origin_no_findings(self):
+        responses = {
+            "OPTIONS": _FakeResp(200, {"allow": "GET, POST, HEAD, OPTIONS"}),
+            "TRACE": _FakeResp(405, {}, ""),
+            "PROPFIND": _FakeResp(405, {}, ""),
+        }
+        rec = await self._run(responses)
+        self.assertEqual(rec, [])
+
+    async def test_webdav_not_double_reported(self):
+        # OPTIONS(dav) と PROPFIND(207) が両方成立しても WebDAV Finding は 1 件だけ。
+        responses = {
+            "OPTIONS": _FakeResp(200, {"allow": "GET, PROPFIND", "dav": "1,2"}),
+            "TRACE": _FakeResp(405, {}, ""),
+            "PROPFIND": _FakeResp(207, {}, "<multistatus/>"),
+        }
+        rec = await self._run(responses)
+        webdav = [r for r in rec if r["evidence_type"] == "http_webdav_enabled"]
+        self.assertEqual(len(webdav), 1)
+        self.assertEqual(webdav[0]["severity"], "low")  # 告知≠悪用可能
+
+    async def test_xst_without_token_is_likely(self):
+        trace = _FakeResp(200, {"Content-Type": "message/http"}, "TRACE / HTTP/1.1\n")
+        # _echo を付けない＝token 非反射。
+        responses = {
+            "OPTIONS": _FakeResp(200, {"allow": "GET, POST"}),
+            "TRACE": trace,
+            "PROPFIND": _FakeResp(405, {}, ""),
+        }
+        rec = await self._run(responses)
+        xst = [r for r in rec if r["evidence_type"] == "http_trace_xst"]
+        self.assertEqual(len(xst), 1)
+        self.assertEqual(xst[0]["confidence"], "likely")
+
+    async def test_client_kwargs_uses_scoped_cookie_override(self):
+        # _client_kwargs は cookie_override（URL 単位で再スコープした Cookie）で置換する。
+        # None のときは Cookie を付与しない（#157 P2）。
+        engine, scanner = self._scanner()
+
+        def _auth_headers(extra=None, *, include_cookie=True, url=""):
+            return {"X-Custom": "1"}  # 非 Cookie ヘッダのみ
+        engine.auth_headers = _auth_headers
+
+        kw_origin = scanner._client_kwargs("https://h.test", cookie_override="root=r")
+        self.assertEqual(kw_origin["headers"].get("Cookie"), "root=r")
+        kw_none = scanner._client_kwargs("https://h.test", cookie_override=None)
+        self.assertNotIn("Cookie", kw_none["headers"])
+        self.assertEqual(kw_none["headers"].get("X-Custom"), "1")  # 非 Cookie ヘッダは維持
+
+    async def test_explicit_cookie_header_not_overwritten(self):
+        # operator が -H で明示した Cookie は cookie_override で上書きしない（#157 P2）。
+        engine, scanner = self._scanner()
+
+        def _auth_headers(extra=None, *, include_cookie=True, url=""):
+            return {"Cookie": "explicit=1"}  # HeaderManager 由来の明示 Cookie
+        engine.auth_headers = _auth_headers
+
+        kw = scanner._client_kwargs("https://h.test", cookie_override="engine=2")
+        self.assertEqual(kw["headers"].get("Cookie"), "explicit=1")
+
+    async def test_origin_and_page_get_path_scoped_cookies(self):
+        # scan_page は各 target を engine.cookie_header_for_url で再スコープした Cookie で probe する。
+        # origin(/) は Path=/ の Cookie のみ、page(/admin) は両方（#157 P2）。
+        engine, scanner = self._scanner()
+        seen: dict[str, str] = {}
+
+        async def _cookie_for(url):
+            # /admin には root+admin、origin ルートには root のみ返す（path スコープ相当）。
+            return "root=r; adm=a" if url.endswith("/admin") else "root=r"
+        engine.cookie_header_for_url = _cookie_for
+
+        made: list[tuple[str, str]] = []
+        real_kwargs = scanner._client_kwargs
+
+        def _spy(target, *, cookie_override=None):
+            made.append((target, cookie_override or ""))
+            return real_kwargs(target, cookie_override=cookie_override)
+        scanner._client_kwargs = _spy
+
+        responses = {"OPTIONS": _FakeResp(200, {"allow": "GET"}),
+                     "TRACE": _FakeResp(405, {}, ""), "PROPFIND": _FakeResp(404, {}, "")}
+        client = _FakeClient(responses)
+        with mock.patch.object(hm.httpx, "AsyncClient", return_value=client):
+            await scanner.scan_page("http://app.test/admin")
+        by_target = dict(made)
+        self.assertEqual(by_target["http://app.test"], "root=r")           # origin: root のみ
+        self.assertEqual(by_target["http://app.test/admin"], "root=r; adm=a")  # page: 両方
+
+    async def test_probe_cap_is_per_origin(self):
+        # 上限は origin 単位。1 origin の多数パスが枠を食い潰しても、別 origin は必ず probe される（#157）。
+        engine, scanner = self._scanner()
+        scanner._MAX_TARGETS_PER_ORIGIN = 2
+        probed: list[str] = []
+
+        async def _opt(client, target, origin, probe_state=None):
+            probed.append(target)
+            return []
+
+        async def _empty(*a, **k):
+            return []
+        scanner._check_options = _opt
+        scanner._check_trace = _empty
+        scanner._check_webdav = _empty
+
+        responses = {"OPTIONS": _FakeResp(200, {"allow": "GET"}),
+                     "TRACE": _FakeResp(405, {}, ""), "PROPFIND": _FakeResp(404, {}, "")}
+        client = _FakeClient(responses)
+        with mock.patch.object(hm.httpx, "AsyncClient", return_value=client):
+            # origin A: origin + 3 paths（page probe は 2 で頭打ち、origin は常に許可）。
+            for p in ("/a", "/b", "/c"):
+                await scanner.scan_page(f"http://a.test{p}")
+            # origin B: 枯渇せず origin probe が走る。
+            await scanner.scan_page("http://b.test/x")
+        self.assertIn("http://a.test", probed)     # origin A ルート
+        self.assertIn("http://b.test", probed)     # 別 origin も必ず probe（グローバル枯渇しない）
+        self.assertIn("http://b.test/x", probed)
+
+    async def test_trace_body_redacts_sent_auth_header_value(self):
+        # client.headers の秘匿値が本文（JSON 直列化など行頭に出ない形）でも伏字化される（#157 C2）。
+        secret = "Bearer supersecrettoken"
+        trace = _FakeResp(200, {"Content-Type": "message/http"},
+                          'TRACE / HTTP/1.1\n{"Authorization":"%s"}\n' % secret)
+        trace._echo = True
+        responses = {
+            "OPTIONS": _FakeResp(200, {"allow": "GET, POST"}),
+            "TRACE": trace,
+            "PROPFIND": _FakeResp(405, {}, ""),
+        }
+        engine, scanner = self._scanner()
+        recorded = []
+
+        async def _rec(**kw):
+            recorded.append(kw)
+            return object()
+
+        scanner.record_finding = _rec
+        client = _FakeClient(responses, headers={"Authorization": secret})
+        with mock.patch.object(hm.httpx, "AsyncClient", return_value=client):
+            await scanner.scan_page("http://app.test/")
+        xst = [r for r in recorded if r["evidence_type"] == "http_trace_xst"]
+        self.assertEqual(len(xst), 1)
+        self.assertNotIn("supersecrettoken", xst[0]["pair"]["response"]["body"])
+
+    async def test_path_target_probed_in_addition_to_origin(self):
+        responses = {
+            "OPTIONS": _FakeResp(200, {"allow": "GET"}),
+            "TRACE": _FakeResp(405, {}, ""),
+            "PROPFIND": _FakeResp(404, {}, ""),
+        }
+        engine, scanner = self._scanner()
+
+        async def _rec(**kw):
+            return object()
+        scanner.record_finding = _rec
+        client = _FakeClient(responses)
+        with mock.patch.object(hm.httpx, "AsyncClient", return_value=client):
+            await scanner.scan_page("http://app.test/dav/files")
+        # origin ルートとページパスの両方を検査している。
+        urls = {u for _, u, _ in client.requested}
+        self.assertIn("http://app.test", urls)
+        self.assertIn("http://app.test/dav/files", urls)
+
+    async def test_cors_acam_does_not_produce_dangerous_finding(self):
+        # Access-Control-Allow-Methods（CORS ポリシー告知）だけでは危険メソッド/WebDAV を報告しない。
+        responses = {
+            "OPTIONS": _FakeResp(200, {"access-control-allow-methods": "PUT, DELETE, PROPFIND"}),
+            "TRACE": _FakeResp(405, {}, ""),
+            "PROPFIND": _FakeResp(405, {}, ""),
+        }
+        rec = await self._run(responses)
+        self.assertEqual(rec, [])
+
+    async def test_allow_header_still_detected(self):
+        responses = {
+            "OPTIONS": _FakeResp(200, {"allow": "GET, PUT, DELETE"}),
+            "TRACE": _FakeResp(405, {}, ""),
+            "PROPFIND": _FakeResp(405, {}, ""),
+        }
+        rec = await self._run(responses)
+        danger = [r for r in rec if r["evidence_type"] == "http_dangerous_methods"]
+        self.assertEqual(len(danger), 1)
+
+    async def test_client_creation_failure_raises_for_retry(self):
+        # client 生成/__aenter__ 失敗＝probe が 1 つも走らない → PageDocumentUnavailable を投げ
+        # engine に error 扱い（resume 再試行）させる（tested 完了で恒久 skip させない）。
+        engine, scanner = self._scanner()
+
+        class _BadEnter:
+            async def __aenter__(self): raise RuntimeError("tls handshake failed")
+            async def __aexit__(self, *a): return False
+
+        with mock.patch.object(hm.httpx, "AsyncClient", return_value=_BadEnter()):
+            with self.assertRaises(hm.PageDocumentUnavailable):
+                await scanner.scan_page("http://app.test/")
+
+    async def test_single_probe_failure_raises_for_retry(self):
+        # OPTIONS だけ transport 失敗（TRACE/PROPFIND は 405 応答）でも、OPTIONS 固有のカバレッジ
+        # （危険 Allow メソッド）が欠けるので未検査扱いにして resume へ回す（Codex #157）。
+        engine, scanner = self._scanner()
+
+        class _OptFail:
+            def __init__(self):
+                self._r = {"TRACE": _FakeResp(405, {}, ""), "PROPFIND": _FakeResp(405, {}, "")}
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): return False
+            async def request(self, method, url, headers=None):
+                if method == "OPTIONS":
+                    raise RuntimeError("dns failure")
+                return self._r[method]
+
+        with mock.patch.object(hm.httpx, "AsyncClient", return_value=_OptFail()):
+            with self.assertRaises(hm.PageDocumentUnavailable):
+                await scanner.scan_page("http://app.test/")
+
+    async def test_all_requests_failing_raises_for_retry(self):
+        # DNS/接続/TLS 等で全 probe が request 時に失敗＝応答ゼロ（未検査）→ PageDocumentUnavailable を投げ
+        # engine に error(resume 再試行)扱いさせる（[] で tested 完了→恒久 skip させない・Codex #157）。
+        engine, scanner = self._scanner()
+
+        class _Boom:
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): return False
+            async def request(self, *a, **k): raise RuntimeError("boom")
+
+        with mock.patch.object(hm.httpx, "AsyncClient", return_value=_Boom()):
+            with self.assertRaises(hm.PageDocumentUnavailable):
+                await scanner.scan_page("http://app.test/")
+        # 未検査ターゲットは guard から外れ、resume で再試行できる。
+        self.assertNotIn("http://app.test", scanner._checked_targets)
+
+    async def test_partial_target_failure_raises_even_with_findings(self):
+        # origin は応答して finding が出るが page path の client が失敗 → finding があっても raise し、
+        # 失敗ターゲットを resume 対象にする（Codex #157）。
+        engine, scanner = self._scanner()
+        recorded = []
+
+        async def _rec(**kw):
+            recorded.append(kw)
+            return object()
+        scanner.record_finding = _rec
+
+        ok = _FakeClient({
+            "OPTIONS": _FakeResp(200, {"allow": "GET, PUT, DELETE"}),
+            "TRACE": _FakeResp(405, {}, ""),
+            "PROPFIND": _FakeResp(405, {}, ""),
+        })
+
+        class _Boom:
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): return False
+            async def request(self, *a, **k): raise RuntimeError("boom")
+
+        clients = [ok, _Boom()]  # origin=ok, page path=boom
+        with mock.patch.object(hm.httpx, "AsyncClient", side_effect=lambda **k: clients.pop(0)):
+            with self.assertRaises(hm.PageDocumentUnavailable):
+                await scanner.scan_page("http://app.test/page")
+        # origin の danger finding は record 済み（raise で戻り値は失われるが resume で再発見される）。
+        self.assertTrue(any(r["evidence_type"] == "http_dangerous_methods" for r in recorded))
+
+
+class CliChecksTests(unittest.TestCase):
+    def test_checks_http_methods_is_accepted(self):
+        import sys
+        import main as m
+        argv = ["prog", "scan", "http://x.test", "--checks", "http_methods", "--no-monitor"]
+        with mock.patch.object(sys, "argv", argv):
+            args = m.parse_args()
+        self.assertIn("http_methods", args.checks)
+
+
+if __name__ == "__main__":
+    unittest.main()

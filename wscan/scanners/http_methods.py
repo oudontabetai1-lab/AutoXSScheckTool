@@ -1,0 +1,392 @@
+"""HTTP メソッド設定不備スキャナ（危険メソッド告知 / XST / WebDAV）。
+
+対象オリジンに対して **read-only なメソッド**だけを使い、以下を検出する:
+- ``OPTIONS`` の ``Allow`` に危険メソッド（PUT/DELETE/PATCH/CONNECT/TRACE）が告知されている。
+- ``TRACE`` が有効で、送信ヘッダをそのまま反射する（Cross-Site Tracing / XST）。
+- WebDAV が有効（``OPTIONS`` の ``DAV`` ヘッダ、または ``PROPFIND`` が 207 Multi-Status を返す）。
+
+状態を変更する PUT/DELETE 等は**送らない**（OPTIONS/TRACE/PROPFIND のみ）。判定ロジックは純粋関数に
+分離し、通信失敗は graceful（Finding を作らない）。
+"""
+import re
+import secrets
+from typing import TYPE_CHECKING
+from urllib.parse import urlparse
+
+import httpx
+
+from wscan.scanner_contract import (
+    CapabilityState, Carrier, CarrierCapability, CostClass, ExecutionKind,
+    ScannerContract, StateChangeClass,
+)
+
+from .base import BaseScanner, Finding, PageDocumentUnavailable
+
+if TYPE_CHECKING:
+    from wscan.engine import ScanEngine
+
+
+# OPTIONS の Allow に現れたら報告する危険メソッド。
+_DANGEROUS_METHODS = frozenset({"PUT", "DELETE", "PATCH", "CONNECT", "TRACE"})
+# WebDAV を示すメソッド/ヘッダ。
+_WEBDAV_METHODS = frozenset({"PROPFIND", "PROPPATCH", "MKCOL", "COPY", "MOVE", "LOCK", "UNLOCK"})
+
+_UNSUPPORTED = tuple(
+    CarrierCapability(
+        carrier=c, state=CapabilityState.UNSUPPORTED,
+        reason="オリジンの HTTP メソッド設定を観測しパラメータ注入をしない",
+    )
+    for c in (
+        Carrier.QUERY, Carrier.FORM, Carrier.JSON, Carrier.XML, Carrier.MULTIPART,
+        Carrier.HEADER, Carrier.COOKIE, Carrier.PATH, Carrier.GRAPHQL, Carrier.WEBSOCKET,
+    )
+)
+
+
+def parse_allow_methods(allow_header: str) -> set[str]:
+    """``Allow`` / ``Access-Control-Allow-Methods`` ヘッダをメソッド集合へ（純粋）。"""
+    return {
+        tok.strip().upper()
+        for tok in (allow_header or "").split(",")
+        if tok.strip()
+    }
+
+
+def dangerous_methods(allowed: set[str]) -> set[str]:
+    """告知メソッドのうち危険なものを返す（純粋）。"""
+    return {m for m in allowed if m in _DANGEROUS_METHODS}
+
+
+def webdav_methods(allowed: set[str]) -> set[str]:
+    """告知メソッドのうち WebDAV 由来のものを返す（純粋）。"""
+    return {m for m in allowed if m in _WEBDAV_METHODS}
+
+
+def trace_reflection_strength(status: int, headers: dict, body: str, token: str) -> str:
+    """TRACE 応答の XST 成立強度を返す（純粋）: ``"confirmed"`` / ``"likely"`` / ``""``。
+
+    - probe トークンが本文に反射 → ``"confirmed"``（我々の送信ヘッダが実際に返っている）。
+    - トークン非反射だが ``message/http`` かつ本文に ``TRACE`` → ``"likely"``（TRACE 応答らしいが
+      我々のヘッダ反射までは未確証。canned 応答の誤検知を避けるため確定にしない）。
+    - それ以外 → ``""``（不成立）。
+    """
+    if status != 200:
+        return ""
+    ctype = ""
+    for k, v in (headers or {}).items():
+        if str(k).lower() == "content-type":
+            ctype = str(v).lower()
+            break
+    if token and token in (body or ""):
+        return "confirmed"
+    if "message/http" in ctype and "TRACE" in (body or ""):
+        return "likely"
+    return ""
+
+
+def trace_reflects(status: int, headers: dict, body: str, token: str) -> bool:
+    """後方互換: XST が成立（confirmed/likely いずれか）かを返す（純粋）。"""
+    return bool(trace_reflection_strength(status, headers, body, token))
+
+
+_TRACE_HEADER_LINE = re.compile(r"^([^\r\n:]+):(.*)$")
+
+
+def redact_trace_body(body: str, limit: int = 2000, sent_secret_values=()) -> str:
+    """TRACE が反射した送信ヘッダのうち秘匿値をマスクする（純粋）。
+
+    XST の証跡（どのヘッダが反射したか）は残しつつ、Authorization/Cookie 等の実値は残さない。
+    2 段構え:
+    (1) 行頭 `Header: value` 形は is_sensitive_header（runtime 登録のカスタム認証ヘッダも含む正規述語）で値を伏字化。
+    (2) ``sent_secret_values`` に送信した秘匿ヘッダの実値を渡すと、行頭に現れない直列化でも本文中
+        どこでも伏字化する。実値そのものに加え、HTML 実体参照（&amp;/&quot; 等）・percent エンコード・
+        JSON 文字列エスケープ（クォートやバックスラッシュのエスケープ）といった一般的なエンコード変種も生成して置換する（Codex #157）。
+    """
+    if not body:
+        return ""
+    import html as _html
+    import json as _json
+    from urllib.parse import quote as _quote
+
+    from wscan.request_logger import is_sensitive_header
+
+    text = body[:limit]
+    # (2) 送信した秘匿値を literal に伏字化（直列化形式に依らない）。反射器が安全に直列化した
+    # エンコード形（HTML 属性の &amp;/&quot;・percent エンコード・JSON のクォート/バックスラッシュ
+    # エスケープ）でも可逆な資格情報が残らないよう、各値の一般的なエンコード変種も生成して置換する
+    # （Codex #157）。長い値（＝より具体的な変種）から先に置換する。
+    variants: set[str] = set()
+    for val in (sent_secret_values or []):
+        if not val or len(val) < 4:
+            continue
+        variants.add(val)
+        variants.add(_html.escape(val))                  # & < > " ' → 実体参照
+        variants.add(_quote(val, safe=""))               # percent エンコード
+        variants.add(_json.dumps(val)[1:-1])             # JSON 文字列本体のエスケープ
+    for v in sorted({x for x in variants if x and len(x) >= 4}, key=len, reverse=True):
+        text = text.replace(v, "[REDACTED]")
+    # (1) 行頭ヘッダ形の値を伏字化。
+    out: list[str] = []
+    for line in text.splitlines(keepends=True):
+        m = _TRACE_HEADER_LINE.match(line.rstrip("\r\n"))
+        if m and is_sensitive_header(m.group(1).strip()):
+            nl = line[len(line.rstrip("\r\n")):]  # 改行（\r\n 等）を保持
+            out.append(f"{m.group(1)}: [REDACTED]{nl}")
+        else:
+            out.append(line)
+    return "".join(out)
+
+
+class HttpMethodsScanner(BaseScanner):
+    """HTTP メソッド設定（危険メソッド告知 / XST / WebDAV）を検査する（origin 単位・read-only）。"""
+
+    HAS_PAGE_LEVEL = True
+    CHECK_TYPE = "http_methods"
+    CONTRACT = ScannerContract(
+        execution_kinds=frozenset({ExecutionKind.PAGE_ANALYSIS}),
+        capabilities=_UNSUPPORTED,
+        state_change=StateChangeClass.READ_ONLY,
+        cost=CostClass.LOW,
+    )
+
+    SEVERITY = "medium"
+
+    # origin だけでなくページのパスも検査するが、リクエスト増を抑えるため **origin 単位**で
+    # 検査対象数を上限で抑える（グローバル上限だと多パスの 1 origin が後続 origin の枠を奪う・Codex #157）。
+    _MAX_TARGETS_PER_ORIGIN = 25
+
+    def __init__(self, engine: "ScanEngine"):
+        super().__init__(engine)
+        self._checked_targets: set[str] = set()
+        self._webdav_reported: set[str] = set()  # origin 単位（OPTIONS/PROPFIND の二重報告を防ぐ）
+
+    async def scan_field(
+        self, url: str, form_index: int, field: dict, is_url_param: bool = False,
+    ) -> list[Finding]:
+        return []
+
+    def _client_kwargs(self, target: str, *, cookie_override=None) -> dict:
+        proxy = getattr(self.engine, "proxy", "") or None
+        kwargs: dict = {"timeout": getattr(self.engine, "timeout", 15), "follow_redirects": False}
+        if hasattr(self.engine, "httpx_client_kwargs"):
+            kwargs = self.engine.httpx_client_kwargs(**kwargs)
+        elif proxy:
+            kwargs["proxy"] = proxy
+        if hasattr(self.engine, "auth_headers"):
+            # engine.auth_headers は Cookie 文字列を path 非依存で付ける（同期時のページ path で
+            # スコープされ Path=/ と Path=/admin の両方を含む）。origin と page で送るべき Cookie が
+            # 異なるため、cookie_override（URL 単位で再スコープした Cookie。engine.cookie_header_for_url
+            # 由来）があればそれで置換する。None のときは従来どおり Cookie を付与しない（Codex #157）。
+            headers = dict(self.auth_headers_for_url(target, include_cookie=False))
+            # operator が -H / refresh で明示した Cookie（HeaderManager 由来）は上書きしない。
+            # engine 生成 Cookie の置換だけ行う（明示認証セッションを破壊しない・Codex #157）。
+            if cookie_override and not any(k.lower() == "cookie" for k in headers):
+                headers["Cookie"] = cookie_override
+            kwargs["headers"] = headers
+        return kwargs
+
+    async def scan_page(self, url: str) -> list[Finding]:
+        parsed = urlparse(url)
+        origin = f"{parsed.scheme}://{parsed.netloc}"
+        # origin ルートに加えてページ自身のパスも検査する（パス単位の WebDAV/メソッド設定を
+        # 見逃さない）。query/fragment は落として同一パスを 1 回だけ検査する。
+        page_target = f"{origin}{parsed.path}" if parsed.path and parsed.path != "/" else origin
+
+        findings: list[Finding] = []
+        target_failed = False
+        for target in (origin, page_target):
+            if target in self._checked_targets:
+                continue
+            # 上限は **origin 単位**で数える。グローバル上限だと 1 origin の多数パスが枠を食い潰し、
+            # 後続 origin が 1 度も probe されないのに tested 完了扱いになり恒久的な偽カバレッジになる
+            # （Codex #157）。origin ルート probe は常に許可して各 origin の最低限の検査を確保する。
+            is_origin_probe = target == origin
+            if not is_origin_probe:
+                per_origin = sum(
+                    1 for t in self._checked_targets
+                    if t == origin or t.startswith(origin + "/")
+                )
+                if per_origin >= self._MAX_TARGETS_PER_ORIGIN:
+                    self._record_scan_note(f"target_cap:{self.CHECK_TYPE}")
+                    continue
+            self._checked_targets.add(target)
+
+            if self.monitor:
+                await self.monitor.emit_status(f"HTTP methods check on {target}")
+            # 各 probe(OPTIONS/TRACE/PROPFIND)は独立した finding クラスを担う（OPTIONS だけが
+            # 危険 Allow メソッドの唯一の情報源等）。従って 1 つでも request 時失敗があれば、その
+            # finding クラスのカバレッジが欠けるので target を未検査扱いにして resume へ回す
+            # （全 probe 失敗だけを未検査とすると、OPTIONS だけ失敗したケースを取りこぼす・Codex #157）。
+            probe_state = {"failed": False}
+            # Cookie は URL 単位で再スコープして送る。origin ルート(/) には Path=/ の Cookie だけ、
+            # page(/admin) には Path=/ と Path=/admin の Cookie を送る（Path=/admin を / に漏らさず、
+            # かつ認証専用の root TRACE/WebDAV を匿名で見逃さない・Codex #157）。
+            cookie_override = None
+            if hasattr(self.engine, "cookie_header_for_url"):
+                cookie_override = await self.engine.cookie_header_for_url(target)
+            try:
+                async with httpx.AsyncClient(
+                    **self._client_kwargs(target, cookie_override=cookie_override)
+                ) as client:
+                    findings += await self._check_options(client, target, origin, probe_state)
+                    findings += await self._check_trace(client, target, probe_state)
+                    findings += await self._check_webdav(client, target, origin, probe_state)
+            except Exception:
+                self._record_scan_note(f"transport_error:{self.CHECK_TYPE}:client")
+                self._checked_targets.discard(target)
+                target_failed = True
+                continue
+            if probe_state["failed"]:
+                # client は生成できたが いずれかの probe が request 時に失敗＝カバレッジ欠落。
+                self._record_scan_note(f"transport_error:{self.CHECK_TYPE}:probe_incomplete")
+                self._checked_targets.discard(target)
+                target_failed = True
+        # いずれかの target が完全に未検査（応答ゼロ）なら、他 target の finding の有無に関わらず
+        # observability 失敗を伝播する。engine に error 扱いさせ resume で再試行させる（返り値で
+        # 正常終了すると checkpoint 完了で恒久 skip される・Codex #157）。
+        if target_failed:
+            raise PageDocumentUnavailable(
+                f"{self.CHECK_TYPE}: 未検査のターゲットがあります（応答取得に失敗）: {origin}"
+            )
+        return findings
+
+    async def _check_options(self, client, target, origin, probe_state=None) -> list[Finding]:
+        try:
+            r = await client.request("OPTIONS", target)
+            self._record_probe_status(r)
+        except Exception:
+            if probe_state is not None:
+                probe_state["failed"] = True
+            self._record_scan_note(f"transport_error:{self.CHECK_TYPE}:options")
+            return []
+        # 危険メソッド/WebDAV の判定は Allow（そのエンドポイントが実際に受理するメソッド）だけに
+        # 基づく。Access-Control-Allow-Methods は cross-origin ポリシーの告知でありメソッド対応の
+        # 証明ではない（汎用 CORS ミドルウェアが PUT 等を返すと空 Allow で誤検知になる・Codex #157）。
+        allowed = parse_allow_methods(r.headers.get("allow", ""))
+        dav = webdav_methods(allowed) or bool(r.headers.get("dav"))
+        findings: list[Finding] = []
+        danger = dangerous_methods(allowed)
+        if danger:
+            pair = {"request": {"url": target, "method": "OPTIONS"},
+                    "response": {"status": r.status_code, "headers": dict(r.headers), "body": ""}}
+            findings.append(await self.record_finding(
+                url=target, field_name="(Allow header)",
+                payload="OPTIONS", evidence=(
+                    f"サーバが危険な HTTP メソッドを告知しています: {', '.join(sorted(danger))} "
+                    f"(Allow: {r.headers.get('allow', '')})。不要なメソッドは無効化してください。"
+                ),
+                pair=pair, severity="low", confidence="likely",
+                evidence_type="http_dangerous_methods",
+                evidence_details={"allow": sorted(allowed), "dangerous": sorted(danger)},
+                reproduction_steps=[
+                    f"Send: OPTIONS {target}",
+                    f"Inspect the Allow header: {r.headers.get('allow', '')}",
+                    "Disable unused methods (PUT/DELETE/PATCH/TRACE/CONNECT).",
+                ],
+            ))
+        # WebDAV は「有効の告知」であり悪用可能性そのものではないため low（告知≠悪用可能）。
+        # OPTIONS で報告したら origin 単位で記録し、PROPFIND 側の二重報告を抑止する。
+        if dav and origin not in self._webdav_reported:
+            self._webdav_reported.add(origin)
+            pair = {"request": {"url": target, "method": "OPTIONS"},
+                    "response": {"status": r.status_code, "headers": dict(r.headers), "body": ""}}
+            findings.append(await self.record_finding(
+                url=target, field_name="(WebDAV)", payload="OPTIONS",
+                evidence=(
+                    "WebDAV が有効の可能性があります"
+                    f"（DAV ヘッダ: {r.headers.get('dav', '')} / Allow: {r.headers.get('allow', '')}）。"
+                    "不要なら WebDAV を無効化してください。"
+                ),
+                pair=pair, severity="low", confidence="likely",
+                evidence_type="http_webdav_enabled",
+                evidence_details={"dav": r.headers.get("dav", ""), "allow": sorted(allowed)},
+                reproduction_steps=[
+                    f"Send: OPTIONS {target}",
+                    "Confirm a DAV response header or WebDAV verbs in Allow.",
+                    "Disable WebDAV if not required.",
+                ],
+            ))
+        return findings
+
+    async def _check_trace(self, client, target, probe_state=None) -> list[Finding]:
+        token = "XST-" + secrets.token_hex(8)
+        try:
+            r = await client.request("TRACE", target, headers={"X-Xst-Probe": token})
+            self._record_probe_status(r)
+        except Exception:
+            if probe_state is not None:
+                probe_state["failed"] = True
+            self._record_scan_note(f"transport_error:{self.CHECK_TYPE}:trace")
+            return []
+        strength = trace_reflection_strength(
+            r.status_code, dict(r.headers), r.text[:4000], token)
+        if not strength:
+            return []
+        # 反射本文には送信した Authorization/Cookie 等が含まれ得るのでマスクして保存する。
+        # 実際に送信したヘッダ（client.headers）から秘匿値を拾い、JSON/属性/エスケープ等で
+        # 行頭に現れない直列化でも literal 置換で伏字化する（Codex #157）。
+        from wscan.request_logger import is_sensitive_header
+        sent_secrets = [v for k, v in client.headers.items() if is_sensitive_header(k)]
+        pair = {"request": {"url": target, "method": "TRACE"},
+                "response": {"status": r.status_code, "headers": dict(r.headers),
+                             "body": redact_trace_body(r.text, sent_secret_values=sent_secrets)}}
+        confirmed = strength == "confirmed"
+        evidence = (
+            "TRACE メソッドが有効で送信ヘッダを反射します（Cross-Site Tracing / XST）。"
+            "HttpOnly Cookie 等の窃取に悪用され得ます。TRACE を無効化してください。"
+        ) if confirmed else (
+            "TRACE メソッドが有効で TRACE 応答（message/http）を返します。送信ヘッダの反射までは"
+            "未確証ですが XST の可能性があります。TRACE を無効化してください。"
+        )
+        return [await self.record_finding(
+            url=target, field_name="(TRACE method)", payload="TRACE",
+            evidence=evidence,
+            pair=pair, severity="medium", confidence=strength,
+            evidence_type="http_trace_xst",
+            evidence_details={"reflected_token": confirmed},
+            reproduction_steps=[
+                f"Send: TRACE {target} with a custom header",
+                "Confirm the response reflects the request (200, echoed header).",
+                "Disable the TRACE method on the server/proxy.",
+            ],
+        )]
+
+    async def _check_webdav(self, client, target, origin, probe_state=None) -> list[Finding]:
+        # OPTIONS で既に WebDAV を報告済みなら二重報告しない（origin 単位）。
+        if origin in self._webdav_reported:
+            return []
+        # OPTIONS で判定できなかった場合の補強。PROPFIND(Depth:0) は read-only。
+        try:
+            r = await client.request("PROPFIND", target, headers={"Depth": "0"})
+            self._record_probe_status(r)
+        except Exception:
+            if probe_state is not None:
+                probe_state["failed"] = True
+            self._record_scan_note(f"transport_error:{self.CHECK_TYPE}:propfind")
+            return []
+        # 207 Multi-Status（WebDAV 応答）を強シグナルとする。
+        if r.status_code != 207:
+            return []
+        # await 中に別パスの検査（--concurrency>1）が同 origin を報告済みにし得るので、
+        # 記録直前に再チェックして二重報告を防ぐ（入口ガードは await 前でレースする・Codex #157）。
+        if origin in self._webdav_reported:
+            return []
+        self._webdav_reported.add(origin)
+        pair = {"request": {"url": target, "method": "PROPFIND"},
+                "response": {"status": r.status_code, "headers": dict(r.headers),
+                             "body": r.text[:2000]}}
+        return [await self.record_finding(
+            url=target, field_name="(WebDAV)", payload="PROPFIND",
+            evidence=(
+                "PROPFIND が 207 Multi-Status を返し WebDAV が有効です。"
+                "不要なら WebDAV を無効化してください。"
+            ),
+            pair=pair, severity="low", confidence="confirmed",
+            evidence_type="http_webdav_enabled",
+            evidence_details={"propfind_status": 207},
+            reproduction_steps=[
+                f"Send: PROPFIND {target} with Depth: 0",
+                "Confirm a 207 Multi-Status WebDAV response.",
+                "Disable WebDAV if not required.",
+            ],
+        )]
