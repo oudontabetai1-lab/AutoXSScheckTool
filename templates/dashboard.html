@@ -254,7 +254,7 @@ body {
   gap:6px;
   flex-wrap:wrap;
   padding:6px 8px;
-  background:#0d1117;
+  background:#161826;
   border-bottom:1px solid var(--border);
 }
 .sitemap-pill {
@@ -453,7 +453,7 @@ body {
 .fc-confidence { font-size:.65rem; font-weight:800; padding:2px 8px; border-radius:10px; text-transform:uppercase; letter-spacing:.05em; border:1px solid transparent; }
 .fc-confidence-confirmed { color:#86efac; background:rgba(63,185,80,.16); border-color:rgba(63,185,80,.35); }
 .fc-confidence-likely { color:#facc15; background:rgba(210,153,34,.15); border-color:rgba(210,153,34,.35); }
-.fc-confidence-tentative { color:#a5d6ff; background:rgba(56,139,253,.12); border-color:rgba(56,139,253,.3); }
+.fc-confidence-tentative { color:#b5abfc; background:rgba(56,139,253,.12); border-color:rgba(56,139,253,.3); }
 .fc-verified { font-size:.65rem; color:#86efac; background:rgba(63,185,80,.12); border:1px solid rgba(63,185,80,.25); padding:2px 8px; border-radius:10px; }
 .fc-assumed { font-size:.65rem; color:#facc15; background:rgba(210,153,34,.12); border:1px solid rgba(210,153,34,.35); padding:2px 8px; border-radius:10px; }
 .fc-unverified { font-size:.65rem; color:#fca5a5; background:rgba(248,81,73,.12); border:1px solid rgba(248,81,73,.35); padding:2px 8px; border-radius:10px; }
@@ -487,8 +487,8 @@ body {
 }
 .net-section { color: var(--accent); font-weight: 700; margin-bottom: 4px; margin-top: 10px; }
 .net-key { color: #79c0ff; }
-.net-val { color: #a5d6ff; }
-.net-body { color: #e6edf3; }
+.net-val { color: #b5abfc; }
+.net-body { color: #e9e9ed; }
 .net-status-ok { color: var(--low); }
 .net-status-err { color: var(--critical); }
 
@@ -593,7 +593,7 @@ body {
   border: none;
   cursor: pointer;
 }
-.pm-btn.confirm { background: var(--success); color: #0d1117; }
+.pm-btn.confirm { background: var(--success); color: #161826; }
 .pm-btn.confirm:hover { opacity: 0.9; }
 /* Plan table inside modal */
 .pm-page-card {
@@ -1905,9 +1905,9 @@ https://example.com/search?q=test" style="width:100%;font-family:monospace;font-
           <button class="sm-mini-btn" onclick="smZoom(1.25)" title="拡大">＋</button>
           <button class="sm-mini-btn" onclick="smResetView()" title="リセット">⟲</button>
           <div class="sitemap-legend">
-            <span class="sitemap-pill"><span class="sm-dot" style="background:#f0883e"></span>巡回中</span>
+            <span class="sitemap-pill"><span class="sm-dot" style="background:#d99a63"></span>巡回中</span>
             <span class="sitemap-pill"><span class="sm-dot" style="background:#9184d9"></span>完了</span>
-            <span class="sitemap-pill"><span class="sm-dot" style="background:#f85149"></span>検出</span>
+            <span class="sitemap-pill"><span class="sm-dot" style="background:#e2708f"></span>検出</span>
           </div>
         </div>
         <!-- 検査前レビュー: 遷移図を見ながら検査開始/再巡回/中止を選ぶバー -->
@@ -3521,10 +3521,10 @@ async function loadDefaultConfigFromServer() {
 
 const SCN_ACTIONS = {
   navigate: {ico:'🌐', label:'移動',     color:'#9184d9'},
-  fill:     {ico:'⌨️', label:'入力',     color:'#3fb950'},
-  submit:   {ico:'📤', label:'送信',     color:'#d29922'},
+  fill:     {ico:'⌨️', label:'入力',     color:'#8fb9c9'},
+  submit:   {ico:'📤', label:'送信',     color:'#d99a63'},
   click:    {ico:'🖱️', label:'クリック', color:'#a371f7'},
-  wait:     {ico:'⏱️', label:'待機',     color:'#7d8590'},
+  wait:     {ico:'⏱️', label:'待機',     color:'#9397ab'},
 };
 
 // Scenarios saved from the config tab (persist with the scan config).
@@ -5329,11 +5329,11 @@ function _smRenderCompact(model) {
     const p = n.parent && byId[n.parent]; if (!p) return;
     const x1 = p.x + BW, y1 = p.y + BH / 2, x2 = n.x, y2 = n.y + BH / 2, mx = (x1 + x2) / 2;
     vp.appendChild(_smEl('path', { d: `M${x1},${y1} C${mx},${y1} ${mx},${y2} ${x2},${y2}`, fill: 'none', stroke: '#4a5568', 'stroke-width': 1.5, 'marker-end': 'url(#sm-arr)' }));
-    vp.appendChild(_smEl('circle', { cx: x1, cy: y1, r: 3.2, fill: '#f85149', stroke: '#fff', 'stroke-width': 1 }));
+    vp.appendChild(_smEl('circle', { cx: x1, cy: y1, r: 3.2, fill: '#e2708f', stroke: '#fff', 'stroke-width': 1 }));
     const txt = (n.via && n.via.text) || '';
     if (txt) {
       const tw = Math.min(txt.length, 14) * 7 + 12, lx = mx, ly = (y1 + y2) / 2;
-      vp.appendChild(_smEl('rect', { x: lx - tw / 2, y: ly - 8, width: tw, height: 16, rx: 4, fill: '#0d1117', stroke: '#21262d' }));
+      vp.appendChild(_smEl('rect', { x: lx - tw / 2, y: ly - 8, width: tw, height: 16, rx: 4, fill: '#161826', stroke: '#232532' }));
       const t = _smEl('text', { x: lx, y: ly + 3, 'text-anchor': 'middle', 'font-size': '10px', fill: '#c9d1d9' });
       t.textContent = txt.length > 14 ? txt.slice(0, 13) + '…' : txt; vp.appendChild(t);
     }
@@ -5351,7 +5351,7 @@ function _smRenderCompact(model) {
       g.appendChild(car); tx = 24;
     }
     g.appendChild(_smEl('circle', { cx: tx + 4, cy: BH / 2, r: 4.5, fill: _smNodeColor(n) }));
-    const title = _smEl('text', { x: tx + 14, y: BH / 2 - 2, 'font-size': '10.5px', fill: '#e6edf3' });
+    const title = _smEl('text', { x: tx + 14, y: BH / 2 - 2, 'font-size': '10.5px', fill: '#e9e9ed' });
     title.textContent = _smShort(n.url); g.appendChild(title);
     const sub = _smEl('text', { x: tx + 14, y: BH / 2 + 11, 'font-size': '9px', fill: '#8b949e' });
     sub.textContent = (state.smCollapsed[n.url] && desc[n.url]) ? `${desc[n.url]} ページ`
@@ -5385,7 +5385,7 @@ function _smRenderShots(model) {
     const txt = (n.via && n.via.text) || '';
     if (txt) {
       const tw = Math.min(txt.length, 14) * 7 + 12, lx = mx, ly = (y1 + y2) / 2;
-      vp.appendChild(_smEl('rect', { x: lx - tw / 2, y: ly - 8, width: tw, height: 16, rx: 4, fill: '#0d1117', stroke: '#21262d' }));
+      vp.appendChild(_smEl('rect', { x: lx - tw / 2, y: ly - 8, width: tw, height: 16, rx: 4, fill: '#161826', stroke: '#232532' }));
       const t = _smEl('text', { x: lx, y: ly + 3, 'text-anchor': 'middle', 'font-size': '10px', fill: '#c9d1d9' });
       t.textContent = txt.length > 14 ? txt.slice(0, 13) + '…' : txt; vp.appendChild(t);
     }
@@ -5415,10 +5415,10 @@ function _smRenderShots(model) {
       g.appendChild(_smEl('rect', {
         x: 6 + (CW - 12) * nr.x, y: 6 + IMGH * nr.y,
         width: Math.max(8, (CW - 12) * nr.w), height: Math.max(7, IMGH * nr.h),
-        rx: 3, fill: 'rgba(248,81,73,.18)', stroke: '#f85149', 'stroke-width': 1.5
+        rx: 3, fill: 'rgba(248,81,73,.18)', stroke: '#e2708f', 'stroke-width': 1.5
       }));
     });
-    const title = _smEl('text', { x: 8, y: CH - 11, 'font-size': '10.5px', fill: '#e6edf3' });
+    const title = _smEl('text', { x: 8, y: CH - 11, 'font-size': '10.5px', fill: '#e9e9ed' });
     title.textContent = _smShort(n.url); g.appendChild(title);
     const sub = _smEl('text', { x: 8, y: CH - 2, 'font-size': '9px', fill: '#8b949e' });
     sub.textContent = `${n.forms || 0}f / ${n.inputs || 0}i / ${n.params || 0}p`; g.appendChild(sub);
@@ -5571,8 +5571,8 @@ function _smWirePan() {
 
 function _smNodeColor(d) {
   switch (d.status) {
-    case 'vuln':     return '#f85149';
-    case 'scanning': return '#f0883e';
+    case 'vuln':     return '#e2708f';
+    case 'scanning': return '#d99a63';
     case 'done':     return '#9184d9';
     default:         return '#3a3f4a';
   }
