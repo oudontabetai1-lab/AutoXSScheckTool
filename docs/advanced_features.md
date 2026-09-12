@@ -1,6 +1,6 @@
 # 高度診断支援機能 — 詳細調査レポート
 
-元々 `b1d1128` で実装された A〜J の 10 機能に加え、K〜P の 6 機能を追加実装。合計 16 機能。
+元々 `b1d1128` で実装された A〜J の 10 機能に加え、K〜Q の 7 機能を追加実装。合計 17 機能。
 
 ---
 
@@ -24,6 +24,7 @@
 | N | リクエストレート制御 | `wscan/engine.py`, `main.py` | 実装済み |
 | O | HAR ファイルインポート | `wscan/har_importer.py`, `wscan/engine.py` | 実装済み |
 | P | WebSocket インジェクション | `wscan/scanners/websocket.py` | 実装済み |
+| Q | TLS 設定検査（sslyze・opt-in） | `wscan/scanners/tls_config_scan.py`, `wscan/tls_scan.py` | 実装済み |
 
 ---
 
@@ -552,6 +553,52 @@ python main.py scan --checks xss sqli websocket https://target.example.com
 
 ---
 
+## Q. TLS 設定検査（sslyze・opt-in）
+
+**ファイル**: `wscan/scanners/tls_config_scan.py`, `wscan/tls_scan.py`
+
+### 目的
+OSS の [sslyze](https://github.com/nabla-c0d3/sslyze) を使い、TLS 通信路の設定不備（弱いプロトコルの受理・既知の実装脆弱性）を検査する。`https` オリジンのみが対象。**外部依存を伴う opt-in** で、sslyze 未導入なら inert（何もしない）。判定は純粋関数 `tls_scan.extract_tls_issues` に分離し、通信/スキャン失敗は graceful に（Finding を作らない）扱う。
+
+### 検出対象
+
+| 種別 | 例 | severity |
+|------|----|---------|
+| 弱いプロトコルの受理 | SSLv2 / SSLv3 | high |
+| 弱いプロトコルの受理 | TLS 1.0 / TLS 1.1 | medium |
+| Heartbleed (CVE-2014-0160) | メモリ over-read による情報漏えい | critical |
+| OpenSSL CCS Injection (CVE-2014-0224) | MITM による復号/改ざん | high |
+| ROBOT | Bleichenbacher オラクルによる復号 | high |
+
+CVSS は severity バケツ一律ではなく**脆弱性ごとの実 impact** で割り当てる（例: Heartbleed は機密性のみ＝`C:H/I:N/A:N`）。
+
+### セットアップ
+
+```bash
+# sslyze を導入（未導入だと TLS 検査は自動でスキップ）
+python3 -m pip install -r requirements-tls.txt
+```
+
+### 使い方
+
+```bash
+# TLS 検査を有効化（--checks で明示すると自動で有効になる）
+python main.py scan https://target.example.com --checks tls_scan
+
+# 他のチェックと組み合わせ
+python main.py scan https://target.example.com --checks xss sqli tls_scan
+```
+
+ダッシュボードでは機能フラグ「TLS 設定不備検査」トグル、または config の `features.tls_scan` でも有効化できる。
+
+### 特徴・注意点
+
+- **クロール非依存の origin 検査**: 弱いプロトコル（TLS1.0/1.1 のみ受理等）は Chromium がネゴシエートできずクロール段階で落ちるため、攻撃スコープ内の seed origin を直接 sslyze で検査して取りこぼしを防ぐ（`_is_attack_target_url` で攻撃スコープに限定）。
+- **proxy / mTLS 未対応**: 監査 proxy やクライアント証明書認証が設定されている場合、sslyze は別経路の直接接続になるため検査せず observability に skip を記録する（別接続で誤った結果を出さない）。
+- 対象ホストへ送るのは TLS レベルのプローブのみ（Heartbleed の heartbeat 要求、CCS Injection / ROBOT の細工した TLS メッセージ等の**能動的な脆弱性プローブ**を含む）で、HTTP 等のアプリケーションデータや外部サービスへの送信はしない。
+
+---
+
 ## 実装品質評価
 
 | 機能 | 完成度 | 備考 |
@@ -572,3 +619,4 @@ python main.py scan --checks xss sqli websocket https://target.example.com
 | N リクエストレート制御 | ★★★★★ | sleep_factor との統合がクリーン |
 | O HAR インポート | ★★★★☆ | Set-Cookie/Authorization 自動抽出 |
 | P WebSocket スキャナー | ★★★☆☆ | JSON フィールド注入対応、WS 切断時は不安定の可能性 |
+| Q TLS 設定検査 | ★★★★☆ | sslyze 活用・opt-in、クロール非依存の origin 検査、kind 別 CVSS |
