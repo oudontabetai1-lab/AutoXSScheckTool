@@ -178,7 +178,9 @@ class HttpMethodsScanner(BaseScanner):
             # 異なるため、cookie_override（URL 単位で再スコープした Cookie。engine.cookie_header_for_url
             # 由来）があればそれで置換する。None のときは従来どおり Cookie を付与しない（Codex #157）。
             headers = dict(self.auth_headers_for_url(target, include_cookie=False))
-            if cookie_override:
+            # operator が -H / refresh で明示した Cookie（HeaderManager 由来）は上書きしない。
+            # engine 生成 Cookie の置換だけ行う（明示認証セッションを破壊しない・Codex #157）。
+            if cookie_override and not any(k.lower() == "cookie" for k in headers):
                 headers["Cookie"] = cookie_override
             kwargs["headers"] = headers
         return kwargs

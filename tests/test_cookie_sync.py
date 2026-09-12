@@ -77,6 +77,16 @@ class CookieHeaderForUrlTests(unittest.TestCase):
         eng = types.SimpleNamespace(browser=types.SimpleNamespace(page=None))
         self.assertEqual(asyncio.run(ScanEngine.cookie_header_for_url(eng, "https://x.test")), "")
 
+    def test_secure_cookie_excluded_over_http(self):
+        # Secure Cookie は HTTP 宛には送らず、HTTPS 宛には送る（Codex #157）。
+        from wscan.engine import _scoped_cookie_header
+        cookies = [
+            {"name": "sid", "value": "s", "domain": "example.com", "path": "/", "secure": True},
+            {"name": "lang", "value": "ja", "domain": "example.com", "path": "/", "secure": False},
+        ]
+        self.assertEqual(_scoped_cookie_header(cookies, "http://example.com/"), "lang=ja")
+        self.assertEqual(_scoped_cookie_header(cookies, "https://example.com/"), "sid=s; lang=ja")
+
 
 class CookieDomainSyncTests(unittest.TestCase):
     def test_exact_and_parent_accepted_subdomain_rejected(self):

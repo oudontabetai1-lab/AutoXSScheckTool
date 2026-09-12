@@ -266,10 +266,15 @@ def _scoped_cookie_header(cookies: list, url: str) -> str:
     parsed = _up(url or "")
     target_host = (parsed.hostname or "").lower()
     req_path = parsed.path or "/"
+    is_https = (parsed.scheme or "").lower() == "https"
     matched: list[tuple[str, str]] = []
     for c in (cookies or []):
         name = c.get("name")
         if not name:
+            continue
+        # Secure Cookie は HTTPS 宛以外に送らない（ブラウザの Secure 強制と同じ）。手組み Cookie を
+        # 平文 HTTP へ送ると TRACE 反射等で秘匿値が漏れる（Codex #157）。
+        if c.get("secure") and not is_https:
             continue
         raw_dom = str(c.get("domain", ""))
         is_domain_cookie = raw_dom.startswith(".")

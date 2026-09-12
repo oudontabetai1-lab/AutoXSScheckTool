@@ -230,6 +230,17 @@ class ScannerTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("Cookie", kw_none["headers"])
         self.assertEqual(kw_none["headers"].get("X-Custom"), "1")  # 非 Cookie ヘッダは維持
 
+    async def test_explicit_cookie_header_not_overwritten(self):
+        # operator が -H で明示した Cookie は cookie_override で上書きしない（#157 P2）。
+        engine, scanner = self._scanner()
+
+        def _auth_headers(extra=None, *, include_cookie=True, url=""):
+            return {"Cookie": "explicit=1"}  # HeaderManager 由来の明示 Cookie
+        engine.auth_headers = _auth_headers
+
+        kw = scanner._client_kwargs("https://h.test", cookie_override="engine=2")
+        self.assertEqual(kw["headers"].get("Cookie"), "explicit=1")
+
     async def test_origin_and_page_get_path_scoped_cookies(self):
         # scan_page は各 target を engine.cookie_header_for_url で再スコープした Cookie で probe する。
         # origin(/) は Path=/ の Cookie のみ、page(/admin) は両方（#157 P2）。
