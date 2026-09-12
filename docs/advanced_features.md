@@ -595,7 +595,7 @@ python main.py scan https://target.example.com --checks xss sqli tls_scan
 
 - **クロール非依存の origin 検査**: 弱いプロトコル（TLS1.0/1.1 のみ受理等）は Chromium がネゴシエートできずクロール段階で落ちるため、攻撃スコープ内の seed origin を直接 sslyze で検査して取りこぼしを防ぐ（`_is_attack_target_url` で攻撃スコープに限定）。
 - **proxy / mTLS 未対応**: 監査 proxy やクライアント証明書認証が設定されている場合、sslyze は別経路の直接接続になるため検査せず observability に skip を記録する（別接続で誤った結果を出さない）。
-- ネットワークへ送るのは対象ホストへの TLS ハンドシェイクのみで、外部サービスへのデータ送信はしない。
+- 対象ホストへ送るのは TLS レベルのプローブのみ（Heartbleed の heartbeat 要求、CCS Injection / ROBOT の細工した TLS メッセージ等の**能動的な脆弱性プローブ**を含む）で、HTTP 等のアプリケーションデータや外部サービスへの送信はしない。
 
 ---
 
