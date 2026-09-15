@@ -70,8 +70,10 @@ def test_scan_page_auth_headers_path_does_not_raise():
 
 
 def test_scan_page_collects_jwt_from_session_cookie():
-    # session cookie（engine.cookies）中の JWT も auth_headers 経路で拾えること。
+    # session cookie（engine.cookies）中の JWT を auth_headers 経路で実際に拾い、
+    # Finding を生成すること。exp 無し HS256 弱鍵トークンは少なくとも jwt_no_expiry を出す。
+    # （[] を許す弱い assert だと cookies_str 常時空でも通ってしまうため検出を確認する。）
     token = _build_jwt({"alg": "HS256", "typ": "JWT"}, {"sub": "admin"}, "secret")
     result = _run_scan_page(_AuthEngine(cookies=f"session={token}"), body="")
-    # 未初期化バグがあればここへ到達する前に NameError。到達＝バグ解消。
-    assert isinstance(result, list)
+    assert len(result) >= 1
+    assert any("jwt" in (f.check_type or "").lower() for f in result)
