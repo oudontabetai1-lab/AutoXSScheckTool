@@ -2145,8 +2145,10 @@ def _load_flow_files(paths) -> list[dict]:
 # トグルに限定する。setup のコピー可能コマンドへそのまま連結されるため、`--header-refresh-cmd`
 # のように値がシェル実行される option（header_manager が create_subprocess_shell で実行）や
 # 任意の値付き option を弾く。構文的に正しいだけの long option は許可しない。
+# すべて scan サブコマンドに実在する option（scan --help で検証済・#170 P2）。
+# `--no-headless` は scan に無く生成コマンドが `unrecognized arguments` で落ちるため除外。
 _SAFE_SETUP_FLAGS = frozenset({
-    "--dom-xss", "--spa-crawl", "--all-checks", "--headless", "--no-headless",
+    "--dom-xss", "--spa-crawl", "--all-checks", "--headless",
     "--no-monitor", "--no-sitemap-crawl", "--fast", "--ctf",
 })
 
