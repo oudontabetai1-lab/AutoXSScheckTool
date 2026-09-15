@@ -4875,6 +4875,21 @@ class ScanEngine:
         # (which, on redirect-on-auth apps, would only capture post-login content).
         self.visited_urls.add(login_seed)
 
+    def _match_pre_attack_flow(self, page: "CrawledPage"):
+        """このページを target とする pre-attack flow を返す（無ければ None）。
+
+        flow の最後の navigate step の URL がページ URL と一致するものを prerequisite とみなす。
+        """
+        for flow in self.flows:
+            if not flow.steps:
+                continue
+            last_nav = next(
+                (s for s in reversed(flow.steps) if s.action == "navigate"), None
+            )
+            if last_nav and last_nav.url.rstrip("/") == page.url.rstrip("/"):
+                return flow
+        return None
+
     async def _attack_one_page(self, page: CrawledPage, plans: dict):
         """
         Run all checks on a single crawled page.
@@ -4897,6 +4912,29 @@ class ScanEngine:
                 await self._sync_cookies_from_browser(self.browser, for_url=page.url)
             except Exception:
                 pass
+
+        # ── Pre-attack flow は page-level 検査より前に実行する（F10・Codex #167 P1）──
+        # ログイン/セットアップ flow が失敗したまま page-level（graphql/cache/proto 等）や
+        # field を検査すると、未認証ページを "tested" として checkpoint し誤結果を生む。
+        # 失敗時は coverage gap を記録し、以降の全検査を skip する。
+        matched_flow = self._match_pre_attack_flow(page)
+        if matched_flow:
+            console.print(
+                f"\n  [cyan][Flow] Pre-attack flow:[/cyan] {matched_flow.name}"
+            )
+            if not await FlowRunner(self.browser).run(matched_flow):
+                console.print(
+                    f"  [yellow][Flow] Pre-attack flow failed: {matched_flow.name} — "
+                    f"skipping all checks on {page.url}[/yellow]"
+                )
+                self._record_unscannable_url(
+                    page.url,
+                    note=(
+                        f"Pre-attack flow '{matched_flow.name}' failed: a prerequisite "
+                        "step could not complete (e.g. missing field/selector)"
+                    ),
+                )
+                return
 
         # ── Page-level checks (header inspection, clickjacking, session, etc.) ──
         for check_name, scanner in self.scanners.items():
@@ -4967,40 +5005,9 @@ class ScanEngine:
         if not page.forms and not page.url_params:
             return
 
-        # ── Run multi-step attack flows that target this page ─────────────
-        matched_flow = None
-        for flow in self.flows:
-            if flow.steps:
-                # The last step action=navigate|attack defines the target URL
-                last_nav = next(
-                    (s for s in reversed(flow.steps) if s.action == "navigate"),
-                    None,
-                )
-                if last_nav and last_nav.url.rstrip("/") == page.url.rstrip("/"):
-                    matched_flow = flow
-                    break
+        # 前提 flow は page-level 検査の前に実行・成否判定済み（上参照）。ここでは attack の
+        # ため browser が target ページに居ることを確認し、ずれていれば復帰する。
         if matched_flow:
-            console.print(
-                f"\n  [cyan][Flow] Pre-attack flow:[/cyan] {matched_flow.name}"
-            )
-            # Use context-aware browser (worker in concurrent mode)
-            flow_ok = await FlowRunner(self.browser).run(matched_flow)
-            if not flow_ok:
-                # 前提 flow（ログイン/セットアップ等）が失敗したまま攻撃すると、未認証や
-                # 誤ページを検査して誤った結果を生む。coverage gap として記録し攻撃を skip
-                # する（前提の欠落を 0 Finding=安全へ丸めない・F10）。
-                console.print(
-                    f"  [yellow][Flow] Pre-attack flow failed: {matched_flow.name} — "
-                    f"skipping attack on {page.url}[/yellow]"
-                )
-                self._record_unscannable_url(
-                    page.url,
-                    note=(
-                        f"Pre-attack flow '{matched_flow.name}' failed: a prerequisite "
-                        "step could not complete (e.g. missing field/selector)"
-                    ),
-                )
-                return
             # Verify the browser ended on the intended target page.
             # A failed step in the flow may leave the browser on the wrong URL.
             try:

@@ -69,7 +69,21 @@ def test_attack_one_page_skips_when_pre_attack_flow_fails():
     from wscan.engine import ScanEngine
 
     eng = ScanEngine.__new__(ScanEngine)
-    eng.scanners = {}                 # page-level ループを no-op に
+
+    page_scanned = {"called": False}
+
+    class _PageScanner:
+        HAS_PAGE_LEVEL = True
+
+        async def scan_page(self, url):
+            page_scanned["called"] = True
+            return []
+
+    eng.scanners = {"security_headers": _PageScanner()}  # page-level 検査の番兵
+    eng._checkpoint_is_done = lambda *a, **k: False
+    eng._checkpoint_mark_done = lambda *a, **k: None
+    eng._record_scan_matrix = lambda *a, **k: None
+    eng._record_finding = lambda *a, **k: None
     eng.concurrency = 1
     eng.navigation_retries = 0
     eng.flows = [ScanFlow(name="login", steps=[
@@ -108,4 +122,5 @@ def test_attack_one_page_skips_when_pre_attack_flow_fails():
 
     eng._record_unscannable_url.assert_called_once()
     assert "flow" in str(eng._record_unscannable_url.call_args).lower()
-    assert attacked["called"] is False  # 攻撃へ進んでいない
+    assert attacked["called"] is False        # 攻撃（field）へ進んでいない
+    assert page_scanned["called"] is False    # page-level 検査も走っていない（前提flow前に判定）
