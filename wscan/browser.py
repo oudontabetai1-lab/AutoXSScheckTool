@@ -38,6 +38,11 @@ console = Console()
 
 _DEFAULT_PORTS = {"http": 80, "https": 443, "ws": 80, "wss": 443}
 
+# page.content() は稀に無限ハングする（開いた JS ダイアログ・停止したナビゲーション等）。
+# try/except は例外しか捕まえられずハングを防げないため、待機を有界にする（F06）。
+# realistic_site 通し E2E が SQLi 再検証の page.content() 待ちで 900 秒 timeout していた。
+_PAGE_CONTENT_TIMEOUT = 30.0
+
 
 # セッションを終了させるリンク（ログアウト等）。SPA クリック探索がこれを踏むと、
 # 認証セッションが失効し go_back() でも復元できず、以降の認証ページが軒並みログインへ
@@ -1472,9 +1477,15 @@ class BrowserManager:
             return ""
 
     async def get_page_source(self) -> str:
-        """Get current page HTML source."""
+        """Get current page HTML source.
+
+        page.content() の待機を有界にする（F06）。無限ハング時は "" を返して呼び出し側の
+        「取得不能＝空」経路に合流させ、通し E2E 全体の停止を防ぐ。
+        """
         try:
-            return await self.page.content()
+            return await asyncio.wait_for(
+                self.page.content(), timeout=_PAGE_CONTENT_TIMEOUT
+            )
         except Exception:
             return ""
 
@@ -2820,7 +2831,9 @@ class BrowserManager:
             post_url = page.url
             post_body = ""
             try:
-                post_body = await page.content()
+                post_body = await asyncio.wait_for(
+                    page.content(), timeout=_PAGE_CONTENT_TIMEOUT
+                )
             except Exception:
                 pass
 
