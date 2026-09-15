@@ -312,9 +312,11 @@ def test_urls_same_page_ignores_fragment_only():
 
     same = ScanEngine._urls_same_page
     assert same("http://t/admin", "http://t/admin#settings") is True
-    assert same("http://t/admin/", "http://t/admin") is True
+    assert same("http://t/admin/", "http://t/admin") is True  # path 末尾スラッシュは正規化
     assert same("http://t/admin", "http://t/login") is False
     assert same("http://t/view?page=admin", "http://t/view?page=home") is False
+    # クエリ値末尾の `/` は消さない（別状態を同一視しない・#167 P2）
+    assert same("http://t/view?next=/", "http://t/view?next=") is False
     assert same("", "http://t/admin") is False
 
 

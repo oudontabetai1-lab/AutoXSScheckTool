@@ -4899,9 +4899,17 @@ class ScanEngine:
         `page.url#settings` のような同一文書内 tab 遷移を「別ページ」と誤判定して flow が
         用意した状態を破棄しないため、着地先検証・attack 前 re-nav の双方で共有する（#167 P1）。
         """
-        from urllib.parse import urldefrag
+        from urllib.parse import urldefrag, urlsplit
+
+        def _norm(u: str) -> str:
+            # fragment を除去し、**path の末尾スラッシュだけ**を正規化する。URL 全体を
+            # rstrip すると `?next=/` のようにクエリ値末尾の `/` を消して別状態を同一視して
+            # しまうため、path のみに限定する（#167 P2）。
+            parts = urlsplit(urldefrag(u or "")[0])
+            return parts._replace(path=parts.path.rstrip("/")).geturl()
+
         try:
-            return urldefrag(current or "")[0].rstrip("/") == urldefrag(target or "")[0].rstrip("/")
+            return _norm(current) == _norm(target)
         except Exception:
             return False
 
