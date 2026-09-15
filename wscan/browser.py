@@ -54,15 +54,26 @@ async def _bounded_page_content(page) -> str:
     await し、取り残しの例外/キャンセルをここで確実に消費する（orphan future を残さない）。
     """
     task = asyncio.ensure_future(page.content())
-    try:
-        return await asyncio.wait_for(asyncio.shield(task), timeout=_PAGE_CONTENT_TIMEOUT)
-    except Exception:
+
+    async def _drain() -> None:
+        # shield 下の内側 task を確実に終わらせ、取り残しの例外/キャンセルを消費する。
         if not task.done():
             task.cancel()
         try:
             await task
         except BaseException:
             pass
+
+    try:
+        return await asyncio.wait_for(asyncio.shield(task), timeout=_PAGE_CONTENT_TIMEOUT)
+    except asyncio.CancelledError:
+        # 呼び出し側の cancel（scan 全体の SCAN_TIMEOUT_S 等）。shield が task を守るため、
+        # 明示的に drain してから cancellation を re-raise する（orphan Playwright 操作を残さない）。
+        await _drain()
+        raise
+    except Exception:
+        # 自前 timeout / その他失敗。内側 task を drain して "" へ合流。
+        await _drain()
         return ""
 
 

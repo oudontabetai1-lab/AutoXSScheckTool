@@ -51,3 +51,23 @@ def test_get_page_source_returns_quickly_when_content_hangs():
 def test_get_page_source_returns_content_when_available():
     bm = _make_bm(_FastPage())
     assert asyncio.run(bm.get_page_source()) == "<html>ok</html>"
+
+
+def test_bounded_content_drains_and_reraises_on_caller_cancel():
+    # scan 全体の SCAN_TIMEOUT_S 等で呼び出し側が cancel した場合、shield 下の
+    # 内側 page.content task を drain し CancelledError を再送する（orphan を残さない）。
+    page = _HangingPage()
+
+    async def run():
+        inner = asyncio.ensure_future(browser_mod._bounded_page_content(page))
+        await asyncio.sleep(0.05)  # wait_for の await に入らせる
+        inner.cancel()
+        try:
+            await inner
+        except asyncio.CancelledError:
+            return "cancelled"
+        return "not-cancelled"
+
+    result = asyncio.run(run())
+    assert result == "cancelled"   # cancellation は握りつぶさず再送
+    assert page.cancelled          # 内側 task は cancel+await 済み
