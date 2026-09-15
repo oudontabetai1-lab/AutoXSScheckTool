@@ -364,6 +364,9 @@ def test_urls_same_page_ignores_fragment_only():
     # トークン値は保持して区別（checkpoint 正規化と違い csrf/nonce を落とさない・#167 P2）
     assert same("http://t/checkout?csrf=A", "http://t/checkout?csrf=B") is False
     assert same("http://t/checkout?csrf=A", "http://t/checkout?csrf=A") is True
+    # 明示的な空クエリ `?` の有無を区別（サーバが別ルートへ写しうる・#167 P2）
+    assert same("http://t/confirm?", "http://t/confirm") is False
+    assert same("http://t/confirm?", "http://t/confirm?") is True
 
 
 def test_pre_auth_mode_skips_pre_attack_flow():

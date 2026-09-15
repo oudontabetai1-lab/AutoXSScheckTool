@@ -4939,11 +4939,16 @@ class ScanEngine:
         from urllib.parse import urlsplit
 
         def _norm(u: str):
-            p = urlsplit(u or "")
+            u = u or ""
+            p = urlsplit(u)
             frag = p.fragment
             keep_frag = frag if (frag[:1] in ("/", "!") or "/" in frag) else ""
             path = p.path if (p.query or keep_frag) else p.path.rstrip("/")
-            return (p.scheme, p.netloc, path, p.query, keep_frag)
+            # 明示的な空クエリ `?` を保持する（`/confirm?` と `/confirm` を区別）。urlsplit は
+            # 両方 query="" で表すため、サーバが別ルートへ写す2形を同一視しないよう
+            # `?` の有無を key に含める（url_normalize.py:172-177 と整合・#167 P2）。
+            had_query_delim = "?" in u.split("#", 1)[0]
+            return (p.scheme, p.netloc, path, p.query, had_query_delim, keep_frag)
 
         try:
             return _norm(current) == _norm(target)
