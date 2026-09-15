@@ -4,9 +4,6 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>WScan — Live Monitor</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%23161826'/%3E%3Cpath d='M4 4h8v2H6v2h5v2H6v2h6v2H4z' fill='%239184d9'/%3E%3C/svg%3E">
 <style>
 /* ─── Reset & Base ─────────────────────────────────────────── */
@@ -929,7 +926,7 @@ body { padding-left: 212px; }
 .ws-newscan:hover{background:linear-gradient(to bottom,#6f64a8,#5d5294)}
 .ws-rail .ws-cur{padding:12px 12px 2px}
 .ws-rail .ws-eyebrow{display:flex;align-items:center;gap:7px;font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--text-muted);margin-bottom:5px}
-.ws-rail .pulse{width:6px;height:6px;border-radius:50%;background:var(--accent);animation:wsPulseRail 1.8s ease-in-out infinite}
+.ws-rail .pulse{width:6px;height:6px;border-radius:50%;background:var(--text-muted)}.ws-rail .pulse.running{background:var(--running);animation:wsPulseRail 1.8s ease-in-out infinite}.ws-rail .pulse.done{background:var(--success)}.ws-rail .pulse.error{background:var(--critical)}
 @keyframes wsPulseRail{0%,100%{opacity:1}50%{opacity:.35}}
 .ws-rail .ws-cur-status{font-size:12px;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .ws-rail .foot{margin-top:auto;padding:0 18px;display:flex;flex-direction:column;gap:8px;font-size:11.5px;color:var(--text-muted)}
@@ -4495,7 +4492,7 @@ function togglePayloadExpand() {
 // ─── UI Helpers ─────────────────────────────────────────────────
 function setStatus(message, state) {
   document.getElementById('statusText').textContent = message;
-  var _rs=document.getElementById('railStatus'); if(_rs)_rs.textContent = message;
+  var _rs=document.getElementById('railStatus'); if(_rs)_rs.textContent = message; var _pl=document.querySelector('.ws-rail .pulse'); if(_pl)_pl.className='pulse'+(state?' '+state:'');
   const dot = document.getElementById('statusDot');
   dot.className = 'status-dot' + (state ? ' ' + state : '');
 }
