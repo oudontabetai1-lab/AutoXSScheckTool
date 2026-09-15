@@ -182,3 +182,61 @@ def test_cookies_resynced_after_successful_pre_attack_flow():
     # flow の後に少なくとも1回 sync が走る（fresh cookie を engine.cookies へ反映）。
     assert order.index("sync", order.index("flow") + 1) > order.index("flow")
     eng._record_unscannable_url.assert_not_called()  # 成功時は unscannable 記録しない
+
+
+def test_pre_attack_flow_redirected_to_login_is_skipped():
+    """flow が 200 で login/別URL へ redirect した場合、page-level 検査前に skip する（#167 P1）。"""
+    from wscan.engine import ScanEngine
+
+    page_scanned = {"called": False}
+
+    class _PageScanner:
+        HAS_PAGE_LEVEL = True
+
+        async def scan_page(self, url):
+            page_scanned["called"] = True
+            return []
+
+    eng = ScanEngine.__new__(ScanEngine)
+    eng.scanners = {"security_headers": _PageScanner()}
+    eng._checkpoint_is_done = lambda *a, **k: False
+    eng._checkpoint_mark_done = lambda *a, **k: None
+    eng._record_scan_matrix = lambda *a, **k: None
+    eng._record_finding = lambda *a, **k: None
+    eng.concurrency = 1
+    eng.navigation_retries = 0
+    eng.flows = [ScanFlow(name="login", steps=[
+        FlowStep(action="navigate", url="http://t.test/admin"),
+    ])]
+
+    class _Br:
+        def __init__(self):
+            self.page = types.SimpleNamespace(url="http://t.test/login")  # redirect 着地
+
+        async def navigate(self, url, retries=0):
+            return True  # 200 だが依然 login に留まる（復帰失敗）
+
+    eng._browser = _Br()
+    eng._record_unscannable_url = MagicMock()
+
+    async def _noop(*a, **k):
+        return None
+
+    eng._maybe_relogin_for_page = _noop
+    eng._sync_cookies_from_browser = _noop
+    eng._save_checkpoint = lambda *a, **k: None
+
+    page = types.SimpleNamespace(url="http://t.test/admin", forms=[{"x": 1}], url_params=[])
+
+    class _OkRunner:
+        def __init__(self, browser):
+            pass
+
+        async def run(self, flow):
+            return True  # run 自体は成功扱いだが着地が target でない
+
+    with patch("wscan.engine.FlowRunner", _OkRunner):
+        asyncio.run(eng._attack_one_page(page, {}))
+
+    eng._record_unscannable_url.assert_called_once()
+    assert page_scanned["called"] is False  # 誤ページに page-level を当てない

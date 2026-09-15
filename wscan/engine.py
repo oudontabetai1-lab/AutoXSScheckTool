@@ -4935,6 +4935,34 @@ class ScanEngine:
                     ),
                 )
                 return
+            # flow の最終遷移が login/error ページへ redirect（200）されると navigate は True でも
+            # target に居ない。page-level 検査の前に着地先 URL を検証し、復帰できなければ未認証/
+            # 誤ページを "tested" と誤記録しないよう記録して skip する（Codex #167 P1）。
+            try:
+                landed = (self.browser.page.url or "").rstrip("/")
+            except Exception:
+                landed = ""
+            if landed != page.url.rstrip("/"):
+                recovered = await self.browser.navigate(
+                    page.url, retries=self.navigation_retries
+                )
+                try:
+                    landed = (self.browser.page.url or "").rstrip("/")
+                except Exception:
+                    landed = ""
+                if not recovered or landed != page.url.rstrip("/"):
+                    console.print(
+                        f"  [yellow][Flow] Pre-attack flow did not reach {page.url} "
+                        f"(landed on {landed or '?'}) — skipping[/yellow]"
+                    )
+                    self._record_unscannable_url(
+                        page.url,
+                        note=(
+                            f"Pre-attack flow '{matched_flow.name}' did not reach the target "
+                            "page (redirected to login/error or navigation failed)"
+                        ),
+                    )
+                    return
             # 成功した flow はセッション Cookie を発行/更新し得る。HTTP scanner は browser jar
             # ではなく engine.cookies から Cookie ヘッダを得るため、flow 後に採り直して乖離を
             # 防ぐ（さもないと page-level が空/失効 Cookie で protected を叩く・Codex #167 P1）。
