@@ -4,13 +4,49 @@ fixture_id: realistic_healthcare
 runner_profile: scan_engine
 mode: normal-deterministic
 source_kind: first_party
-# page 観測系（passive）check: js_static（first-party JS の source→sink）・clickjacking（framing
-# 保護ヘッダ欠落）。注入点を持たずページ/レスポンス自体を観測するため injection を宣言せず、match は
-# canonical page identity（field="(page)"/location="page-level"）で宣言する。scorer は passive case を
-# (check, path) で採点し、exercised は scan_page の page-level 行を要求する（page-level スキャナが
-# 実走した genuine な証拠）。EXPECTED_FINDINGS / SAFE_ENDPOINTS（field=None）を正本にする。
-# 注: sri（脆弱 candidate FN）は E2E で scanner recall 課題が判明したため本ゲートには含めない。
+# page 観測系（passive）check: clickjacking（framing 保護ヘッダ欠落）・js_static（first-party JS の
+# source→sink）・sri（外部 CDN を integrity 無しで読み込む）・secret_leak（JS アセットに秘密埋め込み）。
+# 注入点を持たずページ/レスポンス自体を観測するため injection を宣言せず、match は canonical page
+# identity（field="(page)"/location="page-level"）で宣言する。scorer は passive case を (check, path) で
+# 採点し、exercised は scan_page の page-level 行を要求する（page-level スキャナが実走した genuine な
+# 証拠）。EXPECTED_FINDINGS / SAFE_ENDPOINTS（field=None）を正本にする。
 cases:
+  # ── sri（外部 CDN script を integrity 無しで読み込む）─────────────────────
+  - case_id: realistic_healthcare_page_observation.sri.insights.vulnerable
+    expected: vulnerable
+    check: sri
+    request: {method: GET, path: /portal/insights}
+    match: {path: /portal/insights, field: "(page)", location: page-level}
+    twin_id: realistic_healthcare_page_observation.sri.insights_safe.safe
+    taxonomy: [supply_chain, unauthenticated]
+    gate: observed
+  - case_id: realistic_healthcare_page_observation.sri.insights_safe.safe
+    expected: safe
+    check: sri
+    request: {method: GET, path: /portal/insights-safe}
+    match: {path: /portal/insights-safe, field: "(page)", location: page-level}
+    twin_id: realistic_healthcare_page_observation.sri.insights.vulnerable
+    taxonomy: [supply_chain, unauthenticated]
+    gate: observed
+
+  # ── secret_leak（JS アセットに高エントロピー秘密を埋め込む）───────────────
+  - case_id: realistic_healthcare_page_observation.secret_leak.vendor.vulnerable
+    expected: vulnerable
+    check: secret_leak
+    request: {method: GET, path: /static/vendor.js}
+    match: {path: /static/vendor.js, field: "(page)", location: page-level}
+    twin_id: realistic_healthcare_page_observation.secret_leak.vendor_safe.safe
+    taxonomy: [info_leak, unauthenticated]
+    gate: observed
+  - case_id: realistic_healthcare_page_observation.secret_leak.vendor_safe.safe
+    expected: safe
+    check: secret_leak
+    request: {method: GET, path: /static/vendor.safe.js}
+    match: {path: /static/vendor.safe.js, field: "(page)", location: page-level}
+    twin_id: realistic_healthcare_page_observation.secret_leak.vendor.vulnerable
+    taxonomy: [info_leak, unauthenticated]
+    gate: observed
+
   # ── clickjacking（X-Frame-Options / CSP frame-ancestors 欠落）──────────────
   - case_id: realistic_healthcare_page_observation.clickjacking.embed.vulnerable
     expected: vulnerable

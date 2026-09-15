@@ -41,6 +41,20 @@ class RealisticAPIFixtureTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIn(("jwt_weak_secret", "/api/v1/session/bootstrap", None), expected)
 
+    async def test_leftover_git_config_and_directory_listing(self):
+        # 0017: 忘れ物 .git/config が配信され、内容シグネチャで確定できる。
+        from wscan.scanners.info_disclosure import _CONTENT_PATTERNS, detect_directory_listing
+        import re
+        r = await self.client.get("/.git/config")
+        self.assertEqual(r.status_code, 200)
+        self.assertTrue(any(re.search(p, r.text, re.IGNORECASE | re.DOTALL)
+                            for p in _CONTENT_PATTERNS))
+        # 安全ツイン（404）。
+        self.assertEqual((await self.client.get("/safe/.git/config")).status_code, 404)
+        # ディレクトリリスティング（autoindex）と安全ツイン。
+        self.assertTrue(detect_directory_listing((await self.client.get("/uploads/")).text))
+        self.assertFalse(detect_directory_listing((await self.client.get("/media/")).text))
+
     async def test_home_links_to_console_and_api_surfaces(self):
         resp = await self.client.get("/")
 

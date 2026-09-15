@@ -4923,13 +4923,93 @@ class ScanEngine:
             login_seed, {"parent": None, "screenshot_b64": "", "depth": 0}
         )
 
-        await self._attack_one_page(page, {})
+        # 認証前のログインフォーム検査。pre-attack flow（ログイン等）をここで走らせると
+        # auto-login 前の pre-auth 検査を汚染するため無効化する（#167 P2）。
+        await self._attack_one_page(page, {}, run_pre_attack_flows=False)
 
         # Prevent the authenticated crawl/attack from re-visiting the login page
         # (which, on redirect-on-auth apps, would only capture post-login content).
         self.visited_urls.add(login_seed)
 
-    async def _attack_one_page(self, page: CrawledPage, plans: dict):
+    def _match_pre_attack_flow(self, page: "CrawledPage"):
+        """このページを target とする pre-attack flow を返す（無ければ None）。
+
+        flow の最後の navigate step の URL がページ URL と一致するものを prerequisite とみなす。
+        """
+        for flow in self.flows:
+            if not flow.steps:
+                continue
+            last_nav = next(
+                (s for s in reversed(flow.steps) if s.action == "navigate"), None
+            )
+            # 着地先検証と同じ比較器を使う（Codex #167 P2）：fragment 差（`#settings`）は
+            # 同一ページ扱いで flow を選び、query 値差（`?next=/` と `?next=`）は別物として
+            # 誤選択しない。生の rstrip("/") 比較だと fragment 付き flow を取りこぼす一方、
+            # query 末尾スラッシュだけ違う別 target を同一視して誤った state 変更 flow を走らせうる。
+            if last_nav and self._urls_same_page(last_nav.url, page.url):
+                return flow
+        return None
+
+    def _page_level_checks_pending(self, page: "CrawledPage") -> bool:
+        """page-level 検査でこのページに未完了(=実際に probe する)単位が残るか。
+
+        resume 時の pre-attack flow 再生要否を判定するための保守的な述語。実際に走る
+        scanner だけを pending に数える：``scan_page_context`` は常時対象、``scan_page`` は
+        ``may_run_page_scanner`` が許可する場合のみ（read-only profile で state 変更系が
+        skip されるなら走らない＝pending でない）。API テンプレート専用は本ループでは走らない。
+        checkpoint と純粋 gate のみで I/O 無し。``record_skip=False`` で観測ノートを二重記録しない。
+        """
+        for check_name, scanner in self.scanners.items():
+            if check_name in _API_TEMPLATE_ONLY_CHECKS:
+                continue
+            has_page_impl = getattr(
+                scanner, "HAS_PAGE_LEVEL", False
+            ) or hasattr(scanner, "scan_page_context")
+            if not has_page_impl:
+                continue
+            if not hasattr(scanner, "scan_page_context"):
+                gate = getattr(scanner, "may_run_page_scanner", None)
+                if callable(gate) and not gate(page.url, record_skip=False):
+                    continue
+            cp_url = _page_check_cp_url(check_name, page.url)
+            if not self._checkpoint_is_done(cp_url, "(page)", 0, check_name):
+                return True
+        return False
+
+    @staticmethod
+    def _urls_same_page(current: str, target: str) -> bool:
+        """flow 選択・着地先検証用の URL 同一ページ判定。
+
+        規則（checkpoint 用 normalize_url_for_key と**あえて別**）:
+        - 通常の同一文書内アンカー（`#settings`）は無視して同一ページ扱い。
+        - route 的 fragment（SPA の `#/admin` / `#!/x`）は保持して区別（#167 P1）。
+        - path 末尾スラッシュは query も route fragment も無いときだけ吸収。query があれば
+          `/app/?x` と `/app?x` を区別（#167 P2）。
+        - **query 値は厳密一致**を要求する。checkpoint 正規化は csrf/nonce 等の揮発クエリを
+          落とすため `/checkout?csrf=A` と `?csrf=B` を同一視し、別 tokenized state 用の flow を
+          誤選択・誤着地承認しうる（#167 P2）。flow マッチはトークンを保持する必要があるため
+          normalize_url_for_key を使わず、path/fragment のみ正規化する専用比較器にする。
+        """
+        from urllib.parse import urlsplit
+
+        def _norm(u: str):
+            u = u or ""
+            p = urlsplit(u)
+            frag = p.fragment
+            keep_frag = frag if (frag[:1] in ("/", "!") or "/" in frag) else ""
+            path = p.path if (p.query or keep_frag) else p.path.rstrip("/")
+            # 明示的な空クエリ `?` を保持する（`/confirm?` と `/confirm` を区別）。urlsplit は
+            # 両方 query="" で表すため、サーバが別ルートへ写す2形を同一視しないよう
+            # `?` の有無を key に含める（url_normalize.py:172-177 と整合・#167 P2）。
+            had_query_delim = "?" in u.split("#", 1)[0]
+            return (p.scheme, p.netloc, path, p.query, had_query_delim, keep_frag)
+
+        try:
+            return _norm(current) == _norm(target)
+        except Exception:
+            return False
+
+    async def _attack_one_page(self, page: CrawledPage, plans: dict, *, run_pre_attack_flows: bool = True):
         """
         Run all checks on a single crawled page.
         Uses ``self.browser`` which transparently returns the worker's browser
@@ -4951,6 +5031,85 @@ class ScanEngine:
                 await self._sync_cookies_from_browser(self.browser, for_url=page.url)
             except Exception:
                 pass
+
+        # ── Pre-attack flow は page-level 検査より前に実行する（F10・Codex #167 P1）──
+        # ログイン/セットアップ flow が失敗したまま page-level（graphql/cache/proto 等）や
+        # field を検査すると、未認証ページを "tested" として checkpoint し誤結果を生む。
+        # 失敗時は coverage gap を記録し、以降の全検査を skip する。
+        # ただし認証前のログインフォーム検査（_scan_login_form_preauth）から呼ばれた場合は、
+        # auto-login 前の pre-auth 検査を汚染しないよう flow を実行しない（#167 P2）。
+        matched_flow = self._match_pre_attack_flow(page) if run_pre_attack_flows else None
+        # 再開時、フォーム/URLパラメータの無いページで page-level 単位が全て checkpoint 済みなら
+        # pre-attack flow を再生しない（Codex #167 P2）。state 変更を伴う前提 flow（add-to-cart 等）を
+        # 「残 probe 0」で再実行し、アプリ操作を無駄に繰り返す/状態を汚すのを防ぐ。安全側限定：入力の
+        # 無いページは page-level 検査だけが走り field/adaptive/multi-param 単位を持たないため「残作業
+        # なし」を厳密に判定できる。入力のあるページは従来どおり再生する（field/adaptive 単位の厳密
+        # 列挙は取りこぼし時に必要な flow を誤 skip＝偽陰性を生むため行わない）。
+        if (matched_flow and not page.forms and not page.url_params
+                and not self._page_level_checks_pending(page)):
+            console.print(
+                f"  [dim][Flow] Skip pre-attack flow (page fully checkpointed): "
+                f"{matched_flow.name} @ {page.url}[/dim]"
+            )
+            matched_flow = None
+        if matched_flow:
+            console.print(
+                f"\n  [cyan][Flow] Pre-attack flow:[/cyan] {matched_flow.name}"
+            )
+            if not await FlowRunner(self.browser).run(matched_flow):
+                console.print(
+                    f"  [yellow][Flow] Pre-attack flow failed: {matched_flow.name} — "
+                    f"skipping all checks on {page.url}[/yellow]"
+                )
+                self._record_unscannable_url(
+                    page.url,
+                    note=(
+                        f"Pre-attack flow '{matched_flow.name}' failed: a prerequisite "
+                        "step could not complete (e.g. missing field/selector)"
+                    ),
+                )
+                return
+            # flow の最終遷移が login/error ページへ redirect（200）されると navigate は True でも
+            # target に居ない。page-level 検査の前に着地先 URL を検証し、復帰できなければ未認証/
+            # 誤ページを "tested" と誤記録しないよう記録して skip する（Codex #167 P1）。
+            # 比較は fragment を無視する：`page.url#settings` 等の同一文書内の tab 遷移を
+            # 「target から離脱」と誤判定して flow が用意した状態を破棄しないため（Codex #167 P1）。
+            def _on_target() -> bool:
+                try:
+                    cur = self.browser.page.url
+                except Exception:
+                    return False
+                return self._urls_same_page(cur, page.url)
+
+            if not _on_target():
+                recovered = await self.browser.navigate(
+                    page.url, retries=self.navigation_retries
+                )
+                if not recovered or not _on_target():
+                    try:
+                        landed = self.browser.page.url or "?"
+                    except Exception:
+                        landed = "?"
+                    console.print(
+                        f"  [yellow][Flow] Pre-attack flow did not reach {page.url} "
+                        f"(landed on {landed}) — skipping[/yellow]"
+                    )
+                    self._record_unscannable_url(
+                        page.url,
+                        note=(
+                            f"Pre-attack flow '{matched_flow.name}' did not reach the target "
+                            "page (redirected to login/error or navigation failed)"
+                        ),
+                    )
+                    return
+            # 成功した flow はセッション Cookie を発行/更新し得る。HTTP scanner は browser jar
+            # ではなく engine.cookies から Cookie ヘッダを得るため、flow 後に採り直して乖離を
+            # 防ぐ（さもないと page-level が空/失効 Cookie で protected を叩く・Codex #167 P1）。
+            if (getattr(self, "concurrency", 1) or 1) <= 1:
+                try:
+                    await self._sync_cookies_from_browser(self.browser, for_url=page.url)
+                except Exception:
+                    pass
 
         # ── Page-level checks (header inspection, clickjacking, session, etc.) ──
         for check_name, scanner in self.scanners.items():
@@ -5021,34 +5180,21 @@ class ScanEngine:
         if not page.forms and not page.url_params:
             return
 
-        # ── Run multi-step attack flows that target this page ─────────────
-        matched_flow = None
-        for flow in self.flows:
-            if flow.steps:
-                # The last step action=navigate|attack defines the target URL
-                last_nav = next(
-                    (s for s in reversed(flow.steps) if s.action == "navigate"),
-                    None,
-                )
-                if last_nav and last_nav.url.rstrip("/") == page.url.rstrip("/"):
-                    matched_flow = flow
-                    break
+        # 前提 flow は page-level 検査の前に実行・成否判定済み（上参照）。ここでは attack の
+        # ため browser が target ページに居ることを確認し、ずれていれば復帰する。
         if matched_flow:
-            console.print(
-                f"\n  [cyan][Flow] Pre-attack flow:[/cyan] {matched_flow.name}"
-            )
-            # Use context-aware browser (worker in concurrent mode)
-            await FlowRunner(self.browser).run(matched_flow)
             # Verify the browser ended on the intended target page.
             # A failed step in the flow may leave the browser on the wrong URL.
             try:
-                actual_url = self.browser.page.url.rstrip("/")
-                if actual_url != page.url.rstrip("/"):
+                # fragment 差（#settings 等）は同一ページ扱いで再navしない（flowが用意した
+                # tab/状態を破棄しない）。真に別ページ（path/query差）のときのみ復帰する。
+                if not self._urls_same_page(self.browser.page.url, page.url):
                     console.print(
-                        f"  [yellow][Flow] Ended on {actual_url}, "
+                        f"  [yellow][Flow] Ended on {self.browser.page.url}, "
                         f"re-navigating to {page.url}[/yellow]"
                     )
-                    if not await self.browser.navigate(page.url, retries=self.navigation_retries):
+                    if not await self.browser.navigate(page.url, retries=self.navigation_retries) \
+                            or not self._urls_same_page(self.browser.page.url, page.url):
                         self._record_unscannable_url(
                             page.url,
                             note="Pre-attack flow ended on a different URL and re-navigation failed: "

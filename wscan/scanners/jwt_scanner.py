@@ -251,12 +251,14 @@ class JWTScanner(BaseScanner):
         # Build request headers — pull through engine.auth_headers() so custom
         # --header values and refreshed bearer tokens are always included.
         req_headers = dict(_HEADERS)
+        # cookies_str は auth_headers の有無に関わらず後段（session cookie からの JWT 抽出）で
+        # 参照するため、必ず先に束縛する。以前は else 節でのみ代入しており、auth_headers を
+        # 持つ通常 ScanEngine 経路で NameError となり JWT 検査が丸ごと脱落していた（F03）。
+        cookies_str = getattr(self.engine, "cookies", "") or ""
         if hasattr(self.engine, "auth_headers"):
             req_headers.update(self.auth_headers_for_url(url))
-        else:
-            cookies_str = getattr(self.engine, "cookies", "") or ""
-            if cookies_str:
-                req_headers["Cookie"] = cookies_str
+        elif cookies_str:
+            req_headers["Cookie"] = cookies_str
 
         # Fetch the target page
         try:

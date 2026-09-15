@@ -70,9 +70,10 @@ class PreAuthLoginScanTests(unittest.TestCase):
     def _run_preauth(self, engine):
         captured = {}
 
-        async def fake_attack(page, plans):
+        async def fake_attack(page, plans, *, run_pre_attack_flows=True):
             captured["page"] = page
             captured["plans"] = plans
+            captured["run_pre_attack_flows"] = run_pre_attack_flows
 
         engine._attack_one_page = fake_attack
         asyncio.run(engine._scan_login_form_preauth())
@@ -88,6 +89,8 @@ class PreAuthLoginScanTests(unittest.TestCase):
         self.assertIn("page", captured)
         self.assertEqual(captured["page"].url, "http://app.test/login")
         self.assertTrue(captured["page"].forms)
+        # pre-auth 検査では pre-attack flow を実行しない（#167 P2）。
+        self.assertFalse(captured.get("run_pre_attack_flows", True))
         # Navigated to the login page in the (still unauthenticated) context.
         self.assertIn("http://app.test/login", engine._browser.navigated)
         # Marked visited so the authenticated crawl won't re-record it.

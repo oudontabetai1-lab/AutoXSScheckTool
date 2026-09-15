@@ -132,12 +132,14 @@ def test_realistic_healthcare_page_observation_scanner_scorecard():
     """
     _require_chromium()
     out = _run_manifest(
-        "realistic_healthcare_page_observation.yaml", {"clickjacking", "js_static"}
+        "realistic_healthcare_page_observation.yaml",
+        {"clickjacking", "js_static", "sri", "secret_leak"},
     )
     assert "run_error" not in out, out
-    assert out["case_counts"] == {"planned": 4, "completed": 4, "incomplete": 0}
+    assert out["case_counts"] == {"planned": 8, "completed": 8, "incomplete": 0}
+    # manifest 順: sri(vuln→safe), secret_leak(vuln→safe), clickjacking(vuln→safe), js_static(vuln→safe)。
     assert [c["classification"]["candidate"] for c in out["cases"]] == [
-        "tp", "tn", "tp", "tn",
+        "tp", "tn", "tp", "tn", "tp", "tn", "tp", "tn",
     ], out
 
 
