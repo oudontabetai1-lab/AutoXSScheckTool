@@ -361,6 +361,9 @@ def test_urls_same_page_ignores_fragment_only():
     assert same("http://app/#/admin", "http://app/#/admin") is True
     # query を伴う path 末尾スラッシュ差は区別（url_normalize と整合・#167 P2）
     assert same("http://t/app/?action=save", "http://t/app?action=save") is False
+    # トークン値は保持して区別（checkpoint 正規化と違い csrf/nonce を落とさない・#167 P2）
+    assert same("http://t/checkout?csrf=A", "http://t/checkout?csrf=B") is False
+    assert same("http://t/checkout?csrf=A", "http://t/checkout?csrf=A") is True
 
 
 def test_pre_auth_mode_skips_pre_attack_flow():

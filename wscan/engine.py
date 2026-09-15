@@ -264,7 +264,7 @@ from .attack_planner import AttackPlanner, FieldAttackPlan, PageAttackPlan
 from .adaptive_payload import AdaptivePayloadEngine
 from .browser import BrowserManager, bucketize_status_counts, canonical_host
 from .header_scope import allowed_header_origins, headers_allowed_for_url
-from .url_normalize import normalize_proxy_server, normalize_url_for_key
+from .url_normalize import normalize_proxy_server
 from .tls_config import TLSConfig
 from .chain_scanner import ChainScanner, ChainFinding
 from .ctf_flag_finder import FlagFinder
@@ -4924,16 +4924,29 @@ class ScanEngine:
 
     @staticmethod
     def _urls_same_page(current: str, target: str) -> bool:
-        """canonical な checkpoint identity（normalize_url_for_key）で同一ページかを判定する。
+        """flow 選択・着地先検証用の URL 同一ページ判定。
 
-        通常の同一文書内アンカー（`page.url#settings` の tab 遷移）は無視して同一ページ扱いに
-        する一方、route 的 fragment（SPA の `#/admin` と `#/login`）、生存クエリ差、query を
-        伴う path の末尾スラッシュ差（`/app/?x` と `/app?x`）は区別する。独自の urldefrag+rstrip
-        だと SPA hash route を潰し（#167 P1）、query 付き path slash を消す（#167 P2）ため、
-        flow 選択・着地先検証の双方で checkpoint と同じ正規化に一元化する。
+        規則（checkpoint 用 normalize_url_for_key と**あえて別**）:
+        - 通常の同一文書内アンカー（`#settings`）は無視して同一ページ扱い。
+        - route 的 fragment（SPA の `#/admin` / `#!/x`）は保持して区別（#167 P1）。
+        - path 末尾スラッシュは query も route fragment も無いときだけ吸収。query があれば
+          `/app/?x` と `/app?x` を区別（#167 P2）。
+        - **query 値は厳密一致**を要求する。checkpoint 正規化は csrf/nonce 等の揮発クエリを
+          落とすため `/checkout?csrf=A` と `?csrf=B` を同一視し、別 tokenized state 用の flow を
+          誤選択・誤着地承認しうる（#167 P2）。flow マッチはトークンを保持する必要があるため
+          normalize_url_for_key を使わず、path/fragment のみ正規化する専用比較器にする。
         """
+        from urllib.parse import urlsplit
+
+        def _norm(u: str):
+            p = urlsplit(u or "")
+            frag = p.fragment
+            keep_frag = frag if (frag[:1] in ("/", "!") or "/" in frag) else ""
+            path = p.path if (p.query or keep_frag) else p.path.rstrip("/")
+            return (p.scheme, p.netloc, path, p.query, keep_frag)
+
         try:
-            return normalize_url_for_key(current or "") == normalize_url_for_key(target or "")
+            return _norm(current) == _norm(target)
         except Exception:
             return False
 
