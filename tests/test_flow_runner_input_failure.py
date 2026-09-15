@@ -124,3 +124,52 @@ def test_attack_one_page_skips_when_pre_attack_flow_fails():
     assert "flow" in str(eng._record_unscannable_url.call_args).lower()
     assert attacked["called"] is False        # 攻撃（field）へ進んでいない
     assert page_scanned["called"] is False    # page-level 検査も走っていない（前提flow前に判定）
+
+
+def test_cookies_resynced_after_successful_pre_attack_flow():
+    """成功した flow の後、page-level 検査の前に engine.cookies を採り直すこと（#167 P1）。
+
+    login flow がセッション Cookie を発行/更新するため、flow 前の sync だけだと HTTP
+    scanner が空/失効 Cookie で protected を叩く。flow 後に再 sync することを検証。
+    """
+    from wscan.engine import ScanEngine
+
+    order = []
+    eng = ScanEngine.__new__(ScanEngine)
+    eng.scanners = {}                 # page-level は本テストの焦点外（no-op）
+    eng.concurrency = 1
+    eng.flows = [ScanFlow(name="login", steps=[
+        FlowStep(action="navigate", url="http://t.test/admin"),
+    ])]
+    eng._browser = types.SimpleNamespace(
+        page=types.SimpleNamespace(url="http://t.test/admin")
+    )
+    eng._record_unscannable_url = MagicMock()
+
+    async def _relogin(*a, **k):
+        return None
+
+    async def _sync(*a, **k):
+        order.append("sync")
+
+    eng._maybe_relogin_for_page = _relogin
+    eng._sync_cookies_from_browser = _sync
+    eng._save_checkpoint = lambda *a, **k: None
+
+    page = types.SimpleNamespace(url="http://t.test/admin", forms=[], url_params=[])
+
+    class _OkRunner:
+        def __init__(self, browser):
+            pass
+
+        async def run(self, flow):
+            order.append("flow")
+            return True
+
+    with patch("wscan.engine.FlowRunner", _OkRunner):
+        asyncio.run(eng._attack_one_page(page, {}))
+
+    assert "flow" in order and "sync" in order
+    # flow の後に少なくとも1回 sync が走る（fresh cookie を engine.cookies へ反映）。
+    assert order.index("sync", order.index("flow") + 1) > order.index("flow")
+    eng._record_unscannable_url.assert_not_called()  # 成功時は unscannable 記録しない

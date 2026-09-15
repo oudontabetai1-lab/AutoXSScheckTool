@@ -4935,6 +4935,14 @@ class ScanEngine:
                     ),
                 )
                 return
+            # 成功した flow はセッション Cookie を発行/更新し得る。HTTP scanner は browser jar
+            # ではなく engine.cookies から Cookie ヘッダを得るため、flow 後に採り直して乖離を
+            # 防ぐ（さもないと page-level が空/失効 Cookie で protected を叩く・Codex #167 P1）。
+            if (getattr(self, "concurrency", 1) or 1) <= 1:
+                try:
+                    await self._sync_cookies_from_browser(self.browser, for_url=page.url)
+                except Exception:
+                    pass
 
         # ── Page-level checks (header inspection, clickjacking, session, etc.) ──
         for check_name, scanner in self.scanners.items():
