@@ -262,6 +262,10 @@ python3 main.py scan https://secure.example.com \
 python3 main.py manual-crawl https://app.example.com --output manual_seed.json
 ```
 
+ダッシュボードの「手動巡回」ではサーバ上のブラウザを遠隔操作できます。新規タブは自動追従します。
+認証設定に TOTP を入力して遠隔ブラウザを起動すると、「OTP欄を指定」で現在コードを即時入力でき、
+期限切れ時は「TOTPを再入力」で更新できます。TOTP の secret・URI・生成コードは巡回 JSON に保存されません。
+
 保存した巡回結果を検査に使う:
 
 ```bash

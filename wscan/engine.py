@@ -254,6 +254,26 @@ def _cookie_path_matches(request_path: str, cookie_path: str) -> bool:
     # 境界が "/" であること（/admin が /administrator に誤マッチしないように）
     return cp.endswith("/") or req[len(cp):len(cp) + 1] == "/"
 
+
+def _redirect_scope_to_add(effective_origin: str, target_url: str) -> str:
+    """手動巡回の実効 origin が target と異なる同一ホストなら、攻撃スコープへ
+    加えるべき origin（``scheme://netloc``）を返す（純粋・Codex #153）。該当しなければ ""。
+
+    別ホストや同一 origin では "" を返し、scheme・ポート変更だけを反映する。
+    """
+    if not effective_origin:
+        return ""
+    from urllib.parse import urlparse as _up
+    ep, tp = _up(effective_origin), _up(target_url or "")
+    if (ep.hostname and tp.hostname
+            and ep.hostname.lower() == tp.hostname.lower()
+            and ep.scheme in ("http", "https")
+            and tp.scheme in ("http", "https")
+            and (ep.scheme, ep.netloc.lower()) != (tp.scheme, tp.netloc.lower())):
+        return f"{ep.scheme}://{ep.netloc}"
+    return ""
+
+
 import yaml
 from rich.console import Console
 from rich.rule import Rule
@@ -2990,6 +3010,18 @@ class ScanEngine:
                     f"  [dim cyan][Manual Crawl][/dim cyan] {len(manual_seed.urls)} URL, "
                     f"{len(manual_seed.cookies)} Cookie を読み込みました: {self.manual_crawl_path}"
                 )
+                # 同一ホストへの scheme・ポート変更後の実効 origin を攻撃スコープへ昇格する。
+                # 訪問だけでなく、手動巡回で捕捉したフォーム・パラメータも検査対象にする。
+                # primary（target_url）だけでなく**設定済みの全ターゲット/アクセス scope**と
+                # 突き合わせる：副 target が https へリダイレクトすると実効 origin が primary と
+                # 別ホストになり、primary 比較だけだと scope に入らず副 target が未スキャンになる
+                # （Codex #153・追加ターゲットのリダイレクト追従）。無関係 origin は
+                # _redirect_scope_to_add が host 一致を要求するので広げない。
+                for _cfg in (self.target_url, *self.target_urls, *self.access_urls):
+                    _eff_scope = _redirect_scope_to_add(manual_seed.effective_origin, _cfg)
+                    if _eff_scope and _eff_scope not in self.target_urls:
+                        self.target_urls.append(_eff_scope)
+                        break
                 for _murl in manual_seed.urls:
                     if (
                         _murl not in self.visited_urls
