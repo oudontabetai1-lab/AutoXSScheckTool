@@ -146,6 +146,13 @@ class _FakeEngine:
         self.wave_errors = []
         self.proxy = ""
         self.timeout = 10
+        self.flows = []
+        self.navigation_retries = 0
+
+    def _match_pre_attack_flow(self, page):
+        # これらの http_methods テストは pre-attack flow を扱わない（#167 が
+        # _attack_one_page に導入した呼び出しへの最小スタブ）。
+        return None
 
 
 class ScannerTests(unittest.IsolatedAsyncioTestCase):
