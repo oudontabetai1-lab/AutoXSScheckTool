@@ -264,7 +264,7 @@ from .attack_planner import AttackPlanner, FieldAttackPlan, PageAttackPlan
 from .adaptive_payload import AdaptivePayloadEngine
 from .browser import BrowserManager, bucketize_status_counts, canonical_host
 from .header_scope import allowed_header_origins, headers_allowed_for_url
-from .url_normalize import normalize_proxy_server
+from .url_normalize import normalize_proxy_server, normalize_url_for_key
 from .tls_config import TLSConfig
 from .chain_scanner import ChainScanner, ChainFinding
 from .ctf_flag_finder import FlagFinder
@@ -4924,22 +4924,16 @@ class ScanEngine:
 
     @staticmethod
     def _urls_same_page(current: str, target: str) -> bool:
-        """fragment を無視して同一ページ（同一 path+query）かを判定する。
+        """canonical な checkpoint identity（normalize_url_for_key）で同一ページかを判定する。
 
-        `page.url#settings` のような同一文書内 tab 遷移を「別ページ」と誤判定して flow が
-        用意した状態を破棄しないため、着地先検証・attack 前 re-nav の双方で共有する（#167 P1）。
+        通常の同一文書内アンカー（`page.url#settings` の tab 遷移）は無視して同一ページ扱いに
+        する一方、route 的 fragment（SPA の `#/admin` と `#/login`）、生存クエリ差、query を
+        伴う path の末尾スラッシュ差（`/app/?x` と `/app?x`）は区別する。独自の urldefrag+rstrip
+        だと SPA hash route を潰し（#167 P1）、query 付き path slash を消す（#167 P2）ため、
+        flow 選択・着地先検証の双方で checkpoint と同じ正規化に一元化する。
         """
-        from urllib.parse import urldefrag, urlsplit
-
-        def _norm(u: str) -> str:
-            # fragment を除去し、**path の末尾スラッシュだけ**を正規化する。URL 全体を
-            # rstrip すると `?next=/` のようにクエリ値末尾の `/` を消して別状態を同一視して
-            # しまうため、path のみに限定する（#167 P2）。
-            parts = urlsplit(urldefrag(u or "")[0])
-            return parts._replace(path=parts.path.rstrip("/")).geturl()
-
         try:
-            return _norm(current) == _norm(target)
+            return normalize_url_for_key(current or "") == normalize_url_for_key(target or "")
         except Exception:
             return False
 

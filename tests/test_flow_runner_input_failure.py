@@ -356,6 +356,11 @@ def test_urls_same_page_ignores_fragment_only():
     # クエリ値末尾の `/` は消さない（別状態を同一視しない・#167 P2）
     assert same("http://t/view?next=/", "http://t/view?next=") is False
     assert same("", "http://t/admin") is False
+    # SPA hash route は別ページ（urldefrag で潰さない・#167 P1）
+    assert same("http://app/#/login", "http://app/#/admin") is False
+    assert same("http://app/#/admin", "http://app/#/admin") is True
+    # query を伴う path 末尾スラッシュ差は区別（url_normalize と整合・#167 P2）
+    assert same("http://t/app/?action=save", "http://t/app?action=save") is False
 
 
 def test_pre_auth_mode_skips_pre_attack_flow():
