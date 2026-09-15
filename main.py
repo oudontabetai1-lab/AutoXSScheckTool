@@ -2149,8 +2149,11 @@ def _load_flow_files(paths) -> list[dict]:
 # `--no-headless` は scan に無く生成コマンドが `unrecognized arguments` で落ちるため除外。
 # `--fast` は run_scan が depth==既定を「未指定」とみなし fast preset で depth=1 に変える＝
 # 案内した `--depth N` と実行結果が食い違うため除外（#170 P2）。
+# `--all-checks` は _effective_checks が --checks を全 scanner で置換するため、提案した checks
+# サブセットより広い（状態変更を含みうる）スキャンになり要約と食い違うため除外（#170 P2）。
+# 残りは checks/depth と直交する無害トグルのみ。
 _SAFE_SETUP_FLAGS = frozenset({
-    "--dom-xss", "--spa-crawl", "--all-checks", "--headless",
+    "--dom-xss", "--spa-crawl", "--headless",
     "--no-monitor", "--no-sitemap-crawl", "--ctf",
 })
 
@@ -3466,10 +3469,18 @@ async def run_setup(args):
     from wscan.scanners import SCANNERS
     from wscan import auto_config as _auto_config
 
+    # ウィザード既定の system プロンプト（_SYSTEM_PROMPT）は checks/depth のみの別スキーマを
+    # 要求し flags/reason を含まないため、その system のままだとモデルが setup 用の追加項目を
+    # 落とす。setup のスキーマに一致する system を渡す（#170 P2）。
+    setup_system = (
+        "You are a web security scanner configuration assistant. "
+        "Follow the user's message exactly and return only the JSON object it specifies "
+        "(fields: checks, depth, reason, flags). Do not add or omit fields."
+    )
     suggestion = None
     if await pg._check_llm_available():
         try:
-            text = await _auto_config._call_llm(pg, prompt)
+            text = await _auto_config._call_llm(pg, prompt, system=setup_system)
             suggestion = _parse_setup_llm(text, set(SCANNERS))
         except Exception:
             suggestion = None

