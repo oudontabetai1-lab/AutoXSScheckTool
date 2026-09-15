@@ -1,6 +1,9 @@
+import json
 import tempfile
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 from wscan.browser import BrowserManager
 from wscan.engine import ScanEngine
@@ -421,6 +424,31 @@ class EngineScanGapTests(unittest.IsolatedAsyncioTestCase):
         )
         engine._browser = _FakeCrawlBrowser()
         return engine
+
+    async def test_manual_redirect_seed_is_an_attack_target(self):
+        # 実効 origin の seed が訪問だけで終わらず、フォーム・パラメータを攻撃へ渡す。
+        for target, origin in (
+            ("http://fixture.test/", "https://fixture.test"),
+            ("http://fixture.test:8000/", "http://fixture.test:8080"),
+        ):
+            with self.subTest(origin=origin), tempfile.TemporaryDirectory() as tmp:
+                seed_url = origin + "/search?q=test"
+                path = Path(tmp) / "manual.json"
+                path.write_text(json.dumps({
+                    "start_url": origin + "/",
+                    "seed_urls": [seed_url],
+                }), encoding="utf-8")
+                engine = self._engine(target, manual_crawl_path=str(path), depth=0)
+                engine._browser.get_url_params = AsyncMock(return_value=["q"])
+
+                pages = await engine._phase_crawl()
+
+                self.assertIn(origin, engine.target_urls)
+                self.assertTrue(engine._is_attack_target_url(origin + "/"))
+                self.assertFalse(engine._is_attack_target_url("https://unrelated.test/search"))
+                seed_page = next(page for page in pages if page.url == seed_url)
+                self.assertTrue(seed_page.forms)
+                self.assertTrue(seed_page.url_params)
 
     async def test_first_page_spa_marker_auto_enables_crawl_and_settle(self):
         engine = self._engine(depth=1)

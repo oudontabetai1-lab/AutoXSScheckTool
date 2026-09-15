@@ -126,7 +126,7 @@ class ManualCrawlSeedTests(unittest.TestCase):
         self.assertEqual(seed.effective_origin, "")
 
     def test_redirect_scope_to_add_pure(self):
-        # 同一ホスト・scheme 差なら追加 origin を返し、別ホスト/scheme 一致なら空（engine スコープ判定）。
+        # 同一ホストの origin 差なら追加し、別ホスト・同一 origin は広げない。
         from wscan.engine import _redirect_scope_to_add
         self.assertEqual(
             _redirect_scope_to_add("https://example.test/", "http://example.test/"),
@@ -137,7 +137,17 @@ class ManualCrawlSeedTests(unittest.TestCase):
             "https://example.test:8443")
         # 別ホストは広げない。
         self.assertEqual(_redirect_scope_to_add("https://evil.test/", "http://example.test/"), "")
-        # scheme 一致（リダイレクト無し）は空。
+        # scheme が同じでもポート変更は追加する。末尾スラッシュ・パスは含めない。
+        self.assertEqual(
+            _redirect_scope_to_add("http://example.test:8080/app/", "http://example.test:8000/"),
+            "http://example.test:8080")
+        self.assertEqual(
+            _redirect_scope_to_add("http://evil.test:8080/", "http://example.test:8000/"), "")
+        self.assertEqual(
+            _redirect_scope_to_add("ftp://example.test/", "http://example.test/"), "")
+        # 同一 origin はパスが違っても追加しない。
+        self.assertEqual(
+            _redirect_scope_to_add("http://example.test:8000/app/", "http://example.test:8000/"), "")
         self.assertEqual(_redirect_scope_to_add("http://example.test/", "http://example.test/"), "")
         self.assertEqual(_redirect_scope_to_add("", "http://example.test/"), "")
 
