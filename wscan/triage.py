@@ -548,11 +548,14 @@ class TriageEngine:
                 "Mention which specific fields to target first and why."
             )
 
+            from wscan.llm_client import complete_text
+
             with pg.use_role("triage"):
-                results = await pg._call_llm(prompt)
-            if isinstance(results, list):
-                return "\n".join(str(r) for r in results)
-            return str(results)
+                # triage の分析は散文。payload 配列パーサ（pg._call_llm→_extract_json_list）へ
+                # 通すと散文が失われ、結果欄に文字列 "None" を出していた（F08）。text 完了で
+                # 生の分析文をそのまま得る。空応答・失敗は空欄として区別（"None" を出さない）。
+                text = await complete_text(pg, prompt, max_tokens=500, temperature=0.7)
+            return text.strip() if text and text.strip() else ""
         except Exception:
             return ""
 
