@@ -8,6 +8,7 @@
 状態を変更する PUT/DELETE 等は**送らない**（OPTIONS/TRACE/PROPFIND のみ）。判定ロジックは純粋関数に
 分離し、通信失敗は graceful（Finding を作らない）。
 """
+import base64
 import re
 import secrets
 from typing import TYPE_CHECKING
@@ -92,7 +93,18 @@ def trace_reflects(status: int, headers: dict, body: str, token: str) -> bool:
 _TRACE_HEADER_LINE = re.compile(r"^([^\r\n:]+):(.*)$")
 
 
-def redact_trace_body(body: str, limit: int = 2000, sent_secret_values=()) -> str:
+def url_userinfo_secrets(target: str) -> tuple[str, ...]:
+    """URL の生 userinfo と HTTPX が合成する Basic 認証値を返す（純粋）。"""
+    url = httpx.URL(target)
+    if not url.userinfo:
+        return ()
+    raw = urlparse(target).netloc.rsplit("@", 1)[0]
+    decoded = f"{url.username}:{url.password}"
+    basic = "Basic " + base64.b64encode(decoded.encode("utf-8")).decode("ascii")
+    return raw, decoded, basic
+
+
+def redact_trace_body(body: str, limit: int = 2000, sent_secret_values=(), target_url: str = "") -> str:
     """TRACE が反射した送信ヘッダのうち秘匿値をマスクする（純粋）。
 
     XST の証跡（どのヘッダが反射したか）は残しつつ、Authorization/Cookie 等の実値は残さない。
@@ -110,20 +122,21 @@ def redact_trace_body(body: str, limit: int = 2000, sent_secret_values=()) -> st
 
     from wscan.request_logger import is_sensitive_header
 
-    text = body[:limit]
+    text = body
     # (2) 送信した秘匿値を literal に伏字化（直列化形式に依らない）。反射器が安全に直列化した
     # エンコード形（HTML 属性の &amp;/&quot;・percent エンコード・JSON のクォート/バックスラッシュ
     # エスケープ）でも可逆な資格情報が残らないよう、各値の一般的なエンコード変種も生成して置換する
     # （Codex #157）。長い値（＝より具体的な変種）から先に置換する。
     variants: set[str] = set()
-    for val in (sent_secret_values or []):
-        if not val or len(val) < 4:
-            continue
+    # URL 由来と確定した資格情報は短くても伏せる。切り詰めは秘匿後に行う。
+    values = [v for v in (sent_secret_values or []) if v and len(v) >= 4]
+    values.extend(url_userinfo_secrets(target_url))
+    for val in values:
         variants.add(val)
         variants.add(_html.escape(val))                  # & < > " ' → 実体参照
         variants.add(_quote(val, safe=""))               # percent エンコード
         variants.add(_json.dumps(val)[1:-1])             # JSON 文字列本体のエスケープ
-    for v in sorted({x for x in variants if x and len(x) >= 4}, key=len, reverse=True):
+    for v in sorted({x for x in variants if x}, key=len, reverse=True):
         text = text.replace(v, "[REDACTED]")
     # (1) 行頭ヘッダ形の値を伏字化。
     out: list[str] = []
@@ -134,7 +147,7 @@ def redact_trace_body(body: str, limit: int = 2000, sent_secret_values=()) -> st
             out.append(f"{m.group(1)}: [REDACTED]{nl}")
         else:
             out.append(line)
-    return "".join(out)
+    return "".join(out)[:limit]
 
 
 class HttpMethodsScanner(BaseScanner):
@@ -212,7 +225,8 @@ class HttpMethodsScanner(BaseScanner):
             self._checked_targets.add(target)
 
             if self.monitor:
-                await self.monitor.emit_status(f"HTTP methods check on {target}")
+                await self.monitor.emit_status(
+                    f"HTTP methods check on {httpx.URL(target).copy_with(username=None, password=None)}")
             # 各 probe(OPTIONS/TRACE/PROPFIND)は独立した finding クラスを担う（OPTIONS だけが
             # 危険 Allow メソッドの唯一の情報源等）。従って 1 つでも request 時失敗があれば、その
             # finding クラスのカバレッジが欠けるので target を未検査扱いにして resume へ回す
@@ -224,6 +238,12 @@ class HttpMethodsScanner(BaseScanner):
             cookie_override = None
             if hasattr(self.engine, "cookie_header_for_url"):
                 cookie_override = await self.engine.cookie_header_for_url(target)
+                if cookie_override is None:
+                    # jar 取得失敗は匿名 probe にせず、記録して resume 対象に残す。
+                    self._record_scan_note(f"transport_error:{self.CHECK_TYPE}:cookie_jar")
+                    self._checked_targets.discard(target)
+                    target_failed = True
+                    continue
             try:
                 async with httpx.AsyncClient(
                     **self._client_kwargs(target, cookie_override=cookie_override)
@@ -246,7 +266,7 @@ class HttpMethodsScanner(BaseScanner):
         # 正常終了すると checkpoint 完了で恒久 skip される・Codex #157）。
         if target_failed:
             raise PageDocumentUnavailable(
-                f"{self.CHECK_TYPE}: 未検査のターゲットがあります（応答取得に失敗）: {origin}"
+                f"{self.CHECK_TYPE}: 未検査のターゲットがあります（認証情報または応答の取得に失敗）"
             )
         return findings
 
@@ -329,7 +349,7 @@ class HttpMethodsScanner(BaseScanner):
         sent_secrets = [v for k, v in client.headers.items() if is_sensitive_header(k)]
         pair = {"request": {"url": target, "method": "TRACE"},
                 "response": {"status": r.status_code, "headers": dict(r.headers),
-                             "body": redact_trace_body(r.text, sent_secret_values=sent_secrets)}}
+                             "body": redact_trace_body(r.text, sent_secret_values=sent_secrets, target_url=target)}}
         confirmed = strength == "confirmed"
         evidence = (
             "TRACE メソッドが有効で送信ヘッダを反射します（Cross-Site Tracing / XST）。"

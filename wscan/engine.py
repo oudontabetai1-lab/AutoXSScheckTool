@@ -255,13 +255,15 @@ def _cookie_path_matches(request_path: str, cookie_path: str) -> bool:
     return cp.endswith("/") or req[len(cp):len(cp) + 1] == "/"
 
 
-def _scoped_cookie_header(cookies: list, url: str) -> str:
+def _scoped_cookie_header(cookies: list | None, url: str) -> str | None:
     """ブラウザ jar の cookie 群から、``url`` のホスト/パスへ送られる Cookie ヘッダを作る（純粋・RFC6265）。
 
     domain（host-only は完全一致のみ・domain-scoped は suffix 可）と path（``_cookie_path_matches``）で
     絞り、Path の長い順（§5.4）に並べる。空なら ""。同一ホストでも origin ルート(/) と page(/admin)で
     送るべき Cookie が変わる（Path=/admin は / に送らない）ため、URL 単位でスコープした文字列を返す。
     """
+    if cookies is None:
+        return None  # 取得失敗と正当な空 jar を区別する。
     from urllib.parse import urlparse as _up
     parsed = _up(url or "")
     target_host = (parsed.hostname or "").lower()
@@ -2376,20 +2378,20 @@ class ScanEngine:
         # 送って別セッションで検査してしまう。一致が無ければクリアして未認証で送る。
         self.cookies = _scoped_cookie_header(cookies, for_url or self.target_url)
 
-    async def cookie_header_for_url(self, url: str) -> str:
+    async def cookie_header_for_url(self, url: str) -> str | None:
         """``url`` のホスト/パスへ送られる Cookie ヘッダをブラウザ jar から作る（path/domain スコープ済み）。
 
         ``self.cookies`` は同期時の for_url（=ページ path）でスコープされ Path=/ と Path=/admin の
         両方を含むため、origin ルート(/) の probe へそのまま送ると Path=/admin の Cookie を漏らす。
         本メソッドは URL 単位で再スコープした文字列を返し、origin と page で送り分けられるようにする
-        （http_methods 等が使用・Codex #157）。ブラウザ未接続・jar 空・例外時は ""。"""
+        （http_methods 等が使用・Codex #157）。jar 空は ""、ブラウザ未接続・取得例外時は None（呼び出し側で記録・未完了扱い）。"""
         try:
             page = getattr(self.browser, "page", None)
             if page is None:
-                return ""
+                return None
             cookies = await page.context.cookies()
         except Exception:
-            return ""
+            return None
         return _scoped_cookie_header(cookies, url)
 
     async def _maybe_relogin_for_page(self, url: str) -> None:

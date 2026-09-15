@@ -324,6 +324,78 @@ class ScannerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(xst), 1)
         self.assertNotIn("supersecrettoken", xst[0]["pair"]["response"]["body"])
 
+    async def test_trace_userinfo_redaction_with_real_httpx_auth(self):
+        # HTTPX の実認証処理で合成された値を inline 反射し、純粋関数と保存本文を検証する。
+        for userinfo in ("", "alice:secret@", "al%69ce:s%40cret@", "a:b@"):
+            with self.subTest(userinfo=userinfo):
+                target = f"https://{userinfo}app.test/"
+                engine, scanner = self._scanner()
+                scanner.record_finding = mock.AsyncMock(return_value=object())
+                reflected = []
+
+                def echo(request):
+                    auth = request.headers.get("Authorization", "")
+                    reflected.append(auth)
+                    body = f"TRACE / HTTP/1.1 inline Authorization: {auth}; url={target}"
+                    return hm.httpx.Response(200, headers={"Content-Type": "message/http"}, text=body)
+
+                async with hm.httpx.AsyncClient(transport=hm.httpx.MockTransport(echo)) as client:
+                    await scanner._check_trace(client, target)
+                body = scanner.record_finding.call_args.kwargs["pair"]["response"]["body"]
+                secrets = hm.url_userinfo_secrets(target)
+                if userinfo:
+                    self.assertIn(reflected[0], secrets)
+                    for secret in secrets:
+                        self.assertNotIn(secret, body)
+                    # excerpt 境界で資格情報の前半だけ残さない。
+                    self.assertNotIn(userinfo[:-1], hm.redact_trace_body(
+                        "x" * 1998 + userinfo, target_url=target))
+                else:
+                    self.assertEqual(secrets, ())
+                    self.assertIn(target, body)
+
+    async def test_cookie_failure_leaves_page_checkpoint_for_retry(self):
+        from types import SimpleNamespace
+        from wscan.engine import ScanEngine
+
+        for failure in ("exception", "missing_page", "missing_browser"):
+            with self.subTest(failure=failure):
+                engine, scanner = self._scanner()
+                jar = mock.AsyncMock(side_effect=RuntimeError("cookie-secret"))
+                engine.browser = SimpleNamespace(page=SimpleNamespace(context=SimpleNamespace(cookies=jar)))
+                if failure == "missing_page":
+                    engine.browser.page = None
+                elif failure == "missing_browser":
+                    engine.browser = None
+                engine.cookie_header_for_url = lambda url: ScanEngine.cookie_header_for_url(engine, url)
+                engine.concurrency = 2
+                engine._maybe_relogin_for_page = mock.AsyncMock()
+                engine.scanners = {"http_methods": scanner}
+                engine._checkpoint_is_done = mock.Mock(return_value=False)
+                engine._checkpoint_mark_done = mock.Mock()
+                engine._save_checkpoint = mock.Mock()
+                engine._record_scan_matrix = mock.Mock()
+                page = SimpleNamespace(url="https://app.test/admin", forms=[], url_params=[])
+                with mock.patch.object(hm.httpx, "AsyncClient") as client:
+                    await ScanEngine._attack_one_page(engine, page, {})
+                    client.assert_not_called()
+                engine._checkpoint_mark_done.assert_not_called()
+                self.assertEqual(engine._record_scan_matrix.call_args.kwargs["status"], "error")
+                self.assertEqual(scanner._checked_targets, set())
+                self.assertIn("transport_error:http_methods:cookie_jar", engine.wave_errors)
+                self.assertNotIn("cookie-secret", str(engine.wave_errors) + str(engine._record_scan_matrix.call_args))
+
+                # 復旧後の本当に空の jar は通常検査・checkpoint 完了を許す。
+                engine.browser = SimpleNamespace(page=SimpleNamespace(context=SimpleNamespace(
+                    cookies=mock.AsyncMock(return_value=[]))))
+                client = _FakeClient({"OPTIONS": _FakeResp(401), "TRACE": _FakeResp(405),
+                                      "PROPFIND": _FakeResp(405)})
+                with mock.patch.object(hm.httpx, "AsyncClient", return_value=client):
+                    await ScanEngine._attack_one_page(engine, page, {})
+                self.assertEqual(len(client.requested), 6)
+                engine._checkpoint_mark_done.assert_called_once()
+                self.assertEqual(engine._record_scan_matrix.call_args.kwargs["status"], "tested")
+
     async def test_path_target_probed_in_addition_to_origin(self):
         responses = {
             "OPTIONS": _FakeResp(200, {"allow": "GET"}),

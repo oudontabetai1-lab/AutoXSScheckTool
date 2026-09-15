@@ -73,9 +73,21 @@ class CookieHeaderForUrlTests(unittest.TestCase):
         # page(/admin): 両方送る（長い path が先）。
         self.assertEqual(self._hdr(cookies, "https://example.com/admin"), "adm=a; root=r")
 
-    def test_no_browser_returns_empty(self):
+    def test_no_browser_returns_unavailable(self):
         eng = types.SimpleNamespace(browser=types.SimpleNamespace(page=None))
-        self.assertEqual(asyncio.run(ScanEngine.cookie_header_for_url(eng, "https://x.test")), "")
+        self.assertIsNone(asyncio.run(ScanEngine.cookie_header_for_url(eng, "https://x.test")))
+
+    def test_empty_jar_and_failed_jar_are_distinct(self):
+        from wscan.engine import _scoped_cookie_header
+        self.assertEqual(self._hdr([], "https://x.test"), "")
+        self.assertEqual(_scoped_cookie_header([], "https://x.test"), "")
+        self.assertIsNone(_scoped_cookie_header(None, "https://x.test"))
+
+    def test_cookie_fetch_exception_returns_unavailable(self):
+        from unittest.mock import AsyncMock
+        ctx = types.SimpleNamespace(cookies=AsyncMock(side_effect=RuntimeError("cookie-secret")))
+        eng = types.SimpleNamespace(browser=types.SimpleNamespace(page=types.SimpleNamespace(context=ctx)))
+        self.assertIsNone(asyncio.run(ScanEngine.cookie_header_for_url(eng, "https://x.test")))
 
     def test_secure_cookie_excluded_over_http(self):
         # Secure Cookie は HTTP 宛には送らず、HTTPS 宛には送る（Codex #157）。
