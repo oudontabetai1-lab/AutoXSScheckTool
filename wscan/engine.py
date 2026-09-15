@@ -4938,22 +4938,29 @@ class ScanEngine:
             # flow の最終遷移が login/error ページへ redirect（200）されると navigate は True でも
             # target に居ない。page-level 検査の前に着地先 URL を検証し、復帰できなければ未認証/
             # 誤ページを "tested" と誤記録しないよう記録して skip する（Codex #167 P1）。
-            try:
-                landed = (self.browser.page.url or "").rstrip("/")
-            except Exception:
-                landed = ""
-            if landed != page.url.rstrip("/"):
+            # 比較は fragment を無視する：`page.url#settings` 等の同一文書内の tab 遷移を
+            # 「target から離脱」と誤判定して flow が用意した状態を破棄しないため（Codex #167 P1）。
+            from urllib.parse import urldefrag
+
+            def _on_target() -> bool:
+                try:
+                    cur = urldefrag(self.browser.page.url or "")[0].rstrip("/")
+                except Exception:
+                    return False
+                return cur == urldefrag(page.url)[0].rstrip("/")
+
+            if not _on_target():
                 recovered = await self.browser.navigate(
                     page.url, retries=self.navigation_retries
                 )
-                try:
-                    landed = (self.browser.page.url or "").rstrip("/")
-                except Exception:
-                    landed = ""
-                if not recovered or landed != page.url.rstrip("/"):
+                if not recovered or not _on_target():
+                    try:
+                        landed = self.browser.page.url or "?"
+                    except Exception:
+                        landed = "?"
                     console.print(
                         f"  [yellow][Flow] Pre-attack flow did not reach {page.url} "
-                        f"(landed on {landed or '?'}) — skipping[/yellow]"
+                        f"(landed on {landed}) — skipping[/yellow]"
                     )
                     self._record_unscannable_url(
                         page.url,
