@@ -44,6 +44,28 @@ _DEFAULT_PORTS = {"http": 80, "https": 443, "ws": 80, "wss": 443}
 _PAGE_CONTENT_TIMEOUT = 30.0
 
 
+async def _bounded_page_content(page) -> str:
+    """page.content() を有界化して HTML を返す。取得不能・timeout 時は "" を返す。
+
+    page.content() は native な timeout 引数を持たないため asyncio で有界化するが、
+    timeout でこちらの await だけを cancel すると Playwright 側の protocol 操作が
+    保留のまま残り、後で「Future exception was never retrieved」を生む（_on_dialog の
+    comment 参照）。そこで shield で内側 task を守り、timeout 時は task を cancel して
+    await し、取り残しの例外/キャンセルをここで確実に消費する（orphan future を残さない）。
+    """
+    task = asyncio.ensure_future(page.content())
+    try:
+        return await asyncio.wait_for(asyncio.shield(task), timeout=_PAGE_CONTENT_TIMEOUT)
+    except Exception:
+        if not task.done():
+            task.cancel()
+        try:
+            await task
+        except BaseException:
+            pass
+        return ""
+
+
 # セッションを終了させるリンク（ログアウト等）。SPA クリック探索がこれを踏むと、
 # 認証セッションが失効し go_back() でも復元できず、以降の認証ページが軒並みログインへ
 # リダイレクトして攻撃面を失う（自動有効化で既定化するため特に危険・Codex #104 P1）。
@@ -1482,12 +1504,7 @@ class BrowserManager:
         page.content() の待機を有界にする（F06）。無限ハング時は "" を返して呼び出し側の
         「取得不能＝空」経路に合流させ、通し E2E 全体の停止を防ぐ。
         """
-        try:
-            return await asyncio.wait_for(
-                self.page.content(), timeout=_PAGE_CONTENT_TIMEOUT
-            )
-        except Exception:
-            return ""
+        return await _bounded_page_content(self.page)
 
     async def find_forms(self) -> list[dict]:
         """Find all forms and their inputs on the current page."""
@@ -2829,13 +2846,7 @@ class BrowserManager:
             await page.wait_for_load_state("domcontentloaded", timeout=15000)
 
             post_url = page.url
-            post_body = ""
-            try:
-                post_body = await asyncio.wait_for(
-                    page.content(), timeout=_PAGE_CONTENT_TIMEOUT
-                )
-            except Exception:
-                pass
+            post_body = await _bounded_page_content(page)
 
             # Check success
             if success_indicator:
