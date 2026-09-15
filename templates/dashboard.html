@@ -935,7 +935,7 @@ body { padding-left: 212px; }
 .ws-rail .foot{margin-top:auto;padding:0 18px;display:flex;flex-direction:column;gap:8px;font-size:11.5px;color:var(--text-muted)}
 .ws-rail .foot .ln{height:1px;background:linear-gradient(to right,transparent,rgba(233,233,237,.14),transparent)}
 .ws-rail .dot{width:6px;height:6px;border-radius:50%;background:var(--low);display:inline-block;margin-right:7px}
-@media(max-width:900px){body{padding-left:0}.ws-rail{display:none}}
+@media(max-width:1200px){body{padding-left:0}.ws-rail{display:none}}
 </style>
 </head>
 <body>
@@ -951,7 +951,7 @@ body { padding-left: 212px; }
   </div>
   <div class="foot">
     <div class="ln"></div>
-    <div><span class="dot"></span>serve · 127.0.0.1</div>
+    <div><span class="dot"></span><span id="railHost">serve</span></div><script>try{var h=location.host;if(h)document.getElementById('railHost').textContent='serve · '+h}catch(e){}</script>
   </div>
 </aside>
 
