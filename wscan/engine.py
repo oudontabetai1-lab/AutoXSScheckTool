@@ -4984,7 +4984,23 @@ class ScanEngine:
                 f"\n  [cyan][Flow] Pre-attack flow:[/cyan] {matched_flow.name}"
             )
             # Use context-aware browser (worker in concurrent mode)
-            await FlowRunner(self.browser).run(matched_flow)
+            flow_ok = await FlowRunner(self.browser).run(matched_flow)
+            if not flow_ok:
+                # 前提 flow（ログイン/セットアップ等）が失敗したまま攻撃すると、未認証や
+                # 誤ページを検査して誤った結果を生む。coverage gap として記録し攻撃を skip
+                # する（前提の欠落を 0 Finding=安全へ丸めない・F10）。
+                console.print(
+                    f"  [yellow][Flow] Pre-attack flow failed: {matched_flow.name} — "
+                    f"skipping attack on {page.url}[/yellow]"
+                )
+                self._record_unscannable_url(
+                    page.url,
+                    note=(
+                        f"Pre-attack flow '{matched_flow.name}' failed: a prerequisite "
+                        "step could not complete (e.g. missing field/selector)"
+                    ),
+                )
+                return
             # Verify the browser ended on the intended target page.
             # A failed step in the flow may leave the browser on the wrong URL.
             try:
