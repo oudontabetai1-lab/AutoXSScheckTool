@@ -3012,11 +3012,16 @@ class ScanEngine:
                 )
                 # 同一ホストへの scheme・ポート変更後の実効 origin を攻撃スコープへ昇格する。
                 # 訪問だけでなく、手動巡回で捕捉したフォーム・パラメータも検査対象にする。
-                _eff_scope = _redirect_scope_to_add(
-                    manual_seed.effective_origin, self.target_url
-                )
-                if _eff_scope and _eff_scope not in self.target_urls:
-                    self.target_urls.append(_eff_scope)
+                # primary（target_url）だけでなく**設定済みの全ターゲット/アクセス scope**と
+                # 突き合わせる：副 target が https へリダイレクトすると実効 origin が primary と
+                # 別ホストになり、primary 比較だけだと scope に入らず副 target が未スキャンになる
+                # （Codex #153・追加ターゲットのリダイレクト追従）。無関係 origin は
+                # _redirect_scope_to_add が host 一致を要求するので広げない。
+                for _cfg in (self.target_url, *self.target_urls, *self.access_urls):
+                    _eff_scope = _redirect_scope_to_add(manual_seed.effective_origin, _cfg)
+                    if _eff_scope and _eff_scope not in self.target_urls:
+                        self.target_urls.append(_eff_scope)
+                        break
                 for _murl in manual_seed.urls:
                     if (
                         _murl not in self.visited_urls

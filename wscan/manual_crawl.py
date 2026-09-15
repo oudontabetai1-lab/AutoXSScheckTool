@@ -141,12 +141,18 @@ def load_manual_crawl_seed(
     # 起動時リダイレクト（http→https 等・同一ホスト）後の実効 origin を保存してあるので、
     # 同一ホストなら caller の same_origin_as より優先する。これをしないと、target が http の
     # まま保存が https のとき、厳密 origin 判定で全 seed が scheme 差で落ちる（Codex #153）。
-    # 別ホストへは昇格しない（host 一致を条件にする）。
+    # 別ホストへは昇格しない（host 一致を条件にする）。ただし primary（same_origin_as）だけでなく
+    # **明示設定された追加ターゲット/アクセス scope のホスト**とも突き合わせる。副 target が
+    # https へリダイレクトすると saved_start が primary と別ホストになり、従来は落として
+    # 副 target が丸ごと未スキャンになっていた（Codex #153・追加ターゲットのリダイレクト追従）。
     effective_origin = same_origin_as
     saved_start = str(data.get("start_url") or "")
     if saved_start.startswith(("http://", "https://")):
-        if not same_origin_as or (
-                _origin_tuple(saved_start)[1] == _origin_tuple(same_origin_as)[1]):
+        _configured_hosts = {
+            _origin_tuple(s)[1] for s in ([same_origin_as] + scopes) if s
+        }
+        _configured_hosts.discard("")
+        if not same_origin_as or _origin_tuple(saved_start)[1] in _configured_hosts:
             effective_origin = saved_start
 
     return ManualCrawlSeed(

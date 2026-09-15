@@ -116,6 +116,23 @@ class ManualCrawlSeedTests(unittest.TestCase):
         # 別ホストの保存 origin は昇格しない＝effective_origin も空（engine スコープを広げない）。
         self.assertEqual(seed.effective_origin, "")
 
+    def test_load_honors_redirect_of_additional_configured_target(self):
+        # primary とは別ホストの「明示設定された追加ターゲット」（allowed_scopes 経由）が
+        # https へリダイレクトした場合、その実効 origin を採用し seed を落とさない（Codex #153）。
+        data = {
+            "start_url": "https://secondary.test/",
+            "seed_urls": ["https://secondary.test/", "https://secondary.test/app"],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "manual.json"
+            path.write_text(json.dumps(data), encoding="utf-8")
+            seed = load_manual_crawl_seed(
+                str(path), "http://primary.test/",
+                allowed_scopes=["http://secondary.test/"],
+            )
+        self.assertIn("https://secondary.test/app", seed.urls)
+        self.assertEqual(seed.effective_origin, "https://secondary.test/")
+
     def test_effective_origin_empty_when_no_redirect(self):
         # target と scheme が同じ（リダイレクト無し）なら effective_origin は空。
         data = {"start_url": "http://example.test/", "seed_urls": ["http://example.test/a"]}
