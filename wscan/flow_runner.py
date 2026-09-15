@@ -145,7 +145,10 @@ class FlowRunner:
 
         if step.action == "navigate":
             console.print(f"  [dim]{label} navigate → {step.url}[/dim]")
-            await self.browser.navigate(step.url)
+            # navigate は 4xx/timeout で False を返す（例外は投げない）。破棄すると失敗した
+            # 遷移を成功扱いし、前提未達のまま後続/攻撃へ進む（F10・Codex #167 P1）。
+            if not await self.browser.navigate(step.url):
+                raise FlowStepError(f"navigate failed (non-OK response/timeout): {step.url}")
 
         elif step.action == "fill":
             display_val = step.value if step.field.lower() not in ("password", "pass", "passwd") else "***"

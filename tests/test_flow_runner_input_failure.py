@@ -25,12 +25,14 @@ class _FakePage:
 
 
 class _FakeBrowser:
-    def __init__(self, page):
+    def __init__(self, page, nav_ok=True):
         self.page = page
         self.navigated = []
+        self.nav_ok = nav_ok
 
     async def navigate(self, url):
         self.navigated.append(url)
+        return self.nav_ok
 
 
 def _run(browser, steps):
@@ -57,6 +59,13 @@ def test_fill_existing_field_completes():
 def test_submit_without_target_fails():
     browser = _FakeBrowser(_FakePage(submit_ok=False))
     ok = _run(browser, [FlowStep(action="submit")])
+    assert ok is False
+
+
+def test_navigate_failure_fails_flow():
+    # navigate が False（4xx/timeout）を返したら flow 失敗（成功扱いにしない）。
+    browser = _FakeBrowser(_FakePage(), nav_ok=False)
+    ok = _run(browser, [FlowStep(action="navigate", url="http://t.test/x")])
     assert ok is False
 
 
