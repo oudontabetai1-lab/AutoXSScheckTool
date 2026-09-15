@@ -173,7 +173,13 @@ class FlowRunner:
                         el = find(`[name="${f}"],[id="${f}"]`);
                     }
                     if (!el) return false;
-                    el.value = v;
+                    // 旧記録は checkbox/radio も fill(value) で保存する。value 代入では checked が
+                    // 変わらず前提（規約同意等）を再現できないため、checked を復元する（#170 P2）。
+                    if (el.type === 'checkbox' || el.type === 'radio') {
+                        el.checked = v !== '' && v !== 'false' && v !== 'off' && v !== '0';
+                    } else {
+                        el.value = v;
+                    }
                     ['input', 'change', 'blur'].forEach(e =>
                         el.dispatchEvent(new Event(e, {bubbles: true}))
                     );

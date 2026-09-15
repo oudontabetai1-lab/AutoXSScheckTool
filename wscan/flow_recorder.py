@@ -101,7 +101,14 @@ class FlowRecorder:
                         // querySelector で pseudo-class 等と誤解釈され throw するのを防ぐ・#170 P2）。
                         const esc = (window.CSS && CSS.escape) ? CSS.escape(el.id) : el.id;
                         const sel = el.id ? '#' + esc : (el.name ? '[name="' + el.name + '"]' : el.tagName.toLowerCase());
-                        if (typeof window['{_fn_fill}'] === 'function') {{
+                        // checkbox/radio は value ではなく checked 状態が本質。fill は value を
+                        // 代入するだけで checked を変えず、規約同意等の前提を再現できない。click で
+                        // 相互作用そのものを記録・再現する（#170 P2）。
+                        if (el.type === 'checkbox' || el.type === 'radio') {{
+                            if (typeof window['{_fn_click}'] === 'function') {{
+                                window['{_fn_click}'](sel);
+                            }}
+                        }} else if (typeof window['{_fn_fill}'] === 'function') {{
                             window['{_fn_fill}'](sel, el.value);
                         }}
                     }}

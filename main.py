@@ -2149,12 +2149,13 @@ def _load_flow_files(paths) -> list[dict]:
 # `--no-headless` は scan に無く生成コマンドが `unrecognized arguments` で落ちるため除外。
 # `--fast` は run_scan が depth==既定を「未指定」とみなし fast preset で depth=1 に変える＝
 # 案内した `--depth N` と実行結果が食い違うため除外（#170 P2）。
-# `--all-checks` は _effective_checks が --checks を全 scanner で置換するため、提案した checks
-# サブセットより広い（状態変更を含みうる）スキャンになり要約と食い違うため除外（#170 P2）。
-# 残りは checks/depth と直交する無害トグルのみ。
+# 提案 checks/depth の要約と**実効設定が食い違う**flag は全て除外する（#170 P2）：
+#   --all-checks（--checks を全 scanner で置換）/ --dom-xss（dom_xss を checks に追加）/
+#   --ctf（ssti 追加＋遅延半減）/ --spa-crawl（クロール範囲拡大）/ --fast（depth を 1 に）/
+#   --no-headless（scan 非対応）。
+# 残すのは表示・実行時のみで check セットを変えず、要約より広くならない（＝narrow/中立の）flag だけ。
 _SAFE_SETUP_FLAGS = frozenset({
-    "--dom-xss", "--spa-crawl", "--headless",
-    "--no-monitor", "--no-sitemap-crawl", "--ctf",
+    "--headless", "--no-monitor", "--no-sitemap-crawl",
 })
 
 
