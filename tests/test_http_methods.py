@@ -188,6 +188,57 @@ class ScannerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("http_webdav_enabled", types)
         self.assertIn("http_trace_xst", types)
 
+    async def test_redact_url_strips_userinfo(self):
+        self.assertEqual(hm.redact_url("http://alice:secret@app.test/x"), "http://app.test/x")
+        self.assertEqual(hm.redact_url("https://app.test/x"), "https://app.test/x")
+
+    async def test_userinfo_not_persisted_in_findings(self):
+        # URL userinfo（Basic 認証）が finding.url / pair / reproduction に残らないこと（#157 P1）。
+        engine, scanner = self._scanner()
+        recorded = []
+
+        async def _rec(**kw):
+            recorded.append(kw)
+            return object()
+
+        scanner.record_finding = _rec
+        responses = {
+            "OPTIONS": _FakeResp(200, {"allow": "GET, PUT, DELETE", "dav": "1"}),
+            "TRACE": _FakeResp(405, {}, ""),
+            "PROPFIND": _FakeResp(207, {}, "<multistatus/>"),
+        }
+        client = _FakeClient(responses)
+        with mock.patch.object(hm.httpx, "AsyncClient", return_value=client):
+            await scanner.scan_page("http://alice:secret@app.test/admin")
+        self.assertTrue(recorded)
+        blob = repr(recorded)
+        self.assertNotIn("secret", blob)
+        self.assertNotIn("alice:secret", blob)
+        for kw in recorded:
+            self.assertNotIn("@app.test", kw["url"])           # userinfo 除去済み
+            self.assertNotIn("secret", str(kw.get("pair", "")))
+        # probe 自体は userinfo 付き URL で送られている（Basic 認証を保つ）。
+        self.assertTrue(any("alice:secret@app.test" in str(u) for u in client.requested))
+
+    async def test_dedup_none_not_inflating_coverage(self):
+        # record_finding が dedup で None を返しても findings に None を積まない（#157 P2）。
+        engine, scanner = self._scanner()
+
+        async def _none(**kw):
+            return None
+
+        scanner.record_finding = _none
+        responses = {
+            "OPTIONS": _FakeResp(200, {"allow": "GET, PUT, DELETE", "dav": "1"}),
+            "TRACE": _FakeResp(200, {"Content-Type": "message/http"}, "TRACE / HTTP/1.1\n"),
+            "PROPFIND": _FakeResp(207, {}, "<multistatus/>"),
+        }
+        responses["TRACE"]._echo = True
+        client = _FakeClient(responses)
+        with mock.patch.object(hm.httpx, "AsyncClient", return_value=client):
+            findings = await scanner.scan_page("http://app.test/")
+        self.assertEqual(findings, [])                          # None を積まない＝水増しなし
+
     async def test_safe_origin_no_findings(self):
         responses = {
             "OPTIONS": _FakeResp(200, {"allow": "GET, POST, HEAD, OPTIONS"}),

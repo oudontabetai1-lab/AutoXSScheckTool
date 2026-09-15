@@ -104,6 +104,20 @@ def url_userinfo_secrets(target: str) -> tuple[str, ...]:
     return raw, decoded, basic
 
 
+def redact_url(target: str) -> str:
+    """URL から userinfo（Basic 認証資格情報）を除去する（純粋・#157 P2）。
+
+    probe は userinfo 付き URL で行うが、finding.url・request-pair・reproduction 等
+    **永続化する証跡**にはこの redacted URL を使う（checkpoint/レポート/ダッシュボードへ
+    資格情報を残さない）。解析不能時は安全側として userinfo らしき前置を素朴に除去する。
+    """
+    try:
+        return str(httpx.URL(target).copy_with(username=None, password=None))
+    except Exception:
+        # 念のためのフォールバック：scheme://userinfo@host... の userinfo を落とす。
+        return re.sub(r"^([a-zA-Z][\w+.-]*://)[^/@]*@", r"\1", target)
+
+
 def redact_trace_body(body: str, limit: int = 2000, sent_secret_values=(), target_url: str = "") -> str:
     """TRACE が反射した送信ヘッダのうち秘匿値をマスクする（純粋）。
 
@@ -286,11 +300,12 @@ class HttpMethodsScanner(BaseScanner):
         dav = webdav_methods(allowed) or bool(r.headers.get("dav"))
         findings: list[Finding] = []
         danger = dangerous_methods(allowed)
+        display = redact_url(target)  # 永続化用（userinfo 資格情報を残さない・#157 P2）
         if danger:
-            pair = {"request": {"url": target, "method": "OPTIONS"},
+            pair = {"request": {"url": display, "method": "OPTIONS"},
                     "response": {"status": r.status_code, "headers": dict(r.headers), "body": ""}}
-            findings.append(await self.record_finding(
-                url=target, field_name="(Allow header)",
+            f = await self.record_finding(
+                url=display, field_name="(Allow header)",
                 payload="OPTIONS", evidence=(
                     f"サーバが危険な HTTP メソッドを告知しています: {', '.join(sorted(danger))} "
                     f"(Allow: {r.headers.get('allow', '')})。不要なメソッドは無効化してください。"
@@ -299,19 +314,21 @@ class HttpMethodsScanner(BaseScanner):
                 evidence_type="http_dangerous_methods",
                 evidence_details={"allow": sorted(allowed), "dangerous": sorted(danger)},
                 reproduction_steps=[
-                    f"Send: OPTIONS {target}",
+                    f"Send: OPTIONS {display}",
                     f"Inspect the Allow header: {r.headers.get('allow', '')}",
                     "Disable unused methods (PUT/DELETE/PATCH/TRACE/CONNECT).",
                 ],
-            ))
+            )
+            if f:  # dedup で None のとき coverage を水増ししない（#157 P2）
+                findings.append(f)
         # WebDAV は「有効の告知」であり悪用可能性そのものではないため low（告知≠悪用可能）。
         # OPTIONS で報告したら origin 単位で記録し、PROPFIND 側の二重報告を抑止する。
         if dav and origin not in self._webdav_reported:
             self._webdav_reported.add(origin)
-            pair = {"request": {"url": target, "method": "OPTIONS"},
+            pair = {"request": {"url": display, "method": "OPTIONS"},
                     "response": {"status": r.status_code, "headers": dict(r.headers), "body": ""}}
-            findings.append(await self.record_finding(
-                url=target, field_name="(WebDAV)", payload="OPTIONS",
+            f = await self.record_finding(
+                url=display, field_name="(WebDAV)", payload="OPTIONS",
                 evidence=(
                     "WebDAV が有効の可能性があります"
                     f"（DAV ヘッダ: {r.headers.get('dav', '')} / Allow: {r.headers.get('allow', '')}）。"
@@ -321,11 +338,13 @@ class HttpMethodsScanner(BaseScanner):
                 evidence_type="http_webdav_enabled",
                 evidence_details={"dav": r.headers.get("dav", ""), "allow": sorted(allowed)},
                 reproduction_steps=[
-                    f"Send: OPTIONS {target}",
+                    f"Send: OPTIONS {display}",
                     "Confirm a DAV response header or WebDAV verbs in Allow.",
                     "Disable WebDAV if not required.",
                 ],
-            ))
+            )
+            if f:
+                findings.append(f)
         return findings
 
     async def _check_trace(self, client, target, probe_state=None) -> list[Finding]:
@@ -347,7 +366,8 @@ class HttpMethodsScanner(BaseScanner):
         # 行頭に現れない直列化でも literal 置換で伏字化する（Codex #157）。
         from wscan.request_logger import is_sensitive_header
         sent_secrets = [v for k, v in client.headers.items() if is_sensitive_header(k)]
-        pair = {"request": {"url": target, "method": "TRACE"},
+        display = redact_url(target)  # 永続化用（userinfo を残さない・#157 P2）
+        pair = {"request": {"url": display, "method": "TRACE"},
                 "response": {"status": r.status_code, "headers": dict(r.headers),
                              "body": redact_trace_body(r.text, sent_secret_values=sent_secrets, target_url=target)}}
         confirmed = strength == "confirmed"
@@ -358,18 +378,19 @@ class HttpMethodsScanner(BaseScanner):
             "TRACE メソッドが有効で TRACE 応答（message/http）を返します。送信ヘッダの反射までは"
             "未確証ですが XST の可能性があります。TRACE を無効化してください。"
         )
-        return [await self.record_finding(
-            url=target, field_name="(TRACE method)", payload="TRACE",
+        f = await self.record_finding(
+            url=display, field_name="(TRACE method)", payload="TRACE",
             evidence=evidence,
             pair=pair, severity="medium", confidence=strength,
             evidence_type="http_trace_xst",
             evidence_details={"reflected_token": confirmed},
             reproduction_steps=[
-                f"Send: TRACE {target} with a custom header",
+                f"Send: TRACE {display} with a custom header",
                 "Confirm the response reflects the request (200, echoed header).",
                 "Disable the TRACE method on the server/proxy.",
             ],
-        )]
+        )
+        return [f] if f else []  # dedup で None なら coverage を水増ししない（#157 P2）
 
     async def _check_webdav(self, client, target, origin, probe_state=None) -> list[Finding]:
         # OPTIONS で既に WebDAV を報告済みなら二重報告しない（origin 単位）。
@@ -392,11 +413,12 @@ class HttpMethodsScanner(BaseScanner):
         if origin in self._webdav_reported:
             return []
         self._webdav_reported.add(origin)
-        pair = {"request": {"url": target, "method": "PROPFIND"},
+        display = redact_url(target)  # 永続化用（userinfo を残さない・#157 P2）
+        pair = {"request": {"url": display, "method": "PROPFIND"},
                 "response": {"status": r.status_code, "headers": dict(r.headers),
                              "body": r.text[:2000]}}
-        return [await self.record_finding(
-            url=target, field_name="(WebDAV)", payload="PROPFIND",
+        f = await self.record_finding(
+            url=display, field_name="(WebDAV)", payload="PROPFIND",
             evidence=(
                 "PROPFIND が 207 Multi-Status を返し WebDAV が有効です。"
                 "不要なら WebDAV を無効化してください。"
@@ -405,8 +427,9 @@ class HttpMethodsScanner(BaseScanner):
             evidence_type="http_webdav_enabled",
             evidence_details={"propfind_status": 207},
             reproduction_steps=[
-                f"Send: PROPFIND {target} with Depth: 0",
+                f"Send: PROPFIND {display} with Depth: 0",
                 "Confirm a 207 Multi-Status WebDAV response.",
                 "Disable WebDAV if not required.",
             ],
-        )]
+        )
+        return [f] if f else []  # dedup で None なら coverage を水増ししない（#157 P2）
