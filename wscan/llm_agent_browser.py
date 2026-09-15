@@ -34,6 +34,7 @@ from urllib.parse import urlparse
 
 from rich.console import Console
 from rich.rule import Rule
+from .url_normalize import endpoint_identity
 
 from .header_scope import (
     _BLANK_URLS as _BLANK_URLS,  # re-export: tests/external callers
@@ -57,6 +58,19 @@ if TYPE_CHECKING:
 console = Console()
 
 _TARGET_HANDLER_TIMEOUT_SECONDS = 3.0
+
+
+def parse_reviewer_gap_lines(text: str) -> tuple[list[str], list[str]]:
+    """reviewer の gap 報告・解決行をブラウザ非依存で抽出する。"""
+    gaps, resolved = [], []
+    for line in text.splitlines():
+        marker, separator, description = line.strip().partition(":")
+        if separator and description.strip():
+            if marker.strip().casefold() == "coverage gap":
+                gaps.append(description.strip())
+            elif marker.strip().casefold() == "gap resolved":
+                resolved.append(description.strip())
+    return gaps, resolved
 
 
 def _agent_config_directory_result(
@@ -1290,7 +1304,7 @@ class AgentBrowserScanner:
                             summary="executable candidate was not reproduced after resume",
                         )
                         continue
-                    self._active_episode_id = work.work_id
+                    self._active_episode_id = f"{work.work_id}:{work.attempts}"
                     self._episode_offset = self._harness.session_consumed_steps
                     self._harness.set_phase(
                         AgentPhase.AUTHENTICATING
@@ -1372,6 +1386,10 @@ class AgentBrowserScanner:
                         self._harness.mark_dynamic_verification(
                             work.target, is_reproduced
                         )
+                    if work.role == AgentRole.ADVERSARIAL_REVIEWER:
+                        reported, resolved = parse_reviewer_gap_lines(episode_text)
+                        self._harness.record_reviewer_gaps(reported)
+                        self._harness.resolve_reviewer_gaps(resolved)
                     terminal = (
                         WorkStatus.COMPLETE
                         if history.is_successful() and self._work_completion_claimed(work, final)
@@ -1437,7 +1455,10 @@ class AgentBrowserScanner:
                     coverage_complete=self._harness.coverage_complete,
                 )
                 result.harness_status = status.value
-                result.coverage_gaps = list(self._harness.state.coverage_gaps)
+                result.coverage_gaps = list(dict.fromkeys([
+                    *self._harness.state.coverage_gaps,
+                    *self._harness.state.reviewer_gaps,
+                ]))
                 result.steps_taken = self._harness.state.consumed_steps
                 result.final_summary = (histories[-1].final_result() or "") if histories else ""
                 result.memory = self._memory
@@ -1683,11 +1704,19 @@ class AgentBrowserScanner:
         """どの episode で見つかった URL も対象なら全 check の queue へ入れる。"""
         if not self._harness or self.recon_mode:
             return
+        known = {
+            endpoint_identity(self._work_target(item) or item.target)
+            for item in self._harness.state.work_queue
+        }
         for url in self._runtime_observed_urls:
             if not self.is_security_probe_allowed(url):
                 continue
             if url not in self._memory.visited_urls:
                 self._memory.visited_urls.append(url)
+            identity = endpoint_identity(url)
+            if identity in known:
+                continue
+            known.add(identity)
             for check in self.checks:
                 self._enqueue_work(AgentRole.PROBE_SPECIALIST, url, check_type=check)
 
@@ -1788,6 +1817,9 @@ class AgentBrowserScanner:
             "missing pages, missing input/check pairs, auth loss, and unsupported completion claims. "
             "Return each actual gap as `COVERAGE GAP: <description>`, or state REVIEW COMPLETE only when the ledger "
             "shows every discovered page and input was tested for every requested check.\n"
+            "A resolved gap must be stated as `GAP RESOLVED: <description>`.\n"
+            + "\nUnresolved reviewer gaps:\n"
+            + "\n".join(self._harness.state.reviewer_gaps if self._harness else [])
             + "\nDeterministic work ledger:\n" + ledger + "\nEvidence excerpt:\n" + evidence
         )
 

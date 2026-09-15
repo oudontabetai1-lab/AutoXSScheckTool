@@ -122,6 +122,7 @@ class AgentRunState:
     visited_urls: list[str] = field(default_factory=list)
     tested_targets: list[str] = field(default_factory=list)
     coverage_gaps: list[str] = field(default_factory=list)
+    reviewer_gaps: list[str] = field(default_factory=list)
     hypotheses_count: int = 0
     repeated_steps: int = 0
     stop_reason: str = ""
@@ -145,6 +146,7 @@ class AgentRunState:
             raise ValueError("unsupported agent checkpoint schema")
         values = dict(data)
         values.pop("schema_version", None)
+        values["reviewer_gaps"] = values.get("reviewer_gaps", [])
         values["status"] = AgentRunStatus(values.get("status", "running"))
         values["phase"] = AgentPhase(values.get("phase", "initializing"))
         values["work_queue"] = [
@@ -227,7 +229,8 @@ class AgentHarness:
         self.trace_path = self.output_dir / TRACE_FILENAME
         self.manifest_path = self.output_dir / MANIFEST_FILENAME
         self._base_consumed = 0
-        self._last_signature = ""
+        self._last_signature = None
+        self._last_episode_id = None
         self._same_signature_count = 0
         self._evidence_failed = False
         self._secret_values = tuple(sorted(
@@ -370,8 +373,11 @@ class AgentHarness:
     @property
     def coverage_complete(self) -> bool:
         """強制確認対象が全て完了し、未解決 gap がない場合だけ真。"""
-        return bool(self.state.work_queue) and not self.state.coverage_gaps and all(
-            item.status == WorkStatus.COMPLETE for item in self.state.work_queue
+        return (
+            bool(self.state.work_queue)
+            and not self.state.coverage_gaps
+            and not self.state.reviewer_gaps
+            and all(item.status == WorkStatus.COMPLETE for item in self.state.work_queue)
         )
 
     def record_step(
@@ -384,6 +390,10 @@ class AgentHarness:
         executed_actions: Iterable,
         blocked_count: int = 0,
     ) -> AgentStepRecord:
+        if episode_id != self._last_episode_id:
+            self._same_signature_count = 0
+            self._last_signature = None
+            self._last_episode_id = episode_id
         global_step = self._base_consumed + max(0, int(local_step))
         self.state.consumed_steps = min(self.spec.max_steps, max(
             self.state.consumed_steps, global_step
@@ -452,6 +462,26 @@ class AgentHarness:
             self.state.hypotheses_count = max(0, int(hypotheses_count))
         self.checkpoint()
 
+    def record_reviewer_gaps(self, gaps: Iterable[str]) -> None:
+        """reviewer の未解決 gap は再試行後も保持する。"""
+        self.state.reviewer_gaps = _unique([
+            *self.state.reviewer_gaps,
+            *(self._sanitize_value(str(gap))[:1000] for gap in gaps),
+        ])
+        self.checkpoint()
+
+    def resolve_reviewer_gaps(self, resolved: Iterable[str]) -> None:
+        """明示的に解決された記述だけを除く（空白・大小文字を正規化）。"""
+        descriptions = {
+            " ".join(self._sanitize_value(str(gap))[:1000].casefold().split())
+            for gap in resolved
+        } - {""}
+        self.state.reviewer_gaps = [
+            gap for gap in self.state.reviewer_gaps
+            if " ".join(gap.casefold().split()) not in descriptions
+        ]
+        self.checkpoint()
+
     def note_hypotheses(self, hypotheses: Iterable[dict]) -> None:
         """nonce 検証済み仮説を構造化して checkpoint に保持する。"""
         existing = {
@@ -493,6 +523,7 @@ class AgentHarness:
         error: str = "",
         cancelled: bool = False,
     ) -> AgentRunStatus:
+        coverage_complete = coverage_complete and not self.state.reviewer_gaps
         self.state.phase = AgentPhase.FINALIZING
         if cancelled:
             self.state.status = AgentRunStatus.CANCELLED
@@ -510,7 +541,7 @@ class AgentHarness:
             if not self.state.stop_reason:
                 if self.remaining_steps <= 0:
                     self.state.stop_reason = "budget_exhausted"
-                elif self.state.coverage_gaps:
+                elif self.state.coverage_gaps or self.state.reviewer_gaps:
                     self.state.stop_reason = "coverage_incomplete"
                 else:
                     self.state.stop_reason = "agent_incomplete"
@@ -595,6 +626,7 @@ class AgentHarness:
             "hypotheses": list(self.state.hypotheses),
             "coverage_complete": bool(coverage_complete),
             "coverage_gaps": list(self.state.coverage_gaps),
+            "reviewer_gaps": list(self.state.reviewer_gaps),
             "stop_reason": self.state.stop_reason,
             "evidence_errors": list(self.state.evidence_errors),
             "work_items": [item.to_dict() for item in self.state.work_queue],

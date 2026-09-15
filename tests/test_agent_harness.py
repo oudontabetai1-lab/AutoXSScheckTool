@@ -250,3 +250,60 @@ def test_finalize_reports_incomplete_when_final_artifact_write_fails(
     monkeypatch.setattr(harness, "_atomic_write_json", fail_selected)
     status = harness.finalize(success=True, coverage_complete=True)
     assert status == AgentRunStatus.EVIDENCE_INCOMPLETE
+
+
+def test_loop_detection_is_scoped_to_each_episode(tmp_path):
+    harness = AgentHarness(tmp_path, spec(max_steps=20), repeat_threshold=3)
+    for episode in ("A", "B", "C"):
+        for step in (1, 2):
+            record = harness.record_step(
+                episode_id=episode, local_step=step, url="http://fixture.test",
+                proposed_actions=[{"done": {}}], executed_actions=[],
+            )
+            assert not record.repeated
+            assert harness.state.stop_reason != "loop_detected"
+    record = harness.record_step(
+        episode_id="C", local_step=3, url="http://fixture.test",
+        proposed_actions=[{"done": {}}], executed_actions=[],
+    )
+    assert record.repeated
+    assert harness.state.stop_reason == "loop_detected"
+
+
+def test_reviewer_gap_survives_retry_and_checkpoint_until_explicit_resolution(tmp_path):
+    harness = AgentHarness(tmp_path, spec())
+    work = harness.enqueue(AgentRole.ADVERSARIAL_REVIEWER, "http://fixture.test")
+    harness.record_reviewer_gaps(["missing /admin xss", "missing /admin xss"])
+    harness.finish_work(work.work_id, WorkStatus.INCONCLUSIVE)
+    harness.note_coverage(coverage_gaps=["reviewer:inconclusive"])
+    harness.finish_work(work.work_id, WorkStatus.COMPLETE)
+    harness.note_coverage(coverage_gaps=[])
+    assert harness.state.reviewer_gaps == ["missing /admin xss"]
+    assert not harness.coverage_complete
+
+    resumed = AgentHarness(tmp_path, spec(), resume=True)
+    assert resumed.state.reviewer_gaps == ["missing /admin xss"]
+    assert not resumed.coverage_complete
+    resumed.resolve_reviewer_gaps(["", "unrelated gap", "/admin"])
+    assert not resumed.coverage_complete
+    resumed.resolve_reviewer_gaps([" MISSING  /admin XSS "])
+    assert resumed.coverage_complete
+    assert AgentHarness(tmp_path, spec(), resume=True).state.reviewer_gaps == []
+
+
+def test_reviewer_gaps_redacted_capped_and_accumulated(tmp_path):
+    harness = AgentHarness(tmp_path, spec(), secret_values=["private-secret"])
+    harness.record_reviewer_gaps(["private-secret", "x" * 1500, " "])
+    harness.record_reviewer_gaps(["other gap", "private-secret"])
+    assert harness.state.reviewer_gaps == ["<redacted>", "x" * 1000, "other gap"]
+    assert "private-secret" not in harness.state_path.read_text()
+    assert harness.finalize(success=True, coverage_complete=True) == AgentRunStatus.PARTIAL
+    assert not json.loads(harness.manifest_path.read_text())["coverage_complete"]
+
+
+def test_legacy_checkpoint_without_reviewer_gaps(tmp_path):
+    harness = AgentHarness(tmp_path, spec())
+    data = json.loads(harness.state_path.read_text())
+    data.pop("reviewer_gaps")
+    harness.state_path.write_text(json.dumps(data))
+    assert AgentHarness(tmp_path, spec(), resume=True).state.reviewer_gaps == []

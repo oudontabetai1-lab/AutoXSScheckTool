@@ -377,3 +377,101 @@ def test_dynamic_agent_replay_does_not_impersonate_deterministic_verification():
     assert converted.agent_verified is False
     assert converted.evidence_details["agent_dynamic_reproduced"] is True
     assert "deterministic scanner verification is still pending" in converted.verification_note
+
+
+def test_observed_probe_urls_only_enqueue_new_endpoints(tmp_path):
+    scanner = AgentBrowserScanner("http://fixture.test", checks=["xss", "sqli"])
+    scanner._harness = AgentHarness(
+        tmp_path,
+        AgentRunSpec(
+            mode="agent", target_url="http://fixture.test",
+            target_urls=("http://fixture.test",), access_urls=(),
+            exclude_urls=(), exclude_fields=(), checks=("xss", "sqli"),
+            provider="ollama", model="exact", max_steps=20,
+        ),
+    )
+    scanner._enqueue_work(AgentRole.PROBE_SPECIALIST, "http://fixture.test/search?q=normal", check_type="xss")
+    scanner._harness.next_work()  # 実行中の target も既知として扱う。
+    scanner._runtime_observed_urls = [
+        "http://fixture.test/search?q=<script>",
+        "http://fixture.test/search?q=1%27",
+    ]
+    scanner._enqueue_observed_probe_work()
+    assert len(scanner._harness.state.work_queue) == 1
+    scanner._runtime_observed_urls += [
+        "http://fixture.test/admin",
+        "http://fixture.test/search?q=x&debug=1",
+        "http://fixture.test/search?debug=2&q=payload",
+    ]
+    scanner._enqueue_observed_probe_work()
+    new_work = scanner._harness.state.work_queue[1:]
+    assert {(item.target, item.check_type) for item in new_work} == {
+        (url, check) for url in (
+            "http://fixture.test/admin", "http://fixture.test/search?q=x&debug=1"
+        ) for check in ("xss", "sqli")
+    }
+    assert set(scanner._runtime_observed_urls) <= set(scanner._memory.visited_urls)
+    scanner._enqueue_observed_probe_work()
+    assert len(scanner._harness.state.work_queue) == 5
+
+
+def test_parse_reviewer_gap_lines():
+    from wscan.llm_agent_browser import parse_reviewer_gap_lines
+
+    assert parse_reviewer_gap_lines(
+        "  coverage gap: missing /admin xss  \n"
+        " GAP RESOLVED : fixed /search sqli \n"
+        "Coverage Gap: another: detail\nCOVERAGE GAP:  \n"
+        "GAP RESOLVED:\nNo COVERAGE GAP: ignored\nREVIEW COMPLETE"
+    ) == (["missing /admin xss", "another: detail"], ["fixed /search sqli"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("resolve", [False, True])
+async def test_reviewer_retry_requires_explicit_gap_resolution(tmp_path, resolve):
+    reviewer_attempts = 0
+
+    class _Agent:
+        def __init__(self, **kwargs):
+            self.task = kwargs["task"]
+
+        async def run(self, **kwargs):
+            nonlocal reviewer_attempts
+            if "Act only as the Explorer" in self.task:
+                return _History("EXPLORATION COMPLETE")
+            if "probe specialist" in self.task:
+                return _History("PROBE COMPLETE")
+            reviewer_attempts += 1
+            if reviewer_attempts == 1:
+                return _History("COVERAGE GAP: missing /admin xss")
+            assert "missing /admin xss" in self.task
+            assert "GAP RESOLVED: <description>" in self.task
+            return _History(
+                ("GAP RESOLVED: missing /admin xss\n" if resolve else "")
+                + "REVIEW COMPLETE"
+            )
+
+    class _Browser:
+        def __init__(self, **kwargs):
+            pass
+
+        async def stop(self):
+            pass
+
+    module = types.ModuleType("browser_use")
+    module.Agent = _Agent
+    module.Browser = _Browser
+    scanner = AgentBrowserScanner(
+        "http://fixture.test", checks=["xss"], max_steps=40,
+        harness_output_dir=tmp_path,
+    )
+    with patch("wscan.llm_agent_browser._build_llm", return_value=object()), patch(
+        "wscan.llm_agent_browser.check_agent_config_directory", return_value=(True, "")
+    ), patch.dict(sys.modules, {"browser_use": module}):
+        result = await scanner.run()
+
+    assert reviewer_attempts == 2
+    assert all(item.status == WorkStatus.COMPLETE for item in scanner._harness.state.work_queue)
+    assert result.harness_status == ("complete" if resolve else "partial")
+    assert result.success is resolve
+    assert result.coverage_gaps == ([] if resolve else ["missing /admin xss"])

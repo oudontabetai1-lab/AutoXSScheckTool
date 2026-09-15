@@ -311,3 +311,17 @@ def test_normalize_proxy_server_rejects_unparseable():
     for bad in ("://x", "not a url", "http://127.0.0.1: 8080"):
         with pytest.raises(ValueError):
             p(bad)
+
+
+def test_endpoint_identity_ignores_values_order_duplicates_and_fragment():
+    from wscan.url_normalize import endpoint_identity
+
+    assert endpoint_identity("https://a/search?q=normal&tag=1") == endpoint_identity(
+        "https://a/search?tag=&q=%3Cscript%3E&q=1%27#anchor"
+    )
+    assert endpoint_identity("https://a/search?q=x") != endpoint_identity("https://a/admin?q=x")
+    assert endpoint_identity("https://a/search?q=x") != endpoint_identity("https://a/search?q=x&debug=1")
+    assert endpoint_identity("https://a/search?q=x") != endpoint_identity("http://a/search?q=x")
+    assert endpoint_identity("https://a/search?q=x") != endpoint_identity("https://b/search?q=x")
+    assert endpoint_identity("https://a/search?debug") == endpoint_identity("https://a/search?debug=1")
+    assert endpoint_identity("https://a/search?a%26b=x") != endpoint_identity("https://a/search?a=x&b=y")

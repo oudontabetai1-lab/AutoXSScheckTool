@@ -1,7 +1,14 @@
 """checkpoint キー専用の保守的な URL 正規化。"""
 from __future__ import annotations
 
-from urllib.parse import unquote_plus, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, unquote_plus, urlencode, urlsplit, urlunsplit
+
+
+def endpoint_identity(url: str) -> str:
+    """probe の重複判定用にクエリ値を除き、パラメータ名の集合を返す。"""
+    parsed = urlsplit(url)
+    names = sorted({key for key, _ in parse_qsl(parsed.query, keep_blank_values=True)})
+    return urlunsplit(parsed._replace(query=urlencode([(key, "") for key in names]), fragment=""))
 
 
 # 名前だけで意味を持ち得ない、純粋なキャッシュバスター/CSRF トークン。
