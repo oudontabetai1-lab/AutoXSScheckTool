@@ -53,6 +53,20 @@ def test_none_returns_empty():
     assert _load_flow_files(None) == []
 
 
+def test_skips_structurally_broken_steps(tmp_path):
+    # JSON 妥当でも step が非 dict（[1]）や timeout 非数値だと後段の FlowStep.from_dict が
+    # 落ちてスキャン全体を止める。_load_flow_files で検証して skip すること（#170 P2）。
+    nondict = tmp_path / "nondict.json"
+    nondict.write_text(json.dumps([1, 2]), encoding="utf-8")
+    badtimeout = tmp_path / "badtimeout.json"
+    badtimeout.write_text(json.dumps([{"action": "wait", "timeout": "soon"}]), encoding="utf-8")
+    good = tmp_path / "good.json"
+    good.write_text(json.dumps([{"action": "navigate", "url": "http://t/x"}]), encoding="utf-8")
+
+    flows = _load_flow_files([str(nondict), str(badtimeout), str(good)])
+    assert [f["name"] for f in flows] == ["good"]   # 壊れた step 構造は skip、good は残す
+
+
 def test_roundtrip_recorded_fill_uses_selector(tmp_path):
     """読み込んだ recording を ScanFlow 化し、fill が selector で解決されることを確認。"""
     rec = tmp_path / "rec.json"
