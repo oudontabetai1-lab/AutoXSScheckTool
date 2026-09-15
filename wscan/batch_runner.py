@@ -150,6 +150,11 @@ class BatchRunner:
             if key in global_cfg:
                 global_kwargs[key] = global_cfg[key]
 
+        # global.llm は ScanEngine の llm_provider へ写像する。そのまま llm= で渡すと
+        # ScanEngine が未知 kwarg で TypeError となり全対象が開始前に失敗していた（F01）。
+        if "llm" in global_kwargs:
+            global_kwargs["llm_provider"] = global_kwargs.pop("llm")
+
         return cls(targets=targets, global_kwargs=global_kwargs)
 
     # ──────────────────────────────────────────────────────────────────────────
@@ -255,8 +260,15 @@ class BatchRunner:
                 f"[{r.duration_secs:.1f}s]"
             )
             total_findings += r.findings_count
+        failed = [r for r in self.results if not r.success]
+        succeeded = len(self.results) - len(failed)
         lines.append("-" * 60)
         lines.append(f"  合計: {total_findings} 件の脆弱性が検出されました")
+        if failed:
+            # 全失敗と一部失敗を明示する（0件表示を「成功」と誤認させない・F02）。
+            scope = "全対象が失敗" if succeeded == 0 else f"{len(failed)}/{len(self.results)} 対象が失敗"
+            names = ", ".join((r.target.label or r.target.url)[:40] for r in failed)
+            lines.append(f"  ⚠️  {scope}（成功 {succeeded} / 失敗 {len(failed)}）: {names}")
         lines.append(f"  出力: {self.output_base}")
         return "\n".join(lines)
 
