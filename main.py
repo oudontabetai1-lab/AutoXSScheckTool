@@ -3024,7 +3024,8 @@ async def run_serve(args):
                 enable_waf_detection=bool(cfg.get("enable_waf_detection", True)),
                 enable_payload_learning=bool(cfg.get("enable_payload_learning", True)),
                 enable_community_payloads=bool(cfg.get("enable_community_payloads", True)),
-                enable_component_intel=bool(cfg.get("enable_component_intel", False)),
+                enable_component_intel=(None if cfg.get("enable_component_intel") is None
+                                        else bool(cfg.get("enable_component_intel"))),
                 # 明示指定が無ければ None を渡し、ScanEngine の checks 推論（checks に tls_scan が
                 # あれば有効）に委ねる。False 既定で上書きすると checks:["tls_scan"] が黙って no-op に
                 # なる（REST/WS/定期の serve リクエスト・Codex #158）。

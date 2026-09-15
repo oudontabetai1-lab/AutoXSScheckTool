@@ -122,6 +122,9 @@ _CDN_LAYOUTS = (
      frozenset({"cdnjs.cloudflare.com", "ajax.googleapis.com"})),
     (re.compile(r"^/((?:@[\w.-]+/)?[\w.-]+)@(\d[\w.\-]*)"), frozenset({"unpkg.com"})),
 )
+# CDN 固有の識別子だけを npm 名へ写す。未知の名前は従来どおり保持する。
+_CDN_NPM_ALIASES = {"lodash.js": "lodash", "angularjs": "angular"}
+
 # ファイル名埋め込み（.../jquery-3.4.1.min.js）。任意 origin でも一致するため推測（filename）扱い。
 _LIB_FILENAME_PATTERN = re.compile(r"/([\w.-]+?)-(\d+\.\d+(?:\.\d+)?)(?:\.min)?\.js(?:$|[?#])")
 
@@ -148,6 +151,8 @@ def _library_from_url(absolute: str) -> "Optional[Library]":
         if not name or not version or not version[0].isdigit():
             continue
         reliability = "cdn" if host in cdn_hosts else "filename"
+        if host in cdn_hosts and path.startswith("/ajax/libs/"):
+            name = _CDN_NPM_ALIASES.get(name, name)
         return Library(name=name, version=version, ecosystem="npm",
                        url=absolute, reliability=reliability)
     # 構造化 URL に一致しなければ、ファイル名埋め込み（任意 origin の推測＝filename）を試す。
@@ -409,6 +414,13 @@ class ComponentIntelUnavailable(Exception):
     """
 
 
+def _require_dict(data: object, ctx: str) -> dict:
+    """成功応答の JSON オブジェクトを検証する（純粋・不正なら未確定）。"""
+    if not isinstance(data, dict):
+        raise ComponentIntelUnavailable(f"{ctx}:not_a_dict")
+    return data
+
+
 # 一時的（retry 相当・照会不能）として扱う HTTP ステータス。408/425/429 と 5xx 全域
 # （501/507/520 等の proxy/CDN コードも含む）。これ以外の非 200（404 等）は「無データ」= None。
 _TRANSIENT_STATUS = frozenset({408, 425, 429})
@@ -545,8 +557,7 @@ async def lookup_osv(
         data = resp.json()
     except Exception as exc:
         raise ComponentIntelUnavailable(f"osv:{name}:bad_json") from exc
-    if not isinstance(data, dict):
-        return None
+    data = _require_dict(data, f"osv:{name}")
     vulns = data.get("vulns")
     return vulns if isinstance(vulns, list) else []
 
@@ -631,6 +642,4 @@ async def lookup_nvd(
         data = resp.json()
     except Exception as exc:
         raise ComponentIntelUnavailable(f"nvd:{product}:bad_json") from exc
-    if not isinstance(data, dict):
-        return None
-    return summarize_nvd(data)
+    return summarize_nvd(_require_dict(data, f"nvd:{product}"))

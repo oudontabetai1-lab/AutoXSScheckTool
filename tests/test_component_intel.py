@@ -76,7 +76,7 @@ class ParseJsLibrariesTests(unittest.TestCase):
         )
         libs = {(l.name, l.version) for l in ci.parse_js_libraries(html, "https://t.example/")}
         self.assertIn(("jquery", "3.4.1"), libs)
-        self.assertIn(("lodash.js", "4.17.10"), libs)
+        self.assertIn(("lodash", "4.17.10"), libs)
         self.assertIn(("vue", "2.6.10"), libs)
         self.assertIn(("angular", "1.7.2"), libs)
         self.assertTrue(all(l.ecosystem == "npm" for l in ci.parse_js_libraries(html, "https://t.example/")))
@@ -848,6 +848,110 @@ class CliChecksTests(unittest.TestCase):
         with mock.patch.object(sys, "argv", argv):
             args = m.parse_args()
         self.assertIn("outdated_components", args.checks)
+
+
+
+class Review155PureTests(unittest.TestCase):
+    def test_cdn_aliases_and_safe_twins(self):
+        for host in ("cdnjs.cloudflare.com", "ajax.googleapis.com"):
+            for alias, expected in (("lodash.js", "lodash"), ("angularjs", "angular"),
+                                    ("unknown.js", "unknown.js")):
+                url = f"https://{host}/ajax/libs/{alias}/1.2.3/lib.js"
+                lib = ci.parse_js_libraries_from_urls([url])[0]
+                self.assertEqual((lib.name, lib.ecosystem), (expected, "npm"))
+                self.assertEqual(lib.url, url)
+        # npm の実名・自己ホスト・版なし URL を CDN エイリアスと取り違えない。
+        for url in ("https://unpkg.com/lodash.js@1.2.3/lib.js",
+                    "https://cdn.jsdelivr.net/npm/angularjs@1.2.3/lib.js",
+                    "https://local.test/ajax/libs/lodash.js/1.2.3/lib.js"):
+            lib = ci.parse_js_libraries_from_urls([url])[0]
+            self.assertIn(lib.name, ("lodash.js", "angularjs"))
+        self.assertEqual(ci.parse_js_libraries_from_urls(
+            ["https://cdnjs.cloudflare.com/ajax/libs/lodash.js/latest/lib.js"]), [])
+
+    def test_success_payload_requires_dict(self):
+        for payload in (None, [], ["x"], "ok", 1, 1.5, True):
+            with self.subTest(payload=payload):
+                with self.assertRaisesRegex(ci.ComponentIntelUnavailable, "not_a_dict"):
+                    ci._require_dict(payload, "test")
+        for payload in ({}, {"vulns": []}, {"totalResults": 0}):
+            self.assertIs(ci._require_dict(payload, "test"), payload)
+
+    def test_serve_preserves_check_inference_and_explicit_flags(self):
+        import ast
+        from pathlib import Path
+        from tempfile import TemporaryDirectory
+        from wscan.engine import ScanEngine
+
+        # serve の実際の全 ScanEngine caller から引数式を取り出して実行する。
+        tree = ast.parse(Path("main.py").read_text(encoding="utf-8"))
+        serve = next(n for n in tree.body
+                     if isinstance(n, ast.AsyncFunctionDef) and n.name == "run_serve")
+        calls = [n for n in ast.walk(serve) if isinstance(n, ast.Call)
+                 and isinstance(n.func, ast.Name) and n.func.id == "ScanEngine"]
+        self.assertTrue(calls)
+        for call in calls:
+            value = next(k.value for k in call.keywords if k.arg == "enable_component_intel")
+            expression = compile(ast.Expression(value), "main.py", "eval")
+            for cfg, expected in (({}, True), ({"enable_component_intel": None}, True),
+                                  ({"enable_component_intel": False}, False),
+                                  ({"enable_component_intel": True}, True)):
+                flag = eval(expression, {"cfg": cfg})
+                if cfg.get("enable_component_intel") is None:
+                    self.assertIsNone(flag)
+                with TemporaryDirectory() as output:
+                    engine = ScanEngine("https://x.test", checks=["outdated_components"],
+                                        enable_component_intel=flag, llm_provider="none",
+                                        monitor=None, output_dir=output)
+                    self.assertEqual(engine.component_intel["enabled"], expected)
+
+
+class Review155NetworkTests(unittest.IsolatedAsyncioTestCase):
+    async def test_non_dict_success_is_unavailable_for_both_apis(self):
+        url = f"{ci.DEFAULT_NVD_BASE_URL}/rest/json/cves/2.0"
+        for payload in (None, [], ["x"], "ok", 1, 1.5, True):
+            with self.subTest(payload=payload):
+                with self.assertRaisesRegex(ci.ComponentIntelUnavailable, "osv:jquery:not_a_dict"):
+                    await ci.lookup_osv("npm", "jquery", "3.4.1",
+                                        client=_FakeClient(post_result=(200, payload)))
+                with self.assertRaisesRegex(ci.ComponentIntelUnavailable, "nvd:nginx:not_a_dict"):
+                    await ci.lookup_nvd("nginx", "1.18.0",
+                                        client=_FakeClient({url: (200, payload)}))
+        # 正常な「該当なし」は引き続き確定結果として扱う。
+        self.assertEqual(await ci.lookup_osv(
+            "npm", "jquery", "3.4.1", client=_FakeClient(post_result=(200, {}))), [])
+        self.assertEqual((await ci.lookup_nvd(
+            "nginx", "1.18.0", client=_FakeClient({url: (200, {"totalResults": 0})})))["total"], 0)
+
+    async def test_malformed_osv_is_retried_and_alias_reaches_query(self):
+        from unittest.mock import patch
+        from wscan.scanners.base import PageDocumentUnavailable
+
+        engine = _FakeEngine({"enabled": True})
+        scanner = SCANNERS["outdated_components"](engine)
+        html = '<script src="https://cdnjs.cloudflare.com/ajax/libs/lodash.js/4.17.20/lodash.min.js"></script>'
+
+        async def pair(url):
+            return {"request": {"url": url},
+                    "response": {"status": 200, "headers": {}, "body": html}}
+
+        client = _FakeClient(post_result=(200, []))
+        original = ci.lookup_osv
+
+        async def lookup(*args, **kwargs):
+            return await original(*args, **kwargs, client=client)
+
+        scanner._response_pair = pair
+        with patch.object(ci, "lookup_osv", lookup):
+            with self.assertRaises(PageDocumentUnavailable):
+                await scanner.scan_page("https://x.test/")
+            self.assertEqual(engine._osv_cache, {})
+            self.assertNotIn("https://x.test/", scanner._checked_urls)
+            client._post_result = (200, {"vulns": []})
+            self.assertEqual(await scanner.scan_page("https://x.test/"), [])
+        self.assertEqual(len(client.posts), 2)
+        self.assertEqual(client.posts[0][1]["package"], {"name": "lodash", "ecosystem": "npm"})
+        self.assertIn("https://x.test/", scanner._checked_urls)
 
 
 if __name__ == "__main__":
