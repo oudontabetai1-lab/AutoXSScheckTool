@@ -145,7 +145,18 @@ def test_cookies_resynced_after_successful_pre_attack_flow():
 
     order = []
     eng = ScanEngine.__new__(ScanEngine)
-    eng.scanners = {}                 # page-level は本テストの焦点外（no-op）
+
+    class _PageScanner:                # 未完了の page-level 単位＝実作業あり（flow を再生させる）
+        HAS_PAGE_LEVEL = True
+
+        async def scan_page(self, url):
+            return []
+
+    eng.scanners = {"security_headers": _PageScanner()}
+    eng._checkpoint_is_done = lambda *a, **k: False
+    eng._checkpoint_mark_done = lambda *a, **k: None
+    eng._record_scan_matrix = lambda *a, **k: None
+    eng._record_finding = lambda *a, **k: None
     eng.concurrency = 1
     eng.flows = [ScanFlow(name="login", steps=[
         FlowStep(action="navigate", url="http://t.test/admin"),
@@ -355,3 +366,80 @@ def test_pre_auth_mode_skips_pre_attack_flow():
         asyncio.run(eng._attack_one_page(page, {}, run_pre_attack_flows=False))
 
     assert ran["flow"] is False  # pre-auth 検査では flow を走らせない
+
+
+def _build_eng_for_flow_skip(page_check_done: bool):
+    """入力の無いページ＋page-level scanner 1つの最小 ScanEngine を組む（#167 P2 用）。"""
+    from wscan.engine import ScanEngine
+
+    class _PageScanner:
+        HAS_PAGE_LEVEL = True
+
+        async def scan_page(self, url):
+            return []
+
+    eng = ScanEngine.__new__(ScanEngine)
+    eng.scanners = {"security_headers": _PageScanner()}
+    eng._checkpoint_is_done = lambda *a, **k: page_check_done
+    eng._checkpoint_mark_done = lambda *a, **k: None
+    eng._record_scan_matrix = lambda *a, **k: None
+    eng._record_finding = lambda *a, **k: None
+    eng.concurrency = 1
+    eng.navigation_retries = 0
+    eng.flows = [ScanFlow(name="setup", steps=[
+        FlowStep(action="navigate", url="http://t.test/cart"),
+    ])]
+    eng._browser = types.SimpleNamespace(page=types.SimpleNamespace(url="http://t.test/cart"))
+    eng._record_unscannable_url = MagicMock()
+
+    async def _noop(*a, **k):
+        return None
+
+    eng._maybe_relogin_for_page = _noop
+    eng._sync_cookies_from_browser = _noop
+    eng._save_checkpoint = lambda *a, **k: None
+    return eng
+
+
+def test_pre_attack_flow_skipped_when_no_input_page_fully_checkpointed():
+    """再開時、入力の無いページで page-level 単位が全済みなら pre-attack flow を再生しない（#167 P2）。
+
+    state 変更を伴う前提 flow（add-to-cart 等）を「残 probe 0」で再実行してアプリ操作を
+    無駄に繰り返す/状態を汚すのを防ぐ。
+    """
+    ran = {"flow": False}
+    eng = _build_eng_for_flow_skip(page_check_done=True)
+    page = types.SimpleNamespace(url="http://t.test/cart", forms=[], url_params=[])
+
+    class _Runner:
+        def __init__(self, browser):
+            pass
+
+        async def run(self, flow):
+            ran["flow"] = True
+            return True
+
+    with patch("wscan.engine.FlowRunner", _Runner):
+        asyncio.run(eng._attack_one_page(page, {}))
+
+    assert ran["flow"] is False  # 残作業なし → flow 再生しない
+
+
+def test_pre_attack_flow_runs_when_no_input_page_has_pending_check():
+    """対照: 同じ入力無しページでも未完了の page-level 単位が残れば flow を再生する（偽陰性防止）。"""
+    ran = {"flow": False}
+    eng = _build_eng_for_flow_skip(page_check_done=False)
+    page = types.SimpleNamespace(url="http://t.test/cart", forms=[], url_params=[])
+
+    class _Runner:
+        def __init__(self, browser):
+            pass
+
+        async def run(self, flow):
+            ran["flow"] = True
+            return True
+
+    with patch("wscan.engine.FlowRunner", _Runner):
+        asyncio.run(eng._attack_one_page(page, {}))
+
+    assert ran["flow"] is True  # 残 probe あり → 従来どおり flow 再生

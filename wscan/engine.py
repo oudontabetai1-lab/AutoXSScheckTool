@@ -4892,6 +4892,32 @@ class ScanEngine:
                 return flow
         return None
 
+    def _page_level_checks_pending(self, page: "CrawledPage") -> bool:
+        """page-level 検査でこのページに未完了(=実際に probe する)単位が残るか。
+
+        resume 時の pre-attack flow 再生要否を判定するための保守的な述語。実際に走る
+        scanner だけを pending に数える：``scan_page_context`` は常時対象、``scan_page`` は
+        ``may_run_page_scanner`` が許可する場合のみ（read-only profile で state 変更系が
+        skip されるなら走らない＝pending でない）。API テンプレート専用は本ループでは走らない。
+        checkpoint と純粋 gate のみで I/O 無し。``record_skip=False`` で観測ノートを二重記録しない。
+        """
+        for check_name, scanner in self.scanners.items():
+            if check_name in _API_TEMPLATE_ONLY_CHECKS:
+                continue
+            has_page_impl = getattr(
+                scanner, "HAS_PAGE_LEVEL", False
+            ) or hasattr(scanner, "scan_page_context")
+            if not has_page_impl:
+                continue
+            if not hasattr(scanner, "scan_page_context"):
+                gate = getattr(scanner, "may_run_page_scanner", None)
+                if callable(gate) and not gate(page.url, record_skip=False):
+                    continue
+            cp_url = _page_check_cp_url(check_name, page.url)
+            if not self._checkpoint_is_done(cp_url, "(page)", 0, check_name):
+                return True
+        return False
+
     @staticmethod
     def _urls_same_page(current: str, target: str) -> bool:
         """fragment を無視して同一ページ（同一 path+query）かを判定する。
@@ -4943,6 +4969,19 @@ class ScanEngine:
         # ただし認証前のログインフォーム検査（_scan_login_form_preauth）から呼ばれた場合は、
         # auto-login 前の pre-auth 検査を汚染しないよう flow を実行しない（#167 P2）。
         matched_flow = self._match_pre_attack_flow(page) if run_pre_attack_flows else None
+        # 再開時、フォーム/URLパラメータの無いページで page-level 単位が全て checkpoint 済みなら
+        # pre-attack flow を再生しない（Codex #167 P2）。state 変更を伴う前提 flow（add-to-cart 等）を
+        # 「残 probe 0」で再実行し、アプリ操作を無駄に繰り返す/状態を汚すのを防ぐ。安全側限定：入力の
+        # 無いページは page-level 検査だけが走り field/adaptive/multi-param 単位を持たないため「残作業
+        # なし」を厳密に判定できる。入力のあるページは従来どおり再生する（field/adaptive 単位の厳密
+        # 列挙は取りこぼし時に必要な flow を誤 skip＝偽陰性を生むため行わない）。
+        if (matched_flow and not page.forms and not page.url_params
+                and not self._page_level_checks_pending(page)):
+            console.print(
+                f"  [dim][Flow] Skip pre-attack flow (page fully checkpointed): "
+                f"{matched_flow.name} @ {page.url}[/dim]"
+            )
+            matched_flow = None
         if matched_flow:
             console.print(
                 f"\n  [cyan][Flow] Pre-attack flow:[/cyan] {matched_flow.name}"
