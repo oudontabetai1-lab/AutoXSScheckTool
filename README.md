@@ -286,6 +286,7 @@ python3 main.py scan URL [URL ...] [options]
 | `--port PORT` | `8765` | モニターポート |
 | `--timeout SECS` | `30` | リクエストタイムアウト |
 | `--max-forms N` | `50` | 1ページの最大フォーム数 |
+| `--flows FILE...` | なし | `record` で保存したフロー JSON を攻撃前に再生（ログイン・カート投入等の前提操作）。複数指定可 |
 
 スコープ・認証・通信:
 
@@ -457,6 +458,11 @@ python3 main.py record URL [--output flows/recording.json] [--headless]
 ```
 
 ブラウザ操作を再生可能な JSON フローとして記録します。画面を操作する場合は `--headless` を付けません。
+記録したフローは、攻撃前の前提操作（ログイン・カート投入など）として `scan --flows` で再生できます。
+
+```bash
+python3 main.py scan URL --flows flows/recording.json [flows/other.json ...]
+```
 
 ### `manual-crawl` — 手動巡回シード
 

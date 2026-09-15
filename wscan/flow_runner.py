@@ -151,11 +151,18 @@ class FlowRunner:
                 raise FlowStepError(f"navigate failed (non-OK response/timeout): {step.url}")
 
         elif step.action == "fill":
-            display_val = step.value if step.field.lower() not in ("password", "pass", "passwd") else "***"
-            console.print(f"  [dim]{label} fill [{step.field}] = {display_val[:40]}[/dim]")
+            # record が保存する fill step は CSS selector（`#id` / `[name="x"]`）を持つ。
+            # selector があればそれを優先し、無ければ field(name/id)から組み立てる。これで
+            # record→scan --flows の再生が実際に効く（click と対称・F09）。
+            ident = step.selector or step.field
+            masked = any(p in ident.lower() for p in ("password", "pass", "passwd"))
+            display_val = "***" if masked else step.value
+            console.print(f"  [dim]{label} fill [{ident}] = {display_val[:40]}[/dim]")
             filled = await self.browser.page.evaluate(
-                """([f, v]) => {
-                    const el = document.querySelector(`[name="${f}"],[id="${f}"]`);
+                """([sel, f, v]) => {
+                    const el = sel
+                        ? document.querySelector(sel)
+                        : document.querySelector(`[name="${f}"],[id="${f}"]`);
                     if (!el) return false;
                     el.value = v;
                     ['input', 'change', 'blur'].forEach(e =>
@@ -163,11 +170,11 @@ class FlowRunner:
                     );
                     return true;
                 }""",
-                [step.field, step.value],
+                [step.selector, step.field, step.value],
             )
             if not filled:
                 # 存在しない欄への fill を成功扱いにすると前提の欠落を見逃す（F10）。
-                raise FlowStepError(f"fill target not found: field '{step.field}'")
+                raise FlowStepError(f"fill target not found: {ident!r}")
 
         elif step.action == "submit":
             console.print(f"  [dim]{label} submit[/dim]")

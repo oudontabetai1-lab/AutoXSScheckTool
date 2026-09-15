@@ -1266,6 +1266,10 @@ Examples:
         ),
     )
     scan.add_argument(
+        "--flows", nargs="+", metavar="FILE", default=None,
+        help="record で保存した flow JSON を1つ以上、攻撃前に再生する（例: --flows flows/recording.json）",
+    )
+    scan.add_argument(
         "--delay", type=float, default=_CFG.get("request_delay", 0.5), metavar="SECS",
         help=(
             "リクエスト間の待機秒数 (デフォルト: config scan.request_delay または 0.5)。"
@@ -2098,6 +2102,69 @@ def _collapse_multi_target(
     return primary, list(extra) + list(target_urls or [])
 
 
+def _load_flow_files(paths) -> list[dict]:
+    """`--flows` の JSON ファイルを ScanEngine 用の flow dict へ読み込む（F09）。
+
+    record サブコマンドは steps の**リスト**を保存し、ScanFlow.from_dict は
+    ``{"name", "steps"}`` を期待する。両形式を受ける：リストは file 名を name として包み、
+    dict はそのまま使う（name 欠落は file 名で補完）。壊れた/読めないファイルは警告して
+    skip する（他の flow やスキャン自体は止めない）。
+    """
+    import json
+    from pathlib import Path
+
+    flows: list[dict] = []
+    for fp in paths or []:
+        p = Path(fp)
+        try:
+            raw = json.loads(p.read_text(encoding="utf-8"))
+        except Exception as exc:
+            print(f"[warn] --flows: {fp} を読み込めません（skip）: {exc}")
+            continue
+        if isinstance(raw, list):
+            flows.append({"name": p.stem, "steps": raw})
+        elif isinstance(raw, dict) and isinstance(raw.get("steps"), list):
+            flows.append({"name": raw.get("name") or p.stem, "steps": raw["steps"]})
+        else:
+            print(f"[warn] --flows: {fp} は steps リスト/｛name,steps｝形式ではありません（skip）")
+    return flows
+
+
+def _parse_setup_llm(text, known_checks) -> "Optional[dict]":
+    """setup の LLM 応答テキストから {checks, depth, flags, reason} を防御的に抽出（F11）。
+
+    壊れた JSON・非 dict・checks 不在/全て未知は None（＝無効応答→呼び出し側が既定へ fallback）。
+    checks は実レジストリ（SCANNERS）で検証し未知を落とす。depth は 1-5 の int 以外なら 2。
+    純粋関数（ネット非依存）でテスト可能。
+    """
+    import json
+    import re as _re
+
+    if not text or not text.strip():
+        return None
+    m = _re.search(r"\{.*\}", text, _re.S)  # コードフェンス等を無視して最外 JSON を拾う
+    if not m:
+        return None
+    try:
+        data = json.loads(m.group(0))
+    except Exception:
+        return None
+    if not isinstance(data, dict) or not isinstance(data.get("checks"), list):
+        return None
+    checks = list(dict.fromkeys(
+        c for c in data["checks"] if isinstance(c, str) and c in known_checks
+    ))
+    if not checks:
+        return None  # 有効な check が皆無＝無効応答として扱う
+    depth = data.get("depth")
+    if not isinstance(depth, int) or not (1 <= depth <= 5):
+        depth = 2
+    flags_raw = data.get("flags")
+    flags = [f for f in flags_raw if isinstance(f, str)] if isinstance(flags_raw, list) else []
+    reason = data.get("reason") if isinstance(data.get("reason"), str) else ""
+    return {"checks": checks, "depth": depth, "flags": flags, "reason": reason}
+
+
 async def run_scan(args):
     from rich.console import Console
     from rich.panel import Panel
@@ -2409,7 +2476,7 @@ async def run_scan(args):
             enable_tls_scan=True if "tls_scan" in checks_list else None,
             enable_llm_web_browsing=getattr(args, "llm_web_browsing", False),
             concurrency=getattr(args, "concurrency", 1),
-            flows=getattr(args, "flows", None) or [],
+            flows=_load_flow_files(getattr(args, "flows", None)),
             max_payloads=getattr(args, "max_payloads", 0),
             fast_mode=getattr(args, "fast", False),
             # A: Multi-account privilege escalation
@@ -3363,35 +3430,48 @@ async def run_setup(args):
         role_models=getattr(args, "role_models", {}),
     )
 
+    # LLM 応答を検証して提案へ反映する（F11）。妥当な JSON が得られなければ（無効応答・
+    # LLM 障害・provider=none）明示的にヒューリスティックへ fallback する。両経路とも
+    # 最終的に checks/depth/flags を確定させ、後段のコマンド生成へ渡す。
+    from wscan.scanners import SCANNERS
+    from wscan import auto_config as _auto_config
+
     suggestion = None
     if await pg._check_llm_available():
         try:
-            import re as _re
-            raw = await pg._call_llm(prompt) or []
-            # _call_llm returns list; for setup we need text → call backends directly
-            # Fallback: use text-based call
+            text = await _auto_config._call_llm(pg, prompt)
+            suggestion = _parse_setup_llm(text, set(SCANNERS))
         except Exception:
-            pass
+            suggestion = None
 
-    # Simple heuristic fallback
-    checks = ["sqli", "xss", "os"]
-    depth = 2
-    flags: list[str] = []
-    desc_lower = description.lower()
-    if "api" in desc_lower or "rest" in desc_lower or "graphql" in desc_lower:
-        checks += ["header_injection"]
-    if "admin" in desc_lower or "dashboard" in desc_lower:
-        checks += ["privesc"]
-        depth = 3
-    if "login" in desc_lower or "auth" in desc_lower:
-        checks += ["session", "csrf"]
-    if "redirect" in desc_lower or "link" in desc_lower:
-        checks += ["open_redirect"]
-    if "template" in desc_lower or "render" in desc_lower:
-        checks += ["ssti"]
-    if "dom" in desc_lower or "spa" in desc_lower or "react" in desc_lower or "vue" in desc_lower:
-        flags.append("--dom-xss")
-    checks = list(dict.fromkeys(checks))  # dedup
+    if suggestion:
+        checks = suggestion["checks"]
+        depth = suggestion["depth"]
+        flags = list(suggestion["flags"])
+        console.print("\n[dim]LLM の提案を採用しました。[/dim]")
+        if suggestion["reason"]:
+            console.print(f"[dim]理由: {suggestion['reason']}[/dim]")
+    else:
+        # Simple heuristic fallback（LLM 無効/無応答時の明示的な既定）
+        console.print("\n[dim]LLM 応答が無効/利用不可のため既定ヒューリスティックを使用します。[/dim]")
+        checks = ["sqli", "xss", "os"]
+        depth = 2
+        flags = []
+        desc_lower = description.lower()
+        if "api" in desc_lower or "rest" in desc_lower or "graphql" in desc_lower:
+            checks += ["header_injection"]
+        if "admin" in desc_lower or "dashboard" in desc_lower:
+            checks += ["privesc"]
+            depth = 3
+        if "login" in desc_lower or "auth" in desc_lower:
+            checks += ["session", "csrf"]
+        if "redirect" in desc_lower or "link" in desc_lower:
+            checks += ["open_redirect"]
+        if "template" in desc_lower or "render" in desc_lower:
+            checks += ["ssti"]
+        if "dom" in desc_lower or "spa" in desc_lower or "react" in desc_lower or "vue" in desc_lower:
+            flags.append("--dom-xss")
+        checks = list(dict.fromkeys(checks))  # dedup
 
     cmd = f"python main.py scan <URL> --checks {' '.join(checks)} --depth {depth}"
     if flags:
