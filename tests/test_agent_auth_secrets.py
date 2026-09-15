@@ -147,3 +147,43 @@ async def test_rejected_non_resume_invocation_preserves_existing_artifacts(tmp_p
     assert returned is result
     assert evidence.read_text() == "original evidence"
     assert reproduction.read_text() == "original reproduction"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", [RuntimeError("missing API key"), ModuleNotFoundError("missing dependency")])
+@pytest.mark.parametrize("resume,existing", [(True, True), (False, True), (True, False)])
+async def test_llm_initialization_failure_preserves_only_existing_resume_artifacts(
+    tmp_path, failure, resume, existing,
+):
+    from wscan.agent_engine import AgentEngine
+
+    output_dir = tmp_path / "run"
+    originals = {
+        "evidence.json": b"original evidence",
+        "reproduction.json": b"original reproduction",
+        "agent_summary.md": b"original summary",
+    }
+    if existing:
+        output_dir.mkdir()
+        for name, content in originals.items():
+            (output_dir / name).write_bytes(content)
+
+    with patch(
+        "wscan.llm_agent_browser._build_llm", side_effect=failure,
+    ), patch(
+        "wscan.llm_agent_browser.check_agent_config_directory", return_value=(True, ""),
+    ):
+        engine = AgentEngine(
+            "https://app.example.test", output_dir=str(output_dir),
+            open_report=False, resume=resume,
+        )
+        result = await engine.run()
+
+    assert result.error == str(failure)
+    assert result.success is False
+    assert result.preserve_existing_artifacts is (resume and existing)
+    if resume and existing:
+        assert {p.name: p.read_bytes() for p in output_dir.iterdir()} == originals
+    else:
+        evidence = json.loads((output_dir / "evidence.json").read_text())
+        assert evidence["findings"] == []

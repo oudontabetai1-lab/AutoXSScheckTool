@@ -23,6 +23,7 @@ STATE_FILENAME = "agent_state.json"
 TRACE_FILENAME = "agent_steps.jsonl"
 MANIFEST_FILENAME = "agent_manifest.json"
 SCHEMA_VERSION = 1
+_INTERNAL_ID_KEYS = frozenset({"candidate_id"})
 
 
 class AgentRunStatus(str, Enum):
@@ -504,12 +505,14 @@ class AgentHarness:
                 return
         raise KeyError(candidate_id)
 
-    def _sanitize_value(self, value):
+    def _sanitize_value(self, value, _key=None):
         if isinstance(value, dict):
-            return {str(key): self._sanitize_value(item) for key, item in value.items()}
+            return {str(key): self._sanitize_value(item, _key=str(key)) for key, item in value.items()}
         if isinstance(value, (list, tuple)):
             return [self._sanitize_value(item) for item in value]
         if isinstance(value, str):
+            if _key in _INTERNAL_ID_KEYS:
+                return value
             # request_logger の一般 redaction regex に巨大な敵対文字列を直接渡さない。
             text = self._redact_runtime(value)[:1000]
             return redact_text(text)

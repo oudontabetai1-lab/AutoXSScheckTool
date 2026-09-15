@@ -182,6 +182,7 @@ class AgentEngine:
 
         ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         self.output_dir = Path(output_dir) if output_dir else OUTPUT_BASE / f"agent_{ts}"
+        self._existing_run_dir = self.output_dir.is_dir()
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
     # ------------------------------------------------------------------
@@ -229,9 +230,11 @@ class AgentEngine:
 
         result: AgentScanResult = await scanner.run()
 
-        if getattr(result, "preserve_existing_artifacts", False):
-            # `--resume` なしで既存 run directory を指定した拒否ケース。以前の
-            # evidence/reproduction を空の失敗結果で上書きしない。
+        if getattr(result, "preserve_existing_artifacts", False) or (
+            self.resume and self._existing_run_dir and result.error
+        ):
+            result.preserve_existing_artifacts = True
+            # 既存 run の拒否・resume 失敗時は evidence/reproduction を保全する。
             console.print(
                 f"[bold red]Agent scan FAILED: {result.error}[/bold red]"
             )

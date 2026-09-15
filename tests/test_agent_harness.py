@@ -307,3 +307,25 @@ def test_legacy_checkpoint_without_reviewer_gaps(tmp_path):
     data.pop("reviewer_gaps")
     harness.state_path.write_text(json.dumps(data))
     assert AgentHarness(tmp_path, spec(), resume=True).state.reviewer_gaps == []
+
+
+def test_short_secret_preserves_candidate_id_through_resume_and_verification(tmp_path):
+    candidate_id = "329fc1e63355d6014a43"
+    harness = AgentHarness(tmp_path, spec(), secret_values=["a"])
+    hypothesis = {
+        "candidate_id": candidate_id,
+        "evidence": "a",
+        "nested": [{"candidate_id": candidate_id, "evidence": "a"}],
+        "dynamic_verified": False,
+    }
+    safe = harness._sanitize_value(hypothesis)
+    assert safe["candidate_id"] == candidate_id
+    assert safe["evidence"] == "<redacted>"
+    assert safe["nested"] == [{"candidate_id": candidate_id, "evidence": "<redacted>"}]
+    harness.note_hypotheses([hypothesis])
+    resumed = AgentHarness(tmp_path, spec(), resume=True, secret_values=["a"])
+    assert resumed.state.hypotheses[0]["candidate_id"] == candidate_id
+    assert resumed.state.hypotheses[0]["evidence"] == "<redacted>"
+    resumed.mark_dynamic_verification(candidate_id, True)
+    state = json.loads((tmp_path / "agent_state.json").read_text())
+    assert state["hypotheses"][0]["dynamic_verified"] is True

@@ -4,11 +4,19 @@ from __future__ import annotations
 from urllib.parse import parse_qsl, unquote_plus, urlencode, urlsplit, urlunsplit
 
 
+_INJECTION_META_CHARS = frozenset("<>\"'`;(){}|\\/%*")
+
+
 def endpoint_identity(url: str) -> str:
-    """probe の重複判定用にクエリ値を除き、パラメータ名の集合を返す。"""
+    """routing 値は保持し、注入らしい値だけを空にして probe の重複を除く。"""
     parsed = urlsplit(url)
-    names = sorted({key for key, _ in parse_qsl(parsed.query, keep_blank_values=True)})
-    return urlunsplit(parsed._replace(query=urlencode([(key, "") for key in names]), fragment=""))
+    pairs = set()
+    for key, value in parse_qsl(parsed.query, keep_blank_values=True):
+        # ponytail: メタ文字・64文字超の簡易判定。必要なら routing の明示契約へ。
+        if len(value) > 64 or any(char in _INJECTION_META_CHARS or char.isspace() for char in value):
+            value = ""
+        pairs.add((key, value))
+    return urlunsplit(parsed._replace(query=urlencode(sorted(pairs)), fragment=""))
 
 
 # 名前だけで意味を持ち得ない、純粋なキャッシュバスター/CSRF トークン。

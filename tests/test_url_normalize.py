@@ -313,15 +313,38 @@ def test_normalize_proxy_server_rejects_unparseable():
             p(bad)
 
 
-def test_endpoint_identity_ignores_values_order_duplicates_and_fragment():
+def test_endpoint_identity_ignores_payloads_order_duplicates_and_fragment():
     from wscan.url_normalize import endpoint_identity
 
-    assert endpoint_identity("https://a/search?q=normal&tag=1") == endpoint_identity(
-        "https://a/search?tag=&q=%3Cscript%3E&q=1%27#anchor"
+    assert endpoint_identity("https://a/search?q=<script>&tag=1") == endpoint_identity(
+        "https://a/search?tag=1&q=%3Cscript%3E&q=1%27#anchor"
     )
     assert endpoint_identity("https://a/search?q=x") != endpoint_identity("https://a/admin?q=x")
     assert endpoint_identity("https://a/search?q=x") != endpoint_identity("https://a/search?q=x&debug=1")
     assert endpoint_identity("https://a/search?q=x") != endpoint_identity("http://a/search?q=x")
     assert endpoint_identity("https://a/search?q=x") != endpoint_identity("https://b/search?q=x")
-    assert endpoint_identity("https://a/search?debug") == endpoint_identity("https://a/search?debug=1")
+    assert endpoint_identity("https://a/search?debug") == endpoint_identity("https://a/search?debug=")
     assert endpoint_identity("https://a/search?a%26b=x") != endpoint_identity("https://a/search?a=x&b=y")
+
+
+@pytest.mark.parametrize("value", ["<script>", "1'", '"', "`", ";", "(", ")", "{", "}", "|", "\\", "/", "%", "*", "two words", "x" * 65, "%3Cscript%3E"])
+def test_endpoint_identity_collapses_injection_values(value):
+    from urllib.parse import urlencode
+    from wscan.url_normalize import endpoint_identity
+
+    assert endpoint_identity("/search?" + urlencode({"q": value})) == endpoint_identity("/search?q=1'")
+
+
+@pytest.mark.parametrize("value", ["admin", "home", "123", "x" * 64])
+def test_endpoint_identity_preserves_short_routing_values(value):
+    from wscan.url_normalize import endpoint_identity
+
+    assert endpoint_identity("/view?page=" + value) == "/view?page=" + value
+    assert endpoint_identity("/view?page=" + value) != endpoint_identity("/view")
+
+
+def test_endpoint_identity_distinguishes_routes():
+    from wscan.url_normalize import endpoint_identity
+
+    assert endpoint_identity("/view?page=admin") != endpoint_identity("/view?page=home")
+    assert endpoint_identity("/search?q=<script>") == endpoint_identity("/search?q=1'")

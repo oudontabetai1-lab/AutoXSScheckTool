@@ -390,7 +390,7 @@ def test_observed_probe_urls_only_enqueue_new_endpoints(tmp_path):
             provider="ollama", model="exact", max_steps=20,
         ),
     )
-    scanner._enqueue_work(AgentRole.PROBE_SPECIALIST, "http://fixture.test/search?q=normal", check_type="xss")
+    scanner._enqueue_work(AgentRole.PROBE_SPECIALIST, "http://fixture.test/search?q=<script>", check_type="xss")
     scanner._harness.next_work()  # 実行中の target も既知として扱う。
     scanner._runtime_observed_urls = [
         "http://fixture.test/search?q=<script>",
@@ -401,18 +401,21 @@ def test_observed_probe_urls_only_enqueue_new_endpoints(tmp_path):
     scanner._runtime_observed_urls += [
         "http://fixture.test/admin",
         "http://fixture.test/search?q=x&debug=1",
-        "http://fixture.test/search?debug=2&q=payload",
+        "http://fixture.test/search?debug=1&q=x",
+        "http://fixture.test/view?page=admin",
+        "http://fixture.test/view?page=home",
     ]
     scanner._enqueue_observed_probe_work()
     new_work = scanner._harness.state.work_queue[1:]
     assert {(item.target, item.check_type) for item in new_work} == {
         (url, check) for url in (
-            "http://fixture.test/admin", "http://fixture.test/search?q=x&debug=1"
+            "http://fixture.test/admin", "http://fixture.test/search?q=x&debug=1",
+            "http://fixture.test/view?page=admin", "http://fixture.test/view?page=home"
         ) for check in ("xss", "sqli")
     }
     assert set(scanner._runtime_observed_urls) <= set(scanner._memory.visited_urls)
     scanner._enqueue_observed_probe_work()
-    assert len(scanner._harness.state.work_queue) == 5
+    assert len(scanner._harness.state.work_queue) == 9
 
 
 def test_parse_reviewer_gap_lines():
