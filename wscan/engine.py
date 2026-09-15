@@ -4890,6 +4890,19 @@ class ScanEngine:
                 return flow
         return None
 
+    @staticmethod
+    def _urls_same_page(current: str, target: str) -> bool:
+        """fragment を無視して同一ページ（同一 path+query）かを判定する。
+
+        `page.url#settings` のような同一文書内 tab 遷移を「別ページ」と誤判定して flow が
+        用意した状態を破棄しないため、着地先検証・attack 前 re-nav の双方で共有する（#167 P1）。
+        """
+        from urllib.parse import urldefrag
+        try:
+            return urldefrag(current or "")[0].rstrip("/") == urldefrag(target or "")[0].rstrip("/")
+        except Exception:
+            return False
+
     async def _attack_one_page(self, page: CrawledPage, plans: dict):
         """
         Run all checks on a single crawled page.
@@ -4940,14 +4953,12 @@ class ScanEngine:
             # 誤ページを "tested" と誤記録しないよう記録して skip する（Codex #167 P1）。
             # 比較は fragment を無視する：`page.url#settings` 等の同一文書内の tab 遷移を
             # 「target から離脱」と誤判定して flow が用意した状態を破棄しないため（Codex #167 P1）。
-            from urllib.parse import urldefrag
-
             def _on_target() -> bool:
                 try:
-                    cur = urldefrag(self.browser.page.url or "")[0].rstrip("/")
+                    cur = self.browser.page.url
                 except Exception:
                     return False
-                return cur == urldefrag(page.url)[0].rstrip("/")
+                return self._urls_same_page(cur, page.url)
 
             if not _on_target():
                 recovered = await self.browser.navigate(
@@ -5054,13 +5065,15 @@ class ScanEngine:
             # Verify the browser ended on the intended target page.
             # A failed step in the flow may leave the browser on the wrong URL.
             try:
-                actual_url = self.browser.page.url.rstrip("/")
-                if actual_url != page.url.rstrip("/"):
+                # fragment 差（#settings 等）は同一ページ扱いで再navしない（flowが用意した
+                # tab/状態を破棄しない）。真に別ページ（path/query差）のときのみ復帰する。
+                if not self._urls_same_page(self.browser.page.url, page.url):
                     console.print(
-                        f"  [yellow][Flow] Ended on {actual_url}, "
+                        f"  [yellow][Flow] Ended on {self.browser.page.url}, "
                         f"re-navigating to {page.url}[/yellow]"
                     )
-                    if not await self.browser.navigate(page.url, retries=self.navigation_retries):
+                    if not await self.browser.navigate(page.url, retries=self.navigation_retries) \
+                            or not self._urls_same_page(self.browser.page.url, page.url):
                         self._record_unscannable_url(
                             page.url,
                             note="Pre-attack flow ended on a different URL and re-navigation failed: "

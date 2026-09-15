@@ -304,3 +304,15 @@ def test_pre_attack_flow_fragment_change_is_on_target():
     eng._record_unscannable_url.assert_not_called()  # fragment 差は離脱扱いしない
     assert navs == []                                # 不要な base への再navもしない
     assert page_scanned["called"] is True            # target 上として page-level 実行
+
+
+def test_urls_same_page_ignores_fragment_only():
+    """_urls_same_page: fragment 差は同一、path/query 差は別（着地先検証・attack前re-navで共有）。"""
+    from wscan.engine import ScanEngine
+
+    same = ScanEngine._urls_same_page
+    assert same("http://t/admin", "http://t/admin#settings") is True
+    assert same("http://t/admin/", "http://t/admin") is True
+    assert same("http://t/admin", "http://t/login") is False
+    assert same("http://t/view?page=admin", "http://t/view?page=home") is False
+    assert same("", "http://t/admin") is False
