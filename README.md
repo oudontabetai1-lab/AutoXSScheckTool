@@ -286,6 +286,7 @@ python3 main.py scan URL [URL ...] [options]
 | `--port PORT` | `8765` | モニターポート |
 | `--timeout SECS` | `30` | リクエストタイムアウト |
 | `--max-forms N` | `50` | 1ページの最大フォーム数 |
+| `--flows FILE...` | なし | `record` で保存したフロー JSON を、その `navigate` 先が一致したクロール済みページの攻撃直前に再生（カート投入等のページ単位前提操作）。複数指定可。サイト全体の認証は `--cookie`/自動ログインを使う |
 
 スコープ・認証・通信:
 
@@ -457,6 +458,13 @@ python3 main.py record URL [--output flows/recording.json] [--headless]
 ```
 
 ブラウザ操作を再生可能な JSON フローとして記録します。画面を操作する場合は `--headless` を付けません。
+記録したフローは **ページ単位の前提操作**（例: カート投入してからカート画面を攻撃）として `scan --flows` で再生できます。
+
+```bash
+python3 main.py scan URL --flows flows/recording.json [flows/other.json ...]
+```
+
+フローはその最後の `navigate` 先 URL が**クロールで発見したページと一致したとき**、そのページの攻撃直前に再生されます。したがって「ログインして初めて到達できる保護領域」全体を認証させる用途には向きません（未認証クロールが保護ページを発見できないため）。サイト全体の認証には `--cookie` / `--cookie-file` や自動ログインを使ってください。フローで確立した認証をクロール前段に効かせる強化は今後の課題です。
 
 ### `manual-crawl` — 手動巡回シード
 

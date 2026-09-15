@@ -151,23 +151,45 @@ class FlowRunner:
                 raise FlowStepError(f"navigate failed (non-OK response/timeout): {step.url}")
 
         elif step.action == "fill":
-            display_val = step.value if step.field.lower() not in ("password", "pass", "passwd") else "***"
-            console.print(f"  [dim]{label} fill [{step.field}] = {display_val[:40]}[/dim]")
+            # record が保存する fill step は CSS selector（`#id` / `[name="x"]`）を持つ。
+            # selector があればそれを優先し、無ければ field(name/id)から組み立てる。これで
+            # record→scan --flows の再生が実際に効く（click と対称・F09）。
+            ident = step.selector or step.field
+            masked = any(p in ident.lower() for p in ("password", "pass", "passwd"))
+            display_val = "***" if masked else step.value
+            console.print(f"  [dim]{label} fill [{ident}] = {display_val[:40]}[/dim]")
             filled = await self.browser.page.evaluate(
-                """([f, v]) => {
-                    const el = document.querySelector(`[name="${f}"],[id="${f}"]`);
+                """([sel, f, v]) => {
+                    const find = (s) => { try { return document.querySelector(s); } catch (e) { return null; } };
+                    let el = null;
+                    if (sel) {
+                        el = find(sel);
+                        // 未エスケープの id セレクタ（`#user:name` 等）は querySelector が
+                        // pseudo-class と誤解釈して throw/null になる。`#id` を属性セレクタで
+                        // 再試行して既存の記録でも解決する（#170 P2）。
+                        if (!el && sel[0] === '#')
+                            el = find('[id="' + sel.slice(1).replace(/"/g, '\\\\"') + '"]');
+                    } else {
+                        el = find(`[name="${f}"],[id="${f}"]`);
+                    }
                     if (!el) return false;
-                    el.value = v;
+                    // 旧記録は checkbox/radio も fill(value) で保存する。value 代入では checked が
+                    // 変わらず前提（規約同意等）を再現できないため、checked を復元する（#170 P2）。
+                    if (el.type === 'checkbox' || el.type === 'radio') {
+                        el.checked = v !== '' && v !== 'false' && v !== 'off' && v !== '0';
+                    } else {
+                        el.value = v;
+                    }
                     ['input', 'change', 'blur'].forEach(e =>
                         el.dispatchEvent(new Event(e, {bubbles: true}))
                     );
                     return true;
                 }""",
-                [step.field, step.value],
+                [step.selector, step.field, step.value],
             )
             if not filled:
                 # 存在しない欄への fill を成功扱いにすると前提の欠落を見逃す（F10）。
-                raise FlowStepError(f"fill target not found: field '{step.field}'")
+                raise FlowStepError(f"fill target not found: {ident!r}")
 
         elif step.action == "submit":
             console.print(f"  [dim]{label} submit[/dim]")
@@ -209,4 +231,6 @@ class FlowRunner:
             await asyncio.sleep(step.timeout)
 
         else:
-            console.print(f"  [yellow]{label} unknown action '{step.action}' — skipped[/yellow]")
+            # 不明アクション（タイプミス等）を skip して flow を成功扱いにすると、前提未達のまま
+            # 誤った状態で検査してしまう。失敗として扱い run() を False にする（F10 と同型・#170 P2）。
+            raise FlowStepError(f"unknown flow action: {step.action!r}")

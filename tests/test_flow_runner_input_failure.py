@@ -62,6 +62,17 @@ def test_submit_without_target_fails():
     assert ok is False
 
 
+def test_unknown_action_fails_flow():
+    # タイプミス等の不明アクションを skip して成功扱いにせず、flow を失敗させる（#170 P2）。
+    browser = _FakeBrowser(_FakePage())
+    ok = _run(browser, [
+        FlowStep(action="clik", selector="#buy"),           # typo
+        FlowStep(action="navigate", url="http://after.test/"),
+    ])
+    assert ok is False
+    assert browser.navigated == []                          # 後続の依存 step へ進めない
+
+
 def test_navigate_failure_fails_flow():
     # navigate が False（4xx/timeout）を返したら flow 失敗（成功扱いにしない）。
     browser = _FakeBrowser(_FakePage(), nav_ok=False)
