@@ -317,6 +317,33 @@ def test_pre_attack_flow_fragment_change_is_on_target():
     assert page_scanned["called"] is True            # target 上として page-level 実行
 
 
+def test_match_pre_attack_flow_uses_normalized_url():
+    """flow 選択も _urls_same_page で行う（Codex #167 P2）。
+
+    fragment 付き flow を取りこぼさず、query 値だけ違う別 target を誤選択しない。
+    """
+    from wscan.engine import ScanEngine
+
+    eng = ScanEngine.__new__(ScanEngine)
+
+    def _flow(nav_url, name="f"):
+        return ScanFlow(name=name, steps=[FlowStep(action="navigate", url=nav_url)])
+
+    # 1) fragment 差は同一ページとして選択される（生 rstrip では取りこぼしていた）。
+    eng.flows = [_flow("http://t.test/admin#settings", "frag")]
+    page = types.SimpleNamespace(url="http://t.test/admin")
+    assert eng._match_pre_attack_flow(page).name == "frag"
+
+    # 2) query 値差（末尾スラッシュ）は別 target＝誤選択しない。
+    eng.flows = [_flow("http://t.test/view?next=/", "wrong")]
+    page2 = types.SimpleNamespace(url="http://t.test/view?next=")
+    assert eng._match_pre_attack_flow(page2) is None
+
+    # 3) 素の一致は従来どおり選択（path 末尾スラッシュ差は正規化）。
+    eng.flows = [_flow("http://t.test/admin/", "base")]
+    assert eng._match_pre_attack_flow(page).name == "base"
+
+
 def test_urls_same_page_ignores_fragment_only():
     """_urls_same_page: fragment 差は同一、path/query 差は別（着地先検証・attack前re-navで共有）。"""
     from wscan.engine import ScanEngine

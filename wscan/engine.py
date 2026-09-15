@@ -4888,7 +4888,11 @@ class ScanEngine:
             last_nav = next(
                 (s for s in reversed(flow.steps) if s.action == "navigate"), None
             )
-            if last_nav and last_nav.url.rstrip("/") == page.url.rstrip("/"):
+            # 着地先検証と同じ比較器を使う（Codex #167 P2）：fragment 差（`#settings`）は
+            # 同一ページ扱いで flow を選び、query 値差（`?next=/` と `?next=`）は別物として
+            # 誤選択しない。生の rstrip("/") 比較だと fragment 付き flow を取りこぼす一方、
+            # query 末尾スラッシュだけ違う別 target を同一視して誤った state 変更 flow を走らせうる。
+            if last_nav and self._urls_same_page(last_nav.url, page.url):
                 return flow
         return None
 
