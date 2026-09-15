@@ -4,7 +4,9 @@
   未知 kwarg で TypeError となり全対象が開始前に失敗する。
 - F02: 全対象失敗でも CLI 終了 0・「合計0件」で自動運用が成功と誤認する。
 """
+import asyncio
 import textwrap
+from unittest.mock import patch
 
 from wscan.batch_runner import BatchRunner, BatchResult, BatchTarget
 
@@ -36,6 +38,25 @@ def test_batch_exit_code_all_and_partial_failures():
     assert main._batch_exit_code([ok, ok]) == 0    # 全成功は 0
     assert main._batch_exit_code([ok, bad]) == 1   # 一部失敗は非0
     assert main._batch_exit_code([bad, bad]) == 1  # 全失敗は非0
+
+
+def test_empty_message_exception_counts_as_failure(tmp_path):
+    # str(exc) が空の例外（bare TimeoutError）でも失敗として扱う（error 非空・success 偽）。
+    runner = BatchRunner(targets=[], global_kwargs={})
+    runner.output_base = tmp_path
+    target = BatchTarget(url="http://target.test/")
+
+    class _Boom:
+        def __init__(self, **kwargs):
+            raise TimeoutError()  # str() == ""
+
+    assert str(TimeoutError()) == ""  # 前提: 空メッセージ例外
+    with patch("wscan.engine.ScanEngine", _Boom):
+        result = asyncio.run(runner._run_one(target))
+
+    assert not result.success
+    assert result.error  # 非空
+    assert main._batch_exit_code([result]) == 1
 
 
 def test_summary_text_marks_failures():

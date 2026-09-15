@@ -222,13 +222,16 @@ class BatchRunner:
                 duration_secs=time.time() - start,
             )
         except Exception as exc:
+            # str(exc) が空の例外（bare TimeoutError() 等）でも error を必ず非空にする。
+            # 空だと BatchResult.success=not error が真になり失敗を成功と誤認する（F02の穴）。
+            err = str(exc) or repr(exc) or type(exc).__name__
             result = BatchResult(
                 target=target,
                 output_dir=out_dir,
                 duration_secs=time.time() - start,
-                error=str(exc),
+                error=err,
             )
-            _print(f"[Batch] エラー: {label} — {exc}")
+            _print(f"[Batch] エラー: {label} — {err}")
 
         status = "✅" if result.success else "❌"
         _print(
