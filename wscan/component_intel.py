@@ -122,8 +122,21 @@ _CDN_LAYOUTS = (
      frozenset({"cdnjs.cloudflare.com", "ajax.googleapis.com"})),
     (re.compile(r"^/((?:@[\w.-]+/)?[\w.-]+)@(\d[\w.\-]*)"), frozenset({"unpkg.com"})),
 )
-# CDN 固有の識別子だけを npm 名へ写す。未知の名前は従来どおり保持する。
-_CDN_NPM_ALIASES = {"lodash.js": "lodash", "angularjs": "angular"}
+# CDN 固有の識別子を npm 名へ写す（cdnjs/Google AJAX は npm と名前が食い違うことがある）。
+# 一律 `.js` 除去は誤り（`chart.js` は npm 名そのもの）なので、確実に食い違う既知識別子だけを
+# 明示マップする。未知の名前は従来どおり保持（保守側＝実在パッケージを誤マップしない・Codex #155）。
+_CDN_NPM_ALIASES = {
+    "lodash.js": "lodash",
+    "angularjs": "angular",
+    "angular.js": "angular",
+    "moment.js": "moment",
+    "jqueryui": "jquery-ui",
+    "handlebars.js": "handlebars",
+    "backbone.js": "backbone",
+    "underscore.js": "underscore",
+    "mustache.js": "mustache",
+    "zepto.js": "zepto",
+}
 
 # ファイル名埋め込み（.../jquery-3.4.1.min.js）。任意 origin でも一致するため推測（filename）扱い。
 _LIB_FILENAME_PATTERN = re.compile(r"/([\w.-]+?)-(\d+\.\d+(?:\.\d+)?)(?:\.min)?\.js(?:$|[?#])")

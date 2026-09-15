@@ -12,6 +12,7 @@
 - **graceful**：API 障害・照会不能は Finding を出さない（偽検出を作らない・確実性重視）。
 - 外部へ送るのは製品 slug のみ（target URL・ヘッダ値全体は送らない）。
 """
+import asyncio
 from typing import TYPE_CHECKING
 
 from wscan.scanner_contract import (
@@ -174,6 +175,42 @@ class OutdatedComponentScanner(BaseScanner):
                 findings.append(f)
         return findings
 
+    def _lookup_locks(self, attr: str):
+        """engine 単位の per-key ロック表を返す（in-flight 照会の直列化用・#155 P2）。"""
+        locks = getattr(self.engine, attr, None)
+        if locks is None:
+            locks = {}
+            try:
+                setattr(self.engine, attr, locks)
+            except Exception:
+                return None
+        return locks
+
+    async def _cached_lookup(self, cache, locks_attr, key, compute):
+        """per-key ロックで in-flight 照会を直列化し、engine 単位キャッシュを共有する（#155 P2）。
+
+        --concurrency>1 では複数 worker が本 scanner とキャッシュを共有するが、cache チェックと
+        await が非アトミックなため、同一サーババナー等で全 worker が同じ key を同時に不在と見て
+        同一 EOL/OSV/NVD リクエストを重複発行し、engine 全体キャッシュを無効化して外部 API を
+        枯渇させ得る。key 毎の Lock 内で double-checked に確認して直列化する。compute() は結果を
+        返すか例外を送出（例外はキャッシュせず呼び出し側へ伝播＝一時失敗を resume に残す）。
+        """
+        locks = self._lookup_locks(locks_attr)
+        lock = locks.setdefault(key, asyncio.Lock()) if locks is not None else None
+
+        async def _run():
+            if cache is not None and key in cache:
+                return cache[key]
+            result = await compute()
+            if cache is not None:
+                cache[key] = result
+            return result
+
+        if lock is None:  # engine 不在等：直列化不能でもキャッシュのみで従来どおり動く。
+            return await _run()
+        async with lock:
+            return await _run()
+
     async def _scan_nvd(self, url, pair, components, base_url, timeout, state) -> list[dict]:
         import os
         api_key = os.environ.get("WSCAN_NVD_API_KEY", "") or ""
@@ -194,23 +231,21 @@ class OutdatedComponentScanner(BaseScanner):
             if key in seen:
                 continue
             seen.add(key)
-            if cache is not None and key in cache:
-                info = cache[key]
-            else:
-                try:
-                    info = await component_intel.lookup_nvd(
+            try:
+                info = await self._cached_lookup(
+                    cache, "_nvd_locks", key,
+                    lambda: component_intel.lookup_nvd(
                         comp.product, comp.version, base_url=base_url,
                         api_key=api_key, timeout=timeout,
-                    )
-                except component_intel.ComponentIntelUnavailable as exc:
-                    self._record_scan_note(f"transport_error:{self.CHECK_TYPE}:nvd:{type(exc).__name__}")
-                    state["transient"] = True
-                    continue
-                except Exception as exc:
-                    self._record_scan_note(f"transport_error:{self.CHECK_TYPE}:nvd:{type(exc).__name__}")
-                    continue
-                if cache is not None:
-                    cache[key] = info
+                    ),
+                )
+            except component_intel.ComponentIntelUnavailable as exc:
+                self._record_scan_note(f"transport_error:{self.CHECK_TYPE}:nvd:{type(exc).__name__}")
+                state["transient"] = True
+                continue
+            except Exception as exc:
+                self._record_scan_note(f"transport_error:{self.CHECK_TYPE}:nvd:{type(exc).__name__}")
+                continue
             if not info or not info.get("total"):
                 continue  # 照会不能・0 件は報告しない
             ids = info.get("cve_ids") or []
@@ -271,23 +306,21 @@ class OutdatedComponentScanner(BaseScanner):
             if key in seen:
                 continue
             seen.add(key)
-            if cache is not None and key in cache:
-                result = cache[key]
-            else:
-                try:
-                    result = await component_intel.check_component_eol(
+            try:
+                result = await self._cached_lookup(
+                    cache, "_eol_locks", key,
+                    lambda: component_intel.check_component_eol(
                         comp, base_url=base_url, timeout=timeout,
-                    )
-                except component_intel.ComponentIntelUnavailable as exc:
-                    # 一時失敗: page を再試行可能に残す（キャッシュしない）。
-                    self._record_scan_note(f"transport_error:{self.CHECK_TYPE}:eol:{type(exc).__name__}")
-                    state["transient"] = True
-                    continue
-                except Exception as exc:  # その他は graceful（非キャッシュ・継続）
-                    self._record_scan_note(f"transport_error:{self.CHECK_TYPE}:{type(exc).__name__}")
-                    continue
-                if cache is not None:
-                    cache[key] = result
+                    ),
+                )
+            except component_intel.ComponentIntelUnavailable as exc:
+                # 一時失敗: page を再試行可能に残す（キャッシュしない）。
+                self._record_scan_note(f"transport_error:{self.CHECK_TYPE}:eol:{type(exc).__name__}")
+                state["transient"] = True
+                continue
+            except Exception as exc:  # その他は graceful（非キャッシュ・継続）
+                self._record_scan_note(f"transport_error:{self.CHECK_TYPE}:{type(exc).__name__}")
+                continue
             if not result or not result.get("is_eol"):
                 continue  # サポート中・判定不能は報告しない
             eol_val = result.get("eol")
@@ -354,22 +387,20 @@ class OutdatedComponentScanner(BaseScanner):
                 continue
             seen.add(key)
             ck = (lib.ecosystem, lib.name, lib.version)
-            if cache is not None and ck in cache:
-                vulns = cache[ck]
-            else:
-                try:
-                    vulns = await component_intel.lookup_osv(
+            try:
+                vulns = await self._cached_lookup(
+                    cache, "_osv_locks", ck,
+                    lambda: component_intel.lookup_osv(
                         lib.ecosystem, lib.name, lib.version, base_url=base_url, timeout=timeout,
-                    )
-                except component_intel.ComponentIntelUnavailable as exc:
-                    self._record_scan_note(f"transport_error:{self.CHECK_TYPE}:osv:{type(exc).__name__}")
-                    state["transient"] = True
-                    continue
-                except Exception as exc:
-                    self._record_scan_note(f"transport_error:{self.CHECK_TYPE}:osv:{type(exc).__name__}")
-                    continue
-                if cache is not None:
-                    cache[ck] = vulns
+                    ),
+                )
+            except component_intel.ComponentIntelUnavailable as exc:
+                self._record_scan_note(f"transport_error:{self.CHECK_TYPE}:osv:{type(exc).__name__}")
+                state["transient"] = True
+                continue
+            except Exception as exc:
+                self._record_scan_note(f"transport_error:{self.CHECK_TYPE}:osv:{type(exc).__name__}")
+                continue
             if not vulns:
                 continue  # 脆弱性なし・照会不能(None)は報告しない
             info = component_intel.summarize_osv_vulns(vulns)

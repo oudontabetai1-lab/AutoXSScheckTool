@@ -3,6 +3,7 @@
 純粋関数（ヘッダ解析・cycle 一致・EOL 判定）はネットワーク非依存で検証し、ネットワーク層と
 scanner は fake client / monkeypatch で外部 API を叩かずに検証する。
 """
+import asyncio
 import datetime as dt
 import types
 import unittest
@@ -308,6 +309,28 @@ class OutdatedComponentScannerTests(unittest.IsolatedAsyncioTestCase):
         cfg = {"enabled": enabled, "eol_base_url": "https://endoflife.date", "timeout": 8}
         engine = _FakeEngine(component_intel=cfg)
         return engine, SCANNERS["outdated_components"](engine)
+
+    async def test_cached_lookup_serializes_in_flight(self):
+        # --concurrency>1 相当：engine を共有する2 worker が同一 key を同時照会しても
+        # 外部 lookup は1回に直列化され、両者が同じ結果を得る（#155 P2）。
+        engine = _FakeEngine(component_intel={"enabled": True})
+        s1 = SCANNERS["outdated_components"](engine)
+        s2 = SCANNERS["outdated_components"](engine)
+        cache: dict = {}
+        calls = {"n": 0}
+
+        async def _compute():
+            calls["n"] += 1
+            await asyncio.sleep(0.01)   # この間に他 worker が同 key を照会し得る
+            return {"v": calls["n"]}
+
+        r1, r2 = await asyncio.gather(
+            s1._cached_lookup(cache, "_eol_locks", ("p", "1"), _compute),
+            s2._cached_lookup(cache, "_eol_locks", ("p", "1"), _compute),
+        )
+        self.assertEqual(calls["n"], 1)          # 重複照会しない
+        self.assertEqual(r1, r2)                 # 両者同じ結果
+        self.assertEqual(cache[("p", "1")], {"v": 1})
 
     async def test_disabled_is_inert(self):
         engine, scanner = self._scanner(enabled=False)
@@ -855,7 +878,12 @@ class Review155PureTests(unittest.TestCase):
     def test_cdn_aliases_and_safe_twins(self):
         for host in ("cdnjs.cloudflare.com", "ajax.googleapis.com"):
             for alias, expected in (("lodash.js", "lodash"), ("angularjs", "angular"),
-                                    ("unknown.js", "unknown.js")):
+                                    ("angular.js", "angular"), ("moment.js", "moment"),
+                                    ("jqueryui", "jquery-ui"), ("handlebars.js", "handlebars"),
+                                    ("backbone.js", "backbone"), ("underscore.js", "underscore"),
+                                    ("mustache.js", "mustache"), ("zepto.js", "zepto"),
+                                    # 実在 npm 名（`.js` を含む）は誤って剥がさない。
+                                    ("chart.js", "chart.js"), ("unknown.js", "unknown.js")):
                 url = f"https://{host}/ajax/libs/{alias}/1.2.3/lib.js"
                 lib = ci.parse_js_libraries_from_urls([url])[0]
                 self.assertEqual((lib.name, lib.ecosystem), (expected, "npm"))
