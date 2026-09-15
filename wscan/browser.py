@@ -38,6 +38,28 @@ console = Console()
 
 _DEFAULT_PORTS = {"http": 80, "https": 443, "ws": 80, "wss": 443}
 
+# page.content() は稀に無限ハングする（開いた JS ダイアログ・停止したナビゲーション等）。
+# try/except は例外しか捕まえられずハングを防げないため、待機を有界にする（F06）。
+# realistic_site 通し E2E が SQLi 再検証の page.content() 待ちで 900 秒 timeout していた。
+_PAGE_CONTENT_TIMEOUT = 30.0
+
+
+async def _bounded_page_content(page) -> str:
+    """page.content() を有界化して HTML を返す。取得不能・timeout 時は "" を返す。
+
+    page.content() は native な timeout 引数を持たないため asyncio.wait_for で有界化する。
+    wait_for は timeout / 呼び出し側 cancel のいずれでも内側 task を cancel し、その cleanup
+    完了まで待って（drain して）から例外を伝播する（Python 3.12 で実測確認）。そのため
+    shield や手動 drain は不要で、orphan な Playwright 操作を残さない。CancelledError は
+    BaseException なので下の except Exception に捕まらず、呼び出し側 cancel は伝播する。
+    """
+    try:
+        return await asyncio.wait_for(page.content(), timeout=_PAGE_CONTENT_TIMEOUT)
+    except asyncio.CancelledError:
+        raise  # scan 全体の cancel 等。握りつぶさず伝播（wait_for が内側を drain 済み）。
+    except Exception:
+        return ""  # 自前 timeout / その他失敗は「取得不能=空」へ合流。
+
 
 # セッションを終了させるリンク（ログアウト等）。SPA クリック探索がこれを踏むと、
 # 認証セッションが失効し go_back() でも復元できず、以降の認証ページが軒並みログインへ
@@ -1472,11 +1494,12 @@ class BrowserManager:
             return ""
 
     async def get_page_source(self) -> str:
-        """Get current page HTML source."""
-        try:
-            return await self.page.content()
-        except Exception:
-            return ""
+        """Get current page HTML source.
+
+        page.content() の待機を有界にする（F06）。無限ハング時は "" を返して呼び出し側の
+        「取得不能＝空」経路に合流させ、通し E2E 全体の停止を防ぐ。
+        """
+        return await _bounded_page_content(self.page)
 
     async def find_forms(self) -> list[dict]:
         """Find all forms and their inputs on the current page."""
@@ -2818,11 +2841,7 @@ class BrowserManager:
             await page.wait_for_load_state("domcontentloaded", timeout=15000)
 
             post_url = page.url
-            post_body = ""
-            try:
-                post_body = await page.content()
-            except Exception:
-                pass
+            post_body = await _bounded_page_content(page)
 
             # Check success
             if success_indicator:

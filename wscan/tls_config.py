@@ -1,6 +1,7 @@
 """TLS and client-certificate configuration helpers."""
 from __future__ import annotations
 
+import ssl
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlparse
@@ -88,15 +89,35 @@ class TLSConfig:
             opts["client_certificates"] = [cert]
         return opts
 
+    def build_ssl_context(self) -> ssl.SSLContext | None:
+        """httpx 0.28 用の明示 SSLContext を構築する。
+
+        httpx 0.28 は ``cert=`` / ``verify="<path>"`` のショートカットを廃止し、
+        クライアント証明書付き（mTLS）接続には ``ssl.SSLContext`` を要求する。旧実装は
+        ``cert=(crt,key)`` を渡していたため mTLS がサイレントに確立できなかった（F05）。
+        検証も client 証明書も不要なら ``None`` を返す（呼び出し側は verify=False）。
+        """
+        want_validation = self.verify_tls or bool(self.ca_cert)
+        has_client = bool(self.client_cert)  # PEM のみ（PFX は httpx 経路では従来非対応）
+        if not want_validation and not has_client:
+            return None
+        if want_validation:
+            # CA 指定時はそれで検証、未指定＋verify_tls時はシステム CA。
+            context = ssl.create_default_context(cafile=self.ca_cert or None)
+        else:
+            # 検証は無効（自己署名の内部ターゲット等）だが client 証明書は送る。
+            context = ssl.create_default_context()
+            context.check_hostname = False
+            context.verify_mode = ssl.CERT_NONE
+        if has_client:
+            context.load_cert_chain(
+                certfile=self.client_cert,
+                keyfile=self.client_key or None,
+                password=(self.client_cert_password or None),
+            )
+        return context
+
     def httpx_options(self) -> dict:
-        opts: dict = {"verify": False}
-        if self.verify_tls:
-            opts["verify"] = self.ca_cert or True
-        elif self.ca_cert:
-            # A supplied CA bundle means the user expects validation against it.
-            opts["verify"] = self.ca_cert
-        if self.client_cert and self.client_key:
-            opts["cert"] = (self.client_cert, self.client_key)
-        elif self.client_cert:
-            opts["cert"] = self.client_cert
-        return opts
+        context = self.build_ssl_context()
+        # httpx は verify に SSLContext を受け取る。None は検証無効(=verify=False)。
+        return {"verify": context if context is not None else False}
