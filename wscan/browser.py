@@ -47,36 +47,18 @@ _PAGE_CONTENT_TIMEOUT = 30.0
 async def _bounded_page_content(page) -> str:
     """page.content() を有界化して HTML を返す。取得不能・timeout 時は "" を返す。
 
-    page.content() は native な timeout 引数を持たないため asyncio で有界化するが、
-    timeout でこちらの await だけを cancel すると Playwright 側の protocol 操作が
-    保留のまま残り、後で「Future exception was never retrieved」を生む（_on_dialog の
-    comment 参照）。そこで shield で内側 task を守り、timeout 時は task を cancel して
-    await し、取り残しの例外/キャンセルをここで確実に消費する（orphan future を残さない）。
+    page.content() は native な timeout 引数を持たないため asyncio.wait_for で有界化する。
+    wait_for は timeout / 呼び出し側 cancel のいずれでも内側 task を cancel し、その cleanup
+    完了まで待って（drain して）から例外を伝播する（Python 3.12 で実測確認）。そのため
+    shield や手動 drain は不要で、orphan な Playwright 操作を残さない。CancelledError は
+    BaseException なので下の except Exception に捕まらず、呼び出し側 cancel は伝播する。
     """
-    task = asyncio.ensure_future(page.content())
-
-    async def _drain() -> None:
-        # 内側 task を終わらせ、その例外/キャンセルを消費する。ただし cleanup 中に
-        # 現在の task 自身が外部 cancel された場合は握りつぶさず伝播させる。
-        # asyncio.wait は内側 task の例外を送出せず（task 内に留める）、かつ現在 task の
-        # cancel では CancelledError を送出する（捕捉しない）ため、両立できる。
-        if not task.done():
-            task.cancel()
-        await asyncio.wait({task})
-        if not task.cancelled():
-            task.exception()  # 実例外を retrieve し未観測 future 警告を防ぐ
-
     try:
-        return await asyncio.wait_for(asyncio.shield(task), timeout=_PAGE_CONTENT_TIMEOUT)
+        return await asyncio.wait_for(page.content(), timeout=_PAGE_CONTENT_TIMEOUT)
     except asyncio.CancelledError:
-        # 呼び出し側の cancel（scan 全体の SCAN_TIMEOUT_S 等）。shield が task を守るため、
-        # 明示的に drain してから cancellation を re-raise する（orphan Playwright 操作を残さない）。
-        await _drain()
-        raise
+        raise  # scan 全体の cancel 等。握りつぶさず伝播（wait_for が内側を drain 済み）。
     except Exception:
-        # 自前 timeout / その他失敗。内側 task を drain して "" へ合流。
-        await _drain()
-        return ""
+        return ""  # 自前 timeout / その他失敗は「取得不能=空」へ合流。
 
 
 # セッションを終了させるリンク（ログアウト等）。SPA クリック探索がこれを踏むと、

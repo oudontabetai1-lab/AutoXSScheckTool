@@ -1,7 +1,9 @@
 """F06: get_page_source が page.content() の無限ハングで停止しないことを検証する。
 
 realistic_site 通し E2E が SQLi 再検証の page.content() 待ちで 900 秒 timeout していた。
-待機を有界化したので、ハングしても "" を返して速やかに戻ることを確認する。
+待機を asyncio.wait_for で有界化したので、(1) ハングしても "" を返して速やかに戻る、
+(2) 呼び出し側 cancel（scan 全体の SCAN_TIMEOUT_S 等）は内側 task を drain した上で
+握りつぶさず伝播する、ことを確認する。
 """
 import asyncio
 import time
@@ -20,7 +22,6 @@ class _HangingPage:
             await asyncio.sleep(5)  # patched timeout より十分長い
             return "<html>late</html>"
         except asyncio.CancelledError:
-            # timeout 後に内側 task が cancel され await されること（orphan future 防止）を検証。
             self.cancelled = True
             raise
 
@@ -45,7 +46,7 @@ def test_get_page_source_returns_quickly_when_content_hangs():
         elapsed = time.monotonic() - start
     assert result == ""          # 取得不能は空に合流（ハングしない）
     assert elapsed < 2.0         # 5秒待たず有界時間で戻る
-    assert page.cancelled        # 内側 task は cancel＋await 済み＝orphan future を残さない
+    assert page.cancelled        # 内側 task は cancel＋drain 済み（orphan を残さない）
 
 
 def test_get_page_source_returns_content_when_available():
@@ -53,49 +54,29 @@ def test_get_page_source_returns_content_when_available():
     assert asyncio.run(bm.get_page_source()) == "<html>ok</html>"
 
 
-def test_bounded_content_drains_and_reraises_on_caller_cancel():
-    # scan 全体の SCAN_TIMEOUT_S 等で呼び出し側が cancel した場合、shield 下の
-    # 内側 page.content task を drain し CancelledError を再送する（orphan を残さない）。
-    page = _HangingPage()
+def test_caller_cancel_propagates_after_inner_drained():
+    # scan 全体の cancel が来た場合、内側 page.content の cleanup を drain してから
+    # CancelledError を伝播する（"" を返して cancel 済み scan を継続しない）。
+    finished = {"v": False}
+
+    class _SlowCleanupPage:
+        async def content(self):
+            try:
+                await asyncio.sleep(3600)
+            except asyncio.CancelledError:
+                await asyncio.sleep(0.05)   # cleanup（drain されるべき）
+                finished["v"] = True
+                raise
 
     async def run():
-        inner = asyncio.ensure_future(browser_mod._bounded_page_content(page))
+        inner = asyncio.ensure_future(browser_mod._bounded_page_content(_SlowCleanupPage()))
         await asyncio.sleep(0.05)  # wait_for の await に入らせる
         inner.cancel()
         try:
             await inner
+            return "no-raise"
         except asyncio.CancelledError:
             return "cancelled"
-        return "not-cancelled"
 
-    result = asyncio.run(run())
-    assert result == "cancelled"   # cancellation は握りつぶさず再送
-    assert page.cancelled          # 内側 task は cancel+await 済み
-
-
-def test_caller_cancel_during_drain_is_not_swallowed():
-    # 自前 timeout 後の _drain（内側 task の slow cancel を待機中）に scan 全体の
-    # cancel が到達しても、握りつぶさず伝播させる（"" を返して継続しない）。
-    async def run():
-        drain_reached = asyncio.Event()
-
-        class _SlowCancelPage:
-            async def content(self):
-                try:
-                    await asyncio.sleep(3600)
-                except asyncio.CancelledError:
-                    drain_reached.set()        # _drain が内側 task を cancel した合図
-                    await asyncio.sleep(3600)   # 遅い cancel（外部 cancel で中断される）
-                    raise
-
-        with patch.object(browser_mod, "_PAGE_CONTENT_TIMEOUT", 0.01):
-            inner = asyncio.ensure_future(browser_mod._bounded_page_content(_SlowCancelPage()))
-            await asyncio.wait_for(drain_reached.wait(), timeout=2)  # _drain 到達を確定
-            inner.cancel()  # cleanup 中に外部 cancel
-            try:
-                await inner
-                return "no-raise"
-            except asyncio.CancelledError:
-                return "cancelled"
-
-    assert asyncio.run(run()) == "cancelled"
+    assert asyncio.run(run()) == "cancelled"  # cancellation は握りつぶさず伝播
+    assert finished["v"]                       # 内側 task の cleanup 完了後に伝播した
