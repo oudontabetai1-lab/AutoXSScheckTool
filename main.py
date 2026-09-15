@@ -1852,6 +1852,15 @@ def _agent_exit_code(result) -> int:
     return 0
 
 
+def _batch_exit_code(results) -> int:
+    """batch 結果から CLI 終了コードを決める純粋関数。
+
+    1 件でも失敗（例外/開始不能＝``success`` が偽）があれば非0。全成功・空リストは 0。
+    全対象失敗でも 0 を返し「合計0件」を成功と誤認させていた問題を防ぐ（F02）。
+    """
+    return 1 if any(not getattr(r, "success", False) for r in (results or [])) else 0
+
+
 def _llm_model_display(args) -> str:
     """Return a short model info string for the startup banner."""
     role_models = getattr(args, "role_models", {}) or {}
@@ -3413,6 +3422,7 @@ async def run_batch(args):
     console.print(runner.summary_text())
     summary_path = runner.save_batch_summary_json()
     console.print(f"\n  [dim]Batch summary:[/dim] {summary_path}")
+    return runner.results
 
 
 async def run_record(args):
@@ -3562,7 +3572,10 @@ def main():
         elif args.command == "record":
             asyncio.run(run_record(args))
         elif args.command == "batch":
-            asyncio.run(run_batch(args))
+            batch_results = asyncio.run(run_batch(args))
+            batch_exit = _batch_exit_code(batch_results)
+            if batch_exit:
+                sys.exit(batch_exit)
         elif args.command == "import-payloads":
             run_import_payloads(args)
         elif args.command == "capability-matrix":
