@@ -859,9 +859,24 @@ class MonitorServer:
             except Exception:
                 return JSONResponse({"error": "Invalid JSON"}, status_code=400)
 
+            # 入力型を開始前に検証する（F07）。body/config が dict でない（`[]` 等）、url が
+            # 非文字列（数値等）だと、以前は `.get` の AttributeError で 500、または受理後に
+            # 非同期例外になっていた。型不正は 4xx で明示的に拒否する。
+            if not isinstance(body, dict):
+                return JSONResponse(
+                    {"error": "request body must be a JSON object"}, status_code=400
+                )
             config = body.get("config", body)
-            if not config.get("url"):
-                return JSONResponse({"error": "url is required"}, status_code=400)
+            if not isinstance(config, dict):
+                return JSONResponse(
+                    {"error": "config must be a JSON object"}, status_code=400
+                )
+            url = config.get("url")
+            if not isinstance(url, str) or not url.strip():
+                return JSONResponse(
+                    {"error": "url is required and must be a non-empty string"},
+                    status_code=400,
+                )
 
             scope_err = self._config_scope_error(config)
             if scope_err:
