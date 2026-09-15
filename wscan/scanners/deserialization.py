@@ -40,7 +40,10 @@ if TYPE_CHECKING:
 _DESER_ERROR_PATTERNS = [
     # PHP
     r"unserialize\(\)",
-    r"O:\d+:\"[A-Za-z_]",
+    # NOTE: `O:\d+:"...` は PHP シリアライズ済みオブジェクトの**構造**マーカーであり
+    # エラー signature ではない。probe payload 自身がこの形なので、単に入力を反射する
+    # ページ（例 vuln_app /search）を critical・reproduced と誤確証していた（F04）。
+    # error パターンから除外し、確証は実エラー文言に限定する。
     r"unserialization.*failed",
     r"could not be unserialized",
     # Java
@@ -106,6 +109,18 @@ _PROBES = [
         "application/yaml",
     ),
 ]
+
+
+def _strip_reflected_payload(text: str, payload: str) -> str:
+    """反射された payload 自身を error パターン照合前に除去する（反射≠実行）。
+
+    baseline/probe 差分は正しい統制だが、判別トークンが payload 内にあると
+    「単なる入力反射」を差分として拾い誤確証する。送信値を応答から取り除いてから
+    照合することで、アプリが生成した実エラー文言だけを確証根拠に残す。
+    """
+    if not text or not payload:
+        return text or ""
+    return text.replace(payload, " ")
 
 
 class DeserializationScanner(BaseScanner):
@@ -238,7 +253,9 @@ class DeserializationScanner(BaseScanner):
             try:
                 src, pair = await self._apply_ip(ip, payload)
 
-                err = self.check_response_for_patterns(src, _DESER_ERROR_PATTERNS)
+                err = self.check_response_for_patterns(
+                    _strip_reflected_payload(src, payload), _DESER_ERROR_PATTERNS
+                )
                 baseline_err = self.check_response_for_patterns(
                     baseline_src or "",
                     _DESER_ERROR_PATTERNS,
@@ -350,7 +367,9 @@ class DeserializationScanner(BaseScanner):
                     r = await client.post(url, content=raw_payload)
                     self._record_probe_status(r)
 
-                err = self.check_response_for_patterns(r.text, _DESER_ERROR_PATTERNS)
+                err = self.check_response_for_patterns(
+                    _strip_reflected_payload(r.text, payload), _DESER_ERROR_PATTERNS
+                )
                 baseline_err = self.check_response_for_patterns(
                     baseline.text,
                     _DESER_ERROR_PATTERNS,
@@ -433,7 +452,7 @@ class DeserializationScanner(BaseScanner):
             _DESER_ERROR_PATTERNS,
         )
         probe_err = self.check_response_for_patterns(
-            probe_src or "",
+            _strip_reflected_payload(probe_src or "", payload),
             _DESER_ERROR_PATTERNS,
         )
         return bool(probe_err and not baseline_err)
@@ -479,7 +498,7 @@ class DeserializationScanner(BaseScanner):
             _DESER_ERROR_PATTERNS,
         )
         probe_err = self.check_response_for_patterns(
-            probe.text,
+            _strip_reflected_payload(probe.text, payload),
             _DESER_ERROR_PATTERNS,
         )
         return bool(probe_err and not baseline_err)
