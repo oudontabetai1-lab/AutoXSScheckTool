@@ -56,13 +56,15 @@ async def _bounded_page_content(page) -> str:
     task = asyncio.ensure_future(page.content())
 
     async def _drain() -> None:
-        # shield 下の内側 task を確実に終わらせ、取り残しの例外/キャンセルを消費する。
+        # 内側 task を終わらせ、その例外/キャンセルを消費する。ただし cleanup 中に
+        # 現在の task 自身が外部 cancel された場合は握りつぶさず伝播させる。
+        # asyncio.wait は内側 task の例外を送出せず（task 内に留める）、かつ現在 task の
+        # cancel では CancelledError を送出する（捕捉しない）ため、両立できる。
         if not task.done():
             task.cancel()
-        try:
-            await task
-        except BaseException:
-            pass
+        await asyncio.wait({task})
+        if not task.cancelled():
+            task.exception()  # 実例外を retrieve し未観測 future 警告を防ぐ
 
     try:
         return await asyncio.wait_for(asyncio.shield(task), timeout=_PAGE_CONTENT_TIMEOUT)

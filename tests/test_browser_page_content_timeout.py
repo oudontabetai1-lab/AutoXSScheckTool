@@ -71,3 +71,31 @@ def test_bounded_content_drains_and_reraises_on_caller_cancel():
     result = asyncio.run(run())
     assert result == "cancelled"   # cancellation は握りつぶさず再送
     assert page.cancelled          # 内側 task は cancel+await 済み
+
+
+def test_caller_cancel_during_drain_is_not_swallowed():
+    # 自前 timeout 後の _drain（内側 task の slow cancel を待機中）に scan 全体の
+    # cancel が到達しても、握りつぶさず伝播させる（"" を返して継続しない）。
+    async def run():
+        drain_reached = asyncio.Event()
+
+        class _SlowCancelPage:
+            async def content(self):
+                try:
+                    await asyncio.sleep(3600)
+                except asyncio.CancelledError:
+                    drain_reached.set()        # _drain が内側 task を cancel した合図
+                    await asyncio.sleep(3600)   # 遅い cancel（外部 cancel で中断される）
+                    raise
+
+        with patch.object(browser_mod, "_PAGE_CONTENT_TIMEOUT", 0.01):
+            inner = asyncio.ensure_future(browser_mod._bounded_page_content(_SlowCancelPage()))
+            await asyncio.wait_for(drain_reached.wait(), timeout=2)  # _drain 到達を確定
+            inner.cancel()  # cleanup 中に外部 cancel
+            try:
+                await inner
+                return "no-raise"
+            except asyncio.CancelledError:
+                return "cancelled"
+
+    assert asyncio.run(run()) == "cancelled"
