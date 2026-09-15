@@ -135,6 +135,38 @@ class RealisticIntranetFixtureTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertLess(abs(len(resp.text) - len(normal.text)), 200)
 
+    # ── ファイルアップロード ─────────────────────────────────────────────
+    async def test_file_upload_accepts_dangerous_probe(self):
+        resp = await self.client.post(
+            "/documents/upload",
+            files={"attachment": ("wscan_probe.php", b"<?php echo 'probe'; ?>", "image/jpeg")},
+        )
+        self.assertEqual(resp.status_code, 201)
+        self.assertIn("file received", resp.text)
+
+    async def test_file_upload_safe_twin_rejects_dangerous_probes(self):
+        probes = (
+            ("wscan_probe.php", b"<?php echo 'probe'; ?>", "image/jpeg"),
+            ("wscan_probe.php.jpg", b"<?php echo 'probe'; ?>", "image/jpeg"),
+            ("wscan_probe_gif.php", b"GIF89a\n<?php echo 'probe'; ?>", "image/gif"),
+        )
+        for filename, content, content_type in probes:
+            with self.subTest(filename=filename):
+                resp = await self.client.post(
+                    "/documents/upload-safe",
+                    files={"attachment": (filename, content, content_type)},
+                )
+                self.assertEqual(resp.status_code, 415)
+                self.assertNotRegex(resp.text, r"uploaded|success|saved|stored|file\s+received")
+
+    async def test_file_upload_safe_twin_accepts_real_image(self):
+        resp = await self.client.post(
+            "/documents/upload-safe",
+            files={"attachment": ("avatar.jpg", b"\xff\xd8\xff\xe0fixture", "image/jpeg")},
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.text, "accepted image\n")
+
     # ── DOM-based XSS ─────────────────────────────────────────────────────
     async def test_dom_xss_widget_writes_param_to_innerhtml(self):
         resp = await self.client.get("/dashboard/widget", params={"tab": "overview"})

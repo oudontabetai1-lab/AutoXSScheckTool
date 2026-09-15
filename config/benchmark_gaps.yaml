@@ -9,10 +9,6 @@ gaps:
     reason: E2E benchmark ground truth 未整備（vulnerable/safe twin case が未作成）
     owner_task: "0034"
     deadline: "2026-12-31"
-  clickjacking:
-    reason: E2E benchmark ground truth 未整備（vulnerable/safe twin case が未作成）
-    owner_task: "0034"
-    deadline: "2026-12-31"
   cms:
     reason: E2E benchmark ground truth 未整備（vulnerable/safe twin case が未作成）
     owner_task: "0034"
@@ -22,10 +18,6 @@ gaps:
     owner_task: "0034"
     deadline: "2026-12-31"
   deserialization:
-    reason: E2E benchmark ground truth 未整備（vulnerable/safe twin case が未作成）
-    owner_task: "0034"
-    deadline: "2026-12-31"
-  file_upload:
     reason: E2E benchmark ground truth 未整備（vulnerable/safe twin case が未作成）
     owner_task: "0034"
     deadline: "2026-12-31"
@@ -49,6 +41,10 @@ gaps:
     reason: E2E benchmark ground truth 未整備（vulnerable/safe twin case が未作成）
     owner_task: "0034"
     deadline: "2026-12-31"
+  tls_scan:
+    reason: sslyze(OSS)＋実 TLS ハンドシェイク依存の opt-in 検査で、決定論 E2E benchmark 未整備
+    owner_task: "0018"
+    deadline: "2026-12-31"
   privesc:
     reason: E2E benchmark ground truth 未整備（vulnerable/safe twin case が未作成）
     owner_task: "0034"
@@ -65,15 +61,7 @@ gaps:
     reason: E2E benchmark ground truth 未整備（vulnerable/safe twin case が未作成）
     owner_task: "0034"
     deadline: "2026-12-31"
-  secret_leak:
-    reason: E2E benchmark ground truth 未整備（vulnerable/safe twin case が未作成）
-    owner_task: "0034"
-    deadline: "2026-12-31"
   session:
-    reason: E2E benchmark ground truth 未整備（vulnerable/safe twin case が未作成）
-    owner_task: "0034"
-    deadline: "2026-12-31"
-  sri:
     reason: E2E benchmark ground truth 未整備（vulnerable/safe twin case が未作成）
     owner_task: "0034"
     deadline: "2026-12-31"

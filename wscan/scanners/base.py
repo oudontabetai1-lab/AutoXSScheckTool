@@ -2,6 +2,7 @@
 Base Scanner Class
 Provides common utilities for all vulnerability scanners.
 """
+import asyncio
 import json
 import re
 import time
@@ -50,6 +51,7 @@ _CVSS_TABLE: dict[str, tuple[str, float]] = {
     "info_disclosure":   ("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N",  7.5),
     "host_header":       ("CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:L/I:L/A:N",  5.4),
     "security_headers":  ("CVSS:3.1/AV:N/AC:H/PR:N/UI:R/S:U/C:L/I:N/A:N",  3.1),
+    "tls_scan":          ("CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:H/I:N/A:N",  5.9),
     "nosql":             ("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:N",  9.1),
     "deserialization":   ("CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:C/C:H/I:H/A:H", 10.0),
     "request_smuggling": ("CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:C/C:H/I:H/A:N",  8.7),
@@ -138,6 +140,30 @@ _IDEMPOTENCY_HEADER_NAMES = frozenset({
     "idempotency-token",
     "x-idempotency-token",
 })
+
+# page 観測系の直接 GET(replay) が返した際、「恒久的にこの document ではない」ではなく
+# 一時障害＝resume で再試行すべき status。408/429/5xx を transient として扱う（Codex #145 P2 round18）。
+_TRANSIENT_REPLAY_STATUSES = frozenset({408, 429, 500, 502, 503, 504})
+
+
+def _body_looks_like_html(body: str, headers, *, is_2xx: bool) -> bool:
+    """応答本文が「ブラウザが描画する HTML document」かを判定する（純粋・Codex #147）。
+
+    Content-Type に html を含めば HTML。Content-Type 欠落時は 2xx crawl document を HTML とみなし、
+    非 2xx では `<html`/`<!doctype html` の軽いスニッフィングに留める（error 応答の誤検知回避）。
+    明示的な非 HTML（json/js/画像等）は False。
+    """
+    ctype = ""
+    for k, v in (headers or {}).items():
+        if str(k).lower() == "content-type":
+            ctype = str(v).lower()
+            break
+    if "html" in ctype:
+        return True
+    if not ctype:
+        blob = (body or "")[:4000].lower()
+        return is_2xx or ("<html" in blob) or ("<!doctype html" in blob)
+    return False
 
 
 def refresh_idempotency_headers(headers: dict) -> dict:
@@ -369,6 +395,10 @@ class Finding:
     confidence: str = "tentative"   # "confirmed" | "likely" | "tentative"
     evidence_type: str = ""          # Structured signal, e.g. xss_dialog, sqli_error
     evidence_details: dict = field(default_factory=dict)
+    # check_type 由来の既定 CVSS を上書きする per-finding 値（同一 check_type でも issue ごとに
+    # 深刻度が変わる scanner 用。None/"" のときは _cvss_for(check_type) を使う）。
+    cvss_score_override: Optional[float] = None
+    cvss_vector_override: str = ""
     reproduction_steps: list[str] = field(default_factory=list)
     source: str = "scanner"          # "scanner" | "agent"
     agent_verified: bool = False      # Agent 発見を決定論スキャナでも再現できたか
@@ -443,6 +473,10 @@ class Finding:
             confidence=data.get("confidence", "tentative"),
             evidence_type=data.get("evidence_type", ""),
             evidence_details=dict(data.get("evidence_details", {}) or {}),
+            # 直列化された実効 CVSS を override として復元し、resume で issue 別 CVSS を保つ
+            # （欠落した旧 checkpoint は None/"" で check_type 既定へフォールバック）。
+            cvss_score_override=data.get("cvss_score"),
+            cvss_vector_override=data.get("cvss_vector", "") or "",
             reproduction_steps=list(data.get("reproduction_steps", []) or []),
             source=data.get("source", "scanner"),
             agent_verified=bool(data.get("agent_verified", False)),
@@ -463,11 +497,12 @@ class Finding:
 
     @property
     def cvss_vector(self) -> str:
-        return _cvss_for(self.check_type)[0]
+        return self.cvss_vector_override or _cvss_for(self.check_type)[0]
 
     @property
     def cvss_score(self) -> float:
-        return _cvss_for(self.check_type)[1]
+        return self.cvss_score_override if self.cvss_score_override is not None \
+            else _cvss_for(self.check_type)[1]
 
     def to_dict(self) -> dict:
         from wscan.compliance_map import get_refs
@@ -569,6 +604,35 @@ def injection_point_from_finding(finding: Finding) -> Optional[InjectionPoint]:
                 f"json_body provenance を復元できません: {exc!r}"
             ) from exc
     raise ProvenanceError(f"未知の injection_location です: {location!r}")
+
+
+class PageDocumentUnavailable(RuntimeError):
+    """page 観測系スキャナが対象 document を取得できなかった（transport 失敗＋capture 無し）。
+
+    header 観測系（clickjacking/security_headers）はこれを送出し、engine の page-level except に
+    捕捉させて **checkpoint を完了扱いにしない**（[] を返すと tested/完了で恒久 skip となり resume が
+    再試行できない・Codex #145 P2 round15）。3xx 等の legitimate NOT_REACHED では送出しない。
+    """
+
+
+class _DirectResponse:
+    """``BaseScanner._get`` が返す httpx.Response 互換の最小レスポンス。
+
+    Playwright ``APIResponse`` を正規化し、観測系スキャナ/``_response_pair``/``verify_finding``
+    が使う ``status_code`` / ``headers``（小文字キー dict）/ ``text``（取得済み str）/ ``url`` を提供する。
+    """
+
+    __slots__ = ("status_code", "headers", "text", "url", "body_unavailable")
+
+    def __init__(self, status_code: int, headers: dict, text: str, url: str,
+                 body_unavailable: bool = False):
+        self.status_code = status_code
+        self.headers = headers
+        self.text = text
+        self.url = url
+        # 本文の取得/復号が完全に失敗した（text() も body() も失敗）ことを示す。空本文の 200 を
+        # 「本文なし」と取り違えないための信号（content 観測系が PageDocumentUnavailable を投げる）。
+        self.body_unavailable = body_unavailable
 
 
 class BaseScanner(ABC):
@@ -1444,14 +1508,451 @@ class BaseScanner(ABC):
         have loaded scripts, stylesheets, or images.  Falling back to the latest
         network pair can make header/cookie findings describe an asset instead
         of the document URL.
+
+        ``--concurrency>1`` では各 worker が私的 ``NetworkCapture`` を持つため、__init__ 捕捉の
+        メイン ``self.browser`` ではなく **呼び出し時の worker-aware** ``self.engine.browser`` から
+        network を解決する（Codex #145 round9）。serial 時は engine.browser がメインを返すため挙動不変。
         """
-        network = getattr(self.browser, "network", None)
+        browser = getattr(self.engine, "browser", None) or getattr(self, "browser", None)
+        network = getattr(browser, "network", None)
         if not network:
             return {}
         latest_for_url = getattr(network, "latest_for_url", None)
         if latest_for_url:
             return latest_for_url(url, match_query=False) or {}
         return network.latest() or {}
+
+    @staticmethod
+    def _followable_redirect(src_url: str, dst_url: str) -> bool:
+        """redirect を追従してよいか（same-host のみ・http→https の canonical upgrade は許可）。
+
+        別ホストへの redirect は追従しない（初期 URL にしかスコープされない認証ヘッダ/Cookie が
+        別 origin へ漏れる・Codex #145 P1）。同一ホストなら:
+          - 同一スキーム: 既定ポート（80/443）と明示ポートを同一視して追従（P2d：http://h →
+            http://h:80 の canonical redirect を cross-origin 誤判定しない）。
+          - スキーム差: http→https の **canonical upgrade（既定ポート 80→443）のみ**許可（攻撃対象が
+            canonical HTTPS へ 301 する通常ケース）。非既定ポート（http://h:8080 → https://h:8443）は
+            同一ホストでも別サービスの可能性があり、scoped auth を別 origin へ晒しうるため追従しない
+            （Codex #145 P1 round5）。https→http のダウングレードも追従しない。
+        """
+        from urllib.parse import urlparse
+        s, d = urlparse(src_url), urlparse(dst_url)
+        s_host = (s.hostname or "").lower()
+        d_host = (d.hostname or "").lower()
+        if not d_host or s_host != d_host:
+            return False
+        s_scheme = (s.scheme or "").lower()
+        d_scheme = (d.scheme or "").lower()
+        default = {"http": 80, "https": 443}
+        if s_scheme == d_scheme:
+            s_port = s.port if s.port is not None else default.get(s_scheme)
+            d_port = d.port if d.port is not None else default.get(d_scheme)
+            return s_port == d_port
+        if s_scheme == "http" and d_scheme == "https":
+            # 既定ポート同士（http:80 → https:443）の canonical upgrade のみ。非既定ポートの
+            # upgrade は別サービスへの credential 露出になりうるため承認しない。
+            s_port = s.port if s.port is not None else 80
+            d_port = d.port if d.port is not None else 443
+            return s_port == 80 and d_port == 443
+        return False
+
+    async def _get(self, url: str):
+        """対象 URL の GET レスポンスを直接取得する（page 観測系スキャナ共有）。
+
+        ブラウザの network capture（current_page_pair）は latest() フォールバックで別リクエスト
+        （asset/別ページ）の pair を返し、ヘッダ観測系（clickjacking/security_headers 等）が誤った
+        ヘッダを見て FP/FN を出しうる。対象を直接 GET することで実ヘッダ/本文を確実に得る。
+
+        取得は **Playwright browser context の APIRequestContext（``context.request``）** で行う。
+        これは browser context と同じ Cookie jar を使い、リクエスト Cookie の送出と応答 ``Set-Cookie``
+        の反映（session rotation・削除・httpOnly/sameSite 保持）を native に処理する。そのため httpx
+        の別クライアントで Cookie を再現していた処理（jar 構築・scoping・単一ラベル/IPv6・書き戻し）が
+        一切不要になり、監査 GET が session を rotation させても browser と desync しない
+        （Codex #145 round12。従来の httpx 実装は round2〜11 で Cookie 忠実性の指摘が続いていた）。
+
+        redirect は ``max_redirects=0`` で自動追従を無効化し、**same-host のみ手動追従**する（別ホスト/
+        ダウングレードへ認証ヘッダを漏らさない）。認証ヘッダは in-scope の元 url から一度だけ算出して
+        全 hop で再利用し（承認 upgrade でも scoped auth を落とさない）、Chromium と同じ document
+        request ヘッダ（UA/Accept/Sec-Fetch）を付与する（UA/Accept/Fetch-Metadata で応答を出し分ける
+        origin/WAF の変種掴みを防ぐ）。追従しきれずなお 3xx なら _response_pair 側で document 扱いしない。
+
+        APIRequestContext が使えない（テストダブル等）ときは例外を投げ、_response_pair を network
+        fallback へ倒す。
+        """
+        from urllib.parse import urljoin, urlparse
+
+        browser = getattr(self.engine, "browser", None) or getattr(self, "browser", None)
+        ctx = getattr(browser, "_context", None)
+        request_ctx = getattr(ctx, "request", None)
+        if request_ctx is None or not hasattr(request_ctx, "get"):
+            raise RuntimeError("browser APIRequestContext unavailable")
+
+        _has_auth = hasattr(self.engine, "auth_headers")
+        # 認証ヘッダは in-scope の元 url から算出し全 same-host hop で再利用（承認 upgrade でも
+        # scoped credential を落とさない）。include_cookie=False で global engine.cookies を生 Cookie
+        # ヘッダとして載せない（Cookie は APIRequestContext の共有 jar が native に扱う）。
+        base_auth = (
+            dict(self.auth_headers_for_url(url, include_cookie=False))
+            if _has_auth
+            else None
+        )
+        # Chromium navigation と同じ document request ヘッダ（UA/Accept/Fetch Metadata）を再現。
+        browser_headers: dict = {}
+        _ua = getattr(browser, "DEFAULT_USER_AGENT", "") or ""
+        if _ua:
+            browser_headers["User-Agent"] = _ua
+            browser_headers["Accept"] = (
+                "text/html,application/xhtml+xml,application/xml;q=0.9,"
+                "image/avif,image/webp,*/*;q=0.8"
+            )
+            browser_headers["Accept-Language"] = "en-US,en;q=0.9"
+            browser_headers["Sec-Fetch-Site"] = "none"
+            browser_headers["Sec-Fetch-Mode"] = "navigate"
+            browser_headers["Sec-Fetch-User"] = "?1"
+            browser_headers["Sec-Fetch-Dest"] = "document"
+
+        origin_host = (urlparse(url).hostname or "").lower()
+
+        def _headers_for(hop_url: str) -> dict:
+            # 認証ヘッダは same-host hop（承認 upgrade 含む）では in-scope 元 url の scoped auth を
+            # 再利用（round4: upgrade 先が header-scope 外でも同一 host なら落とさない）。scope 承認の
+            # **別ホスト** hop（bare→www 双方 target 等）では、その host の scoped headers を再計算する
+            # （元 host のヘッダを別 host へ送らない・Codex #145 round13）。生成ヘッダは case-insensitive
+            # に auth で置換する（Codex #145 round11）。
+            headers = dict(browser_headers)
+            if not _has_auth:
+                return headers
+            hop_host = (urlparse(hop_url).hostname or "").lower()
+            auth = base_auth if hop_host == origin_host else dict(
+                self.auth_headers_for_url(hop_url, include_cookie=False)
+            )
+            if auth:
+                _bl = {k.lower() for k in auth}
+                headers = {k: v for k, v in headers.items() if k.lower() not in _bl}
+                headers.update(auth)
+            return headers
+
+        # --timeout（秒）を Playwright の ms へ渡す。未設定/0 は Playwright 既定に委ねる。
+        # 従来は set_default_timeout が page にしか効かず context.request は 30s 固定だった
+        # （低 timeout でも page 毎に 2 回 stall、30s 超では正当な遅延応答が失敗）（Codex #145 round13）。
+        get_kwargs: dict = {"max_redirects": 0}
+        try:
+            _t = float(getattr(self.engine, "timeout", 0) or 0)
+            if _t > 0:
+                get_kwargs["timeout"] = _t * 1000.0
+        except Exception:
+            pass
+
+        current = url
+        response = None
+        try:
+            # 最初の GET も try 内に入れ、cookie を変異させ得る送信は必ず finally の再同期に載せる。
+            response = await request_ctx.get(current, headers=_headers_for(current) or None, **get_kwargs)
+            hops = 0
+            while response.status in (301, 302, 303, 307, 308) and hops < 5:
+                loc = response.headers.get("location")
+                if not loc:
+                    break
+                target = urljoin(current, loc)
+                if not (
+                    self._followable_redirect(current, target)
+                    or self._redirect_target_in_scope(target)
+                ):
+                    break  # same-host/承認 upgrade/明示 scope 以外は追従しない（認証情報の漏洩防止）
+                await self._dispose_response(response)  # 中間 response の body を解放
+                hops += 1
+                current = target
+                response = await request_ctx.get(
+                    current, headers=_headers_for(current) or None, **get_kwargs
+                )
+            body_unavailable = False
+            try:
+                text = await response.text()
+            except Exception:
+                # 非 UTF-8 の HTML/JS 本文で response.text() が失敗しても本文を捨てない
+                # （SRI/secret_leak が非 UTF-8 バンドルの秘密/外部 script を見逃す FN になる）。
+                # network-capture 経路（browser.py）と同じく body() バイト列を safe_decode する（Codex #147 P2）。
+                text = ""
+                try:
+                    from wscan.textio import safe_decode
+                    text = safe_decode(await response.body(), limit=50000)
+                except Exception:
+                    # text() も body() も失敗＝本文を得られない。body_unavailable を立てて content
+                    # 観測系（_document_body 呼び出し側）に PageDocumentUnavailable を投げさせる。
+                    # ここでは note を刻まない: この共有 GET は header 監査(clickjacking/security_headers)が
+                    # 先に呼ぶことがあり、本文失敗を header-only check の degradation として誤計上すると
+                    # _degraded_checks がその check の tested(TN)行まで NOT_REACHED 化する。note は本文を
+                    # 実際に要求する _document_body 側で content scanner 名義で刻む（Codex #147）。
+                    text = ""
+                    body_unavailable = True
+            direct = _DirectResponse(
+                status_code=int(response.status),
+                headers=dict(response.headers),  # Playwright は小文字キーの dict を返す
+                text=text[:50000],
+                url=str(getattr(response, "url", current) or current),
+                body_unavailable=body_unavailable,
+            )
+            self._record_probe_status(direct)
+            return direct
+        finally:
+            # 監査 GET が Playwright context の Cookie を rotation/削除させた可能性があるため、
+            # engine.cookies を browser context（source of truth）から再同期する。後続の httpx ベース
+            # 直接呼び出し（CORSScanner._get_with_origin 等が使う engine.cookies）が stale セッションを
+            # 送らないようにする（Codex #145 P1 round14）。**成功・失敗どちらでも** finally で行うのが要点で、
+            # 中間 redirect hop が cookie を変異させた後に次 hop が例外（timeout 等）を投げると、成功パス
+            # だけの同期では engine.cookies に無効トークンが残り CORS 等が未認証応答に走る（Codex #145 P2 round16）。
+            # engine の既存同期機構を使う（自作しない）。ただし engine.cookies は共有なので、並列
+            # (--concurrency>1)では別 worker の検査中に書き換える競合になる。_attack_one_page の
+            # per-page cookie 同期と同じく **直列時のみ**行う（並列は既存の共有 cookie 前提・round15）。
+            _sync = getattr(self.engine, "_sync_cookies_from_browser", None)
+            if callable(_sync) and (getattr(self.engine, "concurrency", 1) or 1) <= 1:
+                try:
+                    await _sync(browser, url)
+                except Exception:
+                    pass
+            # APIResponse は dispose するまで body を保持する。証拠を _DirectResponse へ複写後に
+            # 最終 response を必ず解放し、多ページ/大 document でのメモリ蓄積を防ぐ（Codex #145 round13）。
+            if response is not None:
+                await self._dispose_response(response)
+
+    def _redirect_target_in_scope(self, target: str) -> bool:
+        """redirect 先が engine の明示 scope（配置済み attack/access target 由来の origin）か。"""
+        try:
+            origins = getattr(self.engine, "_header_scope_origins", None)
+            if not origins:
+                return False
+            from wscan.header_scope import headers_allowed_for_url
+            return headers_allowed_for_url(target, origins)
+        except Exception:
+            return False
+
+    @staticmethod
+    async def _dispose_response(response) -> None:
+        """APIResponse の body を解放する（メモリ蓄積防止・Codex #145 round13）。例外は無視。"""
+        try:
+            disp = getattr(response, "dispose", None)
+            if callable(disp):
+                await disp()
+        except Exception:
+            pass
+
+    @staticmethod
+    def _reject_redirect_pair(pair: dict, url: str) -> dict:
+        """captured pair が 3xx redirect なら document 扱いせず status なし pair を返す。
+
+        直接 GET が例外を投げ network fallback（current_page_pair）へ倒れたとき、captured pair が
+        3xx（別リクエストの redirect 等）だと観測系が「document のヘッダ欠落」と誤監査して FP を
+        出す。直接 GET 経路と同じ 3xx ガードを fallback にも適用する（Codex #145 P2 round6）。
+        """
+        resp = (pair or {}).get("response") or {}
+        status = resp.get("status")
+        try:
+            is_redirect = status is not None and 300 <= int(status) < 400
+        except (TypeError, ValueError):
+            is_redirect = False
+        if not is_redirect:
+            return pair
+        return {
+            "request": (pair or {}).get("request") or {"url": url, "method": "GET"},
+            "response": {"url": resp.get("url", url), "headers": {}, "body": ""},
+        }
+
+    async def _response_pair(self, url: str) -> dict:
+        """対象ページの request/response pair を返す（page 観測系スキャナ共有・per-URL replay 1 回）。
+
+        clickjacking / security_headers / sri / secret_leak は同一ページのヘッダを各自監査するため、
+        素朴には 1 ページに複数回 GET(replay) してしまう。副作用のある GET（logout/action リンク・
+        token 消費など 2xx を返すもの）を read-only のはずのヘッダ検査で二重に叩かないよう、engine 単位の
+        per-URL キャッシュで **1 ページ 1 replay** を共有する（Codex #145 P2 round18）。同一ページを続けて
+        走る page 観測系スキャナ群がこのキャッシュを共有する。cookie 再同期も 1 回に減る。
+        （replay を完全に無くす＝ブラウザ navigation 応答の per-URL 保存は別タスク＝verify 側の共有も含む。）
+        """
+        raw = await self._raw_document_cached(url)
+        if not raw:
+            return {}  # 完全な取得失敗（transient/total failure）→ scanner が PageDocumentUnavailable
+        status = raw.get("status")
+        # header 監査は「2xx の描画された document」だけを対象にする。直接 GET は replay であり、
+        # one-time link / nonce 消費 URL では 2 回目の GET が 3xx や 401/404/410 等を返し得る。その
+        # 非 2xx 応答の欠落ヘッダ（XFO/CSP 等）を監査すると FP になるため status を落として NOT_REACHED。
+        # transient（408/429/5xx）は {} で PageDocumentUnavailable→resume 再試行（round17/18/19）。
+        if status is None or not (200 <= int(status) < 300):
+            try:
+                if status is not None and int(status) in _TRANSIENT_REPLAY_STATUSES:
+                    return {}
+            except (TypeError, ValueError):
+                pass
+            return {
+                "request": {"url": url, "method": "GET"},
+                "response": {"url": raw.get("url", url), "headers": {}, "body": ""},
+            }
+        return {
+            "request": {"url": url, "method": "GET"},
+            "response": {
+                "url": raw.get("url", url),
+                "status": int(status),
+                "headers": raw.get("headers", {}),
+                "body": raw.get("body", ""),
+            },
+        }
+
+    async def _document_body(self, url: str, *, allow_non_2xx: bool = True,
+                             html_only: bool = False) -> str:
+        """content 観測系スキャナ（sri/secret_leak）用に対象応答の**本文**を返す。
+
+        `_response_pair`（header 監査用）は非 2xx を本文空の statusless に潰すが、secret_leak は
+        401/403/404/500 等の error/auth 応答本文に漏れた秘密も走査する必要がある（`allow_non_2xx=True`）。
+        一方 **SRI は「ブラウザが実際に描画した document」= 2xx のみを監査すべき**で、恒久非 2xx の
+        error テンプレート本文（integrity 無しの外部 script を含み得る）を監査すると元 URL に対する
+        FP になる。そこで `allow_non_2xx=False` のときは恒久非 2xx を NOT_REACHED（本文 ""）にする。
+        transient（408/429/5xx）は、**本文があり allow_non_2xx=True（secret_leak）なら本文を返して
+        走査する**（500 のスタックトレース等に漏れた秘密を取りこぼさない・Codex #147）。本文が空なら
+        走査対象が無いので `PageDocumentUnavailable` を送出して resume 再試行へ回す。本文の取得自体に
+        失敗した（body_unavailable）場合も空本文と取り違えず必ず送出する。取得は header 監査と同じ
+        per-URL raw キャッシュを共有し 1 ページ 1 replay を保つ。
+        """
+        raw = await self._raw_document_cached(url)
+        if not raw:
+            self._record_scan_note(f"transport_error:{self.CHECK_TYPE}:no_response")
+            raise PageDocumentUnavailable(
+                f"{self.CHECK_TYPE}: 対象 document を取得できませんでした: {url}"
+            )
+        body = raw.get("body", "") or ""
+        # 本文の取得/復号が完全に失敗＝空本文と取り違えない（FN 防止）。必ず resume へ回す。
+        if raw.get("body_unavailable"):
+            self._record_scan_note(f"transport_error:{self.CHECK_TYPE}:body_unavailable")
+            raise PageDocumentUnavailable(
+                f"{self.CHECK_TYPE}: 本文を取得できませんでした: {url}"
+            )
+        status = raw.get("status")
+        try:
+            if status is not None and int(status) in _TRANSIENT_REPLAY_STATUSES:
+                # transient でも、走査対象の本文があり content 監査（allow_non_2xx=True）なら走査する。
+                if allow_non_2xx and body:
+                    return body
+                # SRI 等(html_only): ブラウザは 5xx/429 でも HTML を描画し integrity 無しの外部 script を
+                # 読み込むため、監査可能な HTML 本文があれば 2xx 同様に監査する。これを resume 用に
+                # 投げ続けると、恒久的に失敗する endpoint は毎回再試行されるだけで一度も監査されない
+                # （Codex #147）。body が無い/非 HTML のときだけ resume へ回す。
+                if html_only and body and _body_looks_like_html(
+                        body, raw.get("headers"), is_2xx=False):
+                    return body
+                self._record_scan_note(f"transport_error:{self.CHECK_TYPE}:transient")
+                raise PageDocumentUnavailable(
+                    f"{self.CHECK_TYPE}: 一時的な取得失敗（{status}）: {url}"
+                )
+        except (TypeError, ValueError):
+            pass
+        if html_only:
+            # SRI 等: ステータスではなく「ブラウザが描画する HTML document か」で判定する。
+            # 2xx に限ると、ブラウザが描画し外部 script を読み込む custom 401/404 HTML を見逃す
+            # （status だけでは本文が描画されないとは限らない・Codex #147）。HTML 以外（JSON API の
+            # error・生 asset 等）は NOT_REACHED（本文なし）として誤検知を避ける。
+            is_2xx = False
+            try:
+                is_2xx = status is not None and (200 <= int(status) < 300)
+            except (TypeError, ValueError):
+                is_2xx = False
+            return body if _body_looks_like_html(
+                body, raw.get("headers"), is_2xx=is_2xx) else ""
+        return body
+
+    async def _raw_document_cached(self, url: str) -> Optional[dict]:
+        """対象 URL の生取得結果 ``{"status","headers","body","url"}`` を per-URL キャッシュ付きで返す。
+
+        header 観測系（clickjacking/security_headers）と content 観測系（sri/secret_leak）が
+        **同一ページの取得を 1 回だけ共有**するためのチョークポイント（副作用 GET を read-only ヘッダ
+        検査で二重に叩かない・Codex #145 P2 round18）。ポリシー（2xx 限定/本文保持）は各呼び出し側が
+        被せる。完全な取得失敗は ``None``。（replay 完全廃止＝ブラウザ navigation 応答の保存は別タスク。）
+        """
+        cache = getattr(self.engine, "_page_obs_raw_cache", None)
+        if cache is None:
+            try:
+                cache = {}
+                self.engine._page_obs_raw_cache = cache
+            except Exception:
+                cache = None
+        if cache is None:
+            return await self._compute_raw_document(url)
+        if url in cache:
+            entry = cache[url]
+            # in-flight（別コルーチンが取得中）なら同じ Future を待って GET を共有する
+            # （並列 page 観測系スキャナが同一 URL を二重 GET しない・Codex #147）。値なら即返す。
+            if isinstance(entry, asyncio.Future):
+                return await entry
+            return entry
+        # ページ数に比例した無制限成長を防ぐ簡易上限（並列 worker の in-flight を十分に覆う）。
+        if len(cache) > 64:
+            cache.clear()
+        fut: asyncio.Future = asyncio.get_event_loop().create_future()
+        cache[url] = fut  # in-flight マーカー（後続の同一 URL はこれを await）
+        try:
+            raw = await self._compute_raw_document(url)
+        except Exception as exc:
+            cache.pop(url, None)  # 失敗は毒キャッシュにしない
+            if not fut.done():
+                fut.set_exception(exc)
+            raise
+        cache[url] = raw  # Future を結果（dict/None）へ置換
+        if not fut.done():
+            fut.set_result(raw)
+        return raw
+
+    async def _compute_raw_document(self, url: str) -> Optional[dict]:
+        """直接 GET を優先し、失敗時のみ network capture へ fallback して生の応答を正規化する。
+
+        戻り値は ``{"status": int|None, "headers": dict, "body": str, "url": str}``、完全な取得失敗は
+        ``None``。status/本文の解釈（2xx 限定・非2xx 本文保持・transient）は呼び出し側のポリシーに委ねる。
+        """
+        try:
+            response = await self._get(url)
+            return {
+                "status": response.status_code,
+                "headers": dict(response.headers),
+                "body": (response.text or "")[:50000],
+                "url": str(getattr(response, "url", url) or url),
+                "body_unavailable": bool(getattr(response, "body_unavailable", False)),
+            }
+        except Exception:
+            pair = self.current_page_pair(url)
+            resp = (pair or {}).get("response") or {}
+            if not resp:
+                return None
+            # capture 側（NetworkCapture.enrich_response）は本文を読めなかったとき body キー自体を
+            # 欠落させる。これを空本文と取り違えず body_unavailable として伝播し、content 観測系に
+            # PageDocumentUnavailable を投げさせる（direct GET 失敗と同じ扱い・Codex #147）。
+            body_missing = "body" not in resp
+            return {
+                "status": resp.get("status"),
+                "headers": resp.get("headers", {}) or {},
+                "body": resp.get("body", "") or "",
+                "url": resp.get("url", url),
+                "body_unavailable": body_missing,
+            }
+
+    @staticmethod
+    def _apply_capture_status_policy(pair: dict, url: str) -> dict:
+        """captured pair の status に direct-GET と同じ document 判定を適用する（Codex #145 P2 round19）。
+
+        2xx=そのまま監査、transient(408/429/5xx)=空 ``{}``（→ scanner が PageDocumentUnavailable→
+        resume 再試行）、その他の非 2xx（3xx・恒久 4xx）=status なし pair（NOT_REACHED）、status 無し=
+        そのまま（既存の観測失敗判定に委ねる）。``_reject_redirect_pair`` の 3xx 限定ガードを一般化したもの。
+        """
+        resp = (pair or {}).get("response") or {}
+        status = resp.get("status")
+        if status is None:
+            return pair
+        try:
+            s = int(status)
+        except (TypeError, ValueError):
+            return pair
+        if 200 <= s < 300:
+            return pair
+        if s in _TRANSIENT_REPLAY_STATUSES:
+            return {}
+        return {
+            "request": (pair or {}).get("request") or {"url": url, "method": "GET"},
+            "response": {"url": resp.get("url", url), "headers": {}, "body": ""},
+        }
 
     async def record_finding(
         self,
@@ -1469,6 +1970,8 @@ class BaseScanner(ABC):
         evidence_details: Optional[dict] = None,
         reproduction_steps: Optional[list[str]] = None,
         injection_point: Optional[InjectionPoint] = None,
+        cvss_score: Optional[float] = None,
+        cvss_vector: str = "",
     ) -> Finding:
         """Create and record a finding."""
         if screenshot_b64 is None:
@@ -1538,6 +2041,8 @@ class BaseScanner(ABC):
             confidence=confidence,
             evidence_type=evidence_type or self.CHECK_TYPE,
             evidence_details=evidence_details or {},
+            cvss_score_override=cvss_score,
+            cvss_vector_override=cvss_vector or "",
             reproduction_steps=reproduction_steps or self._default_reproduction_steps(
                 url, field_name, payload
             ),

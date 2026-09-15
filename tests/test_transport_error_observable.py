@@ -6,11 +6,13 @@
 落ちても「完全なスキャン」と誤表示してしまう（Codex #101 P1）。修正後は XSS と同様に
 ``transport_error:<check>`` を ``wave_errors`` へ記録する（挙動は不変）。
 """
+import asyncio
 import unittest
 
 import pytest
 
 from wscan.scanners import SCANNERS
+from wscan.scanners.base import PageDocumentUnavailable
 
 
 class _BoomBrowser:
@@ -385,6 +387,92 @@ class UrlParamDeliveryFlagTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(await self._run(nav_ok=True, nav_status=200, prior=False))
 
 
+class ClickjackingHeaderEvidenceTests(unittest.IsolatedAsyncioTestCase):
+    """clickjacking は対象ページの実ヘッダ（直接 GET）で framing 保護を判定する（0034 FP 修正）。
+
+    XFO: DENY または CSP frame-ancestors があれば安全（finding なし）。current_page_pair の
+    latest() フォールバックで別リクエストの誤ヘッダを掴んで安全ページを FP にしない。
+    """
+
+    def _scanner(self):
+        engine = _FakeEngine()
+        engine.browser.network = None
+        return engine, SCANNERS["clickjacking"](engine)
+
+    async def _run(self, resp_headers):
+        engine, scanner = self._scanner()
+
+        async def _pair(url):
+            return {"request": {"url": url}, "response": {"status": 200, "headers": resp_headers}}
+
+        scanner._response_pair = _pair
+        recorded = []
+
+        async def _rec(**kw):
+            recorded.append(kw)
+            return object()
+
+        scanner.record_finding = _rec
+        out = await scanner.scan_page("http://x/portal/embed")
+        return recorded, engine
+
+    async def test_xfo_deny_is_safe(self):
+        recorded, _ = await self._run({"X-Frame-Options": "DENY"})
+        self.assertFalse(recorded)  # 保護あり＝finding なし（FP を出さない）
+
+    async def test_csp_frame_ancestors_is_safe(self):
+        recorded, _ = await self._run(
+            {"Content-Security-Policy": "default-src 'self'; frame-ancestors 'none'"}
+        )
+        self.assertFalse(recorded)
+
+    async def test_full_secure_headers_is_safe(self):
+        # /portal/embed-safe 相当（XFO DENY と frame-ancestors 'none' 両方）＝安全。
+        recorded, _ = await self._run(
+            {"X-Frame-Options": "DENY",
+             "Content-Security-Policy": "default-src 'self'; frame-ancestors 'none'"}
+        )
+        self.assertFalse(recorded)
+
+    async def test_no_framing_protection_is_vulnerable(self):
+        recorded, _ = await self._run({"Content-Security-Policy": "default-src 'self'"})
+        self.assertTrue(recorded)  # framing 保護なし＝finding
+
+    async def test_no_response_records_transport_error(self):
+        engine, scanner = self._scanner()
+
+        async def _empty(url):
+            return {}
+
+        scanner._response_pair = _empty
+        # 完全な取得失敗（response 証拠なし）は transport_error を刻んだ上で
+        # PageDocumentUnavailable を送出し、engine の error 経路（checkpoint 未完了→
+        # resume 再試行）へ載せる（Codex #145 P2 round15）。[] 返しだと tested 完了で恒久 skip。
+        with self.assertRaises(PageDocumentUnavailable):
+            await scanner.scan_page("http://x/portal/embed")
+        self.assertTrue(
+            any(e.startswith("transport_error:clickjacking:") for e in engine.wave_errors),
+            engine.wave_errors,
+        )
+
+    async def test_statusless_pair_returns_empty_without_raising(self):
+        # response は非空だが status 欠落（未消費の 3xx 等 legitimate NOT_REACHED）は
+        # transport_error を刻みつつ [] を返す（例外にしない）。完全失敗（raise）と
+        # 区別し続けることを固定する（Codex #145 P2 round15）。
+        engine, scanner = self._scanner()
+
+        async def _statusless(url):
+            return {"request": {"url": url}, "response": {"headers": {}}}
+
+        scanner._response_pair = _statusless
+        out = await scanner.scan_page("http://x/portal/embed")
+        self.assertEqual(out, [])
+        self.assertTrue(
+            any(e.startswith("transport_error:clickjacking:") for e in engine.wave_errors),
+            engine.wave_errors,
+        )
+
+
 class SecurityHeadersFetchEvidenceTests(unittest.IsolatedAsyncioTestCase):
     """security_headers は「レスポンス証拠の欠如」で観測失敗を判定し、空ヘッダは監査する
     （Codex #142 P1/P2）。空レスポンス→transport_error、valid だが空ヘッダ→監査（note なし）。
@@ -403,8 +491,10 @@ class SecurityHeadersFetchEvidenceTests(unittest.IsolatedAsyncioTestCase):
             return {}  # レスポンス証拠なし（fetch 失敗）
 
         scanner._response_pair = _empty
-        out = await scanner.scan_page("http://x/legacy/status")
-        self.assertEqual(out, [])
+        # 完全な取得失敗は transport_error を刻んだ上で PageDocumentUnavailable を送出する
+        # （Codex #145 P2 round15。[] 返しだと checkpoint tested 完了で resume 再試行されない）。
+        with self.assertRaises(PageDocumentUnavailable):
+            await scanner.scan_page("http://x/legacy/status")
         self.assertTrue(
             any(e.startswith("transport_error:security_headers:") for e in engine.wave_errors),
             engine.wave_errors,
@@ -432,6 +522,768 @@ class SecurityHeadersFetchEvidenceTests(unittest.IsolatedAsyncioTestCase):
             any(e.startswith("transport_error:security_headers:") for e in engine.wave_errors),
             engine.wave_errors,
         )
+
+    async def test_non_html_asset_is_skipped(self):
+        # 明示的な非 HTML（JS バンドル等）は document セキュリティヘッダ監査の対象外＝FP を出さない
+        # （clickjacking と同じガード・Codex #147）。
+        engine, scanner = self._scanner()
+
+        async def _js(url):
+            return {"request": {"url": url},
+                    "response": {"status": 200,
+                                 "headers": {"Content-Type": "application/javascript"}}}
+
+        scanner._response_pair = _js
+        recorded = []
+
+        async def _rec(**kw):
+            recorded.append(kw)
+            return object()
+
+        scanner.record_finding = _rec
+        out = await scanner.scan_page("http://x/static/vendor.js")
+        self.assertEqual(out, [])
+        self.assertFalse(recorded, "non-HTML asset must not produce missing-header findings")
+
+
+class FollowableRedirectTests(unittest.IsolatedAsyncioTestCase):
+    """_get の redirect 追従判定（Codex #145 P1）。same-host のみ・http→https upgrade は許可。"""
+
+    def _cls(self):
+        return SCANNERS["clickjacking"]
+
+    def test_same_host_same_scheme_follows(self):
+        f = self._cls()._followable_redirect
+        self.assertTrue(f("http://h/a", "http://h/b"))
+
+    def test_default_port_equals_explicit(self):
+        # http://h → http://h:80 は同一（P2d：canonical redirect を cross-origin 誤判定しない）。
+        f = self._cls()._followable_redirect
+        self.assertTrue(f("http://h/a", "http://h:80/a"))
+        self.assertTrue(f("https://h/a", "https://h:443/a"))
+
+    def test_http_to_https_upgrade_follows(self):
+        # 攻撃対象が canonical HTTPS へ 301 する通常ケースを追従する（P1）。
+        f = self._cls()._followable_redirect
+        self.assertTrue(f("http://h/page", "https://h/page"))
+        # 既定ポート明示（80→443）も canonical upgrade として追従。
+        self.assertTrue(f("http://h:80/page", "https://h:443/page"))
+
+    def test_non_default_port_upgrade_blocked(self):
+        # http://h:8080 → https://h:8443 は別サービスの可能性があり追従しない（P1 round5）。
+        f = self._cls()._followable_redirect
+        self.assertFalse(f("http://h:8080/page", "https://h:8443/page"))
+        self.assertFalse(f("http://h:8080/page", "https://h/page"))
+        self.assertFalse(f("http://h/page", "https://h:8443/page"))
+
+    def test_https_to_http_downgrade_blocked(self):
+        f = self._cls()._followable_redirect
+        self.assertFalse(f("https://h/page", "http://h/page"))
+
+    def test_different_host_blocked(self):
+        # 別ホストへは追従しない（認証情報の漏洩防止）。
+        f = self._cls()._followable_redirect
+        self.assertFalse(f("http://h/a", "http://evil/a"))
+        self.assertFalse(f("http://h/a", "https://evil/a"))
+
+    def test_different_port_same_scheme_blocked(self):
+        f = self._cls()._followable_redirect
+        self.assertFalse(f("http://h:8000/a", "http://h:9000/a"))
+
+
+class RejectRedirectPairTests(unittest.TestCase):
+    """_response_pair の fallback（current_page_pair）が返す 3xx を document 扱いしない（P2 round6）。"""
+
+    def _cls(self):
+        return SCANNERS["clickjacking"]
+
+    def test_redirect_pair_status_stripped(self):
+        f = self._cls()._reject_redirect_pair
+        pair = {"request": {"url": "http://x/"},
+                "response": {"status": 302, "url": "http://x/", "headers": {"location": "/y"}}}
+        out = f(pair, "http://x/")
+        # status が消え headers も空＝観測系は NOT_REACHED 扱い。
+        self.assertNotIn("status", out["response"])
+        self.assertEqual(out["response"]["headers"], {})
+
+    def test_non_redirect_pair_unchanged(self):
+        f = self._cls()._reject_redirect_pair
+        pair = {"request": {"url": "http://x/"},
+                "response": {"status": 200, "url": "http://x/", "headers": {"x-frame-options": "DENY"}}}
+        self.assertIs(f(pair, "http://x/"), pair)
+
+    def test_missing_status_unchanged(self):
+        f = self._cls()._reject_redirect_pair
+        pair = {"response": {"headers": {}}}
+        self.assertIs(f(pair, "http://x/"), pair)
+
+    def test_empty_pair_unchanged(self):
+        f = self._cls()._reject_redirect_pair
+        self.assertEqual(f({}, "http://x/"), {})
+
+
+class CaptureStatusPolicyTests(unittest.TestCase):
+    """_apply_capture_status_policy は fallback の captured pair にも direct-GET と同じ
+    document status 方針を適用する（2xx=監査/transient=空/その他非2xx=NOT_REACHED・Codex #145 P2 round19）。"""
+
+    def _f(self):
+        return SCANNERS["clickjacking"]._apply_capture_status_policy
+
+    def test_2xx_capture_unchanged(self):
+        pair = {"request": {"url": "http://x/"},
+                "response": {"status": 200, "url": "http://x/", "headers": {"x-frame-options": "DENY"}}}
+        self.assertIs(self._f()(pair, "http://x/"), pair)
+
+    def test_permanent_non_2xx_capture_becomes_not_reached(self):
+        for status in (301, 401, 403, 404, 410):
+            with self.subTest(status=status):
+                pair = {"request": {"url": "http://x/"},
+                        "response": {"status": status, "url": "http://x/", "headers": {"a": "b"}}}
+                out = self._f()(pair, "http://x/")
+                self.assertNotIn("status", out["response"])
+                self.assertEqual(out["response"]["headers"], {})
+
+    def test_transient_capture_becomes_empty(self):
+        for status in (408, 429, 500, 502, 503, 504):
+            with self.subTest(status=status):
+                pair = {"request": {"url": "http://x/"},
+                        "response": {"status": status, "url": "http://x/", "headers": {}}}
+                self.assertEqual(self._f()(pair, "http://x/"), {})
+
+    def test_statusless_capture_unchanged(self):
+        pair = {"response": {"headers": {}}}
+        self.assertIs(self._f()(pair, "http://x/"), pair)
+
+
+class ResponsePairDocumentGuardTests(unittest.IsolatedAsyncioTestCase):
+    """_response_pair は直接 GET(replay)が **2xx（描画された document）** のときだけ status/headers を
+    載せる。恒久的な非 2xx（3xx・401/404/410 等の「この document ではない」）は status を落として
+    NOT_REACHED（[] 返し）。ただし transient（408/429/5xx）は空 pair を返して scanner に
+    PageDocumentUnavailable を投げさせ resume 再試行可能にする（Codex #145 P2 round17/18）。"""
+
+    def _scanner(self, response):
+        engine = _FakeEngine()
+        engine.browser = _APIBrowser(_FakeRequestCtx(response))
+        return engine, SCANNERS["clickjacking"](engine)
+
+    async def _pair_for(self, status, headers=None):
+        engine, scanner = self._scanner(
+            _FakeAPIResponse(status, headers or {"X-Frame-Options": "DENY"})
+        )
+        return await scanner._response_pair("http://app.test/doc")
+
+    async def test_2xx_is_audited(self):
+        pair = await self._pair_for(200)
+        self.assertEqual(pair["response"].get("status"), 200)
+        self.assertIn("x-frame-options", {k.lower() for k in pair["response"]["headers"]})
+
+    async def test_401_replay_is_not_reached(self):
+        pair = await self._pair_for(401)
+        self.assertNotIn("status", pair["response"])  # NOT_REACHED
+        self.assertEqual(pair["response"]["headers"], {})
+
+    async def test_404_replay_is_not_reached(self):
+        pair = await self._pair_for(404)
+        self.assertNotIn("status", pair["response"])
+        self.assertEqual(pair["response"]["headers"], {})
+
+    async def test_410_replay_is_not_reached(self):
+        pair = await self._pair_for(410)
+        self.assertNotIn("status", pair["response"])
+
+    async def test_transient_5xx_returns_empty_pair(self):
+        # 503/429/408 は transient＝空 pair（→ scanner が PageDocumentUnavailable→resume 再試行）。
+        for status in (503, 502, 500, 429, 408, 504):
+            with self.subTest(status=status):
+                pair = await self._pair_for(status)
+                self.assertEqual(pair, {})
+
+    async def test_clickjacking_does_not_flag_401_replay(self):
+        # 401 replay の欠落 XFO/CSP を framing 保護なしと誤報しない（回帰）。
+        engine, scanner = self._scanner(_FakeAPIResponse(401, {}))
+        findings = await scanner.scan_page("http://app.test/one-time")
+        self.assertEqual(findings, [])
+
+    async def test_clickjacking_raises_on_transient_replay(self):
+        # transient(503)は tested 完了にせず PageDocumentUnavailable で error 経路→resume 再試行。
+        engine, scanner = self._scanner(_FakeAPIResponse(503, {}))
+        with self.assertRaises(PageDocumentUnavailable):
+            await scanner.scan_page("http://app.test/flaky")
+
+    async def test_header_scanners_share_one_replay_per_url(self):
+        """clickjacking と security_headers が同一 engine・同一 URL で GET を 1 回だけ共有する
+        （副作用のある GET を read-only ヘッダ検査で二重に叩かない・Codex #145 P2 round18）。"""
+        engine = _FakeEngine()
+        ctx = _FakeRequestCtx(_FakeAPIResponse(200, {"X-Frame-Options": "DENY"}))
+        engine.browser = _APIBrowser(ctx)
+        cj = SCANNERS["clickjacking"](engine)
+        sh = SCANNERS["security_headers"](engine)
+        url = "http://app.test/logout"
+        pair_cj = await cj._response_pair(url)
+        pair_sh = await sh._response_pair(url)
+        # 2 スキャナが同一 URL を監査しても直接 GET は 1 回だけ（キャッシュ共有）。
+        self.assertEqual(len(ctx.calls), 1, ctx.calls)
+        self.assertEqual(pair_cj, pair_sh)
+        self.assertEqual(pair_cj["response"].get("status"), 200)
+        # 別 URL は別途 1 回 GET する。
+        await cj._response_pair("http://app.test/other")
+        self.assertEqual(len(ctx.calls), 2)
+
+    async def test_get_recovers_body_via_safe_decode_on_non_utf8(self):
+        # response.text() が非 UTF-8 で失敗しても body() バイト列を safe_decode して本文を保つ
+        # （SRI/secret_leak が非 UTF-8 バンドルを見逃す FN 防止・Codex #147 P2）。
+        leaked = "AKIA3SVBQ4XZ7KLMN2PQ"
+        raw = ('<script>var k="' + leaked + '";</script>').encode("utf-8") + b"\xff\xfe"
+        resp = _FakeAPIResponse(200, {"Content-Type": "text/html"}, text_raises=True, body_bytes=raw)
+        engine, scanner = self._scanner(resp)
+        out = await scanner._get("http://app.test/bundle.js")
+        self.assertIn(leaked, out.text)
+        # content scanner（secret_leak）が実際に検出できる。
+        engine2 = _FakeEngine()
+        engine2.browser = _APIBrowser(_FakeRequestCtx(
+            _FakeAPIResponse(200, {"Content-Type": "text/html"}, text_raises=True, body_bytes=raw)
+        ))
+        sl = SCANNERS["secret_leak"](engine2)
+
+        async def _rec(**kw):
+            return object()
+
+        sl.record_finding = _rec
+        findings = await sl.scan_page("http://app.test/bundle.js")
+        self.assertEqual(len(findings), 1)
+
+    async def test_clickjacking_skips_non_html_content_type(self):
+        # framing 保護は HTML document のみ対象。raw asset（.js 等・非 HTML content-type）は監査せず
+        # []（XFO/CSP 欠落を「未保護」と誤報しない・Codex #147 P2）。
+        engine, scanner = self._scanner(
+            _FakeAPIResponse(200, {"Content-Type": "text/plain; charset=utf-8"})
+        )
+        self.assertEqual(await scanner.scan_page("http://app.test/static/vendor.js"), [])
+
+    async def _audits(self, headers):
+        # record_finding をスタブし「guard を通過して監査（record_finding 到達）」を検証する
+        # （fake browser で record_finding 全体を回さずに済ませる）。
+        engine, scanner = self._scanner(_FakeAPIResponse(200, headers))
+        called = {"n": 0}
+
+        async def _rec(**kw):
+            called["n"] += 1
+            return object()
+
+        scanner.record_finding = _rec
+        out = await scanner.scan_page("http://app.test/page")
+        return called["n"], out
+
+    async def test_clickjacking_audits_html_without_protection(self):
+        # HTML document で framing 保護が無ければ従来どおり監査（content-type ガードの FN 非導入確認）。
+        n, out = await self._audits({"Content-Type": "text/html"})
+        self.assertEqual(n, 1)
+        self.assertEqual(len(out), 1)
+
+    async def test_clickjacking_audits_when_content_type_absent(self):
+        # content-type 欠落時は従来どおり監査（欠落で skip すると FN になるため）。
+        n, out = await self._audits({})
+        self.assertEqual(n, 1)
+        self.assertEqual(len(out), 1)
+
+    async def test_js_content_scanners_no_body_returns_empty(self):
+        # 本文が無ければ [] を返し live DOM へフォールバックしない（wrong-page FP/FN 防止・Codex #147 P2）。
+        for check in ("sri", "secret_leak"):
+            with self.subTest(check=check):
+                engine = _FakeEngine()
+                engine.browser = _APIBrowser(_FakeRequestCtx(_FakeAPIResponse(200, {}, text="")))
+                scanner = SCANNERS[check](engine)
+                self.assertEqual(await scanner.scan_page("http://app.test/x"), [])
+
+    async def test_transient_empty_body_raises_for_resume(self):
+        # 本文が無い transient(503) は走査対象が無いので PageDocumentUnavailable→resume（sri/secret_leak とも）。
+        for check in ("sri", "secret_leak"):
+            with self.subTest(check=check):
+                engine = _FakeEngine()
+                engine.browser = _APIBrowser(_FakeRequestCtx(_FakeAPIResponse(503, {}, text="")))
+                scanner = SCANNERS[check](engine)
+                with self.assertRaises(PageDocumentUnavailable):
+                    await scanner.scan_page("http://app.test/x")
+
+    async def test_sri_audits_transient_html_body(self):
+        # 5xx/429 でもブラウザは HTML を描画し integrity 無しの外部 script を読み込むため、
+        # 監査可能な HTML 本文があれば監査する（恒久失敗 endpoint を毎回 resume で再試行する
+        # だけで一度も監査しない問題を解消・Codex #147）。
+        html = ('<html><head><script src="https://cdn.jsdelivr.net/npm/jquery@3.6.0/x.js">'
+                '</script></head></html>')
+        engine = _FakeEngine()
+        engine.browser = _APIBrowser(_FakeRequestCtx(
+            _FakeAPIResponse(503, {"Content-Type": "text/html"}, text=html)))
+        scanner = SCANNERS["sri"](engine)
+
+        async def _rec(**kw):
+            return object()
+        scanner.record_finding = _rec
+        out = await scanner.scan_page("http://app.test/x")
+        self.assertEqual(len(out), 1)  # raise せず監査して finding 化
+
+    async def test_sri_raises_on_transient_non_html_body(self):
+        # transient の非 HTML（JSON API error 等）は SRI 監査対象でないので resume へ回す。
+        engine = _FakeEngine()
+        engine.browser = _APIBrowser(_FakeRequestCtx(
+            _FakeAPIResponse(503, {"Content-Type": "application/json"}, text='{"e":"x"}')))
+        scanner = SCANNERS["sri"](engine)
+        with self.assertRaises(PageDocumentUnavailable):
+            await scanner.scan_page("http://app.test/x")
+
+    async def test_secret_leak_scans_non_2xx_error_body(self):
+        # 400/401/403/404（恒久）に加え 500（transient）の error 本文に漏れた秘密も走査する
+        # （500 スタックトレース等の漏えいを取りこぼさない・Codex #147 Comment）。
+        leaked = "AKIA3SVBQ4XZ7KLMN2PQ"  # AWS Access Key ID 形式（AKIA+16、EXAMPLE 等を含まない）
+        for status in (400, 401, 403, 404, 500):
+            with self.subTest(status=status):
+                engine = _FakeEngine()
+                body = f'{{"error":"unauthorized","debug_key":"{leaked}"}}'
+                engine.browser = _APIBrowser(_FakeRequestCtx(_FakeAPIResponse(status, {}, text=body)))
+                scanner = SCANNERS["secret_leak"](engine)
+
+                async def _rec(**kw):
+                    return object()
+
+                scanner.record_finding = _rec
+                out = await scanner.scan_page("http://app.test/api")
+                self.assertEqual(len(out), 1, f"status={status}: secret in error body not detected")
+
+    async def test_body_unavailable_raises_not_empty(self):
+        # text() も body() も失敗した場合、空本文と取り違えず PageDocumentUnavailable を投げる。
+        for check in ("sri", "secret_leak"):
+            with self.subTest(check=check):
+                engine = _FakeEngine()
+                resp = _FakeAPIResponse(200, {}, text_raises=True, body_bytes=None)
+                # body() も失敗させる。
+                async def _boom():
+                    raise RuntimeError("body failed")
+                resp.body = _boom
+                engine.browser = _APIBrowser(_FakeRequestCtx(resp))
+                scanner = SCANNERS[check](engine)
+                with self.assertRaises(PageDocumentUnavailable):
+                    await scanner.scan_page("http://app.test/x")
+
+    async def test_capture_fallback_missing_body_raises(self):
+        # direct GET 失敗→capture fallback で、captured response に body キーが無い（本文読取失敗）とき、
+        # 空本文と取り違えず body_unavailable を伝播して PageDocumentUnavailable を投げる（Codex #147）。
+        for check in ("sri", "secret_leak"):
+            with self.subTest(check=check):
+                engine = _FakeEngine()
+                scanner = SCANNERS[check](engine)
+
+                async def _boom_get(u):
+                    raise RuntimeError("direct GET failed")
+                # capture fallback: status/headers はあるが body キーが無い（読めなかった）。
+                scanner._get = _boom_get
+                scanner.current_page_pair = lambda u: {
+                    "request": {"url": u},
+                    "response": {"status": 200, "headers": {"content-type": "text/html"}, "url": u},
+                }
+                with self.assertRaises(PageDocumentUnavailable):
+                    await scanner.scan_page("http://app.test/x")
+
+    async def test_header_only_scanner_not_degraded_by_body_failure(self):
+        # 本文読取失敗(body_unavailable)でも、header 監査(clickjacking)はヘッダで完了できる。
+        # body 失敗を clickjacking 名義の transport_error にして degraded 扱いしない（Codex #147 4巡目）。
+        engine = _FakeEngine()
+        resp = _FakeAPIResponse(200, {"content-type": "text/html"}, text_raises=True, body_bytes=None)
+
+        async def _boom():
+            raise RuntimeError("body failed")
+        resp.body = _boom
+        engine.browser = _APIBrowser(_FakeRequestCtx(resp))
+        scanner = SCANNERS["clickjacking"](engine)
+
+        async def _rec(**kw):
+            return object()
+
+        scanner.record_finding = _rec
+        await scanner.scan_page("http://app.test/x")  # ヘッダで監査完了（例外なし）
+        self.assertEqual(
+            [e for e in engine.wave_errors if "body" in e],
+            [],
+            engine.wave_errors,
+        )
+
+    async def test_permanent_non_2xx_does_not_record_transport_error(self):
+        # 恒久非 2xx（404 等）は content scanner が本文走査するため transport_error を刻まない
+        # （degraded_checks が無関係な safe case を NOT_REACHED 化しない・Codex #147 P2 Comment3）。
+        for check in ("sri", "secret_leak"):
+            with self.subTest(check=check):
+                engine = _FakeEngine()
+                engine.browser = _APIBrowser(_FakeRequestCtx(_FakeAPIResponse(404, {}, text="<html>ok</html>")))
+                scanner = SCANNERS[check](engine)
+                await scanner.scan_page("http://app.test/missing")
+                self.assertEqual(
+                    [e for e in engine.wave_errors if e.startswith(f"transport_error:{check}")],
+                    [],
+                    engine.wave_errors,
+                )
+
+    async def test_sri_audits_non_2xx_html_document(self):
+        # ブラウザが描画する custom 401/404 HTML（外部 script を読み込む）は SRI 監査対象
+        # （status だけでは本文が描画されないとは限らない・Codex #147 4巡目）。
+        html = '<html><head><script src="https://cdn.example.com/lib.js"></script></head></html>'
+        for status in (401, 404):
+            with self.subTest(status=status):
+                engine = _FakeEngine()
+                engine.browser = _APIBrowser(_FakeRequestCtx(
+                    _FakeAPIResponse(status, {"content-type": "text/html"}, text=html)))
+                scanner = SCANNERS["sri"](engine)
+                recorded = []
+
+                async def _rec(**kw):
+                    recorded.append(kw)
+                    return object()
+
+                scanner.record_finding = _rec
+                out = await scanner.scan_page("http://app.test/missing")
+                self.assertEqual(len(out), 1)
+
+    async def test_sri_audits_2xx_without_content_type_or_html_tag(self):
+        # Content-Type 欠落の 2xx document は <html> タグが無く（前置き先行でも）HTML とみなし監査する
+        # （省略/遅延した <html> で実在の未保護 script を取りこぼさない・Codex #147）。
+        body = ('\n\n<!-- long preamble ... -->\n'
+                '<script src="https://cdn.example.com/lib.js"></script>')
+        engine = _FakeEngine()
+        engine.browser = _APIBrowser(_FakeRequestCtx(_FakeAPIResponse(200, {}, text=body)))
+        scanner = SCANNERS["sri"](engine)
+        recorded = []
+
+        async def _rec(**kw):
+            recorded.append(kw)
+            return object()
+
+        scanner.record_finding = _rec
+        out = await scanner.scan_page("http://app.test/page")
+        self.assertEqual(len(out), 1)
+
+    async def test_sri_ignores_non_html_non_2xx(self):
+        # 非 HTML（JSON API error 等）の非 2xx は NOT_REACHED（誤検知回避）。
+        engine = _FakeEngine()
+        engine.browser = _APIBrowser(_FakeRequestCtx(
+            _FakeAPIResponse(404, {"content-type": "application/json"},
+                             text='{"error":"not found","cdn":"https://cdn.example.com/lib.js"}')))
+        scanner = SCANNERS["sri"](engine)
+
+        async def _rec(**kw):
+            return object()
+
+        scanner.record_finding = _rec
+        self.assertEqual(await scanner.scan_page("http://app.test/api"), [])
+
+    async def test_sri_audits_2xx_document(self):
+        # 2xx の描画 document では従来どおり外部 script を監査（FN 非導入確認）。
+        html = '<html><head><script src="https://cdn.example.com/lib.js"></script></head></html>'
+        engine = _FakeEngine()
+        engine.browser = _APIBrowser(_FakeRequestCtx(_FakeAPIResponse(200, {}, text=html)))
+        scanner = SCANNERS["sri"](engine)
+        recorded = []
+
+        async def _rec(**kw):
+            recorded.append(kw)
+            return object()
+
+        scanner.record_finding = _rec
+        out = await scanner.scan_page("http://app.test/page")
+        self.assertEqual(len(out), 1)
+        self.assertEqual(recorded[0]["evidence_type"], "sri_missing")
+
+    async def test_secret_leak_still_scans_non_2xx_body_after_2xx_gate(self):
+        # allow_non_2xx=True の secret_leak は 404 本文の秘密を引き続き走査する（sri の 2xx 限定と両立）。
+        leaked = "AKIA3SVBQ4XZ7KLMN2PQ"
+        engine = _FakeEngine()
+        body = f'{{"error":"not found","debug_key":"{leaked}"}}'
+        engine.browser = _APIBrowser(_FakeRequestCtx(_FakeAPIResponse(404, {}, text=body)))
+        scanner = SCANNERS["secret_leak"](engine)
+
+        async def _rec(**kw):
+            return object()
+
+        scanner.record_finding = _rec
+        out = await scanner.scan_page("http://app.test/api")
+        self.assertEqual(len(out), 1)
+
+    async def test_raw_document_shared_in_flight_single_get(self):
+        # 並列に同一 URL を要求しても直接 GET(_compute)は 1 回だけ（in-flight 共有・Codex #147）。
+        engine = _FakeEngine()
+        engine.browser = _APIBrowser(_FakeRequestCtx(_FakeAPIResponse(200, {"X-Frame-Options": "DENY"})))
+        cj = SCANNERS["clickjacking"](engine)
+        sh = SCANNERS["security_headers"](engine)
+        calls = {"n": 0}
+
+        async def _slow_compute(u):
+            calls["n"] += 1
+            await asyncio.sleep(0.01)  # in-flight 中に他コルーチンへ制御を渡す
+            return {"status": 200, "headers": {"x-frame-options": "DENY"}, "body": "", "url": u}
+
+        cj._compute_raw_document = _slow_compute
+        sh._compute_raw_document = _slow_compute
+        url = "http://app.test/logout"
+        p1, p2 = await asyncio.gather(cj._response_pair(url), sh._response_pair(url))
+        self.assertEqual(calls["n"], 1)  # 二重 GET しない
+        self.assertEqual(p1, p2)
+        self.assertEqual(p1["response"].get("status"), 200)
+
+
+class CurrentPagePairWorkerAwareTests(unittest.TestCase):
+    """current_page_pair は __init__ 捕捉の self.browser でなく worker-aware な
+    self.engine.browser の network から pair を読む（Codex #145 round9 の fallback 経路）。"""
+
+    class _Net:
+        def __init__(self, pair):
+            self._pair = pair
+
+        def latest_for_url(self, url, match_query=False):
+            return self._pair
+
+        def latest(self):
+            return self._pair
+
+    class _Browser:
+        def __init__(self, pair):
+            self.network = CurrentPagePairWorkerAwareTests._Net(pair)
+
+    def test_reads_from_current_worker_browser(self):
+        engine = _FakeEngine()
+        engine.browser = self._Browser({"response": {"status": 200, "url": "m"}})
+        scanner = SCANNERS["clickjacking"](engine)
+        # 構築後に engine.browser を worker のもの（別 capture）へ差し替える。
+        engine.browser = self._Browser({"response": {"status": 200, "url": "worker"}})
+        pair = scanner.current_page_pair("http://x/")
+        self.assertEqual(pair["response"]["url"], "worker")  # worker の capture を読む
+
+
+class _FakeAPIResponse:
+    """Playwright APIResponse の最小ダブル（status/headers/text/url + dispose 記録）。"""
+
+    def __init__(self, status, headers=None, text="<html>", body_bytes=None, text_raises=False):
+        self.status = status
+        self.headers = {k.lower(): v for k, v in (headers or {}).items()}
+        self._text = text
+        self._body = body_bytes
+        self._text_raises = text_raises
+        self.url = ""
+        self.disposed = 0
+
+    async def text(self):
+        if self._text_raises:
+            raise UnicodeDecodeError("utf-8", b"", 0, 1, "invalid")
+        return self._text
+
+    async def body(self):
+        return self._body if self._body is not None else self._text.encode("utf-8", "replace")
+
+    async def dispose(self):
+        self.disposed += 1
+
+
+class _FakeRequestCtx:
+    """context.request の最小ダブル。get() の (url, headers, kwargs) を記録し、順に応答を返す。"""
+
+    def __init__(self, responses):
+        self._responses = responses if isinstance(responses, list) else [responses]
+        self.calls: list = []
+        self._i = 0
+
+    async def get(self, url, headers=None, **kw):
+        self.calls.append((url, dict(headers or {}), kw))
+        r = self._responses[min(self._i, len(self._responses) - 1)]
+        self._i += 1
+        r.url = url
+        return r
+
+
+class _APIBrowser:
+    DEFAULT_USER_AGENT = "Mozilla/5.0 TestUA"
+
+    def __init__(self, request_ctx):
+        class _Ctx:
+            pass
+
+        self._context = _Ctx()
+        self._context.request = request_ctx
+
+
+class DirectGetAPIRequestContextTests(unittest.IsolatedAsyncioTestCase):
+    """_get は Playwright browser context の APIRequestContext（context.request）で取得する
+    （Codex #145 round12）。Cookie は Playwright が native 管理するため httpx jar 自作を撤去。"""
+
+    def _scanner(self, responses, *, auth=None):
+        engine = _FakeEngine()
+        engine.browser = _APIBrowser(_FakeRequestCtx(responses))
+        if auth is not None:
+            engine.auth_headers = auth
+        scanner = SCANNERS["clickjacking"](engine)
+        return engine, scanner
+
+    async def test_returns_direct_response_from_api_context(self):
+        resp = _FakeAPIResponse(200, {"X-Frame-Options": "DENY"}, text="<html>ok</html>")
+        engine, scanner = self._scanner(resp)
+        out = await scanner._get("http://app.test/p")
+        self.assertEqual(out.status_code, 200)
+        self.assertEqual(out.headers.get("x-frame-options"), "DENY")
+        self.assertEqual(out.text, "<html>ok</html>")
+
+    async def test_sends_fetch_metadata_and_ua(self):
+        engine, scanner = self._scanner(_FakeAPIResponse(200))
+        await scanner._get("http://app.test/p")
+        _url, headers, kw = engine.browser._context.request.calls[0]
+        h = {k.lower(): v for k, v in headers.items()}
+        self.assertEqual(h.get("sec-fetch-site"), "none")
+        self.assertEqual(h.get("sec-fetch-mode"), "navigate")
+        self.assertEqual(h.get("sec-fetch-user"), "?1")
+        self.assertEqual(h.get("sec-fetch-dest"), "document")
+        self.assertEqual(h.get("user-agent"), "Mozilla/5.0 TestUA")
+        self.assertEqual(kw.get("max_redirects"), 0)  # 自動追従は無効
+
+    async def test_honors_configured_timeout_in_ms(self):
+        """engine.timeout（秒）を Playwright の ms として毎 hop 渡す（Codex #145 round13）。"""
+        engine, scanner = self._scanner(_FakeAPIResponse(200))
+        engine.timeout = 5  # 秒
+        await scanner._get("http://app.test/p")
+        _url, _h, kw = engine.browser._context.request.calls[0]
+        self.assertEqual(kw.get("timeout"), 5000.0)
+
+    async def test_resyncs_engine_cookies_after_get(self):
+        """監査 GET 後に engine._sync_cookies_from_browser で engine.cookies を再同期する
+        （httpx ベースの CORS 等が stale セッションを送らない・Codex #145 P1 round14）。"""
+        engine, scanner = self._scanner(_FakeAPIResponse(200))
+        called = {}
+
+        async def _sync(browser, for_url=""):
+            called["browser"] = browser
+            called["url"] = for_url
+
+        engine._sync_cookies_from_browser = _sync
+        await scanner._get("http://app.test/p")
+        self.assertEqual(called.get("url"), "http://app.test/p")
+        self.assertIs(called.get("browser"), engine.browser)
+
+    async def test_resyncs_engine_cookies_even_when_redirect_hop_raises(self):
+        """中間 redirect hop が cookie を rotation/削除した後に次 hop が例外を投げても、
+        engine.cookies を再同期する（finally 経路）。成功パスだけの同期では無効トークンが
+        残り CORS 等が未認証応答に走る（Codex #145 P2 round16）。"""
+
+        class _RaiseOnSecondGet:
+            def __init__(self):
+                self.calls = 0
+
+            async def get(self, url, headers=None, **kw):
+                self.calls += 1
+                if self.calls == 1:
+                    r = _FakeAPIResponse(302, {"location": "/landing"})
+                    r.url = url
+                    return r  # 承認された同一ホスト redirect（cookie を変異させ得る）
+                raise RuntimeError("hop timeout")  # 次 hop の取得が失敗
+
+        engine = _FakeEngine()
+        engine.browser = _APIBrowser(_RaiseOnSecondGet())
+        scanner = SCANNERS["clickjacking"](engine)
+        called = {}
+
+        async def _sync(browser, for_url=""):
+            called["url"] = for_url
+
+        engine._sync_cookies_from_browser = _sync
+        with self.assertRaises(RuntimeError):
+            await scanner._get("http://app.test/start")
+        # 例外が伝播しても、直列なので再同期は必ず実行される。
+        self.assertEqual(called.get("url"), "http://app.test/start")
+
+    async def test_no_cookie_resync_under_concurrency(self):
+        """並列(--concurrency>1)では共有 engine.cookies を書き換えないよう再同期をスキップ
+        （別 worker の検査中の競合防止・Codex #145 P1 round15）。"""
+        engine, scanner = self._scanner(_FakeAPIResponse(200))
+        engine.concurrency = 2
+        called = {"n": 0}
+
+        async def _sync(browser, for_url=""):
+            called["n"] += 1
+
+        engine._sync_cookies_from_browser = _sync
+        await scanner._get("http://app.test/p")
+        self.assertEqual(called["n"], 0)
+
+    async def test_disposes_responses(self):
+        """最終 response を dispose して body を解放する（Codex #145 round13）。"""
+        resp = _FakeAPIResponse(200, {"X-Frame-Options": "DENY"})
+        engine, scanner = self._scanner(resp)
+        await scanner._get("http://app.test/p")
+        self.assertGreaterEqual(resp.disposed, 1)
+
+    async def test_disposes_intermediate_redirect_responses(self):
+        r1 = _FakeAPIResponse(302, {"location": "/landing"})
+        r2 = _FakeAPIResponse(200, {"X-Frame-Options": "DENY"})
+        engine, scanner = self._scanner([r1, r2])
+        await scanner._get("http://app.test/start")
+        self.assertGreaterEqual(r1.disposed, 1)  # 中間 redirect も解放
+        self.assertGreaterEqual(r2.disposed, 1)
+
+    async def test_scope_approved_cross_host_redirect_followed(self):
+        """engine の明示 scope（_header_scope_origins）に含まれる別ホストへの redirect は追従し、
+        その host の scoped auth を再計算する（Codex #145 round13）。"""
+        r1 = _FakeAPIResponse(302, {"location": "https://www.app.test/"})
+        r2 = _FakeAPIResponse(200, {"X-Frame-Options": "DENY"})
+        engine, scanner = self._scanner([r1, r2])
+        engine._header_scope_origins = {"https://www.app.test", "http://app.test"}
+        out = await scanner._get("http://app.test/start")
+        self.assertEqual(out.status_code, 200)
+        self.assertEqual(
+            engine.browser._context.request.calls[1][0], "https://www.app.test/"
+        )
+
+    async def test_user_header_replaces_generated_case_insensitively(self):
+        auth = lambda extra=None, include_cookie=True, url=None: {
+            "user-agent": "CustomUA", "accept-language": "ja"
+        }
+        engine, scanner = self._scanner(_FakeAPIResponse(200), auth=auth)
+        await scanner._get("http://app.test/p")
+        _url, headers, _mr = engine.browser._context.request.calls[0]
+        h = {k.lower(): v for k, v in headers.items()}
+        self.assertEqual(h.get("user-agent"), "CustomUA")
+        self.assertNotIn("Mozilla", h.get("user-agent", ""))
+        # 生成 User-Agent（大文字）が重複して残っていないこと。
+        self.assertNotIn("User-Agent", headers)
+        self.assertEqual(h.get("accept-language"), "ja")
+
+    async def test_missing_api_context_raises_for_fallback(self):
+        """APIRequestContext が無い（テストダブル等）なら例外→_response_pair が network fallback。"""
+        engine = _FakeEngine()
+        engine.browser = object()  # _context 無し
+        scanner = SCANNERS["clickjacking"](engine)
+        with self.assertRaises(Exception):
+            await scanner._get("http://app.test/p")
+
+    async def test_same_host_redirect_followed(self):
+        responses = [
+            _FakeAPIResponse(302, {"location": "/landing"}),
+            _FakeAPIResponse(200, {"X-Frame-Options": "DENY"}),
+        ]
+        engine, scanner = self._scanner(responses)
+        out = await scanner._get("http://app.test/start")
+        self.assertEqual(out.status_code, 200)
+        # 2 hop 目が same-host の /landing を叩いている。
+        self.assertEqual(engine.browser._context.request.calls[1][0], "http://app.test/landing")
+
+    async def test_cross_host_redirect_not_followed(self):
+        responses = [_FakeAPIResponse(302, {"location": "https://evil.test/x"})]
+        engine, scanner = self._scanner(responses)
+        out = await scanner._get("http://app.test/start")
+        # 別ホストは追従せず 3xx のまま返す（_response_pair が status を落として NOT_REACHED）。
+        self.assertEqual(out.status_code, 302)
+        self.assertEqual(len(engine.browser._context.request.calls), 1)
+
+    async def test_uses_worker_aware_engine_browser(self):
+        """__init__ 捕捉のメイン self.browser でなく呼び出し時の self.engine.browser を使う。"""
+        engine = _FakeEngine()
+        engine.browser = object()  # 構築時のメインは APIRequestContext 無し
+        scanner = SCANNERS["clickjacking"](engine)
+        # 構築後に worker の browser（APIRequestContext あり）へ差し替える。
+        engine.browser = _APIBrowser(_FakeRequestCtx(_FakeAPIResponse(200, {"X-Frame-Options": "DENY"})))
+        out = await scanner._get("http://app.test/p")
+        self.assertEqual(out.status_code, 200)  # worker の context で取得できる
 
 
 if __name__ == "__main__":

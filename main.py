@@ -154,6 +154,7 @@ def _load_config(path: Path = _CONFIG_PATH) -> dict:
     cfg["waf_detection"]           = bool(f.get("waf_detection",    True))
     cfg["payload_learning"]        = bool(f.get("payload_learning", True))
     cfg["community_payloads"]      = bool(f.get("community_payloads", True))
+    cfg["tls_scan"]                = bool(f.get("tls_scan",         False))
     cfg["sitemap_crawl"]           = bool(f.get("sitemap_crawl",    True))
     cfg["cvss_scores"]             = bool(f.get("cvss_scores",      True))
     cfg["skip_registration"]       = bool(f.get("skip_registration", True))
@@ -748,7 +749,13 @@ Examples:
 
     # ── scan subcommand ────────────────────────────────────────────
     scan = sub.add_parser("scan", help="Run a security scan")
-    scan.add_argument("url", help="Target URL (e.g. https://example.com)")
+    scan.add_argument(
+        "url", nargs="+",
+        help="対象 URL。複数指定すると 1 回のスキャン（＝同一ログインセッション）で "
+             "全 URL を攻撃スコープとして巡回する（例: scan https://a https://b）。"
+             "先頭がクロール起点、2 つ目以降は --target-url と同義。"
+             "ログインが別々のサイトを個別に並行スキャンするなら `batch` を使う。",
+    )
 
     scan.add_argument(
         "--payloads", "-p", metavar="FILE",
@@ -768,6 +775,8 @@ Examples:
         "race_condition", "websocket", "secret_leak", "sri", "js_static",
         # 新クラス
         "prototype_pollution", "cache_poisoning", "mass_assignment",
+        # opt-in（外部OSS/依存が要る）検査。--checks で明示指定すると自動で有効化する。
+        "tls_scan",
     ]
     _default_checks = _CFG.get("checks", ["sqli", "xss", "os"])
     scan.add_argument(
@@ -1843,6 +1852,15 @@ def _agent_exit_code(result) -> int:
     return 0
 
 
+def _batch_exit_code(results) -> int:
+    """batch 結果から CLI 終了コードを決める純粋関数。
+
+    1 件でも失敗（例外/開始不能＝``success`` が偽）があれば非0。全成功・空リストは 0。
+    全対象失敗でも 0 を返し「合計0件」を成功と誤認させていた問題を防ぐ（F02）。
+    """
+    return 1 if any(not getattr(r, "success", False) for r in (results or [])) else 0
+
+
 def _llm_model_display(args) -> str:
     """Return a short model info string for the startup banner."""
     role_models = getattr(args, "role_models", {}) or {}
@@ -2063,11 +2081,37 @@ async def run_agent(args):
     return result
 
 
+def _collapse_multi_target(
+    url_arg: "str | list[str]", target_urls: list,
+) -> "tuple[str, list]":
+    """位置引数 url（nargs='+'）を (先頭=クロール起点, 残り＋既存 target_urls) へ畳み込む。
+
+    純粋関数。先頭 URL を単一の攻撃起点に、2 つ目以降を追加攻撃スコープの先頭へ前置する
+    （既存の --target-url 由来 target_urls はその後ろに温存）。空文字は除外。文字列を
+    そのまま渡された場合（後方互換）は (url, target_urls) をそのまま返す。
+    """
+    if not isinstance(url_arg, list):
+        return url_arg, list(target_urls or [])
+    urls = [u for u in url_arg if u]
+    primary = urls[0] if urls else ""
+    extra = urls[1:]
+    return primary, list(extra) + list(target_urls or [])
+
+
 async def run_scan(args):
     from rich.console import Console
     from rich.panel import Panel
 
     console = Console()
+
+    # 位置引数 url は nargs="+"（複数対象を 1 スキャンで指定可）。先頭をクロール
+    # 起点 args.url（以降のコードは文字列前提）に畳み込み、2 つ目以降は追加攻撃
+    # スコープ（--target-url と同じ target_urls）へ前置する。同一ログインセッション
+    # で全対象を巡回・攻撃する（別ログインのサイトを個別並行するなら batch）。
+    if isinstance(getattr(args, "url", None), list):
+        args.url, args.target_urls = _collapse_multi_target(
+            args.url, getattr(args, "target_urls", []) or []
+        )
 
     # ── Fast mode preset ──────────────────────────────────────────────
     # Apply defaults only for options the user did NOT explicitly set.
@@ -2361,6 +2405,8 @@ async def run_scan(args):
             enable_community_payloads=getattr(args, "community_payloads", True),
             enable_adaptive_payloads=not getattr(args, "no_adaptive_payloads", False),
             enable_sitemap_crawl=not getattr(args, "no_sitemap_crawl", False),
+            # tls_scan は opt-in。--checks/--all-checks で明示されたら有効化（未指定なら config）。
+            enable_tls_scan=True if "tls_scan" in checks_list else None,
             enable_llm_web_browsing=getattr(args, "llm_web_browsing", False),
             concurrency=getattr(args, "concurrency", 1),
             flows=getattr(args, "flows", None) or [],
@@ -2692,6 +2738,7 @@ async def run_serve(args):
             "enable_waf_detection": _CFG.get("waf_detection", True),
             "enable_payload_learning": _CFG.get("payload_learning", True),
             "community_payloads": _CFG.get("community_payloads", True),
+            "tls_scan": _CFG.get("tls_scan", False),
             "enable_sitemap_crawl": _CFG.get("sitemap_crawl", True),
             "spa_crawl": _CFG.get("spa_crawl", False),
             "auto_spa_crawl": _CFG.get("auto_spa_crawl", True),
@@ -2982,6 +3029,11 @@ async def run_serve(args):
                 enable_waf_detection=bool(cfg.get("enable_waf_detection", True)),
                 enable_payload_learning=bool(cfg.get("enable_payload_learning", True)),
                 enable_community_payloads=bool(cfg.get("enable_community_payloads", True)),
+                # 明示指定が無ければ None を渡し、ScanEngine の checks 推論（checks に tls_scan が
+                # あれば有効）に委ねる。False 既定で上書きすると checks:["tls_scan"] が黙って no-op に
+                # なる（REST/WS/定期の serve リクエスト・Codex #158）。
+                enable_tls_scan=(None if cfg.get("enable_tls_scan") is None
+                                 else bool(cfg.get("enable_tls_scan"))),
                 enable_sitemap_crawl=bool(cfg.get("enable_sitemap_crawl", True)),
                 enable_llm_web_browsing=bool(cfg.get("enable_llm_web_browsing", False)),
                 ctf_mode=bool(cfg.get("ctf_mode", False)),
@@ -3370,6 +3422,7 @@ async def run_batch(args):
     console.print(runner.summary_text())
     summary_path = runner.save_batch_summary_json()
     console.print(f"\n  [dim]Batch summary:[/dim] {summary_path}")
+    return runner.results
 
 
 async def run_record(args):
@@ -3519,7 +3572,10 @@ def main():
         elif args.command == "record":
             asyncio.run(run_record(args))
         elif args.command == "batch":
-            asyncio.run(run_batch(args))
+            batch_results = asyncio.run(run_batch(args))
+            batch_exit = _batch_exit_code(batch_results)
+            if batch_exit:
+                sys.exit(batch_exit)
         elif args.command == "import-payloads":
             run_import_payloads(args)
         elif args.command == "capability-matrix":
