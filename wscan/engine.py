@@ -4869,7 +4869,9 @@ class ScanEngine:
             login_seed, {"parent": None, "screenshot_b64": "", "depth": 0}
         )
 
-        await self._attack_one_page(page, {})
+        # 認証前のログインフォーム検査。pre-attack flow（ログイン等）をここで走らせると
+        # auto-login 前の pre-auth 検査を汚染するため無効化する（#167 P2）。
+        await self._attack_one_page(page, {}, run_pre_attack_flows=False)
 
         # Prevent the authenticated crawl/attack from re-visiting the login page
         # (which, on redirect-on-auth apps, would only capture post-login content).
@@ -4903,7 +4905,7 @@ class ScanEngine:
         except Exception:
             return False
 
-    async def _attack_one_page(self, page: CrawledPage, plans: dict):
+    async def _attack_one_page(self, page: CrawledPage, plans: dict, *, run_pre_attack_flows: bool = True):
         """
         Run all checks on a single crawled page.
         Uses ``self.browser`` which transparently returns the worker's browser
@@ -4930,7 +4932,9 @@ class ScanEngine:
         # ログイン/セットアップ flow が失敗したまま page-level（graphql/cache/proto 等）や
         # field を検査すると、未認証ページを "tested" として checkpoint し誤結果を生む。
         # 失敗時は coverage gap を記録し、以降の全検査を skip する。
-        matched_flow = self._match_pre_attack_flow(page)
+        # ただし認証前のログインフォーム検査（_scan_login_form_preauth）から呼ばれた場合は、
+        # auto-login 前の pre-auth 検査を汚染しないよう flow を実行しない（#167 P2）。
+        matched_flow = self._match_pre_attack_flow(page) if run_pre_attack_flows else None
         if matched_flow:
             console.print(
                 f"\n  [cyan][Flow] Pre-attack flow:[/cyan] {matched_flow.name}"

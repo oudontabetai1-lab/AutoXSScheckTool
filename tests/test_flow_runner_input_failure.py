@@ -316,3 +316,40 @@ def test_urls_same_page_ignores_fragment_only():
     assert same("http://t/admin", "http://t/login") is False
     assert same("http://t/view?page=admin", "http://t/view?page=home") is False
     assert same("", "http://t/admin") is False
+
+
+def test_pre_auth_mode_skips_pre_attack_flow():
+    """run_pre_attack_flows=False（pre-auth ログインフォーム検査）では flow を実行しない（#167 P2）。"""
+    from wscan.engine import ScanEngine
+
+    ran = {"flow": False}
+    eng = ScanEngine.__new__(ScanEngine)
+    eng.scanners = {}
+    eng.concurrency = 1
+    eng.flows = [ScanFlow(name="login", steps=[
+        FlowStep(action="navigate", url="http://t.test/login"),
+    ])]
+    eng._browser = types.SimpleNamespace(page=types.SimpleNamespace(url="http://t.test/login"))
+    eng._record_unscannable_url = MagicMock()
+
+    async def _noop(*a, **k):
+        return None
+
+    eng._maybe_relogin_for_page = _noop
+    eng._sync_cookies_from_browser = _noop
+    eng._save_checkpoint = lambda *a, **k: None
+
+    page = types.SimpleNamespace(url="http://t.test/login", forms=[], url_params=[])
+
+    class _Runner:
+        def __init__(self, browser):
+            pass
+
+        async def run(self, flow):
+            ran["flow"] = True
+            return True
+
+    with patch("wscan.engine.FlowRunner", _Runner):
+        asyncio.run(eng._attack_one_page(page, {}, run_pre_attack_flows=False))
+
+    assert ran["flow"] is False  # pre-auth 検査では flow を走らせない
