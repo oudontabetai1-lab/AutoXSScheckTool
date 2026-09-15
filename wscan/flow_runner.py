@@ -30,6 +30,10 @@ if TYPE_CHECKING:
 console = Console()
 
 
+class FlowStepError(Exception):
+    """前提 step の失敗（対象欄・送信先の欠落等）。run() が失敗として扱う（F10）。"""
+
+
 # ---------------------------------------------------------------------------
 # Data model
 # ---------------------------------------------------------------------------
@@ -146,17 +150,21 @@ class FlowRunner:
         elif step.action == "fill":
             display_val = step.value if step.field.lower() not in ("password", "pass", "passwd") else "***"
             console.print(f"  [dim]{label} fill [{step.field}] = {display_val[:40]}[/dim]")
-            await self.browser.page.evaluate(
+            filled = await self.browser.page.evaluate(
                 """([f, v]) => {
                     const el = document.querySelector(`[name="${f}"],[id="${f}"]`);
-                    if (!el) return;
+                    if (!el) return false;
                     el.value = v;
                     ['input', 'change', 'blur'].forEach(e =>
                         el.dispatchEvent(new Event(e, {bubbles: true}))
                     );
+                    return true;
                 }""",
                 [step.field, step.value],
             )
+            if not filled:
+                # 存在しない欄への fill を成功扱いにすると前提の欠落を見逃す（F10）。
+                raise FlowStepError(f"fill target not found: field '{step.field}'")
 
         elif step.action == "submit":
             console.print(f"  [dim]{label} submit[/dim]")
@@ -172,13 +180,15 @@ class FlowRunner:
                     return false;
                 }"""
             )
-            if clicked:
-                try:
-                    await self.browser.page.wait_for_load_state(
-                        "domcontentloaded", timeout=15_000
-                    )
-                except Exception:
-                    pass
+            if not clicked:
+                # 送信ボタン/フォームが無いのに成功扱いすると後続を誤って進める（F10 同型）。
+                raise FlowStepError("submit target not found (no submit button or form)")
+            try:
+                await self.browser.page.wait_for_load_state(
+                    "domcontentloaded", timeout=15_000
+                )
+            except Exception:
+                pass
 
         elif step.action == "click":
             sel = step.selector or step.field
