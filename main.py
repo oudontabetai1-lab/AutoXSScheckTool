@@ -2147,9 +2147,11 @@ def _load_flow_files(paths) -> list[dict]:
 # 任意の値付き option を弾く。構文的に正しいだけの long option は許可しない。
 # すべて scan サブコマンドに実在する option（scan --help で検証済・#170 P2）。
 # `--no-headless` は scan に無く生成コマンドが `unrecognized arguments` で落ちるため除外。
+# `--fast` は run_scan が depth==既定を「未指定」とみなし fast preset で depth=1 に変える＝
+# 案内した `--depth N` と実行結果が食い違うため除外（#170 P2）。
 _SAFE_SETUP_FLAGS = frozenset({
     "--dom-xss", "--spa-crawl", "--all-checks", "--headless",
-    "--no-monitor", "--no-sitemap-crawl", "--fast", "--ctf",
+    "--no-monitor", "--no-sitemap-crawl", "--ctf",
 })
 
 

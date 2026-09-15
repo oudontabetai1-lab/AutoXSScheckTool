@@ -225,4 +225,6 @@ class FlowRunner:
             await asyncio.sleep(step.timeout)
 
         else:
-            console.print(f"  [yellow]{label} unknown action '{step.action}' — skipped[/yellow]")
+            # 不明アクション（タイプミス等）を skip して flow を成功扱いにすると、前提未達のまま
+            # 誤った状態で検査してしまう。失敗として扱い run() を False にする（F10 と同型・#170 P2）。
+            raise FlowStepError(f"unknown flow action: {step.action!r}")

