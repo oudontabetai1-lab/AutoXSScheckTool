@@ -418,3 +418,21 @@ class RequestLoggerLLMTests(unittest.TestCase):
             rl.log_llm_call(provider="ollama", status="ok")
             self.assertFalse(rl.llm_path.exists())
             self.assertEqual(rl.llm_call_count, 0)
+
+
+class RecordLLMCallHelperTests(unittest.TestCase):
+    def test_record_llm_call_forwards_to_logger(self):
+        from wscan.llm_client import record_llm_call
+        logger = MagicMock()
+        pg = types.SimpleNamespace(request_logger=logger)
+        record_llm_call(pg, provider="ollama", role="planner", model="m",
+                        timeout_seconds=None, elapsed_seconds=2.0, status="ok",
+                        prompt_chars=10, response_chars=5, caller="attack_planner._llm_plan")
+        logger.log_llm_call.assert_called_once()
+        self.assertEqual(logger.log_llm_call.call_args.kwargs["role"], "planner")
+
+    def test_record_llm_call_without_logger_is_noop(self):
+        from wscan.llm_client import record_llm_call
+        pg = types.SimpleNamespace()  # request_logger 属性なし
+        record_llm_call(pg, provider="ollama", role="planner", model="m",
+                        timeout_seconds=None, elapsed_seconds=1.0, status="empty")  # 例外を出さない

@@ -560,6 +560,9 @@ Consider stored / second-order attacks carefully:
 
         raw: Optional[str] = None
         provider = self.payload_gen.provider
+        import time as _time
+        from .llm_client import record_llm_call
+        _t0 = _time.monotonic()
         with self.payload_gen.use_role("planner"):
             if provider == "claude":
                 raw = await self._call_claude(prompt)
@@ -569,6 +572,17 @@ Consider stored / second-order attacks carefully:
                 raw = await self._call_gemini(prompt)
             else:
                 raw = await self._call_ollama(prompt)
+        # LLM 呼び出し観測性（0065）。planner は complete_text 非経由の自前実装なので個別記録する。
+        # 各 _call_* は失敗を握って None を返すため、ここでは ok/empty のみ区別（本文なし・elapsed 記録）。
+        record_llm_call(
+            self.payload_gen, provider=provider, role="planner",
+            model=getattr(self.payload_gen, f"{provider}_model", "") or "",
+            timeout_seconds=None, elapsed_seconds=_time.monotonic() - _t0,
+            status=("ok" if raw else "empty"),
+            prompt_chars=len(prompt) if isinstance(prompt, str) else None,
+            response_chars=len(raw) if isinstance(raw, str) else 0,
+            caller="attack_planner._llm_plan",
+        )
 
         if not raw:
             return None

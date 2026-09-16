@@ -94,6 +94,29 @@ def _retry_after_seconds(response: Any, cap: float = 8.0) -> float | None:
     return min(cap, seconds)
 
 
+def record_llm_call(
+    pg, *, provider, role, model, timeout_seconds, elapsed_seconds, status,
+    retries=0, prompt_chars=None, response_chars=None, caller="",
+) -> None:
+    """LLM 呼び出しメタデータを ``pg.request_logger`` へ記録する（0065）。
+
+    本文は渡さず文字数のみ。request_logger 未配線・記録失敗では no-op（ベストエフォート）。
+    complete_text と、complete_text を経由しない自前ストリーミング経路（planner 等）の共通入口。
+    """
+    logger = getattr(pg, "request_logger", None)
+    if logger is None:
+        return
+    try:
+        logger.log_llm_call(
+            provider=provider, role=role, model=model,
+            timeout_seconds=timeout_seconds, elapsed_seconds=elapsed_seconds,
+            status=status, retries=retries, prompt_chars=prompt_chars,
+            response_chars=response_chars, caller=caller,
+        )
+    except Exception:
+        pass
+
+
 def _completion_result(
     text: str | None,
     status: CompletionStatus,
@@ -155,24 +178,18 @@ async def complete_text(
     # 文字数のみ。request_logger 未配線（triage の使い捨て pg 等）や記録失敗では no-op。
     import time as _time
     _t0 = _time.monotonic()
-    _logger = getattr(pg, "request_logger", None)
     _role = pg.current_role() if hasattr(pg, "current_role") else ""
     _model = getattr(pg, f"{provider}_model", "") or ""
 
     def _finish(text, status, attempt=0):
-        if _logger is not None:
-            try:
-                _logger.log_llm_call(
-                    provider=provider, role=_role, model=_model,
-                    timeout_seconds=request_timeout,
-                    elapsed_seconds=_time.monotonic() - _t0,
-                    status=status, retries=attempt,
-                    prompt_chars=len(prompt) if isinstance(prompt, str) else None,
-                    response_chars=len(text) if isinstance(text, str) else 0,
-                    caller="complete_text",
-                )
-            except Exception:
-                pass
+        record_llm_call(
+            pg, provider=provider, role=_role, model=_model,
+            timeout_seconds=request_timeout, elapsed_seconds=_time.monotonic() - _t0,
+            status=status, retries=attempt,
+            prompt_chars=len(prompt) if isinstance(prompt, str) else None,
+            response_chars=len(text) if isinstance(text, str) else 0,
+            caller="complete_text",
+        )
         return _completion_result(text, status, return_status)
 
     for attempt in range(max_retries + 1):
