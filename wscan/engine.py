@@ -1052,6 +1052,8 @@ class ScanEngine:
             prompt_templates=prompt_templates,
             enable_web_browsing=enable_llm_web_browsing,
         )
+        # LLM 呼び出し観測性（0065）：complete_text がここから logger を getattr で拾う。
+        self.payload_gen.request_logger = self.request_logger
 
         # Central registry lives in wscan/scanners/__init__.py
         from .scanners import SCANNERS as _SCANNERS
@@ -1161,9 +1163,13 @@ class ScanEngine:
             category = note.split(":", 1)[0].strip() if ":" in note else "other"
             category = category or "other"
             by_category[category] = by_category.get(category, 0) + 1
+        # LLM 呼び出し総数を併記（llm_calls.jsonl の件数・0065）。詳細な role/status/latency 集計は
+        # RequestLogger に構造化カウンタを足す follow-up（step2）で。ここは可視化の第一歩の count のみ。
+        rl = getattr(self, "request_logger", None)
         return {
             "total": len(self.wave_errors),
             "by_category": by_category,
+            "llm_calls": getattr(rl, "llm_call_count", 0) if rl is not None else 0,
         }
 
     def coverage_summary(self) -> dict:

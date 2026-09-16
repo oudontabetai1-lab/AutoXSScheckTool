@@ -55,7 +55,11 @@ def test_observability_summary_groups_categories_and_other():
             "baseline_unavailable": 1,
             "other": 1,
         },
+        "llm_calls": 0,   # request_logger 未設定なら 0（0065）
     }
+    # request_logger の LLM 呼び出し件数を反映する。
+    engine.request_logger = SimpleNamespace(llm_call_count=7)
+    assert engine.observability_summary()["llm_calls"] == 7
 
 
 @pytest.mark.asyncio

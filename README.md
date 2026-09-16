@@ -757,6 +757,7 @@ output/<timestamp>/
 ├── ai_finding_fixes.json
 ├── http_requests.jsonl
 ├── payloads.jsonl
+├── llm_calls.jsonl      # LLM 呼び出しの監査（provider/role/所要時間/失敗種別・本文なし）
 └── screenshots/
 ```
 

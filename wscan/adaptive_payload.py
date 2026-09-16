@@ -570,6 +570,9 @@ class AdaptivePayloadEngine:
 
         provider = self.pg.provider
         raw: Optional[str] = None
+        import time as _time
+        from .llm_client import record_llm_call
+        _t0 = _time.monotonic()
         with self.pg.use_role("adaptive"):
             if provider == "claude":
                 raw = await self._stream_claude(prompt)
@@ -579,6 +582,17 @@ class AdaptivePayloadEngine:
                 raw = await self._call_gemini(prompt)
             else:
                 raw = await self._stream_ollama(prompt)
+        # LLM 呼び出し観測性（0065）。mutate_payload は complete_text 非経由の自前ストリーミング。
+        # 各 _stream_*/_call_gemini は失敗を握って None を返すため ok/empty のみ区別（本文なし）。
+        record_llm_call(
+            self.pg, provider=provider, role="adaptive",
+            model=getattr(self.pg, f"{provider}_model", "") or "",
+            timeout_seconds=None, elapsed_seconds=_time.monotonic() - _t0,
+            status=("ok" if raw else "empty"),
+            prompt_chars=len(prompt) if isinstance(prompt, str) else None,
+            response_chars=len(raw) if isinstance(raw, str) else 0,
+            caller="adaptive_payload.mutate_payload",
+        )
 
         if not raw:
             return []

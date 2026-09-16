@@ -154,11 +154,13 @@ class RequestLogger:
         self.enabled = enabled
         self.http_path = self.output_dir / "http_requests.jsonl"
         self.payload_path = self.output_dir / "payloads.jsonl"
+        self.llm_path = self.output_dir / "llm_calls.jsonl"
         # NetworkCapture（同期）と Monitor（async）双方から呼ばれうるので
         # ファイル追記をロックで直列化する。
         self._lock = threading.Lock()
         self.http_count = 0
         self.payload_count = 0
+        self.llm_call_count = 0
 
     def _append(self, path: Path, record: dict) -> None:
         if not self.enabled:
@@ -211,3 +213,36 @@ class RequestLogger:
         }
         self._append(self.payload_path, record)
         self.payload_count += 1
+
+    def log_llm_call(
+        self, *, provider: str = "", role: str = "", model: str = "",
+        timeout_seconds=None, elapsed_seconds=None, status: str = "",
+        retries=None, prompt_chars=None, response_chars=None,
+        input_tokens=None, output_tokens=None, exception_type=None, caller: str = "",
+    ) -> None:
+        """LLM 呼び出し1回のメタデータを記録する（0065 観測性）。
+
+        **本文（prompt/response）は保存しない**（文字数のみ）。例外は種別名のみ記録し
+        `str(exc)` は保存しない：Gemini の URL には APIキーが平文で入り、httpx 例外文字列に
+        URL が載りうるため（output/ は閲覧者へ配信されうる）。ベストエフォート（失敗しても継続）。
+        """
+        if not self.enabled:
+            return
+        record = {
+            "ts": time.time(),
+            "provider": provider,
+            "role": role,
+            "model": model,
+            "timeout_seconds": timeout_seconds,
+            "elapsed_seconds": elapsed_seconds,
+            "status": status,
+            "retries": retries,
+            "prompt_chars": prompt_chars,
+            "response_chars": response_chars,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "exception_type": exception_type,
+            "caller": caller,
+        }
+        self._append(self.llm_path, record)
+        self.llm_call_count += 1
