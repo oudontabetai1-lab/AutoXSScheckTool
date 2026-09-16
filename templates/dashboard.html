@@ -1039,8 +1039,16 @@ body { padding-left: 212px; }
             <input type="number" id="cfgDepth" value="2" min="1" max="10">
           </div>
           <div class="cfg-field">
-            <label>タイムアウト (秒)</label>
+            <label>タイムアウト (秒・HTTP/ページ)</label>
             <input type="number" id="cfgTimeoutInput" value="30" min="5" max="300">
+          </div>
+          <div class="cfg-field">
+            <label>LLM タイムアウト (秒・1回)</label>
+            <input type="number" id="cfgLlmTimeoutInput" value="30" min="1" max="600">
+          </div>
+          <div class="cfg-field">
+            <label>LLM streaming タイムアウト (秒・planner/変異)</label>
+            <input type="number" id="cfgLlmStreamTimeoutInput" value="90" min="1" max="600">
           </div>
           <div class="cfg-field">
             <label>最大フォーム数/ページ</label>
@@ -2977,6 +2985,8 @@ function submitScanConfig() {
     url,
     depth:       parseInt(document.getElementById('cfgDepth').value) || 2,
     timeout:     parseInt(document.getElementById('cfgTimeoutInput').value) || 30,
+    llm_timeout_seconds: parseInt(document.getElementById('cfgLlmTimeoutInput')?.value) || 30,
+    llm_stream_timeout_seconds: parseInt(document.getElementById('cfgLlmStreamTimeoutInput')?.value) || 90,
     max_forms:   parseInt(document.getElementById('cfgMaxForms').value) || 50,
     concurrency: parseInt(document.getElementById('cfgConcurrency').value) || 1,
     proxy:       document.getElementById('cfgProxy').value.trim(),
@@ -3185,6 +3195,8 @@ function applyImportedConfig(cfg) {
   setVal('cfgInputUrl', cfg.url);
   setVal('cfgDepth', cfg.depth);
   setVal('cfgTimeoutInput', cfg.timeout);
+  setVal('cfgLlmTimeoutInput', cfg.llm_timeout_seconds);
+  setVal('cfgLlmStreamTimeoutInput', cfg.llm_stream_timeout_seconds);
   setVal('cfgMaxForms', cfg.max_forms);
   setVal('cfgConcurrency', cfg.concurrency);
   setVal('cfgMaxPayloads', cfg.max_payloads);
@@ -5132,6 +5144,8 @@ function submitHybridScan() {
     headless:     cfgToggles.headless,
     depth:        parseInt(document.getElementById('cfgDepth').value) || 2,
     timeout:      parseInt(document.getElementById('cfgTimeoutInput').value) || 30,
+    llm_timeout_seconds: parseInt(document.getElementById('cfgLlmTimeoutInput')?.value) || 30,
+    llm_stream_timeout_seconds: parseInt(document.getElementById('cfgLlmStreamTimeoutInput')?.value) || 90,
     concurrency:  parseInt(document.getElementById('cfgConcurrency').value) || 1,
     auth_user:    (document.getElementById('cfgAuthUser')?.value || '').trim(),
     auth_pass:    (document.getElementById('cfgAuthPass')?.value || ''),
