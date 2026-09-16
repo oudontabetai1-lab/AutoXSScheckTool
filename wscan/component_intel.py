@@ -8,9 +8,11 @@ API 情報（base URL・timeout 等）は設定で管理する（``config/wscan.
 設計原則（``llm_web_tools`` と同じ薄い足場）:
 - **純粋関数**（``parse_components_from_headers`` / ``match_cycle`` / ``evaluate_eol``）は
   ネットワーク非依存でテスト可能。判定ロジックはここに集約する。
-- **ネットワーク層**（``fetch_product_cycles`` / ``check_component_eol``）は **失敗しても raise せず**
-  ``None`` を返す（スキャンを壊さない・偽陰性にしない）。任意の httpx client を注入でき、テストで
-  差し替え可能。
+- **ネットワーク層**（``fetch_product_cycles`` / ``check_component_eol`` / ``lookup_osv``）は
+  到達失敗（timeout/接続断/5xx/429/JSON 破損）を **``ComponentIntelUnavailable`` で raise** する
+  （呼び出し側スキャナが捕捉して coverage gap として記録＝未到達を「0 finding＝安全」に丸めない・
+  偽陰性にしない）。データ無し/不一致/判定不能や runtime 不在（httpx 未 import・slug 空）は
+  ``None`` を返す。任意の httpx client を注入でき、テストで差し替え可能。
 - 外部へ送るのは **製品名（slug）のみ**。target URL・ヘッダ値全体・個人情報は送らない。
 
 opt-in（``features.component_intel``＝既定 off）で、スキャンのネット非依存原則を壊さない。
