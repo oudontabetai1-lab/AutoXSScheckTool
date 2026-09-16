@@ -1163,9 +1163,13 @@ class ScanEngine:
             category = note.split(":", 1)[0].strip() if ":" in note else "other"
             category = category or "other"
             by_category[category] = by_category.get(category, 0) + 1
+        # LLM 呼び出し総数を併記（llm_calls.jsonl の件数・0065）。詳細な role/status/latency 集計は
+        # RequestLogger に構造化カウンタを足す follow-up（step2）で。ここは可視化の第一歩の count のみ。
+        rl = getattr(self, "request_logger", None)
         return {
             "total": len(self.wave_errors),
             "by_category": by_category,
+            "llm_calls": getattr(rl, "llm_call_count", 0) if rl is not None else 0,
         }
 
     def coverage_summary(self) -> dict:
