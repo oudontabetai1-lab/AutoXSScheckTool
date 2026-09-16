@@ -526,6 +526,7 @@ class FindingInjectionProvenanceTests(unittest.IsolatedAsyncioTestCase):
         # 残りの finding を検証し続ける（破損 provenance 等の巻き込み防止・no-penalty）。
         class _Engine2:
             _phase_verify = ScanEngine._phase_verify
+            _profile = ScanEngine._profile  # WSCAN_PROFILE 計測（既定 no-op・F06/0059）
             _VERIFIABLE_CHECKS = {"sqli"}
 
             def __init__(self, findings):

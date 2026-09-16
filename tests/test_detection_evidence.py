@@ -65,6 +65,8 @@ class _VerifierBrowser:
             (),
             {"content": AsyncMock(return_value=baseline_html)},
         )()
+        # verify baseline は有界版 get_page_source 経由で取得する（F06/0059）。
+        self.get_page_source = AsyncMock(return_value=baseline_html)
         self.navigate = AsyncMock(return_value=True)
 
     def reset_dialog(self):

@@ -219,7 +219,7 @@ class XSSScanner(BaseScanner):
         baseline_source = ""
         try:
             await self.browser.navigate(ip.url)
-            baseline_source = await self.browser.page.content()
+            baseline_source = await self.browser.get_page_source()
             body = self._response_body_for(ip.url)
             if body:
                 baseline_source = body
@@ -910,7 +910,7 @@ class XSSScanner(BaseScanner):
         try:
             self.browser.reset_dialog()
             await self.browser.navigate(finding.url)
-            baseline_source = await self.browser.page.content()
+            baseline_source = await self.browser.get_page_source()
             body = self._response_body_for(finding.url)
             if body:
                 baseline_source = body

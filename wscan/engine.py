@@ -182,6 +182,11 @@ _AUTO_ENABLED_CHECKS: frozenset[str] = frozenset({"cms", "privesc"})
 # する（状態変更系プローブの二重送信・resume 重複を防ぐ）。
 _API_TEMPLATE_ONLY_CHECKS: frozenset[str] = frozenset({"mass_assignment"})
 
+# 1 件の finding 検証（_verify_one）の上限秒。正常な verify_finding は実測で ~50-115s に収まるため
+# 十分な余裕を取りつつ、内部 await が返らない病的ケースが verify フェーズ全体（＝スキャン）を
+# 止めるのを防ぐ（超過は "skipped"＝未検証/要手動確認へ・F06/0059）。
+_VERIFY_ONE_TIMEOUT_S = 180.0
+
 # SPA 収穫の JSON body を実攻撃するチェック。capability 判定に加えて明示的な
 # ホワイトリストを置き、将来の対応拡大が意図せず攻撃範囲を広げるのを防ぐ。
 _JSON_INJECTION_CHECKS = ("sqli",)
@@ -2495,6 +2500,22 @@ class ScanEngine:
     # Public entry point
     # =========================================================================
 
+    def _profile(self, msg: str) -> None:
+        """WSCAN_PROFILE=1 のとき scan 開始からの経過秒を stderr へ即時 flush 出力する（F06/0059 計測用）。
+
+        E2E が SCAN_TIMEOUT_S で殺されても「どこで時間が集中したか / 最後にどの単位で止まったか」を
+        残すため、まとめてでなく逐次出力する。本番は環境変数未設定で完全 no-op（オーバーヘッドなし）。
+        """
+        if not os.environ.get("WSCAN_PROFILE"):
+            return
+        import time as _t
+        import sys as _s
+        t0 = getattr(self, "_scan_t0", None)
+        if t0 is None:
+            t0 = _t.monotonic()
+            self._scan_t0 = t0
+        print(f"[PROFILE +{_t.monotonic() - t0:7.1f}s] {msg}", file=_s.stderr, flush=True)
+
     async def run(self):
         """4-phase scan pipeline."""
         if self.monitor:
@@ -2592,7 +2613,9 @@ class ScanEngine:
 
                 # ── Phase 1: Crawl ───────────────────────────────────────
                 if self.monitor: await self.monitor.emit_phase("crawl")
+                self._profile("crawl: start")
                 crawled_pages = await self._phase_crawl()
+                self._profile(f"crawl: done ({len(crawled_pages)} pages)")
 
                 # ── Phase 1b: Crawl Review (crawl→plan 間の一時停止レビュー) ──
                 if self.interactive_crawl_review and self.monitor:
@@ -2609,11 +2632,15 @@ class ScanEngine:
 
                 # ── Phase 2: Plan ────────────────────────────────────────
                 if self.monitor: await self.monitor.emit_phase("plan")
+                self._profile("plan: start")
                 plans = await self._phase_plan(crawled_pages)
+                self._profile("plan: done")
 
                 # ── Phase 3: Attack ──────────────────────────────────────
                 if self.monitor: await self.monitor.emit_phase("attack")
+                self._profile("attack: start")
                 await self._phase_attack(crawled_pages, plans)
+                self._profile("attack: done")
             except AbortScan:
                 scan_aborted = True
                 # 中断時点の Finding と進捗を必ず永続化してから続行する。payload 単位の
@@ -2635,11 +2662,15 @@ class ScanEngine:
             # この後続フェーズは実行しない（abort 制御の信頼性を保つ）。
             if not scan_aborted:
                 try:
+                    self._profile("phase3b api-template: start")
                     await self._run_api_template_checks()
+                    self._profile("phase3b json-injection: start")
                     await self._run_json_injection_checks()
+                    self._profile("phase3b tls-seed: start")
                     # crawl が到達できない弱プロトコル origin を取りこぼさないため、
                     # seed origin に対して TLS 検査を直接走らせる（Codex #158 P1）。
                     await self._run_tls_seed_scans()
+                    self._profile("phase3b: done")
                 except AbortScan:
                     scan_aborted = True
 
@@ -2689,7 +2720,9 @@ class ScanEngine:
             # snapshot — verifiers near token expiry would 401 and mark real
             # findings unconfirmed.
             try:
+                self._profile("verify: start")
                 await self._phase_verify()
+                self._profile("verify: done")
                 self._save_checkpoint()
             finally:
                 try:
@@ -2707,7 +2740,9 @@ class ScanEngine:
 
             # ── Phase 4: Report ──────────────────────────────────────────
             if self.monitor: await self.monitor.emit_phase("report")
+            self._profile("report: start")
             await self._phase_report_async()
+            self._profile("report: done")
 
             if self.monitor:
                 self.monitor.api_findings = [f.to_dict() for f in self.all_findings]
@@ -4961,6 +4996,10 @@ class ScanEngine:
         Uses ``self.browser`` which transparently returns the worker's browser
         when called from inside a concurrent worker task.
         """
+        self._profile(
+            f"attack page START: {page.url} "
+            f"(forms={len(page.forms)} params={len(page.url_params)})"
+        )
         # ── セッション失効チェック（全検査の前に一度）────────────────────
         # 長時間スキャンでセッションが切れると以降が全てログイン画面/401 に化け、
         # 検出力が静かにゼロになる。ページ単位検査（graphql/cache/proto/mass 等）も
@@ -5267,6 +5306,7 @@ class ScanEngine:
 
         for fi, dom, field, is_url_param in field_queue:
             field_name = field.get("name", f"field_{fi}")
+            self._profile(f"  field: {field_name} @ {page.url}")
             key = (f"{page.url}||url_param||{field_name}" if is_url_param
                    else f"{page.url}||{fi}||{field_name}")
             # Guard scanned_forms with a lock so concurrent workers don't
@@ -6239,14 +6279,27 @@ class ScanEngine:
                 f"Verification: re-testing {len(to_verify)} finding(s)", "running"
             )
 
+        self._profile(f"verify: {len(to_verify)} findings to verify")
         for i, finding in enumerate(to_verify):
             skipped = False
             state = ""
+            self._profile(
+                f"  verify #{i+1}/{len(to_verify)}: {getattr(finding, 'check_type', '?')} "
+                f"@ {getattr(finding, 'url', '?')}"
+            )
             try:
-                state = await self._verify_one(finding)
+                # 1 件の finding 検証が wedge しても verify フェーズ全体（＝スキャン）を
+                # 止めないよう有界化する。verify_finding は navigate/baseline/apply/fire を
+                # 重ねるため、特定 finding（例: 反射 XSS の再現）で内部 await が返らないと
+                # 外側 SCAN_TIMEOUT_S まで到達し全 E2E が停止していた（F06/0059 実測）。
+                # timeout は下の except（TimeoutError も Exception）で "skipped"＝未検証
+                # （要手動確認）に倒す：finding は消さず、CONFIRMED にも上げない。
+                state = await asyncio.wait_for(
+                    self._verify_one(finding), timeout=_VERIFY_ONE_TIMEOUT_S
+                )
             except Exception as exc:
-                # 想定外の例外（破損 provenance の復元失敗など）で verify フェーズ全体を
-                # 止めない。1 件の異常が残り全 finding の検証を巻き込むのを防ぐ。
+                # 想定外の例外（破損 provenance の復元失敗など）や上記 timeout で verify
+                # フェーズ全体を止めない。1 件の異常が残り全 finding の検証を巻き込むのを防ぐ。
                 # 黙って検出力を落とさないよう wave_errors に記録する。
                 skipped = True
                 errors = getattr(self, "wave_errors", None)
