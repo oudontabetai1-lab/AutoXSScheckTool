@@ -113,7 +113,11 @@ llm:
   concurrency: 0
 
   # LLM API 1回あたりのタイムアウト秒数と、一時失敗時の最大リトライ回数
+  # timeout_seconds: one-shot 呼び出し（baseline/adaptive本体/report/triage＝complete_text 経由）
+  # stream_timeout_seconds: streaming 呼び出し（planner・適応ペイロード変異の自前実装）。既定は従来の 90s
+  # ※どちらも HTTP/ページ読み込みの timeout（scan --timeout）とは別物
   timeout_seconds: 30
+  stream_timeout_seconds: 90
   max_retries: 2
 
   # Ollama

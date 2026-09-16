@@ -592,7 +592,7 @@ class AdaptivePayloadEngine:
         import httpx
         full = ""
         try:
-            async with httpx.AsyncClient(timeout=90.0) as client:
+            async with httpx.AsyncClient(timeout=self.pg.llm_stream_timeout_seconds) as client:
                 async with client.stream(
                     "POST",
                     f"{self.pg.ollama_url}/api/generate",
@@ -632,7 +632,7 @@ class AdaptivePayloadEngine:
         import httpx
         full = ""
         try:
-            async with httpx.AsyncClient(timeout=90.0) as client:
+            async with httpx.AsyncClient(timeout=self.pg.llm_stream_timeout_seconds) as client:
                 async with client.stream(
                     "POST",
                     llm_endpoint.chat_completions_url(self.pg.openai_base_url),
@@ -709,7 +709,7 @@ class AdaptivePayloadEngine:
             return None
         import httpx
         try:
-            async with httpx.AsyncClient(timeout=60.0) as client:
+            async with httpx.AsyncClient(timeout=self.pg.llm_stream_timeout_seconds) as client:
                 url = (
                     f"https://generativelanguage.googleapis.com/v1beta/models/"
                     f"{self.pg.gemini_model}:generateContent?key={api_key}"
