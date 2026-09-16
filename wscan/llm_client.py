@@ -151,6 +151,30 @@ async def complete_text(
     except Exception:
         return _completion_result(None, "unavailable", return_status)
 
+    # LLM 呼び出しの観測性（0065）：実際に問い合わせる経路の結果を記録する。本文は保存せず
+    # 文字数のみ。request_logger 未配線（triage の使い捨て pg 等）や記録失敗では no-op。
+    import time as _time
+    _t0 = _time.monotonic()
+    _logger = getattr(pg, "request_logger", None)
+    _role = pg.current_role() if hasattr(pg, "current_role") else ""
+    _model = getattr(pg, f"{provider}_model", "") or ""
+
+    def _finish(text, status, attempt=0):
+        if _logger is not None:
+            try:
+                _logger.log_llm_call(
+                    provider=provider, role=_role, model=_model,
+                    timeout_seconds=request_timeout,
+                    elapsed_seconds=_time.monotonic() - _t0,
+                    status=status, retries=attempt,
+                    prompt_chars=len(prompt) if isinstance(prompt, str) else None,
+                    response_chars=len(text) if isinstance(text, str) else 0,
+                    caller="complete_text",
+                )
+            except Exception:
+                pass
+        return _completion_result(text, status, return_status)
+
     for attempt in range(max_retries + 1):
         retry_after = None
         try:
@@ -170,8 +194,8 @@ async def complete_text(
                 except (TypeError, AttributeError, IndexError) as exc:
                     raise _RetryableResponseError(str(exc)) from exc
                 if text is None or not text.strip():
-                    return _completion_result(text, "empty", return_status)
-                return _completion_result(text, "ok", return_status)
+                    return _finish(text, "empty", attempt)
+                return _finish(text, "ok", attempt)
 
             async with httpx.AsyncClient(timeout=request_timeout) as client:
                 if provider == "openai":
@@ -224,15 +248,15 @@ async def complete_text(
                         if block is not None:
                             # 安全ブロック等。再試行しても無駄なので blocked(収束)扱い。
                             # LLM 全体は生きているため availability は倒さない。
-                            return _completion_result(None, "blocked", return_status)
+                            return _finish(None, "blocked", attempt)
                         text = data["candidates"][0]["content"]["parts"][0]["text"]
                     else:
                         text = data["response"]
                     if not isinstance(text, str):
                         raise TypeError("LLM response text is not a string")
                     if not text.strip():
-                        return _completion_result(text, "empty", return_status)
-                    return _completion_result(text, "ok", return_status)
+                        return _finish(text, "empty", attempt)
+                    return _finish(text, "ok", attempt)
                 except (ValueError, TypeError, KeyError, IndexError) as exc:
                     raise _RetryableResponseError(str(exc)) from exc
 
@@ -244,8 +268,8 @@ async def complete_text(
         retryable = is_retryable(failure)
         if attempt >= max_retries or not retryable:
             status: CompletionStatus = "transient" if retryable else "permanent"
-            return _completion_result(None, status, return_status)
+            return _finish(None, status, attempt)
         delay = retry_after if retry_after is not None else backoff_seconds(attempt)
         await asyncio.sleep(delay)
 
-    return _completion_result(None, "transient", return_status)
+    return _finish(None, "transient", max_retries)

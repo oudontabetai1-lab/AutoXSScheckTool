@@ -155,6 +155,10 @@ class PayloadGenerator:
         roles = ["planner", "payload", "adaptive", "triage", "report"]
         return {role: self.get_model(role) for role in roles if self.get_model(role)}
 
+    def current_role(self) -> str:
+        """現在 active な role（use_role コンテキスト内）を返す。LLM 呼び出しログ記録用。既定は空文字（0065）。"""
+        return _active_role.get() or ""
+
     @contextmanager
     def use_role(self, role: str):
         """Expose a role-specific model in the current task context."""

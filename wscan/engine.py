@@ -1052,6 +1052,8 @@ class ScanEngine:
             prompt_templates=prompt_templates,
             enable_web_browsing=enable_llm_web_browsing,
         )
+        # LLM 呼び出し観測性（0065）：complete_text がここから logger を getattr で拾う。
+        self.payload_gen.request_logger = self.request_logger
 
         # Central registry lives in wscan/scanners/__init__.py
         from .scanners import SCANNERS as _SCANNERS

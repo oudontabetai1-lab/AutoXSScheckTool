@@ -346,3 +346,75 @@ class GeminiRemediationRegressionTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LLMObservabilityTests(unittest.TestCase):
+    """complete_text が LLM 呼び出しを本文なしで記録する（0065）。"""
+
+    def _run_openai_ok(self, **pg_over):
+        pg = _payload_generator("openai", **pg_over)
+        resp = _Response(200, {"choices": [{"message": {"content": "HELLO"}}]})
+        _client, context = _mock_async_client([resp])
+        with patch("wscan.llm_client.httpx.AsyncClient", return_value=context):
+            return asyncio.run(complete_text(pg, "PROMPTBODY"))
+
+    def test_logs_call_metadata_without_body(self):
+        logger = MagicMock()
+        result = self._run_openai_ok(request_logger=logger, current_role=lambda: "payload")
+        self.assertEqual(result, "HELLO")
+        logger.log_llm_call.assert_called_once()
+        kw = logger.log_llm_call.call_args.kwargs
+        self.assertEqual(kw["provider"], "openai")
+        self.assertEqual(kw["role"], "payload")
+        self.assertEqual(kw["status"], "ok")
+        self.assertEqual(kw["model"], "gpt-test")
+        self.assertEqual(kw["prompt_chars"], len("PROMPTBODY"))
+        self.assertEqual(kw["response_chars"], len("HELLO"))
+        self.assertGreaterEqual(kw["elapsed_seconds"], 0.0)
+        # 本文（prompt/response）は kwargs に一切含めない。
+        blob = repr(kw)
+        self.assertNotIn("PROMPTBODY", blob)
+        self.assertNotIn("HELLO", blob)
+
+    def test_records_transient_status_on_retryable_failure(self):
+        logger = MagicMock()
+        pg = _payload_generator("openai", request_logger=logger,
+                                current_role=lambda: "payload", llm_max_retries=0)
+        resp = _Response(503, {})
+        _client, context = _mock_async_client([resp])
+        with patch("wscan.llm_client.httpx.AsyncClient", return_value=context):
+            asyncio.run(complete_text(pg, "p"))
+        logger.log_llm_call.assert_called_once()
+        self.assertEqual(logger.log_llm_call.call_args.kwargs["status"], "transient")
+
+    def test_no_request_logger_does_not_crash(self):
+        # request_logger 未配線（既存の SimpleNamespace）でも従来どおり動く（回帰）。
+        self.assertEqual(self._run_openai_ok(), "HELLO")
+
+
+class RequestLoggerLLMTests(unittest.TestCase):
+    def test_log_llm_call_writes_jsonl_without_body(self):
+        import json
+        import tempfile
+        from wscan.request_logger import RequestLogger
+        with tempfile.TemporaryDirectory() as d:
+            rl = RequestLogger(d)
+            rl.log_llm_call(provider="claude", role="adaptive", model="m",
+                            timeout_seconds=30.0, elapsed_seconds=1.5, status="ok",
+                            retries=0, prompt_chars=100, response_chars=20, caller="complete_text")
+            self.assertEqual(rl.llm_call_count, 1)
+            rec = json.loads(rl.llm_path.read_text(encoding="utf-8").strip())
+        self.assertEqual(rec["provider"], "claude")
+        self.assertEqual(rec["status"], "ok")
+        self.assertEqual(rec["prompt_chars"], 100)
+        self.assertNotIn("prompt", rec)      # 本文キーは持たない
+        self.assertNotIn("response", rec)
+
+    def test_log_llm_call_disabled_is_noop(self):
+        import tempfile
+        from wscan.request_logger import RequestLogger
+        with tempfile.TemporaryDirectory() as d:
+            rl = RequestLogger(d, enabled=False)
+            rl.log_llm_call(provider="ollama", status="ok")
+            self.assertFalse(rl.llm_path.exists())
+            self.assertEqual(rl.llm_call_count, 0)
