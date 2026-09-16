@@ -80,3 +80,65 @@ def test_caller_cancel_propagates_after_inner_drained():
 
     assert asyncio.run(run()) == "cancelled"  # cancellation は握りつぶさず伝播
     assert finished["v"]                       # 内側 task の cleanup 完了後に伝播した
+
+
+# --- dialog.dismiss() の有界化（F06/0059）--------------------------------
+
+class _HangingDialog:
+    def __init__(self):
+        self.message = "xss"
+        self.dismissed = False
+        self.cancelled = False
+
+    async def dismiss(self):
+        try:
+            await asyncio.sleep(5)      # patched timeout より十分長い
+            self.dismissed = True
+        except asyncio.CancelledError:
+            self.cancelled = True
+            raise
+
+
+class _FastDialog:
+    def __init__(self):
+        self.message = "xss"
+        self.dismissed = False
+
+    async def dismiss(self):
+        self.dismissed = True
+
+
+class _DialogPage:
+    async def screenshot(self, **kw):
+        return b"\xff\xd8\xff"          # 最小 JPEG 相当（内容は問わない）
+
+
+def _make_dialog_bm():
+    bm = BrowserManager.__new__(BrowserManager)
+    bm.page = _DialogPage()
+    bm.dialog_fired = False
+    bm.dialog_message = ""
+    bm.dialog_screenshot_b64 = ""
+    return bm
+
+
+def test_on_dialog_returns_quickly_when_dismiss_hangs():
+    # alert() の dismiss() がハングしても _on_dialog は有界時間で戻る（以降のページ操作を
+    # wedge しない）。内側 task は cancel+drain され orphan future を残さない（F06/0059）。
+    bm = _make_dialog_bm()
+    dialog = _HangingDialog()
+    with patch.object(browser_mod, "_DIALOG_DISMISS_TIMEOUT", 0.05):
+        start = time.monotonic()
+        asyncio.run(bm._on_dialog(dialog))
+        elapsed = time.monotonic() - start
+    assert elapsed < 2.0            # 5秒待たず有界時間で戻る
+    assert dialog.cancelled         # dismiss は cancel+drain 済み
+    assert bm.dialog_fired          # signal 自体は記録される
+
+
+def test_on_dialog_dismisses_when_fast():
+    bm = _make_dialog_bm()
+    dialog = _FastDialog()
+    asyncio.run(bm._on_dialog(dialog))
+    assert dialog.dismissed
+    assert bm.dialog_fired
