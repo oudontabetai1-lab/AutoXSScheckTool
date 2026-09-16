@@ -1,10 +1,12 @@
-# WScan — Web Security Scanner
+# Vulix — self-learning browser security exploration engine
 
-WScan は、IPA「安全なウェブサイトの作り方」の脆弱性カテゴリを中心に、Playwright による実ブラウザ操作、決定論スキャナ、LLM を組み合わせた Web 脆弱性検査ツールです。用途に応じて、再現性と確証を重視する **通常モード (`scan`)**、LLM の独自解釈と探索力を重視する **Agent モード (`agent`)**、Agent の発見範囲と通常スキャンの確実性を両立する **Hybrid モード（ダッシュボード）**を使い分けます。Hybrid は Agent を URL 偵察だけに使うのではなく、Agent が見つけた脆弱性仮説も最終レポートへラベル付きで併記します。
+**Vulix**（VULIX = Vulnerability Understanding, Learning & Intelligent eXploration）は、対象アプリと対話しながら状態を理解し、観測結果で次の行動を決める **security exploration engine** です（[ADR-0022](docs/) による再定義。旧称 WScan）。Playwright による実ブラウザ操作、決定論スキャナ、LLM を組み合わせ、用途に応じて、再現性と確証を重視する **通常モード (`scan`)**、LLM の独自解釈と探索力を重視する **Agent モード (`agent`)**、両者を両立する **Hybrid モード（ダッシュボード）**を使い分けます。Hybrid は Agent を URL 偵察だけに使うのではなく、Agent が見つけた脆弱性仮説も最終レポートへラベル付きで併記します。
+
+> **exploration engine への進化は段階的**です。現行の実装・CLI（`python3 main.py …`・内部パッケージ `wscan/`）はそのまま利用でき、Vulix ブランドと新しいエンジン語彙（Observer/Mapper/Planner/Executor/Evaluator/Learner）へ加算的に移行します。
 
 > **基本の操作面はブラウザで開くダッシュボードです**（`python3 main.py serve`）。通常・Agent・Hybrid の起動、機能フラグの切り替え、進捗確認、結果閲覧までダッシュボードで完結します。`scan`・`agent` などの CLI サブコマンドは自動化・CI・スクリプト用の補助入口です。
 
-> WScan は、自分が管理している環境、または明示的な検査許可を得た環境だけに使用してください。
+> Vulix は、自分が管理している環境、または明示的な検査許可を得た環境だけに使用してください。
 
 ## 目次
 
