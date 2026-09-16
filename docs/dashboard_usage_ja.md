@@ -287,6 +287,7 @@ HTML レポートのバッジ:
 | `report.sarif` | CI/CD 用 SARIF。全 Finding を保持し、未確証は `level: note` |
 | `remediation_plan.md`, `remediation_tasks.json` | 修正計画とタスク |
 | `http_requests.jsonl`, `payloads.jsonl` | 通信と投入ペイロードの監査ログ |
+| `llm_calls.jsonl` | LLM 呼び出しの監査（provider/role/model/所要時間/失敗種別/文字数）。プロンプト・応答本文は保存しない |
 | `scan_config.json` | 実行設定。秘匿値は伏字 |
 | `checkpoint.json` | 再開用の完了単位と Finding |
 
