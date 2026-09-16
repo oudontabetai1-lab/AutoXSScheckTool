@@ -380,6 +380,35 @@ def _community_payloads_enabled_by_config(path: Path | None = None) -> bool:
         return True
 
 
+def _component_intel_config(path: Path | None = None) -> dict:
+    """config/wscan.yaml の features.component_intel と component_intel ブロックを読む。
+
+    ``{"enabled": bool, "eol_base_url": str, "timeout": float}`` を返す。既定 off。
+    外部 API 情報（base URL・timeout）を設定で管理するためのチョークポイント。
+    """
+    config_path = path or (CONFIG_DIR / "wscan.yaml")
+    result = {"enabled": False, "eol_base_url": "https://endoflife.date",
+              "osv_base_url": "https://api.osv.dev", "nvd_enabled": False,
+              "nvd_base_url": "https://services.nvd.nist.gov", "timeout": 8.0}
+    try:
+        with open(config_path, encoding="utf-8") as f:
+            raw = yaml.safe_load(f) or {}
+        result["enabled"] = bool((raw.get("features", {}) or {}).get("component_intel", False))
+        block = raw.get("component_intel", {}) or {}
+        if block.get("eol_base_url"):
+            result["eol_base_url"] = str(block["eol_base_url"])
+        if block.get("osv_base_url"):
+            result["osv_base_url"] = str(block["osv_base_url"])
+        result["nvd_enabled"] = bool(block.get("nvd_enabled", False))
+        if block.get("nvd_base_url"):
+            result["nvd_base_url"] = str(block["nvd_base_url"])
+        if block.get("timeout") is not None:
+            result["timeout"] = float(block["timeout"])
+    except Exception:
+        pass
+    return result
+
+
 def _tls_scan_enabled_by_config(path: Path | None = None) -> bool:
     """config/wscan.yaml の features.tls_scan を読む（既定 off）。"""
     config_path = path or (CONFIG_DIR / "wscan.yaml")
@@ -565,6 +594,7 @@ class ScanEngine:
         enable_waf_detection: bool = True,
         enable_payload_learning: bool = True,
         enable_community_payloads: Optional[bool] = None,
+        enable_component_intel: Optional[bool] = None,
         enable_tls_scan: Optional[bool] = None,
         enable_payload_evolution: Optional[bool] = None,
         enable_payload_mutation: Optional[bool] = None,
@@ -839,6 +869,30 @@ class ScanEngine:
         self.flows: list[ScanFlow] = ScanFlow.list_from_dicts(flows or [])
         if ctf_mode and "ssti" not in self.checks:
             self.checks.append("ssti")
+
+        # EOL コンポーネント検査（opt-in）。有効時のみ endoflife.date への照会設定を
+        # self.component_intel に持ち、outdated_components を checks に追加する（既定 off＝スキャンの
+        # ネット非依存を維持）。有効/無効は enable_component_intel（ダッシュボード/CLI 上書き）優先、
+        # 未指定なら config/wscan.yaml の features.component_intel。base URL/timeout は常に config から。
+        _ci_cfg = _component_intel_config()
+        # enable 未指定なら、checks に outdated_components が明示されていれば有効化し、無ければ config。
+        # これで CLI/ダッシュボード経由でなく checks を直接渡す BatchRunner 等でも、明示指定した
+        # 検査が config off のまま黙って no-op にならない（TLS 隣接ロジックと対称・Codex #155）。
+        _ci_enabled = (
+            ("outdated_components" in self.checks or _ci_cfg["enabled"])
+            if enable_component_intel is None
+            else bool(enable_component_intel)
+        )
+        self.component_intel: dict = {
+            "enabled": _ci_enabled,
+            "eol_base_url": _ci_cfg["eol_base_url"],
+            "osv_base_url": _ci_cfg.get("osv_base_url", "https://api.osv.dev"),
+            "nvd_enabled": _ci_cfg.get("nvd_enabled", False),
+            "nvd_base_url": _ci_cfg.get("nvd_base_url", "https://services.nvd.nist.gov"),
+            "timeout": _ci_cfg["timeout"],
+        }
+        if _ci_enabled and "outdated_components" not in self.checks:
+            self.checks.append("outdated_components")
 
         # TLS 設定不備検査（opt-in）。features.tls_scan=true で tls_scan を checks に追加。
         # 有効/無効は enable_tls_scan（ダッシュボード/CLI 上書き）優先。未指定なら、checks に

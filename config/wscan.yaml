@@ -283,6 +283,11 @@ features:
   # 巡回完了後に画面一覧を確認し、手動巡回や追加URLで再巡回できるようにするか
   interactive_crawl_review: false
 
+  # EOL(サポート終了)コンポーネント検査。Server/X-Powered-By 等のバナーから製品+バージョンを
+  # 抽出し、無料の endoflife.date API へ照会して EOL を検出する。**既定 off**（有効時のみ
+  # スキャン中に外部 API へ製品名を送信する＝ネット非依存でなくなるため opt-in）。
+  component_intel: false
+
   # 以下は CLI フラグで制御する運用機能（設定ファイルでは管理しない）:
   #   --api-spec FILE            API ファースト検査（OpenAPI/Swagger/Postman 取り込み）
   #   --resume DIR / --no-checkpoint  再開可能スキャン（checkpoint.json）
@@ -337,6 +342,24 @@ notifications:
 
   # 通知する最低重大度 (critical / high / medium / low)
   min_severity: "high"
+
+# ──────────────────────────────────────────────────────────
+# コンポーネント/EOL 照会（外部 API 情報の管理）
+# ──────────────────────────────────────────────────────────
+# features.component_intel=true のときに使う。API のベース URL・タイムアウトをここで管理する
+# （鍵が要る API を足す場合は env で渡す想定。例: WSCAN_NVD_API_KEY）。外部へ送るのは製品名の
+# みで、target URL やヘッダ値全体は送らない。
+component_intel:
+  # EOL 判定 API（endoflife.date）。self-host 版に向けるときは base URL を差し替える。
+  eol_base_url: "https://endoflife.date"
+  # 既知脆弱性 API（OSV.dev）。外部 JS ライブラリ（jsdelivr/cdnjs/unpkg 等）を照会する。
+  osv_base_url: "https://api.osv.dev"
+  # CVE 照会（NVD）。限定オプション（既定 off）。CPE の当たり判定はノイズが多いため参考情報として
+  # 集約報告する。API キーは env WSCAN_NVD_API_KEY で渡すとレート制限が緩和される（無くても動作）。
+  nvd_enabled: false
+  nvd_base_url: "https://services.nvd.nist.gov"
+  # 1 リクエストのタイムアウト秒。
+  timeout: 8
 
 # ──────────────────────────────────────────────────────────
 # 出力
