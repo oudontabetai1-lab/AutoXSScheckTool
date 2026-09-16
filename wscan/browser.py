@@ -42,6 +42,8 @@ _DEFAULT_PORTS = {"http": 80, "https": 443, "ws": 80, "wss": 443}
 # try/except は例外しか捕まえられずハングを防げないため、待機を有界にする（F06）。
 # realistic_site 通し E2E が SQLi 再検証の page.content() 待ちで 900 秒 timeout していた。
 _PAGE_CONTENT_TIMEOUT = 30.0
+# dialog.dismiss() は native timeout を持たないため asyncio.wait_for で有界化する上限（F06/0059）。
+_DIALOG_DISMISS_TIMEOUT = 3.0
 
 
 async def _bounded_page_content(page) -> str:
@@ -1201,10 +1203,15 @@ class BrowserManager:
         except Exception:
             self.dialog_screenshot_b64 = ""
         try:
-            await dialog.dismiss()
+            # dismiss() は native timeout を持たないコマンドで、CDP 応答が返らないと await が
+            # 永久に完了しない。ダイアログ未解消の間は同ページの goto/content/フォーム操作が全て
+            # ブロックされるため、alert() を撒く payload が1つでも wedge すると以降の全操作が
+            # 連鎖停止し外側の scan timeout まで到達する（F06/0059）。asyncio.wait_for で有界化する
+            # （3.12 は timeout 時に内側 coroutine を cancel+drain するので orphan future を残さない）。
+            await asyncio.wait_for(dialog.dismiss(), timeout=_DIALOG_DISMISS_TIMEOUT)
         except Exception:
-            # The page may already have navigated or been closed by a parallel
-            # worker. The dialog signal is still useful evidence.
+            # timeout（未応答）や、並行 worker がページを navigate/close 済みのケースを含む。
+            # dialog 発火の signal 自体は evidence として有効なので握りつぶして続行する。
             pass
 
     async def update_extra_headers(self, headers: dict) -> None:
