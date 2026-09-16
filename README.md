@@ -284,7 +284,9 @@ python3 main.py scan URL [URL ...] [options]
 | `--report-model MODEL` | provider モデル | 分析・修正提案用モデル上書き |
 | `-o, --output DIR` | `output/<timestamp>/` | 証跡・レポート出力先 |
 | `--port PORT` | `8765` | モニターポート |
-| `--timeout SECS` | `30` | リクエストタイムアウト |
+| `--timeout SECS` | `30` | HTTP/ページ読み込みのタイムアウト（**LLM ではない**） |
+| `--llm-timeout SECS` | config `llm.timeout_seconds`（`30`） | LLM 1回（one-shot: baseline/adaptive本体/report/triage）の応答上限。正の有限値のみ |
+| `--llm-stream-timeout SECS` | config `llm.stream_timeout_seconds`（`90`） | LLM streaming（planner・適応ペイロード変異）の1回応答上限。正の有限値のみ |
 | `--max-forms N` | `50` | 1ページの最大フォーム数 |
 
 スコープ・認証・通信:
@@ -543,7 +545,8 @@ python3 main.py capability-matrix -o cap.md  # ファイルへ書き出し
 | キー | 型 | 既定値 | 対応 CLI / UI |
 | --- | --- | --- | --- |
 | `llm.provider` | str | `ollama` | `--llm` / LLM設定 |
-| `llm.timeout_seconds` | int | `30` | — |
+| `llm.timeout_seconds` | float | `30` | `--llm-timeout` / LLM one-shot 応答上限（HTTP `--timeout` とは別） |
+| `llm.stream_timeout_seconds` | float | `90` | `--llm-stream-timeout` / LLM streaming（planner・適応変異）応答上限 |
 | `llm.max_retries` | int | `2` | — |
 | `llm.ollama_model` | str | `llama3` | `--ollama-model` / LLM設定 |
 | `llm.ollama_url` | str | `http://localhost:11434` | Agent/Setup の `--ollama-url` / Agent・Hybrid設定 |

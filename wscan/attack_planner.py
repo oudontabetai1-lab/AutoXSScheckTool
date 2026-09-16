@@ -614,7 +614,7 @@ Consider stored / second-order attacks carefully:
         _thinking_header("Ollama", self.payload_gen.ollama_model)
         full = ""
         try:
-            async with httpx.AsyncClient(timeout=90.0) as client:
+            async with httpx.AsyncClient(timeout=self.payload_gen.llm_stream_timeout_seconds) as client:
                 async with client.stream(
                     "POST",
                     f"{self.payload_gen.ollama_url}/api/generate",
@@ -660,7 +660,7 @@ Consider stored / second-order attacks carefully:
         _thinking_header("OpenAI", self.payload_gen.openai_model)
         full = ""
         try:
-            async with httpx.AsyncClient(timeout=90.0) as client:
+            async with httpx.AsyncClient(timeout=self.payload_gen.llm_stream_timeout_seconds) as client:
                 async with client.stream(
                     "POST",
                     llm_endpoint.chat_completions_url(self.payload_gen.openai_base_url),
@@ -712,7 +712,7 @@ Consider stored / second-order attacks carefully:
                 f"https://generativelanguage.googleapis.com/v1beta/models/"
                 f"{model}:generateContent?key={api_key}"
             )
-            async with httpx.AsyncClient(timeout=90.0) as client:
+            async with httpx.AsyncClient(timeout=self.payload_gen.llm_stream_timeout_seconds) as client:
                 resp = await client.post(
                     url,
                     json={"contents": [{"parts": [{"text": prompt}]}]},

@@ -67,6 +67,7 @@ class PayloadGenerator:
         openai_base_url: str = "",
         llm_timeout_seconds: float = 30.0,
         llm_max_retries: int = 2,
+        llm_stream_timeout_seconds: float = 90.0,
     ):
         from . import llm_endpoint
         # このインスタンスが使うベース URL を **構築時にスナップショット** する。
@@ -89,6 +90,17 @@ class PayloadGenerator:
         self._claude_model = claude_model
         self.llm_timeout_seconds = float(llm_timeout_seconds)
         self.llm_max_retries = max(0, int(llm_max_retries))
+        # planner / adaptive 変異の自前ストリーミング経路の1回上限（complete_text の one-shot とは別）。
+        # 既定 90s は従来のハードコード値を維持（回帰なし）。config/CLI/ダッシュボードから変更可（0065）。
+        # 不正値（0/負/NaN/inf・serve API 等 argparse を通らない経路）は既定 90 へ安全に倒す。
+        import math as _math
+        try:
+            _stream = float(llm_stream_timeout_seconds)
+            if not _math.isfinite(_stream) or _stream <= 0:
+                _stream = 90.0
+        except (TypeError, ValueError):
+            _stream = 90.0
+        self.llm_stream_timeout_seconds = _stream
         self.default_payloads = default_payloads or {}
         self.prompt_templates = prompt_templates or {}
         self.role_models = {

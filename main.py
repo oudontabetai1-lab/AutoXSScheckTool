@@ -28,6 +28,19 @@ _CONFIG_PATH = Path(__file__).parent / "config" / "wscan.yaml"
 HYBRID_RECON_MAX_RETRIES = 2
 
 
+def _positive_float(value):
+    """argparse 用: 正の有限 float だけを受ける（0/負/NaN/inf を開始前に拒否・0065）。"""
+    import argparse
+    import math
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        raise argparse.ArgumentTypeError(f"数値ではありません: {value!r}")
+    if not math.isfinite(f) or f <= 0:
+        raise argparse.ArgumentTypeError(f"正の有限秒を指定してください（0/負/NaN/inf 不可）: {value!r}")
+    return f
+
+
 def _load_config(path: Path = _CONFIG_PATH) -> dict:
     """
     Load config/wscan.yaml and return a flat dict of resolved values.
@@ -93,6 +106,7 @@ def _load_config(path: Path = _CONFIG_PATH) -> dict:
     cfg["gemini_model"]            = str(l.get("gemini_model", "gemini-2.0-flash"))
     cfg["claude_model"]            = str(l.get("claude_model", "claude-haiku-4-5-20251001"))
     cfg["llm_timeout_seconds"]     = float(l.get("timeout_seconds", 30))
+    cfg["llm_stream_timeout_seconds"] = float(l.get("stream_timeout_seconds", 90))
     cfg["llm_max_retries"]         = int(l.get("max_retries", 2))
     # 外部 OpenAI 互換 LLM（tsuzumi2 等）のベース URL。config ファイルの値のみを
     # CLI/ダッシュボードの既定にする。env(WSCAN_LLM_BASE_URL/OPENAI_BASE_URL)は
@@ -860,7 +874,17 @@ Examples:
     )
     scan.add_argument(
         "--timeout", type=int, default=_CFG.get("timeout", 30), metavar="SECS",
-        help=f"Request timeout in seconds (default: {_CFG.get('timeout', 30)})",
+        help=f"HTTP/ページ読み込みのタイムアウト秒（LLM ではない。default: {_CFG.get('timeout', 30)}）",
+    )
+    scan.add_argument(
+        "--llm-timeout", type=_positive_float, default=None, metavar="SECS",
+        help="LLM 1回（one-shot: baseline/adaptive/report/triage）の応答上限秒。"
+             f"未指定は config llm.timeout_seconds（既定 {_CFG.get('llm_timeout_seconds', 30)}）。",
+    )
+    scan.add_argument(
+        "--llm-stream-timeout", type=_positive_float, default=None, metavar="SECS",
+        help="LLM streaming（planner・適応ペイロード変異）の1回応答上限秒。"
+             f"未指定は config llm.stream_timeout_seconds（既定 {_CFG.get('llm_stream_timeout_seconds', 90)}）。",
     )
     scan.add_argument(
         "--max-forms", type=int, default=_CFG.get("max_forms", 50), metavar="N",
@@ -1458,6 +1482,14 @@ Examples:
         ),
     )
     agent.add_argument("url", help="Target URL (e.g. https://example.com)")
+    agent.add_argument(
+        "--llm-timeout", type=_positive_float, default=None, metavar="SECS",
+        help="LLM 1回（one-shot）の応答上限秒。未指定は config llm.timeout_seconds。",
+    )
+    agent.add_argument(
+        "--llm-stream-timeout", type=_positive_float, default=None, metavar="SECS",
+        help="LLM streaming（planner・適応変異）の1回応答上限秒。未指定は config llm.stream_timeout_seconds。",
+    )
     agent.add_argument(
         "--llm",
         choices=["claude", "openai", "openai_compatible", "ollama"],
@@ -2186,7 +2218,8 @@ async def run_scan(args):
             claude_model=getattr(args, "claude_model", "claude-haiku-4-5-20251001"),
             openai_base_url=_effective_llm_base_url(args),
             role_models=getattr(args, "role_models", {}),
-            llm_timeout_seconds=_CFG.get("llm_timeout_seconds", 30),
+            llm_timeout_seconds=(getattr(args, "llm_timeout", None) or _CFG.get("llm_timeout_seconds", 30)),
+            llm_stream_timeout_seconds=(getattr(args, "llm_stream_timeout", None) or _CFG.get("llm_stream_timeout_seconds", 90)),
             llm_max_retries=_CFG.get("llm_max_retries", 2),
         )
         _wizard_result = await run_wizard(_pg)
@@ -2347,7 +2380,8 @@ async def run_scan(args):
             claude_model=args.claude_model,
             openai_base_url=_effective_llm_base_url(args),
             role_models=getattr(args, "role_models", {}),
-            llm_timeout_seconds=_CFG.get("llm_timeout_seconds", 30),
+            llm_timeout_seconds=(getattr(args, "llm_timeout", None) or _CFG.get("llm_timeout_seconds", 30)),
+            llm_stream_timeout_seconds=(getattr(args, "llm_stream_timeout", None) or _CFG.get("llm_stream_timeout_seconds", 90)),
             llm_max_retries=_CFG.get("llm_max_retries", 2),
             checks=checks_list,
             output_dir=args.output,
@@ -2698,6 +2732,7 @@ async def run_serve(args):
         "openai_base_url": _CFG.get("openai_base_url", ""),
         "role_models": _CFG.get("role_models", {}),
         "llm_timeout_seconds": _CFG.get("llm_timeout_seconds", 30),
+        "llm_stream_timeout_seconds": _CFG.get("llm_stream_timeout_seconds", 90),
         "llm_max_retries": _CFG.get("llm_max_retries", 2),
         "auth_user": _CFG.get("auth_user", ""),
         "auth_pass": _CFG.get("auth_pass", ""),
@@ -2974,6 +3009,9 @@ async def run_serve(args):
                 role_models=cfg.get("role_models", {}) or {},
                 llm_timeout_seconds=float(
                     cfg.get("llm_timeout_seconds", _CFG.get("llm_timeout_seconds", 30))
+                ),
+                llm_stream_timeout_seconds=float(
+                    cfg.get("llm_stream_timeout_seconds", _CFG.get("llm_stream_timeout_seconds", 90))
                 ),
                 llm_max_retries=_serve_ints["llm_max_retries"],
                 auth_user=cfg.get("auth_user", "") or "",
