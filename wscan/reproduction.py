@@ -14,8 +14,13 @@ from .request_logger import _is_sensitive_header, _redact_headers
 from .scanners.base import Finding
 
 
-def write_reproduction_package(findings: list[Finding], output_dir: Path) -> dict:
-    items = [_finding_to_repro_item(f, i + 1) for i, f in enumerate(findings)]
+def write_reproduction_package(
+    findings: list[Finding], output_dir: Path, *, authenticated: bool = False
+) -> dict:
+    items = [
+        _finding_to_repro_item(f, i + 1, authenticated=authenticated)
+        for i, f in enumerate(findings)
+    ]
     json_path = output_dir / "reproduction.json"
     shell_path = output_dir / "reproduce.sh"
 
@@ -46,7 +51,7 @@ def write_reproduction_package(findings: list[Finding], output_dir: Path) -> dic
     return {"json": str(json_path), "shell": str(shell_path), "count": len(items)}
 
 
-def _finding_to_repro_item(finding: Finding, item_id: int) -> dict:
+def _finding_to_repro_item(finding: Finding, item_id: int, *, authenticated: bool = False) -> dict:
     request = dict(finding.request or {})
     if "headers" in request:
         request["headers"] = _redact_headers(request["headers"])
@@ -75,7 +80,11 @@ def _finding_to_repro_item(finding: Finding, item_id: int) -> dict:
         "evidence_type": finding.evidence_type,
         "evidence_details": finding.evidence_details,
         "preconditions": {
-            "authorization_required": any(
+            # captured request ヘッダから推定するが、Agent finding は認証後でも request
+            # ヘッダを持たず常に False になる（Codex #154 P2）。run が認証済み（user/pass・
+            # TOTP・storage-state）なら、その run の finding は認証セッション無しでは再現不能な
+            # ため authorization_required を立てる。
+            "authorization_required": bool(authenticated) or any(
                 _is_sensitive_header(name) for name in (request.get("headers") or {})
             ),
             "note": "Use an authorized test account and replace all redacted values at runtime.",

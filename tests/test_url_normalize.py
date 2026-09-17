@@ -348,3 +348,26 @@ def test_endpoint_identity_distinguishes_routes():
 
     assert endpoint_identity("/view?page=admin") != endpoint_identity("/view?page=home")
     assert endpoint_identity("/search?q=<script>") == endpoint_identity("/search?q=1'")
+
+
+def test_route_aware_identity_distinguishes_hash_routes():
+    # hash ルート SPA は fragment を保持して別 identity にする（Codex #154 P1・偽 COMPLETE 防止）。
+    from wscan.url_normalize import route_aware_identity, endpoint_identity
+
+    assert route_aware_identity("http://h/app#/users") != route_aware_identity("http://h/app#/admin")
+    # fragment 無しは endpoint_identity と一致（挙動不変）。
+    assert route_aware_identity("http://h/view?page=x") == endpoint_identity("http://h/view?page=x")
+
+
+def test_route_aware_identity_still_dedups_payload_variants():
+    # payload 変種（注入メタ文字入りの query 値）は従来どおり dedup される。
+    from wscan.url_normalize import route_aware_identity
+
+    assert route_aware_identity("http://h/search?q=<script>") == route_aware_identity("http://h/search?q=1'")
+
+
+def test_route_aware_identity_ignores_non_route_fragment():
+    # 単なるアンカー（route でない fragment）は identity に影響しない。
+    from wscan.url_normalize import route_aware_identity, endpoint_identity
+
+    assert route_aware_identity("http://h/doc#section1") == endpoint_identity("http://h/doc#section1")

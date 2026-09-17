@@ -288,7 +288,14 @@ class AgentEngine:
         # 通常スキャンと同じ再現成果物を Agent 仮説にも生成する。assumed/reproduced は
         # verification_state で明確に区別され、秘密値は exporter 側で伏せる。
         from wscan.reproduction import write_reproduction_package
-        write_reproduction_package(findings, self.output_dir)
+        # 認証（user/pass・TOTP・storage-state）を使った run の finding は認証セッション無しでは
+        # 再現不能なので、reproduction に authorization_required を立てる（Codex #154 P2）。
+        authenticated_run = bool(
+            (self.auth_user and self.auth_pass) or self.totp_secret or self.storage_state
+        )
+        write_reproduction_package(
+            findings, self.output_dir, authenticated=authenticated_run
+        )
 
         # 初期化・実行のハードエラー、または history 上の非成功で 0 findings を「正常完了」に
         # 見せない。evidence は残すが、成功レポートと完了イベントは生成しない（D8）。findings が

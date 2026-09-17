@@ -34,7 +34,7 @@ from urllib.parse import urlparse
 
 from rich.console import Console
 from rich.rule import Rule
-from .url_normalize import endpoint_identity
+from .url_normalize import endpoint_identity, route_aware_identity
 
 from .header_scope import (
     _BLANK_URLS as _BLANK_URLS,  # re-export: tests/external callers
@@ -674,6 +674,7 @@ class AgentBrowserScanner:
         self._step_count = 0
         self._episode_offset = 0
         self._active_episode_id = "legacy"
+        self._active_role: AgentRole | None = None
         self._harness: AgentHarness | None = None
         self._runtime_work_targets: dict[str, str] = {}
         self._runtime_observed_urls: list[str] = []
@@ -1305,6 +1306,7 @@ class AgentBrowserScanner:
                         )
                         continue
                     self._active_episode_id = f"{work.work_id}:{work.attempts}"
+                    self._active_role = work.role
                     self._episode_offset = self._harness.session_consumed_steps
                     self._harness.set_phase(
                         AgentPhase.AUTHENTICATING
@@ -1387,7 +1389,11 @@ class AgentBrowserScanner:
                             work.target, is_reproduced
                         )
                     if work.role == AgentRole.ADVERSARIAL_REVIEWER:
-                        reported, resolved = parse_reviewer_gap_lines(episode_text)
+                        # gap 制御指令は reviewer の final result からのみ解析する。episode_text は
+                        # 未信頼な target ページの extracted_content() を含み、``COVERAGE GAP: bogus``
+                        # で偽 gap を作られたり ``GAP RESOLVED:`` で実 gap を消される（prompt injection・
+                        # Codex #154 P1）。完了マーカーが final を見るのと経路を揃える。
+                        reported, resolved = parse_reviewer_gap_lines(final)
                         self._harness.record_reviewer_gaps(reported)
                         self._harness.resolve_reviewer_gaps(resolved)
                     terminal = (
@@ -1427,7 +1433,16 @@ class AgentBrowserScanner:
                         ]))
                     # probe/verify 中の redirect・form submit・SPA 遷移も新しい
                     # in-scope page として強制検査対象へ昇格する。
-                    self._enqueue_observed_probe_work()
+                    newly_enqueued = self._enqueue_observed_probe_work()
+                    # 新しい probe work が増えたら、完了済みの adversarial reviewer を再キューして
+                    # 拡張された ledger を必ずレビューさせる（新 evidence の未レビュー完了を防ぐ・
+                    # Codex #154 P2）。reviewer 自身の episode が新ページを踏んだ場合も同様。
+                    if newly_enqueued and any(
+                        item.role == AgentRole.ADVERSARIAL_REVIEWER
+                        and item.status == WorkStatus.COMPLETE
+                        for item in self._harness.state.work_queue
+                    ):
+                        self._harness.requeue_role(AgentRole.ADVERSARIAL_REVIEWER)
                 result.findings = [
                     _finding_from_checkpoint(item)
                     for item in self._harness.state.hypotheses
@@ -1626,7 +1641,16 @@ class AgentBrowserScanner:
             ),
             {},
         )
-        return {} if "<redacted>" in str(candidate.get("url", "")) else candidate
+        # url だけでなく実行に効く全フィールド（payload/field_name）の redaction を検出する。
+        # _sanitize_value は payload/field_name も伏せるため（例: user "admin" → SQLi payload
+        # "admin'--" が "<redacted>'--"）、url が無傷でも改変済み payload で検証してしまう
+        # （Codex #154 P1）。いずれかが redacted なら候補無し扱いにし、_prepare_resume_work が
+        # originating probe を再キューして原候補を復元する。
+        redacted = any(
+            "<redacted>" in str(candidate.get(key, ""))
+            for key in ("url", "payload", "field_name")
+        )
+        return {} if redacted else candidate
 
     def _prepare_resume_work(self) -> None:
         """checkpoint で実行情報を失った未完了 work だけ再発見対象へ戻す。"""
@@ -1700,25 +1724,31 @@ class AgentBrowserScanner:
             ("wscan-agent-auth-context-v1\0" + payload).encode("utf-8")
         ).hexdigest()
 
-    def _enqueue_observed_probe_work(self) -> None:
-        """どの episode で見つかった URL も対象なら全 check の queue へ入れる。"""
+    def _enqueue_observed_probe_work(self) -> int:
+        """どの episode で見つかった URL も対象なら全 check の queue へ入れる。
+
+        新規に enqueue した work item 数を返す（>0 なら未レビューの ledger が増えたことを示す）。
+        """
         if not self._harness or self.recon_mode:
-            return
+            return 0
         known = {
-            endpoint_identity(self._work_target(item) or item.target)
+            route_aware_identity(self._work_target(item) or item.target)
             for item in self._harness.state.work_queue
         }
+        added = 0
         for url in self._runtime_observed_urls:
             if not self.is_security_probe_allowed(url):
                 continue
             if url not in self._memory.visited_urls:
                 self._memory.visited_urls.append(url)
-            identity = endpoint_identity(url)
+            identity = route_aware_identity(url)
             if identity in known:
                 continue
             known.add(identity)
             for check in self.checks:
                 self._enqueue_work(AgentRole.PROBE_SPECIALIST, url, check_type=check)
+                added += 1
+        return added
 
     async def _harness_should_stop(self) -> bool:
         return bool(self._harness and self._harness.should_stop)
@@ -1940,6 +1970,25 @@ class AgentBrowserScanner:
             login.path,
         )
 
+    def _is_login_flow_page(self, url: str) -> bool:
+        """認証入力を許可してよいログイン/IdP フローのページか判定する。
+
+        configured login page の exact 一致に加え、**authenticator episode 実行中**は
+        同一 origin（scheme+netloc）の access-only ページも許可する。外部 IdP が
+        ``/sign-in`` → ``/mfa`` のようにパス遷移する多段フローで、遷移先ページの認証入力
+        （TOTP/password）が filter_probe_actions に落とされて認証が完了できない問題を防ぐ
+        （Codex #154 P1）。cross-origin へ資格情報を漏らさないよう netloc 一致に限定する。
+        """
+        if self._is_configured_login_page(url):
+            return True
+        if self._active_role != AgentRole.AUTHENTICATOR or not self.login_url:
+            return False
+        if not ((self.auth_user and self.auth_pass) or self.totp_secret or self.storage_state):
+            return False
+        current = urlparse(str(url or "").rstrip("/"))
+        login = urlparse(self.login_url.rstrip("/"))
+        return (current.scheme, current.netloc) == (login.scheme, login.netloc)
+
     def _build_security_scope_policy(self) -> str:
         """Agent が各操作前に従う攻撃対象・訪問専用スコープを生成する。"""
         attack_lines = "\n".join(f"  - {url}" for url in self.target_urls) or "  - (none)"
@@ -2036,7 +2085,7 @@ class AgentBrowserScanner:
                     "WSCAN_AUTH_PASS",
                     "WSCAN_bu_2fa_code",
                 )
-                if not allow_mutation and self._is_configured_login_page(current_url)
+                if not allow_mutation and self._is_login_flow_page(current_url)
                 else ()
             )
             filtered_actions, blocked_count = filter_probe_actions(

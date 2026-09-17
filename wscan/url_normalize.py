@@ -19,6 +19,22 @@ def endpoint_identity(url: str) -> str:
     return urlunsplit(parsed._replace(query=urlencode(sorted(pairs)), fragment=""))
 
 
+def route_aware_identity(url: str) -> str:
+    """endpoint_identity（注入値の空化＋query ソートで payload 変種を dedup）に、
+    client-side route を示す fragment を **保持**して合成した identity（Codex #154 P1）。
+
+    endpoint_identity は fragment を落とすため、hash ルート SPA の ``/app#/users`` と
+    ``/app#/admin`` が同一 identity になり、2つ目のルートが「既知」として probe queue から
+    抑止されていた。route らしい fragment（``/`` や ``!`` 始まり、または ``/`` を含む）だけを
+    付け直し、payload 変種の dedup（値の空化・query ソート）はそのまま活かす。純粋関数。
+    """
+    base = endpoint_identity(url)
+    fragment = urlsplit(url).fragment
+    if fragment and (fragment[:1] in ("/", "!") or "/" in fragment):
+        return f"{base}#{fragment}"
+    return base
+
+
 # 名前だけで意味を持ち得ない、純粋なキャッシュバスター/CSRF トークン。
 _ALWAYS_VOLATILE_KEYS = frozenset(
     {
