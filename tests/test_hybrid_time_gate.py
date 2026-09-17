@@ -238,6 +238,7 @@ def test_hybrid_recon_retries_after_next_window_and_keeps_handoff():
     monitor = _Monitor()
     current = [datetime(2024, 1, 1, 11, 59, 59)]
     attempts = []
+    retry_callbacks = []
     expected = SimpleNamespace(
         discovered_urls=["https://fixture.test/discovered"],
         findings=[{"kind": "agent"}],
@@ -265,10 +266,12 @@ def test_hybrid_recon_retries_after_next_window_and_keeps_handoff():
             None,
             now_fn=lambda: current[0],
             sleep_fn=fake_sleep,
+            on_retry=lambda: retry_callbacks.append("resume"),
         )
     )
 
     assert attempts == [1, 2]
+    assert retry_callbacks == ["resume"]
     assert handoff is expected
     assert continue_to_phase2 is True
     assert monitor.api_scan_status == "scanning"

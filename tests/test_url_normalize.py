@@ -311,3 +311,63 @@ def test_normalize_proxy_server_rejects_unparseable():
     for bad in ("://x", "not a url", "http://127.0.0.1: 8080"):
         with pytest.raises(ValueError):
             p(bad)
+
+
+def test_endpoint_identity_ignores_payloads_order_duplicates_and_fragment():
+    from wscan.url_normalize import endpoint_identity
+
+    assert endpoint_identity("https://a/search?q=<script>&tag=1") == endpoint_identity(
+        "https://a/search?tag=1&q=%3Cscript%3E&q=1%27#anchor"
+    )
+    assert endpoint_identity("https://a/search?q=x") != endpoint_identity("https://a/admin?q=x")
+    assert endpoint_identity("https://a/search?q=x") != endpoint_identity("https://a/search?q=x&debug=1")
+    assert endpoint_identity("https://a/search?q=x") != endpoint_identity("http://a/search?q=x")
+    assert endpoint_identity("https://a/search?q=x") != endpoint_identity("https://b/search?q=x")
+    assert endpoint_identity("https://a/search?debug") == endpoint_identity("https://a/search?debug=")
+    assert endpoint_identity("https://a/search?a%26b=x") != endpoint_identity("https://a/search?a=x&b=y")
+
+
+@pytest.mark.parametrize("value", ["<script>", "1'", '"', "`", ";", "(", ")", "{", "}", "|", "\\", "/", "%", "*", "two words", "x" * 65, "%3Cscript%3E"])
+def test_endpoint_identity_collapses_injection_values(value):
+    from urllib.parse import urlencode
+    from wscan.url_normalize import endpoint_identity
+
+    assert endpoint_identity("/search?" + urlencode({"q": value})) == endpoint_identity("/search?q=1'")
+
+
+@pytest.mark.parametrize("value", ["admin", "home", "123", "x" * 64])
+def test_endpoint_identity_preserves_short_routing_values(value):
+    from wscan.url_normalize import endpoint_identity
+
+    assert endpoint_identity("/view?page=" + value) == "/view?page=" + value
+    assert endpoint_identity("/view?page=" + value) != endpoint_identity("/view")
+
+
+def test_endpoint_identity_distinguishes_routes():
+    from wscan.url_normalize import endpoint_identity
+
+    assert endpoint_identity("/view?page=admin") != endpoint_identity("/view?page=home")
+    assert endpoint_identity("/search?q=<script>") == endpoint_identity("/search?q=1'")
+
+
+def test_route_aware_identity_distinguishes_hash_routes():
+    # hash ルート SPA は fragment を保持して別 identity にする（Codex #154 P1・偽 COMPLETE 防止）。
+    from wscan.url_normalize import route_aware_identity, endpoint_identity
+
+    assert route_aware_identity("http://h/app#/users") != route_aware_identity("http://h/app#/admin")
+    # fragment 無しは endpoint_identity と一致（挙動不変）。
+    assert route_aware_identity("http://h/view?page=x") == endpoint_identity("http://h/view?page=x")
+
+
+def test_route_aware_identity_still_dedups_payload_variants():
+    # payload 変種（注入メタ文字入りの query 値）は従来どおり dedup される。
+    from wscan.url_normalize import route_aware_identity
+
+    assert route_aware_identity("http://h/search?q=<script>") == route_aware_identity("http://h/search?q=1'")
+
+
+def test_route_aware_identity_ignores_non_route_fragment():
+    # 単なるアンカー（route でない fragment）は identity に影響しない。
+    from wscan.url_normalize import route_aware_identity, endpoint_identity
+
+    assert route_aware_identity("http://h/doc#section1") == endpoint_identity("http://h/doc#section1")
